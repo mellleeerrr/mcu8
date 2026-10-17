@@ -29,6 +29,17 @@ use crate::frame::Frame;
 use crate::layout_bridge::{LayoutBridge, SlotRects};
 use crate::vad::Vad;
 
+/// MCU media rendering and backpressure statistics (M3.6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct McuRenderStats {
+    /// Number of frames successfully composited and rendered.
+    pub frames_rendered: u64,
+    /// Number of frames dropped due to backpressure / deadline overrun.
+    pub frames_dropped: u64,
+    /// Duration of the last compositing pass (microseconds).
+    pub last_duration_us: u64,
+}
+
 /// Per-room MCU state.
 #[derive(Debug)]
 struct RoomState {
@@ -48,6 +59,12 @@ struct RoomState {
     bridge: LayoutBridge,
     /// Elapsed ms since the last layout change (drives the crossfade).
     elapsed_ms: u64,
+    /// Monotonic timestamp of when layout was applied (ms).
+    layout_applied_at_ms: Option<u64>,
+    /// Monotonic timestamp of the last render pass (ms).
+    last_render_ms: u64,
+    /// Rendering and backpressure statistics.
+    stats: McuRenderStats,
     /// Last composed frame, per subscriber (mock: the same composite for
     /// every subscriber).
     composite: Frame,
@@ -74,6 +91,9 @@ impl RoomState {
             current_layout: Layout::new(LayoutKind::Grid),
             bridge: LayoutBridge::new(),
             elapsed_ms: 0,
+            layout_applied_at_ms: None,
+            last_render_ms: 0,
+            stats: McuRenderStats::default(),
             composite: Frame::new(
                 CANVAS_SIZE.0,
                 CANVAS_SIZE.1,
@@ -145,12 +165,35 @@ impl RoomState {
     }
 
     /// Recomputes the composite + mixed audio + per-participant mix-minus + VAD from the current
-    /// frames and participant audio.
+    /// frames and participant audio (deterministic logical step of 33ms).
     fn tick(&mut self, frames: &BTreeMap<u32, Frame>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
-        // Advance the crossfade clock (30 fps → ~33 ms per frame).
         self.elapsed_ms += 33;
+        self.process_media(frames, audio_inputs);
+    }
+
+    /// Advances the pipeline at a specific monotonic timestamp `now_ms`.
+    /// Applies frame dropping backpressure if invoked faster than the ~30 fps budget.
+    fn tick_at(&mut self, now_ms: u64, frames: &BTreeMap<u32, Frame>, audio_inputs: &[(ParticipantId, Vec<f32>)]) -> bool {
+        if self.last_render_ms != 0 && now_ms < self.last_render_ms + 30 {
+            self.stats.frames_dropped += 1;
+            return false;
+        }
+        self.last_render_ms = now_ms;
+        if let Some(applied_at) = self.layout_applied_at_ms {
+            self.elapsed_ms = now_ms.saturating_sub(applied_at);
+        } else {
+            self.elapsed_ms += 33;
+        }
+        self.process_media(frames, audio_inputs);
+        true
+    }
+
+    fn process_media(&mut self, frames: &BTreeMap<u32, Frame>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
+        let t0 = std::time::Instant::now();
         let rects = self.slot_rects();
         self.composite = Compositor.compose(frames, &rects).into_frame();
+        self.stats.last_duration_us = t0.elapsed().as_micros() as u64;
+        self.stats.frames_rendered += 1;
 
         let slices: Vec<&[f32]> = audio_inputs.iter().map(|(_, v)| v.as_slice()).collect();
         let target_len = self.mixed_audio.len().max(960);
@@ -239,6 +282,31 @@ impl McuEngine {
             .collect();
         state.tick(&frames, &audio_inputs);
         Some(state.composite.clone())
+    }
+
+    /// Advances the room's pipeline at a specific monotonic timestamp `now_ms`.
+    /// Returns Some(Frame) if rendered, or None if dropped by backpressure.
+    pub fn tick_at(&self, room: RoomId, now_ms: u64) -> Option<Frame> {
+        let mut g = self.rooms.lock().unwrap();
+        let state = g.get_mut(&room)?;
+        let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
+        let audio_map = self.audio.lock().unwrap().get(&room).cloned().unwrap_or_default();
+        let audio_inputs: Vec<(ParticipantId, Vec<f32>)> = state
+            .publisher_tracks
+            .keys()
+            .filter_map(|pid| audio_map.get(pid).cloned().map(|samples| (*pid, samples)))
+            .collect();
+        if state.tick_at(now_ms, &frames, &audio_inputs) {
+            Some(state.composite.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Returns the rendering and backpressure stats of a room (M3.6).
+    pub fn stats(&self, room: RoomId) -> Option<McuRenderStats> {
+        let g = self.rooms.lock().unwrap();
+        g.get(&room).map(|s| s.stats)
     }
 
     /// The current crossfaded slot rects of a room (test/inspector).

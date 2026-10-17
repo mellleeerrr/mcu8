@@ -50,14 +50,21 @@ pub struct Conference {
     cfg: ConferenceConfig,
     state: ConferenceState,
     media: MediaEngine,
-    // (фаза 8: здесь будут async-каналы → Dioxus signals; сейчас — sync для простоты)
+    session_id: ulid::Ulid,
+    join_nonce: Option<String>,
 }
 
 impl Conference {
     /// Создаёт conference (state = Idle).
     #[must_use]
     pub fn new(cfg: ConferenceConfig) -> Self {
-        Self { cfg, state: ConferenceState::Idle, media: MediaEngine::default() }
+        Self {
+            cfg,
+            state: ConferenceState::Idle,
+            media: MediaEngine::default(),
+            session_id: vks_common::ids::ulid(),
+            join_nonce: None,
+        }
     }
 
     /// Текущее состояние.
@@ -72,10 +79,28 @@ impl Conference {
         &self.cfg.room_id
     }
 
-    /// Id текущей сессии (ULID, для resume).
+    /// Генератор нового Id сессии (ULID).
     #[must_use]
     pub fn session_id() -> ulid::Ulid {
         vks_common::ids::ulid()
+    }
+
+    /// Стабильный Id текущей сессии инстанса.
+    #[must_use]
+    pub fn current_session_id(&self) -> ulid::Ulid {
+        self.session_id
+    }
+
+    /// Nonce, полученный при join (для resume).
+    #[must_use]
+    pub fn join_nonce(&self) -> Option<&str> {
+        self.join_nonce.as_deref()
+    }
+
+    /// Текущий режим media engine.
+    #[must_use]
+    pub fn current_mode(&self) -> RoomMode {
+        self.media.mode()
     }
 
     /// Начинает join (async): idle → joining → (signaling handshake) → active.
@@ -86,14 +111,27 @@ impl Conference {
         self.state = ConferenceState::Joining;
 
         // 1. Signaling handshake (ClientHello → ServerHello).
-        let hello = client.hello_async(&self.cfg.token).await?;
+        let hello = match client.hello_async(&self.cfg.token).await {
+            Ok(h) => h,
+            Err(e) => {
+                self.state = ConferenceState::Idle;
+                return Err(ConferenceError::Signaling(e));
+            }
+        };
         if hello.server_version.is_empty() {
+            self.state = ConferenceState::Idle;
             return Err(ConferenceError::BadServerHello);
         }
 
         // 2. JoinRoom (получаем join_nonce для resume).
-        let join_result = client.join_room_async(&self.cfg.room_id, &self.cfg.display_name).await?;
-        let _ = join_result.join_nonce.clone(); // сохранится в resume-token (фаза 8)
+        let join_result = match client.join_room_async(&self.cfg.room_id, &self.cfg.display_name).await {
+            Ok(jr) => jr,
+            Err(e) => {
+                self.state = ConferenceState::Idle;
+                return Err(ConferenceError::Signaling(e));
+            }
+        };
+        self.join_nonce = Some(join_result.join_nonce);
 
         // 3. Media engine → active.
         self.state = ConferenceState::Active;
@@ -131,6 +169,7 @@ impl Conference {
         if self.state == ConferenceState::Active || self.state == ConferenceState::Reconnecting {
             let _ = client.leave_room_async(&self.cfg.room_id).await;
         }
+        self.join_nonce = None;
         self.state = ConferenceState::Left;
     }
 
@@ -274,5 +313,31 @@ mod tests {
         let b = Conference::session_id();
         // два последовательных ULID — разные
         assert_ne!(a.to_string(), b.to_string());
+    }
+
+    #[test]
+    fn failed_start_resets_state_to_idle_allowing_retry() {
+        let mut c = Conference::new(test_cfg());
+        let initial_session = c.current_session_id();
+        assert_eq!(c.current_session_id(), initial_session);
+        assert!(c.join_nonce().is_none());
+
+        let mut bad_client = SignalingClient::with_transport(Arc::new(MockSignaling::empty_server_hello()));
+        let res = c.start(&mut bad_client);
+        assert!(matches!(res, Err(ConferenceError::BadServerHello)));
+        // State MUST be reset to Idle instead of being stuck in Joining!
+        assert_eq!(c.state(), ConferenceState::Idle);
+
+        // Can retry successfully without AlreadyStarted error!
+        let mut good_client = SignalingClient::with_transport(Arc::new(MockSignaling::ok()));
+        c.start(&mut good_client).unwrap();
+        assert_eq!(c.state(), ConferenceState::Active);
+        assert!(c.join_nonce().is_some());
+        assert_eq!(c.current_mode(), RoomMode::Sfu);
+
+        // Leave clears join_nonce
+        c.leave(&mut good_client);
+        assert_eq!(c.state(), ConferenceState::Left);
+        assert!(c.join_nonce().is_none());
     }
 }

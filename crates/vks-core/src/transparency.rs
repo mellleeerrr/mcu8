@@ -83,6 +83,7 @@ pub struct ModeSwitcher {
     switch_epoch: u64,
     current_layout: Option<LayoutDescriptor>,
     events: Vec<RoomModeChanged>,
+    last_retired: Option<Box<dyn MediaEngine>>,
 }
 
 impl ModeSwitcher {
@@ -96,6 +97,7 @@ impl ModeSwitcher {
             switch_epoch: 0,
             current_layout: None,
             events: Vec::new(),
+            last_retired: None,
         }
     }
 
@@ -119,6 +121,12 @@ impl ModeSwitcher {
     #[must_use]
     pub fn take_events(&mut self) -> Vec<RoomModeChanged> {
         std::mem::take(&mut self.events)
+    }
+
+    /// Забирает прежний отработавший движок для плавной смены (graceful handover)
+    /// или отложенного освобождения ресурсов комнаты (M3.7).
+    pub fn take_retired(&mut self) -> Option<Box<dyn MediaEngine>> {
+        self.last_retired.take()
     }
 
     /// Apply Layout к активным движок; сохраняем — ADR: «Layout сохраняется
@@ -145,7 +153,30 @@ impl ModeSwitcher {
         // Подменяем active, инкрементируем epoch, генерируем событие.
         // current_layout сохраняется в self.current_layout (ADR: Layout сохраняется при переключении).
         let new_mode = candidate.mode();
-        self.active = candidate;
+        let old_active = std::mem::replace(&mut self.active, candidate);
+        self.last_retired = Some(old_active);
+        self.switch_epoch += 1;
+        self.events.push(RoomModeChanged { room_id: self.room, new_mode, switch_epoch: self.switch_epoch });
+        SwitchOutcome::Switched { epoch: self.switch_epoch }
+    }
+
+    /// Асинхронное переключение на `candidate` с проверкой готовности,
+    /// переносом сохранённой раскладки и очисткой кандидата при rollback (M3.7).
+    pub async fn switch_mode_async(&mut self, candidate: Box<dyn MediaEngine>) -> SwitchOutcome {
+        let start = self.clock.now_ms();
+        while !self.clock.is_ready() {
+            self.clock.tick();
+            if self.clock.now_ms() - start >= self.max_wait_ms {
+                let _ = candidate.destroy_room(self.room).await;
+                return SwitchOutcome::RolledBack;
+            }
+        }
+        if let Some(ref layout) = self.current_layout {
+            let _ = candidate.apply_layout(self.room, layout.clone()).await;
+        }
+        let new_mode = candidate.mode();
+        let old_active = std::mem::replace(&mut self.active, candidate);
+        self.last_retired = Some(old_active);
         self.switch_epoch += 1;
         self.events.push(RoomModeChanged { room_id: self.room, new_mode, switch_epoch: self.switch_epoch });
         SwitchOutcome::Switched { epoch: self.switch_epoch }
@@ -183,19 +214,30 @@ impl ClientView {
 struct MockEngine {
     mode: RoomMode,
     layout_calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    destroyed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MockEngine {
     #[must_use]
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(mode: RoomMode) -> Self {
-        Self { mode, layout_calls: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)) }
+        Self {
+            mode,
+            layout_calls: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            destroyed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 
     #[must_use]
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn layout_call_count(&self) -> u32 {
         self.layout_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn is_destroyed(&self) -> bool {
+        self.destroyed.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -208,6 +250,7 @@ impl MediaEngine for MockEngine {
         Ok(RoomMediaHandle { room: RoomId::new(), mode: self.mode })
     }
     async fn destroy_room(&self, _room: RoomId) -> Result<(), MediaEngineError> {
+        self.destroyed.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
     async fn switch_room_mode(&self, _room: RoomId, new: RoomMode) -> Result<RoomMode, MediaEngineError> {
@@ -356,5 +399,43 @@ mod tests {
         assert_eq!(sw.mode(), RoomMode::Sfu);
         assert_eq!(sw.epoch(), 0);
         assert!(sw.take_events().is_empty());
+    }
+
+    /// Проверка сохранения прежнего движка в last_retired для graceful handover.
+    #[test]
+    fn switch_mode_retains_retired_engine_for_handover() {
+        let sfu: Box<dyn MediaEngine> = Box::new(MockEngine::new(RoomMode::Sfu));
+        let mut sw = ModeSwitcher::new(RoomId::new(), sfu, 3000, 0);
+        assert!(sw.take_retired().is_none());
+
+        let mcu: Box<dyn MediaEngine> = Box::new(MockEngine::new(RoomMode::Mcu));
+        let out = sw.switch_mode(mcu);
+        assert_eq!(out, SwitchOutcome::Switched { epoch: 1 });
+        let retired = sw.take_retired();
+        assert!(retired.is_some(), "previous engine must be retained for handover");
+        assert_eq!(retired.unwrap().mode(), RoomMode::Sfu);
+        assert!(sw.take_retired().is_none(), "take_retired must be idempotent");
+    }
+
+    /// Асинхронное переключение: применение раскладки к кандидату и очистка кандидата при timeout.
+    #[tokio::test]
+    async fn switch_mode_async_lifecycle() {
+        let sfu: Box<dyn MediaEngine> = Box::new(MockEngine::new(RoomMode::Sfu));
+        let mut sw = ModeSwitcher::new(RoomId::new(), sfu, 3000, 0);
+        sw.apply_layout(&layout());
+
+        let mcu = MockEngine::new(RoomMode::Mcu);
+        let mcu_box: Box<dyn MediaEngine> = Box::new(mcu);
+        let out = sw.switch_mode_async(mcu_box).await;
+        assert_eq!(out, SwitchOutcome::Switched { epoch: 1 });
+        assert_eq!(sw.mode(), RoomMode::Mcu);
+
+        // Timeout rollback: candidate must have destroy_room called to prevent resource leak
+        let mut sw_slow = ModeSwitcher::new(RoomId::new(), Box::new(MockEngine::new(RoomMode::Sfu)), 10, 50);
+        let candidate = MockEngine::new(RoomMode::Mcu);
+        let candidate_destroyed = candidate.destroyed.clone();
+        let out = sw_slow.switch_mode_async(Box::new(candidate)).await;
+        assert_eq!(out, SwitchOutcome::RolledBack);
+        assert!(candidate_destroyed.load(std::sync::atomic::Ordering::SeqCst), "timed out candidate must be destroyed");
     }
 }
