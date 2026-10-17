@@ -127,21 +127,23 @@ impl ModeSwitcher {
         self.current_layout = Some(layout.clone());
     }
 
+    #[must_use]
+    pub fn current_layout(&self) -> Option<&LayoutDescriptor> {
+        self.current_layout.as_ref()
+    }
+
     /// In-place переключение на `candidate`.
     pub fn switch_mode(&mut self, candidate: Box<dyn MediaEngine>) -> SwitchOutcome {
-        let mut clock = SwitchClock::new(1); // кандидат «готовится» 1 мс
-                                             // Ждём готовности candidate в пределах timeout.
         let start = self.clock.now_ms();
-        while !clock.is_ready() {
-            clock.tick();
+        while !self.clock.is_ready() {
             self.clock.tick();
             if self.clock.now_ms() - start >= self.max_wait_ms {
                 // Timeout — rollback — active не трогаем, epoch не инкрементится.
                 return SwitchOutcome::RolledBack;
             }
         }
-        // Кандидат готов: подменяем active, инкрементируем epoch, сохраняем
-        // layout, генерируем событие.
+        // Подменяем active, инкрементируем epoch, генерируем событие.
+        // current_layout сохраняется в self.current_layout (ADR: Layout сохраняется при переключении).
         let new_mode = candidate.mode();
         self.active = candidate;
         self.switch_epoch += 1;
@@ -304,8 +306,7 @@ mod tests {
         let out = sw.switch_mode(mcu_box);
         assert_eq!(out, SwitchOutcome::Switched { epoch: 1 });
         assert_eq!(sw.mode(), RoomMode::Mcu);
-        // (mock: layout_calls на новом движке — в реальном коде apply_layout
-        //  вызывается на новом; здесь проверяем, что current_layout сохранён.)
+        assert_eq!(sw.current_layout(), Some(&layout()));
         let _ = sfu_layout_calls;
     }
 
@@ -342,5 +343,18 @@ mod tests {
         assert!(!c.is_ready());
         c.tick();
         assert!(c.is_ready());
+    }
+
+    /// Timeout при переключении вызывает корректный rollback.
+    #[test]
+    fn switch_timeout_rolls_back() {
+        let sfu: Box<dyn MediaEngine> = Box::new(MockEngine::new(RoomMode::Sfu));
+        let mut sw = ModeSwitcher::new(RoomId::new(), sfu, 10, 50); // wait 10ms max, ready after 50ms
+        let mcu: Box<dyn MediaEngine> = Box::new(MockEngine::new(RoomMode::Mcu));
+        let out = sw.switch_mode(mcu);
+        assert_eq!(out, SwitchOutcome::RolledBack);
+        assert_eq!(sw.mode(), RoomMode::Sfu);
+        assert_eq!(sw.epoch(), 0);
+        assert!(sw.take_events().is_empty());
     }
 }

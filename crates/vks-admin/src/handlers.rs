@@ -10,8 +10,10 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
-    http::{header, StatusCode},
+    body::Body,
+    extract::{Path, Query, Request, State},
+    http::{header, HeaderValue, StatusCode},
+    middleware::Next,
     response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
@@ -151,6 +153,57 @@ fn not_found(entity: &str, id: &str) -> Response {
         .into_response()
 }
 
+/// Код envelope для router-отказов (прочие статусы — не наши: не трогаем).
+fn envelope_code(status: StatusCode) -> Option<&'static str> {
+    match status {
+        StatusCode::METHOD_NOT_ALLOWED => Some("method_not_allowed"),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => Some("unsupported_media_type"),
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => Some("invalid_body"),
+        _ => None,
+    }
+}
+
+/// Текст `error` по умолчанию, когда исходное тело пустое.
+fn default_error_text(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::METHOD_NOT_ALLOWED => "method not allowed for this endpoint",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => "expected application/json body",
+        _ => "invalid request body",
+    }
+}
+
+/// Единый error-envelope для router-отказов (BACKEND_RULES §6.4, T1.4):
+/// axum-отказы 405/415 и ошибки парсинга тела 400/422 отдаются JSON-конвертом
+/// `{error_code, error}` вместо text/plain. Заголовки исходного ответа
+/// сохраняются (в т.ч. `Allow` у 405 — обязателен по RFC 9110 §15.5.6), текст
+/// исходного тела переносится в `error`; JSON-ответы не перетираются.
+async fn error_envelope_middleware(request: Request, next: Next) -> Response {
+    let response = next.run(request).await;
+    let Some(error_code) = envelope_code(response.status()) else {
+        return response;
+    };
+    let is_json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    if is_json {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let raw = axum::body::to_bytes(body, 4096).await.unwrap_or_default();
+    let detail = String::from_utf8_lossy(&raw).trim().to_string();
+    let error = if detail.is_empty() { default_error_text(parts.status).to_string() } else { detail };
+    let payload = serde_json::json!({ "error_code": error_code, "error": error }).to_string();
+    parts.headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    parts.headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&payload.len().to_string()).unwrap_or(HeaderValue::from_static("0")),
+    );
+    Response::from_parts(parts, Body::from(payload))
+}
+
 // ---------------------------------------------------------------------------
 // Handlers.
 // ---------------------------------------------------------------------------
@@ -161,11 +214,9 @@ pub async fn healthz() -> Response {
     (StatusCode::from_u16(mode.status_code()).unwrap(), Json(serde_json::to_value(mode).unwrap())).into_response()
 }
 
-/// `GET /readyz` — readiness (DB + NATS + media).
-///
-/// Эта волна: all-OK stub (production — реальная проверка).
-pub async fn readyz() -> Response {
-    let r = Readiness::all_ok();
+/// `GET /readyz` — readiness (BACKEND_RULES §4.3): реальный ping DB + media.
+pub async fn readyz(State(state): State<SharedState>) -> Response {
+    let r = Readiness::from_state(&state).await;
     (StatusCode::from_u16(r.status_code()).unwrap(), Json(serde_json::to_value(r).unwrap())).into_response()
 }
 
@@ -434,7 +485,7 @@ pub fn router(state: SharedState) -> Router {
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), crate::auth_middleware::v1_rbac_middleware))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), crate::auth_middleware::jwt_auth_middleware));
 
-    public_routes.merge(protected_v1).with_state(state)
+    public_routes.merge(protected_v1).layer(axum::middleware::from_fn(error_envelope_middleware)).with_state(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -499,15 +550,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readyz_returns_200_all_ok() {
+    async fn readyz_returns_200_with_real_state() {
         let app = test_router();
         let resp = app.oneshot(req(Method::GET, "/readyz")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["db"], true);
-        assert_eq!(json["nats"], true);
         assert_eq!(json["media"], true);
+        assert!(json.get("nats").is_none(), "NATS-фикция удалена (T1.3)");
+    }
+
+    #[tokio::test]
+    async fn router_rejections_use_error_envelope() {
+        // 405: метод не подходит — JSON-конверт + `Allow` (RFC 9110 §15.5.6).
+        let app = test_router();
+        let resp = app.oneshot(req(Method::PUT, "/healthz")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert!(resp.headers().contains_key(header::ALLOW), "405 обязан нести Allow");
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error_code"], "method_not_allowed");
+
+        // 415: тело без application/json.
+        let (app, _state, token) = authed_test_app();
+        let request = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/rooms")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(axum::body::Body::from("not json"))
+            .unwrap();
+        let resp = app.oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error_code"], "unsupported_media_type");
+
+        // 400: битый JSON с корректным content-type.
+        let (app, _state, token) = authed_test_app();
+        let request = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/rooms")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from("{not-json"))
+            .unwrap();
+        let resp = app.oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error_code"], "invalid_body");
+
+        // 400 из хендлера (невалидный UUID): статус сохраняется, текст ошибки — в `error`.
+        let (app, _state, token) = authed_test_app();
+        let resp = app.oneshot(authed_req(Method::GET, "/api/v1/rooms/not-a-uuid", &token)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error_code"], "invalid_body");
+        assert!(json["error"].as_str().is_some_and(|s| !s.is_empty()), "текст ошибки сохранён");
     }
 
     #[tokio::test]
@@ -590,7 +692,8 @@ mod tests {
     async fn get_room_after_create() {
         let (app, state, token) = authed_test_app();
         let created = Rooms::create(&state, "conf");
-        let resp = app.oneshot(authed_req(Method::GET, &format!("/api/v1/rooms/{}", created.id), &token)).await.unwrap();
+        let resp =
+            app.oneshot(authed_req(Method::GET, &format!("/api/v1/rooms/{}", created.id), &token)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -600,7 +703,10 @@ mod tests {
     #[tokio::test]
     async fn get_unknown_room_404() {
         let (app, _state, token) = authed_test_app();
-        let resp = app.oneshot(authed_req(Method::GET, "/api/v1/rooms/00000000-0000-0000-0000-000000000000", &token)).await.unwrap();
+        let resp = app
+            .oneshot(authed_req(Method::GET, "/api/v1/rooms/00000000-0000-0000-0000-000000000000", &token))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 

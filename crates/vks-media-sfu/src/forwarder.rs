@@ -109,11 +109,17 @@ impl Forwarder {
         self.config
     }
 
-    /// Аннуцирует track (publisher). Если full-mesh — новые подписчики
-    /// получат его автоматически.
+    /// Аннуцирует track (publisher). Если full-mesh — все существующие
+    /// и новые подписчики получат его автоматически (L02).
     pub fn announce_track(&mut self, track: TrackId) {
         if self.active_tracks.insert(track) {
-            self.subscriptions.entry(track).or_default();
+            let set = self.subscriptions.entry(track).or_default();
+            if self.config.full_mesh_default {
+                for (subscriber, tracks) in &mut self.subscriber_tracks {
+                    tracks.insert(track);
+                    set.insert(*subscriber);
+                }
+            }
         }
     }
 
@@ -253,6 +259,23 @@ mod tests {
         let tracks = f.tracks_of(&sub).unwrap();
         assert!(tracks.contains(&t(1)));
         assert!(tracks.contains(&t(2)));
+    }
+
+    #[test]
+    fn full_mesh_late_track_reaches_existing_subscribers() {
+        let mut f = Forwarder::full_mesh();
+        let s1 = p(1);
+        f.add_subscriber(s1);
+
+        // Track 1 announced AFTER subscriber already joined (L02)
+        f.announce_track(t(1));
+        let tracks = f.tracks_of(&s1).unwrap();
+        assert!(tracks.contains(&t(1)), "late announced track must reach existing subscriber in full-mesh");
+
+        let mut sink = RecordingSink::default();
+        f.route(&mut sink, RtpPacket { track: t(1), payload: vec![42].into() });
+        assert_eq!(sink.sent.len(), 1);
+        assert_eq!(sink.sent[0].0.subscriber, s1);
     }
 
     #[test]

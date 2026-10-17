@@ -121,11 +121,7 @@ pub async fn v1_rbac_middleware(State(state): State<Arc<AppState>>, request: Req
         return deny(
             StatusCode::FORBIDDEN,
             "forbidden",
-            &format!(
-                "role '{}' is not allowed on this endpoint (requires '{}')",
-                role.as_str(),
-                required.as_str()
-            ),
+            &format!("role '{}' is not allowed on this endpoint (requires '{}')", role.as_str(), required.as_str()),
         );
     }
 

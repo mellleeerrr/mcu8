@@ -180,10 +180,17 @@ impl MediaEngine for SfuEngine {
     ) -> Result<PublisherHandle, MediaEngineError> {
         let mut g = self.rooms.lock().unwrap();
         let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
+        let new_track_ids: Vec<TrackId> = tracks.iter().map(|t| t.id).collect();
+        if let Some(old_tracks) = state.publisher_tracks.insert(publisher, new_track_ids) {
+            for old_t in old_tracks {
+                if !tracks.iter().any(|t| t.id == old_t) {
+                    state.forwarder.withdraw_track(old_t);
+                }
+            }
+        }
         for t in &tracks {
             state.forwarder.announce_track(t.id);
         }
-        state.publisher_tracks.insert(publisher, tracks.iter().map(|t| t.id).collect());
         Ok(PublisherHandle { room, publisher })
     }
 
@@ -384,6 +391,35 @@ mod tests {
         e.remove_publisher(rid, pub1).await.unwrap();
         let after = e.route(rid, RtpPacket { track: track1.id, payload: vec![].into() }).unwrap();
         assert!(after.is_empty());
+    }
+
+    #[tokio::test]
+    async fn renegotiate_publisher_withdraws_removed_tracks() {
+        let e = SfuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let pub1 = p(1);
+        let track1 = video_track(pub1);
+        let track2 = video_track(pub1);
+        e.add_publisher(rid, pub1, vec![track1.clone()]).await.unwrap();
+
+        let sub1 = p(10);
+        e.add_subscriber(rid, sub1, sub_req()).await.unwrap();
+
+        // Track 1 routes to subscriber
+        let r1 = e.route(rid, RtpPacket { track: track1.id, payload: vec![].into() }).unwrap();
+        assert_eq!(r1.len(), 1);
+
+        // Publisher renegotiates: replaces track1 with track2 (L04)
+        e.add_publisher(rid, pub1, vec![track2.clone()]).await.unwrap();
+
+        // Track 1 is now withdrawn: routes to 0 subscribers
+        let r1_after = e.route(rid, RtpPacket { track: track1.id, payload: vec![].into() }).unwrap();
+        assert!(r1_after.is_empty(), "withdrawn track 1 must no longer route");
+
+        // Track 2 routes to subscriber
+        let r2 = e.route(rid, RtpPacket { track: track2.id, payload: vec![].into() }).unwrap();
+        assert_eq!(r2.len(), 1, "new track 2 must route to subscriber");
     }
 
     #[tokio::test]

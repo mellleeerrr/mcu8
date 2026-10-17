@@ -89,6 +89,8 @@ pub struct Media {
     pub fingerprint: Option<String>,
     /// direction `a=sendonly`/`a=recvonly`/`a=sendrecv`.
     pub direction: Option<String>,
+    /// `a=candidate:...` (RFC 8839 / RFC 5245 ICE-кандидаты).
+    pub candidates: Vec<String>,
 }
 
 /// SDP-документ: session-секция + медиа-секции.
@@ -210,6 +212,7 @@ impl Sdp {
                 ice_pwd: None,
                 fingerprint: None,
                 direction: None,
+                candidates: Vec::new(),
             };
         }
         let kind = MediaKind::from_str_loose(parts[0]).unwrap_or(MediaKind::Audio);
@@ -235,6 +238,7 @@ impl Sdp {
             ice_pwd: None,
             fingerprint: None,
             direction: None,
+            candidates: Vec::new(),
         }
     }
 
@@ -260,6 +264,7 @@ impl Sdp {
             Some(("mid", rest)) => media.mid = Some(rest.trim().to_string()),
             Some(("msid", rest)) => media.msid = Some(rest.trim().to_string()),
             Some(("ssrc", rest)) => media.ssrcs.push(rest.trim().to_string()),
+            Some(("candidate", rest)) => media.candidates.push(rest.trim().to_string()),
             Some(("ice-ufrag", rest)) => media.ice_ufrag = Some(rest.trim().to_string()),
             Some(("ice-pwd", rest)) => media.ice_pwd = Some(rest.trim().to_string()),
             Some(("fingerprint", rest)) => media.fingerprint = Some(rest.trim().to_string()),
@@ -294,7 +299,7 @@ impl Sdp {
                 first = false;
             }
             out.push_str(&format!(
-                "m={} {} UDP/TP/RTP{}\n",
+                "m={} {} UDP/TLS/RTP/SAVPF{}\n",
                 media.kind.as_str(),
                 media.port,
                 if fmt.trim().is_empty() { String::new() } else { format!(" {fmt}") }
@@ -310,6 +315,9 @@ impl Sdp {
             }
             for ssrc in &media.ssrcs {
                 out.push_str(&format!("a=ssrc:{ssrc}\n"));
+            }
+            for c in &media.candidates {
+                out.push_str(&format!("a=candidate:{c}\n"));
             }
             if let Some(ufrag) = &media.ice_ufrag {
                 out.push_str(&format!("a=ice-ufrag:{ufrag}\n"));
@@ -374,13 +382,14 @@ impl Sdp {
                 port: 0,
                 payload_types: profile.rtp_maps.iter().map(|r| r.payload).collect(),
                 mid: media.mid.clone().or_else(|| Some(i.to_string())),
-                msid: Some("sfu-out {i}".to_string()),
+                msid: Some(format!("sfu-out {i}")),
                 ssrcs: vec![format!("ssrc-sfu-{i}")],
                 rtp_maps: profile.rtp_maps.clone(),
                 ice_ufrag: Some(profile.ufrag.clone()),
                 ice_pwd: Some(profile.pwd.clone()),
                 fingerprint: Some(profile.fingerprint.clone()),
                 direction: Some("recvonly".to_string()),
+                candidates: Vec::new(),
             };
             let _ = &mut m;
             answer.media.push(m);
@@ -402,7 +411,7 @@ impl Sdp {
                 if media.ice_pwd.is_none() {
                     media.ice_pwd = Some(c.pwd.clone());
                 }
-                media.ssrcs.push(format!("candidate {}/{}", c.addr, c.port));
+                media.candidates.push(format!("1 1 UDP 2130706431 {} {} typ {}", c.addr, c.port, c.typ));
             }
         }
         self
@@ -442,6 +451,7 @@ mod tests {
                     ice_pwd: Some("apwd".into()),
                     fingerprint: Some("sha-256 AA:BB:CC".into()),
                     direction: Some("sendrecv".into()),
+                    candidates: Vec::new(),
                 },
                 Media {
                     kind: MediaKind::Video,
@@ -455,6 +465,7 @@ mod tests {
                     ice_pwd: Some("apwd".into()),
                     fingerprint: Some("sha-256 AA:BB:CC".into()),
                     direction: Some("sendrecv".into()),
+                    candidates: Vec::new(),
                 },
             ],
         }

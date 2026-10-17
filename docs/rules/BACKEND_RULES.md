@@ -134,7 +134,9 @@
 
 ### 4.3. Health checks
 - `/healthz` (liveness): 200 всегда.
-- `/readyz` (readiness): DB + NATS + media OK → 200, иначе 503.
+- `/readyz` (readiness): DB (реальный ping хранилища, `SELECT 1`) + media OK → 200, иначе 503.
+  Проверка NATS вернётся вместе с реальным NATS (ADR-0014 — долг S3); media-проверка
+  углубится при подключении движков в `AppState` (S2).
 - K8s: liveness 10s/3s, readiness 5s/3s, startup 30s.
 
 ### 4.4. Resource limits

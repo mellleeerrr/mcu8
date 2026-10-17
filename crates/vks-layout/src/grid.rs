@@ -59,30 +59,31 @@ fn grid_rects(n: usize, canvas: &Canvas) -> Vec<Rect> {
     }
 
     // row heights: uniform division, remainder to the last row
+    let base_h = if rows > 0 { h / rows as u32 } else { 0 };
     let mut row_heights = Vec::with_capacity(rows);
     let mut y_cursor = 0u32;
     for r in 0..rows {
-        let remaining_rows = rows - r;
-        let tile_h = if remaining_rows == 1 { h - y_cursor } else { h / remaining_rows as u32 };
+        let tile_h = if r + 1 == rows { h.saturating_sub(y_cursor) } else { base_h };
         row_heights.push(tile_h);
-        y_cursor += tile_h;
+        y_cursor = y_cursor.saturating_add(tile_h);
     }
 
     let mut out = Vec::with_capacity(n);
     let mut y = 0u32;
     for (r, &count) in row_counts.iter().enumerate() {
         let row_h = row_heights[r];
+        let base_w = if count > 0 { w / count } else { 0 };
         let mut x_cursor = 0u32;
         for c in 0..count {
             let tile_w = if c + 1 == count {
-                w - x_cursor // last tile in the row takes the remainder
+                w.saturating_sub(x_cursor) // last tile in the row takes the remainder
             } else {
-                w / count
+                base_w
             };
             out.push(Rect::new(x_cursor, y, tile_w, row_h));
-            x_cursor += tile_w;
+            x_cursor = x_cursor.saturating_add(tile_w);
         }
-        y += row_h;
+        y = y.saturating_add(row_h);
     }
     out
 }
@@ -166,13 +167,34 @@ mod tests {
 
     #[test]
     fn grid_five_six_eight_nine_balanced() {
-        for n in [5usize, 6, 8, 9] {
+        for n in [5usize, 6, 8, 9, 13, 16, 25] {
             let canvas = Canvas::new(1920, 1080);
             let rects = GridLayout::compute(&canvas, n);
             assert_eq!(rects.len(), n, "n={n}");
             assert_eq!(total_area(&rects), canvas.area(), "n={n} full coverage");
             assert_no_overlap(&rects);
             assert_inside(&canvas, &rects);
+        }
+    }
+
+    #[test]
+    fn grid_nine_and_sixteen_uniform_row_heights() {
+        let canvas = Canvas::new(1920, 1080);
+
+        // n=9 (3x3): rows must be 360, 360, 360, not distorted 360, 540, 180 (L01)
+        let rects_9 = GridLayout::compute(&canvas, 9);
+        assert_eq!(rects_9.len(), 9);
+        for r in &rects_9 {
+            assert_eq!(r.h, 360, "9-slot tiles must have uniform height 360");
+            assert_eq!(r.w, 640, "9-slot tiles must have uniform width 640");
+        }
+
+        // n=16 (4x4): rows must be 270, 270, 270, 270, no subtraction underflow (L01)
+        let rects_16 = GridLayout::compute(&canvas, 16);
+        assert_eq!(rects_16.len(), 16);
+        for r in &rects_16 {
+            assert_eq!(r.h, 270, "16-slot tiles must have uniform height 270");
+            assert_eq!(r.w, 480, "16-slot tiles must have uniform width 480");
         }
     }
 

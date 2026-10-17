@@ -45,11 +45,7 @@ fn role_to_permissions(role: vks_core::Role) -> &'static [&'static str] {
 /// `GET /api/v3/profile` → `{user:{…}}` (маппер `RW`; permissions зависят от роли).
 pub async fn profile(State(state): State<SharedState>, Extension(verified): Extension<VerifiedJwt>) -> Response {
     track("profile");
-    let username_from_db = state
-        .local_db
-        .as_ref()
-        .and_then(|db| db.user(&verified.user_id).ok())
-        .map(|u| u.username);
+    let username_from_db = state.local_db.as_ref().and_then(|db| db.user(&verified.user_id).ok()).map(|u| u.username);
 
     let display_name = username_from_db.clone().unwrap_or_else(|| verified.user_id.clone());
 
@@ -264,4 +260,17 @@ pub async fn waitingroom() -> Response {
 pub async fn conferences_status() -> Response {
     track("conferences/status");
     Json(json!({ "status": "enabled" })).into_response()
+}
+
+/// `GET /api/v3/ui/video_layouts` / `GET /api/v3/video_layouts` → `{video_layouts:[...]}`.
+pub async fn video_layouts() -> Response {
+    track("video_layouts");
+    Json(json!({
+        "video_layouts": [
+            { "id": "grid", "title": "Grid", "description": "Автоматическая сетка участников", "is_default": true },
+            { "id": "focus", "title": "Focus", "description": "Докладчик крупно + лента участников", "is_default": false },
+            { "id": "speaker", "title": "Speaker", "description": "Один активный спикер", "is_default": false }
+        ]
+    }))
+    .into_response()
 }

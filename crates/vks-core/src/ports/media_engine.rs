@@ -136,7 +136,7 @@ impl SubscribeRequest {
 /// В MCU: compositor использует это для pixel-rect.
 ///
 /// Поля упрощены для ядра: конкретная геометрия живёт в vks-layout.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutDescriptor {
     /// Идентикатор layout (versioned).
     pub layout_id: String,

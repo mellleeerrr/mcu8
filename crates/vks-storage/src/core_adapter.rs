@@ -135,6 +135,11 @@ impl Storage for MemoryStorage {
 
 #[async_trait]
 impl Storage for SqliteStorage {
+    async fn ping(&self) -> Result<(), StorageError> {
+        sqlx::query("SELECT 1").execute(self.pool()).await.map_err(to_storage_err)?;
+        Ok(())
+    }
+
     async fn upsert_room(&self, room: &Room) -> Result<(), StorageError> {
         let id = *room.id.as_uuid();
         let name = &room.name;
@@ -271,6 +276,11 @@ impl Storage for SqliteStorage {
 
 #[async_trait]
 impl Storage for PostgresStorage {
+    async fn ping(&self) -> Result<(), StorageError> {
+        sqlx::query("SELECT 1").execute(self.pool()).await.map_err(to_storage_err)?;
+        Ok(())
+    }
+
     async fn upsert_room(&self, room: &Room) -> Result<(), StorageError> {
         let id = *room.id.as_uuid();
         let name = &room.name;
@@ -442,6 +452,9 @@ mod tests {
         storage.upsert_layout(&layout).await.expect("upsert_layout");
         let loaded_l = storage.get_layout("layout-1").await.expect("get_layout").expect("exists");
         assert_eq!(loaded_l.name, "Grid 2x2");
+
+        // Health probe (`/readyz`): реальный ping (SQL `SELECT 1`).
+        storage.ping().await.expect("ping");
 
         // Cleanup
         storage.delete_room(room_id).await.expect("delete_room");

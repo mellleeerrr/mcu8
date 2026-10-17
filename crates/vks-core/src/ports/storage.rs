@@ -127,6 +127,14 @@ pub trait Storage: Send + Sync + 'static {
 
     // --- Helpers ---
 
+    /// Проверка живости хранилища (readiness `/readyz`, BACKEND_RULES §4.3).
+    ///
+    /// Дефолт — OK: in-memory реализации всегда готовы; SQL-адаптеры
+    /// переопределяют реальным запросом (`SELECT 1`).
+    async fn ping(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     /// Сбрасывает всё (для тестов).
     async fn reset(&self) -> Result<(), StorageError>;
 }

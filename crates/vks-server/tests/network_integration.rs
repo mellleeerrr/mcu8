@@ -18,9 +18,12 @@ use axum::http::{header, Request, StatusCode};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMsg;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tower::ServiceExt;
 
 use vks_admin::handlers::router as admin_router;
@@ -199,10 +202,10 @@ async fn test_admin_rest_jwt_sqlite() {
 
 #[tokio::test]
 async fn test_signaling_ws_handshake() {
-    let addr = spawn_live_server().await;
+    let (addr, _state, token) = spawn_live_server_with_auth().await;
     let url = format!("ws://{addr}/ws");
 
-    let (ws_stream, _) = connect_async(&url).await.expect("connect to websocket");
+    let ws_stream = connect_ws(&url, Some(&token)).await;
     let (mut write, mut read) = ws_stream.split();
 
     // 1. ClientHello
@@ -293,15 +296,15 @@ async fn test_sfu_udp_media_loopback() {
 
 #[tokio::test]
 async fn test_e2e_two_clients_signaling_session() {
-    let addr = spawn_live_server().await;
+    let (addr, _state, token) = spawn_live_server_with_auth().await;
     let url = format!("ws://{addr}/ws");
 
     // Client 1 connects
-    let (ws_1, _) = connect_async(&url).await.expect("connect client 1");
+    let ws_1 = connect_ws(&url, Some(&token)).await;
     let (mut write_1, mut read_1) = ws_1.split();
 
     // Client 2 connects
-    let (ws_2, _) = connect_async(&url).await.expect("connect client 2");
+    let ws_2 = connect_ws(&url, Some(&token)).await;
     let (mut write_2, mut read_2) = ws_2.split();
 
     // 1. Client 1 Handshake
@@ -327,6 +330,130 @@ async fn test_e2e_two_clients_signaling_session() {
     assert!(matches!(env_res_2.payload(), Some(Payload::JoinRoomResult(_))));
 
     // Both clients successfully joined the room!
+}
+
+/// Подключение к `/ws` с опциональным Bearer-токеном (auth-at-handshake, T1.2).
+async fn connect_ws(url: &str, token: Option<&str>) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
+    let mut request = url.into_client_request().expect("client request");
+    if let Some(token) = token {
+        request.headers_mut().insert(header::AUTHORIZATION, format!("Bearer {token}").parse().expect("auth header"));
+    }
+    let (ws, _resp) = connect_async(request).await.expect("connect to websocket");
+    ws
+}
+
+/// Ожидает отказ WS-handshake и возвращает HTTP-статус отказа (негативные кейсы).
+async fn connect_ws_expect_reject(url: &str, token: Option<&str>) -> StatusCode {
+    let mut request = url.into_client_request().expect("client request");
+    if let Some(token) = token {
+        request.headers_mut().insert(header::AUTHORIZATION, format!("Bearer {token}").parse().expect("auth header"));
+    }
+    match connect_async(request).await {
+        Err(WsError::Http(response)) => response.status(),
+        Err(other) => panic!("expected HTTP rejection, got {other:?}"),
+        Ok(_) => panic!("expected HTTP rejection, but handshake succeeded"),
+    }
+}
+
+/// T1.2: `/ws` требует валидный Bearer (сетевой сигналинг, fail-closed).
+#[tokio::test]
+async fn test_signaling_ws_auth_required() {
+    let (addr, _state, token) = spawn_live_server_with_auth().await;
+    let url = format!("ws://{addr}/ws");
+
+    // Без заголовка — 401, без апгрейда.
+    assert_eq!(connect_ws_expect_reject(&url, None).await, StatusCode::UNAUTHORIZED);
+
+    // Битый токен — 401.
+    assert_eq!(connect_ws_expect_reject(&url, Some("not-a-jwt")).await, StatusCode::UNAUTHORIZED);
+
+    // Валидный токен — апгрейд и ServerHello.
+    let ws_stream = connect_ws(&url, Some(&token)).await;
+    let (mut write, mut read) = ws_stream.split();
+    write.send(TungsteniteMsg::Binary(client_hello(1, "authed-room", "c1").encode().into())).await.unwrap();
+    let reply = read.next().await.unwrap().unwrap();
+    let env = Envelope::decode(&reply.into_data()).unwrap();
+    assert!(matches!(env.payload(), Some(Payload::ServerHello(_))));
+}
+
+/// T1.2: отклонённый JoinRoom (до ClientHello) не создаёт комнату и не считает участника.
+#[tokio::test]
+async fn test_signaling_join_before_hello_does_not_create_room() {
+    let (addr, state, token) = spawn_live_server_with_auth().await;
+    let url = format!("ws://{addr}/ws");
+    let ws_stream = connect_ws(&url, Some(&token)).await;
+    let (mut write, mut read) = ws_stream.split();
+
+    // JoinRoom до ClientHello — FSM отвечает Error, сайд-эффектов быть не должно.
+    write.send(TungsteniteMsg::Binary(join_room(1, "ghost-room", "Ghost").encode().into())).await.unwrap();
+    let reply = read.next().await.unwrap().unwrap();
+    let env = Envelope::decode(&reply.into_data()).unwrap();
+    assert!(matches!(env.payload(), Some(Payload::Error(_))), "join before hello must be rejected");
+    let ghost = state.rooms.lock().unwrap().values().any(|r| r.name == "ghost-room");
+    assert!(!ghost, "rejected JoinRoom must not create a room");
+
+    // Валидный флоу: hello → join → комната создана, participants = 1.
+    write.send(TungsteniteMsg::Binary(client_hello(2, "ghost-room", "c1").encode().into())).await.unwrap();
+    let _ = read.next().await.unwrap().unwrap();
+    write.send(TungsteniteMsg::Binary(join_room(3, "ghost-room", "Alice").encode().into())).await.unwrap();
+    let reply = read.next().await.unwrap().unwrap();
+    let env = Envelope::decode(&reply.into_data()).unwrap();
+    assert!(matches!(env.payload(), Some(Payload::JoinRoomResult(_))));
+    let participants = state.rooms.lock().unwrap().values().find(|r| r.name == "ghost-room").map(|r| r.participants);
+    assert_eq!(participants, Some(1), "room must exist with exactly one participant");
+}
+
+/// T1.2: лимиты сигналинг-сессии — частота (1008) и размер кадра (1009).
+#[tokio::test]
+async fn test_signaling_ws_limits_close_connection() {
+    let (addr, _state, token) = spawn_live_server_with_auth().await;
+    let url = format!("ws://{addr}/ws");
+
+    // 1) Частота: >60 сообщений/сек → close с причиной.
+    let ws_stream = connect_ws(&url, Some(&token)).await;
+    let (mut write, mut read) = ws_stream.split();
+    write.send(TungsteniteMsg::Binary(client_hello(1, "rl-room", "c1").encode().into())).await.unwrap();
+    for msg_id in 2..=70u64 {
+        let spam = client_hello(msg_id, "rl-room", "c1");
+        if write.send(TungsteniteMsg::Binary(spam.encode().into())).await.is_err() {
+            break;
+        }
+    }
+    let mut close_reason = None;
+    for _ in 0..300 {
+        match read.next().await {
+            Some(Ok(TungsteniteMsg::Close(frame))) => {
+                close_reason = Some(format!("{frame:?}"));
+                break;
+            }
+            None | Some(Err(_)) => break,
+            Some(Ok(_)) => continue,
+        }
+    }
+    assert!(
+        close_reason.as_deref().unwrap_or_default().contains("message rate exceeded"),
+        "rate limiter must close with reason, got {close_reason:?}"
+    );
+
+    // 2) Размер сообщения: 65 КиБ > лимита 64 КиБ (§2.4) → graceful close 4008.
+    let ws_stream = connect_ws(&url, Some(&token)).await;
+    let (mut write, mut read) = ws_stream.split();
+    write.send(TungsteniteMsg::Binary(vec![0u8; 65 * 1024].into())).await.unwrap();
+    let mut close_reason = None;
+    for _ in 0..50 {
+        match read.next().await {
+            Some(Ok(TungsteniteMsg::Close(frame))) => {
+                close_reason = Some(format!("{frame:?}"));
+                break;
+            }
+            None | Some(Err(_)) => break,
+            Some(Ok(_)) => continue,
+        }
+    }
+    assert!(
+        close_reason.as_deref().unwrap_or_default().contains("message too large"),
+        "message size limiter must close with 4008 and reason, got {close_reason:?}"
+    );
 }
 
 /// HTTP GET через живой TCP-сокет (статусная строка + заголовки + тело).
@@ -366,6 +493,14 @@ async fn test_live_composition_root_serves_ui() {
     // (не 401 и не перехват статикой).
     let response = raw_get(addr, "/api/v1/rooms").await;
     assert!(response.starts_with("HTTP/1.1 503"), "v1 protected regression: {response}");
+
+    // WS-сигналинг без настроенного issuer — тоже fail-closed 503 (T1.2).
+    let url = format!("ws://{addr}/ws");
+    assert_eq!(
+        connect_ws_expect_reject(&url, None).await,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "ws must fail closed without issuer"
+    );
 }
 
 /// Composition-проверка цепочки `/api/v3` через `build_app` (фаза 2, ADR-0027):
@@ -502,7 +637,7 @@ async fn test_live_signaling_syncs_ui_sessions() {
 
     // 2. Connect WebSocket client and join room
     let url = format!("ws://{addr}/ws");
-    let (ws_stream, _) = connect_async(&url).await.expect("connect");
+    let ws_stream = connect_ws(&url, Some(&token)).await;
     let (mut write, mut read) = ws_stream.split();
 
     let hello = client_hello(1, "conf-sync", "alice-client");

@@ -1,21 +1,21 @@
 //! `vks-server` — библиотека составных частей сервера.
 //!
 //! Здесь — единая точка сборки HTTP-приложения [`build_app`]: admin REST
-//! (`/api/v1/*`), метрики (`/metrics`), сетевой сигналинг (`/ws`, protobuf) и
-//! статика фронтенда PNM (`/pnm/`, `/mcu/*`) на [`frontend::Frontend`].
+//! (`/api/v1/*`), метрики (`/metrics`), сетевой сигналинг (`/ws`, protobuf;
+//! auth-at-handshake + лимиты) и статика фронтенда PNM (`/pnm/`, `/mcu/*`).
 //! Используется и `main.rs` (композиционный корень), и интеграционными тестами.
 
 pub mod frontend;
 
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::Request;
-use axum::http::{header, StatusCode};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Request, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
+use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use tracing::{info, warn};
 
@@ -23,6 +23,7 @@ use vks_admin::state::AppState;
 use vks_common::metrics::{
     encode as encode_metrics, HTTP_REQUESTS, HTTP_REQUEST_DURATION, HTTP_RESPONSE_BYTES, SIGNALING_MESSAGES,
 };
+use vks_proto::signaling::signaling_message::Payload;
 use vks_signaling::envelope::Envelope;
 use vks_signaling::handler::{HandlerConfig, SignalingHandler};
 
@@ -36,12 +37,13 @@ use crate::frontend::{statics_rel_path, Frontend};
 /// поэтому тесты гоняют ровно ту же сборку, что и `main.rs`.
 pub fn build_app(state: Arc<AppState>, frontend: &Frontend) -> Router {
     let csp = frontend.csp.clone();
-    let ws_state = state.clone();
+    // Сигналинг: auth-at-handshake и лимиты (T1.2) — внутри ws_handler.
+    let signaling = Router::new().route("/ws", get(ws_handler)).with_state(state.clone());
     vks_admin::handlers::router(state.clone())
         // Адаптер legacy UI `/api/v3/*` (ADR-0027, фазы 2–3 плана).
         .merge(vks_admin::api_v3::router(state))
+        .merge(signaling)
         .route("/metrics", get(metrics_handler))
-        .route("/ws", get(move |ws| ws_handler(ws, ws_state)))
         .merge(frontend.router())
         .layer(axum::middleware::from_fn(move |request: Request, next: Next| {
             let csp = csp.clone();
@@ -124,17 +126,67 @@ async fn metrics_handler() -> Response {
 }
 
 /// Эндпоинт WebSocket-сигналинга.
-async fn ws_handler(ws: WebSocketUpgrade, state: Arc<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_ws_socket(socket, state))
+///
+/// Auth-at-handshake (ADR-0009, fail-closed): обязателен валидный
+/// `Authorization: Bearer`; без настроенного `jwt_issuer` — 503, без/с битым
+/// токеном — 401. Браузерный JS (не умеет ставить заголовки) обязан идти через
+/// адаптер `/api/v3/ws`. Роль на этом шаге не проверяется: авторизация
+/// конкретных сигналинг-действий — зона FSM и следующих волн.
+async fn ws_handler(State(state): State<Arc<AppState>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    let Some(issuer) = &state.jwt_issuer else {
+        return ws_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "auth_unavailable",
+            "JWT authentication service is not configured",
+        );
+    };
+    let bearer = headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok()).and_then(|h| {
+        let (scheme, token) = h.split_once(' ')?;
+        (scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty()).then(|| token.trim())
+    });
+    let Some(token) = bearer else {
+        return ws_error(StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid Authorization header");
+    };
+    if let Err(e) = issuer.verify(token) {
+        tracing::debug!(error = %e, "ws jwt verification failed");
+        return ws_error(StatusCode::UNAUTHORIZED, "unauthorized", "invalid or expired token");
+    }
+    // Транспортный потолок памяти на сообщение (см. MAX_WS_TRANSPORT_BYTES):
+    // 64–256 КиБ — graceful close 4008 в handle_ws_socket, свыше — транспортный отсев.
+    ws.max_message_size(MAX_WS_TRANSPORT_BYTES).on_upgrade(move |socket| handle_ws_socket(socket, state))
 }
 
+/// JSON-конверт ошибки handshake (до upgrade).
+fn ws_error(status: StatusCode, error_code: &str, error: &str) -> Response {
+    (status, Json(serde_json::json!({ "error_code": error_code, "error": error }))).into_response()
+}
+
+/// Лимит сигналинг-сообщения (protobuf-конверт), BACKEND_RULES §2.4: 64 КиБ;
+/// превышение — `MessageTooLarge` (close 4008) до декодирования протокола.
+const MAX_WS_MESSAGE_BYTES: usize = 64 * 1024;
+
+/// Транспортный потолок памяти на сообщение (4× явного лимита): сообщения
+/// 64–256 КиБ доходят до прикладной проверки (graceful close 4008), свыше —
+/// отсекаются tungstenite'ом до сборки всего сообщения.
+const MAX_WS_TRANSPORT_BYTES: usize = MAX_WS_MESSAGE_BYTES * 4;
+
+/// Лимит частоты: не более 60 сообщений/сек на соединение.
+const MAX_WS_MESSAGES_PER_SEC: usize = 60;
+
 /// Обработка сессии WebSocket-сигналинга.
+///
+/// Сайд-эффекты комнаты (создание записи, счётчик участников) применяются только
+/// по **успешному** результату FSM (`JoinRoomResult`/`Ack` на `LeaveRoom`):
+/// отклонённый JoinRoom (например, до ClientHello) ничего не создаёт и не считает.
 async fn handle_ws_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
     let mut handler = SignalingHandler::new(HandlerConfig::default_test());
     let mut current_room: Option<vks_core::RoomId> = None;
+    // Скользящее окно частоты сообщений (T1.2).
+    let mut window_start = std::time::Instant::now();
+    let mut window_count: usize = 0;
 
-    while let Some(msg_res) = receiver.next().await {
+    'session: while let Some(msg_res) = receiver.next().await {
         let msg = match msg_res {
             Ok(m) => m,
             Err(e) => {
@@ -143,36 +195,69 @@ async fn handle_ws_socket(socket: WebSocket, state: Arc<AppState>) {
             }
         };
 
+        // Лимит частоты (T1.2 / SEC-03): окно в секунду распространяется на все входящие кадры.
+        if window_start.elapsed() >= std::time::Duration::from_secs(1) {
+            window_start = std::time::Instant::now();
+            window_count = 0;
+        }
+        window_count += 1;
+        if window_count > MAX_WS_MESSAGES_PER_SEC {
+            warn!(limit = MAX_WS_MESSAGES_PER_SEC, "signaling rate limit exceeded; closing");
+            let frame = CloseFrame { code: 1008, reason: "message rate exceeded".into() }; // 1008 Policy Violation
+            let _ = sender.send(Message::Close(Some(frame))).await;
+            break;
+        }
+
         match msg {
             Message::Binary(bytes) => {
+                // Лимит сообщения (§2.4: protobuf ≤64 КиБ) — до декодирования протокола.
+                if bytes.len() > MAX_WS_MESSAGE_BYTES {
+                    warn!(
+                        size = bytes.len(),
+                        limit = MAX_WS_MESSAGE_BYTES,
+                        "signaling message too large; closing 4008"
+                    );
+                    let frame = CloseFrame { code: 4008, reason: "message too large".into() }; // 4008 MessageTooLarge
+                    let _ = sender.send(Message::Close(Some(frame))).await;
+                    break;
+                }
+
                 SIGNALING_MESSAGES.with_label_values(&["uplink"]).inc();
                 match Envelope::decode(&bytes) {
                     Ok(env) => {
-                        if let Some(vks_proto::signaling::signaling_message::Payload::JoinRoom(join)) = env.payload() {
-                            let rid = if let Ok(u) = uuid::Uuid::parse_str(&join.room_id) {
-                                vks_core::RoomId::from_uuid(u)
-                            } else {
-                                let mut found = None;
-                                if let Ok(rooms) = state.rooms.lock() {
-                                    for (id, r) in rooms.iter() {
-                                        if r.name == join.room_id {
-                                            found = Some(*id);
-                                            break;
+                        let join_name = match env.payload() {
+                            Some(Payload::JoinRoom(join)) => Some(join.room_id.clone()),
+                            _ => None,
+                        };
+                        let was_leave = matches!(env.payload(), Some(Payload::LeaveRoom(_)));
+
+                        // Запрос исполняет FSM; сайд-эффекты — только по успешному результату.
+                        let replies = handler.handle(env);
+                        let joined_ok = replies.iter().any(|r| matches!(r.payload(), Some(Payload::JoinRoomResult(_))));
+                        let left_ok = was_leave && replies.iter().any(|r| matches!(r.payload(), Some(Payload::Ack(_))));
+
+                        if joined_ok {
+                            if let Some(name) = join_name {
+                                let rid = if let Ok(u) = uuid::Uuid::parse_str(&name) {
+                                    vks_core::RoomId::from_uuid(u)
+                                } else {
+                                    let mut found = None;
+                                    if let Ok(rooms) = state.rooms.lock() {
+                                        for (id, r) in rooms.iter() {
+                                            if r.name == name {
+                                                found = Some(*id);
+                                                break;
+                                            }
                                         }
                                     }
-                                }
-                                found.unwrap_or_else(|| {
-                                    let r = vks_admin::rooms::Rooms::create(&state, &join.room_id);
-                                    r.id
-                                })
-                            };
-                            current_room = Some(rid);
-                            let count =
-                                vks_admin::rooms::Rooms::get(&state, &rid).map(|r| r.participants + 1).unwrap_or(1);
-                            vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(count), None);
-                        } else if let Some(vks_proto::signaling::signaling_message::Payload::LeaveRoom(_)) =
-                            env.payload()
-                        {
+                                    found.unwrap_or_else(|| vks_admin::rooms::Rooms::create(&state, &name).id)
+                                };
+                                current_room = Some(rid);
+                                let count =
+                                    vks_admin::rooms::Rooms::get(&state, &rid).map(|r| r.participants + 1).unwrap_or(1);
+                                vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(count), None);
+                            }
+                        } else if left_ok {
                             if let Some(rid) = current_room.take() {
                                 if let Some(room) = vks_admin::rooms::Rooms::get(&state, &rid) {
                                     let new_count = room.participants.saturating_sub(1);
@@ -181,19 +266,32 @@ async fn handle_ws_socket(socket: WebSocket, state: Arc<AppState>) {
                             }
                         }
 
-                        let replies = handler.handle(env);
                         for reply in replies {
                             SIGNALING_MESSAGES.with_label_values(&["downlink"]).inc();
                             let reply_bytes = reply.encode();
                             if let Err(e) = sender.send(Message::Binary(reply_bytes.into())).await {
                                 warn!(error = %e, "failed to send signaling reply");
-                                return;
+                                break 'session; // не `return`: ниже — очистка счётчика комнаты
                             }
                         }
                     }
                     Err(e) => {
                         warn!(error = %e, "failed to decode protobuf signaling envelope");
                     }
+                }
+            }
+            Message::Text(text) => {
+                // Сигналинг — только бинарный протокол; текстовые кадры не
+                // обрабатываем, но ограничиваем их размер тем же лимитом.
+                if text.len() > MAX_WS_MESSAGE_BYTES {
+                    warn!(
+                        size = text.len(),
+                        limit = MAX_WS_MESSAGE_BYTES,
+                        "signaling text message too large; closing 4008"
+                    );
+                    let frame = CloseFrame { code: 4008, reason: "message too large".into() }; // 4008 MessageTooLarge
+                    let _ = sender.send(Message::Close(Some(frame))).await;
+                    break;
                 }
             }
             Message::Ping(payload) => {

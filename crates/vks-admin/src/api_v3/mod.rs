@@ -76,6 +76,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/conferences", get(sessions::conferences).post(sessions::create_conference))
         .route("/api/v3/conferences/{id}", get(sessions::conference).delete(sessions::delete_conference))
         .route("/api/v3/ui/conferences", get(sessions::ui_conferences))
+        .route("/api/v3/ui/conferences/{id}", get(sessions::conference).delete(sessions::delete_conference))
+        .route("/api/v3/ui/video_layouts", get(shell::video_layouts))
+        .route("/api/v3/video_layouts", get(shell::video_layouts))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::token_middleware));
 
     Router::new()
