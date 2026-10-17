@@ -34,7 +34,9 @@ struct RoomState {
     caps: RoomCaps,
     forwarder: Forwarder,
     /// Publisher → его track'и.
-    publisher_tracks: BTreeMap<ParticipantId, Vec<TrackId>>,
+    publisher_tracks: BTreeMap<ParticipantId, Vec<MediaTrack>>,
+    /// Все активные треки в комнате: track_id → MediaTrack.
+    tracks: BTreeMap<TrackId, MediaTrack>,
     /// Subscriber → BWE/selector/congestion (per-subscriber downlink).
     subscribers: BTreeMap<ParticipantId, SubscriberState>,
 }
@@ -48,6 +50,14 @@ struct SubscriberState {
     simulcast: SimulcastSelector,
     /// Congestion (ladder).
     congestion: CongestionLadder,
+    /// Желаемая подписка (треки + audio_only фильтр).
+    subscription: SubscribeRequest,
+}
+
+#[inline]
+fn track_matches_subscription(req: &SubscribeRequest, track: &MediaTrack) -> bool {
+    (!req.audio_only || track.media_kind == vks_core::MediaKind::Audio)
+        && (req.track_ids.is_empty() || req.track_ids.contains(&track.id))
 }
 
 /// SFU engine (impl [`MediaEngine`]).
@@ -151,6 +161,7 @@ impl MediaEngine for SfuEngine {
             caps: cfg.caps,
             forwarder: Forwarder::new(ForwarderConfig { full_mesh_default: true }),
             publisher_tracks: BTreeMap::new(),
+            tracks: BTreeMap::new(),
             subscribers: BTreeMap::new(),
         };
         g.insert(cfg.room_id, state);
@@ -180,17 +191,42 @@ impl MediaEngine for SfuEngine {
     ) -> Result<PublisherHandle, MediaEngineError> {
         let mut g = self.rooms.lock().unwrap();
         let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
-        let new_track_ids: Vec<TrackId> = tracks.iter().map(|t| t.id).collect();
-        if let Some(old_tracks) = state.publisher_tracks.insert(publisher, new_track_ids) {
+
+        // Admission quota check: max_participants
+        if let Some(max_p) = state.caps.max_participants {
+            let is_existing = state.publisher_tracks.contains_key(&publisher) || state.subscribers.contains_key(&publisher);
+            let total_unique = state.publisher_tracks.keys().chain(state.subscribers.keys()).collect::<std::collections::BTreeSet<_>>().len() as u32;
+            if total_unique >= max_p && !is_existing {
+                return Err(MediaEngineError::Other(format!("room capacity exceeded: max {} participants", max_p)));
+            }
+        }
+
+        // 1. Withdraw tracks that are no longer published
+        if let Some(old_tracks) = state.publisher_tracks.get(&publisher) {
             for old_t in old_tracks {
-                if !tracks.iter().any(|t| t.id == old_t) {
-                    state.forwarder.withdraw_track(old_t);
+                if !tracks.iter().any(|t| t.id == old_t.id) {
+                    state.tracks.remove(&old_t.id);
+                    state.forwarder.withdraw_track(old_t.id);
                 }
             }
         }
+
+        // 2. Announce new tracks and apply selective subscription filters
         for t in &tracks {
+            state.tracks.insert(t.id, t.clone());
             state.forwarder.announce_track(t.id);
+
+            // Selective subscriptions: check all subscribers
+            for (sub_id, sub_state) in &state.subscribers {
+                if track_matches_subscription(&sub_state.subscription, t) {
+                    state.forwarder.subscribe(*sub_id, t.id);
+                } else {
+                    state.forwarder.unsubscribe(*sub_id, t.id);
+                }
+            }
         }
+
+        state.publisher_tracks.insert(publisher, tracks);
         Ok(PublisherHandle { room, publisher })
     }
 
@@ -199,7 +235,8 @@ impl MediaEngine for SfuEngine {
         let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
         if let Some(tracks) = state.publisher_tracks.remove(&publisher) {
             for t in tracks {
-                state.forwarder.withdraw_track(t);
+                state.tracks.remove(&t.id);
+                state.forwarder.withdraw_track(t.id);
             }
         }
         Ok(())
@@ -209,17 +246,44 @@ impl MediaEngine for SfuEngine {
         &self,
         room: RoomId,
         subscriber: ParticipantId,
-        _req: SubscribeRequest,
+        req: SubscribeRequest,
     ) -> Result<SubscriberHandle, MediaEngineError> {
         let mut g = self.rooms.lock().unwrap();
         let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
+
+        // Admission quota check: max_participants
+        if let Some(max_p) = state.caps.max_participants {
+            let is_existing = state.subscribers.contains_key(&subscriber) || state.publisher_tracks.contains_key(&subscriber);
+            let total_unique = state.subscribers.keys().chain(state.publisher_tracks.keys()).collect::<std::collections::BTreeSet<_>>().len() as u32;
+            if total_unique >= max_p && !is_existing {
+                return Err(MediaEngineError::Other(format!("room capacity exceeded: max {} participants", max_p)));
+            }
+        }
+
         state.forwarder.add_subscriber(subscriber);
-        let sub = SubscriberState {
-            bwe: BweEstimator::new(),
-            simulcast: SimulcastSelector::new(),
-            congestion: CongestionLadder::new(),
-        };
-        state.subscribers.insert(subscriber, sub);
+
+        // Apply selective subscription filters to already active tracks
+        if req.audio_only || !req.track_ids.is_empty() {
+            for (track_id, track) in &state.tracks {
+                if track_matches_subscription(&req, track) {
+                    state.forwarder.subscribe(subscriber, *track_id);
+                } else {
+                    state.forwarder.unsubscribe(subscriber, *track_id);
+                }
+            }
+        }
+
+        if let Some(existing) = state.subscribers.get_mut(&subscriber) {
+            existing.subscription = req;
+        } else {
+            let sub = SubscriberState {
+                bwe: BweEstimator::new(),
+                simulcast: SimulcastSelector::new(),
+                congestion: CongestionLadder::new(),
+                subscription: req,
+            };
+            state.subscribers.insert(subscriber, sub);
+        }
         Ok(SubscriberHandle { room, subscriber })
     }
 
@@ -275,6 +339,9 @@ mod tests {
     }
     fn video_track(pid: ParticipantId) -> Track {
         Track::new(pid, TrackKind::Video)
+    }
+    fn audio_track(pid: ParticipantId) -> Track {
+        Track::new(pid, TrackKind::Audio)
     }
     fn cfg(rid: RoomId) -> RoomMediaCfg {
         RoomMediaCfg { room_id: rid, mode: RoomMode::Sfu, caps: RoomCaps::default() }
@@ -440,4 +507,146 @@ mod tests {
         let new_mode = e.switch_room_mode(rid, RoomMode::Mcu).await.unwrap();
         assert_eq!(new_mode, RoomMode::Mcu);
     }
+
+    #[tokio::test]
+    async fn audio_only_subscriber_does_not_receive_video_tracks() {
+        let e = SfuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+
+        let pub1 = p(1);
+        let a_track = audio_track(pub1);
+        let v_track = video_track(pub1);
+        e.add_publisher(rid, pub1, vec![a_track.clone(), v_track.clone()]).await.unwrap();
+
+        let sub_audio = p(10);
+        e.add_subscriber(rid, sub_audio, SubscribeRequest { track_ids: Vec::new(), audio_only: true }).await.unwrap();
+
+        let sub_all = p(11);
+        e.add_subscriber(rid, sub_all, sub_req()).await.unwrap();
+
+        // Audio packet routes to both
+        let a_routed = e.route(rid, RtpPacket { track: a_track.id, payload: vec![1].into() }).unwrap();
+        assert_eq!(a_routed.len(), 2);
+        assert!(a_routed.iter().any(|(t, _)| t.subscriber == sub_audio));
+        assert!(a_routed.iter().any(|(t, _)| t.subscriber == sub_all));
+
+        // Video packet routes only to sub_all, NOT sub_audio
+        let v_routed = e.route(rid, RtpPacket { track: v_track.id, payload: vec![2].into() }).unwrap();
+        assert_eq!(v_routed.len(), 1);
+        assert_eq!(v_routed[0].0.subscriber, sub_all);
+    }
+
+    #[tokio::test]
+    async fn selective_track_ids_subscription() {
+        let e = SfuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+
+        let pub1 = p(1);
+        let t1 = video_track(pub1);
+        let t2 = video_track(pub1);
+        e.add_publisher(rid, pub1, vec![t1.clone(), t2.clone()]).await.unwrap();
+
+        let sub = p(10);
+        // Only subscribe to t1
+        e.add_subscriber(rid, sub, SubscribeRequest { track_ids: vec![t1.id], audio_only: false }).await.unwrap();
+
+        let r1 = e.route(rid, RtpPacket { track: t1.id, payload: vec![1].into() }).unwrap();
+        assert_eq!(r1.len(), 1);
+        assert_eq!(r1[0].0.subscriber, sub);
+
+        let r2 = e.route(rid, RtpPacket { track: t2.id, payload: vec![2].into() }).unwrap();
+        assert!(r2.is_empty(), "track 2 must not be routed to subscriber selective for track 1");
+    }
+
+    #[tokio::test]
+    async fn late_publisher_respects_subscriber_filters() {
+        let e = SfuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+
+        let sub_audio = p(10);
+        e.add_subscriber(rid, sub_audio, SubscribeRequest { track_ids: Vec::new(), audio_only: true }).await.unwrap();
+
+        let pub1 = p(1);
+        let a_track = audio_track(pub1);
+        let v_track = video_track(pub1);
+        // Publisher joins AFTER subscriber
+        e.add_publisher(rid, pub1, vec![a_track.clone(), v_track.clone()]).await.unwrap();
+
+        let a_routed = e.route(rid, RtpPacket { track: a_track.id, payload: vec![1].into() }).unwrap();
+        assert_eq!(a_routed.len(), 1);
+        assert_eq!(a_routed[0].0.subscriber, sub_audio);
+
+        let v_routed = e.route(rid, RtpPacket { track: v_track.id, payload: vec![2].into() }).unwrap();
+        assert!(v_routed.is_empty(), "video track must not be routed to audio-only subscriber");
+    }
+
+    #[tokio::test]
+    async fn room_max_participants_quota_enforced() {
+        let e = SfuEngine::new();
+        let rid = room_id();
+        let mut c = cfg(rid);
+        c.caps.max_participants = Some(2);
+        e.create_room(c).await.unwrap();
+
+        let s1 = p(1);
+        let s2 = p(2);
+        let s3 = p(3);
+
+        e.add_subscriber(rid, s1, sub_req()).await.unwrap();
+        e.add_subscriber(rid, s2, sub_req()).await.unwrap();
+        let err = e.add_subscriber(rid, s3, sub_req()).await.unwrap_err();
+        assert!(matches!(err, MediaEngineError::Other(msg) if msg.contains("capacity exceeded")));
+
+        // Re-adding existing subscriber succeeds (idempotent / update)
+        e.add_subscriber(rid, s1, sub_req()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn renegotiation_preserves_subscriber_bwe_state() {
+        let e = SfuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let sub = p(20);
+        e.add_subscriber(rid, sub, sub_req()).await.unwrap();
+
+        // Feed fast TWCC packets to elevate BWE to High layer
+        let now = Instant::now();
+        let fast: Vec<TwccReportedPacket> = (0..30)
+            .map(|i| TwccReportedPacket {
+                sent_seq: i as u16,
+                arrival: now - Duration::from_secs(1) + Duration::from_millis(i as u64 * 10),
+            })
+            .collect();
+        let layer = e.on_feedback(rid, sub, &fast).unwrap();
+        assert_eq!(layer, SimulcastLayer::High);
+
+        // Update subscription (renegotiation)
+        e.add_subscriber(rid, sub, SubscribeRequest { track_ids: Vec::new(), audio_only: true }).await.unwrap();
+
+        // Check congestion/BWE state is preserved (not reset to default)
+        let c = e.subscriber_congestion(rid, sub).unwrap();
+        assert_eq!(c, CongestionLevel::Normal);
+    }
+
+    #[tokio::test]
+    async fn room_max_participants_counts_publishers_and_subscribers() {
+        let e = SfuEngine::new();
+        let rid = room_id();
+        let mut c = cfg(rid);
+        c.caps.max_participants = Some(2);
+        e.create_room(c).await.unwrap();
+
+        let pub1 = p(1);
+        let pub2 = p(2);
+        let pub3 = p(3);
+
+        e.add_publisher(rid, pub1, vec![video_track(pub1)]).await.unwrap();
+        e.add_publisher(rid, pub2, vec![video_track(pub2)]).await.unwrap();
+        let err = e.add_publisher(rid, pub3, vec![video_track(pub3)]).await.unwrap_err();
+        assert!(matches!(err, MediaEngineError::Other(msg) if msg.contains("capacity exceeded")));
+    }
 }
+
