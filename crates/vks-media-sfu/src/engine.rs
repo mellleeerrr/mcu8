@@ -194,8 +194,14 @@ impl MediaEngine for SfuEngine {
 
         // Admission quota check: max_participants
         if let Some(max_p) = state.caps.max_participants {
-            let is_existing = state.publisher_tracks.contains_key(&publisher) || state.subscribers.contains_key(&publisher);
-            let total_unique = state.publisher_tracks.keys().chain(state.subscribers.keys()).collect::<std::collections::BTreeSet<_>>().len() as u32;
+            let is_existing =
+                state.publisher_tracks.contains_key(&publisher) || state.subscribers.contains_key(&publisher);
+            let total_unique = state
+                .publisher_tracks
+                .keys()
+                .chain(state.subscribers.keys())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len() as u32;
             if total_unique >= max_p && !is_existing {
                 return Err(MediaEngineError::Other(format!("room capacity exceeded: max {} participants", max_p)));
             }
@@ -253,8 +259,14 @@ impl MediaEngine for SfuEngine {
 
         // Admission quota check: max_participants
         if let Some(max_p) = state.caps.max_participants {
-            let is_existing = state.subscribers.contains_key(&subscriber) || state.publisher_tracks.contains_key(&subscriber);
-            let total_unique = state.subscribers.keys().chain(state.publisher_tracks.keys()).collect::<std::collections::BTreeSet<_>>().len() as u32;
+            let is_existing =
+                state.subscribers.contains_key(&subscriber) || state.publisher_tracks.contains_key(&subscriber);
+            let total_unique = state
+                .subscribers
+                .keys()
+                .chain(state.publisher_tracks.keys())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len() as u32;
             if total_unique >= max_p && !is_existing {
                 return Err(MediaEngineError::Other(format!("room capacity exceeded: max {} participants", max_p)));
             }
@@ -649,4 +661,3 @@ mod tests {
         assert!(matches!(err, MediaEngineError::Other(msg) if msg.contains("capacity exceeded")));
     }
 }
-

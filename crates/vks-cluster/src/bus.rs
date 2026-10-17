@@ -196,34 +196,65 @@ impl Bus {
         self.state.lock().unwrap().dlq_messages
     }
 
+    /// Вычитка и удаление следующего сообщения из темы (FIFO).
+    pub fn pop(&self, topic: &str) -> Option<Msg> {
+        let mut st = self.state.lock().unwrap();
+        let queue = st.topics.get_mut(topic)?;
+        if queue.is_empty() {
+            None
+        } else {
+            Some(queue.remove(0))
+        }
+    }
+
+    /// Вычитка со сбросом всех накопленных сообщений темы.
+    pub fn drain(&self, topic: &str) -> Vec<Msg> {
+        let mut st = self.state.lock().unwrap();
+        st.topics.remove(topic).unwrap_or_default()
+    }
+
     /// Backpressure (CLUSTERING.md §5): очередь темы > max → non-critical
-    /// drop-ится (и в DLQ), critical retry-ится (остаётся в очереди).
+    /// drop-ится (и в DLQ), critical retry-ится (до hard_max).
     pub fn push_backpressure(&self, topic: &str, msg: Msg, max: usize) -> PushResult {
-        let result = {
+        self.push_backpressure_with_limits(topic, msg, max, max.saturating_mul(2))
+    }
+
+    /// Backpressure с настраиваемыми мягким и жестким лимитами (M5.7).
+    pub fn push_backpressure_with_limits(&self, topic: &str, msg: Msg, max: usize, hard_max: usize) -> PushResult {
+        let hard_max = hard_max.max(max);
+        let action = {
             let st = self.state.lock().unwrap();
             let len = st.topics.get(topic).map(|v| v.len()).unwrap_or(0);
             if len < max {
                 // Под max: обычное publish.
                 None
+            } else if len >= hard_max && msg.critical {
+                // Жесткий предел исчерпан: critical отправляется в DLQ для защиты памяти.
+                Some(PushResult::DroppedCritical)
             } else if msg.critical {
                 Some(PushResult::RetriedCritical)
             } else {
                 Some(PushResult::DroppedNonCritical)
             }
         };
-        match result {
+        match action {
+            Some(PushResult::DroppedCritical) => {
+                self.to_dlq(msg);
+                PushResult::DroppedCritical
+            }
             Some(PushResult::DroppedNonCritical) => {
                 self.to_dlq(msg);
                 PushResult::DroppedNonCritical
             }
-            Some(PushResult::RetriedCritical) | Some(PushResult::Accepted) => {
-                // Критичное при переполнении: остаётся в очереди (retry позже).
+            Some(PushResult::RetriedCritical) => {
+                // Критичное при мягком переполнении: остаётся в очереди (retry позже).
                 let mut st = self.state.lock().unwrap();
                 st.topics.entry(topic.to_string()).or_default().push(msg);
                 PushResult::RetriedCritical
             }
+            Some(PushResult::Accepted) => PushResult::Accepted,
             None => match self.publish(msg) {
-                // Дубликат по id — не как retry-принтым.
+                // Дубликат по id — не как retry-принятым.
                 PublishResult::Duplicate => PushResult::RetriedCritical,
                 _ => PushResult::Accepted,
             },
@@ -347,5 +378,43 @@ mod tests {
         assert_eq!(r, PushResult::RetriedCritical);
         assert_eq!(bus.queue_len("t"), 3);
         assert_eq!(bus.dlq_count(), 0);
+    }
+
+    #[test]
+    fn backpressure_drops_critical_over_hard_max() {
+        let bus = Bus::new();
+        // soft max = 2, hard max = 3
+        for _ in 0..2 {
+            bus.push_backpressure_with_limits("t", Msg::new("t", vec![1], true), 2, 3);
+        }
+        assert_eq!(bus.queue_len("t"), 2);
+        // 3rd message pushes queue to 3 (== hard_max)
+        let r = bus.push_backpressure_with_limits("t", Msg::new("t", vec![2], true), 2, 3);
+        assert_eq!(r, PushResult::RetriedCritical);
+        assert_eq!(bus.queue_len("t"), 3);
+
+        // 4th message exceeds hard_max: dropped to DLQ to protect against unbounded growth
+        let r2 = bus.push_backpressure_with_limits("t", Msg::new("t", vec![3], true), 2, 3);
+        assert_eq!(r2, PushResult::DroppedCritical);
+        assert_eq!(bus.queue_len("t"), 3);
+        assert_eq!(bus.dlq_count(), 1);
+    }
+
+    #[test]
+    fn pop_and_drain_consume_messages() {
+        let bus = Bus::new();
+        bus.subscribe("t");
+        bus.publish(Msg::new("t", vec![1], true));
+        bus.publish(Msg::new("t", vec![2], true));
+        assert_eq!(bus.queue_len("t"), 2);
+
+        let m1 = bus.pop("t").expect("m1");
+        assert_eq!(m1.payload, vec![1]);
+        assert_eq!(bus.queue_len("t"), 1);
+
+        let drained = bus.drain("t");
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].payload, vec![2]);
+        assert_eq!(bus.queue_len("t"), 0);
     }
 }

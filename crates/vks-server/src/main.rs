@@ -104,7 +104,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else if !config.database_url.is_empty() {
         error!(url = %vks_common::config::redact_dsn(&config.database_url), "unsupported database scheme in database_url; aborting startup");
-        return Err(format!("unsupported database scheme in database_url: {}", vks_common::config::redact_dsn(&config.database_url)).into());
+        return Err(format!(
+            "unsupported database scheme in database_url: {}",
+            vks_common::config::redact_dsn(&config.database_url)
+        )
+        .into());
     } else {
         info!("using in-memory storage (database_url not configured)");
         Arc::new(MemoryStorage::new())
@@ -182,29 +186,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _sfu_engine = Arc::new(vks_media_sfu::SfuEngine::new());
     let _mcu_engine = Arc::new(vks_media_mcu::McuEngine::new());
 
-    let (udp_loop, receive_task, candidate_addr, candidate_port) =
-        match vks_media_sfu::udp_loop::UdpMediaLoop::bind(&config.media_listen_addr).await {
-            Ok(loop_handle) => {
-                let local_addr = loop_handle.local_addr();
-                info!(addr = %local_addr, "WebRTC UDP media loop active");
-                let task = loop_handle.start_receive_loop(move |src, packet| {
+    let (udp_loop, receive_task, candidate_addr, candidate_port) = match vks_media_sfu::udp_loop::UdpMediaLoop::bind(
+        &config.media_listen_addr,
+    )
+    .await
+    {
+        Ok(loop_handle) => {
+            let local_addr = loop_handle.local_addr();
+            info!(addr = %local_addr, "WebRTC UDP media loop active");
+            let task = loop_handle.start_receive_loop(move |src, packet| {
                     tracing::trace!(src = %src, track = %packet.track, len = packet.payload.len(), "received UDP media packet");
                 });
-                let ip = if local_addr.ip().is_unspecified() {
-                    "127.0.0.1".to_string()
-                } else {
-                    local_addr.ip().to_string()
-                };
-                let port = local_addr.port();
-                (Some(Arc::new(loop_handle)), Some(task), ip, port)
-            }
-            Err(e) => {
-                warn!(error = %e, addr = %config.media_listen_addr, "failed to bind UDP media loop");
-                (None, None, "127.0.0.1".to_string(), 0)
-            }
-        };
+            let ip =
+                if local_addr.ip().is_unspecified() { "127.0.0.1".to_string() } else { local_addr.ip().to_string() };
+            let port = local_addr.port();
+            (Some(Arc::new(loop_handle)), Some(task), ip, port)
+        }
+        Err(e) => {
+            warn!(error = %e, addr = %config.media_listen_addr, "failed to bind UDP media loop");
+            (None, None, "127.0.0.1".to_string(), 0)
+        }
+    };
 
     // 8. Конфигурация обработчика сигналинга с реальными ICE/кодек атрибутами
+    let ice_servers: Vec<vks_proto::signaling::IceServer> = config
+        .ice_servers
+        .iter()
+        .map(|url| vks_proto::signaling::IceServer {
+            url: url.clone(),
+            username: String::new(),
+            credential: String::new(),
+        })
+        .collect();
+
     let handler_config = HandlerConfig::new(
         "srv-0001",
         &config.server_name,
@@ -217,7 +231,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             RtpMap { payload: 111, codec: "opus".into(), clock: 48000, channels: 2 },
             RtpMap { payload: 96, codec: "vp8".into(), clock: 90000, channels: 0 },
         ],
-    );
+    )
+    .with_ice_servers(ice_servers);
 
     // 9. Сборка маршрутов (единая точка — vks_server::build_app_with_config)
     let app = build_app_with_config(admin_state, &frontend, handler_config);

@@ -24,12 +24,20 @@ pub struct AudioMixer;
 impl AudioMixer {
     #[inline]
     fn sanitize_sample(s: f32) -> f32 {
-        if s.is_finite() { s } else { 0.0 }
+        if s.is_finite() {
+            s
+        } else {
+            0.0
+        }
     }
 
     #[inline]
     fn soft_clip(mixed: f32) -> f32 {
-        if mixed.abs() <= 1.0 { mixed } else { mixed.tanh() }
+        if mixed.abs() <= 1.0 {
+            mixed
+        } else {
+            mixed.tanh()
+        }
     }
 
     /// Mixes N input buffers into a single output buffer.
@@ -81,11 +89,7 @@ impl AudioMixer {
             .iter()
             .map(|own_buf| {
                 let own_non_empty = !own_buf.is_empty();
-                let other_count = if own_non_empty {
-                    n_active.saturating_sub(1)
-                } else {
-                    n_active
-                };
+                let other_count = if own_non_empty { n_active.saturating_sub(1) } else { n_active };
 
                 if other_count == 0 {
                     return vec![0.0f32; output_len];
@@ -94,11 +98,7 @@ impl AudioMixer {
                 let gain = 1.0f32 / (other_count as f32).sqrt();
                 let mut out = vec![0.0f32; output_len];
                 for i in 0..output_len {
-                    let own_sample = if i < own_buf.len() {
-                        Self::sanitize_sample(own_buf[i])
-                    } else {
-                        0.0
-                    };
+                    let own_sample = if i < own_buf.len() { Self::sanitize_sample(own_buf[i]) } else { 0.0 };
                     let sample_minus = sum[i] - own_sample;
                     let mixed = sample_minus * gain;
                     out[i] = Self::soft_clip(mixed);
@@ -212,4 +212,3 @@ mod tests {
         assert!((outputs[1][1] - 0.0).abs() < 1e-6);
     }
 }
-

@@ -48,16 +48,9 @@ pub fn build_app(state: Arc<AppState>, frontend: &Frontend) -> Router {
 /// (внутри [`Frontend::router`]) → роуты. Security-заголовки — **app-wide**, включая
 /// `/api/v1/*`, `/metrics` и `/ws` (§4.2 плана). Статика монтируется из `frontend`,
 /// поэтому тесты гоняют ровно ту же сборку, что и `main.rs`.
-pub fn build_app_with_config(
-    state: Arc<AppState>,
-    frontend: &Frontend,
-    handler_config: HandlerConfig,
-) -> Router {
+pub fn build_app_with_config(state: Arc<AppState>, frontend: &Frontend, handler_config: HandlerConfig) -> Router {
     let csp = frontend.csp.clone();
-    let ws_ctx = WsContext {
-        state: state.clone(),
-        handler_config,
-    };
+    let ws_ctx = WsContext { state: state.clone(), handler_config };
     // Сигналинг: auth-at-handshake и лимиты (T1.2) — внутри ws_handler.
     let signaling = Router::new().route("/ws", get(ws_handler)).with_state(ws_ctx);
     vks_admin::handlers::router(state.clone())
@@ -426,10 +419,13 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                 state.room_hub.broadcast(&rid, Some(pid), payload_bytes.into());
             }
 
-            state.notify_admin("conferences:update", serde_json::json!({
-                "id": rid.to_string(),
-                "participants_count": new_count
-            }));
+            state.notify_admin(
+                "conferences:update",
+                serde_json::json!({
+                    "id": rid.to_string(),
+                    "participants_count": new_count
+                }),
+            );
         }
     }
 }

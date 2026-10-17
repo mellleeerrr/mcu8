@@ -156,7 +156,11 @@ impl Settings {
         if let serde_json::Value::Object(ref mut map) = copy.auth.params {
             for (key, val) in map.iter_mut() {
                 let lower = key.to_lowercase();
-                if lower.contains("pass") || lower.contains("secret") || lower.contains("token") || lower.contains("key") {
+                if lower.contains("pass")
+                    || lower.contains("secret")
+                    || lower.contains("token")
+                    || lower.contains("key")
+                {
                     *val = serde_json::Value::String("***".into());
                 }
             }

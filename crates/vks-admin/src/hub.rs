@@ -61,10 +61,7 @@ impl RoomHub {
         let map = self.channels.read().expect("RoomHub lock poisoned");
         if let Some(tx) = map.get(room_id) {
             if tx.receiver_count() > 0 {
-                let event = RoomBroadcastEvent {
-                    sender_participant_id: sender_pid.map(str::to_string),
-                    payload,
-                };
+                let event = RoomBroadcastEvent { sender_participant_id: sender_pid.map(str::to_string), payload };
                 let _ = tx.send(event);
             }
         }

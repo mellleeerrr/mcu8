@@ -68,7 +68,8 @@ impl Readiness {
             None => true,
             Some(storage) => storage.ping().await.is_ok(),
         };
-        Self { db, media: true }
+        let media = state.mode.lock().is_ok();
+        Self { db, media }
     }
 
     /// Ready ли (все флаги true).

@@ -457,4 +457,3 @@ mod tests {
         assert_eq!(meta.ended_at_ms, 3_000);
     }
 }
-

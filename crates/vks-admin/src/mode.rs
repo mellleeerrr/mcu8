@@ -120,11 +120,14 @@ impl ModeService {
                 new_mode,
                 switch_epoch: m.switch_epoch,
             });
-            state.notify_admin("room:mode_changed", serde_json::json!({
-                "room_id": room_id.to_string(),
-                "mode": new_mode,
-                "switch_epoch": m.switch_epoch,
-            }));
+            state.notify_admin(
+                "room:mode_changed",
+                serde_json::json!({
+                    "room_id": room_id.to_string(),
+                    "mode": new_mode,
+                    "switch_epoch": m.switch_epoch,
+                }),
+            );
         }
         if let Some(storage) = &state.storage {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {

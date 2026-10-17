@@ -52,12 +52,8 @@ pub struct AuthContext {
 /// возвращает 503 Service Unavailable, исключая несанкционированный доступ.
 pub async fn jwt_auth_middleware(State(state): State<Arc<AppState>>, mut request: Request, next: Next) -> Response {
     // 1. Проверяем API-ключ в X-Api-Key или Authorization: Bearer vks_...
-    let api_key_candidate = request
-        .headers()
-        .get("x-api-key")
-        .and_then(|h| h.to_str().ok())
-        .map(str::trim)
-        .or_else(|| {
+    let api_key_candidate =
+        request.headers().get("x-api-key").and_then(|h| h.to_str().ok()).map(str::trim).or_else(|| {
             let auth = request.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
             let (scheme, token) = auth.split_once(' ')?;
             if scheme.eq_ignore_ascii_case("bearer") && token.trim().starts_with(vks_auth::api_key::KEY_PREFIX) {
@@ -148,8 +144,7 @@ pub async fn jwt_auth_middleware(State(state): State<Arc<AppState>>, mut request
         }
     };
 
-    let role = crate::users::Users::resolve_role(&state, &verified.user_id)
-        .unwrap_or(Role::Viewer);
+    let role = crate::users::Users::resolve_role(&state, &verified.user_id).unwrap_or(Role::Viewer);
 
     request.extensions_mut().insert(AuthContext {
         subject: verified.user_id.clone(),
@@ -499,12 +494,8 @@ mod tests {
         let owner = user.id;
 
         // Key with read-only scope
-        let core_key = vks_core::ports::storage::ApiKey {
-            id: hash.clone(),
-            scopes: vec!["read".into()],
-            owner,
-            revoked: false,
-        };
+        let core_key =
+            vks_core::ports::storage::ApiKey { id: hash.clone(), scopes: vec!["read".into()], owner, revoked: false };
         storage.upsert_api_key(&core_key).await.unwrap();
 
         let app = rbac_app(Arc::new(state));
@@ -530,12 +521,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
         // Revoke key -> 401 UNAUTHORIZED
-        let revoked_key = vks_core::ports::storage::ApiKey {
-            id: hash,
-            scopes: vec!["read".into()],
-            owner,
-            revoked: true,
-        };
+        let revoked_key =
+            vks_core::ports::storage::ApiKey { id: hash, scopes: vec!["read".into()], owner, revoked: true };
         storage.upsert_api_key(&revoked_key).await.unwrap();
         let req = Request::builder()
             .uri("/api/v1/rooms")
@@ -547,4 +534,3 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
-

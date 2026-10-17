@@ -15,9 +15,7 @@ pub struct Rooms;
 impl Rooms {
     /// Вычисляет эффективный режим комнаты (явный override иначе глобальный режим).
     fn resolve_effective_mode(state: &AppState, override_mode: Option<RoomMode>) -> RoomMode {
-        override_mode.unwrap_or_else(|| {
-            state.mode.lock().expect("mode store poisoned").global_mode
-        })
+        override_mode.unwrap_or_else(|| state.mode.lock().expect("mode store poisoned").global_mode)
     }
 
     /// Создаёт комнату (per-room режим = `None`, т.е. глобальный).
@@ -81,11 +79,14 @@ impl Rooms {
                     new_mode: m,
                     switch_epoch: mode_state.switch_epoch,
                 });
-                state.notify_admin("room:mode_changed", serde_json::json!({
-                    "room_id": id.to_string(),
-                    "mode": m,
-                    "switch_epoch": mode_state.switch_epoch,
-                }));
+                state.notify_admin(
+                    "room:mode_changed",
+                    serde_json::json!({
+                        "room_id": id.to_string(),
+                        "mode": m,
+                        "switch_epoch": mode_state.switch_epoch,
+                    }),
+                );
                 true
             } else {
                 false

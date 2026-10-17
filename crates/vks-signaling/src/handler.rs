@@ -32,6 +32,7 @@ pub struct HandlerConfig {
     pub candidate_addr: String,
     pub candidate_port: u16,
     pub rtp_maps: Vec<RtpMap>,
+    pub ice_servers: Vec<sig::IceServer>,
 }
 
 impl HandlerConfig {
@@ -56,7 +57,14 @@ impl HandlerConfig {
             candidate_addr: candidate_addr.into(),
             candidate_port,
             rtp_maps,
+            ice_servers: Vec::new(),
         }
+    }
+
+    /// Задает список ICE-серверов (STUN/TURN).
+    pub fn with_ice_servers(mut self, servers: Vec<sig::IceServer>) -> Self {
+        self.ice_servers = servers;
+        self
     }
 
     /// (config/defaults)
@@ -73,6 +81,7 @@ impl HandlerConfig {
                 RtpMap { payload: 111, codec: "opus".into(), clock: 48000, channels: 2 },
                 RtpMap { payload: 96, codec: "vp8".into(), clock: 90000, channels: 0 },
             ],
+            ice_servers: Vec::new(),
         }
     }
 
@@ -182,6 +191,11 @@ impl SignalingHandler {
             return vec![Envelope::error_reply(reply_to, "internal_error", &format!("authOk: {e}"), false)];
         }
         self.room_id = Some(hello.room_id.clone());
+        let ice = if self.config.ice_servers.is_empty() {
+            None
+        } else {
+            Some(sig::IceConfig { servers: self.config.ice_servers.clone() })
+        };
         let server_hello = sig::ServerHello {
             proto_version: MAX_V2,
             min_supported: MIN_V2,
@@ -190,7 +204,7 @@ impl SignalingHandler {
             server_name: self.config.server_name.clone(),
             room_mode: 0,
             caps: None,
-            ice: None,
+            ice,
         };
         vec![Envelope::new(SignalingMessage { msg_id: 0, reply_to, payload: Some(Payload::ServerHello(server_hello)) })]
     }
@@ -468,5 +482,25 @@ mod tests {
         let resp = handler.handle(join(1, "r1"));
         assert_eq!(handler.state(), SessionState::Disconnected);
         assert!(matches!(resp[0].payload(), Some(Payload::Error(e)) if e.code == "bad_state"));
+    }
+
+    #[test]
+    fn server_hello_includes_ice_servers_when_configured() {
+        let config = HandlerConfig::default_test().with_ice_servers(vec![sig::IceServer {
+            url: "stun:stun.l.google.com:19302".into(),
+            username: "".into(),
+            credential: "".into(),
+        }]);
+        let mut handler = SignalingHandler::new(config);
+        let resp = handler.handle(hello(1, 1));
+        match resp[0].payload() {
+            Some(Payload::ServerHello(h)) => {
+                assert!(h.ice.is_some());
+                let servers = &h.ice.as_ref().unwrap().servers;
+                assert_eq!(servers.len(), 1);
+                assert_eq!(servers[0].url, "stun:stun.l.google.com:19302");
+            }
+            other => panic!("expected ServerHello, got {other:?}"),
+        }
     }
 }

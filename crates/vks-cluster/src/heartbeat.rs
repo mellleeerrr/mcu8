@@ -31,18 +31,12 @@ pub struct InstanceRegistry {
 impl InstanceRegistry {
     /// Создаёт пустой реестр с дефолтным дедлайном (10 тиков).
     pub fn new() -> Self {
-        Self {
-            heartbeats: HashMap::new(),
-            deadline_ticks: DEADLINE_TICKS,
-        }
+        Self { heartbeats: HashMap::new(), deadline_ticks: DEADLINE_TICKS }
     }
 
     /// Создаёт реестр с настраиваемым дедлайном в тиках.
     pub fn with_deadline(deadline_ticks: u64) -> Self {
-        Self {
-            heartbeats: HashMap::new(),
-            deadline_ticks,
-        }
+        Self { heartbeats: HashMap::new(), deadline_ticks }
     }
 
     /// Текущий дедлайн в тиках.
@@ -232,4 +226,3 @@ mod tests {
         assert!(!reg.is_alive("i-1", 6));
     }
 }
-

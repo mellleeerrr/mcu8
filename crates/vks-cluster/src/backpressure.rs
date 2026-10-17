@@ -18,8 +18,10 @@ pub enum PushResult {
     Accepted,
     /// Non-critical dropped (очередь полна) → в DLQ.
     DroppedNonCritical,
-    /// Critical: retry (остаётся в очереди, не drop-ится).
+    /// Critical: retry (остаётся в буферной зоне очереди, не drop-ится).
     RetriedCritical,
+    /// Critical: жесткий предел исчерпан (len >= hard_max) → в DLQ для защиты от OOM.
+    DroppedCritical,
 }
 
 /// Max size очереди перед backpressure (CLUSTERING.md §5: >10000).
@@ -29,19 +31,25 @@ pub const DEFAULT_MAX_QUEUE: usize = 10_000;
 pub struct Backpressure {
     queue: VecDeque<Msg>,
     max: usize,
-    /// Dropped non-critical messages (DLQ).
+    hard_max: usize,
+    /// Dropped messages (DLQ).
     dlq: Vec<Msg>,
 }
 
 impl Backpressure {
-    /// Создаёт очередь с max = DEFAULT_MAX_QUEUE.
+    /// Создаёт очередь с max = DEFAULT_MAX_QUEUE и hard_max = 2 * DEFAULT_MAX_QUEUE.
     pub fn new() -> Self {
-        Self { queue: VecDeque::new(), max: DEFAULT_MAX_QUEUE, dlq: Vec::new() }
+        Self::with_limits(DEFAULT_MAX_QUEUE, DEFAULT_MAX_QUEUE.saturating_mul(2))
     }
 
-    /// Создаёт очередь с кастомным max.
+    /// Создаёт очередь с кастомным max и hard_max = max * 2.
     pub fn with_max(max: usize) -> Self {
-        Self { queue: VecDeque::new(), max, dlq: Vec::new() }
+        Self::with_limits(max, max.saturating_mul(2))
+    }
+
+    /// Создаёт очередь с явным max и hard_max.
+    pub fn with_limits(max: usize, hard_max: usize) -> Self {
+        Self { queue: VecDeque::new(), max, hard_max: hard_max.max(max), dlq: Vec::new() }
     }
 
     /// Текущая длина очереди.
@@ -54,24 +62,33 @@ impl Backpressure {
         self.queue.is_empty()
     }
 
-    /// Max size.
+    /// Soft max size.
     pub fn max(&self) -> usize {
         self.max
     }
 
-    /// Push msg. Если очередь < max → Accepted. Если == max:
-    /// - critical → RetriedCritical (остаётся, не drop).
-    /// - non-critical → DroppedNonCritical (в DLQ).
+    /// Hard max size (защита от OOM).
+    pub fn hard_max(&self) -> usize {
+        self.hard_max
+    }
+
+    /// Push msg.
+    /// - Если len < max: Accepted.
+    /// - Если max <= len < hard_max и msg.critical: RetriedCritical (остаётся в очереди).
+    /// - Если len >= hard_max и msg.critical: DroppedCritical (в DLQ).
+    /// - Если len >= max и !msg.critical: DroppedNonCritical (в DLQ).
     pub fn push(&mut self, msg: Msg) -> PushResult {
-        if self.queue.len() < self.max {
+        let len = self.queue.len();
+        if len < self.max {
             self.queue.push_back(msg);
             PushResult::Accepted
-        } else if msg.critical {
-            // Critical: retry — остаётся в очереди (на вершине).
+        } else if len < self.hard_max && msg.critical {
             self.queue.push_back(msg);
             PushResult::RetriedCritical
+        } else if msg.critical {
+            self.dlq.push(msg);
+            PushResult::DroppedCritical
         } else {
-            // Non-critical: drop → DLQ.
             self.dlq.push(msg);
             PushResult::DroppedNonCritical
         }
@@ -82,7 +99,7 @@ impl Backpressure {
         self.queue.pop_front()
     }
 
-    /// DLQ (dropped non-critical).
+    /// DLQ (dropped messages).
     pub fn dlq(&self) -> &[Msg] {
         &self.dlq
     }
@@ -136,6 +153,20 @@ mod tests {
         assert_eq!(r, PushResult::RetriedCritical);
         assert_eq!(bp.len(), 3); // critical stays
         assert_eq!(bp.dropped_count(), 0);
+    }
+
+    #[test]
+    fn drops_critical_when_hard_max_reached() {
+        let mut bp = Backpressure::with_limits(2, 3);
+        bp.push(msg(false));
+        bp.push(msg(false));
+        // len is 2 == max.
+        assert_eq!(bp.push(msg(true)), PushResult::RetriedCritical);
+        // len is now 3 == hard_max. Next critical is dropped to DLQ to prevent unbounded growth.
+        assert_eq!(bp.push(msg(true)), PushResult::DroppedCritical);
+        assert_eq!(bp.len(), 3);
+        assert_eq!(bp.dropped_count(), 1);
+        assert!(bp.dlq()[0].critical);
     }
 
     #[test]

@@ -140,10 +140,7 @@ impl CodecMap {
                     let list = sip_offer.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", ");
                     CodecNegotiationError::NoCompatibleCodec(list)
                 })?;
-                Ok(NegotiatedSelection {
-                    offered_codec: c.clone(),
-                    negotiated,
-                })
+                Ok(NegotiatedSelection { offered_codec: c.clone(), negotiated })
             }
             None => {
                 let list = sip_offer.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", ");

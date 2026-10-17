@@ -156,8 +156,14 @@ impl H323PlusBridge {
             tracing::warn!(
                 operation,
                 ticks = result.ticks_used,
+                limit = self.watchdog.limit,
                 "H323Plus FFI exceeded watchdog limit, module Crashed"
             );
+            return Err(Error::Internal(anyhow::anyhow!(
+                "H323Plus FFI call '{operation}' exceeded watchdog limit ({} ticks > {} limit)",
+                result.ticks_used,
+                self.watchdog.limit
+            )));
         }
         if !result.success {
             return Err(Error::Media(format!("H323Plus FFI call '{operation}' failed")));
@@ -220,8 +226,9 @@ mod tests {
     #[test]
     fn slow_ffi_exceeds_watchdog_marks_crashed() {
         let mut bridge = H323PlusBridge::with_watchdog(Watchdog::new(5));
-        // 6 ticks > 5 limit → watchdog marks Crashed.
-        bridge.call("setup", 6).expect("call itself returns");
+        // 6 ticks > 5 limit → watchdog marks Crashed and returns Error::Internal.
+        let err = bridge.call("setup", 6).expect_err("slow call exceeds watchdog limit");
+        assert!(matches!(err, Error::Internal(_)));
         assert_eq!(bridge.state(), ModuleState::Crashed);
 
         // Дальнейшие вызовы отклоняются, пока не restart.

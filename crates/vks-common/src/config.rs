@@ -43,6 +43,8 @@ pub struct Config {
     /// Разрешить ли fallback на MemoryStorage при отказе БД (`VKS_STORAGE_ALLOW_FALLBACK`; dev: false).
     /// По умолчанию: false (fail-fast: сбой подключения к сконфигурированной БД прерывает startup).
     pub storage_allow_fallback: bool,
+    /// Список адресов ICE-серверов (STUN/TURN, e.g. "stun:stun.l.google.com:19302") (`VKS_ICE_SERVERS`).
+    pub ice_servers: Vec<String>,
 }
 
 /// Маскирует строковые секреты.
@@ -83,6 +85,7 @@ impl std::fmt::Debug for Config {
             .field("admin_password", &redact_secret(&self.admin_password))
             .field("media_listen_addr", &self.media_listen_addr)
             .field("storage_allow_fallback", &self.storage_allow_fallback)
+            .field("ice_servers", &self.ice_servers)
             .finish()
     }
 }
@@ -103,6 +106,7 @@ impl Default for Config {
             admin_password: "admin".into(),
             media_listen_addr: "127.0.0.1:0".into(),
             storage_allow_fallback: false,
+            ice_servers: Vec::new(),
         }
     }
 }
@@ -255,7 +259,10 @@ default_room_mode = "mcu"
     fn redaction_masks_secrets_and_dsn() {
         assert_eq!(redact_secret("secret_123"), "***");
         assert_eq!(redact_secret(""), "<empty>");
-        assert_eq!(redact_dsn("postgres://admin:super_secret_pw@10.0.0.1:5432/vks_db"), "postgres://admin:***@10.0.0.1:5432/vks_db");
+        assert_eq!(
+            redact_dsn("postgres://admin:super_secret_pw@10.0.0.1:5432/vks_db"),
+            "postgres://admin:***@10.0.0.1:5432/vks_db"
+        );
         assert_eq!(redact_dsn("sqlite://app.db"), "sqlite://app.db");
 
         let cfg = Config {
@@ -271,4 +278,3 @@ default_room_mode = "mcu"
         assert!(debug_str.contains("postgres://vks_user:***@localhost:5432/vks"));
     }
 }
-

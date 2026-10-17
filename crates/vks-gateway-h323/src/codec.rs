@@ -144,10 +144,7 @@ impl H323CodecMap {
                     let list = h323_offer.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", ");
                     H323CodecNegotiationError::NoCompatibleCodec(list)
                 })?;
-                Ok(H323NegotiatedSelection {
-                    offered_codec: c.clone(),
-                    negotiated,
-                })
+                Ok(H323NegotiatedSelection { offered_codec: c.clone(), negotiated })
             }
             None => {
                 let list = h323_offer.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", ");

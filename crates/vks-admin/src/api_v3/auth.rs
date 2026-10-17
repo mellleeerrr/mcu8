@@ -247,13 +247,13 @@ pub async fn login(
     }
 
     let auth_result = if let Some(provider) = &state.auth_provider {
-        let creds = vks_core::ports::auth::Credentials {
-            username: body.login.clone(),
-            password: body.password.clone(),
-        };
+        let creds =
+            vks_core::ports::auth::Credentials { username: body.login.clone(), password: body.password.clone() };
         provider.verify(&creds).await.map(|u| u.id.to_string())
     } else if let Some(db) = state.local_db.clone() {
-        db.authenticate(&body.login, &body.password).map(|u| u.id).map_err(|_| vks_core::ports::auth::AuthError::InvalidCredentials)
+        db.authenticate(&body.login, &body.password)
+            .map(|u| u.id)
+            .map_err(|_| vks_core::ports::auth::AuthError::InvalidCredentials)
     } else {
         return error_json(503, "Authentication is not configured");
     };

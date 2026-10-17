@@ -430,7 +430,8 @@ pub async fn record_audit(
     Json(body): Json<RecordAuditRequest>,
 ) -> Response {
     let mut entry = body.entry;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let now =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     // Strict server anti-spoofing: server timestamp is unconditionally authoritative
     entry.ts_ms = now;
     if let Some(axum::extract::Extension(jwt)) = auth {

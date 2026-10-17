@@ -129,11 +129,7 @@ pub fn create_auth_provider(
 ) -> Result<std::sync::Arc<dyn vks_core::ports::AuthProvider>, AuthFactoryError> {
     match config.provider_type.to_lowercase().as_str() {
         "local" => {
-            let local_auth = if let Some(db) = local_db {
-                LocalAuth::with_db(db)
-            } else {
-                LocalAuth::new()
-            };
+            let local_auth = if let Some(db) = local_db { LocalAuth::with_db(db) } else { LocalAuth::new() };
             Ok(std::sync::Arc::new(local_auth))
         }
         "ldap" => {
@@ -146,8 +142,8 @@ pub fn create_auth_provider(
                 return Err(AuthFactoryError::MockLdapProhibited);
             }
 
-            let template = config.ldap_bind_template.clone()
-                .unwrap_or_else(|| "uid={user},ou=people,dc=vks,dc=internal".into());
+            let template =
+                config.ldap_bind_template.clone().unwrap_or_else(|| "uid={user},ou=people,dc=vks,dc=internal".into());
             let ldap_auth = LdapAuth::new(url, template, crate::ldap::MockLdapClient::new());
             Ok(std::sync::Arc::new(AuthProviderEnum::from_ldap(ldap_auth)))
         }
@@ -333,4 +329,3 @@ mod tests {
         }
     }
 }
-

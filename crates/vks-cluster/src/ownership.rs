@@ -47,23 +47,11 @@ pub enum FencingError {
     #[error("комната {0} не имеет активного лиза")]
     NoLease(String),
     #[error("инстанс {actual} не является владельцем комнаты {room_id} (текущий владелец {expected})")]
-    NotOwner {
-        room_id: String,
-        expected: String,
-        actual: String,
-    },
+    NotOwner { room_id: String, expected: String, actual: String },
     #[error("устаревшая эпоха {provided} для комнаты {room_id} (текущая {current})")]
-    StaleEpoch {
-        room_id: String,
-        current: u64,
-        provided: u64,
-    },
+    StaleEpoch { room_id: String, current: u64, provided: u64 },
     #[error("лиз комнаты {room_id} истек на тике {expiry_tick} (текущий {now_tick})")]
-    LeaseExpired {
-        room_id: String,
-        expiry_tick: u64,
-        now_tick: u64,
-    },
+    LeaseExpired { room_id: String, expiry_tick: u64, now_tick: u64 },
 }
 
 /// Реестр ownership rooms.
@@ -99,12 +87,8 @@ impl RoomOwner {
     pub fn unregister(&mut self, instance_id: &str) {
         self.instances.remove(instance_id);
         // Освобождаем все lease'ы этого instance.
-        let stale: Vec<String> = self
-            .leases
-            .iter()
-            .filter(|(_, lease)| lease.owner == instance_id)
-            .map(|(room, _)| room.clone())
-            .collect();
+        let stale: Vec<String> =
+            self.leases.iter().filter(|(_, lease)| lease.owner == instance_id).map(|(room, _)| room.clone()).collect();
         for room in stale {
             self.leases.remove(&room);
         }
@@ -134,13 +118,7 @@ impl RoomOwner {
     ///   выдаётся новый лиз с инкрементом epoch.
     /// - Если активный лиз принадлежит caller: продление (renew) без смены epoch.
     /// - Если активный лиз принадлежит другому: split-brain (lowest instance_id wins).
-    pub fn acquire_lease(
-        &mut self,
-        room_id: &str,
-        instance_id: &str,
-        now_tick: u64,
-        ttl_ticks: u64,
-    ) -> LeaseResult {
+    pub fn acquire_lease(&mut self, room_id: &str, instance_id: &str, now_tick: u64, ttl_ticks: u64) -> LeaseResult {
         self.register(instance_id, now_tick);
         let cur = self.leases.get(room_id).cloned();
 
@@ -149,11 +127,7 @@ impl RoomOwner {
                 let expiry = now_tick.saturating_add(ttl_ticks);
                 self.leases.insert(
                     room_id.to_string(),
-                    Lease {
-                        owner: instance_id.to_string(),
-                        expiry_tick: expiry,
-                        epoch: 1,
-                    },
+                    Lease { owner: instance_id.to_string(), expiry_tick: expiry, epoch: 1 },
                 );
                 LeaseResult::Acquired
             }
@@ -164,11 +138,7 @@ impl RoomOwner {
                     let expiry = now_tick.saturating_add(ttl_ticks);
                     self.leases.insert(
                         room_id.to_string(),
-                        Lease {
-                            owner: instance_id.to_string(),
-                            expiry_tick: expiry,
-                            epoch: new_epoch,
-                        },
+                        Lease { owner: instance_id.to_string(), expiry_tick: expiry, epoch: new_epoch },
                     );
                     LeaseResult::Acquired
                 } else if lease.owner == instance_id {
@@ -176,11 +146,7 @@ impl RoomOwner {
                     let new_expiry = now_tick.saturating_add(ttl_ticks);
                     self.leases.insert(
                         room_id.to_string(),
-                        Lease {
-                            owner: instance_id.to_string(),
-                            expiry_tick: new_expiry,
-                            epoch: lease.epoch,
-                        },
+                        Lease { owner: instance_id.to_string(), expiry_tick: new_expiry, epoch: lease.epoch },
                     );
                     LeaseResult::Acquired
                 } else {
@@ -191,11 +157,7 @@ impl RoomOwner {
                         let new_expiry = now_tick.saturating_add(ttl_ticks);
                         self.leases.insert(
                             room_id.to_string(),
-                            Lease {
-                                owner: instance_id.to_string(),
-                                expiry_tick: new_expiry,
-                                epoch: new_epoch,
-                            },
+                            Lease { owner: instance_id.to_string(), expiry_tick: new_expiry, epoch: new_epoch },
                         );
                         LeaseResult::Acquired
                     } else {
@@ -207,13 +169,7 @@ impl RoomOwner {
     }
 
     /// Обновляет (продлевает) lease до `now_tick + ttl_ticks`.
-    pub fn renew_lease(
-        &mut self,
-        room_id: &str,
-        instance_id: &str,
-        now_tick: u64,
-        ttl_ticks: u64,
-    ) -> LeaseResult {
+    pub fn renew_lease(&mut self, room_id: &str, instance_id: &str, now_tick: u64, ttl_ticks: u64) -> LeaseResult {
         self.acquire_lease(room_id, instance_id, now_tick, ttl_ticks)
     }
 
@@ -236,13 +192,7 @@ impl RoomOwner {
 
     /// Возвращает активного владельца на now_tick (None, если лиз истёк).
     pub fn active_owner(&self, room_id: &str, now_tick: u64) -> Option<&str> {
-        self.leases.get(room_id).and_then(|l| {
-            if now_tick < l.expiry_tick {
-                Some(l.owner.as_str())
-            } else {
-                None
-            }
-        })
+        self.leases.get(room_id).and_then(|l| if now_tick < l.expiry_tick { Some(l.owner.as_str()) } else { None })
     }
 
     /// Текущая эпоха лиза комнаты.
@@ -271,10 +221,7 @@ impl RoomOwner {
         epoch: u64,
         now_tick: u64,
     ) -> Result<(), FencingError> {
-        let lease = self
-            .leases
-            .get(room_id)
-            .ok_or_else(|| FencingError::NoLease(room_id.to_string()))?;
+        let lease = self.leases.get(room_id).ok_or_else(|| FencingError::NoLease(room_id.to_string()))?;
 
         if lease.owner != instance_id {
             return Err(FencingError::NotOwner {
@@ -321,14 +268,7 @@ impl RoomOwner {
         let new_epoch = prev_epoch.saturating_add(1);
         let expiry = now_tick.saturating_add(ttl_ticks);
 
-        self.leases.insert(
-            room_id.to_string(),
-            Lease {
-                owner: winner.clone(),
-                expiry_tick: expiry,
-                epoch: new_epoch,
-            },
-        );
+        self.leases.insert(room_id.to_string(), Lease { owner: winner.clone(), expiry_tick: expiry, epoch: new_epoch });
         Some(SplitBrainResult::Winner(winner))
     }
 }
@@ -488,31 +428,19 @@ mod tests {
         // Неверная эпоха.
         assert_eq!(
             ro.check_fencing("room-1", "i-1", 2, 10),
-            Err(FencingError::StaleEpoch {
-                room_id: "room-1".into(),
-                current: 1,
-                provided: 2
-            })
+            Err(FencingError::StaleEpoch { room_id: "room-1".into(), current: 1, provided: 2 })
         );
 
         // Чужой инстанс.
         assert_eq!(
             ro.check_fencing("room-1", "i-2", 1, 10),
-            Err(FencingError::NotOwner {
-                room_id: "room-1".into(),
-                expected: "i-1".into(),
-                actual: "i-2".into()
-            })
+            Err(FencingError::NotOwner { room_id: "room-1".into(), expected: "i-1".into(), actual: "i-2".into() })
         );
 
         // Истёкший лиз (тик 35 >= 30).
         assert_eq!(
             ro.check_fencing("room-1", "i-1", 1, 35),
-            Err(FencingError::LeaseExpired {
-                room_id: "room-1".into(),
-                expiry_tick: 30,
-                now_tick: 35
-            })
+            Err(FencingError::LeaseExpired { room_id: "room-1".into(), expiry_tick: 30, now_tick: 35 })
         );
     }
 

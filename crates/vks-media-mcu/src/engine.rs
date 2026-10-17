@@ -173,7 +173,12 @@ impl RoomState {
 
     /// Advances the pipeline at a specific monotonic timestamp `now_ms`.
     /// Applies frame dropping backpressure if invoked faster than the ~30 fps budget.
-    fn tick_at(&mut self, now_ms: u64, frames: &BTreeMap<u32, Frame>, audio_inputs: &[(ParticipantId, Vec<f32>)]) -> bool {
+    fn tick_at(
+        &mut self,
+        now_ms: u64,
+        frames: &BTreeMap<u32, Frame>,
+        audio_inputs: &[(ParticipantId, Vec<f32>)],
+    ) -> bool {
         if self.last_render_ms != 0 && now_ms < self.last_render_ms + 30 {
             self.stats.frames_dropped += 1;
             return false;
@@ -333,12 +338,7 @@ impl McuEngine {
 
     /// Returns whether the given participant is currently speaking.
     pub fn is_speaking(&self, room: RoomId, pid: ParticipantId) -> bool {
-        self.rooms
-            .lock()
-            .unwrap()
-            .get(&room)
-            .and_then(|s| s.speaking_states.get(&pid).copied())
-            .unwrap_or(false)
+        self.rooms.lock().unwrap().get(&room).and_then(|s| s.speaking_states.get(&pid).copied()).unwrap_or(false)
     }
 }
 
@@ -627,11 +627,7 @@ mod tests {
         // Custom slot assignment: presenter to slot 0, audience to slot 1
         assignments.insert(presenter, 0);
         assignments.insert(audience, 1);
-        let layout = LayoutDescriptor {
-            layout_id: "focus".into(),
-            version: 1,
-            assignments,
-        };
+        let layout = LayoutDescriptor { layout_id: "focus".into(), version: 1, assignments };
         e.apply_layout(rid, layout).await.unwrap();
 
         let rects = e.slot_rects(rid).expect("slot rects");
@@ -646,4 +642,3 @@ mod tests {
         assert_eq!(r1.y, 810);
     }
 }
-

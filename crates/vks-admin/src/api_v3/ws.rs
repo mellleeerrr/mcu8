@@ -87,8 +87,7 @@ pub async fn ws_handler(
         tracing::warn!(client_ip = %ip, "api_v3 ws: connection rate limit exceeded");
         return error_json(429, "Too many connections");
     }
-    ws.max_message_size(MAX_FRAME_BYTES * 4)
-        .on_upgrade(move |socket| handle_socket(state, ip, socket))
+    ws.max_message_size(MAX_FRAME_BYTES * 4).on_upgrade(move |socket| handle_socket(state, ip, socket))
 }
 
 /// Одна WS-сессия: чтение транзакций, keepalive-ping, ответы/события.

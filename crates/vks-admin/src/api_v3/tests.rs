@@ -626,72 +626,48 @@ async fn shell_monitoring_shapes_and_lifecycle_m4() {
     assert_eq!(patch_conf_body["conference"]["display_name"], "Renamed Conf");
 
     // Contacts & abonents endpoints
-    let contacts_resp = send(
-        &app,
-        request("GET", &format!("/api/v3/ui/conferences/{conf_id}/contacts"), Some(&token), json!({})),
-    )
-    .await;
+    let contacts_resp =
+        send(&app, request("GET", &format!("/api/v3/ui/conferences/{conf_id}/contacts"), Some(&token), json!({})))
+            .await;
     assert_eq!(contacts_resp.status(), StatusCode::OK);
     let contacts_body = json_body(contacts_resp).await;
     assert_eq!(contacts_body["contacts"].as_array().map(Vec::len), Some(0));
 
-    let abonents_resp = send(
-        &app,
-        request("GET", &format!("/api/v3/ui/sessions/{conf_id}/abonents"), Some(&token), json!({})),
-    )
-    .await;
+    let abonents_resp =
+        send(&app, request("GET", &format!("/api/v3/ui/sessions/{conf_id}/abonents"), Some(&token), json!({}))).await;
     assert_eq!(abonents_resp.status(), StatusCode::OK);
     let abonents_body = json_body(abonents_resp).await;
     assert_eq!(abonents_body["abonents"].as_array().map(Vec::len), Some(0));
 
     // Start session
-    let start_resp = send(
-        &app,
-        request("POST", "/api/v3/sessions", Some(&token), json!({ "conference_id": conf_id })),
-    )
-    .await;
+    let start_resp =
+        send(&app, request("POST", "/api/v3/sessions", Some(&token), json!({ "conference_id": conf_id }))).await;
     assert_eq!(start_resp.status(), StatusCode::OK);
     let start_body = json_body(start_resp).await;
     assert_eq!(start_body["session"]["state"], "ACTIVE");
     assert_eq!(start_body["session"]["has_stopped"], false);
 
     // Stop session
-    let stop_resp = send(
-        &app,
-        request("DELETE", &format!("/api/v3/sessions/{conf_id}"), Some(&token), json!({})),
-    )
-    .await;
+    let stop_resp =
+        send(&app, request("DELETE", &format!("/api/v3/sessions/{conf_id}"), Some(&token), json!({}))).await;
     assert_eq!(stop_resp.status(), StatusCode::NO_CONTENT);
 
     // CRITICAL: Conference MUST STILL EXIST in /api/v3/conferences/{id}!
-    let check_conf_resp = send(
-        &app,
-        request("GET", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({})),
-    )
-    .await;
+    let check_conf_resp =
+        send(&app, request("GET", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({}))).await;
     assert_eq!(check_conf_resp.status(), StatusCode::OK, "stopping session MUST NOT delete the conference!");
 
     // Stopped session must appear in has_stopped=true
-    let stopped_query = send(
-        &app,
-        request("GET", "/api/v3/sessions?has_stopped=true", Some(&token), json!({})),
-    )
-    .await;
+    let stopped_query = send(&app, request("GET", "/api/v3/sessions?has_stopped=true", Some(&token), json!({}))).await;
     let stopped_body = json_body(stopped_query).await;
     assert!(stopped_body["count"].as_u64().unwrap_or(0) >= 1, "stopped session must be found in has_stopped=true");
 
     // DELETE conference permanently
-    let del_conf = send(
-        &app,
-        request("DELETE", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({})),
-    )
-    .await;
+    let del_conf =
+        send(&app, request("DELETE", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({}))).await;
     assert_eq!(del_conf.status(), StatusCode::NO_CONTENT);
 
-    let final_check = send(
-        &app,
-        request("GET", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({})),
-    )
-    .await;
+    let final_check =
+        send(&app, request("GET", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({}))).await;
     assert_eq!(final_check.status(), StatusCode::NOT_FOUND);
 }

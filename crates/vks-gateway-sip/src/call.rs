@@ -461,4 +461,3 @@ mod tests {
         assert!(matches!(err, Error::InvalidInput(_)));
     }
 }
-
