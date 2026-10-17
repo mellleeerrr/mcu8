@@ -424,8 +424,18 @@ pub async fn set_settings(State(state): State<SharedState>, Json(body): Json<Set
 }
 
 /// `POST /api/v1/audit` — record an audit entry (append-only).
-pub async fn record_audit(State(state): State<SharedState>, Json(body): Json<RecordAuditRequest>) -> Response {
-    let entry = body.entry.clone();
+pub async fn record_audit(
+    State(state): State<SharedState>,
+    auth: Option<axum::extract::Extension<vks_auth::jwt::VerifiedJwt>>,
+    Json(body): Json<RecordAuditRequest>,
+) -> Response {
+    let mut entry = body.entry;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    // Strict server anti-spoofing: server timestamp is unconditionally authoritative
+    entry.ts_ms = now;
+    if let Some(axum::extract::Extension(jwt)) = auth {
+        entry.user = jwt.user_id;
+    }
     state.audit.lock().expect("audit store poisoned").record(entry.clone());
     json_ok(serde_json::json!({ "recorded": true, "ts_ms": entry.ts_ms }))
 }

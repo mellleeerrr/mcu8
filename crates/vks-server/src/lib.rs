@@ -30,16 +30,36 @@ use vks_signaling::handler::{HandlerConfig, SignalingHandler};
 
 use crate::frontend::{statics_rel_path, Frontend};
 
-/// Собирает полное приложение сервера.
+/// Контекст для WebSocket-сигналинга (состояние приложения + конфигурация сессии).
+#[derive(Clone)]
+pub struct WsContext {
+    pub state: Arc<AppState>,
+    pub handler_config: HandlerConfig,
+}
+
+/// Собирает полное приложение сервера с тестовой конфигурацией по умолчанию.
+pub fn build_app(state: Arc<AppState>, frontend: &Frontend) -> Router {
+    build_app_with_config(state, frontend, HandlerConfig::default_test())
+}
+
+/// Собирает полное приложение сервера с заданной конфигурацией обработчика сигналинга.
 ///
 /// Слои (снаружи внутрь): HTTP-метрики → security-заголовки → `Cache-Control`/`Vary`
 /// (внутри [`Frontend::router`]) → роуты. Security-заголовки — **app-wide**, включая
 /// `/api/v1/*`, `/metrics` и `/ws` (§4.2 плана). Статика монтируется из `frontend`,
 /// поэтому тесты гоняют ровно ту же сборку, что и `main.rs`.
-pub fn build_app(state: Arc<AppState>, frontend: &Frontend) -> Router {
+pub fn build_app_with_config(
+    state: Arc<AppState>,
+    frontend: &Frontend,
+    handler_config: HandlerConfig,
+) -> Router {
     let csp = frontend.csp.clone();
+    let ws_ctx = WsContext {
+        state: state.clone(),
+        handler_config,
+    };
     // Сигналинг: auth-at-handshake и лимиты (T1.2) — внутри ws_handler.
-    let signaling = Router::new().route("/ws", get(ws_handler)).with_state(state.clone());
+    let signaling = Router::new().route("/ws", get(ws_handler)).with_state(ws_ctx);
     vks_admin::handlers::router(state.clone())
         // Адаптер legacy UI `/api/v3/*` (ADR-0027, фазы 2–3 плана).
         .merge(vks_admin::api_v3::router(state))
@@ -133,8 +153,8 @@ async fn metrics_handler() -> Response {
 /// токеном — 401. Браузерный JS (не умеет ставить заголовки) обязан идти через
 /// адаптер `/api/v3/ws`. Роль на этом шаге не проверяется: авторизация
 /// конкретных сигналинг-действий — зона FSM и следующих волн.
-async fn ws_handler(State(state): State<Arc<AppState>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    let Some(issuer) = &state.jwt_issuer else {
+async fn ws_handler(State(ctx): State<WsContext>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    let Some(issuer) = &ctx.state.jwt_issuer else {
         return ws_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "auth_unavailable",
@@ -154,7 +174,7 @@ async fn ws_handler(State(state): State<Arc<AppState>>, headers: HeaderMap, ws: 
     }
     // Транспортный потолок памяти на сообщение (см. MAX_WS_TRANSPORT_BYTES):
     // 64–256 КиБ — graceful close 4008 в handle_ws_socket, свыше — транспортный отсев.
-    ws.max_message_size(MAX_WS_TRANSPORT_BYTES).on_upgrade(move |socket| handle_ws_socket(socket, state))
+    ws.max_message_size(MAX_WS_TRANSPORT_BYTES).on_upgrade(move |socket| handle_ws_socket(socket, ctx))
 }
 
 /// JSON-конверт ошибки handshake (до upgrade).
@@ -179,9 +199,10 @@ const MAX_WS_MESSAGES_PER_SEC: usize = 60;
 /// Сайд-эффекты комнаты (создание записи, счётчик участников) применяются только
 /// по **успешному** результату FSM (`JoinRoomResult`/`Ack` на `LeaveRoom`):
 /// отклонённый JoinRoom (например, до ClientHello) ничего не создаёт и не считает.
-async fn handle_ws_socket(socket: WebSocket, state: Arc<AppState>) {
+async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
     let (mut sender, mut receiver) = socket.split();
-    let mut handler = SignalingHandler::new(HandlerConfig::default_test());
+    let mut handler = SignalingHandler::new(ctx.handler_config);
+    let state = ctx.state;
     let mut current_room: Option<vks_core::RoomId> = None;
     let mut room_rx: Option<tokio::sync::broadcast::Receiver<vks_admin::hub::RoomBroadcastEvent>> = None;
     // Скользящее окно частоты сообщений (T1.2).

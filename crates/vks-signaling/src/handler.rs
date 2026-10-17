@@ -24,15 +24,41 @@ const MAX_V2: u32 = 1;
 /// (config/defaults)
 #[derive(Debug, Clone)]
 pub struct HandlerConfig {
-    server_id: String,
-    server_name: String,
-    ufrag: String,
-    pwd: String,
-    fingerprint: String,
-    rtp_maps: Vec<RtpMap>,
+    pub server_id: String,
+    pub server_name: String,
+    pub ufrag: String,
+    pub pwd: String,
+    pub fingerprint: String,
+    pub candidate_addr: String,
+    pub candidate_port: u16,
+    pub rtp_maps: Vec<RtpMap>,
 }
 
 impl HandlerConfig {
+    /// Создаёт конфигурацию обработчика с явными параметрами.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        server_id: impl Into<String>,
+        server_name: impl Into<String>,
+        ufrag: impl Into<String>,
+        pwd: impl Into<String>,
+        fingerprint: impl Into<String>,
+        candidate_addr: impl Into<String>,
+        candidate_port: u16,
+        rtp_maps: Vec<RtpMap>,
+    ) -> Self {
+        Self {
+            server_id: server_id.into(),
+            server_name: server_name.into(),
+            ufrag: ufrag.into(),
+            pwd: pwd.into(),
+            fingerprint: fingerprint.into(),
+            candidate_addr: candidate_addr.into(),
+            candidate_port,
+            rtp_maps,
+        }
+    }
+
     /// (config/defaults)
     pub fn default_test() -> Self {
         Self {
@@ -41,6 +67,8 @@ impl HandlerConfig {
             ufrag: "sfuufrag".into(),
             pwd: "sfupwd".into(),
             fingerprint: "sha-256 FF:00:11".into(),
+            candidate_addr: "203.0.113.7".into(),
+            candidate_port: 49152,
             rtp_maps: vec![
                 RtpMap { payload: 111, codec: "opus".into(), clock: 48000, channels: 2 },
                 RtpMap { payload: 96, codec: "vp8".into(), clock: 90000, channels: 0 },
@@ -57,8 +85,8 @@ impl HandlerConfig {
             host_candidate: crate::sdp::IceCandidate {
                 ufrag: self.ufrag.clone(),
                 pwd: self.pwd.clone(),
-                addr: "203.0.113.7".into(),
-                port: 49152,
+                addr: self.candidate_addr.clone(),
+                port: self.candidate_port,
                 typ: "host".into(),
             },
             fingerprint: self.fingerprint.clone(),

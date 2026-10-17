@@ -230,6 +230,26 @@ impl AppState {
         self.room_hub.broadcast(room, sender_pid, payload);
     }
 
+    /// Добавляет доверенную запись в аудит-лог с серверной временной меткой.
+    pub fn record_audit_entry(
+        &self,
+        user: impl Into<String>,
+        action: impl Into<String>,
+        room: Option<String>,
+        ip: impl Into<String>,
+    ) {
+        let entry = crate::audit::AuditEntry {
+            ts_ms: now_unix_ms(),
+            user: user.into(),
+            action: action.into(),
+            room,
+            ip: ip.into(),
+        };
+        if let Ok(mut audit) = self.audit.lock() {
+            audit.record(entry);
+        }
+    }
+
     /// Создаёт состояние с подключенным хранилищем ядра.
     pub fn with_storage(storage: Arc<dyn vks_core::ports::Storage>) -> Self {
         let mut state = Self::new();

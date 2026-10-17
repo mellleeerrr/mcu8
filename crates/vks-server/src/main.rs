@@ -28,8 +28,10 @@ use vks_common::config::Config;
 use vks_common::metrics::{init_default as init_metrics, FRONTEND_DENIED};
 use vks_common::tracing::{init as init_tracing, LogFormat};
 use vks_core::ports::Storage;
-use vks_server::build_app;
+use vks_server::build_app_with_config;
 use vks_server::frontend::Frontend;
+use vks_signaling::handler::HandlerConfig;
+use vks_signaling::sdp::RtpMap;
 use vks_storage::{MemoryStorage, PostgresStorage, SqliteStorage};
 
 #[tokio::main]
@@ -69,14 +71,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "configuration applied"
     );
 
-    // 4. Инициализация хранилища (SQLite / Memory fallback)
+    // 4. Инициализация хранилища (SQLite / Postgres / Memory)
+    // M1.6: отказ сконфигурированной БД прерывает startup (fail-fast),
+    // если явно не разрешён fallback (storage_allow_fallback = true).
     let storage: Arc<dyn Storage> = if config.database_url.starts_with("sqlite:") {
         info!(url = %config.database_url, "connecting to SQLite database");
         match SqliteStorage::init(&config.database_url).await {
             Ok(sqlite) => Arc::new(sqlite),
             Err(e) => {
-                error!(error = %e, "failed to initialize SQLite, falling back to MemoryStorage");
-                Arc::new(MemoryStorage::new())
+                if config.storage_allow_fallback {
+                    warn!(error = %e, "failed to initialize SQLite, falling back to MemoryStorage per storage_allow_fallback");
+                    Arc::new(MemoryStorage::new())
+                } else {
+                    error!(error = %e, "failed to initialize configured SQLite database; aborting startup (fail-fast)");
+                    return Err(e.into());
+                }
             }
         }
     } else if config.database_url.starts_with("postgres://") || config.database_url.starts_with("postgresql://") {
@@ -84,12 +93,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match PostgresStorage::init(&config.database_url).await {
             Ok(pg) => Arc::new(pg),
             Err(e) => {
-                error!(error = %e, "failed to initialize PostgreSQL, falling back to MemoryStorage");
-                Arc::new(MemoryStorage::new())
+                if config.storage_allow_fallback {
+                    warn!(error = %e, "failed to initialize PostgreSQL, falling back to MemoryStorage per storage_allow_fallback");
+                    Arc::new(MemoryStorage::new())
+                } else {
+                    error!(error = %e, "failed to initialize configured PostgreSQL database; aborting startup (fail-fast)");
+                    return Err(e.into());
+                }
             }
         }
+    } else if !config.database_url.is_empty() {
+        error!(url = %config.database_url, "unsupported database scheme in database_url; aborting startup");
+        return Err(format!("unsupported database scheme in database_url: {}", config.database_url).into());
     } else {
-        info!("using in-memory storage");
+        info!("using in-memory storage (database_url not configured)");
         Arc::new(MemoryStorage::new())
     };
 
@@ -141,24 +158,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         FRONTEND_DENIED.with_label_values(&["not_configured"]).inc();
     }
 
-    // 7. Инициализация WebRTC медиа-лупа (MEDIA_PIPELINE §2)
-    let udp_loop = match vks_media_sfu::udp_loop::UdpMediaLoop::bind(&config.media_listen_addr).await {
-        Ok(loop_handle) => {
-            info!(addr = %loop_handle.local_addr(), "WebRTC UDP media loop active");
-            Some(Arc::new(loop_handle))
-        }
-        Err(e) => {
-            warn!(error = %e, addr = %config.media_listen_addr, "failed to bind UDP media loop");
-            None
-        }
-    };
+    // 7. Инициализация WebRTC медиа-движков и UDP медиа-лупа (M2.1, M2.4)
     let _sfu_engine = Arc::new(vks_media_sfu::SfuEngine::new());
     let _mcu_engine = Arc::new(vks_media_mcu::McuEngine::new());
 
-    // 8. Сборка маршрутов (единая точка — vks_server::build_app)
-    let app = build_app(admin_state, &frontend);
+    let (udp_loop, receive_task, candidate_addr, candidate_port) =
+        match vks_media_sfu::udp_loop::UdpMediaLoop::bind(&config.media_listen_addr).await {
+            Ok(loop_handle) => {
+                let local_addr = loop_handle.local_addr();
+                info!(addr = %local_addr, "WebRTC UDP media loop active");
+                let task = loop_handle.start_receive_loop(move |src, packet| {
+                    tracing::trace!(src = %src, track = %packet.track, len = packet.payload.len(), "received UDP media packet");
+                });
+                let ip = if local_addr.ip().is_unspecified() {
+                    "127.0.0.1".to_string()
+                } else {
+                    local_addr.ip().to_string()
+                };
+                let port = local_addr.port();
+                (Some(Arc::new(loop_handle)), Some(task), ip, port)
+            }
+            Err(e) => {
+                warn!(error = %e, addr = %config.media_listen_addr, "failed to bind UDP media loop");
+                (None, None, "127.0.0.1".to_string(), 0)
+            }
+        };
 
-    // 9. Привязка сокета и запуск сервера
+    // 8. Конфигурация обработчика сигналинга с реальными ICE/кодек атрибутами
+    let handler_config = HandlerConfig::new(
+        "srv-0001",
+        &config.server_name,
+        "sfuufrag",
+        "sfupwd",
+        "sha-256 FF:00:11",
+        candidate_addr,
+        candidate_port,
+        vec![
+            RtpMap { payload: 111, codec: "opus".into(), clock: 48000, channels: 2 },
+            RtpMap { payload: 96, codec: "vp8".into(), clock: 90000, channels: 0 },
+        ],
+    );
+
+    // 9. Сборка маршрутов (единая точка — vks_server::build_app_with_config)
+    let app = build_app_with_config(admin_state, &frontend, handler_config);
+
+    // 10. Привязка сокета и запуск сервера
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     info!(addr = %config.listen_addr, "vks-server ready and listening for HTTP/WebSocket");
 
@@ -168,6 +212,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(loop_handle) = &udp_loop {
         loop_handle.shutdown();
+    }
+    if let Some(task) = receive_task {
+        let _ = task.await;
     }
 
     info!("vks-server gracefully terminated");

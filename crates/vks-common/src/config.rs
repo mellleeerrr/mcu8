@@ -40,6 +40,9 @@ pub struct Config {
     pub admin_password: String,
     /// Адрес прослушивания WebRTC UDP-трафика (`VKS_MEDIA_LISTEN_ADDR`; dev: `127.0.0.1:0`).
     pub media_listen_addr: String,
+    /// Разрешить ли fallback на MemoryStorage при отказе БД (`VKS_STORAGE_ALLOW_FALLBACK`; dev: false).
+    /// По умолчанию: false (fail-fast: сбой подключения к сконфигурированной БД прерывает startup).
+    pub storage_allow_fallback: bool,
 }
 
 impl Default for Config {
@@ -57,6 +60,7 @@ impl Default for Config {
             admin_login: "admin".into(),
             admin_password: "admin".into(),
             media_listen_addr: "127.0.0.1:0".into(),
+            storage_allow_fallback: false,
         }
     }
 }
