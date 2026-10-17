@@ -70,6 +70,8 @@
 
 ### Что нужно сделать для реализации
 - [x] Импорт архива + `scripts/import-pnm-frontend.sh` + `MANIFEST.sha256` + `NOTES.md` (фаза 1).
+- [x] Полный ребренд рантайма TrueConf MCU → PROSTOR (2026-10-17): 90 файлов + фиксы локалей и
+  cache-bust словника — см. `client/pnm-frontend/NOTES.md` §«Ребренд PROSTOR»; юр. гейт R2 остаётся.
 - [x] `frontend.rs` + роуты/кэш/CSP + тесты (фаза 1).
 - [x] Удаление demo (`docs/progress/archive/demo-2026-10-16.rs`) + `build_app` в `lib.rs` (фаза 1).
 - [ ] `/api/v3` фаза 2 (boot/shell/ws/auth) + фаза 3 (sessions/conferences) — по `FRONTEND_PORT_PLAN.md` §4.5/Приложение A.
