@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message as AxumWsMsg, WebSocket, WebSocketUpgrade};
 use axum::http::{header, Request, StatusCode};
-use axum::middleware;
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
@@ -24,11 +23,12 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMsg;
 use tower::ServiceExt;
 
-use vks_admin::auth_middleware::jwt_auth_middleware;
 use vks_admin::handlers::router as admin_router;
 use vks_admin::state::AppState;
+use vks_admin::users::Users;
 use vks_auth::jwt::{JwtConfig, JwtIssuer};
 use vks_auth::local_db::LocalDb;
+use vks_core::Role;
 use vks_media_sfu::forwarder::RtpPacket;
 use vks_media_sfu::udp_loop::UdpMediaLoop;
 use vks_proto::signaling as sig;
@@ -80,11 +80,11 @@ async fn build_test_app() -> (Router, Arc<AppState>, Arc<JwtIssuer>, String) {
     let token = jwt_issuer.issue("admin_user", None).expect("issue token");
 
     state.jwt_issuer = Some(jwt_issuer.clone());
+    // v1 защищён роутером (JWT + RBAC); запись оператора — как в main.rs.
+    Users::create(&state, "admin_user", Role::Operator);
     let shared_state = Arc::new(state);
 
-    let app = admin_router(shared_state.clone())
-        .route("/ws", get(ws_handler))
-        .layer(middleware::from_fn_with_state(shared_state.clone(), jwt_auth_middleware));
+    let app = admin_router(shared_state.clone()).route("/ws", get(ws_handler));
 
     (app, shared_state, jwt_issuer, token)
 }
@@ -357,9 +357,15 @@ async fn test_live_composition_root_serves_ui() {
     assert!(response.contains("text/html"), "content type: {response}");
     assert!(response.contains("vks-frontend-fixture"), "fixture index body: {response}");
 
-    // Регрессия v1: эндпоинты админки не перехвачены статикой.
+    // Регрессия v1: публичные эндпоинты админки доступны и не перехвачены статикой.
+    let response = raw_get(addr, "/openapi.json").await;
+    assert!(response.starts_with("HTTP/1.1 200"), "v1 openapi regression: {response}");
+    assert!(response.contains("application/json"), "openapi content type: {response}");
+
+    // Защищённые эндпоинты v1 требуют JWT: без секрета — строгий fail-closed 503
+    // (не 401 и не перехват статикой).
     let response = raw_get(addr, "/api/v1/rooms").await;
-    assert!(response.starts_with("HTTP/1.1 200"), "v1 regression: {response}");
+    assert!(response.starts_with("HTTP/1.1 503"), "v1 protected regression: {response}");
 }
 
 /// Composition-проверка цепочки `/api/v3` через `build_app` (фаза 2, ADR-0027):
@@ -379,6 +385,8 @@ async fn test_composition_api_v3_login_chain() {
     db.register("u-admin", "admin", "s3cret").expect("register admin");
     state.jwt_issuer = Some(issuer);
     state.local_db = Some(db);
+    // Оператор в Users-хранилище (как main.rs) — RBAC/профиль видят роль.
+    Users::create(&state, "admin", Role::Operator);
     let state = Arc::new(state);
 
     let frontend = Frontend::load(&frontend_fixture_dir());
@@ -423,12 +431,14 @@ async fn test_composition_api_v3_login_chain() {
     assert_eq!(resp.status(), StatusCode::OK, "sessions with token must succeed");
     let resp = app.clone().oneshot(get("/api/v3/profile", Some(&token))).await.expect("oneshot");
     assert_eq!(resp.status(), StatusCode::OK, "profile with token must succeed");
+    let csp_on_profile = resp.headers().get(header::CONTENT_SECURITY_POLICY).is_some();
+    let profile = axum::body::to_bytes(resp.into_body(), 1 << 20).await.expect("profile body");
+    let profile: serde_json::Value = serde_json::from_slice(&profile).expect("profile json");
+    assert_eq!(profile["user"]["role"], "operator", "login admin must resolve to Operator via Users store");
+    assert_eq!(profile["user"]["permissions"][0], "all");
 
     // 5. Security-заголовки — app-wide (включая /api/v3): CSP есть и на API-ответе.
-    assert!(
-        resp.headers().get(header::CONTENT_SECURITY_POLICY).is_some(),
-        "security headers must be app-wide (build_app layer)"
-    );
+    assert!(csp_on_profile, "security headers must be app-wide (build_app layer)");
 
     // 6. Catch-all → 501 (UI не должен видеть 404 «метод не существует»).
     let resp = app.clone().oneshot(get("/api/v3/definitely/unknown", Some(&token))).await.expect("oneshot");

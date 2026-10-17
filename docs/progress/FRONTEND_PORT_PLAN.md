@@ -3,6 +3,8 @@
 > Статус: **v0.3** — учтены находки финального цикла ревью v0.2 (агент-1 9.5, агент-2 9.3, агент-4 9.2:
 > Vary-слой, полнота CSP-спеки, ETag-факт, lockout по BACKEND_RULES §1.4, отзыв токенов/HS256-долг,
 > WS-лимиты, durability-заметки); **фаза 1 реализована и зелёная**.
+> 2026-10-17: в `deployed/pnm` интегрирован полный ребренд PROSTOR (90 файлов; +2 пост-фикса:
+> локали `\u0004MCU…`→`\u0004PROSTOR…`, cache-bust словника) — см. `client/pnm-frontend/NOTES.md` §«Ребренд PROSTOR».
 > Дата: 2026-10-16. Автор: основной агент. Привязка: `PROJECT_RULES.md` (§4 ADR, §7 крейты, §13.1 фронтенд,
 > §20.2 зависимости), `BACKEND_RULES.md` (§1 аутентификация, §2.4/2.5 лимиты, §6 ошибки/секреты, §7 версии API),
 > `FRONTEND_RULES.md` (§10 legacy PNM), `DEVELOPMENT_PLAN.md` (Фаза 8), **ADR-0027**.
@@ -287,7 +289,7 @@ ui/conferences), `ws.rs` (спека §4.4), `tests.rs` (tower::oneshot + фик
 | `GET /api/v3/system/about` | `{node_id, server_name, versions:{server}, state:{status:"READY", payload:{package:"",backup:"",export:""}}}` ← маппер `PW`; **без этого — полноэкранный оверлей** |
 | `GET /api/v3/about` | (совместимость с exempt-списком интерцептора) тот же/минимальный |
 | `GET /api/v3/references` | `{key,index,buy,contacts,trial_full_version,license_renewal,free_license_restrictions}` (пустые строки) |
-| `GET /api/v3/profile` | `{user:{id,display_name,permissions:["all"],locale_id,time_zone_id,groups:[],emails:[],phones:[],avatars:[],description,creator_id,created_at,busy,defaults:{deletable:false,editable:true}}}` |
+| `GET /api/v3/profile` | `{user:{id,display_name,permissions:["all"] (для Operator; не-Operator — провизорные ключи, TODO(T3)),locale_id,time_zone_id,groups:[],emails:[],phones:[],avatars:[],description,creator_id,created_at,busy,defaults:{deletable:false,editable:true}}}` |
 | `GET /api/v3/time-zones` | `{time_zones:[{id:"UTC"}]}` |
 | `GET /api/v3/locales` | `{locales:[{id:"ru_RU",description:"Русский"},{id:"en_US",…}]}` |
 | `GET /api/v3/abonents/stop_reasons` | `{}` (raw) |

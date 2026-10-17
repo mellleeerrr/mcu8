@@ -42,6 +42,35 @@
 
 ## Итерации
 
+### [2026-10-17] Итерация 5.1 — Rework S1/T1.1: v1 admin API — fail-closed JWT + RBAC (матрица §1.7)
+
+#### Что сделано
+- **RBAC-энфорсмент**: `v1_rbac_middleware` (vks-admin) — вторым слоем после JWT. Матрица
+  `v1_required_role` по BACKEND_RULES §1.7: комнаты — чтение Viewer+, мутации Moderator+;
+  аудит — чтение/экспорт Moderator+, запись Operator (примечание §1.7); users/settings и любой
+  неизвестный роут — Operator (fail-closed дефолт); нет контекста токена — 401; неизвестный/удалённый
+  субъект — 403 (даже на чтение). Цепочка на `protected_v1`: `route_layer(rbac)` → `route_layer(jwt)`
+  (JWT внешний, кладёт `VerifiedJwt`).
+- **Единый резолвинг роли**: `Users::resolve_role` (id/username admin-хранилища; id LocalDb
+  `u-admin` → username; `deleted` отфильтрован); magic-строки `u-admin`/`admin → Operator` из
+  `api_v3/shell.rs` удалены; `profile.role` неизвестному субъекту — Viewer (least privilege).
+- **Ошибки**: схема Bearer case-insensitive (RFC 7235 §2.1), пустой токен → 401; единый конверт
+  `deny(...)`, детали верификации JWT — только в лог (generic «invalid or expired token», §6.4).
+- **Тесты** (vks-admin 91 unit; workspace 602 — счётчики актуализированы, N2 S0.5): middleware-матрица
+  (viewer/moderator, audit-гейт, unknown/deleted, expired `ttl=-1`, Bearer-кейсы), табличный тест
+  матрицы `v1_required_role_matches_matrix` (+ fail-closed дефолт), роутер-уровень (viewer-мутация,
+  unknown, audit, moderator-kick 403, глобальный режим 403, audit-export 403/200), composition
+  (профиль `role=="operator"`, `permissions[0]=="all"`, строгий fail-closed 503).
+- **Доки**: module-doc `auth_middleware.rs`, TODO(T3) для permissions-словаря + синк
+  `FRONTEND_PORT_PLAN.md`; примечание к §1.7 (audit-write); новый файл `ADR-0022`;
+  трекер волн rework — `docs/progress/REWORK_PLAN.md`.
+- **Ревью-цикл** (журнал — `REWORK_PLAN.md`): раунд 1 — 7/10 (F1–F7) → правки; раунд 2 — 9/10
+  (D1: audit читался Viewer) → гейт; раунд 3 — 9/10 (D2: bulk-kick = soft-delete аккаунта — не для
+  Moderator) → зона `/api/v1/users*` целиком Operator; элегантность — 7.5/10 → fail-closed дефолт,
+  generic-401 + helper, табличный тест, §1.7/ADR-0022; раунды 4–5 — финальное подтверждение.
+- **S0-гигиена (в этом же пакете)**: baseline переписан без 31 MB zip (`.git` 46→14 MB; файл на
+  диске, untracked), `.gitignore` дополнен, права файлов нормализованы (644/755).
+
 ### [2026-10-16] Итерация 4.3 — PNM-порт: ревью реализации (6.5/10) → фиксы; фаза 2 (`/api/v3` auth+shell+WS) в дереве
 
 #### Ревью реализации (агент-ревьюер, продолжение общего цикла)

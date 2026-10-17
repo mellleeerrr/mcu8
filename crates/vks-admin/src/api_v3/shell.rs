@@ -19,20 +19,52 @@ use super::{auth, track};
 use crate::settings::SettingsService;
 use crate::state::SharedState;
 
-/// `GET /api/v3/profile` → `{user:{…}}` (маппер `RW`; `permissions:["all"]`).
+// TODO(T3): ключи не-Operator ролей — провизорные (источник истины — гейт UI
+// `getIsProfileHasPermissions`); синхронизировать при появлении неоператорских
+// логинов. Operator отдаёт wildcard "all".
+fn role_to_permissions(role: vks_core::Role) -> &'static [&'static str] {
+    match role {
+        vks_core::Role::Operator => &["all"],
+        vks_core::Role::Moderator => &[
+            "conferences:view",
+            "conferences:create",
+            "conferences:update",
+            "conferences:delete",
+            "sessions:view",
+            "sessions:create",
+            "sessions:update",
+            "sessions:delete",
+            "calibration:start",
+            "calibration:stop",
+        ],
+        vks_core::Role::Participant => &["sessions:view", "conferences:view"],
+        vks_core::Role::Viewer => &["sessions:view"],
+    }
+}
+
+/// `GET /api/v3/profile` → `{user:{…}}` (маппер `RW`; permissions зависят от роли).
 pub async fn profile(State(state): State<SharedState>, Extension(verified): Extension<VerifiedJwt>) -> Response {
     track("profile");
-    let display_name = state
+    let username_from_db = state
         .local_db
         .as_ref()
         .and_then(|db| db.user(&verified.user_id).ok())
-        .map(|u| u.username)
-        .unwrap_or_else(|| verified.user_id.clone());
+        .map(|u| u.username);
+
+    let display_name = username_from_db.clone().unwrap_or_else(|| verified.user_id.clone());
+
+    // Роль — только из admin-хранилища (Users); неизвестному субъекту — Viewer
+    // (least privilege). Единая точка резолвинга id/username — `Users::resolve_role`.
+    let role = crate::users::Users::resolve_role(&state, &verified.user_id).unwrap_or(vks_core::Role::Viewer);
+
+    let permissions = role_to_permissions(role);
+
     Json(json!({
         "user": {
             "id": verified.user_id,
             "display_name": display_name,
-            "permissions": ["all"],
+            "role": role.as_str(),
+            "permissions": permissions,
             "locale_id": "ru_RU",
             "time_zone_id": "UTC",
             "groups": [],

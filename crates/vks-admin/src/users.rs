@@ -58,9 +58,12 @@ impl Users {
         }
     }
 
-    /// Bulk: mute/unmute по списку ids.
+    /// Bulk: mute/unmute по списку ids (состояние `UserRecord`).
     ///
-    /// RBAC: Operator/Moderator. Возвращает число затронутых записей.
+    /// RBAC: Operator — зона «Управление пользователями» (ADR-0022; энфорсится
+    /// `v1_required_role`). Строка §1.7 «Мутить/удалить участника» — про
+    /// live-модерацию сессий, не про записи пользователей.
+    /// Возвращает число затронутых записей.
     pub fn bulk_mute(state: &AppState, ids: &[UserId], muted: bool) -> usize {
         let mut users = state.users.lock().expect("users store poisoned");
         let mut touched = 0;
@@ -108,6 +111,23 @@ impl Users {
             }
         }
         users.len()
+    }
+
+    /// Роль субъекта токена для RBAC (v1-middleware и профиль `/api/v3`).
+    ///
+    /// `subject` — `sub` из JWT: id или username записи admin-хранилища;
+    /// id локального провайдера (`u-admin`, `/api/v3/login`) резолвится в
+    /// username через [`vks_auth::local_db::LocalDb`]. `None` — записи нет
+    /// или она удалена (fail-closed: доступ запрещён).
+    pub fn resolve_role(state: &AppState, subject: &str) -> Option<Role> {
+        let username = state
+            .local_db
+            .as_ref()
+            .and_then(|db| db.user(subject).ok())
+            .map(|u| u.username)
+            .unwrap_or_else(|| subject.to_string());
+        let users = state.users.lock().expect("users store poisoned");
+        users.values().find(|u| !u.deleted && (u.username == username || u.id.to_string() == subject)).map(|u| u.role)
     }
 }
 
@@ -222,5 +242,25 @@ mod tests {
     #[test]
     fn ldap_user_model() {
         let _ = LdapUser { username: "x".into(), role: Role::Participant };
+    }
+
+    #[test]
+    fn resolve_role_by_username_id_and_local_db() {
+        let mut state = AppState::new();
+        let op = Users::create(&state, "op", Role::Operator);
+        assert_eq!(Users::resolve_role(&state, "op"), Some(Role::Operator));
+        assert_eq!(Users::resolve_role(&state, &op.id.to_string()), Some(Role::Operator));
+        assert_eq!(Users::resolve_role(&state, "ghost"), None);
+
+        // LocalDb-субъект (`u-admin`) резолвится в username admin-хранилища.
+        let db = std::sync::Arc::new(vks_auth::local_db::LocalDb::new());
+        db.register("u-admin", "admin", "x").expect("register");
+        state.local_db = Some(db);
+        Users::create(&state, "admin", Role::Operator);
+        assert_eq!(Users::resolve_role(&state, "u-admin"), Some(Role::Operator));
+
+        // Удалённая запись — доступа нет.
+        assert!(Users::delete(&state, &op.id));
+        assert_eq!(Users::resolve_role(&state, "op"), None);
     }
 }

@@ -405,11 +405,13 @@ pub async fn export_audit(State(state): State<SharedState>, Query(query): Query<
 /// Deprecation: `Deprecation`/`Sunset` headers на deprecated endpoints
 /// (эта волна — все v1 активны).
 pub fn router(state: SharedState) -> Router {
-    Router::new()
+    let public_routes = Router::new()
         // Health (no version).
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .route("/openapi.json", get(openapi))
+        .route("/openapi.json", get(openapi));
+
+    let protected_v1 = Router::new()
         // Rooms (v1).
         .route("/api/v1/rooms", get(list_rooms).post(create_room))
         .route("/api/v1/rooms/{id}", get(get_room).patch(update_room).delete(delete_room))
@@ -427,7 +429,12 @@ pub fn router(state: SharedState) -> Router {
         // Audit (v1).
         .route("/api/v1/audit", get(list_audit).post(record_audit))
         .route("/api/v1/audit/export", get(export_audit))
-        .with_state(state)
+        // Порядок route_layer: последний добавленный — внешний, поэтому JWT
+        // выполняется первым и кладёт VerifiedJwt, RBAC читает его следом.
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), crate::auth_middleware::v1_rbac_middleware))
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), crate::auth_middleware::jwt_auth_middleware));
+
+    public_routes.merge(protected_v1).with_state(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -439,13 +446,46 @@ mod tests {
     use super::*;
     use axum::http::Method;
     use tower::ServiceExt;
+    use vks_auth::jwt::{JwtConfig, JwtIssuer};
 
     fn test_router() -> Router {
         router(Arc::new(AppState::new()))
     }
 
+    /// Приложение с валидным токеном; запись в Users-хранилище — по желанию
+    /// (`None` = «токен есть, аккаунта нет» → RBAC должен отклонять).
+    fn authed_app(username: &str, role: Option<vks_core::Role>) -> (Router, Arc<AppState>, String) {
+        let mut state = AppState::new();
+        let config = JwtConfig {
+            secret: "test_secret_for_handlers_12345".to_string(),
+            ttl_secs: 300,
+            issuer: "vks-test".to_string(),
+        };
+        let issuer = Arc::new(JwtIssuer::new(config));
+        let token = issuer.issue(username, None).expect("issue token");
+        state.jwt_issuer = Some(issuer);
+        if let Some(role) = role {
+            crate::users::Users::create(&state, username, role);
+        }
+        let shared = Arc::new(state);
+        (router(shared.clone()), shared, token)
+    }
+
+    fn authed_test_app() -> (Router, Arc<AppState>, String) {
+        authed_app("admin", Some(vks_core::Role::Operator))
+    }
+
     fn req(method: Method, uri: &str) -> axum::http::Request<axum::body::Body> {
         axum::http::Request::builder().method(method).uri(uri).body(axum::body::Body::empty()).unwrap()
+    }
+
+    fn authed_req(method: Method, uri: &str, token: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .unwrap()
     }
 
     #[tokio::test]
@@ -481,11 +521,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unauthenticated_v1_request_fails_with_401() {
+        let (app, _state, _token) = authed_test_app();
+        let resp = app.oneshot(req(Method::GET, "/api/v1/rooms")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn unconfigured_v1_request_fails_closed_with_503() {
+        let app = test_router();
+        let resp = app.oneshot(req(Method::GET, "/api/v1/rooms")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn rbac_viewer_cannot_mutate_v1() {
+        let (app, _state, token) = authed_app("viewer", Some(vks_core::Role::Viewer));
+        let resp = app.oneshot(authed_req(Method::POST, "/api/v1/rooms", &token)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn rbac_unknown_token_subject_is_forbidden() {
+        let (app, _state, token) = authed_app("ghost", None);
+        let resp = app.oneshot(authed_req(Method::GET, "/api/v1/rooms", &token)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn rbac_audit_gate_on_real_router() {
+        // Audit log читается только Moderator+ (BACKEND_RULES §1.7).
+        let (app, _state, token) = authed_app("viewer", Some(vks_core::Role::Viewer));
+        let resp = app.oneshot(authed_req(Method::GET, "/api/v1/audit", &token)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let (app, _state, token) = authed_app("auditor", Some(vks_core::Role::Moderator));
+        let resp = app.oneshot(authed_req(Method::GET, "/api/v1/audit", &token)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn rbac_moderator_cannot_kick_via_bulk_on_real_router() {
+        // bulk включает Kick = soft-delete аккаунта → Operator only.
+        let (app, _state, token) = authed_app("moderator", Some(vks_core::Role::Moderator));
+        let resp = app.oneshot(authed_req(Method::POST, "/api/v1/users/bulk", &token)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn rbac_matrix_negatives_on_real_router() {
+        // §1.7: глобальный MCU/SFU — Operator only.
+        let (app, _state, token) = authed_app("moderator", Some(vks_core::Role::Moderator));
+        let resp = app.oneshot(authed_req(Method::POST, "/api/v1/mode", &token)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // §1.7: экспорт audit-log — Moderator+ (Participant/Viewer ❌).
+        let (app, _state, token) = authed_app("viewer", Some(vks_core::Role::Viewer));
+        let resp = app.oneshot(authed_req(Method::GET, "/api/v1/audit/export", &token)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Operator — разрешённый путь (CSV-экспорт).
+        let (app, _state, token) = authed_test_app();
+        let resp = app.oneshot(authed_req(Method::GET, "/api/v1/audit/export", &token)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn get_room_after_create() {
-        let state = AppState::new();
+        let (app, state, token) = authed_test_app();
         let created = Rooms::create(&state, "conf");
-        let app = router(Arc::new(state));
-        let resp = app.oneshot(req(Method::GET, &format!("/api/v1/rooms/{}", created.id))).await.unwrap();
+        let resp = app.oneshot(authed_req(Method::GET, &format!("/api/v1/rooms/{}", created.id), &token)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -494,18 +599,19 @@ mod tests {
 
     #[tokio::test]
     async fn get_unknown_room_404() {
-        let app = test_router();
-        let resp = app.oneshot(req(Method::GET, "/api/v1/rooms/00000000-0000-0000-0000-000000000000")).await.unwrap();
+        let (app, _state, token) = authed_test_app();
+        let resp = app.oneshot(authed_req(Method::GET, "/api/v1/rooms/00000000-0000-0000-0000-000000000000", &token)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn set_global_mode_endpoint() {
-        let app = test_router();
+        let (app, _state, token) = authed_test_app();
         let body = serde_json::json!({ "mode": "mcu" });
         let req = axum::http::Request::builder()
             .method(Method::POST)
             .uri("/api/v1/mode")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .header(header::CONTENT_TYPE, "application/json")
             .body(axum::body::Body::from(serde_json::to_string(&body).unwrap()))
             .unwrap();
@@ -519,8 +625,8 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_room_id_returns_400() {
-        let app = test_router();
-        let resp = app.oneshot(req(Method::GET, "/api/v1/rooms/not-a-uuid")).await.unwrap();
+        let (app, _state, token) = authed_test_app();
+        let resp = app.oneshot(authed_req(Method::GET, "/api/v1/rooms/not-a-uuid", &token)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

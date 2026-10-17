@@ -96,11 +96,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 5. Инициализация состояния админ-сервера + bootstrap auth `/api/v3` (§4.3).
     let mut admin_state = AppState::with_storage(storage.clone());
 
-    // JwtIssuer: пустой секрет → v3 fail-closed (503 на весь `/api/v3/*`, включая login).
+    // JwtIssuer: пустой секрет → fail-closed (503 на `/api/v3/*`, включая login, и `/api/v1/*`).
     if config.jwt_secret.is_empty() {
         warn!(
-            "VKS_JWT_SECRET is empty: /api/v3/* answers 503 (fail-closed); \
-             set it to enable the PNM web UI"
+            "VKS_JWT_SECRET is empty: /api/v3/* and /api/v1/* answer 503 (fail-closed); \
+             set it to enable the PNM web UI and admin API"
         );
     } else {
         admin_state.jwt_issuer = Some(Arc::new(JwtIssuer::new(JwtConfig {

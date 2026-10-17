@@ -56,6 +56,11 @@
 | Audit log | ✅ | ✅ | ❌ | ❌ |
 | Запись | ✅ | ✅ (confirm) | ✅ (confirm) | ✅ (confirm) |
 
+> Примечание (уточнение при реализации v1, T1.1): «Audit log» — чтение и экспорт
+> (`GET /api/v1/audit`, `/api/v1/audit/export`) — Moderator+; **запись** (`POST /api/v1/audit`)
+> — Operator (запись в append-only журнал — админская операция, риск форджинга).
+> Реализация: `crates/vks-admin/src/auth_middleware.rs::v1_required_role`.
+
 ## 2. Сетевая безопасность
 
 ### 2.1. TLS
