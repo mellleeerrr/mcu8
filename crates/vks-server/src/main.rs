@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // M1.6: отказ сконфигурированной БД прерывает startup (fail-fast),
     // если явно не разрешён fallback (storage_allow_fallback = true).
     let storage: Arc<dyn Storage> = if config.database_url.starts_with("sqlite:") {
-        info!(url = %config.database_url, "connecting to SQLite database");
+        info!(url = %vks_common::config::redact_dsn(&config.database_url), "connecting to SQLite database");
         match SqliteStorage::init(&config.database_url).await {
             Ok(sqlite) => Arc::new(sqlite),
             Err(e) => {
@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else if config.database_url.starts_with("postgres://") || config.database_url.starts_with("postgresql://") {
-        info!(url = %config.database_url, "connecting to PostgreSQL database");
+        info!(url = %vks_common::config::redact_dsn(&config.database_url), "connecting to PostgreSQL database");
         match PostgresStorage::init(&config.database_url).await {
             Ok(pg) => Arc::new(pg),
             Err(e) => {
@@ -103,8 +103,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else if !config.database_url.is_empty() {
-        error!(url = %config.database_url, "unsupported database scheme in database_url; aborting startup");
-        return Err(format!("unsupported database scheme in database_url: {}", config.database_url).into());
+        error!(url = %vks_common::config::redact_dsn(&config.database_url), "unsupported database scheme in database_url; aborting startup");
+        return Err(format!("unsupported database scheme in database_url: {}", vks_common::config::redact_dsn(&config.database_url)).into());
     } else {
         info!("using in-memory storage (database_url not configured)");
         Arc::new(MemoryStorage::new())
@@ -137,6 +137,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if config.admin_password == "admin" {
         warn!("admin password is the dev default; set VKS_ADMIN_PASSWORD before production");
     }
+
+    // M1.9: AuthProvider factory (local/ldap/oidc)
+    let auth_cfg = vks_auth::provider::AuthProviderConfig {
+        provider_type: config.auth_provider.clone(),
+        ldap_url: if config.ldap_url.is_empty() { None } else { Some(config.ldap_url.clone()) },
+        ldap_bind_template: None,
+        allow_mock_ldap: std::env::var("VKS_ALLOW_MOCK_LDAP").map(|v| v == "1" || v == "true").unwrap_or(false),
+        oidc_issuer: None,
+    };
+    let auth_provider = match vks_auth::provider::create_auth_provider(&auth_cfg, Some(local_db.clone())) {
+        Ok(p) => {
+            info!(provider = %config.auth_provider, "auth provider initialized");
+            p
+        }
+        Err(e) => {
+            error!(error = %e, provider = %config.auth_provider, "failed to initialize configured auth provider; aborting startup");
+            return Err(e.into());
+        }
+    };
+    admin_state.auth_provider = Some(auth_provider);
     admin_state.local_db = Some(local_db);
     // `ui:users:search` (WS §4.4) читает admin-хранилище users — держим оператора и там.
     vks_admin::users::Users::create(&admin_state, &config.admin_login, vks_core::Role::Operator);

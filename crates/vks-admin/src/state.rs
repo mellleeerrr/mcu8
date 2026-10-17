@@ -142,6 +142,8 @@ impl ModeState {
 pub struct AppState {
     /// Персистентное хранилище (Postgres / SQLite / Memory).
     pub storage: Option<Arc<dyn vks_core::ports::Storage>>,
+    /// Полиморфный AuthProvider (local / ldap / oidc).
+    pub auth_provider: Option<Arc<dyn vks_core::ports::AuthProvider>>,
     /// JWT Issuer для проверки токенов доступа.
     pub jwt_issuer: Option<Arc<vks_auth::jwt::JwtIssuer>>,
     /// Встроенная база пользователей (local provider) для login `/api/v3` (§4.3).
@@ -201,6 +203,7 @@ impl AppState {
         let (admin_tx, _admin_rx) = tokio::sync::broadcast::channel(crate::hub::ADMIN_CHANNEL_CAPACITY);
         Self {
             storage: None,
+            auth_provider: None,
             jwt_issuer: None,
             local_db: None,
             api_v3: crate::api_v3::ApiV3State::default(),

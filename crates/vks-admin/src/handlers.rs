@@ -413,9 +413,9 @@ pub async fn sync_ldap(State(state): State<SharedState>) -> Response {
     json_ok(serde_json::json!({ "total": total }))
 }
 
-/// `GET /api/v1/settings` — get settings.
+/// `GET /api/v1/settings` — get settings (secrets redacted).
 pub async fn get_settings(State(state): State<SharedState>) -> Response {
-    json_ok(SettingsService::get(&state))
+    json_ok(SettingsService::get(&state).redacted())
 }
 
 /// `POST /api/v1/settings` — set settings (hot-reload).

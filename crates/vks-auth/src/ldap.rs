@@ -77,32 +77,46 @@ impl<C: LdapClient> LdapAuth<C> {
     }
 }
 
+/// Mock client for tests and test-harness verification.
+#[derive(Default)]
+pub struct MockLdapClient {
+    pub last_dn: std::sync::Mutex<Option<String>>,
+    pub accept: std::sync::Mutex<Option<String>>,
+}
+
+impl MockLdapClient {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_accepted_password(pw: impl Into<String>) -> Self {
+        Self {
+            last_dn: std::sync::Mutex::new(None),
+            accept: std::sync::Mutex::new(Some(pw.into())),
+        }
+    }
+}
+
+#[async_trait]
+impl LdapClient for MockLdapClient {
+    async fn bind(&self, dn: &str, password: &str) -> Result<LdapBindResult, LdapError> {
+        *self.last_dn.lock().unwrap() = Some(dn.to_string());
+        match &*self.accept.lock().unwrap() {
+            Some(expected) if expected == password => {
+                Ok(LdapBindResult { dn: dn.to_string(), groups: vec!["vks-users".to_string()] })
+            }
+            Some(expected) => Err(LdapError::Client(format!("bad password for {expected}"))),
+            None => Ok(LdapBindResult { dn: dn.to_string(), groups: vec!["vks-users".to_string()] }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_util::block_on;
     use std::sync::Mutex;
-
-    /// Mock client recording the last bind attempt.
-    #[derive(Default)]
-    struct MockClient {
-        last_dn: Mutex<Option<String>>,
-        accept: Mutex<Option<String>>,
-    }
-
-    #[async_trait]
-    impl LdapClient for MockClient {
-        async fn bind(&self, dn: &str, password: &str) -> Result<LdapBindResult, LdapError> {
-            *self.last_dn.lock().unwrap() = Some(dn.to_string());
-            match &*self.accept.lock().unwrap() {
-                Some(expected) if expected == password => {
-                    Ok(LdapBindResult { dn: dn.to_string(), groups: vec!["vks-users".to_string()] })
-                }
-                Some(expected) => Err(LdapError::Client(format!("bad password for {expected}"))),
-                None => Err(LdapError::Client("mock not configured".into())),
-            }
-        }
-    }
+    type MockClient = MockLdapClient;
 
     #[tokio::test]
     async fn build_dn_substitutes_user() {

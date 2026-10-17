@@ -246,15 +246,24 @@ pub async fn login(
         return locked_response(retry_after);
     }
 
-    let Some(db) = state.local_db.clone() else {
+    let auth_result = if let Some(provider) = &state.auth_provider {
+        let creds = vks_core::ports::auth::Credentials {
+            username: body.login.clone(),
+            password: body.password.clone(),
+        };
+        provider.verify(&creds).await.map(|u| u.id.to_string())
+    } else if let Some(db) = state.local_db.clone() {
+        db.authenticate(&body.login, &body.password).map(|u| u.id).map_err(|_| vks_core::ports::auth::AuthError::InvalidCredentials)
+    } else {
         return error_json(503, "Authentication is not configured");
     };
-    match db.authenticate(&body.login, &body.password) {
-        Ok(user) => {
+
+    match auth_result {
+        Ok(user_id) => {
             state.api_v3.lockout.record_success(&body.login, &ip);
             LOGIN_ATTEMPTS.with_label_values(&["ok"]).inc();
             audit(&state, &body.login, &ip, "login_ok");
-            issue_token(&state, &user.id)
+            issue_token(&state, &user_id)
         }
         Err(_) => {
             let blocked_now = state.api_v3.lockout.record_failure(&body.login, &ip, now);

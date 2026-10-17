@@ -30,11 +30,97 @@ fn deny(status: StatusCode, error_code: &str, error: &str) -> Response {
     (status, Json(serde_json::json!({ "error_code": error_code, "error": error }))).into_response()
 }
 
-/// Middleware валидации JWT Bearer-токена.
+/// Тип авторизации.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthType {
+    Jwt,
+    ApiKey,
+}
+
+/// Контекст авторизации (унифицированный для JWT и API-ключей).
+#[derive(Debug, Clone)]
+pub struct AuthContext {
+    pub subject: String,
+    pub role: Role,
+    pub auth_type: AuthType,
+    pub scopes: Vec<String>,
+}
+
+/// Middleware валидации JWT Bearer-токена и API-ключей.
 ///
-/// Fail-closed (ADR-0009, ADR-0021): если jwt_issuer не сконфигурирован,
+/// Fail-closed (ADR-0009, ADR-0021): если auth не сконфигурирован,
 /// возвращает 503 Service Unavailable, исключая несанкционированный доступ.
 pub async fn jwt_auth_middleware(State(state): State<Arc<AppState>>, mut request: Request, next: Next) -> Response {
+    // 1. Проверяем API-ключ в X-Api-Key или Authorization: Bearer vks_...
+    let api_key_candidate = request
+        .headers()
+        .get("x-api-key")
+        .and_then(|h| h.to_str().ok())
+        .map(str::trim)
+        .or_else(|| {
+            let auth = request.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
+            let (scheme, token) = auth.split_once(' ')?;
+            if scheme.eq_ignore_ascii_case("bearer") && token.trim().starts_with(vks_auth::api_key::KEY_PREFIX) {
+                Some(token.trim())
+            } else {
+                None
+            }
+        });
+
+    if let Some(key) = api_key_candidate {
+        if key.len() != vks_auth::api_key::KEY_PREFIX.len() + vks_auth::api_key::KEY_HEX_LEN {
+            return deny(StatusCode::UNAUTHORIZED, "invalid_api_key", "malformed api key");
+        }
+        let hash = vks_auth::api_key::sha256_hex(key.as_bytes());
+        let Some(storage) = &state.storage else {
+            return deny(StatusCode::SERVICE_UNAVAILABLE, "auth_unavailable", "storage is unavailable");
+        };
+
+        let key_record = match storage.get_api_key(&hash).await {
+            Ok(Some(k)) => k,
+            Ok(None) => match storage.get_api_key(key).await {
+                Ok(Some(k)) => k,
+                Ok(None) => return deny(StatusCode::UNAUTHORIZED, "invalid_api_key", "api key not found"),
+                Err(e) => {
+                    tracing::error!(error = %e, "storage error querying api key");
+                    return deny(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "storage error");
+                }
+            },
+            Err(e) => {
+                tracing::error!(error = %e, "storage error querying api key");
+                return deny(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "storage error");
+            }
+        };
+
+        if key_record.revoked {
+            tracing::warn!(prefix = &key[..8], "rejected revoked api key");
+            return deny(StatusCode::UNAUTHORIZED, "api_key_revoked", "api key has been revoked");
+        }
+
+        let owner_str = key_record.owner.to_string();
+        let owner_role = match crate::users::Users::resolve_role(&state, &owner_str) {
+            Some(r) => r,
+            None => return deny(StatusCode::FORBIDDEN, "forbidden", "api key owner is unknown or disabled"),
+        };
+
+        let effective_role = if key_record.scopes.iter().any(|s| s == "admin" || s == "operator" || s == "*") {
+            owner_role
+        } else if key_record.scopes.iter().any(|s| s == "write" || s == "moderator") {
+            owner_role.min(Role::Moderator)
+        } else {
+            Role::Viewer
+        };
+
+        request.extensions_mut().insert(AuthContext {
+            subject: owner_str,
+            role: effective_role,
+            auth_type: AuthType::ApiKey,
+            scopes: key_record.scopes,
+        });
+        return next.run(request).await;
+    }
+
+    // 2. JWT Bearer
     let Some(issuer) = &state.jwt_issuer else {
         return deny(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -57,12 +143,20 @@ pub async fn jwt_auth_middleware(State(state): State<Arc<AppState>>, mut request
     let verified = match issuer.verify(token) {
         Ok(v) => v,
         Err(e) => {
-            // Детали (тип ошибки/JTI) — только в лог; наружу generic (BACKEND_RULES §6.4).
             tracing::debug!(error = %e, "jwt verification failed");
             return deny(StatusCode::UNAUTHORIZED, "unauthorized", "invalid or expired token");
         }
     };
 
+    let role = crate::users::Users::resolve_role(&state, &verified.user_id)
+        .unwrap_or(Role::Viewer);
+
+    request.extensions_mut().insert(AuthContext {
+        subject: verified.user_id.clone(),
+        role,
+        auth_type: AuthType::Jwt,
+        scopes: vec!["*".into()],
+    });
     request.extensions_mut().insert(verified);
     next.run(request).await
 }
@@ -108,13 +202,28 @@ fn v1_required_role(method: &Method, path: &str) -> Role {
 /// недостаточная роль на мутацию — 403. Ставится ПОСЛЕ
 /// [`jwt_auth_middleware`] (требует `VerifiedJwt` в extensions).
 pub async fn v1_rbac_middleware(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
-    let Some(subject) = request.extensions().get::<VerifiedJwt>().map(|v| v.user_id.clone()) else {
+    let (role, scopes) = if let Some(ctx) = request.extensions().get::<AuthContext>() {
+        if ctx.auth_type == AuthType::Jwt {
+            let Some(role) = crate::users::Users::resolve_role(&state, &ctx.subject) else {
+                return deny(StatusCode::FORBIDDEN, "forbidden", "account is unknown or disabled");
+            };
+            (role, ctx.scopes.clone())
+        } else {
+            (ctx.role, ctx.scopes.clone())
+        }
+    } else if let Some(subject) = request.extensions().get::<VerifiedJwt>().map(|v| v.user_id.clone()) {
+        let Some(role) = crate::users::Users::resolve_role(&state, &subject) else {
+            return deny(StatusCode::FORBIDDEN, "forbidden", "account is unknown or disabled");
+        };
+        (role, vec!["*".into()])
+    } else {
         return deny(StatusCode::UNAUTHORIZED, "unauthorized", "missing verified token context");
     };
 
-    let Some(role) = crate::users::Users::resolve_role(&state, &subject) else {
-        return deny(StatusCode::FORBIDDEN, "forbidden", "account is unknown or disabled");
-    };
+    let is_mutation = !matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+    if is_mutation && !scopes.iter().any(|s| s == "*" || s == "write" || s == "admin" || s == "operator") {
+        return deny(StatusCode::FORBIDDEN, "forbidden", "api key does not have write scope");
+    }
 
     let required = v1_required_role(request.method(), request.uri().path());
     if role.level() < required.level() {
@@ -377,4 +486,65 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
+
+    #[tokio::test]
+    async fn api_key_allows_read_and_enforces_write_scope() {
+        use vks_core::ports::Storage;
+        let storage = Arc::new(vks_storage::MemoryStorage::new());
+        let (key_plain, _key_meta) = vks_auth::api_key::generate("key-1");
+        let hash = vks_auth::api_key::sha256_hex(key_plain.as_bytes());
+
+        let state = AppState::with_storage(storage.clone());
+        let user = crate::users::Users::create(&state, "key_owner", Role::Operator);
+        let owner = user.id;
+
+        // Key with read-only scope
+        let core_key = vks_core::ports::storage::ApiKey {
+            id: hash.clone(),
+            scopes: vec!["read".into()],
+            owner,
+            revoked: false,
+        };
+        storage.upsert_api_key(&core_key).await.unwrap();
+
+        let app = rbac_app(Arc::new(state));
+
+        // GET allowed with X-Api-Key
+        let req = Request::builder()
+            .uri("/api/v1/rooms")
+            .method(Method::GET)
+            .header("x-api-key", &key_plain)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // POST rejected because scopes only has "read"
+        let req = Request::builder()
+            .uri("/api/v1/rooms")
+            .method(Method::POST)
+            .header("x-api-key", &key_plain)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Revoke key -> 401 UNAUTHORIZED
+        let revoked_key = vks_core::ports::storage::ApiKey {
+            id: hash,
+            scopes: vec!["read".into()],
+            owner,
+            revoked: true,
+        };
+        storage.upsert_api_key(&revoked_key).await.unwrap();
+        let req = Request::builder()
+            .uri("/api/v1/rooms")
+            .method(Method::GET)
+            .header("x-api-key", &key_plain)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
 }
+

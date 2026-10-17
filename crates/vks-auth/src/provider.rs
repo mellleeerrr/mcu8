@@ -79,20 +79,85 @@ impl AuthProviderEnum {
 }
 
 /// Local (in-memory) provider.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct LocalAuth {
-    db: LocalDb,
+    db: std::sync::Arc<LocalDb>,
 }
 
 impl LocalAuth {
     pub fn new() -> Self {
-        Self::default()
+        Self { db: std::sync::Arc::new(LocalDb::new()) }
+    }
+
+    pub fn with_db(db: std::sync::Arc<LocalDb>) -> Self {
+        Self { db }
     }
 
     /// The backing user store (exposed so callers can register users / mint
     /// access tokens after a successful login).
     pub fn db(&self) -> &LocalDb {
         &self.db
+    }
+}
+
+/// Configuration for creating an AuthProvider instance.
+#[derive(Debug, Clone)]
+pub struct AuthProviderConfig {
+    pub provider_type: String,
+    pub ldap_url: Option<String>,
+    pub ldap_bind_template: Option<String>,
+    pub allow_mock_ldap: bool,
+    pub oidc_issuer: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AuthFactoryError {
+    #[error("unknown auth provider: '{0}' (expected 'local', 'ldap', 'oidc')")]
+    UnknownProvider(String),
+    #[error("ldap configuration error: {0}")]
+    LdapConfig(String),
+    #[error("mock ldap is prohibited in production (set allow_mock_ldap=true for test harness)")]
+    MockLdapProhibited,
+    #[error("oidc provider error: {0}")]
+    OidcNotConfigured(String),
+}
+
+/// Factory function creating a `vks_core::ports::AuthProvider` trait object.
+pub fn create_auth_provider(
+    config: &AuthProviderConfig,
+    local_db: Option<std::sync::Arc<LocalDb>>,
+) -> Result<std::sync::Arc<dyn vks_core::ports::AuthProvider>, AuthFactoryError> {
+    match config.provider_type.to_lowercase().as_str() {
+        "local" => {
+            let local_auth = if let Some(db) = local_db {
+                LocalAuth::with_db(db)
+            } else {
+                LocalAuth::new()
+            };
+            Ok(std::sync::Arc::new(local_auth))
+        }
+        "ldap" => {
+            let url = config.ldap_url.as_deref().unwrap_or("").trim();
+            if url.is_empty() {
+                return Err(AuthFactoryError::LdapConfig("LDAP URL is required when auth_provider is 'ldap'".into()));
+            }
+
+            if !config.allow_mock_ldap {
+                return Err(AuthFactoryError::MockLdapProhibited);
+            }
+
+            let template = config.ldap_bind_template.clone()
+                .unwrap_or_else(|| "uid={user},ou=people,dc=vks,dc=internal".into());
+            let ldap_auth = LdapAuth::new(url, template, crate::ldap::MockLdapClient::new());
+            Ok(std::sync::Arc::new(AuthProviderEnum::from_ldap(ldap_auth)))
+        }
+        "oidc" => {
+            let _issuer = config.oidc_issuer.as_deref().unwrap_or("").trim();
+            Err(AuthFactoryError::OidcNotConfigured(
+                "OIDC provider is not yet supported in this build; configure 'local' or 'ldap'".into(),
+            ))
+        }
+        other => Err(AuthFactoryError::UnknownProvider(other.into())),
     }
 }
 
@@ -211,4 +276,61 @@ mod tests {
         let v = issuer.verify(&token).unwrap();
         assert_eq!(v.user_id, "u1");
     }
+
+    #[test]
+    fn factory_creates_local_provider() {
+        let cfg = AuthProviderConfig {
+            provider_type: "local".into(),
+            ldap_url: None,
+            ldap_bind_template: None,
+            allow_mock_ldap: false,
+            oidc_issuer: None,
+        };
+        assert!(create_auth_provider(&cfg, None).is_ok());
+    }
+
+    #[test]
+    fn factory_rejects_mock_ldap_in_production() {
+        let cfg = AuthProviderConfig {
+            provider_type: "ldap".into(),
+            ldap_url: Some("ldaps://ldap.internal:636".into()),
+            ldap_bind_template: None,
+            allow_mock_ldap: false,
+            oidc_issuer: None,
+        };
+        match create_auth_provider(&cfg, None) {
+            Err(AuthFactoryError::MockLdapProhibited) => {}
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn factory_allows_mock_ldap_in_test_mode() {
+        let cfg = AuthProviderConfig {
+            provider_type: "ldap".into(),
+            ldap_url: Some("ldaps://ldap.internal:636".into()),
+            ldap_bind_template: None,
+            allow_mock_ldap: true,
+            oidc_issuer: None,
+        };
+        assert!(create_auth_provider(&cfg, None).is_ok());
+    }
+
+    #[test]
+    fn factory_rejects_unconfigured_oidc() {
+        let cfg = AuthProviderConfig {
+            provider_type: "oidc".into(),
+            ldap_url: None,
+            ldap_bind_template: None,
+            allow_mock_ldap: false,
+            oidc_issuer: None,
+        };
+        match create_auth_provider(&cfg, None) {
+            Err(AuthFactoryError::OidcNotConfigured(_)) => {}
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
 }
+

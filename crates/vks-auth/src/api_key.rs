@@ -66,7 +66,7 @@ pub fn prefix(key: &str) -> String {
     key.chars().take(8).collect()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }

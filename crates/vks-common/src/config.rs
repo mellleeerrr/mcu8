@@ -9,7 +9,7 @@ use uncased::Uncased;
 
 /// Базовая конфигурация сервера (покрывает требования R6: имя, IP, БД, LDAP).
 /// Полная структура настраиваемости расширяется в фазах 5/7.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
     /// Имя сервера (требование R6).
@@ -43,6 +43,48 @@ pub struct Config {
     /// Разрешить ли fallback на MemoryStorage при отказе БД (`VKS_STORAGE_ALLOW_FALLBACK`; dev: false).
     /// По умолчанию: false (fail-fast: сбой подключения к сконфигурированной БД прерывает startup).
     pub storage_allow_fallback: bool,
+}
+
+/// Маскирует строковые секреты.
+pub fn redact_secret(s: &str) -> &'static str {
+    if s.is_empty() {
+        "<empty>"
+    } else {
+        "***"
+    }
+}
+
+/// Маскирует учетные данные в DSN/URI: `postgres://user:pass@host/db` -> `postgres://user:***@host/db`.
+pub fn redact_dsn(dsn: &str) -> String {
+    if let Some((scheme_and_creds, host_and_path)) = dsn.split_once('@') {
+        if let Some((scheme, creds)) = scheme_and_creds.split_once("://") {
+            if let Some((user, _pass)) = creds.split_once(':') {
+                return format!("{scheme}://{user}:***@{host_and_path}");
+            }
+            return format!("{scheme}://***@{host_and_path}");
+        }
+    }
+    dsn.to_string()
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("server_name", &self.server_name)
+            .field("listen_addr", &self.listen_addr)
+            .field("auth_provider", &self.auth_provider)
+            .field("database_url", &redact_dsn(&self.database_url))
+            .field("ldap_url", &redact_dsn(&self.ldap_url))
+            .field("default_room_mode", &self.default_room_mode)
+            .field("frontend_dir", &self.frontend_dir)
+            .field("jwt_secret", &redact_secret(&self.jwt_secret))
+            .field("jwt_ttl_secs", &self.jwt_ttl_secs)
+            .field("admin_login", &self.admin_login)
+            .field("admin_password", &redact_secret(&self.admin_password))
+            .field("media_listen_addr", &self.media_listen_addr)
+            .field("storage_allow_fallback", &self.storage_allow_fallback)
+            .finish()
+    }
 }
 
 impl Default for Config {
@@ -208,4 +250,25 @@ default_room_mode = "mcu"
         }
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn redaction_masks_secrets_and_dsn() {
+        assert_eq!(redact_secret("secret_123"), "***");
+        assert_eq!(redact_secret(""), "<empty>");
+        assert_eq!(redact_dsn("postgres://admin:super_secret_pw@10.0.0.1:5432/vks_db"), "postgres://admin:***@10.0.0.1:5432/vks_db");
+        assert_eq!(redact_dsn("sqlite://app.db"), "sqlite://app.db");
+
+        let cfg = Config {
+            database_url: "postgres://vks_user:mypassword@localhost:5432/vks".into(),
+            jwt_secret: "super_secret_jwt".into(),
+            admin_password: "admin_cleartext_password".into(),
+            ..Default::default()
+        };
+        let debug_str = format!("{cfg:?}");
+        assert!(!debug_str.contains("super_secret_jwt"), "jwt_secret leaked in Debug");
+        assert!(!debug_str.contains("admin_cleartext_password"), "admin_password leaked in Debug");
+        assert!(!debug_str.contains("mypassword"), "database_url password leaked in Debug");
+        assert!(debug_str.contains("postgres://vks_user:***@localhost:5432/vks"));
+    }
 }
+

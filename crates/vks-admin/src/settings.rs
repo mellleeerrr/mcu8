@@ -149,6 +149,38 @@ impl Default for Settings {
     }
 }
 
+impl Settings {
+    /// Возвращает безопасную копию настроек с замаскированными секретами.
+    pub fn redacted(&self) -> Self {
+        let mut copy = self.clone();
+        if let serde_json::Value::Object(ref mut map) = copy.auth.params {
+            for (key, val) in map.iter_mut() {
+                let lower = key.to_lowercase();
+                if lower.contains("pass") || lower.contains("secret") || lower.contains("token") || lower.contains("key") {
+                    *val = serde_json::Value::String("***".into());
+                }
+            }
+        }
+        copy
+    }
+
+    /// Объединяет новые настройки с текущими, сохраняя существующие секреты,
+    /// если клиент прислал маскированное значение `"***"`.
+    pub fn merge_preserving_secrets(&mut self, current: &Settings) {
+        if let (serde_json::Value::Object(ref mut new_map), serde_json::Value::Object(ref cur_map)) =
+            (&mut self.auth.params, &current.auth.params)
+        {
+            for (k, v) in new_map.iter_mut() {
+                if v.as_str() == Some("***") {
+                    if let Some(cur_val) = cur_map.get(k) {
+                        *v = cur_val.clone();
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Операции над настройками (hot-reload shape).
 pub struct SettingsService;
 
@@ -160,8 +192,9 @@ impl SettingsService {
 
     /// Устанавливает новые настройки; возвращает новое значение
     /// (hot-reload: production-подписчик NATS применит).
-    pub fn set(state: &crate::state::AppState, next: Settings) -> Settings {
+    pub fn set(state: &crate::state::AppState, mut next: Settings) -> Settings {
         let mut settings = state.settings.lock().expect("settings store poisoned");
+        next.merge_preserving_secrets(&settings);
         *settings = next.clone();
         // Синхронизируем глобальный режим с настройками.
         state.mode.lock().expect("mode store poisoned").global_mode = next.default_mode;
