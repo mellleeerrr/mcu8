@@ -164,6 +164,10 @@ pub struct AppState {
     pub mode: Mutex<ModeState>,
     /// Очередь событий (production → NATS, ADR-0014).
     pub event_queue: crate::mode::ModeEventQueue,
+    /// Хаб fan-out рассылки сигнальных событий в комнатах (WebRTC WS).
+    pub room_hub: Arc<crate::hub::RoomHub>,
+    /// Канал административных событий для legacy UI WS (/api/v3/ws).
+    pub admin_events: tokio::sync::broadcast::Sender<crate::hub::AdminBroadcastEvent>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -194,6 +198,7 @@ impl Default for AppState {
 impl AppState {
     /// Создаёт новое состояние с дефолтными настройками без персистентного хранилища.
     pub fn new() -> Self {
+        let (admin_tx, _admin_rx) = tokio::sync::broadcast::channel(crate::hub::ADMIN_CHANNEL_CAPACITY);
         Self {
             storage: None,
             jwt_issuer: None,
@@ -207,7 +212,22 @@ impl AppState {
             settings: Mutex::new(crate::settings::Settings::default()),
             mode: Mutex::new(ModeState::new()),
             event_queue: crate::mode::ModeEventQueue::new(),
+            room_hub: Arc::new(crate::hub::RoomHub::new()),
+            admin_events: admin_tx,
         }
+    }
+
+    /// Отправляет push-уведомление администраторам (в `/api/v3/ws`).
+    pub fn notify_admin(&self, topic: &str, payload: serde_json::Value) {
+        let _ = self.admin_events.send(crate::hub::AdminBroadcastEvent {
+            topic: topic.to_string(),
+            payload,
+        });
+    }
+
+    /// Рассылает сигнальное сообщение всем участникам комнаты.
+    pub fn broadcast_room(&self, room: &RoomId, sender_pid: Option<&str>, payload: bytes::Bytes) {
+        self.room_hub.broadcast(room, sender_pid, payload);
     }
 
     /// Создаёт состояние с подключенным хранилищем ядра.

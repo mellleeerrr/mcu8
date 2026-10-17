@@ -219,12 +219,9 @@ impl Sdp {
         let _ = index; // (index уже в error-варианте при необходимости)
         let mut payload_types = Vec::new();
         for part in &parts[3..] {
-            if *part == "TCP" {
-                continue;
-            }
             if let Ok(pt) = part.parse::<u32>() {
                 payload_types.push(pt);
-            } // TLS/DTLS/SRTP и т.п. — пропускаем
+            }
         }
         Media {
             kind,
@@ -289,20 +286,18 @@ impl Sdp {
             out.push_str(&format!("a={attr}\n"));
         }
         for media in &self.media {
-            let mut fmt = " / ".to_string();
-            let mut first = true;
-            for pt in &media.payload_types {
-                if !first {
-                    fmt.push(' ');
-                }
-                fmt.push_str(&pt.to_string());
-                first = false;
-            }
+            let fmt_str = if media.payload_types.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " {}",
+                    media.payload_types.iter().map(|pt| pt.to_string()).collect::<Vec<_>>().join(" ")
+                )
+            };
             out.push_str(&format!(
-                "m={} {} UDP/TLS/RTP/SAVPF{}\n",
+                "m={} {} UDP/TLS/RTP/SAVPF{fmt_str}\n",
                 media.kind.as_str(),
-                media.port,
-                if fmt.trim().is_empty() { String::new() } else { format!(" {fmt}") }
+                media.port
             ));
             if let Some(mid) = &media.mid {
                 out.push_str(&format!("a=mid:{mid}\n"));

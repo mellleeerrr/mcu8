@@ -247,11 +247,18 @@ impl SignalingHandler {
 
     fn on_leave_room(&mut self, reply_to: u64) -> Vec<Envelope> {
         let state = self.session.state();
-        if !matches!(state, SessionState::InRoom | SessionState::MediaActive) {
+        if !matches!(
+            state,
+            SessionState::Joining
+                | SessionState::InRoom
+                | SessionState::Negotiating
+                | SessionState::MediaActive
+                | SessionState::Reconnecting
+        ) {
             return vec![Envelope::error_reply(
                 reply_to,
                 "bad_state",
-                &format!("LeaveRoom requires InRoom/MediaActive (current: {state:?})"),
+                &format!("LeaveRoom requires active room state (current: {state:?})"),
                 false,
             )];
         }

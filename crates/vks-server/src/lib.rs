@@ -24,6 +24,7 @@ use vks_common::metrics::{
     encode as encode_metrics, HTTP_REQUESTS, HTTP_REQUEST_DURATION, HTTP_RESPONSE_BYTES, SIGNALING_MESSAGES,
 };
 use vks_proto::signaling::signaling_message::Payload;
+use vks_proto::signaling::{ParticipantJoined, ParticipantLeft, SignalingMessage};
 use vks_signaling::envelope::Envelope;
 use vks_signaling::handler::{HandlerConfig, SignalingHandler};
 
@@ -182,136 +183,231 @@ async fn handle_ws_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
     let mut handler = SignalingHandler::new(HandlerConfig::default_test());
     let mut current_room: Option<vks_core::RoomId> = None;
+    let mut room_rx: Option<tokio::sync::broadcast::Receiver<vks_admin::hub::RoomBroadcastEvent>> = None;
     // Скользящее окно частоты сообщений (T1.2).
     let mut window_start = std::time::Instant::now();
     let mut window_count: usize = 0;
 
-    'session: while let Some(msg_res) = receiver.next().await {
-        let msg = match msg_res {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(error = %e, "websocket receive error");
-                break;
-            }
-        };
-
-        // Лимит частоты (T1.2 / SEC-03): окно в секунду распространяется на все входящие кадры.
-        if window_start.elapsed() >= std::time::Duration::from_secs(1) {
-            window_start = std::time::Instant::now();
-            window_count = 0;
-        }
-        window_count += 1;
-        if window_count > MAX_WS_MESSAGES_PER_SEC {
-            warn!(limit = MAX_WS_MESSAGES_PER_SEC, "signaling rate limit exceeded; closing");
-            let frame = CloseFrame { code: 1008, reason: "message rate exceeded".into() }; // 1008 Policy Violation
-            let _ = sender.send(Message::Close(Some(frame))).await;
-            break;
-        }
-
-        match msg {
-            Message::Binary(bytes) => {
-                // Лимит сообщения (§2.4: protobuf ≤64 КиБ) — до декодирования протокола.
-                if bytes.len() > MAX_WS_MESSAGE_BYTES {
-                    warn!(
-                        size = bytes.len(),
-                        limit = MAX_WS_MESSAGE_BYTES,
-                        "signaling message too large; closing 4008"
-                    );
-                    let frame = CloseFrame { code: 4008, reason: "message too large".into() }; // 4008 MessageTooLarge
-                    let _ = sender.send(Message::Close(Some(frame))).await;
-                    break;
+    'session: loop {
+        tokio::select! {
+            // Fan-out push событий от других участников комнаты (Downlink)
+            broadcast_res = async {
+                match &mut room_rx {
+                    Some(rx) => Some(rx.recv().await),
+                    None => std::future::pending().await,
                 }
-
-                SIGNALING_MESSAGES.with_label_values(&["uplink"]).inc();
-                match Envelope::decode(&bytes) {
-                    Ok(env) => {
-                        let join_name = match env.payload() {
-                            Some(Payload::JoinRoom(join)) => Some(join.room_id.clone()),
-                            _ => None,
-                        };
-                        let was_leave = matches!(env.payload(), Some(Payload::LeaveRoom(_)));
-
-                        // Запрос исполняет FSM; сайд-эффекты — только по успешному результату.
-                        let replies = handler.handle(env);
-                        let joined_ok = replies.iter().any(|r| matches!(r.payload(), Some(Payload::JoinRoomResult(_))));
-                        let left_ok = was_leave && replies.iter().any(|r| matches!(r.payload(), Some(Payload::Ack(_))));
-
-                        if joined_ok {
-                            if let Some(name) = join_name {
-                                let rid = if let Ok(u) = uuid::Uuid::parse_str(&name) {
-                                    vks_core::RoomId::from_uuid(u)
-                                } else {
-                                    let mut found = None;
-                                    if let Ok(rooms) = state.rooms.lock() {
-                                        for (id, r) in rooms.iter() {
-                                            if r.name == name {
-                                                found = Some(*id);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    found.unwrap_or_else(|| vks_admin::rooms::Rooms::create(&state, &name).id)
-                                };
-                                current_room = Some(rid);
-                                let count =
-                                    vks_admin::rooms::Rooms::get(&state, &rid).map(|r| r.participants + 1).unwrap_or(1);
-                                vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(count), None);
-                            }
-                        } else if left_ok {
-                            if let Some(rid) = current_room.take() {
-                                if let Some(room) = vks_admin::rooms::Rooms::get(&state, &rid) {
-                                    let new_count = room.participants.saturating_sub(1);
-                                    vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(new_count), None);
+            } => {
+                if let Some(res) = broadcast_res {
+                    match res {
+                        Ok(event) => {
+                            if event.sender_participant_id.as_deref() != handler.participant_id() {
+                                SIGNALING_MESSAGES.with_label_values(&["downlink"]).inc();
+                                if let Err(e) = sender.send(Message::Binary(event.payload.clone())).await {
+                                    warn!(error = %e, "failed to send broadcast to client");
+                                    break 'session;
                                 }
                             }
                         }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(skipped, "slow signaling subscriber dropped events");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            room_rx = None;
+                        }
+                    }
+                }
+            }
 
-                        for reply in replies {
-                            SIGNALING_MESSAGES.with_label_values(&["downlink"]).inc();
-                            let reply_bytes = reply.encode();
-                            if let Err(e) = sender.send(Message::Binary(reply_bytes.into())).await {
-                                warn!(error = %e, "failed to send signaling reply");
-                                break 'session; // не `return`: ниже — очистка счётчика комнаты
+            msg_res = receiver.next() => {
+                let Some(msg_res) = msg_res else { break 'session };
+                let msg = match msg_res {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!(error = %e, "websocket receive error");
+                        break 'session;
+                    }
+                };
+
+                // Лимит частоты (T1.2 / SEC-03): окно в секунду распространяется на все входящие кадры.
+                if window_start.elapsed() >= std::time::Duration::from_secs(1) {
+                    window_start = std::time::Instant::now();
+                    window_count = 0;
+                }
+                window_count += 1;
+                if window_count > MAX_WS_MESSAGES_PER_SEC {
+                    warn!(limit = MAX_WS_MESSAGES_PER_SEC, "signaling rate limit exceeded; closing");
+                    let frame = CloseFrame { code: 1008, reason: "message rate exceeded".into() }; // 1008 Policy Violation
+                    let _ = sender.send(Message::Close(Some(frame))).await;
+                    break 'session;
+                }
+
+                match msg {
+                    Message::Binary(bytes) => {
+                        // Лимит сообщения (§2.4: protobuf ≤64 КиБ) — до декодирования протокола.
+                        if bytes.len() > MAX_WS_MESSAGE_BYTES {
+                            warn!(
+                                size = bytes.len(),
+                                limit = MAX_WS_MESSAGE_BYTES,
+                                "signaling message too large; closing 4008"
+                            );
+                            let frame = CloseFrame { code: 4008, reason: "message too large".into() }; // 4008 MessageTooLarge
+                            let _ = sender.send(Message::Close(Some(frame))).await;
+                            break 'session;
+                        }
+
+                        SIGNALING_MESSAGES.with_label_values(&["uplink"]).inc();
+                        match Envelope::decode(&bytes) {
+                            Ok(env) => {
+                                let join_name = match env.payload() {
+                                    Some(Payload::JoinRoom(join)) => Some(join.room_id.clone()),
+                                    _ => None,
+                                };
+                                let was_leave = matches!(env.payload(), Some(Payload::LeaveRoom(_)));
+
+                                // Запрос исполняет FSM; сайд-эффекты — только по успешному результату.
+                                let replies = handler.handle(env);
+                                let joined_ok = replies.iter().any(|r| matches!(r.payload(), Some(Payload::JoinRoomResult(_))));
+                                let left_ok = was_leave && replies.iter().any(|r| matches!(r.payload(), Some(Payload::Ack(_))));
+
+                                if joined_ok {
+                                    if let Some(name) = join_name {
+                                        let rid = if let Ok(u) = uuid::Uuid::parse_str(&name) {
+                                            vks_core::RoomId::from_uuid(u)
+                                        } else {
+                                            let mut found = None;
+                                            if let Ok(rooms) = state.rooms.lock() {
+                                                for (id, r) in rooms.iter() {
+                                                    if r.name == name {
+                                                        found = Some(*id);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            found.unwrap_or_else(|| vks_admin::rooms::Rooms::create(&state, &name).id)
+                                        };
+                                        current_room = Some(rid);
+                                        room_rx = Some(state.room_hub.subscribe(&rid));
+                                        let count =
+                                            vks_admin::rooms::Rooms::get(&state, &rid).map(|r| r.participants + 1).unwrap_or(1);
+                                        vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(count), None);
+
+                                        // Рассылаем ParticipantJoined другим участникам комнаты
+                                        if let Some(pid) = handler.participant_id() {
+                                            let joined_msg = SignalingMessage {
+                                                msg_id: 0,
+                                                reply_to: 0,
+                                                payload: Some(Payload::ParticipantJoined(ParticipantJoined {
+                                                    participant_id: pid.to_string(),
+                                                    display_name: pid.to_string(),
+                                                    is_recorder: false,
+                                                })),
+                                            };
+                                            let payload_bytes = Envelope::new(joined_msg).encode();
+                                            state.room_hub.broadcast(&rid, Some(pid), payload_bytes.into());
+                                        }
+
+                                        // Уведомляем админский WebSocket (/api/v3/ws)
+                                        state.notify_admin("conferences:update", serde_json::json!({
+                                            "id": rid.to_string(),
+                                            "participants_count": count
+                                        }));
+                                    }
+                                } else if left_ok {
+                                    if let Some(rid) = current_room.take() {
+                                        room_rx = None;
+                                        state.room_hub.unsubscribe(&rid);
+                                        if let Some(room) = vks_admin::rooms::Rooms::get(&state, &rid) {
+                                            let new_count = room.participants.saturating_sub(1);
+                                            vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(new_count), None);
+
+                                            if let Some(pid) = handler.participant_id() {
+                                                let left_msg = SignalingMessage {
+                                                    msg_id: 0,
+                                                    reply_to: 0,
+                                                    payload: Some(Payload::ParticipantLeft(ParticipantLeft {
+                                                        participant_id: pid.to_string(),
+                                                        reason: 0,
+                                                    })),
+                                                };
+                                                let payload_bytes = Envelope::new(left_msg).encode();
+                                                state.room_hub.broadcast(&rid, Some(pid), payload_bytes.into());
+                                            }
+
+                                            state.notify_admin("conferences:update", serde_json::json!({
+                                                "id": rid.to_string(),
+                                                "participants_count": new_count
+                                            }));
+                                        }
+                                    }
+                                }
+
+                                for reply in replies {
+                                    SIGNALING_MESSAGES.with_label_values(&["downlink"]).inc();
+                                    let reply_bytes = reply.encode();
+                                    if let Err(e) = sender.send(Message::Binary(reply_bytes.into())).await {
+                                        warn!(error = %e, "failed to send signaling reply");
+                                        break 'session; // не `return`: ниже — очистка счётчика комнаты
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "failed to decode protobuf signaling envelope");
                             }
                         }
                     }
-                    Err(e) => {
-                        warn!(error = %e, "failed to decode protobuf signaling envelope");
+                    Message::Text(text) => {
+                        // Сигналинг — только бинарный протокол; текстовые кадры не
+                        // обрабатываем, но ограничиваем их размер тем же лимитом.
+                        if text.len() > MAX_WS_MESSAGE_BYTES {
+                            warn!(
+                                size = text.len(),
+                                limit = MAX_WS_MESSAGE_BYTES,
+                                "signaling text message too large; closing 4008"
+                            );
+                            let frame = CloseFrame { code: 4008, reason: "message too large".into() }; // 4008 MessageTooLarge
+                            let _ = sender.send(Message::Close(Some(frame))).await;
+                            break 'session;
+                        }
                     }
+                    Message::Ping(payload) => {
+                        if let Err(e) = sender.send(Message::Pong(payload)).await {
+                            warn!(error = %e, "failed to send pong reply");
+                            break 'session;
+                        }
+                    }
+                    Message::Close(_) => {
+                        info!("websocket client initiated close");
+                        break 'session;
+                    }
+                    _ => {}
                 }
             }
-            Message::Text(text) => {
-                // Сигналинг — только бинарный протокол; текстовые кадры не
-                // обрабатываем, но ограничиваем их размер тем же лимитом.
-                if text.len() > MAX_WS_MESSAGE_BYTES {
-                    warn!(
-                        size = text.len(),
-                        limit = MAX_WS_MESSAGE_BYTES,
-                        "signaling text message too large; closing 4008"
-                    );
-                    let frame = CloseFrame { code: 4008, reason: "message too large".into() }; // 4008 MessageTooLarge
-                    let _ = sender.send(Message::Close(Some(frame))).await;
-                    break;
-                }
-            }
-            Message::Ping(payload) => {
-                if let Err(e) = sender.send(Message::Pong(payload)).await {
-                    warn!(error = %e, "failed to send pong reply");
-                    break;
-                }
-            }
-            Message::Close(_) => {
-                info!("websocket client initiated close");
-                break;
-            }
-            _ => {}
         }
     }
 
     if let Some(rid) = current_room.take() {
+        state.room_hub.unsubscribe(&rid);
         if let Some(room) = vks_admin::rooms::Rooms::get(&state, &rid) {
             let new_count = room.participants.saturating_sub(1);
             vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(new_count), None);
+
+            if let Some(pid) = handler.participant_id() {
+                let left_msg = SignalingMessage {
+                    msg_id: 0,
+                    reply_to: 0,
+                    payload: Some(Payload::ParticipantLeft(ParticipantLeft {
+                        participant_id: pid.to_string(),
+                        reason: 0,
+                    })),
+                };
+                let payload_bytes = Envelope::new(left_msg).encode();
+                state.room_hub.broadcast(&rid, Some(pid), payload_bytes.into());
+            }
+
+            state.notify_admin("conferences:update", serde_json::json!({
+                "id": rid.to_string(),
+                "participants_count": new_count
+            }));
         }
     }
 }

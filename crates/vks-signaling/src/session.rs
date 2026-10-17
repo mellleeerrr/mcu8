@@ -23,6 +23,7 @@ pub enum SessionState {
     InRoom,
     Negotiating,
     MediaActive,
+    Reconnecting,
     Leaving,
 }
 
@@ -37,6 +38,7 @@ impl SessionState {
             Self::InRoom => "in_room",
             Self::Negotiating => "negotiating",
             Self::MediaActive => "media_active",
+            Self::Reconnecting => "reconnecting",
             Self::Leaving => "leaving",
         }
     }
@@ -59,6 +61,10 @@ pub enum SessionEvent {
     IceStarted,
     /// IceComplete (success).
     IceComplete,
+    /// Потеря сетевого соединения / начало переподключения.
+    ConnectionLost,
+    /// Успешное восстановление сессии (resume с nonce).
+    Resumed,
     /// LeaveRoom получено.
     LeaveRoom,
     /// Left подтверждено, соединение закрывается.
@@ -116,10 +122,21 @@ impl Session {
             (SessionState::MediaActive, SessionEvent::SdpOffer) => Some(SessionState::Negotiating),
             // MediaActive → InRoom (ICE resumption settled without full renegotiation).
             (SessionState::MediaActive, SessionEvent::IceStarted) => Some(SessionState::InRoom),
-            // InRoom / MediaActive → Leaving (LeaveRoom received).
-            (SessionState::InRoom, SessionEvent::LeaveRoom) | (SessionState::MediaActive, SessionEvent::LeaveRoom) => {
-                Some(SessionState::Leaving)
-            }
+
+            // Reconnect / Resume
+            (SessionState::InRoom, SessionEvent::ConnectionLost)
+            | (SessionState::Negotiating, SessionEvent::ConnectionLost)
+            | (SessionState::MediaActive, SessionEvent::ConnectionLost) => Some(SessionState::Reconnecting),
+            (SessionState::Connected, SessionEvent::Resumed) => Some(SessionState::InRoom),
+            (SessionState::Reconnecting, SessionEvent::Resumed) => Some(SessionState::InRoom),
+
+            // Корректный выход из ЛЮБОГО активного состояния комнаты (Joining, InRoom, Negotiating, MediaActive, Reconnecting):
+            (SessionState::Joining, SessionEvent::LeaveRoom)
+            | (SessionState::InRoom, SessionEvent::LeaveRoom)
+            | (SessionState::Negotiating, SessionEvent::LeaveRoom)
+            | (SessionState::MediaActive, SessionEvent::LeaveRoom)
+            | (SessionState::Reconnecting, SessionEvent::LeaveRoom) => Some(SessionState::Leaving),
+
             // Leaving → Disconnected (left confirmed).
             (SessionState::Leaving, SessionEvent::Left) => Some(SessionState::Disconnected),
             // §11: any → Disconnected (timeout / error / close).
@@ -216,6 +233,7 @@ mod tests {
             SessionState::InRoom,
             SessionState::Negotiating,
             SessionState::MediaActive,
+            SessionState::Reconnecting,
             SessionState::Leaving,
         ];
         for target in targets {
@@ -236,9 +254,38 @@ mod tests {
                     s.apply(SessionEvent::SdpOffer).unwrap();
                     s
                 }
+                SessionState::Reconnecting => {
+                    let mut s = into_in_room();
+                    s.apply(SessionEvent::ConnectionLost).unwrap();
+                    s
+                }
             };
             assert_eq!(s.apply(SessionEvent::Disconnect).unwrap(), SessionState::Disconnected);
         }
+    }
+
+    #[test]
+    fn leave_from_negotiating_and_reconnecting() {
+        // Leave from Negotiating
+        let mut s1 = into_in_room();
+        s1.apply(SessionEvent::SdpOffer).unwrap();
+        assert_eq!(s1.state(), SessionState::Negotiating);
+        assert_eq!(s1.apply(SessionEvent::LeaveRoom).unwrap(), SessionState::Leaving);
+        assert_eq!(s1.apply(SessionEvent::Left).unwrap(), SessionState::Disconnected);
+
+        // Leave from Reconnecting
+        let mut s2 = into_in_room();
+        s2.apply(SessionEvent::ConnectionLost).unwrap();
+        assert_eq!(s2.state(), SessionState::Reconnecting);
+        assert_eq!(s2.apply(SessionEvent::LeaveRoom).unwrap(), SessionState::Leaving);
+        assert_eq!(s2.apply(SessionEvent::Left).unwrap(), SessionState::Disconnected);
+    }
+
+    #[test]
+    fn reconnect_and_resume_cycle() {
+        let mut s = into_in_room();
+        assert_eq!(s.apply(SessionEvent::ConnectionLost).unwrap(), SessionState::Reconnecting);
+        assert_eq!(s.apply(SessionEvent::Resumed).unwrap(), SessionState::InRoom);
     }
 
     #[test]

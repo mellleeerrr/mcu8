@@ -77,6 +77,11 @@ impl Vad {
         self.state
     }
 
+    /// Whether the VAD state is currently active (speaker is speaking).
+    pub fn is_speaking(&self) -> bool {
+        self.state == VadState::Active
+    }
+
     /// Classifies one 20 ms frame and advances the debounced state.
     ///
     /// A frame is "loud" when its RMS exceeds `rms_threshold` AND its

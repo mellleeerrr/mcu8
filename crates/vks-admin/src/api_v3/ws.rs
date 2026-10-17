@@ -92,6 +92,7 @@ pub async fn ws_handler(
 async fn handle_socket(state: SharedState, client_ip: String, socket: WebSocket) {
     let (mut sender, mut receiver) = socket.split();
     let mut subscriptions: HashSet<String> = HashSet::new();
+    let mut admin_rx = state.admin_events.subscribe();
     let mut ping = tokio::time::interval(Duration::from_secs(PING_INTERVAL_SECS));
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Первый tick interval срабатывает сразу — пропускаем, чтобы не пинговать на старте.
@@ -102,6 +103,24 @@ async fn handle_socket(state: SharedState, client_ip: String, socket: WebSocket)
             _ = ping.tick() => {
                 if sender.send(Message::Ping(Vec::new().into())).await.is_err() {
                     break;
+                }
+            }
+            admin_msg = admin_rx.recv() => {
+                match admin_msg {
+                    Ok(evt) => {
+                        if subscriptions.contains(&evt.topic) || subscriptions.contains("conferences:*") {
+                            let frame = json!({ "event": evt.topic, "payload": evt.payload });
+                            if sender.send(Message::Text(frame.to_string().into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "slow admin ws subscriber dropped events");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
                 }
             }
             incoming = receiver.next() => {

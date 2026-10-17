@@ -22,6 +22,16 @@ pub const SAMPLE_RATE_HZ: u32 = 48_000;
 pub struct AudioMixer;
 
 impl AudioMixer {
+    #[inline]
+    fn sanitize_sample(s: f32) -> f32 {
+        if s.is_finite() { s } else { 0.0 }
+    }
+
+    #[inline]
+    fn soft_clip(mixed: f32) -> f32 {
+        if mixed.abs() <= 1.0 { mixed } else { mixed.tanh() }
+    }
+
     /// Mixes N input buffers into a single output buffer.
     ///
     /// - `inputs`: one slice per participant (f32 PCM, 48 kHz, mono).
@@ -40,14 +50,62 @@ impl AudioMixer {
             let mut sum = 0.0f32;
             for buf in inputs {
                 if i < buf.len() {
-                    sum += buf[i];
+                    sum += Self::sanitize_sample(buf[i]);
                 }
             }
             let mixed = sum * gain;
             // Soft-clip: pass through inside ±1.0, tanh-clip outside (never exceeds ±1).
-            out[i] = if mixed.abs() <= 1.0 { mixed } else { mixed.tanh() };
+            out[i] = Self::soft_clip(mixed);
         }
         out
+    }
+
+    /// Mix-minus (N-1): produces N output buffers, where output[k] contains the mix of
+    /// all inputs EXCEPT inputs[k].
+    ///
+    /// Complexity: O(N * L) via single global accumulation and per-participant subtraction.
+    /// Gain = 1 / √(N_other) where N_other is the count of other non-empty inputs.
+    pub fn mix_minus(&self, inputs: &[&[f32]], output_len: usize) -> Vec<Vec<f32>> {
+        let n_active = inputs.iter().filter(|b| !b.is_empty()).count();
+
+        // 1. Precompute global sum S[0..output_len] with NaN/Inf sanitization.
+        let mut sum = vec![0.0f32; output_len];
+        for buf in inputs {
+            for (i, s) in buf.iter().take(output_len).enumerate() {
+                sum[i] += Self::sanitize_sample(*s);
+            }
+        }
+
+        // 2. Compute mix-minus for each participant.
+        inputs
+            .iter()
+            .map(|own_buf| {
+                let own_non_empty = !own_buf.is_empty();
+                let other_count = if own_non_empty {
+                    n_active.saturating_sub(1)
+                } else {
+                    n_active
+                };
+
+                if other_count == 0 {
+                    return vec![0.0f32; output_len];
+                }
+
+                let gain = 1.0f32 / (other_count as f32).sqrt();
+                let mut out = vec![0.0f32; output_len];
+                for i in 0..output_len {
+                    let own_sample = if i < own_buf.len() {
+                        Self::sanitize_sample(own_buf[i])
+                    } else {
+                        0.0
+                    };
+                    let sample_minus = sum[i] - own_sample;
+                    let mixed = sample_minus * gain;
+                    out[i] = Self::soft_clip(mixed);
+                }
+                out
+            })
+            .collect()
     }
 }
 
@@ -117,4 +175,41 @@ mod tests {
         let out = AudioMixer.mix(&[&a, &empty, &empty], 2);
         assert!((out[0] - 0.4).abs() < 1e-6, "N counts non-empty only");
     }
+
+    #[test]
+    fn mix_minus_two_participants_hear_each_other_without_self_echo() {
+        let a = [0.6f32, 0.2];
+        let b = [0.4f32, 0.8];
+        let outputs = AudioMixer.mix_minus(&[&a, &b], 2);
+        assert_eq!(outputs.len(), 2);
+        // Participant A hears ONLY participant B (N_other = 1 -> gain = 1.0).
+        assert!((outputs[0][0] - 0.4).abs() < 1e-6, "A hears B");
+        assert!((outputs[0][1] - 0.8).abs() < 1e-6);
+        // Participant B hears ONLY participant A (N_other = 1 -> gain = 1.0).
+        assert!((outputs[1][0] - 0.6).abs() < 1e-6, "B hears A");
+        assert!((outputs[1][1] - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mix_minus_single_participant_gets_silence() {
+        let a = [0.9f32, -0.5];
+        let outputs = AudioMixer.mix_minus(&[&a], 2);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0], vec![0.0f32, 0.0f32]);
+    }
+
+    #[test]
+    fn mix_minus_nan_sanitized() {
+        let bad = [f32::NAN, f32::INFINITY];
+        let good = [0.5f32, 0.5f32];
+        let outputs = AudioMixer.mix_minus(&[&bad, &good], 2);
+        assert_eq!(outputs.len(), 2);
+        // Participant with bad input hears participant with good input safely.
+        assert!((outputs[0][0] - 0.5).abs() < 1e-6);
+        assert!((outputs[0][1] - 0.5).abs() < 1e-6);
+        // Participant with good input hears 0.0 (bad input was sanitized).
+        assert!((outputs[1][0] - 0.0).abs() < 1e-6);
+        assert!((outputs[1][1] - 0.0).abs() < 1e-6);
+    }
 }
+

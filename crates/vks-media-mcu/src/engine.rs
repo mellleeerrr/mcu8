@@ -51,10 +51,16 @@ struct RoomState {
     /// Last composed frame, per subscriber (mock: the same composite for
     /// every subscriber).
     composite: Frame,
-    /// Audio mix of the current frame.
+    /// Audio mix of the current frame (full mix for recording/monitoring).
     mixed_audio: Vec<f32>,
-    /// VAD state for the mixed audio (speaker detection).
-    vad: Vad,
+    /// Per-participant N-1 mix-minus audio (without self-echo).
+    participant_audio: BTreeMap<ParticipantId, Vec<f32>>,
+    /// Per-participant VAD instances (independent debounce and energy tracking).
+    vads: BTreeMap<ParticipantId, Vad>,
+    /// Last committed speaking state per participant.
+    speaking_states: BTreeMap<ParticipantId, bool>,
+    /// Current active/dominant speaker with silence hysteresis.
+    active_speaker: Option<ParticipantId>,
 }
 
 impl RoomState {
@@ -74,7 +80,10 @@ impl RoomState {
                 vec![0u8; CANVAS_SIZE.0 as usize * CANVAS_SIZE.1 as usize],
             ),
             mixed_audio: Vec::new(),
-            vad: Vad::new(crate::vad::VadConfig::default()),
+            participant_audio: BTreeMap::new(),
+            vads: BTreeMap::new(),
+            speaking_states: BTreeMap::new(),
+            active_speaker: None,
         }
     }
 
@@ -84,41 +93,104 @@ impl RoomState {
     }
 
     /// Builds a [`vks_layout::Layout`] from the core [`LayoutDescriptor`]:
-    /// one slot per assigned participant, computed by [`GridLayout`] on the
-    /// MCU canvas (1920×1080).
+    /// preserves assigned slot IDs and supports Grid, Focus, and Speaker layouts.
     fn layout_from_descriptor(desc: &LayoutDescriptor) -> Layout {
         let canvas = Canvas::new(CANVAS_SIZE.0, CANVAS_SIZE.1);
-        let n = desc.assignments.len().max(1);
-        let rects = GridLayout::compute(&canvas, n);
-        let mut layout = Layout::new(LayoutKind::Grid);
+        let kind = match desc.layout_id.to_lowercase().as_str() {
+            "focus" => LayoutKind::Focus,
+            "speaker" => LayoutKind::Speaker,
+            "custom" => LayoutKind::Custom,
+            _ => LayoutKind::Grid,
+        };
+
+        let max_slot = desc.assignments.values().copied().max().unwrap_or(0);
+        let total_slots = (max_slot as usize + 1).max(desc.assignments.len()).clamp(1, 64);
+
+        let mut slot_to_pid = BTreeMap::new();
+        for (pid, slot_id) in &desc.assignments {
+            if (*slot_id as usize) < total_slots {
+                let vpid = vks_layout::ParticipantId::new(pid.as_uuid().as_u128());
+                slot_to_pid.insert(*slot_id, vpid);
+            }
+        }
+
+        let rects = match kind {
+            LayoutKind::Focus | LayoutKind::Speaker if total_slots > 1 => {
+                let large_h = canvas.height * 75 / 100;
+                let strip_h = canvas.height - large_h;
+                let m = (total_slots - 1) as u32;
+
+                let mut r = Vec::with_capacity(total_slots);
+                // Slot 0: large presenter/focus tile
+                r.push(vks_layout::Rect::new(0, 0, canvas.width, large_h));
+                // Slots 1..total_slots: bottom thumbnail strip
+                for k in 0..m {
+                    let x = canvas.width * k / m;
+                    let w = canvas.width / m;
+                    r.push(vks_layout::Rect::new(x, large_h, w, strip_h));
+                }
+                r
+            }
+            _ => GridLayout::compute(&canvas, total_slots),
+        };
+
+        let mut layout = Layout::new(kind);
         layout.version = desc.version;
-        for (i, (pid, _slot)) in desc.assignments.iter().enumerate() {
-            let rect = rects.get(i).copied().unwrap_or_else(|| canvas.as_rect());
-            let vpid = vks_layout::ParticipantId::new(pid.as_uuid().as_u128());
-            // `Slot` is `#[non_exhaustive]` in `vks-layout` — build it
-            // through the `Slot::new` constructor.
-            layout.slots.push(vks_layout::Slot::new(i as u32, Some(vpid), rect));
+        for slot_id in 0..total_slots as u32 {
+            let rect = rects.get(slot_id as usize).copied().unwrap_or_else(|| canvas.as_rect());
+            let pid = slot_to_pid.get(&slot_id).copied();
+            layout.slots.push(vks_layout::Slot::new(slot_id, pid, rect));
         }
         layout
     }
-}
 
-impl RoomState {
-    /// Recomputes the composite + mixed audio + VAD from the current
-    /// frames and rects.
-    fn tick(&mut self, frames: &BTreeMap<u32, Frame>, audio: &[Vec<f32>]) {
+    /// Recomputes the composite + mixed audio + per-participant mix-minus + VAD from the current
+    /// frames and participant audio.
+    fn tick(&mut self, frames: &BTreeMap<u32, Frame>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
         // Advance the crossfade clock (30 fps → ~33 ms per frame).
         self.elapsed_ms += 33;
         let rects = self.slot_rects();
         self.composite = Compositor.compose(frames, &rects).into_frame();
-        let slices: Vec<&[f32]> = audio.iter().map(|v| v.as_slice()).collect();
-        self.mixed_audio = AudioMixer.mix(&slices, self.mixed_audio.len().max(960));
-        // Feed the VAD with one 20 ms slice of the mix (960 samples).
-        let mut frame = [0.0f32; 960];
-        for (i, v) in self.mixed_audio.iter().take(960).enumerate() {
-            frame[i] = *v;
+
+        let slices: Vec<&[f32]> = audio_inputs.iter().map(|(_, v)| v.as_slice()).collect();
+        let target_len = self.mixed_audio.len().max(960);
+        self.mixed_audio = AudioMixer.mix(&slices, target_len);
+
+        // Mix-minus for each participant with audio
+        let minus_mixes = AudioMixer.mix_minus(&slices, target_len);
+        self.participant_audio.clear();
+        for ((pid, _), buf) in audio_inputs.iter().zip(minus_mixes.into_iter()) {
+            self.participant_audio.insert(*pid, buf);
         }
-        self.vad.feed_frame(&frame);
+
+        // Per-participant VAD and active speaker detection
+        let mut highest_energy = 0.0f32;
+        let mut current_speaker = None;
+
+        for (pid, buf) in audio_inputs {
+            let vad = self.vads.entry(*pid).or_insert_with(|| Vad::new(crate::vad::VadConfig::default()));
+            let mut frame = [0.0f32; 960];
+            let mut sum_sq = 0.0f32;
+            for (i, v) in buf.iter().take(960).enumerate() {
+                if v.is_finite() {
+                    frame[i] = *v;
+                    sum_sq += v * v;
+                }
+            }
+            vad.feed_frame(&frame);
+            let is_speaking = vad.is_speaking();
+            self.speaking_states.insert(*pid, is_speaking);
+
+            if is_speaking && sum_sq > highest_energy {
+                highest_energy = sum_sq;
+                current_speaker = Some(*pid);
+            }
+        }
+
+        // Active speaker with silence hysteresis (keep previous speaker if nobody is currently active)
+        if let Some(spk) = current_speaker {
+            self.active_speaker = Some(spk);
+        }
     }
 }
 
@@ -160,15 +232,45 @@ impl McuEngine {
         let state = g.get_mut(&room)?;
         let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
         let audio_map = self.audio.lock().unwrap().get(&room).cloned().unwrap_or_default();
-        let audio: Vec<Vec<f32>> =
-            state.publisher_tracks.keys().filter_map(|pid| audio_map.get(pid).cloned()).collect();
-        state.tick(&frames, &audio);
+        let audio_inputs: Vec<(ParticipantId, Vec<f32>)> = state
+            .publisher_tracks
+            .keys()
+            .filter_map(|pid| audio_map.get(pid).cloned().map(|samples| (*pid, samples)))
+            .collect();
+        state.tick(&frames, &audio_inputs);
         Some(state.composite.clone())
     }
 
     /// The current crossfaded slot rects of a room (test/inspector).
     pub fn slot_rects(&self, room: RoomId) -> Option<SlotRects> {
         self.rooms.lock().unwrap().get(&room).map(|s| s.slot_rects())
+    }
+
+    /// Returns the personal N-1 mix-minus audio for a participant in the room.
+    pub fn participant_audio(&self, room: RoomId, pid: ParticipantId) -> Option<Vec<f32>> {
+        let g = self.rooms.lock().unwrap();
+        g.get(&room)?.participant_audio.get(&pid).cloned()
+    }
+
+    /// Returns the global room audio mix (for recording / monitoring).
+    pub fn mixed_audio(&self, room: RoomId) -> Option<Vec<f32>> {
+        let g = self.rooms.lock().unwrap();
+        g.get(&room).map(|s| s.mixed_audio.clone())
+    }
+
+    /// Returns the active speaker determined by per-participant VAD.
+    pub fn active_speaker(&self, room: RoomId) -> Option<ParticipantId> {
+        self.rooms.lock().unwrap().get(&room).and_then(|s| s.active_speaker)
+    }
+
+    /// Returns whether the given participant is currently speaking.
+    pub fn is_speaking(&self, room: RoomId, pid: ParticipantId) -> bool {
+        self.rooms
+            .lock()
+            .unwrap()
+            .get(&room)
+            .and_then(|s| s.speaking_states.get(&pid).copied())
+            .unwrap_or(false)
     }
 }
 
@@ -226,6 +328,13 @@ impl MediaEngine for McuEngine {
         let mut g = self.rooms.lock().unwrap();
         let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
         state.publisher_tracks.remove(&publisher);
+        state.vads.remove(&publisher);
+        state.speaking_states.remove(&publisher);
+        if state.active_speaker == Some(publisher) {
+            state.active_speaker = None;
+        }
+        state.participant_audio.remove(&publisher);
+        self.audio.lock().unwrap().entry(room).or_default().remove(&publisher);
         Ok(())
     }
 
@@ -245,6 +354,7 @@ impl MediaEngine for McuEngine {
         let mut g = self.rooms.lock().unwrap();
         let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
         state.subscribers.remove(&subscriber);
+        state.participant_audio.remove(&subscriber);
         Ok(())
     }
 
@@ -396,4 +506,76 @@ mod tests {
         e.set_room_capabilities(rid, caps).await.unwrap();
         // No error; state updated internally.
     }
+
+    #[tokio::test]
+    async fn mix_minus_and_speaker_detection() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(1);
+        let b = p(2);
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.add_publisher(rid, b, vec![video_track(b)]).await.unwrap();
+
+        // A speaks with audio (square wave crossing zero), B is silent
+        let speech: Vec<f32> = (0..960).map(|i| if i % 16 < 8 { 0.7f32 } else { -0.7f32 }).collect();
+        e.set_audio(rid, a, speech);
+        e.set_audio(rid, b, vec![0.0f32; 960]);
+
+        // Tick 30 times (30 * 20ms = 600ms > 500ms debounce)
+        for _ in 0..30 {
+            e.tick(rid);
+        }
+
+        // Mix-minus check:
+        // A hears B (which is 0.0, no self echo!)
+        let a_audio = e.participant_audio(rid, a).expect("A audio");
+        assert!((a_audio[0] - 0.0).abs() < 1e-4, "A must not hear their own audio");
+
+        // B hears A (0.7)
+        let b_audio = e.participant_audio(rid, b).expect("B audio");
+        assert!((b_audio[0] - 0.7).abs() < 1e-4, "B must hear A's audio");
+
+        // VAD active speaker check
+        assert_eq!(e.active_speaker(rid), Some(a), "A should be the active speaker");
+
+        // Cleanup check on publisher remove
+        e.remove_publisher(rid, a).await.unwrap();
+        assert!(e.participant_audio(rid, a).is_none(), "Audio cleaned up on remove");
+        assert!(!e.is_speaking(rid, a), "VAD state cleaned up on remove");
+    }
+
+    #[tokio::test]
+    async fn custom_slot_and_focus_layout() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let presenter = p(10);
+        let audience = p(20);
+        e.add_publisher(rid, presenter, vec![video_track(presenter)]).await.unwrap();
+        e.add_publisher(rid, audience, vec![video_track(audience)]).await.unwrap();
+
+        let mut assignments = std::collections::BTreeMap::new();
+        // Custom slot assignment: presenter to slot 0, audience to slot 1
+        assignments.insert(presenter, 0);
+        assignments.insert(audience, 1);
+        let layout = LayoutDescriptor {
+            layout_id: "focus".into(),
+            version: 1,
+            assignments,
+        };
+        e.apply_layout(rid, layout).await.unwrap();
+
+        let rects = e.slot_rects(rid).expect("slot rects");
+        assert_eq!(rects.len(), 2);
+        // Slot 0 (focus) takes 75% height = 810 px
+        let r0 = rects.get(&0).expect("slot 0");
+        assert_eq!(r0.h, 810);
+        assert_eq!(r0.y, 0);
+        // Slot 1 (strip) takes 25% height = 270 px
+        let r1 = rects.get(&1).expect("slot 1");
+        assert_eq!(r1.h, 270);
+        assert_eq!(r1.y, 810);
+    }
 }
+
