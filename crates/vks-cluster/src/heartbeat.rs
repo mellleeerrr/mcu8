@@ -24,12 +24,30 @@ pub enum InstanceStatus {
 pub struct InstanceRegistry {
     /// instance_id → last heartbeat tick.
     heartbeats: HashMap<String, u64>,
+    /// Настраиваемый дедлайн (по умолчанию DEADLINE_TICKS).
+    deadline_ticks: u64,
 }
 
 impl InstanceRegistry {
-    /// Создаёт пустой реестр.
+    /// Создаёт пустой реестр с дефолтным дедлайном (10 тиков).
     pub fn new() -> Self {
-        Self { heartbeats: HashMap::new() }
+        Self {
+            heartbeats: HashMap::new(),
+            deadline_ticks: DEADLINE_TICKS,
+        }
+    }
+
+    /// Создаёт реестр с настраиваемым дедлайном в тиках.
+    pub fn with_deadline(deadline_ticks: u64) -> Self {
+        Self {
+            heartbeats: HashMap::new(),
+            deadline_ticks,
+        }
+    }
+
+    /// Текущий дедлайн в тиках.
+    pub fn deadline_ticks(&self) -> u64 {
+        self.deadline_ticks
     }
 
     /// Регистрирует/обновляет heartbeat instance.
@@ -42,10 +60,26 @@ impl InstanceRegistry {
         self.heartbeats.remove(instance_id);
     }
 
+    /// Удаляет все мёртвые instance на now_tick и возвращает отсортированный список удалённых id.
+    pub fn prune_dead(&mut self, now_tick: u64) -> Vec<String> {
+        let deadline = self.deadline_ticks;
+        let mut dead = Vec::new();
+        self.heartbeats.retain(|id, last| {
+            if now_tick.saturating_sub(*last) >= deadline {
+                dead.push(id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        dead.sort();
+        dead
+    }
+
     /// Статус instance на now_tick.
     pub fn status(&self, instance_id: &str, now_tick: u64) -> Option<InstanceStatus> {
         let last = self.heartbeats.get(instance_id)?;
-        if now_tick.saturating_sub(*last) < DEADLINE_TICKS {
+        if now_tick.saturating_sub(*last) < self.deadline_ticks {
             Some(InstanceStatus::Alive)
         } else {
             Some(InstanceStatus::Dead)
@@ -74,7 +108,7 @@ impl InstanceRegistry {
         let mut v: Vec<String> = self
             .heartbeats
             .iter()
-            .filter(|(_, last)| now_tick.saturating_sub(**last) < DEADLINE_TICKS)
+            .filter(|(_, last)| now_tick.saturating_sub(**last) < self.deadline_ticks)
             .map(|(id, _)| id.clone())
             .collect();
         v.sort();
@@ -86,7 +120,7 @@ impl InstanceRegistry {
         let mut v: Vec<String> = self
             .heartbeats
             .iter()
-            .filter(|(_, last)| now_tick.saturating_sub(**last) >= DEADLINE_TICKS)
+            .filter(|(_, last)| now_tick.saturating_sub(**last) >= self.deadline_ticks)
             .map(|(id, _)| id.clone())
             .collect();
         v.sort();
@@ -178,4 +212,24 @@ mod tests {
         // Even after dead, still in all().
         assert_eq!(reg.all().as_slice(), ["i-1"]);
     }
+
+    #[test]
+    fn with_deadline_and_prune_dead() {
+        let mut reg = InstanceRegistry::with_deadline(5);
+        assert_eq!(reg.deadline_ticks(), 5);
+        reg.heartbeat("i-1", 0);
+        reg.heartbeat("i-2", 4);
+        reg.heartbeat("i-3", 1);
+
+        // At tick 6:
+        // i-1 (diff 6 >= 5 -> dead)
+        // i-2 (diff 2 < 5 -> alive)
+        // i-3 (diff 5 >= 5 -> dead)
+        let pruned = reg.prune_dead(6);
+        assert_eq!(pruned, vec!["i-1", "i-3"]);
+        assert_eq!(reg.all(), vec!["i-2"]);
+        assert!(reg.is_alive("i-2", 6));
+        assert!(!reg.is_alive("i-1", 6));
+    }
 }
+

@@ -50,6 +50,10 @@ pub struct SipCall {
     pub call_id: String,
     /// Аноним от зовущего (From).
     pub from: String,
+    /// Сессионный идентификатор участника в шлюзе.
+    pub participant_id: String,
+    /// Имя текущей привязанной комнаты (если вызов приземлён).
+    pub room_id: Option<String>,
     /// Кодек, согласованный с SIP-стороны.
     pub sip_codec: SipCodec,
     /// WebRTC-кодек, которым комната принимает поток.
@@ -67,9 +71,14 @@ impl SipCall {
     /// ([`CodecMap::negotiate`]).
     pub fn new(call_id: impl Into<String>, from: impl Into<String>, sip_offer: &[SipCodec]) -> Self {
         let (web, transcode) = CodecMap::negotiate(sip_offer);
+        let cid = call_id.into();
+        let frm = from.into();
+        let pid = format!("{frm}:{cid}@sip-gateway");
         Self {
-            call_id: call_id.into(),
-            from: from.into(),
+            call_id: cid,
+            from: frm,
+            participant_id: pid,
+            room_id: None,
             sip_codec: sip_offer.first().cloned().unwrap_or_else(|| SipCodec::new("PCMU")),
             web_codec: web.name,
             needs_transcode: transcode,
@@ -153,8 +162,8 @@ impl SipGateway {
     /// согласовывает кодеки (SIP SDP → WebRTC SDP).
     ///
     /// # Errors
-    /// [`Error::Conflict`] — если UAS не зарегистрирован.
-    /// [`Error::Conflict`] — если Call-ID уже существует.
+    /// [`Error::Conflict`] — если UAS не зарегистрирован или Call-ID уже существует.
+    /// [`Error::InvalidArgument`] — если оффер пуст или не содержит поддерживаемых кодеков.
     pub fn on_invite(
         &mut self,
         call_id: impl Into<String>,
@@ -168,7 +177,16 @@ impl SipGateway {
         if self.calls.contains_key(&call_id) {
             return Err(Error::Conflict(format!("duplicate call id {call_id}")));
         }
+
+        // Строгая валидация кодеков
+        let selection = CodecMap::try_negotiate(sdp_offer)
+            .map_err(|e| Error::InvalidInput(format!("unsupported codec offer: {e}")))?;
+
         let mut call = SipCall::new(call_id.clone(), from.into(), sdp_offer);
+        call.sip_codec = selection.offered_codec;
+        call.web_codec = selection.negotiated.web.name;
+        call.needs_transcode = selection.negotiated.needs_transcode;
+
         // INVITE от зовущего: Idle → Ringing (180).
         call.invite().map_err(|_| Error::Conflict("INVITE transition failed".into()))?;
         self.calls.insert(call.call_id.clone(), call.clone());
@@ -191,48 +209,83 @@ impl SipGateway {
         Ok(call)
     }
 
-    /// Завёршивает вызов (BYE) и выводит его из комнаты, если был
-    /// «приземлён».
+    /// Завершает вызов (BYE) и изолированно выводит его только из привязанной комнаты,
+    /// не затрагивая параллельные вызовы того же абонента в других комнатах.
     ///
     /// # Errors
     /// [`Error::NotFound`] — если вызов не найден; [`Error::Conflict`] —
     /// если не в `Active`.
     pub fn bye(&mut self, call_id: &str) -> Result<SipCall, Error> {
-        // Имя участника до transition (чтобы вычесть из комнаты).
-        let participant_name = self.participant_name(call_id);
-        {
+        let (participant_name, bound_room) = {
             let call = self.calls.get_mut(call_id).ok_or_else(|| Error::NotFound(call_id.to_owned()))?;
             call.bye()?;
+            let p_name = Self::participant_name_for(&call.from);
+            let b_room = call.room_id.take();
+            (p_name, b_room)
+        };
+
+        // Удаляем участника строго из привязанной комнаты
+        if let Some(room) = bound_room {
+            if let Some(participants) = self.rooms.get_mut(&room) {
+                if let Some(pos) = participants.iter().position(|name| name == &participant_name) {
+                    participants.remove(pos);
+                }
+            }
         }
-        // Удаляем участника из комнаты (mock-реестр).
-        for participants in self.rooms.values_mut() {
-            participants.retain(|name| name != &participant_name);
-        }
+
         let call = self.calls.get(call_id).expect("just transitioned").clone();
         tracing::info!(call_id = %call_id, "SIP call terminated");
         Ok(call)
     }
 
-    /// «Приземляет» активный вызов в WebRTC-комнату: вызов регистрируется
-    /// как participant с именем `{from}@sip-gateway` (ARCHITECTURE §2 —
-    /// для WebRTC-клиентов прозрачно, это обычный участник).
-    ///
-    /// Комната создаётся в mock-реестре при первом обращении.
+    /// «Приземляет» активный вызов в WebRTC-комнату.
+    /// Идемпотентен при повторном вызове в ту же комнату.
+    /// При указании другой комнаты корректно переносит участника (Move).
     ///
     /// # Errors
     /// [`Error::NotFound`] — если вызов не найден.
     /// [`Error::Conflict`] — если вызов не в `Active`.
     pub fn land_in_room(&mut self, room_id: impl Into<String>, call_id: &str) -> Result<SipCall, Error> {
-        let room_id = room_id.into();
-        let name = self.participant_name(call_id);
-        let is_active = self.calls.get(call_id).is_some_and(|c| c.state == CallState::Active);
-        if !is_active {
-            let state = self.calls.get(call_id).map_or("unknown", |c| c.state.as_str());
-            return Err(Error::Conflict(format!("land_in_room requires Active, got {state}")));
+        let target_room = room_id.into();
+        let (from, prev_room) = {
+            let call = self.calls.get_mut(call_id).ok_or_else(|| Error::NotFound(call_id.to_owned()))?;
+            if call.state != CallState::Active {
+                return Err(Error::Conflict(format!("land_in_room requires Active, got {}", call.state.as_str())));
+            }
+
+            // 1. Идемпотентность
+            if call.room_id.as_deref() == Some(&target_room) {
+                return Ok(call.clone());
+            }
+
+            let prev = call.room_id.take();
+            call.room_id = Some(target_room.clone());
+            (call.from.clone(), prev)
+        };
+
+        let name = Self::participant_name_for(&from);
+
+        // 2. Перенос: если вызов был в другой комнате — удаляем из старой
+        if let Some(prev) = prev_room {
+            if let Some(participants) = self.rooms.get_mut(&prev) {
+                if let Some(pos) = participants.iter().position(|n| n == &name) {
+                    participants.remove(pos);
+                }
+            }
         }
-        self.rooms.entry(room_id.clone()).or_default().push(name.clone());
-        tracing::info!(room_id = %room_id, call_id = %call_id, participant = %name, "SIP call landed in room");
-        Ok(self.calls.get(call_id).expect("checked above").clone())
+
+        // 3. Приземление в новую комнату
+        let list = self.rooms.entry(target_room.clone()).or_default();
+        if !list.contains(&name) {
+            list.push(name.clone());
+        }
+
+        tracing::info!(room_id = %target_room, call_id = %call_id, participant = %name, "SIP call landed in room");
+        Ok(self.calls.get(call_id).cloned().expect("exists"))
+    }
+
+    fn participant_name_for(from: &str) -> String {
+        format!("{from}@sip-gateway")
     }
 
     /// Имена участников mock-реестра комнаты.
@@ -241,9 +294,10 @@ impl SipGateway {
         self.rooms.get(room_id).map_or(&[], Vec::as_slice)
     }
 
-    /// Имя participant'а в комнате для данного вызова.
-    fn participant_name(&self, call_id: &str) -> String {
-        format!("{}@sip-gateway", self.calls.get(call_id).map_or(call_id, |c| c.from.as_str()))
+    /// Имя participant'а в комнате для данного вызова (если существует).
+    #[must_use]
+    pub fn participant_name(&self, call_id: &str) -> Option<String> {
+        self.calls.get(call_id).map(|c| Self::participant_name_for(&c.from))
     }
 
     /// Активный ли вызов в реестре.
@@ -343,4 +397,68 @@ mod tests {
         let err = g.register_uas().expect_err("already registered");
         assert!(matches!(err, Error::Conflict(_)));
     }
+
+    #[test]
+    fn two_calls_same_from_in_different_rooms_isolated() {
+        let mut g = gateway_with_uas();
+        let offer = [SipCodec::new("PCMU")];
+
+        // Абонент alice совершает два разных звонка в две разные комнаты
+        g.on_invite("call-1", "alice", &offer).unwrap();
+        g.accept("call-1").unwrap();
+        g.land_in_room("room-1", "call-1").unwrap();
+
+        g.on_invite("call-2", "alice", &offer).unwrap();
+        g.accept("call-2").unwrap();
+        g.land_in_room("room-2", "call-2").unwrap();
+
+        assert_eq!(g.room_participants("room-1"), &["alice@sip-gateway"]);
+        assert_eq!(g.room_participants("room-2"), &["alice@sip-gateway"]);
+
+        // Завершаем call-1: он должен удалиться ТОЛЬКО из room-1
+        g.bye("call-1").unwrap();
+        assert_eq!(g.room_participants("room-1"), &[] as &[String]);
+        assert_eq!(g.room_participants("room-2"), &["alice@sip-gateway"]);
+        assert!(!g.has_call("call-1"));
+        assert!(g.has_call("call-2"));
+
+        // Теперь завершаем call-2: он удаляется из room-2
+        g.bye("call-2").unwrap();
+        assert_eq!(g.room_participants("room-2"), &[] as &[String]);
+        assert!(!g.has_call("call-2"));
+    }
+
+    #[test]
+    fn land_in_room_idempotent_and_move() {
+        let mut g = gateway_with_uas();
+        let offer = [SipCodec::new("PCMU")];
+        g.on_invite("call-1", "alice", &offer).unwrap();
+        g.accept("call-1").unwrap();
+
+        // Первое приземление
+        g.land_in_room("room-1", "call-1").unwrap();
+        assert_eq!(g.room_participants("room-1"), &["alice@sip-gateway"]);
+
+        // Повторное приземление в ту же комнату — идемпотентно, не дублирует
+        g.land_in_room("room-1", "call-1").unwrap();
+        assert_eq!(g.room_participants("room-1"), &["alice@sip-gateway"]);
+
+        // Перенос в другую комнату
+        g.land_in_room("room-2", "call-1").unwrap();
+        assert_eq!(g.room_participants("room-1"), &[] as &[String]);
+        assert_eq!(g.room_participants("room-2"), &["alice@sip-gateway"]);
+    }
+
+    #[test]
+    fn unsupported_codec_offer_rejected() {
+        let mut g = gateway_with_uas();
+        // Пустой оффер
+        let err = g.on_invite("call-empty", "alice", &[]).expect_err("empty offer rejected");
+        assert!(matches!(err, Error::InvalidInput(_)));
+
+        // Несовместимый оффер
+        let err = g.on_invite("call-bad", "alice", &[SipCodec::new("AMR")]).expect_err("AMR rejected");
+        assert!(matches!(err, Error::InvalidInput(_)));
+    }
 }
+

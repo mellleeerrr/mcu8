@@ -45,5 +45,5 @@ pub use backpressure::{Backpressure, PushResult, DEFAULT_MAX_QUEUE};
 pub use bus::{Bus, Msg, PublishResult, DLQ_PREFIX, TOPIC_PREFIX};
 pub use circuit::{BreakerError, BreakerState, CircuitBreaker, FAIL_THRESHOLD_PCT, OPEN_TICKS, WINDOW_TICKS};
 pub use heartbeat::{InstanceRegistry, InstanceStatus, DEADLINE_TICKS};
-pub use ownership::{LeaseResult, RoomOwner, SplitBrainResult};
+pub use ownership::{FencingError, Lease, LeaseResult, RoomOwner, SplitBrainResult};
 pub use shutdown::{ShutdownLog, ShutdownOutcome, ShutdownSequence, ShutdownStep, StepResult};

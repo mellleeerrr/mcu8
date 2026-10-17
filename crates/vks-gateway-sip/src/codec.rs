@@ -55,6 +55,24 @@ pub struct NegotiatedCodec {
     pub needs_transcode: bool,
 }
 
+/// Ошибка неготации кодеков.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum CodecNegotiationError {
+    #[error("SDP codec offer is empty")]
+    EmptyOffer,
+    #[error("no compatible audio or video codec found in offer: {0}")]
+    NoCompatibleCodec(String),
+}
+
+/// Результат успешной неготации с сохранением исходного кодека.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegotiatedSelection {
+    /// Выбранный кодек из оффера абонента.
+    pub offered_codec: SipCodec,
+    /// Соответствующий целевой WebRTC-кодек и необходимость транскодирования.
+    pub negotiated: NegotiatedCodec,
+}
+
 /// Детерминированная таблица соответствий SIP ↔ WebRTC.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CodecMap;
@@ -104,22 +122,41 @@ impl CodecMap {
         Some(NegotiatedCodec { web: WebRtcCodec::new(web), needs_transcode: transcode })
     }
 
-    /// Переговор по полному SIP SDP-офферу.
-    ///
-    /// Проходит оффер в порядке объявления; первый аудио-кодек
-    /// определяет audio-поток, первый видео-кодек — video-поток.
-    /// Возвращает `(web_codec, needs_transcode)` по первому подходящему
-    /// кодеку (audio приоритетнее). Пустой оффер → Opus, без
-    /// транскодирования.
-    pub fn negotiate(sip_offer: &[SipCodec]) -> (WebRtcCodec, bool) {
-        // Audio имеет приоритет: большинство SIP-вызовов несут audio.
+    /// Строгая неготация кодека по SIP SDP-офферу.
+    /// Возвращает ошибку, если оффер пуст или не содержит ни одного поддерживаемого аудио/видео кодека.
+    pub fn try_negotiate(sip_offer: &[SipCodec]) -> Result<NegotiatedSelection, CodecNegotiationError> {
+        if sip_offer.is_empty() {
+            return Err(CodecNegotiationError::EmptyOffer);
+        }
+
         let chosen = sip_offer
             .iter()
             .find(|c| Self::is_audio(&c.name))
             .or_else(|| sip_offer.iter().find(|c| Self::is_video(&c.name)));
-        match chosen.and_then(Self::for_codec) {
-            Some(n) => (n.web, n.needs_transcode),
-            None => (WebRtcCodec::new(Self::AUDIO), false),
+
+        match chosen {
+            Some(c) => {
+                let negotiated = Self::for_codec(c).ok_or_else(|| {
+                    let list = sip_offer.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", ");
+                    CodecNegotiationError::NoCompatibleCodec(list)
+                })?;
+                Ok(NegotiatedSelection {
+                    offered_codec: c.clone(),
+                    negotiated,
+                })
+            }
+            None => {
+                let list = sip_offer.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", ");
+                Err(CodecNegotiationError::NoCompatibleCodec(list))
+            }
+        }
+    }
+
+    /// Переговор по полному SIP SDP-офферу с обратной совместимостью (fallback к OPUS при ошибке).
+    pub fn negotiate(sip_offer: &[SipCodec]) -> (WebRtcCodec, bool) {
+        match Self::try_negotiate(sip_offer) {
+            Ok(sel) => (sel.negotiated.web, sel.negotiated.needs_transcode),
+            Err(_) => (WebRtcCodec::new(Self::AUDIO), false),
         }
     }
 

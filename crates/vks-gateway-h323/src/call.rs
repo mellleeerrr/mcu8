@@ -53,6 +53,10 @@ pub struct H323Call {
     pub call_id: String,
     /// Аноним от зовущего (H.323 alias).
     pub from: String,
+    /// Сессионный идентификатор участника в шлюзе.
+    pub participant_id: String,
+    /// Имя текущей привязанной комнаты (если вызов приземлён).
+    pub room_id: Option<String>,
     /// H.323-кодек, согласованный из capability advertisement.
     pub h323_codec: H323Codec,
     /// WebRTC-кодек, которым комната принимает поток.
@@ -70,9 +74,14 @@ impl H323Call {
     /// ([`H323CodecMap::negotiate`]).
     pub fn new(call_id: impl Into<String>, from: impl Into<String>, h323_offer: &[H323Codec]) -> Self {
         let (web, transcode) = H323CodecMap::negotiate(h323_offer);
+        let cid = call_id.into();
+        let frm = from.into();
+        let pid = format!("{frm}:{cid}@h323-gateway");
         Self {
-            call_id: call_id.into(),
-            from: from.into(),
+            call_id: cid,
+            from: frm,
+            participant_id: pid,
+            room_id: None,
             h323_codec: h323_offer.first().cloned().unwrap_or_else(|| H323Codec::new("PCMU")),
             web_codec: web.name,
             needs_transcode: transcode,
@@ -152,6 +161,7 @@ impl H323Gateway {
     ///
     /// # Errors
     /// [`Error::Conflict`] — если call-id уже существует.
+    /// [`Error::InvalidArgument`] — если оффер пуст или не содержит поддерживаемых кодеков.
     pub fn on_setup(
         &mut self,
         call_id: impl Into<String>,
@@ -162,7 +172,16 @@ impl H323Gateway {
         if self.calls.contains_key(&call_id) {
             return Err(Error::Conflict(format!("duplicate call id {call_id}")));
         }
+
+        // Строгая валидация кодеков
+        let selection = H323CodecMap::try_negotiate(h323_offer)
+            .map_err(|e| Error::InvalidInput(format!("unsupported codec offer: {e}")))?;
+
         let mut call = H323Call::new(call_id.clone(), from.into(), h323_offer);
+        call.h323_codec = selection.offered_codec;
+        call.web_codec = selection.negotiated.web.name;
+        call.needs_transcode = selection.negotiated.needs_transcode;
+
         call.setup().map_err(|_| Error::Conflict("Setup transition failed".into()))?;
         self.calls.insert(call.call_id.clone(), call.clone());
         tracing::info!(call_id = %call.call_id, web_codec = %call.web_codec, transcode = call.needs_transcode, "H.323 Setup accepted, alerting");
@@ -196,40 +215,81 @@ impl H323Gateway {
         Ok(self.calls.get(call_id).expect("just transitioned").clone())
     }
 
-    /// Release: Connect → Terminated; выводит участника из комнаты.
+    /// Release: Connect → Terminated; изолированно выводит участника только из привязанной комнаты,
+    /// не затрагивая параллельные вызовы того же абонента в других комнатах.
     ///
     /// # Errors
     /// [`Error::NotFound`] — если вызов не найден; [`Error::Conflict`] —
     /// если не в `Connect`.
     pub fn release(&mut self, call_id: &str) -> Result<H323Call, Error> {
-        let participant_name = self.participant_name(call_id);
-        {
+        let (participant_name, bound_room) = {
             let call = self.calls.get_mut(call_id).ok_or_else(|| Error::NotFound(call_id.to_owned()))?;
             call.release()?;
+            let p_name = Self::participant_name_for(&call.from);
+            let b_room = call.room_id.take();
+            (p_name, b_room)
+        };
+
+        if let Some(room) = bound_room {
+            if let Some(participants) = self.rooms.get_mut(&room) {
+                if let Some(pos) = participants.iter().position(|name| name == &participant_name) {
+                    participants.remove(pos);
+                }
+            }
         }
-        for participants in self.rooms.values_mut() {
-            participants.retain(|name| name != &participant_name);
-        }
+
         tracing::info!(call_id = %call_id, "H.323 call terminated");
         Ok(self.calls.get(call_id).expect("just transitioned").clone())
     }
 
-    /// «Приземляет» connected-вызов в WebRTC-комнату: вызов становится
-    /// participant'ом с именем `{from}@h323-gateway` (ARCHITECTURE §2).
+    /// «Приземляет» connected-вызов в WebRTC-комнату.
+    /// Идемпотентен при повторном вызове в ту же комнату.
+    /// При указании другой комнаты корректно переносит участника (Move).
     ///
     /// # Errors
     /// [`Error::NotFound`] — если вызов не найден.
     /// [`Error::Conflict`] — если вызов не в `Connect`.
     pub fn land_in_room(&mut self, room_id: impl Into<String>, call_id: &str) -> Result<H323Call, Error> {
-        let room_id = room_id.into();
-        let state = self.calls.get(call_id).map_or("unknown", |c| c.state.as_str());
-        if state != H323CallState::Connect.as_str() {
-            return Err(Error::Conflict(format!("land_in_room requires Connect, got {state}")));
+        let target_room = room_id.into();
+        let (from, prev_room) = {
+            let call = self.calls.get_mut(call_id).ok_or_else(|| Error::NotFound(call_id.to_owned()))?;
+            if call.state != H323CallState::Connect {
+                return Err(Error::Conflict(format!("land_in_room requires Connect, got {}", call.state.as_str())));
+            }
+
+            // 1. Идемпотентность
+            if call.room_id.as_deref() == Some(&target_room) {
+                return Ok(call.clone());
+            }
+
+            let prev = call.room_id.take();
+            call.room_id = Some(target_room.clone());
+            (call.from.clone(), prev)
+        };
+
+        let name = Self::participant_name_for(&from);
+
+        // 2. Перенос: если вызов был в другой комнате — удаляем из старой
+        if let Some(prev) = prev_room {
+            if let Some(participants) = self.rooms.get_mut(&prev) {
+                if let Some(pos) = participants.iter().position(|n| n == &name) {
+                    participants.remove(pos);
+                }
+            }
         }
-        let name = self.participant_name(call_id);
-        self.rooms.entry(room_id.clone()).or_default().push(name.clone());
-        tracing::info!(room_id = %room_id, call_id = %call_id, participant = %name, "H.323 call landed in room");
-        Ok(self.calls.get(call_id).expect("checked above").clone())
+
+        // 3. Приземление в новую комнату
+        let list = self.rooms.entry(target_room.clone()).or_default();
+        if !list.contains(&name) {
+            list.push(name.clone());
+        }
+
+        tracing::info!(room_id = %target_room, call_id = %call_id, participant = %name, "H.323 call landed in room");
+        Ok(self.calls.get(call_id).cloned().expect("exists"))
+    }
+
+    fn participant_name_for(from: &str) -> String {
+        format!("{from}@h323-gateway")
     }
 
     /// Имена участников mock-реестра комнаты.
@@ -238,9 +298,10 @@ impl H323Gateway {
         self.rooms.get(room_id).map_or(&[], Vec::as_slice)
     }
 
-    /// Имя participant'а в комнате для данного вызова.
-    fn participant_name(&self, call_id: &str) -> String {
-        format!("{}@h323-gateway", self.calls.get(call_id).map_or(call_id, |c| c.from.as_str()))
+    /// Имя participant'а в комнате для данного вызова (если существует).
+    #[must_use]
+    pub fn participant_name(&self, call_id: &str) -> Option<String> {
+        self.calls.get(call_id).map(|c| Self::participant_name_for(&c.from))
     }
 
     /// Подключён ли вызов (Connect) в реестре.
@@ -339,5 +400,71 @@ mod tests {
         g.on_setup("call-1", "alice", &[H323Codec::new("PCMU")]).unwrap();
         let err = g.land_in_room("room-1", "call-1").expect_err("not connected yet");
         assert!(matches!(err, Error::Conflict(_)));
+    }
+
+    #[test]
+    fn two_calls_same_from_in_different_rooms_isolated() {
+        let mut g = H323Gateway::new();
+        let offer = [H323Codec::new("PCMU")];
+
+        // Абонент alice совершает два разных звонка в две разные комнаты
+        g.on_setup("call-1", "alice", &offer).unwrap();
+        g.proceeding("call-1").unwrap();
+        g.connect("call-1").unwrap();
+        g.land_in_room("room-1", "call-1").unwrap();
+
+        g.on_setup("call-2", "alice", &offer).unwrap();
+        g.proceeding("call-2").unwrap();
+        g.connect("call-2").unwrap();
+        g.land_in_room("room-2", "call-2").unwrap();
+
+        assert_eq!(g.room_participants("room-1"), &["alice@h323-gateway"]);
+        assert_eq!(g.room_participants("room-2"), &["alice@h323-gateway"]);
+
+        // Завершаем call-1: он должен удалиться ТОЛЬКО из room-1
+        g.release("call-1").unwrap();
+        assert_eq!(g.room_participants("room-1"), &[] as &[String]);
+        assert_eq!(g.room_participants("room-2"), &["alice@h323-gateway"]);
+        assert!(!g.has_active_call("call-1"));
+        assert!(g.has_active_call("call-2"));
+
+        // Теперь завершаем call-2: он удаляется из room-2
+        g.release("call-2").unwrap();
+        assert_eq!(g.room_participants("room-2"), &[] as &[String]);
+        assert!(!g.has_active_call("call-2"));
+    }
+
+    #[test]
+    fn land_in_room_idempotent_and_move() {
+        let mut g = H323Gateway::new();
+        let offer = [H323Codec::new("PCMU")];
+        g.on_setup("call-1", "alice", &offer).unwrap();
+        g.proceeding("call-1").unwrap();
+        g.connect("call-1").unwrap();
+
+        // Первое приземление
+        g.land_in_room("room-1", "call-1").unwrap();
+        assert_eq!(g.room_participants("room-1"), &["alice@h323-gateway"]);
+
+        // Повторное приземление в ту же комнату — идемпотентно, не дублирует
+        g.land_in_room("room-1", "call-1").unwrap();
+        assert_eq!(g.room_participants("room-1"), &["alice@h323-gateway"]);
+
+        // Перенос в другую комнату
+        g.land_in_room("room-2", "call-1").unwrap();
+        assert_eq!(g.room_participants("room-1"), &[] as &[String]);
+        assert_eq!(g.room_participants("room-2"), &["alice@h323-gateway"]);
+    }
+
+    #[test]
+    fn unsupported_codec_offer_rejected() {
+        let mut g = H323Gateway::new();
+        // Пустой оффер
+        let err = g.on_setup("call-empty", "alice", &[]).expect_err("empty offer rejected");
+        assert!(matches!(err, Error::InvalidInput(_)));
+
+        // Несовместимый оффер
+        let err = g.on_setup("call-bad", "alice", &[H323Codec::new("AMR")]).expect_err("AMR rejected");
+        assert!(matches!(err, Error::InvalidInput(_)));
     }
 }

@@ -155,7 +155,7 @@ impl RecordingMeta {
             mode,
             started_at_ms,
             ended_at_ms,
-            duration_ms: ended_at_ms - started_at_ms,
+            duration_ms: ended_at_ms.saturating_sub(started_at_ms),
             segments,
             size_bytes,
         }
@@ -174,6 +174,7 @@ pub struct RecordingSession {
     started_at_ms: Option<ClockMs>,
     ended_at_ms: Option<ClockMs>,
     id: Option<Uuid>,
+    cached_meta: Option<RecordingMeta>,
     now_ms: Box<dyn Fn() -> ClockMs>,
 }
 
@@ -189,6 +190,7 @@ impl RecordingSession {
             started_at_ms: None,
             ended_at_ms: None,
             id: None,
+            cached_meta: None,
             now_ms,
         }
     }
@@ -215,13 +217,21 @@ impl RecordingSession {
         let now = (self.now_ms)();
         self.started_at_ms = Some(now);
         self.ended_at_ms = None;
+        self.cached_meta = None;
         self.id = Some(Uuid::new_v4());
         self.state = RecordingState::Running;
         Ok(())
     }
 
     /// Останавливает запись и возвращает финальные метаданные.
+    /// Повторный вызов в состоянии [`RecordingState::Stopped`] идемпотентно
+    /// возвращает зафиксированные метаданные без искажения времени.
     pub fn stop(&mut self) -> Result<RecordingMeta, RecordingError> {
+        if self.state == RecordingState::Stopped {
+            if let Some(ref meta) = self.cached_meta {
+                return Ok(meta.clone());
+            }
+        }
         let started = self.started_at_ms.ok_or(RecordingError::NotStarted)?;
         let now = (self.now_ms)();
         let ended = now.max(started);
@@ -230,16 +240,18 @@ impl RecordingSession {
         let id = self.id.expect("id set on start");
         self.ended_at_ms = Some(ended);
         self.state = RecordingState::Stopped;
-        Ok(RecordingMeta {
+        let meta = RecordingMeta {
             id,
             room_id: self.room_id,
             mode: self.mode,
             started_at_ms: started,
             ended_at_ms: ended,
-            duration_ms: ended - started,
+            duration_ms: ended.saturating_sub(started),
             segments,
             size_bytes,
-        })
+        };
+        self.cached_meta = Some(meta.clone());
+        Ok(meta)
     }
 
     /// Добавляет сегмент. В состоянии [`RecordingState::Stopped`] —
@@ -404,4 +416,45 @@ mod tests {
         assert_eq!(RecordingMode::Mcu.as_str(), "mcu");
         assert_eq!(RecordingMode::SFu.as_str(), "sfu");
     }
+
+    #[test]
+    fn stop_is_idempotent_and_preserves_timestamps() {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let calls_box = std::rc::Rc::clone(&calls);
+        let mut s = RecordingSession::new(
+            room(),
+            Box::new(move || {
+                let n = calls_box.get();
+                calls_box.set(n + 1);
+                match n {
+                    0 => 1_000,
+                    1 => 3_000,
+                    _ => 999_999, // Should NOT be called on subsequent stops
+                }
+            }),
+        );
+        s.start(RecordingMode::Mcu).unwrap();
+        let meta1 = s.stop().unwrap();
+        assert_eq!(meta1.started_at_ms, 1_000);
+        assert_eq!(meta1.ended_at_ms, 3_000);
+        assert_eq!(meta1.duration_ms, 2_000);
+
+        // Second stop must be idempotent: returns exact same meta and doesn't advance clock
+        let meta2 = s.stop().unwrap();
+        assert_eq!(meta1, meta2);
+        assert_eq!(meta2.started_at_ms, 1_000);
+        assert_eq!(meta2.ended_at_ms, 3_000);
+        assert_eq!(meta2.duration_ms, 2_000);
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn meta_underflow_safety() {
+        // ended < started must saturate to 0 rather than panic with integer underflow
+        let meta = RecordingMeta::new(Uuid::new_v4(), room(), RecordingMode::Mcu, 5_000, 3_000, 0, 0);
+        assert_eq!(meta.duration_ms, 0);
+        assert_eq!(meta.started_at_ms, 5_000);
+        assert_eq!(meta.ended_at_ms, 3_000);
+    }
 }
+

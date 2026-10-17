@@ -57,6 +57,24 @@ pub struct NegotiatedCodec {
     pub needs_transcode: bool,
 }
 
+/// Ошибка неготации кодеков H.323.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum H323CodecNegotiationError {
+    #[error("H.323 codec offer is empty")]
+    EmptyOffer,
+    #[error("no compatible audio or video codec found in H.323 offer: {0}")]
+    NoCompatibleCodec(String),
+}
+
+/// Результат успешной неготации с сохранением исходного кодека.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct H323NegotiatedSelection {
+    /// Выбранный кодек из оффера абонента.
+    pub offered_codec: H323Codec,
+    /// Соответствующий целевой WebRTC-кодек и необходимость транскодирования.
+    pub negotiated: NegotiatedCodec,
+}
+
 /// Детерминированная таблица соответствий H.323 ↔ WebRTC.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct H323CodecMap;
@@ -108,19 +126,41 @@ impl H323CodecMap {
         Some(NegotiatedCodec { web: WebRtcCodec::new(web), needs_transcode: canonical != web })
     }
 
-    /// Переговор по полному H.323-офферу.
-    ///
-    /// Первый аудио-кодек определяет audio-поток, при его отсутствии —
-    /// первый видео-кодек. Возвращает `(web_codec, needs_transcode)`.
-    /// Пустой оффер → Opus, без транскодирования.
-    pub fn negotiate(h323_offer: &[H323Codec]) -> (WebRtcCodec, bool) {
+    /// Строгая неготация кодека по H.323-офферу.
+    /// Возвращает ошибку, если оффер пуст или не содержит ни одного поддерживаемого аудио/видео кодека.
+    pub fn try_negotiate(h323_offer: &[H323Codec]) -> Result<H323NegotiatedSelection, H323CodecNegotiationError> {
+        if h323_offer.is_empty() {
+            return Err(H323CodecNegotiationError::EmptyOffer);
+        }
+
         let chosen = h323_offer
             .iter()
             .find(|c| Self::is_audio(&c.name))
             .or_else(|| h323_offer.iter().find(|c| Self::is_video(&c.name)));
-        match chosen.and_then(Self::for_codec) {
-            Some(n) => (n.web, n.needs_transcode),
-            None => (WebRtcCodec::new("OPUS"), false),
+
+        match chosen {
+            Some(c) => {
+                let negotiated = Self::for_codec(c).ok_or_else(|| {
+                    let list = h323_offer.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", ");
+                    H323CodecNegotiationError::NoCompatibleCodec(list)
+                })?;
+                Ok(H323NegotiatedSelection {
+                    offered_codec: c.clone(),
+                    negotiated,
+                })
+            }
+            None => {
+                let list = h323_offer.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", ");
+                Err(H323CodecNegotiationError::NoCompatibleCodec(list))
+            }
+        }
+    }
+
+    /// Переговор по полному H.323-офферу с обратной совместимостью (fallback к OPUS при ошибке).
+    pub fn negotiate(h323_offer: &[H323Codec]) -> (WebRtcCodec, bool) {
+        match Self::try_negotiate(h323_offer) {
+            Ok(sel) => (sel.negotiated.web, sel.negotiated.needs_transcode),
+            Err(_) => (WebRtcCodec::new("OPUS"), false),
         }
     }
 
