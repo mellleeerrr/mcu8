@@ -26,8 +26,6 @@ pub struct PostgresStorage {
     core_participants: std::sync::RwLock<
         std::collections::HashMap<vks_core::participant::ParticipantId, vks_core::participant::Participant>,
     >,
-    core_layouts: std::sync::RwLock<std::collections::HashMap<String, vks_core::ports::storage::Layout>>,
-    core_api_keys: std::sync::RwLock<std::collections::HashMap<String, vks_core::ports::storage::ApiKey>>,
 }
 
 /// Строка users (raw, для `FromRow`).
@@ -95,18 +93,6 @@ impl PostgresStorage {
         &self.core_participants
     }
 
-    pub(crate) fn layouts_map(
-        &self,
-    ) -> &std::sync::RwLock<std::collections::HashMap<String, vks_core::ports::storage::Layout>> {
-        &self.core_layouts
-    }
-
-    pub(crate) fn api_keys_map(
-        &self,
-    ) -> &std::sync::RwLock<std::collections::HashMap<String, vks_core::ports::storage::ApiKey>> {
-        &self.core_api_keys
-    }
-
     /// Создаёт пул по `PgConnectOptions` и применяет migrations.
     pub async fn init_options(options: PgConnectOptions) -> Result<Self> {
         let pool = PgPoolOptions::new()
@@ -120,8 +106,6 @@ impl PostgresStorage {
         let storage = Self {
             pool,
             core_participants: std::sync::RwLock::new(std::collections::HashMap::new()),
-            core_layouts: std::sync::RwLock::new(std::collections::HashMap::new()),
-            core_api_keys: std::sync::RwLock::new(std::collections::HashMap::new()),
         };
         storage.migrate().await?;
         Ok(storage)
@@ -249,6 +233,28 @@ impl PostgresStorage {
                 .await?;
         let row = row.ok_or_else(|| crate::Error::NotFound(format!("room {room_id}")))?;
         RoomMode::from_str(&row.mode)
+    }
+
+    /// Возвращает все per-room overrides режима.
+    pub async fn list_room_mode_overrides(&self) -> Result<Vec<(Uuid, RoomMode)>> {
+        let rows: Vec<RoomModeOverrideRow> =
+            sqlx::query_as("SELECT room_id, mode FROM room_mode_override").fetch_all(&self.pool).await?;
+        let mut res = Vec::with_capacity(rows.len());
+        for r in rows {
+            if let Ok(m) = RoomMode::from_str(&r.mode) {
+                res.push((r.room_id, m));
+            }
+        }
+        Ok(res)
+    }
+
+    /// Удаляет per-room override режима комнаты.
+    pub async fn delete_room_mode_override(&self, room_id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM room_mode_override WHERE room_id = $1")
+            .bind(room_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Удаляет комнату.

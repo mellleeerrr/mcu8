@@ -104,12 +104,12 @@ impl ModeService {
         room_id: &RoomId,
         new_mode: RoomMode,
     ) -> Result<(RoomMode, RoomMode), ModeError> {
-        {
-            let rooms = state.rooms.lock().expect("rooms store poisoned");
-            if !rooms.contains_key(room_id) {
-                return Err(ModeError::RoomNotFound(*room_id));
-            }
-        }
+        let (room_name, created_ms) = {
+            let mut rooms = state.rooms.lock().expect("rooms store poisoned");
+            let record = rooms.get_mut(room_id).ok_or(ModeError::RoomNotFound(*room_id))?;
+            record.mode = Some(new_mode);
+            (record.name.clone(), record.created_ms)
+        };
         let mut m = state.mode.lock().expect("mode store poisoned");
         let old = m.room_mode_overrides.get(room_id).copied().unwrap_or(m.global_mode);
         m.room_mode_overrides.insert(*room_id, new_mode);
@@ -120,6 +120,24 @@ impl ModeService {
                 new_mode,
                 switch_epoch: m.switch_epoch,
             });
+            state.notify_admin("room:mode_changed", serde_json::json!({
+                "room_id": room_id.to_string(),
+                "mode": new_mode,
+                "switch_epoch": m.switch_epoch,
+            }));
+        }
+        if let Some(storage) = &state.storage {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let storage = Arc::clone(storage);
+                let rid = *room_id;
+                drop(handle.spawn(async move {
+                    let mut cr = vks_core::Room::new(room_name, new_mode);
+                    cr.id = rid;
+                    cr.created_ms = created_ms;
+                    let _ = storage.upsert_room(&cr).await;
+                    let _ = storage.set_room_mode_override(rid, new_mode).await;
+                }));
+            }
         }
         Ok((old, new_mode))
     }

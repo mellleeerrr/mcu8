@@ -406,6 +406,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
         }
     }
 
+    drop(room_rx);
     if let Some(rid) = current_room.take() {
         state.room_hub.unsubscribe(&rid);
         if let Some(room) = vks_admin::rooms::Rooms::get(&state, &rid) {

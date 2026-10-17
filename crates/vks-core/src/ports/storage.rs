@@ -83,6 +83,23 @@ pub trait Storage: Send + Sync + 'static {
     /// Список всех комнат.
     async fn list_rooms(&self) -> Result<Vec<Room>, StorageError>;
 
+    // --- Room Mode Overrides ---
+
+    /// Возвращает все per-room overrides режима (room_id -> mode).
+    async fn list_room_mode_overrides(&self) -> Result<std::collections::HashMap<RoomId, crate::room::RoomMode>, StorageError> {
+        Ok(std::collections::HashMap::new())
+    }
+
+    /// Сохраняет или обновляет per-room override режима.
+    async fn set_room_mode_override(&self, _room_id: RoomId, _mode: crate::room::RoomMode) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Удаляет per-room override режима.
+    async fn delete_room_mode_override(&self, _room_id: RoomId) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     // --- Participant CRUD ---
 
     /// Сохраняет участника (create или update).

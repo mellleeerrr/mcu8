@@ -215,12 +215,22 @@ pub struct Room {
     pub mode: RoomMode,
     /// Текущие участники.
     pub participants: Vec<Participant>,
+    /// Время создания, ms epoch.
+    #[serde(default)]
+    pub created_ms: u64,
 }
 
 impl Room {
     /// Создаёт новую комнату в состоянии [`RoomState::Idle`].
     pub fn new(name: impl Into<String>, mode: RoomMode) -> Self {
-        Self { id: RoomId::new(), name: name.into(), state: RoomState::Idle, mode, participants: Vec::new() }
+        Self {
+            id: RoomId::new(),
+            name: name.into(),
+            state: RoomState::Idle,
+            mode,
+            participants: Vec::new(),
+            created_ms: 0,
+        }
     }
 
     /// Возвращает количество участников.

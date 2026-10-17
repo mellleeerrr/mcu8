@@ -28,12 +28,14 @@ use super::auth::{verify_access_token, ClientIp};
 use super::{error_json, track};
 use crate::state::SharedState;
 
-/// Максимальный размер кадра/сообщения (16 KB, §4.4).
-pub const MAX_FRAME_BYTES: usize = 16 * 1024;
+/// Максимальный размер кадра/сообщения (64 KB, M1.8).
+pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// Период keepalive-ping (30 s, §4.4).
 pub const PING_INTERVAL_SECS: u64 = 30;
 /// Лимит новых WS-соединений в секунду на IP (§4.4).
 pub const WS_MAX_CONNECTIONS_PER_SEC: u32 = 100;
+/// Лимит входящих сообщений в секунду на соединение (M1.8).
+pub const WS_MAX_MESSAGES_PER_SEC: u32 = 100;
 
 /// Rate-limit новых WS-соединений: ≤ [`WS_MAX_CONNECTIONS_PER_SEC`]/s per-IP,
 /// фиксированное окно в секунду (in-memory, Mutex — single-node).
@@ -85,7 +87,8 @@ pub async fn ws_handler(
         tracing::warn!(client_ip = %ip, "api_v3 ws: connection rate limit exceeded");
         return error_json(429, "Too many connections");
     }
-    ws.on_upgrade(move |socket| handle_socket(state, ip, socket))
+    ws.max_message_size(MAX_FRAME_BYTES * 4)
+        .on_upgrade(move |socket| handle_socket(state, ip, socket))
 }
 
 /// Одна WS-сессия: чтение транзакций, keepalive-ping, ответы/события.
@@ -97,6 +100,9 @@ async fn handle_socket(state: SharedState, client_ip: String, socket: WebSocket)
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Первый tick interval срабатывает сразу — пропускаем, чтобы не пинговать на старте.
     ping.tick().await;
+
+    let mut msg_window_sec = 0i64;
+    let mut msg_count = 0u32;
 
     loop {
         tokio::select! {
@@ -125,6 +131,29 @@ async fn handle_socket(state: SharedState, client_ip: String, socket: WebSocket)
             }
             incoming = receiver.next() => {
                 let Some(Ok(message)) = incoming else { break };
+                let now_sec = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                if msg_window_sec != now_sec {
+                    msg_window_sec = now_sec;
+                    msg_count = 0;
+                }
+                msg_count += 1;
+                if msg_count > WS_MAX_MESSAGES_PER_SEC {
+                    tracing::warn!(client_ip, msg_count, "api_v3 ws: message rate limit exceeded");
+                    let _ = sender
+                        .send(Message::Text(
+                            json!({
+                                "error": { "code": 429, "description": "Message rate limit exceeded" }
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await;
+                    break;
+                }
+
                 let outcomes = match message {
                     Message::Text(text) => process_frame(&state, &client_ip, text.as_str(), &mut subscriptions),
                     Message::Binary(bytes) => match std::str::from_utf8(&bytes) {

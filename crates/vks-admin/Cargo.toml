@@ -37,3 +37,4 @@ openapi = ["dep:utoipa"]
 [dev-dependencies]
 tokio.workspace = true
 tokio-tungstenite = "0.29"
+vks-storage = { path = "../vks-storage" }

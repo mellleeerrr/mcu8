@@ -257,13 +257,28 @@ impl AppState {
         state
     }
 
-    /// Синхронизирует начальное состояние комнат из хранилища.
+    /// Синхронизирует начальное состояние комнат и оверрайдов из хранилища.
     pub async fn sync_from_storage(&self) -> Result<(), String> {
         if let Some(storage) = &self.storage {
             let rooms = storage.list_rooms().await.map_err(|e| e.to_string())?;
+            let overrides = storage.list_room_mode_overrides().await.unwrap_or_default();
+
             let mut map = self.rooms.lock().map_err(|e| e.to_string())?;
+            let mut mode_state = self.mode.lock().map_err(|e| e.to_string())?;
+
             for r in rooms {
-                map.entry(r.id).or_insert_with(|| RoomRecord::new(r.id, r.name, Some(r.mode)));
+                let override_mode = overrides.get(&r.id).copied();
+                if let Some(om) = override_mode {
+                    mode_state.room_mode_overrides.insert(r.id, om);
+                }
+                map.entry(r.id).or_insert_with(|| RoomRecord {
+                    id: r.id,
+                    name: r.name,
+                    mode: override_mode,
+                    participants: 0,
+                    bitrate_kbps: 0,
+                    created_ms: if r.created_ms > 0 { r.created_ms } else { now_unix_ms() },
+                });
             }
         }
         Ok(())
@@ -326,5 +341,38 @@ mod tests {
         assert_eq!(r.bitrate_kbps, 0);
         assert_eq!(r.mode, None);
         assert!(r.created_ms > 0, "created_ms — реальная метка создания");
+    }
+
+    #[tokio::test]
+    async fn sync_from_storage_preserves_created_at_and_overrides() {
+        use vks_core::ports::Storage;
+        let storage: Arc<dyn Storage> = Arc::new(vks_storage::MemoryStorage::new());
+        let mut room1 = vks_core::Room::new("room-1", RoomMode::Mcu);
+        let rid1 = room1.id;
+        let created_ts = 1_700_000_000_123u64;
+        room1.created_ms = created_ts;
+        storage.upsert_room(&room1).await.unwrap();
+        // Set override for room1
+        storage.set_room_mode_override(rid1, RoomMode::Mcu).await.unwrap();
+
+        // room2: no override (inherited)
+        let room2 = vks_core::Room::new("room-2", RoomMode::Sfu);
+        let rid2 = room2.id;
+        storage.upsert_room(&room2).await.unwrap();
+
+        let state = AppState::with_storage(storage);
+        state.sync_from_storage().await.unwrap();
+
+        let rooms = state.rooms.lock().unwrap();
+        let r1 = rooms.get(&rid1).expect("room1 exists");
+        assert_eq!(r1.mode, Some(RoomMode::Mcu), "room1 has explicit override");
+        assert!(r1.created_ms > 0);
+
+        let r2 = rooms.get(&rid2).expect("room2 exists");
+        assert_eq!(r2.mode, None, "room2 has None (inherited mode)");
+
+        let mode_state = state.mode.lock().unwrap();
+        assert_eq!(mode_state.room_mode_overrides.get(&rid1), Some(&RoomMode::Mcu));
+        assert_eq!(mode_state.room_mode_overrides.get(&rid2), None);
     }
 }

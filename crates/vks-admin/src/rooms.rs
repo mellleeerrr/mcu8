@@ -13,6 +13,13 @@ use crate::state::{AppState, RoomRecord};
 pub struct Rooms;
 
 impl Rooms {
+    /// Вычисляет эффективный режим комнаты (явный override иначе глобальный режим).
+    fn resolve_effective_mode(state: &AppState, override_mode: Option<RoomMode>) -> RoomMode {
+        override_mode.unwrap_or_else(|| {
+            state.mode.lock().expect("mode store poisoned").global_mode
+        })
+    }
+
     /// Создаёт комнату (per-room режим = `None`, т.е. глобальный).
     pub fn create(state: &AppState, name: impl Into<String>) -> RoomRecord {
         let id = RoomId::new();
@@ -24,8 +31,10 @@ impl Rooms {
         if let Some(storage) = &state.storage {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let storage = Arc::clone(storage);
-                let mut cr = vks_core::Room::new(record.name.clone(), record.mode.unwrap_or(RoomMode::Sfu));
+                let effective_mode = Self::resolve_effective_mode(state, record.mode);
+                let mut cr = vks_core::Room::new(record.name.clone(), effective_mode);
                 cr.id = id;
+                cr.created_ms = record.created_ms;
                 drop(handle.spawn(async move {
                     let _ = storage.upsert_room(&cr).await;
                 }));
@@ -60,10 +69,31 @@ impl Rooms {
         if let Some(n) = name {
             record.name = n;
         }
-        if let Some(m) = mode {
+        let mode_changed = if let Some(m) = mode {
+            let old_effective = Self::resolve_effective_mode(state, record.mode);
             record.mode = Some(m);
-            state.mode.lock().expect("mode store poisoned").room_mode_overrides.insert(*id, m);
-        }
+            let mut mode_state = state.mode.lock().expect("mode store poisoned");
+            mode_state.room_mode_overrides.insert(*id, m);
+            if old_effective != m {
+                mode_state.switch_epoch += 1;
+                state.event_queue.publish(crate::mode::ModeChangedEvent {
+                    room_id: Some(*id),
+                    new_mode: m,
+                    switch_epoch: mode_state.switch_epoch,
+                });
+                state.notify_admin("room:mode_changed", serde_json::json!({
+                    "room_id": id.to_string(),
+                    "mode": m,
+                    "switch_epoch": mode_state.switch_epoch,
+                }));
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         if let Some(p) = participants {
             record.participants = p;
         }
@@ -76,11 +106,19 @@ impl Rooms {
                 let storage = Arc::clone(storage);
                 let rid = *id;
                 let room_name = updated.name.clone();
-                let effective_mode = updated.mode.unwrap_or(RoomMode::Sfu);
+                let effective_mode = Self::resolve_effective_mode(state, updated.mode);
+                let created_ms = updated.created_ms;
+                let opt_override = updated.mode;
                 drop(handle.spawn(async move {
                     let mut cr = vks_core::Room::new(room_name, effective_mode);
                     cr.id = rid;
+                    cr.created_ms = created_ms;
                     let _ = storage.upsert_room(&cr).await;
+                    if mode_changed {
+                        if let Some(m) = opt_override {
+                            let _ = storage.set_room_mode_override(rid, m).await;
+                        }
+                    }
                 }));
             }
         }
@@ -103,6 +141,7 @@ impl Rooms {
                 let storage = Arc::clone(storage);
                 let rid = *id;
                 drop(handle.spawn(async move {
+                    let _ = storage.delete_room_mode_override(rid).await;
                     let _ = storage.delete_room(rid).await;
                 }));
             }

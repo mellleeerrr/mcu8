@@ -111,6 +111,14 @@ impl std::fmt::Display for UserId {
     }
 }
 
+impl std::str::FromStr for UserId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Uuid::parse_str(s)?))
+    }
+}
+
 /// Роль участника (ADR-0022, RBAC matrix).
 ///
 /// Порядок убывания полномочий: `Operator` > `Moderator` >

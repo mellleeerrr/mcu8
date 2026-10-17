@@ -43,6 +43,10 @@ impl MemoryStorage {
     pub(crate) fn api_keys_map(&self) -> &RwLock<HashMap<String, vks_core::ports::storage::ApiKey>> {
         &self.core_api_keys
     }
+
+    pub(crate) fn room_mode_overrides_map(&self) -> &RwLock<HashMap<Uuid, RoomMode>> {
+        &self.room_mode_override
+    }
     /// Создаёт пустое in-memory хранилище.
     #[must_use]
     pub fn new() -> Self {
