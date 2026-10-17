@@ -41,6 +41,8 @@ pub struct ApiV3State {
     pub lockout: Lockout,
     /// Rate-limit новых WS-соединений (≤ 100/s per-IP, §4.4).
     pub ws_ratelimit: ws::WsRateLimit,
+    /// Идентификаторы остановленных сессий (M4.3).
+    pub stopped_sessions: std::sync::Mutex<std::collections::HashSet<vks_core::RoomId>>,
 }
 
 /// Собирает `Router` адаптера `/api/v3/*`.
@@ -63,7 +65,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/engine/calibration", get(shell::engine_calibration))
         .route("/api/v3/engine/diagnostics", get(shell::engine_diagnostics))
         .route("/api/v3/system/time", get(shell::system_time))
-        .route("/api/v3/settings/calls", get(shell::settings_calls))
+        .route("/api/v3/settings/calls", get(shell::settings_calls).patch(shell::update_settings_calls))
         .route("/api/v3/settings/security", get(shell::settings_security))
         .route("/api/v3/settings/audio_codecs", get(shell::settings_audio_codecs))
         .route("/api/v3/settings/video_codecs", get(shell::settings_video_codecs))
@@ -71,12 +73,23 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/conferences/status", get(shell::conferences_status))
         // Фаза 3 — данные (наши комнаты).
         .route("/api/v3/ui/sessions", get(sessions::ui_sessions))
-        .route("/api/v3/ui/sessions/{id}", get(sessions::ui_session))
-        .route("/api/v3/sessions", get(sessions::sessions))
+        .route("/api/v3/ui/sessions/{id}", get(sessions::session).delete(sessions::stop_session))
+        .route("/api/v3/ui/sessions/{id}/abonents", get(sessions::session_abonents))
+        .route("/api/v3/sessions", get(sessions::sessions).post(sessions::start_session))
+        .route("/api/v3/sessions/{id}", get(sessions::session).delete(sessions::stop_session))
+        .route("/api/v3/sessions/{id}/abonents", get(sessions::session_abonents))
         .route("/api/v3/conferences", get(sessions::conferences).post(sessions::create_conference))
-        .route("/api/v3/conferences/{id}", get(sessions::conference).delete(sessions::delete_conference))
+        .route(
+            "/api/v3/conferences/{id}",
+            get(sessions::conference).patch(sessions::update_conference).delete(sessions::delete_conference),
+        )
+        .route("/api/v3/conferences/{id}/contacts", get(sessions::conference_contacts))
         .route("/api/v3/ui/conferences", get(sessions::ui_conferences))
-        .route("/api/v3/ui/conferences/{id}", get(sessions::conference).delete(sessions::delete_conference))
+        .route(
+            "/api/v3/ui/conferences/{id}",
+            get(sessions::conference).patch(sessions::update_conference).delete(sessions::delete_conference),
+        )
+        .route("/api/v3/ui/conferences/{id}/contacts", get(sessions::conference_contacts))
         .route("/api/v3/ui/video_layouts", get(shell::video_layouts))
         .route("/api/v3/video_layouts", get(shell::video_layouts))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::token_middleware));

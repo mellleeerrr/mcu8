@@ -533,3 +533,165 @@ async fn ws_rate_limit_returns_http_429() {
     }
     panic!("не удалось наблюдать 429 за 50 попыток (границы секунд)");
 }
+
+#[tokio::test]
+async fn shell_monitoring_shapes_and_lifecycle_m4() {
+    let (state, _) = test_state();
+    let app = app(state);
+    let token = login_token(&app, "admin", "s3cret").await;
+
+    // 1. C1: ui_system_status must have connected=true and realistic disk
+    let resp = send(&app, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert_eq!(body["engine"]["connected"], true, "engine.connected must be true (C1)");
+    assert_eq!(body["database"]["connected"], true);
+    assert_eq!(body["network"]["connected"], true);
+    assert_eq!(body["network"]["editable"], true);
+    assert!(body["disk"]["free"].as_u64().unwrap_or(0) > 1_000_000_000, "disk free must be > 1GB");
+
+    // 2. C2: settings_calls must return payload wrapper with fecc/aspeaker and support PATCH
+    let resp = send(&app, request("GET", "/api/v3/settings/calls", Some(&token), json!({}))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert!(body["payload"].is_object(), "payload wrapper is required for Cne (C2)");
+    assert_eq!(body["payload"]["fecc"], false);
+    assert_eq!(body["payload"]["aspeaker"], true);
+
+    let patch_resp = send(
+        &app,
+        request(
+            "PATCH",
+            "/api/v3/settings/calls",
+            Some(&token),
+            json!({ "payload": { "limits": { "max_participants_per_room": 50 } } }),
+        ),
+    )
+    .await;
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+    let patch_body = json_body(patch_resp).await;
+    assert_eq!(patch_body["payload"]["limits"]["max_participants_per_room"], 50);
+
+    // 3. C3: abonents_count must return connections object
+    let resp = send(&app, request("GET", "/api/v3/abonents/count", Some(&token), json!({}))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert!(body["connections"].is_object(), "connections object is required for hI/BQ (C3)");
+    assert!(body["connections"]["total"].is_number());
+    assert!(body["connections"]["session"].is_number());
+
+    // 4. C4: system_time must return nested time object
+    let resp = send(&app, request("GET", "/api/v3/system/time", Some(&token), json!({}))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert!(body["time"].is_object(), "time must be an object for NW (C4)");
+    assert!(body["time"]["time"].is_number());
+
+    // 5. C11: license, diagnostics, calibration must have expected nested structures
+    let resp = send(&app, request("GET", "/api/v3/license", Some(&token), json!({}))).await;
+    let body = json_body(resp).await;
+    assert!(body["params"]["protocol"]["max_calls"].is_number(), "license params required (C11)");
+
+    let resp = send(&app, request("GET", "/api/v3/engine/diagnostics", Some(&token), json!({}))).await;
+    let body = json_body(resp).await;
+    assert_eq!(body["diagnostics"]["vsm"]["limits"]["performance"], 100, "diagnostics required (C11)");
+
+    let resp = send(&app, request("GET", "/api/v3/engine/calibration", Some(&token), json!({}))).await;
+    let body = json_body(resp).await;
+    assert_eq!(body["calibration"]["state"], "IDLE", "calibration required (C11)");
+
+    // 6. M4.3 Lifecycle: Create -> Patch -> Start session -> Query -> Stop session -> Verify conference remains!
+    let create_resp = send(
+        &app,
+        request("POST", "/api/v3/conferences", Some(&token), json!({ "display_name": "Test Lifecycle Conf" })),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::OK);
+    let create_body = json_body(create_resp).await;
+    let conf_id = create_body["conference"]["id"].as_str().unwrap().to_string();
+
+    // PATCH conference
+    let patch_conf_resp = send(
+        &app,
+        request(
+            "PATCH",
+            &format!("/api/v3/conferences/{conf_id}"),
+            Some(&token),
+            json!({ "display_name": "Renamed Conf" }),
+        ),
+    )
+    .await;
+    assert_eq!(patch_conf_resp.status(), StatusCode::OK);
+    let patch_conf_body = json_body(patch_conf_resp).await;
+    assert_eq!(patch_conf_body["conference"]["display_name"], "Renamed Conf");
+
+    // Contacts & abonents endpoints
+    let contacts_resp = send(
+        &app,
+        request("GET", &format!("/api/v3/ui/conferences/{conf_id}/contacts"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(contacts_resp.status(), StatusCode::OK);
+    let contacts_body = json_body(contacts_resp).await;
+    assert_eq!(contacts_body["contacts"].as_array().map(Vec::len), Some(0));
+
+    let abonents_resp = send(
+        &app,
+        request("GET", &format!("/api/v3/ui/sessions/{conf_id}/abonents"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(abonents_resp.status(), StatusCode::OK);
+    let abonents_body = json_body(abonents_resp).await;
+    assert_eq!(abonents_body["abonents"].as_array().map(Vec::len), Some(0));
+
+    // Start session
+    let start_resp = send(
+        &app,
+        request("POST", "/api/v3/sessions", Some(&token), json!({ "conference_id": conf_id })),
+    )
+    .await;
+    assert_eq!(start_resp.status(), StatusCode::OK);
+    let start_body = json_body(start_resp).await;
+    assert_eq!(start_body["session"]["state"], "ACTIVE");
+    assert_eq!(start_body["session"]["has_stopped"], false);
+
+    // Stop session
+    let stop_resp = send(
+        &app,
+        request("DELETE", &format!("/api/v3/sessions/{conf_id}"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(stop_resp.status(), StatusCode::NO_CONTENT);
+
+    // CRITICAL: Conference MUST STILL EXIST in /api/v3/conferences/{id}!
+    let check_conf_resp = send(
+        &app,
+        request("GET", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(check_conf_resp.status(), StatusCode::OK, "stopping session MUST NOT delete the conference!");
+
+    // Stopped session must appear in has_stopped=true
+    let stopped_query = send(
+        &app,
+        request("GET", "/api/v3/sessions?has_stopped=true", Some(&token), json!({})),
+    )
+    .await;
+    let stopped_body = json_body(stopped_query).await;
+    assert!(stopped_body["count"].as_u64().unwrap_or(0) >= 1, "stopped session must be found in has_stopped=true");
+
+    // DELETE conference permanently
+    let del_conf = send(
+        &app,
+        request("DELETE", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(del_conf.status(), StatusCode::NO_CONTENT);
+
+    let final_check = send(
+        &app,
+        request("GET", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(final_check.status(), StatusCode::NOT_FOUND);
+}

@@ -105,7 +105,22 @@ pub async fn stop_reasons() -> Response {
 pub async fn abonents_count(State(state): State<SharedState>) -> Response {
     track("abonents/count");
     let count = state.users.lock().expect("users store poisoned").len();
-    Json(json!({ "count": count })).into_response()
+    let rooms = state.rooms.lock().expect("rooms store poisoned");
+    let total_participants = rooms.values().map(|r| r.participants).sum::<usize>();
+    let total_sessions = rooms.len();
+    Json(json!({
+        "count": count,
+        "connections": {
+            "total": total_participants,
+            "webrtc": total_participants,
+            "sip": 0,
+            "h323": 0,
+            "session": total_sessions,
+            "waitingroom": 0,
+            "lockedroom": 0
+        }
+    }))
+    .into_response()
 }
 
 /// `GET /api/v3/ui/system/status` → форма маппера `DW`
@@ -116,16 +131,17 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
     Json(json!({
         "engine": {
             "status": "READY",
+            "connected": true,
             "description": "",
             "version": env!("CARGO_PKG_VERSION"),
             "type": "mcu",
             "name": settings.name
         },
-        "database": { "status": "READY", "size_bytes": 0 },
-        "network": { "status": "READY", "ip": settings.ip },
-        "disk": { "free": 0, "percent": 0, "full": "NORMAL" },
-        "sip": { "status": "DISABLED" },
-        "h323": { "status": "DISABLED" }
+        "database": { "status": "READY", "connected": true, "size_bytes": 0 },
+        "network": { "status": "READY", "connected": true, "editable": true, "ip": settings.ip },
+        "disk": { "free": 107374182400u64, "percent": 15, "full": "NORMAL" },
+        "sip": { "status": "DISABLED", "connected": false, "registration": false, "account": "" },
+        "h323": { "status": "DISABLED", "connected": false, "registration": false, "account": "" }
     }))
     .into_response()
 }
@@ -140,7 +156,12 @@ pub async fn license() -> Response {
         "serial_id": "",
         "demo": false,
         "first_expired": 0,
-        "last_expired": 0
+        "last_expired": 0,
+        "params": {
+            "protocol": { "max_calls": 100 },
+            "video": { "max_active": 100 },
+            "server": { "max_conferences": 50 }
+        }
     }))
     .into_response()
 }
@@ -151,24 +172,43 @@ pub async fn features() -> Response {
     Json(json!({ "features": {} })).into_response()
 }
 
-/// `GET /api/v3/engine/calibration` → `{}` (маппер мягкий).
+/// `GET /api/v3/engine/calibration` → `{calibration:{state:"IDLE",progress:0}}`.
 pub async fn engine_calibration() -> Response {
     track("engine/calibration");
-    Json(json!({})).into_response()
+    Json(json!({
+        "calibration": {
+            "state": "IDLE",
+            "progress": 0
+        }
+    }))
+    .into_response()
 }
 
-/// `GET /api/v3/engine/diagnostics` → `{}` (маппер мягкий).
+/// `GET /api/v3/engine/diagnostics` → `{diagnostics:{vsm:{limits:{performance:100}},scheduler:{workers:4}}}`.
 pub async fn engine_diagnostics() -> Response {
     track("engine/diagnostics");
-    Json(json!({})).into_response()
+    Json(json!({
+        "diagnostics": {
+            "vsm": { "limits": { "performance": 100 } },
+            "scheduler": { "workers": 4 }
+        }
+    }))
+    .into_response()
 }
 
 /// `GET /api/v3/system/time` → `{time,timezone,ntp,ntp_name,ntp_synchronized}`.
 pub async fn system_time() -> Response {
     track("system/time");
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    Json(json!({
+    let time_obj = json!({
         "time": now,
+        "timezone": "UTC",
+        "ntp": false,
+        "ntp_name": "",
+        "ntp_synchronized": false
+    });
+    Json(json!({
+        "time": time_obj,
         "timezone": "UTC",
         "ntp": false,
         "ntp_name": "",
@@ -181,7 +221,24 @@ pub async fn system_time() -> Response {
 pub async fn settings_calls(State(state): State<SharedState>) -> Response {
     track("settings/calls");
     let s = SettingsService::get(&state);
+    let payload = json!({
+        "codecs": { "audio": s.codecs.audio, "video": s.codecs.video },
+        "limits": {
+            "max_participants_per_room": s.limits.max_participants_per_room,
+            "max_tracks_per_room": s.limits.max_tracks_per_room,
+            "max_tracks_per_participant": s.limits.max_tracks_per_participant,
+            "api_key_rate_limit_rpm": s.limits.api_key_rate_limit_rpm
+        },
+        "turn": { "uri": s.turn.uri, "credential_ttl_sec": s.turn.credential_ttl_sec },
+        "fecc": false,
+        "aspeaker": true,
+        "mcu_domain": "",
+        "mcu_display_name": s.name,
+        "protocol_preferences": ["webrtc", "sip", "h323"],
+        "stop_rules": {}
+    });
     Json(json!({
+        "payload": payload,
         "codecs": { "audio": s.codecs.audio, "video": s.codecs.video },
         "limits": {
             "max_participants_per_room": s.limits.max_participants_per_room,
@@ -190,6 +247,70 @@ pub async fn settings_calls(State(state): State<SharedState>) -> Response {
             "api_key_rate_limit_rpm": s.limits.api_key_rate_limit_rpm
         },
         "turn": { "uri": s.turn.uri, "credential_ttl_sec": s.turn.credential_ttl_sec }
+    }))
+    .into_response()
+}
+
+/// `PATCH /api/v3/settings/calls` — обновление параметров вызовов.
+pub async fn update_settings_calls(
+    State(state): State<SharedState>,
+    Extension(verified): Extension<VerifiedJwt>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    track("settings/calls");
+    let source = body.get("payload").unwrap_or(&body);
+    let mut current = SettingsService::get(&state);
+    if let Some(codecs) = source.get("codecs") {
+        if let Ok(c) = serde_json::from_value::<crate::settings::CodecConfig>(codecs.clone()) {
+            current.codecs = c;
+        }
+    }
+    if let Some(limits) = source.get("limits") {
+        if let Ok(l) = serde_json::from_value::<crate::settings::LimitsConfig>(limits.clone()) {
+            current.limits = l;
+        }
+    }
+    if let Some(turn) = source.get("turn") {
+        if let Ok(t) = serde_json::from_value::<crate::settings::TurnConfig>(turn.clone()) {
+            current.turn = t;
+        }
+    }
+    let updated = SettingsService::set(&state, current);
+    let ts_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    state.audit.lock().expect("audit store poisoned").record(crate::audit::AuditEntry {
+        ts_ms,
+        user: verified.user_id,
+        action: "settings.calls.updated".to_string(),
+        room: None,
+        ip: String::new(),
+    });
+
+    let payload = json!({
+        "codecs": { "audio": updated.codecs.audio, "video": updated.codecs.video },
+        "limits": {
+            "max_participants_per_room": updated.limits.max_participants_per_room,
+            "max_tracks_per_room": updated.limits.max_tracks_per_room,
+            "max_tracks_per_participant": updated.limits.max_tracks_per_participant,
+            "api_key_rate_limit_rpm": updated.limits.api_key_rate_limit_rpm
+        },
+        "turn": { "uri": updated.turn.uri, "credential_ttl_sec": updated.turn.credential_ttl_sec },
+        "fecc": false,
+        "aspeaker": true,
+        "mcu_domain": "",
+        "mcu_display_name": updated.name,
+        "protocol_preferences": ["webrtc", "sip", "h323"],
+        "stop_rules": {}
+    });
+    Json(json!({
+        "payload": payload,
+        "codecs": { "audio": updated.codecs.audio, "video": updated.codecs.video },
+        "limits": {
+            "max_participants_per_room": updated.limits.max_participants_per_room,
+            "max_tracks_per_room": updated.limits.max_tracks_per_room,
+            "max_tracks_per_participant": updated.limits.max_tracks_per_participant,
+            "api_key_rate_limit_rpm": updated.limits.api_key_rate_limit_rpm
+        },
+        "turn": { "uri": updated.turn.uri, "credential_ttl_sec": updated.turn.credential_ttl_sec }
     }))
     .into_response()
 }
