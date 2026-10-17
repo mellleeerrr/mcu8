@@ -1,0 +1,27 @@
+# Настройки cargo для workspace VKS.
+# Основание: docs/DEVELOPMENT_PLAN.md (Фаза 0), docs/rules/CODE_STYLE.md.
+
+[build]
+# Прочие target'ы (wasm32, aarch64) ставятся при необходимости:
+#   rustup target add wasm32-unknown-unknown   # уже в rust-toolchain.toml
+#   rustup target add aarch64-unknown-linux-gnu
+
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
+
+# Профили для локальной разработки и релизов.
+[profile.dev]
+# Быстрые итерации: debuginfo на уровне line-tables, 1 кодовый блок.
+debug = "line-tables-only"
+
+[profile.release]
+# Финальная сборка для production (см. также [profile.release] в Cargo.toml).
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+# Прочий (benches) — без оптимизаций, быстро.
+[profile.bench]
+opt-level = 3

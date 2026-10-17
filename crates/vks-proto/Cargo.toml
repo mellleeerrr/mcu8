@@ -1,0 +1,23 @@
+# vks-proto — проводной протокол (protobuf + prost).
+# Крейт-привязка: docs/architecture/SIGNALING_PROTOCOL.md.
+# Дерево: standalone (не зависит от внутренних крейтов).
+[package]
+name = "vks-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "VKS wire protocol (protobuf/prost): signaling, media, cluster, admin"
+
+[features]
+default = []
+vendored-protoc = ["dep:protobuf-src"]
+
+[dependencies]
+prost.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+# Компилирует собственный protoc при сборке (опционально через feature vendored-protoc)
+protobuf-src = { version = "1", optional = true }

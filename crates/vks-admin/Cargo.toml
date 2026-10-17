@@ -1,0 +1,38 @@
+# vks-admin — admin REST API (axum + utoipa).
+# Фаза 5. Фаза 0: скелет. Дерево: vks-core, vks-proto, vks-auth, vks-storage (ARCHITECTURE.md §3).
+[package]
+name = "vks-admin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "VKS admin REST API: rooms, users, layouts, settings, mode, records, audit"
+
+[dependencies]
+vks-core = { path = "../vks-core" }
+vks-auth = { path = "../vks-auth" }
+vks-common = { path = "../vks-common" }
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum.workspace = true
+futures-util = "0.3"
+tower = { version = "0.5", features = ["util"] }
+async-trait = "0.1"
+tokio = { workspace = true, features = ["full"] }
+
+# utoipa — опциональная генерация OpenAPI (не в default-сборке).
+[dependencies.utoipa]
+workspace = true
+optional = true
+
+[features]
+default = []
+openapi = ["dep:utoipa"]
+
+[dev-dependencies]
+tokio.workspace = true
+tokio-tungstenite = "0.29"

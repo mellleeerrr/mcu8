@@ -1,0 +1,61 @@
+# cargo-deny конфиг: лицензии, advisories и источники зависимостей workspace VKS.
+# Основание: docs/PROJECT_RULES.md §1.3, docs/DEVELOPMENT_PLAN.md (Фаза 0),
+#            ADR-0027 (tower-http), docs/progress/FRONTEND_PORT_PLAN.md §4.8.
+# Запуск: `cargo deny check` (CI: .github/workflows/ci.yml → EmbarkStudios/cargo-deny-action).
+# Схема проверена по cargo-deny 0.20.2 (локальный бинарник + CI: cargo-deny-action@v2
+# пиннит ровно 0.20.2; проверено `check` и `--all-features check` → exit=0): секции
+# [graph]/[licenses]/[advisories]/[sources]; несуществовавшие ранее [cves]/[skip]/
+# [sources.crates-io] удалены, `[licenses] deny` снят (удалён в 0.20, allow — whitelist).
+
+[graph]
+# Проверяем зависимости целей из rust-toolchain.toml (сборки для других платформ не анализируем).
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "wasm32-unknown-unknown",
+]
+all-features = false
+
+# Лицензии: разрешаем MIT / Apache-2.0 (+ LLVM-exception) / BSD* / ISC / Unicode / Zlib / CC0 / MPL-2.0 / OpenSSL.
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "OpenSSL",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    # webpki-roots (Mozilla, permissive; достижим при `--all-features`: rvoip/reqwest→rustls).
+    "CDLA-Permissive-2.0",
+]
+# NB: в каждом отдельном графе часть записей allow остаётся невстреченной
+# (cargo-deny печатает `warning[license-not-encountered]` — informational, exit=0):
+#   default:        Unicode-DFS-2016, OpenSSL, CC0-1.0, MPL-2.0, CDLA-Permissive-2.0
+#   --all-features: Unicode-DFS-2016, OpenSSL, MPL-2.0
+# Список — union для обоих графов (CI гоняет `check`; полный граф — локально/по релизам):
+# урезание allow под конкретный граф ломало бы второй. Duplicate-варнинги (getrandom и т.п.) —
+# информационные (разные версии транзитивных крейтов), в CI не deny.
+# Copyleft (GPL/LGPL/AGPL) и SSPL запрещены неявно: `allow` — whitelist,
+# ключ `[licenses] deny` удалён в cargo-deny 0.20 (PR #611); всё, что не в allow, — error.
+confidence-threshold = 0.80
+
+# Уязвимости RustSec: vulnerability/unsound — всегда ошибка (cargo-deny >= 0.16);
+# yanked — предупреждение; unmaintained — проверяем только прямые зависимости workspace.
+[advisories]
+yanked = "warn"
+unmaintained = "workspace"
+unused-ignored-advisory = "deny"
+ignore = [
+    # Формат: { id = "RUSTSEC-XXXX-XXXX", reason = "обоснование" } — добавлять по мере появления.
+]
+
+# Источники: только crates.io; неизвестные registry/git — ошибка (supply-chain гигиена).
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

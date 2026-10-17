@@ -1,0 +1,66 @@
+# vks-client-sdk — SDK для видеоконференций (Rust + WASM).
+# Фаза 2 (signaling), 8 (meeting UI). Фаза 0: скелет.
+# Цели: wasm32-unknown-unknown (браузер, Q8: web-sys + WebRTC API) и native (str0m).
+[package]
+name = "vks-client-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "VKS client SDK: Conference API, signaling, media renderers"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+serde.workspace = true
+async-trait = "0.1"
+ulid.workspace = true
+bytes = { workspace = true }
+prost = { workspace = true }
+vks-common = { path = "../../crates/vks-common" }
+vks-layout = { path = "../../crates/vks-layout" }
+vks-proto = { path = "../../crates/vks-proto" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+
+# WASM-цель (фаза 8): web-sys + WebRTC API (ADR-0025, Q8).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "BinaryType",
+    "Blob",
+    "ErrorEvent",
+    "Event",
+    "HtmlMediaElement",
+    "HtmlVideoElement",
+    "MediaStream",
+    "MediaStreamTrack",
+    "MessageEvent",
+    "RtcConfiguration",
+    "RtcIceCandidate",
+    "RtcIceCandidateInit",
+    "RtcIceServer",
+    "RtcPeerConnection",
+    "RtcPeerConnectionIceEvent",
+    "RtcRtpSender",
+    "RtcSdpType",
+    "RtcSessionDescription",
+    "RtcSessionDescriptionInit",
+    "RtcTrackEvent",
+    "WebSocket",
+    "Window",
+    "Document",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+

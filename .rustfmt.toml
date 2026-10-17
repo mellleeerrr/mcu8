@@ -1,0 +1,12 @@
+# rustfmt-настройки VKS.
+# Основание: docs/rules/CODE_STYLE.md §1 (стандартные настройки).
+
+max_width = 120
+comment_width = 100
+wrap_comments = true
+use_small_heuristics = "Max"
+
+# Единый стиль для workspace.
+edition = "2021"
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"

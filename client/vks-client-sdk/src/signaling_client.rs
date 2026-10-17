@@ -1,0 +1,252 @@
+//! Signaling клиент SDK (WS/WebTransport) — join/hello/leave + auto-reconnect.
+//!
+//! Основание: `docs/architecture/SIGNALING_PROTOCOL.md` §2 (ClientHello),
+//! §3 (JoinRoom), §6 (LeaveRoom), §7 (Reconnect).
+//!
+//! Транспорт — порт `SignalingTransport` (WS или WebTransport; Q5). Сейчас —
+//! `MockSignaling` для тестов; реальная impl в `ws.rs`/`wt.rs` (фаза 8).
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use thiserror::Error;
+
+/// Ответ сервера на ClientHello.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerHello {
+    /// Серверный version (для feature detection).
+    pub server_version: String,
+    /// Session id (ULID) — для resume.
+    pub session_id: String,
+    /// Server-time (unix-ms).
+    pub server_time_ms: u64,
+}
+
+/// Результат JoinRoom (server → client).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JoinRoomResult {
+    /// Room id.
+    pub room_id: String,
+    /// Participant id (для этого клиента).
+    pub participant_id: String,
+    /// Nonce для resume (TTL 60s, §7).
+    pub join_nonce: String,
+    /// Список участников (для UI).
+    pub participants: Vec<String>,
+}
+
+/// Ошибка signaling.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SignalingError {
+    #[error("auth failed: {0}")]
+    AuthFailed(String),
+    #[error("room not found: {0}")]
+    RoomNotFound(String),
+    #[error("transport: {0}")]
+    Transport(String),
+}
+
+/// Signaling transport-порт (WS или WebTransport; Q5).
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait SignalingTransport: Send + Sync {
+    /// Отправляет ClientHello (token) → ServerHello.
+    async fn client_hello(&self, token: &str) -> Result<ServerHello, SignalingError>;
+    /// Отправляет JoinRoom (room, name) → JoinRoomResult.
+    async fn join_room(&self, room_id: &str, display_name: &str) -> Result<JoinRoomResult, SignalingError>;
+    /// Отправляет LeaveRoom.
+    async fn leave_room(&self, room_id: &str) -> Result<(), SignalingError>;
+    /// Отправляет SdpOffer → SdpAnswer (SDP exchange).
+    async fn send_sdp_offer(&self, _sdp: &str) -> Result<String, SignalingError> {
+        Ok(String::new())
+    }
+    /// Отправляет IceCandidate.
+    async fn send_ice_candidate(&self, _candidate: &str) -> Result<(), SignalingError> {
+        Ok(())
+    }
+}
+
+/// Signaling клиент (обёртка над transport + backoff для auto-reconnect).
+pub struct SignalingClient {
+    transport: Arc<dyn SignalingTransport>,
+    // backoff для auto-reconnect (exponential 1s→16s, max 5 — §7).
+    reconnect_delay: Duration,
+    reconnect_attempts: u32,
+}
+
+impl SignalingClient {
+    #[must_use]
+    pub fn new(transport: Arc<dyn SignalingTransport>) -> Self {
+        Self { transport, reconnect_delay: Duration::from_secs(1), reconnect_attempts: 0 }
+    }
+
+    /// Создаёт клиент с конкретным transport (для тестов — mock).
+    #[must_use]
+    pub fn with_transport(transport: Arc<dyn SignalingTransport>) -> Self {
+        Self::new(transport)
+    }
+
+    /// ClientHello → ServerHello (async).
+    pub async fn hello_async(&self, token: &str) -> Result<ServerHello, SignalingError> {
+        self.transport.client_hello(token).await
+    }
+
+    /// JoinRoom → JoinRoomResult (async).
+    pub async fn join_room_async(&self, room_id: &str, display_name: &str) -> Result<JoinRoomResult, SignalingError> {
+        self.transport.join_room(room_id, display_name).await
+    }
+
+    /// LeaveRoom (async).
+    pub async fn leave_room_async(&self, room_id: &str) -> Result<(), SignalingError> {
+        self.transport.leave_room(room_id).await
+    }
+
+    /// Отправка SdpOffer → SdpAnswer (async).
+    pub async fn send_sdp_offer_async(&self, sdp: &str) -> Result<String, SignalingError> {
+        self.transport.send_sdp_offer(sdp).await
+    }
+
+    /// Отправка IceCandidate (async).
+    pub async fn send_ice_candidate_async(&self, candidate: &str) -> Result<(), SignalingError> {
+        self.transport.send_ice_candidate(candidate).await
+    }
+
+    /// ClientHello → ServerHello (sync для обратной совместимости на native).
+    pub fn hello(&mut self, token: &str) -> Result<ServerHello, SignalingError> {
+        crate::sync_helper::block_on(self.hello_async(token))
+    }
+
+    /// JoinRoom → JoinRoomResult (sync для обратной совместимости на native).
+    pub fn join_room(&mut self, room_id: &str, display_name: &str) -> Result<JoinRoomResult, SignalingError> {
+        crate::sync_helper::block_on(self.join_room_async(room_id, display_name))
+    }
+
+    /// LeaveRoom (sync для обратной совместимости на native).
+    pub fn leave_room(&mut self, room_id: &str) -> Result<(), SignalingError> {
+        crate::sync_helper::block_on(self.leave_room_async(room_id))
+    }
+
+    /// Текущий backoff-таймер (для auto-reconnect).
+    #[must_use]
+    pub fn next_reconnect_delay(&mut self) -> Duration {
+        if self.reconnect_attempts >= 5 {
+            // исчерпали — возвращаем "max"
+            Duration::from_secs(16)
+        } else {
+            let d = self.reconnect_delay;
+            self.reconnect_delay = (self.reconnect_delay * 2).min(Duration::from_secs(16));
+            self.reconnect_attempts += 1;
+            d
+        }
+    }
+
+    /// Сброс backoff (после успешного reconnect).
+    pub fn reset_reconnect(&mut self) {
+        self.reconnect_delay = Duration::from_secs(1);
+        self.reconnect_attempts = 0;
+    }
+}
+
+/// Mock transport (для тестов).
+#[derive(Debug, Clone, Default)]
+pub struct MockSignaling {
+    pubok_hello: bool,
+    pubok_join: bool,
+}
+
+impl MockSignaling {
+    #[must_use]
+    pub fn ok() -> Self {
+        Self { pubok_hello: true, pubok_join: true }
+    }
+
+    /// Variant с empty `server_version` (для теста `BadServerHello`).
+    #[must_use]
+    pub fn empty_server_hello() -> Self {
+        Self { pubok_hello: false, pubok_join: true }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl SignalingTransport for MockSignaling {
+    async fn client_hello(&self, _token: &str) -> Result<ServerHello, SignalingError> {
+        if self.pubok_hello {
+            Ok(ServerHello {
+                server_version: "1.0".into(),
+                session_id: vks_common::ids::ulid_string(),
+                server_time_ms: 0,
+            })
+        } else {
+            Ok(ServerHello::default())
+        }
+    }
+
+    async fn join_room(&self, room_id: &str, _display_name: &str) -> Result<JoinRoomResult, SignalingError> {
+        if self.pubok_join {
+            Ok(JoinRoomResult {
+                room_id: room_id.into(),
+                participant_id: "p1".into(),
+                join_nonce: "nonce-1".into(),
+                participants: vec!["p1".into()],
+            })
+        } else {
+            Err(SignalingError::RoomNotFound(room_id.into()))
+        }
+    }
+
+    async fn leave_room(&self, _room_id: &str) -> Result<(), SignalingError> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hello_ok() {
+        let mut c = SignalingClient::with_transport(Arc::new(MockSignaling::ok()));
+        let h = c.hello("tok").unwrap();
+        assert_eq!(h.server_version, "1.0");
+        assert!(!h.session_id.is_empty());
+    }
+
+    #[test]
+    fn join_room_ok() {
+        let mut c = SignalingClient::with_transport(Arc::new(MockSignaling::ok()));
+        let r = c.join_room("r1", "alice").unwrap();
+        assert_eq!(r.room_id, "r1");
+        assert_eq!(r.participant_id, "p1");
+        assert!(!r.join_nonce.is_empty());
+    }
+
+    #[test]
+    fn leave_room_ok() {
+        let mut c = SignalingClient::with_transport(Arc::new(MockSignaling::ok()));
+        c.leave_room("r1").unwrap();
+    }
+
+    #[test]
+    fn empty_hello() {
+        let mut c = SignalingClient::with_transport(Arc::new(MockSignaling::empty_server_hello()));
+        let h = c.hello("tok").unwrap();
+        assert!(h.server_version.is_empty());
+    }
+
+    #[test]
+    fn backoff_sequence() {
+        let mut c = SignalingClient::with_transport(Arc::new(MockSignaling::ok()));
+        assert_eq!(c.next_reconnect_delay(), Duration::from_secs(1));
+        assert_eq!(c.next_reconnect_delay(), Duration::from_secs(2));
+        assert_eq!(c.next_reconnect_delay(), Duration::from_secs(4));
+        assert_eq!(c.next_reconnect_delay(), Duration::from_secs(8));
+        assert_eq!(c.next_reconnect_delay(), Duration::from_secs(16));
+        // исчерпаны — max
+        assert_eq!(c.next_reconnect_delay(), Duration::from_secs(16));
+        // reset
+        c.reset_reconnect();
+        assert_eq!(c.next_reconnect_delay(), Duration::from_secs(1));
+    }
+}

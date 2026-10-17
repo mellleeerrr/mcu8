@@ -1,0 +1,16 @@
+# vks-recorder — запись конференций.
+# Фаза 7. Фаза 0: скелет. Дерево: vks-core, vks-proto, vks-common (ARCHITECTURE.md §3).
+[package]
+name = "vks-recorder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "VKS recorder: composite + multi-track recording"
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+tracing.workspace = true
+uuid.workspace = true

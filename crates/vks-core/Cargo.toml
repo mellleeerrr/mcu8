@@ -1,0 +1,21 @@
+# vks-core — чистая доменная логика (no I/O).
+# Дерево: не зависит от внутренних крейтов. Наполняется в фазе 1.
+[package]
+name = "vks-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "VKS core domain logic (rooms, participants, sessions, ports)"
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+# async-traits для портов (MediaEngine, Storage, Auth, Events, Clock, Rng).
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true }

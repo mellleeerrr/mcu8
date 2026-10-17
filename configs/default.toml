@@ -1,0 +1,7 @@
+# Default configuration for VKS Server
+server_name = "vks-mcu"
+listen_addr = "127.0.0.1:8080"
+auth_provider = "local"
+database_url = "sqlite::memory:"
+ldap_url = ""
+default_room_mode = "sfu"

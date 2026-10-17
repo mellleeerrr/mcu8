@@ -1,0 +1,26 @@
+# vks-auth — аутентификация (JWT, API-ключи, LDAP, local_db, provider).
+# Фаза 5. Фаза 0: скелет. Дерево: vks-core, vks-proto (ARCHITECTURE.md §3).
+[package]
+name = "vks-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "VKS authentication: JWT, API keys, LDAP, local DB"
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+uuid.workspace = true
+ulid.workspace = true
+jsonwebtoken = "9"
+sha2 = "0.10"
+pbkdf2 = "0.12"
+subtle = "2"
+rand = "0.8"
+async-trait = "0.1"
+vks-core = { path = "../vks-core" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

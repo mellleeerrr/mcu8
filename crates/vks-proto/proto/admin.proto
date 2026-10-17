@@ -1,0 +1,67 @@
+// vks-proto: admin REST DTO (скелет фазы 0).
+// Основание: docs/architecture/ARCHITECTURE.md §3 (vks-admin),
+// docs/DEVELOPMENT_PLAN.md Фаза 5 (rooms/users/layouts/settings/records/audit).
+// Полное наполнение — в фазе 5.
+syntax = "proto3";
+package vks.admin;
+
+import "media.proto";
+
+// Комната (admin DTO).
+message RoomDto {
+  string id = 1;                // UUID
+  string name = 2;
+  vks.media.RoomMode mode = 3;
+  bool active = 4;
+  uint32 participant_count = 5;
+  int64 created_at_ms = 6;
+}
+
+// Пользователь (admin DTO).
+message UserDto {
+  string id = 1;
+  string display_name = 2;
+  string email = 3;
+  string role = 4;              // operator|moderator|participant|viewer (ADR-0022)
+  bool enabled = 5;
+}
+
+// Раскладка (admin DTO; полные поля — Layout из signaling.proto).
+message LayoutDto {
+  string id = 1;
+  string name = 2;
+  string kind = 3;              // grid|focus|speaker|custom
+  bool is_default = 4;
+}
+
+// Настройки сервера (R6: имя, IP, БД, LDAP, TURN, кодеки, режим, TLS).
+message SettingsDto {
+  string server_name = 1;
+  string listen_addr = 2;
+  string auth_provider = 3;     // local|ldap|oidc
+  string ldap_url = 4;
+  string turn_url = 5;
+  vks.media.RoomMode default_room_mode = 6;
+  string default_layout_id = 7;
+}
+
+// Запись (admin DTO).
+message RecordDto {
+  string id = 1;
+  string room_id = 2;
+  int64 started_at_ms = 3;
+  int64 duration_ms = 4;
+  string file_uri = 5;
+  string status = 6;            // processing|ready|failed
+}
+
+// Аудит-запись (ADR-0019).
+message AuditEntry {
+  string id = 1;
+  int64 timestamp_ms = 2;
+  string actor_id = 3;
+  string actor_ip = 4;
+  string action = 5;            // create_room|switch_mode|...
+  string resource = 6;
+  string detail = 7;
+}

@@ -1,0 +1,39 @@
+// vks-proto: кластерные (NATS) сообщения.
+// Основание: docs/architecture/CLUSTERING.md (room ownership, heartbeat, failover).
+syntax = "proto3";
+package vks.cluster;
+
+// Envelope для NATS-сообщений (темы vks.cluster.*).
+message ClusterMessage {
+  uint64 message_id = 1;    // UUIDv7 (idempotency)
+  oneof payload {
+    InstanceHeartbeat instance_heartbeat = 10;
+    RoomOwnership room_ownership = 11;
+    ServerMaintainingBroadcast server_maintaining_broadcast = 12;
+  }
+}
+
+// Сердцебиение инстанса (TTL 30s, интервал 10s).
+message InstanceHeartbeat {
+  string instance_id = 1;
+  uint64 timestamp_ms = 2;
+  uint32 active_rooms = 3;
+  float cpu_usage = 4;      // 0..1
+}
+
+// Room ownership (consistent hashing + NATS lease).
+message RoomOwnership {
+  string room_id = 1;
+  string owner_instance_id = 2;
+  uint32 lease_ttl_ms = 3;
+  uint64 epoch = 4;         // для split-brain resolution
+}
+
+// Бroadcast: комната переезжает на нового владельца (failover).
+message ServerMaintainingBroadcast {
+  string room_id = 1;
+  string old_owner_id = 2;
+  string new_owner_id = 3;
+  string connect_url = 4;
+  uint64 grace_period_ms = 5;
+}

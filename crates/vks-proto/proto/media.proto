@@ -1,0 +1,77 @@
+// vks-proto: media-сообщения.
+// Основание: docs/architecture/SIGNALING_PROTOCOL.md §5–6,
+// docs/architecture/MEDIA_PIPELINE.md §5 (codecs), ADR-0017 (feature flags).
+syntax = "proto3";
+package vks.media;
+
+// Режим комнаты (ADR-0026, Q7: глобальный дефолт + per-room override).
+enum RoomMode {
+  ROOM_MODE_UNSPECIFIED = 0;
+  ROOM_MODE_SFU = 1;
+  ROOM_MODE_MCU = 2;
+}
+
+// Кодек (ADR-0017: feature flags vp8/vp9/h264/h265/av1/opus/g722/g711).
+enum CodecId {
+  CODEC_ID_UNSPECIFIED = 0;
+  CODEC_ID_VP8 = 1;
+  CODEC_ID_VP9 = 2;
+  CODEC_ID_H264 = 3;
+  CODEC_ID_H265 = 4;
+  CODEC_ID_AV1 = 5;
+  CODEC_ID_OPUS = 6;
+  CODEC_ID_G722 = 7;
+  CODEC_ID_G711 = 8;
+}
+
+// Kind трека.
+enum TrackKind {
+  TRACK_KIND_UNSPECIFIED = 0;
+  TRACK_KIND_AUDIO = 1;
+  TRACK_KIND_VIDEO = 2;
+  TRACK_KIND_SCREEN = 3;
+}
+
+// Описание медиатрека.
+message TrackInfo {
+  string track_id = 1;          // UUIDv7
+  string participant_id = 2;    // UUIDv7
+  TrackKind kind = 3;
+  CodecId codec = 4;
+  uint32 ssrc = 5;
+  uint32 clock_rate = 6;
+  uint32 channels = 7;
+}
+
+// Возможности комнаты (кодеки, ICE, TURN, mode).
+message RoomCaps {
+  RoomMode room_mode = 1;
+  repeated CodecId video_codecs = 2;
+  repeated CodecId audio_codecs = 3;
+  bool simulcast = 4;
+  bool svc = 5;
+  bool dtls_srtp = 6;
+}
+
+// Запрос подписки (SFU: чьи tracks; MCU: ["composite"]).
+message SubscribeRequest {
+  string subscriber_id = 1;
+  repeated string source_track_ids = 2;
+  repeated CodecId preferred_codecs = 3;
+  uint32 max_bitrate_bps = 4;
+}
+
+// Ответ на подписку.
+message SubscribeResponse {
+  bool ok = 1;
+  repeated MediaStreamInfo streams = 2;
+  string error_code = 3;
+}
+
+// Описание медиапотока для subscriber.
+message MediaStreamInfo {
+  uint32 ssrc = 1;
+  CodecId codec = 2;
+  string direction = 3;  // "sendonly" | "recvonly"
+  string track_id = 4;
+}

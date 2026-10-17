@@ -1,0 +1,1 @@
+import{v as s,x as t}from"./index.bundle-2.2.1.66.js";function u(e="system-power"){return s(e,{state:()=>({}),actions:{restartServices(){return t.post("/api/v3/system/restart_services")},rebootServer(){return t.post("/api/v3/system/reboot")},shutdownServer(){return t.post("/api/v3/system/shutdown")}}})()}export{u};

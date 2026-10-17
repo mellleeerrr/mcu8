@@ -1,0 +1,17 @@
+# Сборка
+/target/
+
+# Секреты локальной разработки (BACKEND_RULES §6.3: только env, не в репозиторий)
+.env
+.env.*
+
+# Фронтенд PNM (client/pnm-frontend/):
+# предсжатые .gz генерируются scripts/import-pnm-frontend.sh --gzip (регенерируемы)
+client/pnm-frontend/deployed/**/*.gz
+# исходники старого фронтенда распаковываются по требованию (--with-source)
+client/pnm-frontend/source/
+# .bak-файлы архива в рантайм не импортируются
+*.bak*
+
+# Архив исходников PNM (31 MB) хранится вне git; восстановление — scripts/import-pnm-frontend.sh
+client/pnm-frontend/archive/

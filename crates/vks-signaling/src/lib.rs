@@ -1,0 +1,29 @@
+//! `vks-signaling` — сигнализация VKS.
+//!
+//! Фаза 1: **Session FSM** (SIGNALING_PROTOCOL §11) + **envelope-кодек**
+//! (§1, поверх `vks-proto::SignalingMessage`) + **reconnect/resume/backoff** (§7).
+//!
+//! Фаза 2: **транспорты** — `ws.rs` (WebSocket, основной R5) и `wt.rs`
+//! (WebTransport/QUIC, обязательный второй R5) — как трейты + in-memory
+//! mock-impl'ы (реальные стеки — опциональные features `ws`/`wtransport`);
+//! **`sdp.rs`** (SDP offer/answer + ICE, §4) и **`handler.rs`** (диспетчер
+//! сообщений, привязанный к Session FSM).
+//!
+//! Источник: `docs/architecture/SIGNALING_PROTOCOL.md`.
+//! Дерево: vks-core, vks-proto, vks-common, vks-auth (ARCHITECTURE.md §3).
+
+pub mod envelope;
+pub mod handler;
+pub mod reconnect;
+pub mod sdp;
+pub mod session;
+pub mod ws;
+pub mod wt;
+
+pub use envelope::Envelope;
+pub use handler::{HandlerConfig, SignalingHandler};
+pub use reconnect::{Backoff, ResumeNonce};
+pub use sdp::{IceCandidate, Media, MediaKind, Sdp, SfuAnswerProfile};
+pub use session::{InvalidTransition, Session, SessionEvent, SessionState};
+pub use ws::{MockWs, WsSession};
+pub use wt::{MockWt, WebTransportSession};

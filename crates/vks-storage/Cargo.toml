@@ -1,0 +1,24 @@
+# vks-storage — хранилище (postgres/sqlite/memory + migrations).
+# Фаза 1: backend-реализации Storage (ADR-0008) — без импорта vks-core
+# (порт Storage появится в vks-core; пока crate самодостаточен:
+# свои типизированные строки + CRUD + миграции).
+[package]
+name = "vks-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "VKS storage: postgres, sqlite, memory + migrations"
+
+[dependencies]
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "_unstable-all-types", "migrate", "uuid"] }
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+vks-core = { path = "../vks-core" }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio.workspace = true

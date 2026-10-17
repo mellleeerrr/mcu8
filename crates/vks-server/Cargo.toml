@@ -1,0 +1,51 @@
+# vks-server — главный бинарник (композиционный корень).
+# Фаза 7 (bootstrap). Дерево: ВСЕ крейты (ARCHITECTURE.md §3).
+[package]
+name = "vks-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "VKS server binary (composition root)"
+
+[dependencies]
+vks-common = { path = "../vks-common" }
+vks-core = { path = "../vks-core" }
+vks-storage = { path = "../vks-storage" }
+vks-auth = { path = "../vks-auth" }
+vks-admin = { path = "../vks-admin" }
+vks-signaling = { path = "../vks-signaling" }
+vks-media-sfu = { path = "../vks-media-sfu" }
+vks-media-mcu = { path = "../vks-media-mcu" }
+vks-layout = { path = "../vks-layout" }
+vks-proto = { path = "../vks-proto" }
+
+tokio = { workspace = true, features = ["full"] }
+axum = { workspace = true, features = ["ws"] }
+futures-util = "0.3"
+tracing.workspace = true
+tracing-subscriber = { workspace = true }
+prometheus.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+bytes.workspace = true
+# Статика фронтенда PNM (ADR-0027) и CSP-хэши inline-скриптов.
+tower-http.workspace = true
+sha2.workspace = true
+base64.workspace = true
+
+[lib]
+name = "vks_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vks-server"
+path = "src/main.rs"
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"
+tower = { version = "0.5", features = ["util"] }
+vks-proto = { path = "../vks-proto" }

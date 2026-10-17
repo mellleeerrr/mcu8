@@ -1,0 +1,27 @@
+# vks-signaling — сигнализация (WS/WSS + WebTransport) + Session FSM.
+# Фаза 2 (этап: Session FSM + envelope + reconnect по SIGNALING_PROTOCOL.md).
+# Дерево: vks-core, vks-proto, vks-common, vks-auth (ARCHITECTURE.md §3).
+[package]
+name = "vks-signaling"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "VKS signaling: session FSM, envelope codec, reconnect/backoff (WS/WSS + WebTransport later)"
+
+[features]
+# Реальные WS/WebTransport-стёки (фаза 2, когда появятся tokio-tungstenite /
+# wtransport в workspace). Сейчас — no-op заглушки, включаются фичами.
+ws = []
+wtransport = []
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+prost.workspace = true
+uuid.workspace = true
+vks-proto = { path = "../vks-proto" }
+
+[dev-dependencies]
+proptest.workspace = true

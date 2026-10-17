@@ -1,0 +1,47 @@
+{
+  "evidence": "Live smoke test 2026-10-16 against /tmp/opencode/pnm/deployed/pnm via stub server (see /tmp/opencode/serve_pnm.py)",
+  "static_prefixes": ["/pnm/* (SPA, base href)", "/mcu/* (chunks+assets, absolute in html/css)", "/static/* (server files: avatars, call_history, exports, log_events, logs, media, tcpdumps, videorecords)"],
+  "ws": ["/api/v3/ws (event channel, reconnecting)"],
+  "boot_unauth": [
+    "GET /api/v3/system/about -> {node_id, server_name, versions, state:{status, payload:{package, backup, export}}}",
+    "GET /api/v3/references?language=ru -> {key, index, buy, contacts, trial_full_version, license_renewal, free_license_restrictions}",
+    "GET /api/v3/login/status -> {status: 'enabled'}"
+  ],
+  "login": ["POST /api/v3/login {login,password} -> {token}"],
+  "post_login_shell": [
+    "GET /api/v3/settings/audio_codecs -> {audio_codecs: []}",
+    "GET /api/v3/settings/video_codecs -> {video_codecs: []}",
+    "GET /api/v3/profile -> {user:{id,display_name,permissions,locale_id,time_zone_id,groups,emails,phones,avatars,description,creator_id,created_at,busy,defaults:{deletable,editable}}}",
+    "GET /api/v3/time-zones -> {time_zones:[{id}]}",
+    "GET /api/v3/locales -> {locales:[{id,description}]}",
+    "GET /api/v3/abonents/stop_reasons -> raw object",
+    "GET /api/v3/ui/system/status -> DW mapper (engine/database/network/disk/sip/h323)",
+    "GET /api/v3/license",
+    "GET /api/v3/features -> {features:{}}",
+    "GET /api/v3/engine/calibration",
+    "GET /api/v3/engine/diagnostics",
+    "GET /api/v3/system/time -> {time,timezone,ntp,ntp_name,ntp_synchronized}",
+    "GET /api/v3/settings/calls",
+    "GET /api/v3/settings/security",
+    "GET /api/v3/waitingroom",
+    "GET /api/v3/abonents/count -> {count}"
+  ],
+  "dashboard_conferences_list": [
+    "GET /api/v3/ui/sessions?page=1&page_size=1&sort_field=display_name&sort_order=0&has_stopped=false -> sessions list (maps to our rooms)",
+    "POST /api/v3/conferences (create)"
+  ],
+  "render_proof": {
+    "login_screen": "docs/progress/evidence/pnm-login-stub-2026-10-16.png",
+    "dashboard": "docs/progress/evidence/pnm-dashboard-stub-2026-10-16.png",
+    "branding": "PROSTOR (patched build), footer TrueConf MCU (c) 2026 TKS"
+  },
+  "mappers": {
+    "re": "snake_case -> camelCase field mapper; missing fields are dropped (safe for minimal responses)",
+    "PW": "system/about mapper",
+    "AW": "references mapper",
+    "DW": "ui/system/status mapper",
+    "RW": "profile mapper",
+    "LW": "time-zones mapper {timeZoneId:id}",
+    "xW": "locales mapper {localeId:id, description:description}"
+  }
+}

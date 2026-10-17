@@ -1,0 +1,207 @@
+//! Загрузка конфигурации (figment) + env-override `VKS_*`.
+//!
+//! Основание: `docs/rules/BACKEND_RULES.md` §6.3 (Secrets: env vars VKS_*),
+//! `docs/DEVELOPMENT_PLAN.md` Фаза 0 (config.rs — figment, env override).
+
+use figment::providers::{Env, Format, Serialized, Toml};
+use serde::{Deserialize, Serialize};
+use uncased::Uncased;
+
+/// Базовая конфигурация сервера (покрывает требования R6: имя, IP, БД, LDAP).
+/// Полная структура настраиваемости расширяется в фазах 5/7.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Config {
+    /// Имя сервера (требование R6).
+    pub server_name: String,
+    /// Адрес прослушивания signaling/admin (R6: IP).
+    pub listen_addr: String,
+    /// Стратегия аутентификации: local | ldap | oidc (ADR-0022, BACKEND_RULES §2.1).
+    pub auth_provider: String,
+    /// DSN БД (R6: БД).
+    pub database_url: String,
+    /// URL LDAP (R6: LDAP).
+    pub ldap_url: String,
+    /// Глобальный режим по умолчанию (ADR-0026, Q7): "sfu" | "mcu".
+    pub default_room_mode: String,
+    /// Каталог рантайма статики фронтенда PNM (`index.html` + assets;
+    /// ADR-0027, FRONTEND_PORT_PLAN §4.2). Дефолт — относительно CWD процесса;
+    /// переопределение: `VKS_FRONTEND_DIR`.
+    pub frontend_dir: String,
+    /// Секрет HS256 для `/api/v3` (ADR-0027 §4.3; `VKS_JWT_SECRET`).
+    /// Пустой → v3 fail-closed (503), сервер работает; долг: RS256 (§4.3).
+    pub jwt_secret: String,
+    /// TTL access-токенов `/api/v3`, сек (`VKS_JWT_TTL_SECS`).
+    /// Дефолт 86400: legacy UI не умеет refresh (§4.3, отклонение в ADR-0027).
+    pub jwt_ttl_secs: i64,
+    /// Логин оператора, bootstrapping в LocalDb (`VKS_ADMIN_LOGIN`; dev: `admin`).
+    pub admin_login: String,
+    /// Пароль оператора (`VKS_ADMIN_PASSWORD`; dev: `admin` — предупреждение в лог).
+    pub admin_password: String,
+    /// Адрес прослушивания WebRTC UDP-трафика (`VKS_MEDIA_LISTEN_ADDR`; dev: `127.0.0.1:0`).
+    pub media_listen_addr: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            server_name: "vks".into(),
+            listen_addr: "0.0.0.0:443".into(),
+            auth_provider: "local".into(),
+            database_url: String::new(),
+            ldap_url: String::new(),
+            default_room_mode: "sfu".into(),
+            frontend_dir: "client/pnm-frontend/deployed/pnm".into(),
+            jwt_secret: String::new(),
+            jwt_ttl_secs: 86_400,
+            admin_login: "admin".into(),
+            admin_password: "admin".into(),
+            media_listen_addr: "127.0.0.1:0".into(),
+        }
+    }
+}
+
+impl Config {
+    /// Загружает конфигурацию из (в порядке приоритета, от меньшего к большему):
+    /// 1. значения по умолчанию;
+    /// 2. TOML-файл (если путь задан);
+    /// 3. переменные окружения `VKS_*` (например, `VKS_SERVER_NAME`).
+    ///
+    /// Env-переменные имеют **наивысший** приоритет (BACKEND_RULES §6.3).
+    #[allow(clippy::result_large_err)] // figment::Error is large (contains profile metadata)
+    pub fn load(toml_path: Option<&str>) -> Result<Self, figment::Error> {
+        // 1. дефолты (Config → Serialized → Provider).
+        let mut fig = figment::Figment::from(Serialized::defaults(Config::default()));
+
+        // 2. TOML (опционально).
+        if let Some(path) = toml_path {
+            fig = fig.merge(Toml::file(path));
+        }
+
+        // 3. env-override VKS_* (наивысший приоритет).
+        // Ключи приводятся к нижнему регистру (VKS_SERVER_NAME → server_name).
+        fig = fig.merge(Env::prefixed("VKS_").map(|key| Uncased::new(key.as_str().to_lowercase())));
+
+        fig.extract()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Защита от гонок при параллельных тестах: env-переменные глобальны,
+    // поэтому тест, который их устанавливает, держит мьютекс.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn defaults_apply() {
+        let c = Config::default();
+        assert_eq!(c.server_name, "vks");
+        assert_eq!(c.default_room_mode, "sfu");
+        assert_eq!(c.frontend_dir, "client/pnm-frontend/deployed/pnm");
+        // v3-auth (§4.3): пустой секрет = fail-closed; TTL 86400 (legacy без refresh).
+        assert_eq!(c.jwt_secret, "");
+        assert_eq!(c.jwt_ttl_secs, 86_400);
+        assert_eq!(c.admin_login, "admin");
+        assert_eq!(c.admin_password, "admin");
+        assert_eq!(c.media_listen_addr, "127.0.0.1:0");
+    }
+
+    #[test]
+    fn load_without_toml_gives_defaults() {
+        // Держим тот же мьютекс, чтобы env-тест не менял VKS_SERVER_NAME
+        // в момент этого чтения (эвристика: env-тест устанавливает значение).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let c = Config::load(None).expect("load should succeed with defaults");
+        assert_eq!(c.server_name, "vks");
+        assert_eq!(c.listen_addr, "0.0.0.0:443");
+    }
+
+    #[test]
+    fn env_override_wins() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let var = "VKS_SERVER_NAME";
+        let saved = std::env::var(var).ok();
+        std::env::set_var(var, "from-env-unique");
+        let c = Config::load(None).expect("load with env");
+        assert_eq!(c.server_name, "from-env-unique");
+        match saved {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
+    }
+
+    #[test]
+    fn env_override_jwt_fields() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let saved_secret = std::env::var("VKS_JWT_SECRET").ok();
+        let saved_ttl = std::env::var("VKS_JWT_TTL_SECS").ok();
+        std::env::set_var("VKS_JWT_SECRET", "env-secret-not-logged");
+        std::env::set_var("VKS_JWT_TTL_SECS", "3600");
+        let c = Config::load(None).expect("load with jwt env");
+        assert_eq!(c.jwt_secret, "env-secret-not-logged");
+        assert_eq!(c.jwt_ttl_secs, 3600);
+        match saved_secret {
+            Some(v) => std::env::set_var("VKS_JWT_SECRET", v),
+            None => std::env::remove_var("VKS_JWT_SECRET"),
+        }
+        match saved_ttl {
+            Some(v) => std::env::set_var("VKS_JWT_TTL_SECS", v),
+            None => std::env::remove_var("VKS_JWT_TTL_SECS"),
+        }
+    }
+
+    /// TOML-файл — отдельный путь загрузки (не только env + defaults).
+    /// Записываем временный TOML в `tempdir`-каталог процесса, читаем через
+    /// `Config::load(Some(path))` и проверяем override полей.
+    #[test]
+    fn toml_file_load_overrides_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Временный файл внутри target-каталога крейта (гарантированно writable).
+        let dir = std::env::temp_dir().join(format!("vks-common-config-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("test.toml");
+        std::fs::write(
+            &path,
+            r#"
+server_name = "from-toml-file"
+listen_addr = "127.0.0.1:8443"
+auth_provider = "ldap"
+database_url = "postgres://user:pass@localhost/vks"
+ldap_url = "ldap://ldap.example.com:389"
+default_room_mode = "mcu"
+"#,
+        )
+        .expect("write temp toml");
+        let c = Config::load(Some(path.to_str().expect("valid utf8 path"))).expect("load from toml");
+        assert_eq!(c.server_name, "from-toml-file");
+        assert_eq!(c.listen_addr, "127.0.0.1:8443");
+        assert_eq!(c.auth_provider, "ldap");
+        assert_eq!(c.database_url, "postgres://user:pass@localhost/vks");
+        assert_eq!(c.ldap_url, "ldap://ldap.example.com:389");
+        assert_eq!(c.default_room_mode, "mcu");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Env имеет приоритет над TOML-файлом (BACKEND_RULES §6.3: env — наивысший).
+    #[test]
+    fn env_beats_toml_file() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("vks-common-config-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("priority.toml");
+        std::fs::write(&path, "server_name = \"from-toml\"\n").expect("write temp toml");
+        let var = "VKS_SERVER_NAME";
+        let saved = std::env::var(var).ok();
+        std::env::set_var(var, "from-env-wins");
+        let c = Config::load(Some(path.to_str().expect("valid utf8 path"))).expect("load toml + env");
+        assert_eq!(c.server_name, "from-env-wins", "env must override toml file value");
+        match saved {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+}

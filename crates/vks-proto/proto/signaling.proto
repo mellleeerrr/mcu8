@@ -1,0 +1,216 @@
+// vks-proto: сигнальный протокол (полный).
+// Основание: docs/architecture/SIGNALING_PROTOCOL.md (все секции).
+syntax = "proto3";
+package vks.signaling;
+
+import "media.proto";
+
+// === Envelope ===
+// Каждый WS/WSS-фрейм = один SignalingMessage. Запрос обязан получить reply
+// (reply_to = msg_id) или Error.
+message SignalingMessage {
+  uint64 msg_id = 1;      // ULID
+  uint64 reply_to = 2;    // msg_id запроса; 0 = push
+  oneof payload {
+    ClientHello client_hello = 10;
+    ServerHello server_hello = 11;
+    JoinRoom join_room = 20;
+    JoinRoomResult join_room_result = 21;
+    LeaveRoom leave_room = 30;
+    SdpOffer sdp_offer = 40;
+    SdpAnswer sdp_answer = 41;
+    IceCandidate ice_candidate = 50;
+    IceComplete ice_complete = 51;
+    vks.media.SubscribeRequest subscribe_request = 60;
+    vks.media.SubscribeResponse subscribe_response = 61;
+    Unsubscribe unsubscribe = 62;
+    TrackAdded track_added = 70;
+    TrackRemoved track_removed = 71;
+    LayoutChanged layout_changed = 80;
+    RoomModeChanged room_mode_changed = 90;
+    ParticipantJoined participant_joined = 100;
+    ParticipantLeft participant_left = 101;
+    SpeakingStateChanged speaking_state_changed = 102;
+    QualityReport quality_report = 120;
+    Announcement announcement = 121;
+    Error error = 200;
+    Ack ack = 201;
+    ServerMaintaining server_maintaining = 210;
+  }
+}
+
+// === Auth handshake ===
+message ClientHello {
+  uint32 proto_version = 1;
+  string client_id = 2;        // ULID, стабильный (resume)
+  string sdk_version = 3;
+  string user_agent = 4;
+  string auth_token = 5;       // короткий room JWT
+  string room_id = 6;          // UUID
+  repeated string capabilities = 7; // "simulcast","svc","mcu_renderer",...
+  optional string resume_nonce = 8;
+}
+
+message ServerHello {
+  uint32 proto_version = 1;
+  uint32 min_supported = 2;
+  uint32 max_supported = 3;
+  string server_id = 4;
+  string server_name = 5;
+  vks.media.RoomMode room_mode = 6;
+  vks.media.RoomCaps caps = 7;
+  IceConfig ice = 8;
+}
+
+message IceConfig {
+  repeated IceServer servers = 1;
+}
+
+message IceServer {
+  string url = 1;
+  string username = 2;
+  string credential = 3;
+}
+
+// === Join / Leave ===
+message JoinRoom {
+  string room_id = 1;
+  string display_name = 2;
+  bool is_recorder = 3;
+}
+
+message JoinRoomResult {
+  string participant_id = 1;   // UUIDv7
+  uint64 join_nonce = 2;       // resume (TTL 60s)
+  repeated ParticipantInfo participants = 3;
+  repeated vks.media.TrackInfo publisher_tracks = 4;
+  Layout layout = 5;
+  vks.media.RoomCaps caps = 6;
+}
+
+message ParticipantInfo {
+  string participant_id = 1;
+  string display_name = 2;
+  bool is_recorder = 3;
+  bool is_speaking = 4;
+  repeated string track_ids = 5;
+}
+
+message LeaveRoom {
+  string room_id = 1;
+}
+
+// === SDP / ICE ===
+message SdpOffer { string sdp = 1; }
+message SdpAnswer {
+  string sdp = 1;
+  repeated RtpMap rtp_map = 2;
+}
+message RtpMap {
+  uint32 payload = 1;
+  string codec = 2;
+  uint32 clock = 3;
+  uint32 channels = 4;
+}
+message IceCandidate {
+  string sdp_mid = 1;
+  uint32 sdp_mline_index = 2;
+  string candidate = 3;
+  bool end_of_candidates = 4;
+}
+message IceComplete {
+  bool success = 1;
+  uint64 rtt_ms = 2;
+}
+
+// === Subscribe / Unsubscribe ===
+message Unsubscribe {
+  repeated string track_ids = 1;
+}
+
+// === Track / Participant events ===
+message TrackAdded {
+  string participant_id = 1;
+  vks.media.TrackInfo track = 2;
+}
+message TrackRemoved {
+  string participant_id = 1;
+  string track_id = 2;
+}
+message ParticipantJoined {
+  string participant_id = 1;
+  string display_name = 2;
+  bool is_recorder = 3;
+}
+message ParticipantLeft {
+  string participant_id = 1;
+  uint64 reason = 2; // 0 normal, 1 timeout, 2 kicked, 3 mode_switch
+}
+message SpeakingStateChanged {
+  string participant_id = 1;
+  bool speaking = 2;
+  uint32 level = 3;
+}
+
+// === Quality / Announcement / Error / Ack / Maintaining ===
+message QualityReport {
+  float mos = 1;
+  uint32 rtt_ms = 2;
+  uint32 jitter_ms = 3;
+  uint32 loss_pct = 4;
+  string direction = 5; // "uplink" | "downlink"
+}
+message Announcement {
+  string text = 1;
+  uint64 issued_at = 2;
+}
+message Error {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+message Ack {
+  string acked_msg_id = 1;
+}
+message ServerMaintaining {
+  string new_owner_id = 1;
+  string connect_url = 2;
+  uint64 grace_period_ms = 3;
+}
+
+// === Layout (модель из LAYOUT_ENGINE.md §1) ===
+message Layout {
+  uint32 version = 1;
+  repeated Slot slots = 2;
+  string kind = 3; // "grid" | "focus" | "speaker" | "custom"
+}
+message Slot {
+  uint32 id = 1;
+  Rect rect = 2;
+  uint32 z = 3;
+  SlotAssignment assignment = 4;
+  optional string participant_id = 5; // для FIXED
+}
+message Rect {
+  float x = 1;
+  float y = 2;
+  float w = 3;
+  float h = 4;
+}
+enum SlotAssignment {
+  SLOT_ASSIGNMENT_AUTO = 0;
+  SLOT_ASSIGNMENT_FIXED = 1;
+  SLOT_ASSIGNMENT_PINNED = 2;
+}
+
+// === RoomModeChanged ===
+message RoomModeChanged {
+  vks.media.RoomMode new_mode = 1;
+  vks.media.RoomCaps caps = 2;
+  uint64 switch_epoch = 3;
+  bool graceful = 4;
+}
+
+message LayoutChanged {
+  Layout layout = 1;
+}

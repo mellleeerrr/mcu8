@@ -1,0 +1,37 @@
+# vks-media-mcu — MCU-движок (compositor, oxideav-scene).
+# Фаза 3 (DEVELOPMENT_PLAN.md): MediaEngine-impl (MCU), compositor,
+# audio mixer, VAD, layout bridge. ADR-0004 (oxideav-scene, Q1).
+#
+# Dep-light по умолчанию (298-базовое тестирование workspace не
+# затрагивается): ядро компилируется на std + vks-core + vks-layout.
+# Реальный кодек/композиция (oxideav-scene, ffmpeg) — опциональные
+# фичи; дефолтный build их не тянет.
+[package]
+name = "vks-media-mcu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "VKS MCU engine: compositor, decoder, encoder, audio mixer, VAD (oxideav-scene)"
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+uuid.workspace = true
+vks-core = { path = "../vks-core" }
+vks-layout = { path = "../vks-layout" }
+# async-traits для MediaEngine-порта (vks-core использует async_trait).
+async-trait = "0.1"
+
+# Опциональные реальные кодеки/композиция (ADR-0004): за фичами,
+# дефолтный build — без них (dep-light).
+oxideav-scene = { version = "0.1", optional = true }
+
+[features]
+# Реальный compositor на oxideav-scene (ADR-0004).
+oxideav = ["dep:oxideav-scene"]
+
+[dev-dependencies]
+tokio = { workspace = true }

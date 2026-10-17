@@ -1,0 +1,34 @@
+# vks-gateway-h323 — H.323-шлюз (H323Plus/OPAL, ADR-0007, FFI).
+# Фаза 6 (DEVELOPMENT_PLAN.md): H.323 → WebRTC bridge (participant = gateway),
+# H.263/H.264 → VP8/VP9, G.711/G.729 → Opus, FFI-граница (panic hook, watchdog).
+#
+# Дерево зависимостей: vks-core, vks-common (ARCHITECTURE §3).
+#
+# H323Plus — тяжёлая C++/FFI-зависимость. В этой волне — MOCK FFI-граница
+# (детерминированная, без реальных потоков: tick-счётчик); реальная FFI-
+# обёртка — за опциональным feature `h323plus`.
+[package]
+name = "vks-gateway-h323"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "VKS H.323 gateway: H323Plus FFI bridged into WebRTC rooms"
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+uuid.workspace = true
+vks-core = { path = "../vks-core" }
+vks-common = { path = "../vks-common" }
+
+[features]
+default = []
+# Подключает реальную FFI-обёртку над H323Plus/OPAL (ADR-0007).
+h323plus = []
+
+[dev-dependencies]
+tokio = { workspace = true }
