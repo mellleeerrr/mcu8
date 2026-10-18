@@ -95,10 +95,7 @@ impl SqliteStorage {
     /// Создаёт пул по `SqliteConnectOptions` и применяет migrations.
     pub async fn init_options(options: SqliteConnectOptions) -> Result<Self> {
         let pool = SqlitePoolOptions::new().max_connections(POOL_SIZE).connect_with(options).await?;
-        let storage = Self {
-            pool,
-            core_participants: std::sync::RwLock::new(std::collections::HashMap::new()),
-        };
+        let storage = Self { pool, core_participants: std::sync::RwLock::new(std::collections::HashMap::new()) };
         storage.migrate().await?;
         Ok(storage)
     }
@@ -242,10 +239,7 @@ impl SqliteStorage {
 
     /// Удаляет per-room override режима комнаты.
     pub async fn delete_room_mode_override(&self, room_id: Uuid) -> Result<()> {
-        sqlx::query("DELETE FROM room_mode_override WHERE room_id = $1")
-            .bind(room_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query("DELETE FROM room_mode_override WHERE room_id = $1").bind(room_id).execute(&self.pool).await?;
         Ok(())
     }
 

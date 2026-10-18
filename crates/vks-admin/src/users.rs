@@ -92,13 +92,8 @@ impl Users {
     ) -> Result<UserRecord, vks_core::ports::storage::StorageError> {
         let name = username.into();
         if let Some(storage) = &state.storage {
-            let stored = vks_core::ports::storage::StoredUser {
-                id,
-                username: name.clone(),
-                role,
-                muted: false,
-                deleted: false,
-            };
+            let stored =
+                vks_core::ports::storage::StoredUser { id, username: name.clone(), role, muted: false, deleted: false };
             storage.upsert_user(&stored).await?;
         }
         Ok(Self::create_with_id(state, id, name, role))

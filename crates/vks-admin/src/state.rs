@@ -222,10 +222,7 @@ impl AppState {
 
     /// Отправляет push-уведомление администраторам (в `/api/v3/ws`).
     pub fn notify_admin(&self, topic: &str, payload: serde_json::Value) {
-        let _ = self.admin_events.send(crate::hub::AdminBroadcastEvent {
-            topic: topic.to_string(),
-            payload,
-        });
+        let _ = self.admin_events.send(crate::hub::AdminBroadcastEvent { topic: topic.to_string(), payload });
     }
 
     /// Рассылает сигнальное сообщение всем участникам комнаты.

@@ -156,7 +156,9 @@ pub trait Storage: Send + Sync + 'static {
     // --- Room Mode Overrides ---
 
     /// Возвращает все per-room overrides режима (room_id -> mode).
-    async fn list_room_mode_overrides(&self) -> Result<std::collections::HashMap<RoomId, crate::room::RoomMode>, StorageError> {
+    async fn list_room_mode_overrides(
+        &self,
+    ) -> Result<std::collections::HashMap<RoomId, crate::room::RoomMode>, StorageError> {
         Ok(std::collections::HashMap::new())
     }
 

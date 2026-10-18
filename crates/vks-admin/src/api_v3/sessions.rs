@@ -123,11 +123,7 @@ fn select_rooms(state: &AppState, query: &SessionsQuery) -> (Vec<RoomRecord>, us
 
 /// JSON сессии/конференции (мапперы `Fv`/`dy`/`zZ` мягкие).
 fn session_json(r: &RoomRecord, connections_limit: u32, is_stopped: bool) -> Value {
-    let (state_str, has_stopped) = if is_stopped {
-        ("STOPPED", true)
-    } else {
-        ("ACTIVE", false)
-    };
+    let (state_str, has_stopped) = if is_stopped { ("STOPPED", true) } else { ("ACTIVE", false) };
     json!({
         "id": r.id.to_string(),
         "display_name": r.name,
@@ -192,7 +188,8 @@ pub async fn session(State(state): State<SharedState>, Path(id): Path<String>) -
     track("sessions/{id}");
     match find_room(&state, &id) {
         Some(room) => {
-            let is_stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
+            let is_stopped =
+                state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
             Json(json!({ "session": session_json(&room, connections_limit(&state), is_stopped) })).into_response()
         }
         None => error_json(404, "Session not found"),
@@ -287,7 +284,8 @@ pub async fn conference(State(state): State<SharedState>, Path(id): Path<String>
     track("conferences/{id}");
     match find_room(&state, &id) {
         Some(room) => {
-            let is_stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
+            let is_stopped =
+                state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
             Json(json!({ "conference": session_json(&room, connections_limit(&state), is_stopped) })).into_response()
         }
         None => error_json(404, "Conference not found"),

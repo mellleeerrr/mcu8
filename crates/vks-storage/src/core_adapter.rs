@@ -3,8 +3,8 @@
 //! Связывает конкретные backend-хранилища (`MemoryStorage`, `SqliteStorage`)
 //! с доменным трейтом ядра `vks_core::ports::Storage`.
 
-use std::str::FromStr;
 use async_trait::async_trait;
+use std::str::FromStr;
 
 use vks_core::participant::{Participant, ParticipantId, UserId};
 use vks_core::ports::storage::{ApiKey, AuditEntry, Layout, Storage, StorageError, StoredUser};
@@ -24,11 +24,7 @@ impl Storage for MemoryStorage {
         let id = *room.id.as_uuid();
         let mode = room.mode;
         let mut rooms = self.rooms_map().write().unwrap();
-        let created_at = if let Some(existing) = rooms.get(&id) {
-            existing.created_at
-        } else {
-            crate::rows::now()
-        };
+        let created_at = if let Some(existing) = rooms.get(&id) { existing.created_at } else { crate::rows::now() };
         let r = crate::rows::Room { id, name: room.name.clone(), mode, created_at };
         rooms.insert(id, r);
         Ok(())
@@ -304,24 +300,17 @@ impl Storage for SqliteStorage {
     }
 
     async fn get_layout(&self, id: &str) -> Result<Option<Layout>, StorageError> {
-        let row: Option<(String, String, i32, String, bool)> = sqlx::query_as(
-            "SELECT id, name, version, assigned_rooms, is_default FROM core_layouts WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let row: Option<(String, String, i32, String, bool)> =
+            sqlx::query_as("SELECT id, name, version, assigned_rooms, is_default FROM core_layouts WHERE id = $1")
+                .bind(id)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         match row {
             Some((id, name, version, assigned_rooms, is_default)) => {
                 let assigned_rooms = serde_json::from_str(&assigned_rooms).unwrap_or_default();
-                Ok(Some(Layout {
-                    id,
-                    name,
-                    version: version as u32,
-                    assigned_rooms,
-                    is_default,
-                }))
+                Ok(Some(Layout { id, name, version: version as u32, assigned_rooms, is_default }))
             }
             None => Ok(None),
         }
@@ -337,23 +326,16 @@ impl Storage for SqliteStorage {
     }
 
     async fn list_layouts(&self) -> Result<Vec<Layout>, StorageError> {
-        let rows: Vec<(String, String, i32, String, bool)> = sqlx::query_as(
-            "SELECT id, name, version, assigned_rooms, is_default FROM core_layouts",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let rows: Vec<(String, String, i32, String, bool)> =
+            sqlx::query_as("SELECT id, name, version, assigned_rooms, is_default FROM core_layouts")
+                .fetch_all(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         let mut res = Vec::with_capacity(rows.len());
         for (id, name, version, assigned_rooms, is_default) in rows {
             let assigned_rooms = serde_json::from_str(&assigned_rooms).unwrap_or_default();
-            res.push(Layout {
-                id,
-                name,
-                version: version as u32,
-                assigned_rooms,
-                is_default,
-            });
+            res.push(Layout { id, name, version: version as u32, assigned_rooms, is_default });
         }
         Ok(res)
     }
@@ -377,13 +359,12 @@ impl Storage for SqliteStorage {
     }
 
     async fn get_api_key(&self, id: &str) -> Result<Option<ApiKey>, StorageError> {
-        let row: Option<(String, String, String, bool)> = sqlx::query_as(
-            "SELECT id, scopes, owner, revoked FROM core_api_keys WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let row: Option<(String, String, String, bool)> =
+            sqlx::query_as("SELECT id, scopes, owner, revoked FROM core_api_keys WHERE id = $1")
+                .bind(id)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         match row {
             Some((id, scopes, owner, revoked)) => {
@@ -408,12 +389,11 @@ impl Storage for SqliteStorage {
     }
 
     async fn list_api_keys(&self) -> Result<Vec<ApiKey>, StorageError> {
-        let rows: Vec<(String, String, String, bool)> = sqlx::query_as(
-            "SELECT id, scopes, owner, revoked FROM core_api_keys",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let rows: Vec<(String, String, String, bool)> =
+            sqlx::query_as("SELECT id, scopes, owner, revoked FROM core_api_keys")
+                .fetch_all(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         let mut res = Vec::with_capacity(rows.len());
         for (id, scopes, owner, revoked) in rows {
@@ -446,13 +426,12 @@ impl Storage for SqliteStorage {
 
     async fn get_user(&self, id: UserId) -> Result<Option<StoredUser>, StorageError> {
         let id_str = id.to_string();
-        let row: Option<(String, String, String, bool, bool)> = sqlx::query_as(
-            "SELECT id, username, role, muted, deleted FROM core_users WHERE id = $1",
-        )
-        .bind(&id_str)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let row: Option<(String, String, String, bool, bool)> =
+            sqlx::query_as("SELECT id, username, role, muted, deleted FROM core_users WHERE id = $1")
+                .bind(&id_str)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         match row {
             Some((id_str, username, role_str, muted, deleted)) => {
@@ -480,12 +459,11 @@ impl Storage for SqliteStorage {
     }
 
     async fn list_users(&self) -> Result<Vec<StoredUser>, StorageError> {
-        let rows: Vec<(String, String, String, bool, bool)> = sqlx::query_as(
-            "SELECT id, username, role, muted, deleted FROM core_users ORDER BY username",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let rows: Vec<(String, String, String, bool, bool)> =
+            sqlx::query_as("SELECT id, username, role, muted, deleted FROM core_users ORDER BY username")
+                .fetch_all(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         let mut res = Vec::with_capacity(rows.len());
         for (id_str, username, role_str, muted, deleted) in rows {
@@ -521,22 +499,15 @@ impl Storage for SqliteStorage {
     }
 
     async fn list_audit(&self) -> Result<Vec<AuditEntry>, StorageError> {
-        let rows: Vec<(i64, String, String, Option<String>, String)> = sqlx::query_as(
-            "SELECT ts_ms, user_name, action, room, ip FROM core_audit_log ORDER BY ts_ms ASC",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let rows: Vec<(i64, String, String, Option<String>, String)> =
+            sqlx::query_as("SELECT ts_ms, user_name, action, room, ip FROM core_audit_log ORDER BY ts_ms ASC")
+                .fetch_all(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         Ok(rows
             .into_iter()
-            .map(|(ts_ms, user, action, room, ip)| AuditEntry {
-                ts_ms: ts_ms as u64,
-                user,
-                action,
-                room,
-                ip,
-            })
+            .map(|(ts_ms, user, action, room, ip)| AuditEntry { ts_ms: ts_ms as u64, user, action, room, ip })
             .collect())
     }
 
@@ -680,24 +651,17 @@ impl Storage for PostgresStorage {
     }
 
     async fn get_layout(&self, id: &str) -> Result<Option<Layout>, StorageError> {
-        let row: Option<(String, String, i32, String, bool)> = sqlx::query_as(
-            "SELECT id, name, version, assigned_rooms, is_default FROM core_layouts WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let row: Option<(String, String, i32, String, bool)> =
+            sqlx::query_as("SELECT id, name, version, assigned_rooms, is_default FROM core_layouts WHERE id = $1")
+                .bind(id)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         match row {
             Some((id, name, version, assigned_rooms, is_default)) => {
                 let assigned_rooms = serde_json::from_str(&assigned_rooms).unwrap_or_default();
-                Ok(Some(Layout {
-                    id,
-                    name,
-                    version: version as u32,
-                    assigned_rooms,
-                    is_default,
-                }))
+                Ok(Some(Layout { id, name, version: version as u32, assigned_rooms, is_default }))
             }
             None => Ok(None),
         }
@@ -713,23 +677,16 @@ impl Storage for PostgresStorage {
     }
 
     async fn list_layouts(&self) -> Result<Vec<Layout>, StorageError> {
-        let rows: Vec<(String, String, i32, String, bool)> = sqlx::query_as(
-            "SELECT id, name, version, assigned_rooms, is_default FROM core_layouts",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let rows: Vec<(String, String, i32, String, bool)> =
+            sqlx::query_as("SELECT id, name, version, assigned_rooms, is_default FROM core_layouts")
+                .fetch_all(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         let mut res = Vec::with_capacity(rows.len());
         for (id, name, version, assigned_rooms, is_default) in rows {
             let assigned_rooms = serde_json::from_str(&assigned_rooms).unwrap_or_default();
-            res.push(Layout {
-                id,
-                name,
-                version: version as u32,
-                assigned_rooms,
-                is_default,
-            });
+            res.push(Layout { id, name, version: version as u32, assigned_rooms, is_default });
         }
         Ok(res)
     }
@@ -753,13 +710,12 @@ impl Storage for PostgresStorage {
     }
 
     async fn get_api_key(&self, id: &str) -> Result<Option<ApiKey>, StorageError> {
-        let row: Option<(String, String, String, bool)> = sqlx::query_as(
-            "SELECT id, scopes, owner, revoked FROM core_api_keys WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let row: Option<(String, String, String, bool)> =
+            sqlx::query_as("SELECT id, scopes, owner, revoked FROM core_api_keys WHERE id = $1")
+                .bind(id)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         match row {
             Some((id, scopes, owner, revoked)) => {
@@ -784,12 +740,11 @@ impl Storage for PostgresStorage {
     }
 
     async fn list_api_keys(&self) -> Result<Vec<ApiKey>, StorageError> {
-        let rows: Vec<(String, String, String, bool)> = sqlx::query_as(
-            "SELECT id, scopes, owner, revoked FROM core_api_keys",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let rows: Vec<(String, String, String, bool)> =
+            sqlx::query_as("SELECT id, scopes, owner, revoked FROM core_api_keys")
+                .fetch_all(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         let mut res = Vec::with_capacity(rows.len());
         for (id, scopes, owner, revoked) in rows {
@@ -822,13 +777,12 @@ impl Storage for PostgresStorage {
 
     async fn get_user(&self, id: UserId) -> Result<Option<StoredUser>, StorageError> {
         let id_str = id.to_string();
-        let row: Option<(String, String, String, bool, bool)> = sqlx::query_as(
-            "SELECT id, username, role, muted, deleted FROM core_users WHERE id = $1",
-        )
-        .bind(&id_str)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let row: Option<(String, String, String, bool, bool)> =
+            sqlx::query_as("SELECT id, username, role, muted, deleted FROM core_users WHERE id = $1")
+                .bind(&id_str)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         match row {
             Some((id_str, username, role_str, muted, deleted)) => {
@@ -856,12 +810,11 @@ impl Storage for PostgresStorage {
     }
 
     async fn list_users(&self) -> Result<Vec<StoredUser>, StorageError> {
-        let rows: Vec<(String, String, String, bool, bool)> = sqlx::query_as(
-            "SELECT id, username, role, muted, deleted FROM core_users ORDER BY username",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let rows: Vec<(String, String, String, bool, bool)> =
+            sqlx::query_as("SELECT id, username, role, muted, deleted FROM core_users ORDER BY username")
+                .fetch_all(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         let mut res = Vec::with_capacity(rows.len());
         for (id_str, username, role_str, muted, deleted) in rows {
@@ -897,22 +850,15 @@ impl Storage for PostgresStorage {
     }
 
     async fn list_audit(&self) -> Result<Vec<AuditEntry>, StorageError> {
-        let rows: Vec<(i64, String, String, Option<String>, String)> = sqlx::query_as(
-            "SELECT ts_ms, user_name, action, room, ip FROM core_audit_log ORDER BY ts_ms ASC",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(to_storage_err)?;
+        let rows: Vec<(i64, String, String, Option<String>, String)> =
+            sqlx::query_as("SELECT ts_ms, user_name, action, room, ip FROM core_audit_log ORDER BY ts_ms ASC")
+                .fetch_all(self.pool())
+                .await
+                .map_err(to_storage_err)?;
 
         Ok(rows
             .into_iter()
-            .map(|(ts_ms, user, action, room, ip)| AuditEntry {
-                ts_ms: ts_ms as u64,
-                user,
-                action,
-                room,
-                ip,
-            })
+            .map(|(ts_ms, user, action, room, ip)| AuditEntry { ts_ms: ts_ms as u64, user, action, room, ip })
             .collect())
     }
 

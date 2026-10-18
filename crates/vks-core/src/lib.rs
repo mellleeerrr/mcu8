@@ -37,7 +37,6 @@ pub use ports::{
     // storage
     ApiKey,
     AuditEntry,
-    StoredUser,
     // auth
     AuthError,
     AuthProvider,
@@ -69,6 +68,7 @@ pub use ports::{
     RoomMediaHandle,
     Storage,
     StorageError,
+    StoredUser,
     SubscribeRequest,
     SubscriberHandle,
     Subscription,
