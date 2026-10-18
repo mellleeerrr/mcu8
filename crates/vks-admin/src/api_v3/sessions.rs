@@ -661,8 +661,54 @@ pub async fn edit_abonent(
     Json(json!({ "status": "ok" })).into_response()
 }
 
-/// `GET /api/v3/engine/abonents` → `{abonents:[], count:0}`.
-pub async fn engine_abonents() -> Response {
+/// `GET /api/v3/engine/abonents` → `{abonents:[...], count:N}`.
+pub async fn engine_abonents(State(state): State<SharedState>) -> Response {
     track("engine/abonents");
-    Json(json!({ "abonents": [], "count": 0 })).into_response()
+    let room_ids: Vec<RoomId> =
+        if let Ok(rooms) = state.rooms.lock() { rooms.keys().copied().collect() } else { Vec::new() };
+    let mut all_abonents = Vec::new();
+    for rid in room_ids {
+        for p in state.room_hub.list_participants(&rid) {
+            let (type_id, connection_url) = if p.is_recorder {
+                ("recorder", format!("recorder://{}", p.participant_id))
+            } else if p.participant_id.contains("@sip-gateway") {
+                ("sip", format!("sip://{}", p.display_name))
+            } else if p.participant_id.contains("@h323-gateway") {
+                ("h323", format!("h323://{}", p.display_name))
+            } else {
+                ("webrtc", format!("webrtc://{}", p.participant_id))
+            };
+            all_abonents.push(json!({
+                "abonent_id": p.participant_id,
+                "connection_id": p.participant_id,
+                "contact_id": p.participant_id,
+                "call_string_id": p.participant_id,
+                "video_layout_id": "grid",
+                "display_name": p.display_name,
+                "connection_url": connection_url,
+                "type_id": type_id,
+                "connected_at": p.connected_at,
+                "payload": {
+                    "settings": {
+                        "slot_render_type": "auto",
+                        "auto_call": false,
+                        "audio_rx_enabled": true,
+                        "audio_tx_enabled": !p.is_audio_muted,
+                        "volume_rx": 100,
+                        "volume_tx": 100,
+                        "video_rx_enabled": true,
+                        "video_tx_enabled": !p.is_video_muted,
+                        "crown": false,
+                        "hide_display_name": false
+                    }
+                }
+            }));
+        }
+    }
+    let count = all_abonents.len();
+    Json(json!({
+        "abonents": all_abonents,
+        "count": count
+    }))
+    .into_response()
 }

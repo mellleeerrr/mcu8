@@ -1294,6 +1294,52 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
         other => panic!("expected RoomModeChanged for Bob, got: {other:?}"),
     }
 
+    // Verify engine_abonents populates main participant monitor roster (M4.2)
+    let (code_eng, body_eng) = reqwest_like_request(tcp_addr, "GET", "/api/v3/engine/abonents", &token, None).await;
+    assert_eq!(code_eng, 200);
+    let eng_json: serde_json::Value = serde_json::from_str(&body_eng).unwrap();
+    assert_eq!(eng_json["count"], 2);
+    assert_eq!(eng_json["abonents"].as_array().unwrap().len(), 2);
+
+    // Verify engine_diagnostics contains required resources for UI fetchEngineDiagnostics (C11, M4.2)
+    let (code_diag, body_diag) =
+        reqwest_like_request(tcp_addr, "GET", "/api/v3/engine/diagnostics", &token, None).await;
+    assert_eq!(code_diag, 200);
+    let diag_json: serde_json::Value = serde_json::from_str(&body_diag).unwrap();
+    assert_eq!(diag_json["diagnostics"]["vsm"]["resources"]["required"]["encoders"], 0);
+    assert_eq!(diag_json["diagnostics"]["vsm"]["resources"]["required"]["decoders"], 0);
+
+    // Verify layout preset change (e.g. "auto") preserves MCU mode without demoting to SFU (M4.5)
+    let (code_layout_preset, _) = reqwest_like_request(
+        tcp_addr,
+        "POST",
+        "/api/v3/ui/video_layouts/mode",
+        &token,
+        Some(r#"{"session_id":"room-pkg-d","mode":"auto"}"#),
+    )
+    .await;
+    assert_eq!(code_layout_preset, 200);
+    let current_room_mode = state.rooms.lock().unwrap().values().find(|r| r.name == "room-pkg-d").unwrap().mode;
+    assert_eq!(current_room_mode, Some(vks_core::RoomMode::Mcu), "auto preset must not demote MCU room to SFU");
+
+    // Negative test: 404 on unknown session for video_layouts/mode (truthful errors)
+    let (code_bad_room, _) = reqwest_like_request(
+        tcp_addr,
+        "POST",
+        "/api/v3/ui/video_layouts/mode",
+        &token,
+        Some(r#"{"session_id":"nonexistent-uuid-1234","mode":"mcu"}"#),
+    )
+    .await;
+    assert_eq!(code_bad_room, 404, "unknown session must return 404");
+
+    // Verify abonents/count reflects connections accurately
+    let (code_count, body_count) = reqwest_like_request(tcp_addr, "GET", "/api/v3/abonents/count", &token, None).await;
+    assert_eq!(code_count, 200);
+    let count_json: serde_json::Value = serde_json::from_str(&body_count).unwrap();
+    assert_eq!(count_json["connections"]["total"], 2);
+    assert_eq!(count_json["connections"]["webrtc"], 2);
+
     // 6. McuEngine Media Pipeline: Clocked Mix-Minus Audio (20ms cadence) & Compositing (M3.2, M3.4, M3.6, M3.7)
     let room_id = state.rooms.lock().unwrap().values().find(|r| r.name == "room-pkg-d").unwrap().id;
     let alice_pid_core = vks_server::parse_participant_id(&alice_pid);

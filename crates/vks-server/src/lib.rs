@@ -322,7 +322,31 @@ fn parse_ice_candidate_addr(candidate: &str) -> Option<std::net::SocketAddr> {
 pub fn parse_participant_id(pid_str: &str) -> vks_core::ParticipantId {
     let u = uuid::Uuid::parse_str(pid_str)
         .ok()
-        .or_else(|| if pid_str.len() >= 36 { uuid::Uuid::parse_str(&pid_str[pid_str.len() - 36..]).ok() } else { None })
+        .or_else(|| {
+            if pid_str.len() >= 36 {
+                // First check suffix (e.g. "part-room-uuid")
+                uuid::Uuid::parse_str(&pid_str[pid_str.len() - 36..])
+                    .ok()
+                    // Then scan token boundaries / sliding windows for embedded UUID
+                    .or_else(|| {
+                        for token in pid_str.split(['-', ':', '/', '@', '_']) {
+                            if token.len() == 36 {
+                                if let Ok(parsed) = uuid::Uuid::parse_str(token) {
+                                    return Some(parsed);
+                                }
+                            }
+                        }
+                        for i in 0..=pid_str.len().saturating_sub(36) {
+                            if let Ok(parsed) = uuid::Uuid::parse_str(&pid_str[i..i + 36]) {
+                                return Some(parsed);
+                            }
+                        }
+                        None
+                    })
+            } else {
+                None
+            }
+        })
         .unwrap_or_else(|| {
             use sha2::{Digest, Sha256};
             let digest = Sha256::digest(pid_str.as_bytes());
@@ -948,5 +972,9 @@ mod tests {
         let suffixed = format!("prefix-{}", random_uuid);
         let pid_suffixed = parse_participant_id(&suffixed);
         assert_eq!(pid_suffixed.to_string(), random_uuid.to_string());
+
+        let infixed = format!("prefix-{}-audio-track", random_uuid);
+        let pid_infixed = parse_participant_id(&infixed);
+        assert_eq!(pid_infixed.to_string(), random_uuid.to_string());
     }
 }

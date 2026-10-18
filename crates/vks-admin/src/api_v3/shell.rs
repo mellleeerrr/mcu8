@@ -106,15 +106,33 @@ pub async fn abonents_count(State(state): State<SharedState>) -> Response {
     track("abonents/count");
     let count = state.users.lock().expect("users store poisoned").len();
     let rooms = state.rooms.lock().expect("rooms store poisoned");
-    let total_participants = rooms.values().map(|r| r.participants).sum::<usize>();
     let total_sessions = rooms.len();
+    let mut total_participants = 0;
+    let mut webrtc = 0;
+    let mut sip = 0;
+    let mut h323 = 0;
+    for (rid, r) in rooms.iter() {
+        total_participants += r.participants;
+        for p in state.room_hub.list_participants(rid) {
+            if p.participant_id.contains("@sip-gateway") {
+                sip += 1;
+            } else if p.participant_id.contains("@h323-gateway") {
+                h323 += 1;
+            } else {
+                webrtc += 1;
+            }
+        }
+    }
+    if webrtc + sip + h323 < total_participants {
+        webrtc = total_participants - sip - h323;
+    }
     Json(json!({
         "count": count,
         "connections": {
             "total": total_participants,
-            "webrtc": total_participants,
-            "sip": 0,
-            "h323": 0,
+            "webrtc": webrtc,
+            "sip": sip,
+            "h323": h323,
             "session": total_sessions,
             "waitingroom": 0,
             "lockedroom": 0
@@ -217,12 +235,24 @@ pub async fn engine_calibration() -> Response {
     .into_response()
 }
 
-/// `GET /api/v3/engine/diagnostics` → `{diagnostics:{vsm:{limits:{performance:100}},scheduler:{workers:4}}}`.
+/// `GET /api/v3/engine/diagnostics` → `{diagnostics:{vsm:{limits:{performance:100},resources:{required:{encoders:0,decoders:0},available:{encoders:100,decoders:100}}},scheduler:{workers:4}}}`.
 pub async fn engine_diagnostics() -> Response {
     track("engine/diagnostics");
     Json(json!({
         "diagnostics": {
-            "vsm": { "limits": { "performance": 100 } },
+            "vsm": {
+                "limits": { "performance": 100 },
+                "resources": {
+                    "required": {
+                        "encoders": 0,
+                        "decoders": 0
+                    },
+                    "available": {
+                        "encoders": 100,
+                        "decoders": 100
+                    }
+                }
+            },
             "scheduler": { "workers": 4 }
         }
     }))
@@ -469,28 +499,41 @@ pub async fn switch_video_layout_mode(
         return super::error_json(403, "Forbidden: Moderator role required");
     }
     let room_id_str = body.session_id.or(body.conference_id);
+    if auth.room_scope.is_some() && room_id_str.is_none() {
+        return super::error_json(403, "Forbidden: room_scope requires session_id");
+    }
     if let (Some(ref user_room), Some(ref req_room)) = (&auth.room_scope, &room_id_str) {
         if !req_room.eq_ignore_ascii_case(user_room) {
             return super::error_json(403, "Forbidden: room_scope mismatch");
         }
     }
-    let mode_str = body.mode.unwrap_or_else(|| "sfu".to_string());
-    let new_mode = match mode_str.to_lowercase().as_str() {
-        "mcu" => vks_core::RoomMode::Mcu,
-        _ => vks_core::RoomMode::Sfu,
-    };
 
-    if let Some(ref rid_str) = room_id_str {
-        let rid_opt = if let Ok(u) = uuid::Uuid::parse_str(rid_str) {
+    let rid_opt = if let Some(ref rid_str) = room_id_str {
+        let found = if let Ok(u) = uuid::Uuid::parse_str(rid_str) {
             Some(vks_core::RoomId::from_uuid(u))
         } else if let Ok(rooms) = state.rooms.lock() {
             rooms.values().find(|r| r.name == *rid_str || r.name.eq_ignore_ascii_case(rid_str)).map(|r| r.id)
         } else {
             None
         };
-        if let Some(rid) = rid_opt {
-            let _ = crate::rooms::Rooms::update_async(&state, &rid, None, Some(new_mode), None, None).await;
+        if found.is_none() {
+            return super::error_json(404, "Session not found");
         }
+        found
+    } else {
+        None
+    };
+
+    let mode_str = body.mode.unwrap_or_else(|| "auto".to_string());
+    // M4.5: Only "mcu" or "sfu" triggers a topology mode switch; "auto", "manual", "dynamic" are layout presets.
+    let topology_mode = match mode_str.to_lowercase().as_str() {
+        "mcu" => Some(vks_core::RoomMode::Mcu),
+        "sfu" => Some(vks_core::RoomMode::Sfu),
+        _ => None,
+    };
+
+    if let (Some(rid), Some(new_mode)) = (rid_opt, topology_mode) {
+        let _ = crate::rooms::Rooms::update_async(&state, &rid, None, Some(new_mode), None, None).await;
     }
 
     let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();

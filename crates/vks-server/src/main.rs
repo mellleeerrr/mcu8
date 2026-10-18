@@ -229,7 +229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 7. Инициализация WebRTC медиа-движков и UDP медиа-лупа (M2.1, M2.4)
     let sfu_engine = Arc::new(vks_media_sfu::SfuEngine::new());
-    let _mcu_engine = Arc::new(vks_media_mcu::McuEngine::new());
+    let mcu_engine = Arc::new(vks_media_mcu::McuEngine::new());
 
     let (udp_loop, receive_task, candidate_addr, candidate_port) =
         match vks_media_sfu::udp_loop::UdpMediaLoop::bind(&config.media_listen_addr).await {
@@ -322,7 +322,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &frontend,
         handler_config,
         sfu_engine.clone(),
-        _mcu_engine.clone(),
+        mcu_engine.clone(),
         udp_loop.clone(),
         gateway_manager.clone(),
         recorder_manager.clone(),
