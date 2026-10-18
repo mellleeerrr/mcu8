@@ -184,11 +184,8 @@ impl RoomState {
             return false;
         }
         self.last_render_ms = now_ms;
-        if let Some(applied_at) = self.layout_applied_at_ms {
-            self.elapsed_ms = now_ms.saturating_sub(applied_at);
-        } else {
-            self.elapsed_ms += 33;
-        }
+        let applied_at = *self.layout_applied_at_ms.get_or_insert(now_ms);
+        self.elapsed_ms = now_ms.saturating_sub(applied_at);
         self.process_media(frames, audio_inputs);
         true
     }
@@ -202,13 +199,22 @@ impl RoomState {
 
         let slices: Vec<&[f32]> = audio_inputs.iter().map(|(_, v)| v.as_slice()).collect();
         let target_len = self.mixed_audio.len().max(960);
-        self.mixed_audio = AudioMixer.mix(&slices, target_len);
+        let (full_mix, minus_mixes) = AudioMixer.mix_and_mix_minus(&slices, target_len);
+        self.mixed_audio = full_mix;
 
         // Mix-minus for each participant with audio
-        let minus_mixes = AudioMixer.mix_minus(&slices, target_len);
         self.participant_audio.clear();
         for ((pid, _), buf) in audio_inputs.iter().zip(minus_mixes.into_iter()) {
             self.participant_audio.insert(*pid, buf);
+        }
+
+        // For room subscribers and publishers who didn't publish audio in this tick (e.g. muted/listeners),
+        // supply the room's mixed audio so they hear other participants.
+        for sub in &self.subscribers {
+            self.participant_audio.entry(*sub).or_insert_with(|| self.mixed_audio.clone());
+        }
+        for pub_id in self.publisher_tracks.keys() {
+            self.participant_audio.entry(*pub_id).or_insert_with(|| self.mixed_audio.clone());
         }
 
         // Per-participant VAD and active speaker detection
@@ -322,7 +328,14 @@ impl McuEngine {
     /// Returns the personal N-1 mix-minus audio for a participant in the room.
     pub fn participant_audio(&self, room: RoomId, pid: ParticipantId) -> Option<Vec<f32>> {
         let g = self.rooms.lock().unwrap();
-        g.get(&room)?.participant_audio.get(&pid).cloned()
+        let state = g.get(&room)?;
+        state.participant_audio.get(&pid).cloned().or_else(|| {
+            if state.subscribers.contains(&pid) || state.publisher_tracks.contains_key(&pid) {
+                Some(state.mixed_audio.clone())
+            } else {
+                None
+            }
+        })
     }
 
     /// Returns the global room audio mix (for recording / monitoring).
@@ -435,6 +448,7 @@ impl MediaEngine for McuEngine {
         state.bridge.apply(&new_layout);
         state.current_layout = new_layout;
         state.elapsed_ms = 0;
+        state.layout_applied_at_ms = None;
         Ok(())
     }
 
@@ -640,5 +654,29 @@ mod tests {
         let r1 = rects.get(&1).expect("slot 1");
         assert_eq!(r1.h, 270);
         assert_eq!(r1.y, 810);
+    }
+
+    #[tokio::test]
+    async fn listener_subscriber_receives_mixed_audio() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let speaker = p(1);
+        let listener = p(2);
+        e.add_publisher(rid, speaker, vec![video_track(speaker)]).await.unwrap();
+        e.add_subscriber(rid, listener, sub_req()).await.unwrap();
+
+        // Speaker produces audio
+        e.set_audio(rid, speaker, vec![0.5f32; 960]);
+        e.tick(rid);
+
+        // Speaker gets mix-minus (silence for single speaker)
+        let speaker_audio = e.participant_audio(rid, speaker).expect("speaker audio");
+        assert_eq!(speaker_audio, vec![0.0f32; 960]);
+
+        // Listener (non-publisher) gets the full mixed room audio (speaker's voice)
+        let listener_audio = e.participant_audio(rid, listener).expect("listener audio");
+        assert_eq!(listener_audio.len(), 960);
+        assert!((listener_audio[0] - 0.5f32).abs() < 1e-4);
     }
 }

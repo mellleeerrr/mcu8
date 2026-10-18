@@ -72,7 +72,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/waitingroom", get(shell::waitingroom))
         .route("/api/v3/conferences/status", get(shell::conferences_status))
         // Фаза 3 — данные (наши комнаты).
-        .route("/api/v3/ui/sessions", get(sessions::ui_sessions))
+        .route("/api/v3/ui/sessions", get(sessions::ui_sessions).post(sessions::start_session))
         .route("/api/v3/ui/sessions/{id}", get(sessions::session).delete(sessions::stop_session))
         .route("/api/v3/ui/sessions/{id}/abonents", get(sessions::session_abonents))
         .route("/api/v3/sessions", get(sessions::sessions).post(sessions::start_session))
@@ -84,7 +84,7 @@ pub fn router(state: SharedState) -> Router {
             get(sessions::conference).patch(sessions::update_conference).delete(sessions::delete_conference),
         )
         .route("/api/v3/conferences/{id}/contacts", get(sessions::conference_contacts))
-        .route("/api/v3/ui/conferences", get(sessions::ui_conferences))
+        .route("/api/v3/ui/conferences", get(sessions::ui_conferences).post(sessions::create_conference))
         .route(
             "/api/v3/ui/conferences/{id}",
             get(sessions::conference).patch(sessions::update_conference).delete(sessions::delete_conference),

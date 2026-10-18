@@ -1,7 +1,36 @@
-# Default configuration for VKS Server
+# Default configuration for VKS Server (PROSTOR MCU/SFU)
+# All parameters can be overridden via environment variables with prefix VKS_*
+# Example: VKS_LISTEN_ADDR="0.0.0.0:8080" VKS_JWT_SECRET="secret"
+
+# Server identity
 server_name = "vks-mcu"
 listen_addr = "127.0.0.1:8080"
+media_listen_addr = "127.0.0.1:0"
+
+# Authentication & Identity (ADR-0009 / ADR-0022)
+# Supported auth_provider strategies: "local" | "ldap" | "oidc"
 auth_provider = "local"
+jwt_secret = "dev_secret_change_in_production_vks_mcu_2026"
+jwt_ttl_secs = 86400
+
+# Default bootstrap credentials for Operator in LocalDb
+admin_login = "admin"
+admin_password = "admin_password"
+
+# Directory containing static files for PNM UI (ADR-0027)
+frontend_dir = "client/pnm-frontend/dist"
+
+# Storage & Persistence (PostgreSQL, SQLite or Memory)
 database_url = "sqlite::memory:"
+storage_allow_fallback = false
+
+# External Integrations
 ldap_url = ""
+
+# Default conferencing topology ("sfu" | "mcu")
 default_room_mode = "sfu"
+
+# ICE Servers (STUN / TURN)
+ice_servers = [
+    "stun:stun.l.google.com:19302"
+]

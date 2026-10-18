@@ -42,6 +42,34 @@
 
 ## Итерации
 
+### [2026-10-18] Итерация 5.3 — Комплексная модернизация и устранение архитектурного долга MCU/SFU (Milestones M0–M6)
+
+#### Что сделано
+- **M0 & M1 (Форматирование, Базовый аудит и UI маршруты)**:
+  - Приведение SDP к строгой спецификации RFC 8866 (`vks-signaling/src/sdp.rs`).
+  - Добавлены REST-эндпоинты `/api/v3/ui/conferences/{id}` и `/video_layouts` (`vks-admin`).
+  - Обеспечен откат состояния при сбое `switch_room_mode` (`ModeSwitcher`).
+  - Исправлен порядок rate-limiting в WebSocket (проверка до декодирования Protobuf).
+  - Устранена ошибка целочисленного округления строк сетки раскладок (`vks-layout`).
+- **M2 & M3 (MCU Медиа-пайплайн и Сигналинг)**:
+  - Однопроходный $O(N \cdot L)$ алгоритм N-1 mix-minus аудио с динамическим AGC $1/\sqrt{N-1}$ и мягким ограничением `tanh` (`vks-media-mcu/src/audio_mixer.rs`).
+  - Доставка микшированного звука пассивным слушателям (muted/listeners) без публикации аудио.
+  - Пер-участниковый VAD с фиксацией активного докладчика и гистерезисом тишины.
+  - Применение слотов раскладки с сохранением кастомных ID, ограничением до 64 слотов и фокусом 75%/25% (`vks-media-mcu/src/engine.rs`).
+  - FSM сессии сигналинга с состояниями `Reconnecting`, `ConnectionLost`/`Resumed` и корректным выходом `LeaveRoom` из `Negotiating`/`Joining`.
+  - Fan-out hub (`RoomHub`) на базе ring-buffer `tokio::sync::broadcast` с атомарным ростером участников (`vks-admin/src/hub.rs`, `vks-server/src/lib.rs`).
+  - Обогащение `JoinRoomResult` полным снимком участников комнаты и префиксное сопоставление подписок топиков в WS `/api/v3/ws`.
+- **M4 (Администрирование и UI-интеграция)**:
+  - Реализованы формы shell-мониторинга C1, C2, C3, C4, C11 (`profile`, `time-zones`, `locales`, `features`, `license`, `settings/calls`, `settings/security`).
+  - Счётчики абонентов и жизненный цикл конференций/сессий C5, C6.
+  - Симметричные POST-обработчики для `/api/v3/ui/conferences` и `/api/v3/ui/sessions`.
+- **M5 & M6 (Кластеризация, Шлюзы, Запись и Отказоустойчивость)**:
+  - Монотонные лизы владения комнатами с `now_tick + ttl_ticks`, защитой от захвата активного лиза при split-brain, CAS fencing epoch и настраиваемым heartbeat `prune_dead` (`vks-cluster/src/ownership.rs`).
+  - Строгая валидация кодеков `try_negotiate`, изолированное завершение вызовов по Call-ID и идемпотентный перенос между комнатами `land_in_room` в SIP и H.323 шлюзах.
+  - Защита от underflow в рекордере (`saturating_sub`) и идемпотентный `stop()` (`vks-recorder`).
+  - Ограничение backpressure жестким порогом очереди (hard cap 256), fail-closed FFI сторож для H.323, поддержка динамических ICE STUN/TURN серверов и динамический readyz-чекер.
+  - Каноническая конфигурация `configs/default.toml` и валидация auth provider factory с маскированием секретов в логах.
+
 ### [2026-10-17] Итерация 5.2 — Rework T-F1: ребренд PROSTOR интегрирован в рантайм PNM
 
 #### Что сделано

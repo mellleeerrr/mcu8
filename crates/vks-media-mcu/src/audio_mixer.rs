@@ -49,34 +49,28 @@ impl AudioMixer {
     ///
     /// Gain = `1/√N` where `N` is the count of non-empty inputs; with zero
     /// non-empty inputs the output is all zeros.
+    /// Mixes N input buffers into a single output buffer.
+    ///
+    /// - `inputs`: one slice per participant (f32 PCM, 48 kHz, mono).
+    /// - `output_len`: number of samples of the result.
     pub fn mix(&self, inputs: &[&[f32]], output_len: usize) -> Vec<f32> {
-        let n = inputs.iter().filter(|b| !b.is_empty()).count();
-        let gain = if n == 0 { 0.0 } else { 1.0 / (n as f32).sqrt() };
-
-        let mut out = vec![0.0f32; output_len];
-        for i in 0..output_len {
-            let mut sum = 0.0f32;
-            for buf in inputs {
-                if i < buf.len() {
-                    sum += Self::sanitize_sample(buf[i]);
-                }
-            }
-            let mixed = sum * gain;
-            // Soft-clip: pass through inside ±1.0, tanh-clip outside (never exceeds ±1).
-            out[i] = Self::soft_clip(mixed);
-        }
-        out
+        self.mix_and_mix_minus(inputs, output_len).0
     }
 
     /// Mix-minus (N-1): produces N output buffers, where output[k] contains the mix of
     /// all inputs EXCEPT inputs[k].
-    ///
-    /// Complexity: O(N * L) via single global accumulation and per-participant subtraction.
-    /// Gain = 1 / √(N_other) where N_other is the count of other non-empty inputs.
     pub fn mix_minus(&self, inputs: &[&[f32]], output_len: usize) -> Vec<Vec<f32>> {
+        self.mix_and_mix_minus(inputs, output_len).1
+    }
+
+    /// Single-pass calculation of both the room's global audio mix and per-participant
+    /// mix-minus in O(N * L) with a single accumulation pass.
+    ///
+    /// Returns `(full_mix, per_participant_minus)`.
+    pub fn mix_and_mix_minus(&self, inputs: &[&[f32]], output_len: usize) -> (Vec<f32>, Vec<Vec<f32>>) {
         let n_active = inputs.iter().filter(|b| !b.is_empty()).count();
 
-        // 1. Precompute global sum S[0..output_len] with NaN/Inf sanitization.
+        // 1. Single accumulation pass for global sum S[0..output_len] with NaN/Inf sanitization.
         let mut sum = vec![0.0f32; output_len];
         for buf in inputs {
             for (i, s) in buf.iter().take(output_len).enumerate() {
@@ -84,8 +78,15 @@ impl AudioMixer {
             }
         }
 
-        // 2. Compute mix-minus for each participant.
-        inputs
+        // 2. Global room mix (for recording / monitoring / passive listeners)
+        let full_gain = if n_active == 0 { 0.0 } else { 1.0 / (n_active as f32).sqrt() };
+        let mut full_mix = vec![0.0f32; output_len];
+        for i in 0..output_len {
+            full_mix[i] = Self::soft_clip(sum[i] * full_gain);
+        }
+
+        // 3. Per-participant mix-minus (subtract own signal from global sum)
+        let minus_mixes: Vec<Vec<f32>> = inputs
             .iter()
             .map(|own_buf| {
                 let own_non_empty = !own_buf.is_empty();
@@ -105,7 +106,9 @@ impl AudioMixer {
                 }
                 out
             })
-            .collect()
+            .collect();
+
+        (full_mix, minus_mixes)
     }
 }
 
@@ -210,5 +213,16 @@ mod tests {
         // Participant with good input hears 0.0 (bad input was sanitized).
         assert!((outputs[1][0] - 0.0).abs() < 1e-6);
         assert!((outputs[1][1] - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mix_and_mix_minus_consistency() {
+        let a = [0.6f32, 0.2];
+        let b = [0.4f32, 0.8];
+        let (full, minus) = AudioMixer.mix_and_mix_minus(&[&a, &b], 2);
+        let separate_full = AudioMixer.mix(&[&a, &b], 2);
+        let separate_minus = AudioMixer.mix_minus(&[&a, &b], 2);
+        assert_eq!(full, separate_full);
+        assert_eq!(minus, separate_minus);
     }
 }

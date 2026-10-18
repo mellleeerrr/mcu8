@@ -44,10 +44,22 @@ impl Envelope {
         &self.msg.payload
     }
 
+    /// Мутабельный доступ к payload (для обогащения снимками ростера).
+    #[must_use]
+    pub fn payload_mut(&mut self) -> &mut Option<Payload> {
+        &mut self.msg.payload
+    }
+
     /// Внутренний `SignalingMessage`.
     #[must_use]
     pub fn inner(&self) -> &SignalingMessage {
         &self.msg
+    }
+
+    /// Извлекает внутренний `SignalingMessage`.
+    #[must_use]
+    pub fn into_inner(self) -> SignalingMessage {
+        self.msg
     }
 
     /// Сериализует в protobuf-байты (один фрейм).

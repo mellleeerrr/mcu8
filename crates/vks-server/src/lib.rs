@@ -279,7 +279,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                 let was_leave = matches!(env.payload(), Some(Payload::LeaveRoom(_)));
 
                                 // Запрос исполняет FSM; сайд-эффекты — только по успешному результату.
-                                let replies = handler.handle(env);
+                                let mut replies = handler.handle(env);
                                 let joined_ok = replies.iter().any(|r| matches!(r.payload(), Some(Payload::JoinRoomResult(_))));
                                 let left_ok = was_leave && replies.iter().any(|r| matches!(r.payload(), Some(Payload::Ack(_))));
 
@@ -300,9 +300,35 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                             found.unwrap_or_else(|| vks_admin::rooms::Rooms::create(&state, &name).id)
                                         };
                                         current_room = Some(rid);
-                                        room_rx = Some(state.room_hub.subscribe(&rid));
-                                        let count =
-                                            vks_admin::rooms::Rooms::get(&state, &rid).map(|r| r.participants + 1).unwrap_or(1);
+
+                                        let pid_str = handler.participant_id().map(str::to_string).unwrap_or_default();
+                                        let p_snapshot = vks_admin::hub::ParticipantSnapshot {
+                                            participant_id: pid_str.clone(),
+                                            display_name: pid_str.clone(),
+                                            is_recorder: false,
+                                            is_speaking: false,
+                                            track_ids: Vec::new(),
+                                        };
+                                        let (rx, snapshot) = state.room_hub.register_participant(&rid, p_snapshot);
+                                        room_rx = Some(rx);
+
+                                        // Обогащаем JoinRoomResult полным снимком участников
+                                        for reply in &mut replies {
+                                            if let Some(Payload::JoinRoomResult(ref mut res)) = reply.payload_mut() {
+                                                res.participants = snapshot
+                                                    .iter()
+                                                    .map(|p| vks_proto::signaling::ParticipantInfo {
+                                                        participant_id: p.participant_id.clone(),
+                                                        display_name: p.display_name.clone(),
+                                                        is_recorder: p.is_recorder,
+                                                        is_speaking: p.is_speaking,
+                                                        track_ids: p.track_ids.clone(),
+                                                    })
+                                                    .collect();
+                                            }
+                                        }
+
+                                        let count = snapshot.len();
                                         vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(count), None);
 
                                         // Рассылаем ParticipantJoined другим участникам комнаты
@@ -328,6 +354,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                     }
                                 } else if left_ok {
                                     if let Some(rid) = current_room.take() {
+                                        if let Some(pid) = handler.participant_id() {
+                                            state.room_hub.unregister_participant(&rid, pid);
+                                        }
                                         room_rx = None;
                                         state.room_hub.unsubscribe(&rid);
                                         if let Some(room) = vks_admin::rooms::Rooms::get(&state, &rid) {
@@ -401,6 +430,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
 
     drop(room_rx);
     if let Some(rid) = current_room.take() {
+        if let Some(pid) = handler.participant_id() {
+            state.room_hub.unregister_participant(&rid, pid);
+        }
         state.room_hub.unsubscribe(&rid);
         if let Some(room) = vks_admin::rooms::Rooms::get(&state, &rid) {
             let new_count = room.participants.saturating_sub(1);

@@ -90,6 +90,14 @@ pub async fn ws_handler(
     ws.max_message_size(MAX_FRAME_BYTES * 4).on_upgrade(move |socket| handle_socket(state, ip, socket))
 }
 
+/// Сопоставляет подписку клиента с темой события (точное совпадение, wildcard `*` или разделитель `:`).
+#[inline]
+fn topic_matches(sub: &str, topic: &str) -> bool {
+    sub == topic
+        || (sub.ends_with('*') && topic.starts_with(sub.trim_end_matches('*')))
+        || topic.strip_prefix(sub).is_some_and(|rest| rest.starts_with(':'))
+}
+
 /// Одна WS-сессия: чтение транзакций, keepalive-ping, ответы/события.
 async fn handle_socket(state: SharedState, client_ip: String, socket: WebSocket) {
     let (mut sender, mut receiver) = socket.split();
@@ -113,7 +121,8 @@ async fn handle_socket(state: SharedState, client_ip: String, socket: WebSocket)
             admin_msg = admin_rx.recv() => {
                 match admin_msg {
                     Ok(evt) => {
-                        if subscriptions.contains(&evt.topic) || subscriptions.contains("conferences:*") {
+                        let matched = subscriptions.iter().any(|sub| topic_matches(sub, &evt.topic));
+                        if matched {
                             let frame = json!({ "event": evt.topic, "payload": evt.payload });
                             if sender.send(Message::Text(frame.to_string().into())).await.is_err() {
                                 break;
@@ -358,5 +367,14 @@ mod tests {
         let frame = r#"{"method":"nope","payload":{},"id":"1"}"#;
         let out = process_frame(&state, "10.0.0.1", frame, &mut subs);
         assert!(out[0].0.contains("\"code\":401"), "{}", out[0].0);
+    }
+
+    #[test]
+    fn topic_matching_rules() {
+        assert!(topic_matches("conferences", "conferences:update"));
+        assert!(topic_matches("conferences", "conferences"));
+        assert!(topic_matches("conferences:*", "conferences:update"));
+        assert!(!topic_matches("conferences", "conference:update"));
+        assert!(!topic_matches("conference", "conferences:update"));
     }
 }
