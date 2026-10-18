@@ -142,6 +142,28 @@ fn parse_user_id(s: &str) -> Result<UserId, (StatusCode, String)> {
     Ok(UserId::from_uuid(u))
 }
 
+fn extract_actor(auth: &Option<axum::extract::Extension<crate::auth_middleware::AuthContext>>) -> String {
+    auth.as_ref().map(|a| a.subject.clone()).unwrap_or_else(|| "system".to_string())
+}
+
+fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
+    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
+        if let Some(first) = forwarded.split(',').next() {
+            let trimmed = first.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    if let Some(real_ip) = headers.get("x-real-ip").and_then(|h| h.to_str().ok()) {
+        let trimmed = real_ip.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "127.0.0.1".to_string()
+}
+
 /// Оборачивает `T: Serialize` в Json response.
 fn json_ok<T: serde::Serialize>(value: T) -> Response {
     (StatusCode::OK, Json(serde_json::to_value(value).unwrap_or(serde_json::Value::Null))).into_response()
@@ -241,8 +263,26 @@ pub async fn openapi() -> Json<serde_json::Value> {
 }
 
 /// `POST /api/v1/rooms` — create room.
-pub async fn create_room(State(state): State<SharedState>, Json(body): Json<CreateRoomRequest>) -> Response {
-    json_ok(Rooms::create(&state, body.name))
+pub async fn create_room(
+    State(state): State<SharedState>,
+    auth: Option<axum::extract::Extension<crate::auth_middleware::AuthContext>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<CreateRoomRequest>,
+) -> Response {
+    let room_name = body.name.clone();
+    match Rooms::create_async(&state, body.name).await {
+        Ok(room) => {
+            let actor = extract_actor(&auth);
+            let ip = extract_client_ip(&headers);
+            state.record_audit_entry(actor, "create_room", Some(room_name), ip);
+            json_ok(room)
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error_code": "storage_error", "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 /// `GET /api/v1/rooms` — list rooms.
@@ -265,6 +305,8 @@ pub async fn get_room(State(state): State<SharedState>, Path(id_str): Path<Strin
 /// `PATCH /api/v1/rooms/{id}` — update room.
 pub async fn update_room(
     State(state): State<SharedState>,
+    auth: Option<axum::extract::Extension<crate::auth_middleware::AuthContext>>,
+    headers: axum::http::HeaderMap,
     Path(id_str): Path<String>,
     Json(body): Json<UpdateRoomRequest>,
 ) -> Response {
@@ -272,22 +314,46 @@ pub async fn update_room(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    match Rooms::update(&state, &id, body.name, body.mode, body.participants, body.bitrate_kbps) {
-        Some(record) => json_ok(record),
-        None => not_found("room", &id_str),
+    match Rooms::update_async(&state, &id, body.name, body.mode, body.participants, body.bitrate_kbps).await {
+        Ok(Some(record)) => {
+            let actor = extract_actor(&auth);
+            let ip = extract_client_ip(&headers);
+            state.record_audit_entry(actor, "update_room", Some(record.name.clone()), ip);
+            json_ok(record)
+        }
+        Ok(None) => not_found("room", &id_str),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error_code": "storage_error", "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// `DELETE /api/v1/rooms/{id}` — delete room.
-pub async fn delete_room(State(state): State<SharedState>, Path(id_str): Path<String>) -> Response {
+pub async fn delete_room(
+    State(state): State<SharedState>,
+    auth: Option<axum::extract::Extension<crate::auth_middleware::AuthContext>>,
+    headers: axum::http::HeaderMap,
+    Path(id_str): Path<String>,
+) -> Response {
     let id = match parse_room_id(&id_str) {
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if Rooms::delete(&state, &id) {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        not_found("room", &id_str)
+    match Rooms::delete_async(&state, &id).await {
+        Ok(true) => {
+            let actor = extract_actor(&auth);
+            let ip = extract_client_ip(&headers);
+            state.record_audit_entry(actor, "delete_room", Some(id_str), ip);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => not_found("room", &id_str),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error_code": "storage_error", "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -344,8 +410,26 @@ pub async fn get_room_mode(State(state): State<SharedState>, Path(id_str): Path<
 }
 
 /// `POST /api/v1/users` — create user (Operator only).
-pub async fn create_user(State(state): State<SharedState>, Json(body): Json<CreateUserRequest>) -> Response {
-    json_ok(Users::create(&state, body.username, body.role))
+pub async fn create_user(
+    State(state): State<SharedState>,
+    auth: Option<axum::extract::Extension<crate::auth_middleware::AuthContext>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<CreateUserRequest>,
+) -> Response {
+    let username = body.username.clone();
+    match Users::create_async(&state, body.username, body.role).await {
+        Ok(user) => {
+            let actor = extract_actor(&auth);
+            let ip = extract_client_ip(&headers);
+            state.record_audit_entry(actor, "create_user", Some(username), ip);
+            json_ok(user)
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error_code": "storage_error", "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 /// `GET /api/v1/users` — list users (active).
@@ -368,6 +452,8 @@ pub async fn get_user(State(state): State<SharedState>, Path(id_str): Path<Strin
 /// `PATCH /api/v1/users/{id}` — update user.
 pub async fn update_user(
     State(state): State<SharedState>,
+    auth: Option<axum::extract::Extension<crate::auth_middleware::AuthContext>>,
+    headers: axum::http::HeaderMap,
     Path(id_str): Path<String>,
     Json(body): Json<UpdateUserRequest>,
 ) -> Response {
@@ -375,22 +461,46 @@ pub async fn update_user(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    match Users::update(&state, &id, body.username, body.role) {
-        Some(record) => json_ok(record),
-        None => not_found("user", &id_str),
+    match Users::update_async(&state, &id, body.username, body.role).await {
+        Ok(Some(record)) => {
+            let actor = extract_actor(&auth);
+            let ip = extract_client_ip(&headers);
+            state.record_audit_entry(actor, "update_user", None, ip);
+            json_ok(record)
+        }
+        Ok(None) => not_found("user", &id_str),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error_code": "storage_error", "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
 /// `DELETE /api/v1/users/{id}` — soft-delete (GDPR 152-ФЗ).
-pub async fn delete_user(State(state): State<SharedState>, Path(id_str): Path<String>) -> Response {
+pub async fn delete_user(
+    State(state): State<SharedState>,
+    auth: Option<axum::extract::Extension<crate::auth_middleware::AuthContext>>,
+    headers: axum::http::HeaderMap,
+    Path(id_str): Path<String>,
+) -> Response {
     let id = match parse_user_id(&id_str) {
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    if Users::delete(&state, &id) {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        not_found("user", &id_str)
+    match Users::delete_async(&state, &id).await {
+        Ok(true) => {
+            let actor = extract_actor(&auth);
+            let ip = extract_client_ip(&headers);
+            state.record_audit_entry(actor, "delete_user", None, ip);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => not_found("user", &id_str),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error_code": "storage_error", "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -419,26 +529,47 @@ pub async fn get_settings(State(state): State<SharedState>) -> Response {
 }
 
 /// `POST /api/v1/settings` — set settings (hot-reload).
-pub async fn set_settings(State(state): State<SharedState>, Json(body): Json<SetSettingsRequest>) -> Response {
-    json_ok(SettingsService::set(&state, body.settings.clone()))
+pub async fn set_settings(
+    State(state): State<SharedState>,
+    auth: Option<axum::extract::Extension<crate::auth_middleware::AuthContext>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<SetSettingsRequest>,
+) -> Response {
+    let res = SettingsService::set(&state, body.settings.clone());
+    let actor = extract_actor(&auth);
+    let ip = extract_client_ip(&headers);
+    state.record_audit_entry(actor, "set_settings", None, ip);
+    json_ok(res)
 }
 
 /// `POST /api/v1/audit` — record an audit entry (append-only).
 pub async fn record_audit(
     State(state): State<SharedState>,
-    auth: Option<axum::extract::Extension<vks_auth::jwt::VerifiedJwt>>,
+    auth: Option<axum::extract::Extension<crate::auth_middleware::AuthContext>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<RecordAuditRequest>,
 ) -> Response {
     let mut entry = body.entry;
-    let now =
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     // Strict server anti-spoofing: server timestamp is unconditionally authoritative
-    entry.ts_ms = now;
-    if let Some(axum::extract::Extension(jwt)) = auth {
-        entry.user = jwt.user_id;
+    entry.ts_ms = crate::state::now_unix_ms();
+    if let Some(axum::extract::Extension(ctx)) = auth {
+        entry.user = ctx.subject;
     }
-    state.audit.lock().expect("audit store poisoned").record(entry.clone());
-    json_ok(serde_json::json!({ "recorded": true, "ts_ms": entry.ts_ms }))
+    let client_ip = extract_client_ip(&headers);
+    if entry.ip.trim().is_empty() || client_ip != "127.0.0.1" {
+        entry.ip = client_ip;
+    }
+    match state
+        .record_audit_entry_async(entry.user.clone(), entry.action.clone(), entry.room.clone(), entry.ip.clone())
+        .await
+    {
+        Ok(saved) => json_ok(serde_json::json!({ "recorded": true, "ts_ms": saved.ts_ms })),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error_code": "storage_error", "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 /// `GET /api/v1/audit?user=&action=&ip=&from_ms=&to_ms=` — filter.

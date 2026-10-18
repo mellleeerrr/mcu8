@@ -36,6 +36,8 @@ pub use participant::{Participant, ParticipantId, Permission, Permissions, Role,
 pub use ports::{
     // storage
     ApiKey,
+    AuditEntry,
+    StoredUser,
     // auth
     AuthError,
     AuthProvider,

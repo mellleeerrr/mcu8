@@ -14,6 +14,9 @@ pub enum Error {
     /// Объект не найден.
     #[error("not found: {0}")]
     NotFound(String),
+    /// Некорректные данные.
+    #[error("invalid data: {0}")]
+    InvalidData(String),
     /// Конфликт (дубликат ключа/имени, нарушение целостности).
     #[error("conflict: {0}")]
     Conflict(String),
@@ -26,4 +29,10 @@ pub enum Error {
     /// Ошибка serde (JSON-колонки).
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl From<String> for Error {
+    fn from(s: String) -> Self {
+        Error::InvalidData(s)
+    }
 }

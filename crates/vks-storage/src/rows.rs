@@ -5,47 +5,10 @@
 //! `vks-core` будет готов, это модуль заменяется маппингом на типы ядра.
 
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 use uuid::Uuid;
 
-/// Тип комнаты: `sfu` (SFU-forwarding) или `mcu` (MCU-mixing).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RoomMode {
-    /// SFU: peer-to-peer forwarding без перекодирования.
-    Sfu,
-    /// MCU: смешивание потоков на сервере.
-    Mcu,
-}
-
-impl RoomMode {
-    /// Строковое представление (значение в БД).
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Sfu => "sfu",
-            Self::Mcu => "mcu",
-        }
-    }
-}
-
-impl std::fmt::Display for RoomMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for RoomMode {
-    type Err = crate::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "sfu" => Ok(Self::Sfu),
-            "mcu" => Ok(Self::Mcu),
-            other => Err(crate::Error::Conflict(format!("unknown room mode: {other}"))),
-        }
-    }
-}
+/// Тип комнаты: ре-экспорт канонического типа из `vks-core` (M0-M1).
+pub use vks_core::RoomMode;
 
 /// Пользователь (PII: имя/email — GDPR 152-ФЗ, см. BACKEND_RULES §5.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

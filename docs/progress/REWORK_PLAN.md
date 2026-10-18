@@ -31,11 +31,11 @@
 | ID | Задача | Статус | Ремарка |
 |---|---|---|---|
 | T1.1 | v1 admin API: fail-closed JWT **+ RBAC** по матрице §1.7 | 🟢 | ревью-цикл 1–5 (журнал ниже) |
-| T1.2 | `/ws` (signaling): auth в handshake, лимиты кадра/частоты, комната создаётся только после валидного JoinRoom | ⚪ | сейчас JoinRoom создаёт комнату до валидации |
-| T1.3 | `/readyz` — честная готовность (`Readiness {db, media}`, без NATS-фикции) | ⚪ | сейчас хардкод |
-| T1.4 | Единый error-envelope для 405/415 (и прочих router-отказов) | ⚪ | разнобой конвертов |
-| T1.5 | v3-контракты: `POST /sessions`, `DELETE`, `GET /ui/conferences/{id}`, `PATCH`; `start_at/created_at`; `engine.connected`; `connections{}`; `/ui/video_layouts`; дедуп `rows::RoomMode`/DTO | ⚪ | сверка с бандлом |
-| T1.6 | Фикс инверсии стрелок сортировок `sessions.rs` (XOR) | ⚪ | N1 отчёта |
+| T1.2 | `/ws` (signaling): auth в handshake, лимиты кадра/частоты, комната создаётся только после валидного JoinRoom | 🟢 | P0.3 & P0.5: auth в handshake, Exactly-Once Disconnect, anti-zombie |
+| T1.3 | `/readyz` — честная готовность (`Readiness {db, media}`, без NATS-фикции) | 🟢 | удалена NATS-фикция, реальный пинг db/media |
+| T1.4 | Единый error-envelope для 405/415 (и прочих router-отказов) | 🟢 | error_envelope_middleware с сохранением RFC 9110 Allow |
+| T1.5 | v3-контракты: `POST /sessions`, `DELETE`, `GET /ui/conferences/{id}`, `PATCH`; `start_at/created_at`; `engine.connected`; `connections{}`; `/ui/video_layouts`; дедуп `rows::RoomMode`/DTO | 🟢 | M0–M1: дедупликация RoomMode, подтвержденная запись комнат/пользователей, аудит |
+| T1.6 | Фикс инверсии стрелок сортировок `sessions.rs` (XOR) | 🟢 | нормализовано в api_v3 |
 
 ### S2 — медиа-контур (движки в composition root)
 

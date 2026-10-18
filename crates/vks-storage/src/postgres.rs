@@ -103,7 +103,10 @@ impl PostgresStorage {
             .await?;
         // statement_timeout по BACKEND_RULES §5.1 (30s).
         pool.execute("SET statement_timeout = 30000").await?;
-        let storage = Self { pool, core_participants: std::sync::RwLock::new(std::collections::HashMap::new()) };
+        let storage = Self {
+            pool,
+            core_participants: std::sync::RwLock::new(std::collections::HashMap::new()),
+        };
         storage.migrate().await?;
         Ok(storage)
     }
@@ -229,7 +232,7 @@ impl PostgresStorage {
                 .fetch_optional(&self.pool)
                 .await?;
         let row = row.ok_or_else(|| crate::Error::NotFound(format!("room {room_id}")))?;
-        RoomMode::from_str(&row.mode)
+        Ok(RoomMode::from_str(&row.mode)?)
     }
 
     /// Возвращает все per-room overrides режима.
@@ -247,7 +250,10 @@ impl PostgresStorage {
 
     /// Удаляет per-room override режима комнаты.
     pub async fn delete_room_mode_override(&self, room_id: Uuid) -> Result<()> {
-        sqlx::query("DELETE FROM room_mode_override WHERE room_id = $1").bind(room_id).execute(&self.pool).await?;
+        sqlx::query("DELETE FROM room_mode_override WHERE room_id = $1")
+            .bind(room_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

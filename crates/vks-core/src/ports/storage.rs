@@ -63,12 +63,82 @@ pub struct ApiKey {
     pub revoked: bool,
 }
 
-/// Порт Storage — CRUD для Room/Participant/Layout/ApiKey.
+/// Запись пользователя для persistence (ADR-0022).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredUser {
+    /// Идентификатор пользователя.
+    pub id: UserId,
+    /// Имя пользователя (username).
+    pub username: String,
+    /// Роль пользователя (ADR-0022).
+    pub role: Role,
+    /// Отключен ли микрофон административно.
+    pub muted: bool,
+    /// Помечен ли на удаление (soft delete).
+    pub deleted: bool,
+}
+
+impl From<crate::ports::auth::User> for StoredUser {
+    fn from(u: crate::ports::auth::User) -> Self {
+        Self { id: u.id, username: u.username, role: u.role, muted: false, deleted: false }
+    }
+}
+
+/// Запись аудита для persistence (ADR-0019).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditEntry {
+    /// Время (ms epoch).
+    pub ts_ms: u64,
+    /// Пользователь (username или id).
+    pub user: String,
+    /// Действие (например "room.created").
+    pub action: String,
+    /// Комната (Option: None = глобальное).
+    pub room: Option<String>,
+    /// IP клиента.
+    pub ip: String,
+}
+
+/// Порт Storage — CRUD для Room/Participant/Layout/ApiKey/User/Audit.
 ///
 /// Ядро использует этот порт для persistence; конкретные реализации —
 /// в `vks-storage` (memory/sqlite/postgres).
 #[async_trait]
 pub trait Storage: Send + Sync + 'static {
+    // --- User CRUD ---
+
+    /// Сохраняет или обновляет пользователя.
+    async fn upsert_user(&self, _user: &StoredUser) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Загружает пользователя по id.
+    async fn get_user(&self, _id: UserId) -> Result<Option<StoredUser>, StorageError> {
+        Ok(None)
+    }
+
+    /// Удаляет пользователя по id.
+    async fn delete_user(&self, _id: UserId) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Список всех пользователей.
+    async fn list_users(&self) -> Result<Vec<StoredUser>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    // --- Audit Log ---
+
+    /// Добавляет запись аудита (append-only).
+    async fn append_audit(&self, _entry: &AuditEntry) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Список всех записей аудита.
+    async fn list_audit(&self) -> Result<Vec<AuditEntry>, StorageError> {
+        Ok(Vec::new())
+    }
+
     // --- Room CRUD ---
 
     /// Сохраняет комнату (create или update).
@@ -86,9 +156,7 @@ pub trait Storage: Send + Sync + 'static {
     // --- Room Mode Overrides ---
 
     /// Возвращает все per-room overrides режима (room_id -> mode).
-    async fn list_room_mode_overrides(
-        &self,
-    ) -> Result<std::collections::HashMap<RoomId, crate::room::RoomMode>, StorageError> {
+    async fn list_room_mode_overrides(&self) -> Result<std::collections::HashMap<RoomId, crate::room::RoomMode>, StorageError> {
         Ok(std::collections::HashMap::new())
     }
 

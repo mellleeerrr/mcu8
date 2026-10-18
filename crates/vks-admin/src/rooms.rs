@@ -15,7 +15,9 @@ pub struct Rooms;
 impl Rooms {
     /// Вычисляет эффективный режим комнаты (явный override иначе глобальный режим).
     fn resolve_effective_mode(state: &AppState, override_mode: Option<RoomMode>) -> RoomMode {
-        override_mode.unwrap_or_else(|| state.mode.lock().expect("mode store poisoned").global_mode)
+        override_mode.unwrap_or_else(|| {
+            state.mode.lock().expect("mode store poisoned").global_mode
+        })
     }
 
     /// Создаёт комнату (per-room режим = `None`, т.е. глобальный).
@@ -39,6 +41,24 @@ impl Rooms {
             }
         }
         record
+    }
+
+    /// Создаёт комнату с подтвержденной синхронной записью в Storage до ответа (M0-M1).
+    pub async fn create_async(state: &AppState, name: impl Into<String>) -> Result<RoomRecord, vks_core::ports::storage::StorageError> {
+        let id = RoomId::new();
+        let record = RoomRecord::new(id, name, None);
+        if let Some(storage) = &state.storage {
+            let effective_mode = Self::resolve_effective_mode(state, record.mode);
+            let mut cr = vks_core::Room::new(record.name.clone(), effective_mode);
+            cr.id = id;
+            cr.created_ms = record.created_ms;
+            storage.upsert_room(&cr).await?;
+        }
+        {
+            let mut rooms = state.rooms.lock().expect("rooms store poisoned");
+            rooms.insert(id, record.clone());
+        }
+        Ok(record)
     }
 
     /// Возвращает запись комнаты.
@@ -79,14 +99,11 @@ impl Rooms {
                     new_mode: m,
                     switch_epoch: mode_state.switch_epoch,
                 });
-                state.notify_admin(
-                    "room:mode_changed",
-                    serde_json::json!({
-                        "room_id": id.to_string(),
-                        "mode": m,
-                        "switch_epoch": mode_state.switch_epoch,
-                    }),
-                );
+                state.notify_admin("room:mode_changed", serde_json::json!({
+                    "room_id": id.to_string(),
+                    "mode": m,
+                    "switch_epoch": mode_state.switch_epoch,
+                }));
                 true
             } else {
                 false
@@ -148,6 +165,64 @@ impl Rooms {
             }
         }
         true
+    }
+
+    /// Обновляет запись с подтвержденной синхронной записью в Storage до ответа (M0-M1).
+    pub async fn update_async(
+        state: &AppState,
+        id: &RoomId,
+        name: Option<String>,
+        mode: Option<RoomMode>,
+        participants: Option<usize>,
+        bitrate_kbps: Option<u32>,
+    ) -> Result<Option<RoomRecord>, vks_core::ports::storage::StorageError> {
+        let (current_name, current_created_ms, effective_mode, mode_changed, opt_override) = {
+            let rooms = state.rooms.lock().expect("rooms store poisoned");
+            let rec = match rooms.get(id) {
+                Some(r) => r.clone(),
+                None => return Ok(None),
+            };
+            let new_name = name.clone().unwrap_or(rec.name);
+            let mode_changed = if let Some(m) = mode {
+                let old_effective = Self::resolve_effective_mode(state, rec.mode);
+                old_effective != m
+            } else {
+                false
+            };
+            let effective_mode = Self::resolve_effective_mode(state, mode.or(rec.mode));
+            (new_name, rec.created_ms, effective_mode, mode_changed, mode.or(rec.mode))
+        };
+
+        if let Some(storage) = &state.storage {
+            let mut cr = vks_core::Room::new(current_name, effective_mode);
+            cr.id = *id;
+            cr.created_ms = current_created_ms;
+            storage.upsert_room(&cr).await?;
+            if mode_changed {
+                if let Some(m) = opt_override {
+                    storage.set_room_mode_override(*id, m).await?;
+                }
+            }
+        }
+
+        let updated = Self::update(state, id, name, mode, participants, bitrate_kbps);
+        Ok(updated)
+    }
+
+    /// Удаляет комнату с подтвержденным синхронным удалением из Storage до ответа (M0-M1).
+    pub async fn delete_async(state: &AppState, id: &RoomId) -> Result<bool, vks_core::ports::storage::StorageError> {
+        let exists = {
+            let rooms = state.rooms.lock().expect("rooms store poisoned");
+            rooms.contains_key(id)
+        };
+        if !exists {
+            return Ok(false);
+        }
+        if let Some(storage) = &state.storage {
+            let _ = storage.delete_room_mode_override(*id).await;
+            storage.delete_room(*id).await?;
+        }
+        Ok(Self::delete(state, id))
     }
 
     /// Live view (Observer, read-only): запись + эффективный режим

@@ -44,13 +44,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_metrics();
 
     // 3. Загрузка конфигурации
-    let config_path = std::env::args().nth(1).or_else(|| {
-        if std::path::Path::new("configs/default.toml").exists() {
-            Some("configs/default.toml".to_string())
-        } else {
-            None
-        }
-    });
+    let config_path = std::env::args()
+        .nth(1)
+        .or_else(|| std::env::var("VKS_CONFIG_PATH").ok())
+        .or_else(|| {
+            if std::path::Path::new("configs/default.toml").exists() {
+                Some("configs/default.toml".to_string())
+            } else {
+                None
+            }
+        });
 
     let config = match Config::load(config_path.as_deref()) {
         Ok(c) => {
@@ -105,11 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else if !config.database_url.is_empty() {
         error!(url = %vks_common::config::redact_dsn(&config.database_url), "unsupported database scheme in database_url; aborting startup");
-        return Err(format!(
-            "unsupported database scheme in database_url: {}",
-            vks_common::config::redact_dsn(&config.database_url)
-        )
-        .into());
+        return Err(format!("unsupported database scheme in database_url: {}", vks_common::config::redact_dsn(&config.database_url)).into());
     } else {
         info!("using in-memory storage (database_url not configured)");
         Arc::new(MemoryStorage::new())
@@ -117,6 +116,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Инициализация состояния админ-сервера + bootstrap auth `/api/v3` (§4.3).
     let mut admin_state = AppState::with_storage(storage.clone());
+
+    if let Err(e) = admin_state.sync_from_storage().await {
+        warn!(error = %e, "warning during storage synchronization");
+    }
 
     // JwtIssuer: пустой секрет → fail-closed (503 на `/api/v3/*`, включая login, и `/api/v1/*`).
     if config.jwt_secret.is_empty() {
@@ -136,9 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // LocalDb-оператор (dev-дефолт admin/admin; прод — VKS_ADMIN_PASSWORD).
     let local_db = Arc::new(LocalDb::new());
     match local_db.register(vks_core::BOOTSTRAP_ADMIN_USER_ID, &config.admin_login, &config.admin_password) {
-        Ok(_) => {
-            info!(login = %config.admin_login, id = vks_core::BOOTSTRAP_ADMIN_USER_ID, "local_db operator registered")
-        }
+        Ok(_) => info!(login = %config.admin_login, id = vks_core::BOOTSTRAP_ADMIN_USER_ID, "local_db operator registered"),
         Err(e) => warn!(error = %e, "local_db operator bootstrap skipped"),
     }
     if config.admin_password == "admin" {
@@ -165,8 +166,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     admin_state.auth_provider = Some(auth_provider);
     admin_state.local_db = Some(local_db);
-    // Держим оператора в admin-хранилище users с детерминированным UserId::bootstrap_operator().
-    vks_admin::users::Users::bootstrap_operator(&admin_state, &config.admin_login);
+    // Держим оператора в admin-хранилище users с детерминированным UserId::bootstrap_operator() и пишем в постоянное хранилище.
+    if let Err(e) = vks_admin::users::Users::bootstrap_operator_async(&admin_state, &config.admin_login).await {
+        warn!(error = %e, "failed to bootstrap operator into storage, falling back to memory");
+        vks_admin::users::Users::bootstrap_operator(&admin_state, &config.admin_login);
+    }
 
     let initial_mode = match config.default_room_mode.to_lowercase().as_str() {
         "mcu" => vks_core::RoomMode::Mcu,
@@ -177,10 +181,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut s = admin_state.settings.lock().unwrap();
         s.name = config.server_name.clone();
         s.default_mode = initial_mode;
-    }
-
-    if let Err(e) = admin_state.sync_from_storage().await {
-        warn!(error = %e, "warning during storage synchronization");
     }
     let admin_state = Arc::new(admin_state);
 
@@ -200,27 +200,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _sfu_engine = Arc::new(vks_media_sfu::SfuEngine::new());
     let _mcu_engine = Arc::new(vks_media_mcu::McuEngine::new());
 
-    let (udp_loop, receive_task, candidate_addr, candidate_port) = match vks_media_sfu::udp_loop::UdpMediaLoop::bind(
-        &config.media_listen_addr,
-    )
-    .await
-    {
-        Ok(loop_handle) => {
-            let local_addr = loop_handle.local_addr();
-            info!(addr = %local_addr, "WebRTC UDP media loop active");
-            let task = loop_handle.start_receive_loop(move |src, packet| {
+    let (udp_loop, receive_task, candidate_addr, candidate_port) =
+        match vks_media_sfu::udp_loop::UdpMediaLoop::bind(&config.media_listen_addr).await {
+            Ok(loop_handle) => {
+                let local_addr = loop_handle.local_addr();
+                info!(addr = %local_addr, "WebRTC UDP media loop active");
+                let task = loop_handle.start_receive_loop(move |src, packet| {
                     tracing::trace!(src = %src, track = %packet.track, len = packet.payload.len(), "received UDP media packet");
                 });
-            let ip =
-                if local_addr.ip().is_unspecified() { "127.0.0.1".to_string() } else { local_addr.ip().to_string() };
-            let port = local_addr.port();
-            (Some(Arc::new(loop_handle)), Some(task), ip, port)
-        }
-        Err(e) => {
-            warn!(error = %e, addr = %config.media_listen_addr, "failed to bind UDP media loop");
-            (None, None, "127.0.0.1".to_string(), 0)
-        }
-    };
+                let ip = if local_addr.ip().is_unspecified() {
+                    "127.0.0.1".to_string()
+                } else {
+                    local_addr.ip().to_string()
+                };
+                let port = local_addr.port();
+                (Some(Arc::new(loop_handle)), Some(task), ip, port)
+            }
+            Err(e) => {
+                warn!(error = %e, addr = %config.media_listen_addr, "failed to bind UDP media loop");
+                (None, None, "127.0.0.1".to_string(), 0)
+            }
+        };
 
     // 8. Конфигурация обработчика сигналинга с реальными ICE/кодек атрибутами
     let ice_servers: Vec<vks_proto::signaling::IceServer> = config

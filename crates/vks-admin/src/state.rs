@@ -52,7 +52,7 @@ impl RoomRecord {
 }
 
 /// Текущее время, ms epoch (0 при сбое системных часов — не паникуем).
-fn now_unix_ms() -> u64 {
+pub fn now_unix_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
@@ -222,7 +222,10 @@ impl AppState {
 
     /// Отправляет push-уведомление администраторам (в `/api/v3/ws`).
     pub fn notify_admin(&self, topic: &str, payload: serde_json::Value) {
-        let _ = self.admin_events.send(crate::hub::AdminBroadcastEvent { topic: topic.to_string(), payload });
+        let _ = self.admin_events.send(crate::hub::AdminBroadcastEvent {
+            topic: topic.to_string(),
+            payload,
+        });
     }
 
     /// Рассылает сигнальное сообщение всем участникам комнаты.
@@ -265,8 +268,54 @@ impl AppState {
             ip: ip.into(),
         };
         if let Ok(mut audit) = self.audit.lock() {
-            audit.record(entry);
+            audit.record(entry.clone());
         }
+        if let Some(storage) = &self.storage {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let storage = Arc::clone(storage);
+                let core_entry = vks_core::ports::storage::AuditEntry {
+                    ts_ms: entry.ts_ms,
+                    user: entry.user,
+                    action: entry.action,
+                    room: entry.room,
+                    ip: entry.ip,
+                };
+                drop(handle.spawn(async move {
+                    let _ = storage.append_audit(&core_entry).await;
+                }));
+            }
+        }
+    }
+
+    /// Добавляет доверенную запись в аудит-лог с подтвержденной записью в Storage (M0-M1).
+    pub async fn record_audit_entry_async(
+        &self,
+        user: impl Into<String>,
+        action: impl Into<String>,
+        room: Option<String>,
+        ip: impl Into<String>,
+    ) -> Result<crate::audit::AuditEntry, vks_core::ports::storage::StorageError> {
+        let entry = crate::audit::AuditEntry {
+            ts_ms: now_unix_ms(),
+            user: user.into(),
+            action: action.into(),
+            room,
+            ip: ip.into(),
+        };
+        if let Some(storage) = &self.storage {
+            let core_entry = vks_core::ports::storage::AuditEntry {
+                ts_ms: entry.ts_ms,
+                user: entry.user.clone(),
+                action: entry.action.clone(),
+                room: entry.room.clone(),
+                ip: entry.ip.clone(),
+            };
+            storage.append_audit(&core_entry).await?;
+        }
+        if let Ok(mut audit) = self.audit.lock() {
+            audit.record(entry.clone());
+        }
+        Ok(entry)
     }
 
     /// Создаёт состояние с подключенным хранилищем ядра.
@@ -276,27 +325,41 @@ impl AppState {
         state
     }
 
-    /// Синхронизирует начальное состояние комнат и оверрайдов из хранилища.
+    /// Синхронизирует начальное состояние комнат, оверрайдов и пользователей из хранилища (M0-M1).
     pub async fn sync_from_storage(&self) -> Result<(), String> {
         if let Some(storage) = &self.storage {
             let rooms = storage.list_rooms().await.map_err(|e| e.to_string())?;
             let overrides = storage.list_room_mode_overrides().await.unwrap_or_default();
 
-            let mut map = self.rooms.lock().map_err(|e| e.to_string())?;
-            let mut mode_state = self.mode.lock().map_err(|e| e.to_string())?;
+            {
+                let mut map = self.rooms.lock().map_err(|e| e.to_string())?;
+                let mut mode_state = self.mode.lock().map_err(|e| e.to_string())?;
 
-            for r in rooms {
-                let override_mode = overrides.get(&r.id).copied();
-                if let Some(om) = override_mode {
-                    mode_state.room_mode_overrides.insert(r.id, om);
+                for r in rooms {
+                    let override_mode = overrides.get(&r.id).copied();
+                    if let Some(om) = override_mode {
+                        mode_state.room_mode_overrides.insert(r.id, om);
+                    }
+                    map.entry(r.id).or_insert_with(|| RoomRecord {
+                        id: r.id,
+                        name: r.name,
+                        mode: override_mode,
+                        participants: 0,
+                        bitrate_kbps: 0,
+                        created_ms: if r.created_ms > 0 { r.created_ms } else { now_unix_ms() },
+                    });
                 }
-                map.entry(r.id).or_insert_with(|| RoomRecord {
-                    id: r.id,
-                    name: r.name,
-                    mode: override_mode,
-                    participants: 0,
-                    bitrate_kbps: 0,
-                    created_ms: if r.created_ms > 0 { r.created_ms } else { now_unix_ms() },
+            }
+
+            let users = storage.list_users().await.map_err(|e| e.to_string())?;
+            let mut users_map = self.users.lock().map_err(|e| e.to_string())?;
+            for u in users {
+                users_map.entry(u.id).or_insert_with(|| UserRecord {
+                    id: u.id,
+                    username: u.username,
+                    role: u.role,
+                    muted: u.muted,
+                    deleted: u.deleted,
                 });
             }
         }

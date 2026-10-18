@@ -21,7 +21,7 @@ admin_password = "admin_password"
 frontend_dir = "client/pnm-frontend/deployed/pnm"
 
 # Storage & Persistence (PostgreSQL, SQLite or Memory)
-database_url = "sqlite::memory:"
+database_url = "sqlite::memory:?cache=shared"
 storage_allow_fallback = false
 
 # External Integrations

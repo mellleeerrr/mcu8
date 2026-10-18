@@ -14,14 +14,12 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use vks_auth::jwt::VerifiedJwt;
 use vks_core::RoomId;
 
 use super::{error_json, track};
-use crate::audit::AuditEntry;
 use crate::rooms::Rooms;
 use crate::settings::SettingsService;
 use crate::state::{AppState, RoomRecord, SharedState};
@@ -125,7 +123,11 @@ fn select_rooms(state: &AppState, query: &SessionsQuery) -> (Vec<RoomRecord>, us
 
 /// JSON сессии/конференции (мапперы `Fv`/`dy`/`zZ` мягкие).
 fn session_json(r: &RoomRecord, connections_limit: u32, is_stopped: bool) -> Value {
-    let (state_str, has_stopped) = if is_stopped { ("STOPPED", true) } else { ("ACTIVE", false) };
+    let (state_str, has_stopped) = if is_stopped {
+        ("STOPPED", true)
+    } else {
+        ("ACTIVE", false)
+    };
     json!({
         "id": r.id.to_string(),
         "display_name": r.name,
@@ -156,14 +158,7 @@ fn find_room(state: &AppState, id: &str) -> Option<RoomRecord> {
 }
 
 fn audit_room(state: &AppState, user: &str, action: &str, room_id: &str) {
-    let ts_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-    state.audit.lock().expect("audit store poisoned").record(AuditEntry {
-        ts_ms,
-        user: user.to_string(),
-        action: action.to_string(),
-        room: Some(room_id.to_string()),
-        ip: String::new(),
-    });
+    state.record_audit_entry(user, action, Some(room_id.to_string()), "127.0.0.1");
 }
 
 fn sessions_payload(state: &AppState, query: &SessionsQuery) -> Value {
@@ -197,8 +192,7 @@ pub async fn session(State(state): State<SharedState>, Path(id): Path<String>) -
     track("sessions/{id}");
     match find_room(&state, &id) {
         Some(room) => {
-            let is_stopped =
-                state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
+            let is_stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
             Json(json!({ "session": session_json(&room, connections_limit(&state), is_stopped) })).into_response()
         }
         None => error_json(404, "Session not found"),
@@ -227,7 +221,10 @@ pub async fn start_session(
             None => return error_json(404, "Conference not found"),
         }
     } else {
-        Rooms::create(&state, "Quick Session".to_string())
+        match Rooms::create_async(&state, "Quick Session".to_string()).await {
+            Ok(r) => r,
+            Err(e) => return error_json(500, &format!("Storage error: {e}")),
+        }
     };
     audit_room(&state, &verified.user_id, "session.started", &room.id.to_string());
     Json(json!({ "session": session_json(&room, connections_limit(&state), false) })).into_response()
@@ -242,7 +239,7 @@ pub async fn stop_session(
     track("sessions/{id}");
     match find_room(&state, &id) {
         Some(room) => {
-            Rooms::update(&state, &room.id, None, None, Some(0), Some(0));
+            let _ = Rooms::update_async(&state, &room.id, None, None, Some(0), Some(0)).await;
             state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").insert(room.id);
             audit_room(&state, &verified.user_id, "session.stopped", &room.id.to_string());
             StatusCode::NO_CONTENT.into_response()
@@ -277,7 +274,10 @@ pub async fn create_conference(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Conference".to_string());
-    let record = Rooms::create(&state, name);
+    let record = match Rooms::create_async(&state, name).await {
+        Ok(r) => r,
+        Err(e) => return error_json(500, &format!("Storage error: {e}")),
+    };
     audit_room(&state, &verified.user_id, "conference.created", &record.id.to_string());
     Json(json!({ "conference": session_json(&record, connections_limit(&state), false) })).into_response()
 }
@@ -287,8 +287,7 @@ pub async fn conference(State(state): State<SharedState>, Path(id): Path<String>
     track("conferences/{id}");
     match find_room(&state, &id) {
         Some(room) => {
-            let is_stopped =
-                state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
+            let is_stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
             Json(json!({ "conference": session_json(&room, connections_limit(&state), is_stopped) })).into_response()
         }
         None => error_json(404, "Conference not found"),
@@ -307,7 +306,9 @@ pub async fn update_conference(
         return error_json(404, "Conference not found");
     };
     if let Some(new_name) = body.display_name.filter(|s| !s.trim().is_empty()) {
-        Rooms::update(&state, &room.id, Some(new_name), None, None, None);
+        if let Err(e) = Rooms::update_async(&state, &room.id, Some(new_name), None, None, None).await {
+            return error_json(500, &format!("Storage error: {e}"));
+        }
     }
     audit_room(&state, &verified.user_id, "conference.updated", &room.id.to_string());
     let updated = find_room(&state, &id).unwrap_or(room);
@@ -323,15 +324,15 @@ pub async fn delete_conference(
 ) -> Response {
     track("conferences/{id}");
     match find_room(&state, &id) {
-        Some(room) => {
-            if Rooms::delete(&state, &room.id) {
+        Some(room) => match Rooms::delete_async(&state, &room.id).await {
+            Ok(true) => {
                 state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").remove(&room.id);
                 audit_room(&state, &verified.user_id, "conference.deleted", &room.id.to_string());
                 StatusCode::NO_CONTENT.into_response()
-            } else {
-                error_json(404, "Conference not found")
             }
-        }
+            Ok(false) => error_json(404, "Conference not found"),
+            Err(e) => error_json(500, &format!("Storage error: {e}")),
+        },
         None => error_json(404, "Conference not found"),
     }
 }

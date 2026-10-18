@@ -97,6 +97,18 @@ impl std::fmt::Display for RoomMode {
     }
 }
 
+impl std::str::FromStr for RoomMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "sfu" => Ok(Self::Sfu),
+            "mcu" => Ok(Self::Mcu),
+            other => Err(format!("unknown room mode: {other}")),
+        }
+    }
+}
+
 /// Состояние комнаты (жизненный цикл).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

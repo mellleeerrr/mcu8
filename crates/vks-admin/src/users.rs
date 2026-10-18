@@ -74,6 +74,95 @@ impl Users {
         }
     }
 
+    /// Создаёт пользователя с подтвержденной записью в Storage (M0-M1).
+    pub async fn create_async(
+        state: &AppState,
+        username: impl Into<String>,
+        role: Role,
+    ) -> Result<UserRecord, vks_core::ports::storage::StorageError> {
+        Self::create_with_id_async(state, UserId::new(), username, role).await
+    }
+
+    /// Создаёт или обновляет пользователя с заданным [`UserId`] с подтвержденной записью в Storage (M0-M1).
+    pub async fn create_with_id_async(
+        state: &AppState,
+        id: UserId,
+        username: impl Into<String>,
+        role: Role,
+    ) -> Result<UserRecord, vks_core::ports::storage::StorageError> {
+        let name = username.into();
+        if let Some(storage) = &state.storage {
+            let stored = vks_core::ports::storage::StoredUser {
+                id,
+                username: name.clone(),
+                role,
+                muted: false,
+                deleted: false,
+            };
+            storage.upsert_user(&stored).await?;
+        }
+        Ok(Self::create_with_id(state, id, name, role))
+    }
+
+    /// Регистрирует встроенного оператора с подтвержденной записью в Storage (M0-M1).
+    pub async fn bootstrap_operator_async(
+        state: &AppState,
+        username: impl Into<String>,
+    ) -> Result<UserRecord, vks_core::ports::storage::StorageError> {
+        Self::create_with_id_async(state, UserId::bootstrap_operator(), username, Role::Operator).await
+    }
+
+    /// Обновляет username/role с подтвержденной записью в Storage (M0-M1).
+    pub async fn update_async(
+        state: &AppState,
+        id: &UserId,
+        username: Option<String>,
+        role: Option<Role>,
+    ) -> Result<Option<UserRecord>, vks_core::ports::storage::StorageError> {
+        let current = {
+            let users = state.users.lock().expect("users store poisoned");
+            match users.get(id) {
+                Some(u) => u.clone(),
+                None => return Ok(None),
+            }
+        };
+        let new_username = username.clone().unwrap_or(current.username);
+        let new_role = role.unwrap_or(current.role);
+        if let Some(storage) = &state.storage {
+            let stored = vks_core::ports::storage::StoredUser {
+                id: *id,
+                username: new_username,
+                role: new_role,
+                muted: current.muted,
+                deleted: current.deleted,
+            };
+            storage.upsert_user(&stored).await?;
+        }
+        Ok(Self::update(state, id, username, role))
+    }
+
+    /// Soft-delete с подтвержденным обновлением в Storage (M0-M1).
+    pub async fn delete_async(state: &AppState, id: &UserId) -> Result<bool, vks_core::ports::storage::StorageError> {
+        let current = {
+            let users = state.users.lock().expect("users store poisoned");
+            match users.get(id) {
+                Some(u) if !u.deleted => u.clone(),
+                _ => return Ok(false),
+            }
+        };
+        if let Some(storage) = &state.storage {
+            let stored = vks_core::ports::storage::StoredUser {
+                id: *id,
+                username: current.username,
+                role: current.role,
+                muted: current.muted,
+                deleted: true,
+            };
+            storage.upsert_user(&stored).await?;
+        }
+        Ok(Self::delete(state, id))
+    }
+
     /// Bulk: mute/unmute по списку ids (состояние `UserRecord`).
     ///
     /// RBAC: Operator — зона «Управление пользователями» (ADR-0022; энфорсится

@@ -23,6 +23,8 @@ pub struct MemoryStorage {
     core_participants: RwLock<HashMap<vks_core::participant::ParticipantId, vks_core::participant::Participant>>,
     core_layouts: RwLock<HashMap<String, vks_core::ports::storage::Layout>>,
     core_api_keys: RwLock<HashMap<String, vks_core::ports::storage::ApiKey>>,
+    core_users: RwLock<HashMap<vks_core::UserId, vks_core::ports::storage::StoredUser>>,
+    core_audit: RwLock<Vec<vks_core::ports::storage::AuditEntry>>,
 }
 
 impl MemoryStorage {
@@ -42,6 +44,14 @@ impl MemoryStorage {
 
     pub(crate) fn api_keys_map(&self) -> &RwLock<HashMap<String, vks_core::ports::storage::ApiKey>> {
         &self.core_api_keys
+    }
+
+    pub(crate) fn users_map(&self) -> &RwLock<HashMap<vks_core::UserId, vks_core::ports::storage::StoredUser>> {
+        &self.core_users
+    }
+
+    pub(crate) fn audit_log(&self) -> &RwLock<Vec<vks_core::ports::storage::AuditEntry>> {
+        &self.core_audit
     }
 
     pub(crate) fn room_mode_overrides_map(&self) -> &RwLock<HashMap<Uuid, RoomMode>> {
