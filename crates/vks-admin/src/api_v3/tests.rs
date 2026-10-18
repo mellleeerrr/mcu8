@@ -870,4 +870,171 @@ async fn test_m0_ui_system_status_faults_and_password_persistence() {
     let fresh_app = app(std::sync::Arc::new(fresh_state));
     let restored_token = login_token(&fresh_app, "admin", "new_secret_pwd_42").await;
     assert!(!restored_token.is_empty());
+
+    // 6. Verify audit entries were durably persisted to storage and reloaded
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let audit_records = vks_core::ports::storage::Storage::list_audit(storage.as_ref()).await.unwrap();
+    assert!(audit_records.iter().any(|a| a.action == "password.changed" && a.user == "admin"));
+}
+
+#[tokio::test]
+async fn test_m1_password_change_failure_rolls_back_and_preserves_old_credentials() {
+    let storage = std::sync::Arc::new(vks_storage::MemoryStorage::new());
+    let local_db = std::sync::Arc::new(vks_auth::local_db::LocalDb::new());
+    local_db.register(vks_core::BOOTSTRAP_ADMIN_USER_ID, "admin", "original_secret").unwrap();
+
+    let mut state = AppState::with_storage(storage.clone());
+    state.local_db = Some(local_db.clone());
+    state.jwt_issuer = Some(std::sync::Arc::new(vks_auth::jwt::JwtIssuer::new(vks_auth::jwt::JwtConfig {
+        secret: "test_secret".to_string(),
+        ttl_secs: 3600,
+        issuer: "test".to_string(),
+    })));
+    crate::users::Users::bootstrap_operator_async(&state, "admin").await.unwrap();
+
+    let state = std::sync::Arc::new(state);
+    let app_router = app(state.clone());
+    let token = login_token(&app_router, "admin", "original_secret").await;
+
+    // Inject database storage failure
+    state.inject_fault("db");
+
+    // Attempt to change password while DB is failed
+    let chg_resp = send(
+        &app_router,
+        request(
+            "PATCH",
+            "/api/v3/password",
+            Some(&token),
+            json!({
+                "username": "admin",
+                "old_password": "original_secret",
+                "new_password": "unpersisted_new_pass"
+            }),
+        ),
+    )
+    .await;
+
+    // Must fail-closed with 503 error
+    assert_eq!(chg_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // Old password must STILL work!
+    let login_old = send(
+        &app_router,
+        request("POST", "/api/v3/login", None, json!({ "login": "admin", "password": "original_secret" })),
+    )
+    .await;
+    assert_eq!(login_old.status(), StatusCode::OK);
+
+    // Unpersisted new password must NOT work!
+    let login_new = send(
+        &app_router,
+        request("POST", "/api/v3/login", None, json!({ "login": "admin", "password": "unpersisted_new_pass" })),
+    )
+    .await;
+    assert_eq!(login_new.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_m0_custom_layouts_api_keys_and_gateway_cluster_status() {
+    let storage = std::sync::Arc::new(vks_storage::MemoryStorage::new());
+
+    // 1. Seed custom layout in storage
+    let custom_layout = vks_core::ports::storage::Layout {
+        id: "custom_3x3".to_string(),
+        name: "3x3 Grid Custom".to_string(),
+        version: 1,
+        assigned_rooms: std::collections::BTreeMap::new(),
+        is_default: false,
+    };
+    vks_core::ports::storage::Storage::upsert_layout(storage.as_ref(), &custom_layout).await.unwrap();
+
+    // 2. Seed API key in storage
+    let (plain_key, _key_meta) = vks_auth::api_key::generate("key-op-1");
+    let key_hash = vks_auth::api_key::sha256_hex(plain_key.as_bytes());
+    let admin_id = vks_core::UserId::parse(vks_core::BOOTSTRAP_ADMIN_USER_ID).unwrap();
+    let stored_key = vks_core::ports::storage::ApiKey {
+        id: key_hash.clone(),
+        scopes: vec!["admin".to_string()],
+        owner: admin_id,
+        revoked: false,
+    };
+    vks_core::ports::storage::Storage::upsert_api_key(storage.as_ref(), &stored_key).await.unwrap();
+
+    // 3. Create state and sync from storage
+    let mut state = AppState::with_storage(storage.clone());
+    let local_db = std::sync::Arc::new(vks_auth::local_db::LocalDb::new());
+    local_db.register(vks_core::BOOTSTRAP_ADMIN_USER_ID, "admin", "admin_secret").unwrap();
+    state.local_db = Some(local_db);
+    state.jwt_issuer = Some(std::sync::Arc::new(vks_auth::jwt::JwtIssuer::new(vks_auth::jwt::JwtConfig {
+        secret: "test_secret".to_string(),
+        ttl_secs: 3600,
+        issuer: "test".to_string(),
+    })));
+    crate::users::Users::bootstrap_operator_async(&state, "admin").await.unwrap();
+
+    state.sync_from_storage().await.expect("sync_from_storage succeeds");
+
+    // Verify custom layout is hydrated in state.layouts
+    {
+        let layouts = state.layouts.lock().unwrap();
+        assert!(layouts.contains_key("custom_3x3"));
+        assert_eq!(layouts.get("custom_3x3").unwrap().name, "3x3 Grid Custom");
+    }
+
+    // Verify API key is hydrated in state.api_keys
+    {
+        let keys = state.api_keys.lock().unwrap();
+        assert!(keys.contains_key(&key_hash));
+    }
+
+    let state = std::sync::Arc::new(state);
+    let app_router = app(state.clone());
+    let token = login_token(&app_router, "admin", "admin_secret").await;
+
+    // 4. Verify GET /api/v3/video_layouts returns Grid, Focus, Speaker, AND custom_3x3
+    let vl_resp = send(&app_router, request("GET", "/api/v3/video_layouts", Some(&token), json!({}))).await;
+    assert_eq!(vl_resp.status(), StatusCode::OK);
+    let vl_body = json_body(vl_resp).await;
+    let list = vl_body["video_layouts"].as_array().expect("array of layouts");
+    assert!(list.iter().any(|l| l["id"] == "grid"));
+    assert!(list.iter().any(|l| l["id"] == "focus"));
+    assert!(list.iter().any(|l| l["id"] == "speaker"));
+    assert!(list.iter().any(|l| l["id"] == "custom_3x3" && l["title"] == "3x3 Grid Custom"));
+
+    // 5. Test truthful gateway and cluster status in ui/system/status
+    let status_resp = send(&app_router, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    assert_eq!(status_resp.status(), StatusCode::OK);
+    let status_body = json_body(status_resp).await;
+    assert_eq!(status_body["sip"]["status"], "READY");
+    assert_eq!(status_body["sip"]["connected"], true);
+    assert_eq!(status_body["h323"]["status"], "READY");
+    assert_eq!(status_body["h323"]["connected"], true);
+    assert_eq!(status_body["cluster"]["status"], "READY");
+    assert_eq!(status_body["cluster"]["connected"], true);
+    assert_eq!(status_body["cluster"]["lease_valid"], true);
+
+    // 6. Inject SIP fault
+    state.inject_fault("sip");
+    let resp = send(&app_router, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    let body = json_body(resp).await;
+    assert_eq!(body["sip"]["status"], "FAILED");
+    assert_eq!(body["sip"]["connected"], false);
+    assert_eq!(body["h323"]["status"], "READY");
+    state.clear_fault("sip");
+
+    // 7. Inject Cluster fault
+    state.inject_fault("cluster");
+    let resp = send(&app_router, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    let body = json_body(resp).await;
+    assert_eq!(body["cluster"]["status"], "FAILED");
+    assert_eq!(body["cluster"]["connected"], false);
+    state.clear_fault("cluster");
+
+    // 8. Inject Lease fault
+    state.inject_fault("lease");
+    let resp = send(&app_router, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    let body = json_body(resp).await;
+    assert_eq!(body["cluster"]["lease_valid"], false);
+    state.clear_fault("lease");
 }

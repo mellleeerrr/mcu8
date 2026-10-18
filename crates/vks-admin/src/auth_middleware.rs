@@ -93,23 +93,36 @@ pub async fn jwt_auth_middleware(State(state): State<Arc<AppState>>, mut request
             return deny(StatusCode::UNAUTHORIZED, "invalid_api_key", "malformed api key");
         }
         let hash = vks_auth::api_key::sha256_hex(key.as_bytes());
-        let Some(storage) = &state.storage else {
-            return deny(StatusCode::SERVICE_UNAVAILABLE, "auth_unavailable", "storage is unavailable");
-        };
-
-        let key_record = match storage.get_api_key(&hash).await {
-            Ok(Some(k)) => k,
-            Ok(None) => match storage.get_api_key(key).await {
+        let key_record = if let Some(storage) = &state.storage {
+            if state.has_fault("db") {
+                return deny(StatusCode::SERVICE_UNAVAILABLE, "auth_unavailable", "database is unavailable");
+            }
+            match storage.get_api_key(&hash).await {
                 Ok(Some(k)) => k,
-                Ok(None) => return deny(StatusCode::UNAUTHORIZED, "invalid_api_key", "api key not found"),
+                Ok(None) => match storage.get_api_key(key).await {
+                    Ok(Some(k)) => k,
+                    Ok(None) => {
+                        let in_mem = state.api_keys.lock().map_err(|_| ()).ok();
+                        match in_mem.and_then(|m| m.get(&hash).cloned().or_else(|| m.get(key).cloned())) {
+                            Some(k) => k,
+                            None => return deny(StatusCode::UNAUTHORIZED, "invalid_api_key", "api key not found"),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "storage error querying api key");
+                        return deny(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "storage error");
+                    }
+                },
                 Err(e) => {
                     tracing::error!(error = %e, "storage error querying api key");
                     return deny(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "storage error");
                 }
-            },
-            Err(e) => {
-                tracing::error!(error = %e, "storage error querying api key");
-                return deny(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "storage error");
+            }
+        } else {
+            let in_mem = state.api_keys.lock().map_err(|_| ()).ok();
+            match in_mem.and_then(|m| m.get(&hash).cloned().or_else(|| m.get(key).cloned())) {
+                Some(k) => k,
+                None => return deny(StatusCode::UNAUTHORIZED, "invalid_api_key", "api key not found"),
             }
         };
 

@@ -36,24 +36,39 @@ impl Liveness {
     }
 }
 
-/// Readiness (DB + media OK → ready).
+/// Readiness (DB + media + cluster + gateways OK → ready).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Readiness {
     /// Хранилище: ping OK (`SELECT 1`); без хранилища (in-memory) — true.
     pub db: bool,
     /// Media (SFU/MCU instances healthy).
     pub media: bool,
+    /// Кластер: лизы валидны, координация активна.
+    #[serde(default = "default_true")]
+    pub cluster: bool,
+    /// Шлюзы: SIP/H.323 доступны.
+    #[serde(default = "default_true")]
+    pub gateway: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Readiness {
     /// Создаёт readiness из флагов.
     pub fn new(db: bool, media: bool) -> Self {
-        Self { db, media }
+        Self { db, media, cluster: true, gateway: true }
+    }
+
+    /// Создаёт полный readiness из всех компонентов.
+    pub fn with_components(db: bool, media: bool, cluster: bool, gateway: bool) -> Self {
+        Self { db, media, cluster, gateway }
     }
 
     /// Все зависимости OK (тестовый хелпер).
     pub fn all_ok() -> Self {
-        Self { db: true, media: true }
+        Self { db: true, media: true, cluster: true, gateway: true }
     }
 
     /// Вычисляет готовность по реальному состоянию процесса.
@@ -61,8 +76,9 @@ impl Readiness {
     /// - `db` — ping сконфигурированного хранилища; `storage: None` — in-memory
     ///   режим, деградации нет.
     /// - `media` — медиа-движки являются in-process компонентами без внешних
-    ///   зависимостей (их отказ = паника процесса, её ловит liveness); глубокая
-    ///   проверка data-plane появится при подключении движков в `AppState` (S2).
+    ///   зависимостей (их отказ = паника процесса, её ловит liveness).
+    /// - `cluster` — отсутствие сбоев лизов и кластерной координации (M0.6).
+    /// - `gateway` — отсутствие отказов SIP/H.323 шлюзов (M0.6 / M5.1).
     pub async fn from_state(state: &crate::state::AppState) -> Self {
         let db = if state.has_fault("db") {
             false
@@ -74,12 +90,14 @@ impl Readiness {
         };
         let media =
             if state.has_fault("media") { false } else { state.is_media_healthy() && state.mode.lock().is_ok() };
-        Self { db, media }
+        let cluster = !state.has_fault("cluster") && !state.has_fault("lease");
+        let gateway = !state.has_fault("gateway");
+        Self { db, media, cluster, gateway }
     }
 
     /// Ready ли (все флаги true).
     pub fn ready(&self) -> bool {
-        self.db && self.media
+        self.db && self.media && self.cluster && self.gateway
     }
 
     /// HTTP status: 200 ready, 503 not ready.
@@ -159,6 +177,27 @@ mod tests {
         assert_eq!(Readiness::from_state(&state).await.status_code(), 503);
         state.set_media_healthy(true);
         assert_eq!(Readiness::from_state(&state).await.status_code(), 200);
+
+        state.inject_fault("cluster");
+        let r_cluster = Readiness::from_state(&state).await;
+        assert!(!r_cluster.cluster);
+        assert_eq!(r_cluster.status_code(), 503);
+        state.clear_fault("cluster");
+        assert_eq!(Readiness::from_state(&state).await.status_code(), 200);
+
+        state.inject_fault("lease");
+        let r_lease = Readiness::from_state(&state).await;
+        assert!(!r_lease.cluster);
+        assert_eq!(r_lease.status_code(), 503);
+        state.clear_fault("lease");
+        assert_eq!(Readiness::from_state(&state).await.status_code(), 200);
+
+        state.inject_fault("gateway");
+        let r_gw = Readiness::from_state(&state).await;
+        assert!(!r_gw.gateway);
+        assert_eq!(r_gw.status_code(), 503);
+        state.clear_fault("gateway");
+        assert_eq!(Readiness::from_state(&state).await.status_code(), 200);
     }
 
     #[test]
@@ -167,6 +206,8 @@ mod tests {
         let json = serde_json::to_value(r).unwrap();
         assert_eq!(json["db"], true);
         assert_eq!(json["media"], true);
+        assert_eq!(json["cluster"], true);
+        assert_eq!(json["gateway"], true);
         // NATS-фикция удалена (T1.3): поля нет, пока NATS не подключён (ADR-0014).
         assert!(json.get("nats").is_none());
     }

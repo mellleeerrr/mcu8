@@ -126,14 +126,21 @@ impl RoomState {
             _ => LayoutKind::Grid,
         };
 
-        let max_slot = desc.assignments.values().copied().max().unwrap_or(0);
-        let total_slots = (max_slot as usize + 1).max(desc.assignments.len()).clamp(1, 128);
-
         let mut slot_to_pid = BTreeMap::new();
         for (pid, slot_id) in &desc.assignments {
             let vpid = vks_layout::ParticipantId::new(pid.as_uuid().as_u128());
             slot_to_pid.insert(*slot_id, vpid);
         }
+
+        let max_slot = slot_to_pid.keys().copied().max().unwrap_or(0);
+        let assigned_count = slot_to_pid.len();
+
+        // M0.4 / M3.2: If arbitrary/sparse custom slot IDs are used (e.g. 7, 42),
+        // compute tiles for assigned_count rather than creating 40+ holes.
+        // For contiguous/dense 0..N slots (or when empty), use standard grid sizing.
+        let is_sparse_custom = assigned_count > 0 && (max_slot as usize + 1) > assigned_count * 2;
+        let total_slots =
+            if is_sparse_custom { assigned_count } else { (max_slot as usize + 1).max(assigned_count).clamp(1, 128) };
 
         let rects = match kind {
             LayoutKind::Focus | LayoutKind::Speaker if total_slots > 1 => {
@@ -157,14 +164,24 @@ impl RoomState {
 
         let mut layout = Layout::new(kind);
         layout.version = desc.version;
-        for slot_id in 0..total_slots as u32 {
-            let rect = rects.get(slot_id as usize).copied().unwrap_or_else(|| canvas.as_rect());
-            let pid = slot_to_pid.get(&slot_id).copied();
-            layout.slots.push(vks_layout::Slot::new(slot_id, pid, rect));
-        }
-        for (&slot_id, &vpid) in &slot_to_pid {
-            if layout.slots.iter().all(|s| s.id.as_u32() != slot_id) {
-                layout.slots.push(vks_layout::Slot::new(slot_id, Some(vpid), canvas.as_rect()));
+
+        if is_sparse_custom {
+            for (idx, (&slot_id, &vpid)) in slot_to_pid.iter().enumerate() {
+                let rect = rects.get(idx).copied().unwrap_or_else(|| canvas.as_rect());
+                let is_focus = kind == LayoutKind::Focus && idx == 0;
+                layout.slots.push(vks_layout::Slot::with_attributes(slot_id, Some(vpid), rect, 0, false, is_focus));
+            }
+        } else {
+            for slot_id in 0..total_slots as u32 {
+                let rect = rects.get(slot_id as usize).copied().unwrap_or_else(|| canvas.as_rect());
+                let pid = slot_to_pid.get(&slot_id).copied();
+                let is_focus = kind == LayoutKind::Focus && slot_id == 0;
+                layout.slots.push(vks_layout::Slot::with_attributes(slot_id, pid, rect, 0, false, is_focus));
+            }
+            for (&slot_id, &vpid) in &slot_to_pid {
+                if layout.slots.iter().all(|s| s.id.as_u32() != slot_id) {
+                    layout.slots.push(vks_layout::Slot::new(slot_id, Some(vpid), canvas.as_rect()));
+                }
             }
         }
         layout
@@ -479,6 +496,30 @@ impl MediaEngine for McuEngine {
         }
         state.participant_audio.remove(&publisher);
         self.audio.lock().unwrap().entry(room).or_default().remove(&publisher);
+
+        // M3.2: Eliminate ghost frames and clean up layout bindings
+        let removed_slot = state.layout.as_mut().and_then(|desc| desc.assignments.remove(&publisher));
+        if let Some(slot_id) = removed_slot {
+            self.frames.lock().unwrap().entry(room).or_default().remove(&slot_id);
+        }
+
+        let vpid = vks_layout::ParticipantId::new(publisher.as_uuid().as_u128());
+        for slot in &mut state.current_layout.slots {
+            if slot.participant_id == Some(vpid) {
+                slot.participant_id = None;
+                self.frames.lock().unwrap().entry(room).or_default().remove(&slot.id.as_u32());
+            }
+        }
+
+        if let Some(desc) = &state.layout {
+            let new_layout = RoomState::layout_from_descriptor(desc);
+            state.bridge.apply(&new_layout);
+            state.current_layout = new_layout;
+        }
+
+        // Re-compose composite frame immediately so departed publisher's video is purged
+        let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
+        state.process_video(&frames);
         Ok(())
     }
 
@@ -781,5 +822,83 @@ mod tests {
         assert_eq!(stats_after, stats_before + 1);
         // But listener still has valid fresh audio!
         assert!(e.participant_audio(rid, listener).is_some());
+    }
+
+    #[tokio::test]
+    async fn ghost_frame_cleared_on_publisher_remove() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(1);
+        let b = p(2);
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.add_publisher(rid, b, vec![video_track(b)]).await.unwrap();
+
+        let mut assignments = std::collections::BTreeMap::new();
+        assignments.insert(a, 0);
+        assignments.insert(b, 1);
+        let layout = LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments };
+        e.apply_layout(rid, layout).await.unwrap();
+
+        // Feed frames for slot 0 (a) and slot 1 (b)
+        e.set_frame(rid, 0, Frame::filled(320, 180, 10));
+        e.set_frame(rid, 1, Frame::filled(320, 180, 20));
+
+        // Advance layout crossfade
+        for _ in 0..12 {
+            e.tick(rid);
+        }
+
+        let out = e.tick(rid).unwrap();
+        let row = 400usize;
+        assert_eq!(out.data[row * CANVAS_SIZE.0 as usize + 100], 10, "slot 0 has frame A (10)");
+        assert_eq!(out.data[row * CANVAS_SIZE.0 as usize + 960 + 100], 20, "slot 1 has frame B (20)");
+
+        // Now publisher A leaves the room
+        e.remove_publisher(rid, a).await.unwrap();
+
+        // The composite frame must IMMEDIATELY have publisher A's frame purged (no ghost frame!)
+        let out_after_remove = e.tick(rid).unwrap();
+        assert_ne!(out_after_remove.data[row * CANVAS_SIZE.0 as usize + 100], 10, "slot 0 ghost frame must be gone!");
+        assert_eq!(out_after_remove.data[row * CANVAS_SIZE.0 as usize + 100], 0, "slot 0 is cleared to background");
+
+        // Publisher B's frame is still present
+        assert_eq!(
+            out_after_remove.data[row * CANVAS_SIZE.0 as usize + 960 + 100],
+            20,
+            "slot 1 frame B remains active"
+        );
+    }
+
+    #[tokio::test]
+    async fn arbitrary_slot_ids_7_and_42_sparse_layout_no_holes() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(1);
+        let b = p(2);
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.add_publisher(rid, b, vec![video_track(b)]).await.unwrap();
+
+        // Custom arbitrary slot IDs: 7 and 42
+        let mut assignments = std::collections::BTreeMap::new();
+        assignments.insert(a, 7);
+        assignments.insert(b, 42);
+        let layout = LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments };
+        e.apply_layout(rid, layout).await.unwrap();
+
+        // Under M0.4 / M3.2, sparse slot IDs must create exactly 2 slots without 40+ holes
+        let rects = e.slot_rects(rid).expect("slot rects");
+        assert_eq!(rects.len(), 2, "must have exactly 2 slots for 2 participants, no holes");
+        assert!(rects.contains_key(&7), "slot 7 exists");
+        assert!(rects.contains_key(&42), "slot 42 exists");
+
+        // Both slots occupy full half-screen proportions (e.g. 960 width each)
+        let r7 = rects.get(&7).unwrap();
+        let r42 = rects.get(&42).unwrap();
+        assert_eq!(r7.w, 960);
+        assert_eq!(r7.h, 1080);
+        assert_eq!(r42.w, 960);
+        assert_eq!(r42.h, 1080);
     }
 }

@@ -119,6 +119,31 @@ pub fn redact_dsn(dsn: &str) -> String {
         result = format!("{base}?{}", redacted_params.join("&"));
     }
 
+    // 3. Redact key-value formatted DSNs (e.g. "host=localhost password=secret dbname=vks")
+    if !result.contains('@') && !result.contains('?') && result.contains('=') {
+        let parts: Vec<&str> = result.split_whitespace().collect();
+        if parts.iter().any(|p| p.contains('=')) {
+            let mut redacted_parts = Vec::new();
+            for part in parts {
+                if let Some((k, _v)) = part.split_once('=') {
+                    let lower_k = k.to_lowercase();
+                    if lower_k.contains("pass")
+                        || lower_k.contains("secret")
+                        || lower_k.contains("token")
+                        || lower_k.contains("key")
+                    {
+                        redacted_parts.push(format!("{k}=***"));
+                    } else {
+                        redacted_parts.push(part.to_string());
+                    }
+                } else {
+                    redacted_parts.push(part.to_string());
+                }
+            }
+            result = redacted_parts.join(" ");
+        }
+    }
+
     result
 }
 
@@ -406,5 +431,9 @@ default_room_mode = "mcu"
         );
         assert_eq!(redact_dsn("user:password@host"), "user:***@host");
         assert_eq!(redact_dsn("secret@host"), "***@host");
+        assert_eq!(
+            redact_dsn("host=localhost port=5432 user=postgres password=secret123 dbname=vks"),
+            "host=localhost port=5432 user=postgres password=*** dbname=vks"
+        );
     }
 }

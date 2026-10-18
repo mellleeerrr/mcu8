@@ -321,6 +321,14 @@ pub async fn change_password(
     if body.new_password.is_empty() {
         return error_json(422, "New password must not be empty");
     }
+
+    if state.has_fault("db") {
+        return error_json(503, "Database unavailable");
+    }
+
+    let old_gen = db.generation(&user.id);
+    let old_changed_at = db.password_changed_at(&user.id);
+
     let updated = match db.set_password_async(&body.username, &body.new_password).await {
         Ok(u) => u,
         Err(e) => {
@@ -344,7 +352,22 @@ pub async fn change_password(
             generation: new_gen,
         };
         if let Err(e) = storage.upsert_user_credentials(&creds).await {
-            tracing::warn!(error = %e, "failed to persist updated user credentials to storage");
+            tracing::error!(error = %e, "failed to persist updated user credentials to storage; reverting in-memory state");
+            db.restore_user(
+                &user.id,
+                &user.username,
+                &user.password_hash_hex,
+                &user.salt_hex,
+                Some(old_changed_at),
+                Some(old_gen),
+            );
+            if let Ok(mut users) = state.users.lock() {
+                if let Some(u) = users.values_mut().find(|u| u.id.to_string() == user.id || u.username == user.username)
+                {
+                    u.generation = old_gen;
+                }
+            }
+            return error_json(500, "Storage error: failed to persist password change");
         }
     }
     state.notify_revocation(&user.id, new_gen);
@@ -383,23 +406,13 @@ fn locked_response(retry_after_secs: i64) -> Response {
     resp
 }
 
-/// Запись в аудит (ADR-0019).
+/// Запись в аудит (ADR-0019 / M1.7).
 fn audit(state: &AppState, user: &str, ip: &str, action: &str) {
-    state.audit.lock().expect("audit store poisoned").record(crate::audit::AuditEntry {
-        ts_ms: now_unix_ms(),
-        user: user.to_string(),
-        action: action.to_string(),
-        room: None,
-        ip: ip.to_string(),
-    });
+    state.record_audit_entry(user, action, None, ip);
 }
 
 fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
-}
-
-fn now_unix_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 #[cfg(test)]

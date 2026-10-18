@@ -378,8 +378,16 @@ pub async fn room_live_view(State(state): State<SharedState>, Path(id_str): Path
 }
 
 /// `POST /api/v1/mode` — set global mode (Operator only, ADR-0022/0026).
-pub async fn set_global_mode(State(state): State<SharedState>, Json(body): Json<SetGlobalModeRequest>) -> Response {
+pub async fn set_global_mode(
+    State(state): State<SharedState>,
+    auth: Option<axum::extract::Extension<crate::auth_middleware::AuthContext>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<SetGlobalModeRequest>,
+) -> Response {
     let (old, new) = ModeService::set_global_mode(&state, body.mode);
+    let actor = extract_actor(&auth);
+    let ip = extract_client_ip(&headers, &auth);
+    state.record_audit_entry(actor, "set_global_mode", None, ip);
     json_ok(serde_json::json!({ "old_mode": old, "new_mode": new }))
 }
 
@@ -387,16 +395,28 @@ pub async fn set_global_mode(State(state): State<SharedState>, Json(body): Json<
 pub async fn set_room_mode(
     State(state): State<SharedState>,
     Path(id_str): Path<String>,
+    auth: Option<axum::extract::Extension<crate::auth_middleware::AuthContext>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<SetRoomModeRequest>,
 ) -> Response {
     let id = match parse_room_id(&id_str) {
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-    match ModeService::set_room_mode(&state, &id, body.mode) {
-        Ok((old, new)) => json_ok(serde_json::json!({ "old_mode": old, "new_mode": new })),
-        Err(e) => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error_code": "not_found", "error": e.to_string() })))
+    match ModeService::set_room_mode_async(&state, &id, body.mode).await {
+        Ok((old, new)) => {
+            let actor = extract_actor(&auth);
+            let ip = extract_client_ip(&headers, &auth);
+            state.record_audit_entry(actor, "set_room_mode", Some(id.to_string()), ip);
+            json_ok(serde_json::json!({ "old_mode": old, "new_mode": new }))
+        }
+        Err(crate::mode::ModeError::RoomNotFound(r)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error_code": "not_found", "error": format!("room {r} not found") })),
+        )
+            .into_response(),
+        Err(crate::mode::ModeError::Storage(e)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error_code": "storage_error", "error": e })))
                 .into_response()
         }
     }

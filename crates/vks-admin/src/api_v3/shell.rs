@@ -134,6 +134,14 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
     let engine_desc = if readiness.media { "" } else { "Media engine degraded" };
     let db_status = if readiness.db { "READY" } else { "FAILED" };
 
+    let sip_healthy = !state.has_fault("sip") && !state.has_fault("gateway") && readiness.gateway;
+    let h323_healthy = !state.has_fault("h323") && !state.has_fault("gateway") && readiness.gateway;
+    let cluster_healthy = readiness.cluster;
+
+    let sip_status = if sip_healthy { "READY" } else { "FAILED" };
+    let h323_status = if h323_healthy { "READY" } else { "FAILED" };
+    let cluster_status = if cluster_healthy { "READY" } else { "FAILED" };
+
     Json(json!({
         "engine": {
             "status": engine_status,
@@ -150,8 +158,23 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
         },
         "network": { "status": "READY", "connected": true, "editable": true, "ip": settings.ip },
         "disk": { "free": 107374182400u64, "percent": 15, "full": "NORMAL" },
-        "sip": { "status": "READY", "connected": true, "registration": true, "account": "sip:vks@local" },
-        "h323": { "status": "READY", "connected": true, "registration": true, "account": "h323:vks@local" }
+        "sip": {
+            "status": sip_status,
+            "connected": sip_healthy,
+            "registration": sip_healthy,
+            "account": if sip_healthy { "sip:vks@local" } else { "" }
+        },
+        "h323": {
+            "status": h323_status,
+            "connected": h323_healthy,
+            "registration": h323_healthy,
+            "account": if h323_healthy { "h323:vks@local" } else { "" }
+        },
+        "cluster": {
+            "status": cluster_status,
+            "connected": cluster_healthy,
+            "lease_valid": cluster_healthy
+        }
     }))
     .into_response()
 }
@@ -264,6 +287,7 @@ pub async fn settings_calls(State(state): State<SharedState>) -> Response {
 /// `PATCH /api/v3/settings/calls` — обновление параметров вызовов.
 pub async fn update_settings_calls(
     State(state): State<SharedState>,
+    Extension(auth::ClientIp(ip)): Extension<auth::ClientIp>,
     Extension(auth): Extension<crate::auth_middleware::AuthContext>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
@@ -289,14 +313,7 @@ pub async fn update_settings_calls(
         }
     }
     let updated = SettingsService::set_async(&state, current).await;
-    let ts_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-    state.audit.lock().expect("audit store poisoned").record(crate::audit::AuditEntry {
-        ts_ms,
-        user: auth.subject,
-        action: "settings.calls.updated".to_string(),
-        room: None,
-        ip: String::new(),
-    });
+    state.record_audit_entry(&auth.subject, "settings.calls.updated", None, &ip);
 
     let payload = json!({
         "codecs": { "audio": updated.codecs.audio, "video": updated.codecs.video },
@@ -397,16 +414,37 @@ pub async fn conferences_status() -> Response {
 }
 
 /// `GET /api/v3/ui/video_layouts` / `GET /api/v3/video_layouts` → `{video_layouts:[...]}`.
-pub async fn video_layouts() -> Response {
+pub async fn video_layouts(State(state): State<SharedState>) -> Response {
     track("video_layouts");
-    Json(json!({
-        "video_layouts": [
-            { "id": "grid", "title": "Grid", "description": "Автоматическая сетка участников", "is_default": true },
-            { "id": "focus", "title": "Focus", "description": "Докладчик крупно + лента участников", "is_default": false },
-            { "id": "speaker", "title": "Speaker", "description": "Один активный спикер", "is_default": false }
-        ]
-    }))
-    .into_response()
+    let mut list = vec![
+        json!({ "id": "grid", "title": "Grid", "description": "Автоматическая сетка участников", "is_default": true }),
+        json!({ "id": "focus", "title": "Focus", "description": "Докладчик крупно + лента участников", "is_default": false }),
+        json!({ "id": "speaker", "title": "Speaker", "description": "Один активный спикер", "is_default": false }),
+    ];
+    if let Ok(layouts) = state.layouts.lock() {
+        for (id, l) in layouts.iter() {
+            if id != "grid" && id != "focus" && id != "speaker" {
+                let (is_default, desc) = if let Ok(doc) = serde_json::from_str::<serde_json::Value>(&l.document) {
+                    let def = doc.get("is_default").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let d = doc
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("Пользовательская раскладка {}", l.name));
+                    (def, d)
+                } else {
+                    (false, format!("Пользовательская раскладка {}", l.name))
+                };
+                list.push(json!({
+                    "id": id,
+                    "title": l.name,
+                    "description": desc,
+                    "is_default": is_default,
+                }));
+            }
+        }
+    }
+    Json(json!({ "video_layouts": list })).into_response()
 }
 
 /// Тело запроса переключения режима раскладки / топологии (`POST /api/v3/ui/video_layouts/mode`).

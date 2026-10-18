@@ -72,6 +72,9 @@ pub enum ModeError {
     /// Комната не найдена.
     #[error("room {0} not found")]
     RoomNotFound(RoomId),
+    /// Ошибка персистентного хранилища (M1.4 / M1.5).
+    #[error("storage error: {0}")]
+    Storage(String),
 }
 
 /// ModeService — переключение MCU/SFU (глобально + per-room).
@@ -104,7 +107,7 @@ impl ModeService {
         room_id: &RoomId,
         new_mode: RoomMode,
     ) -> Result<(RoomMode, RoomMode), ModeError> {
-        let (room_name, created_ms) = {
+        let (_room_name, _created_ms) = {
             let mut rooms = state.rooms.lock().expect("rooms store poisoned");
             let record = rooms.get_mut(room_id).ok_or(ModeError::RoomNotFound(*room_id))?;
             record.mode = Some(new_mode);
@@ -129,20 +132,28 @@ impl ModeService {
                 }),
             );
         }
-        if let Some(storage) = &state.storage {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let storage = Arc::clone(storage);
-                let rid = *room_id;
-                drop(handle.spawn(async move {
-                    let mut cr = vks_core::Room::new(room_name, new_mode);
-                    cr.id = rid;
-                    cr.created_ms = created_ms;
-                    let _ = storage.upsert_room(&cr).await;
-                    let _ = storage.set_room_mode_override(rid, new_mode).await;
-                }));
-            }
-        }
         Ok((old, new_mode))
+    }
+
+    /// Переключает режим КОНКРЕТНОЙ комнаты с подтвержденной записью в Storage (M1.4 / M1.5).
+    pub async fn set_room_mode_async(
+        state: &AppState,
+        room_id: &RoomId,
+        new_mode: RoomMode,
+    ) -> Result<(RoomMode, RoomMode), ModeError> {
+        let (room_name, created_ms) = {
+            let rooms = state.rooms.lock().expect("rooms store poisoned");
+            let record = rooms.get(room_id).ok_or(ModeError::RoomNotFound(*room_id))?;
+            (record.name.clone(), record.created_ms)
+        };
+        if let Some(storage) = &state.storage {
+            let mut cr = vks_core::Room::new(room_name.clone(), new_mode);
+            cr.id = *room_id;
+            cr.created_ms = created_ms;
+            storage.upsert_room(&cr).await.map_err(|e| ModeError::Storage(e.to_string()))?;
+            storage.set_room_mode_override(*room_id, new_mode).await.map_err(|e| ModeError::Storage(e.to_string()))?;
+        }
+        Self::set_room_mode(state, room_id, new_mode)
     }
 
     /// Эффективный режим комнаты (override иначе глобальный).

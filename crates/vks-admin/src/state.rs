@@ -166,6 +166,8 @@ pub struct AppState {
     pub users: Mutex<BTreeMap<UserId, UserRecord>>,
     /// Раскладки (id → запись).
     pub layouts: Mutex<BTreeMap<String, LayoutRecord>>,
+    /// API-ключи (id/hash → запись) (M1.1 / M1.6).
+    pub api_keys: Mutex<BTreeMap<String, vks_core::ports::storage::ApiKey>>,
     /// Записи (id → запись).
     pub records: Mutex<BTreeMap<String, RecordEntry>>,
     /// Аудит-лог (append-only, ADR-0019).
@@ -198,6 +200,7 @@ impl std::fmt::Debug for AppState {
             .field("rooms", &self.rooms)
             .field("users", &self.users)
             .field("layouts", &self.layouts)
+            .field("api_keys", &self.api_keys)
             .field("records", &self.records)
             .field("audit", &self.audit)
             .field("settings", &self.settings)
@@ -228,6 +231,7 @@ impl AppState {
             rooms: Mutex::new(BTreeMap::new()),
             users: Mutex::new(BTreeMap::new()),
             layouts: Mutex::new(BTreeMap::new()),
+            api_keys: Mutex::new(BTreeMap::new()),
             records: Mutex::new(BTreeMap::new()),
             audit: Mutex::new(crate::audit::AuditLog::new()),
             settings: Mutex::new(crate::settings::Settings::default()),
@@ -485,6 +489,32 @@ impl AppState {
                     let mut current = self.settings.lock().map_err(|e| e.to_string())?;
                     *current = loaded.clone();
                     self.mode.lock().map_err(|e| e.to_string())?.global_mode = loaded.default_mode;
+                }
+            }
+
+            // M0.4: Hydrate custom layouts from storage
+            let layouts = storage.list_layouts().await.unwrap_or_default();
+            {
+                let mut layouts_map = self.layouts.lock().map_err(|e| e.to_string())?;
+                for l in layouts {
+                    let doc = serde_json::json!({
+                        "version": l.version,
+                        "is_default": l.is_default,
+                        "assigned_rooms": l.assigned_rooms,
+                    })
+                    .to_string();
+                    layouts_map.insert(l.id.clone(), LayoutRecord { id: l.id, name: l.name, document: doc });
+                }
+            }
+
+            // M1.1 / M1.6: Hydrate API keys from storage
+            let keys = storage.list_api_keys().await.unwrap_or_default();
+            {
+                let mut keys_map = self.api_keys.lock().map_err(|e| e.to_string())?;
+                for k in keys {
+                    keys_map.insert(k.id.clone(), k.clone());
+                    let hash = vks_auth::api_key::sha256_hex(k.id.as_bytes());
+                    keys_map.insert(hash, k);
                 }
             }
         }
