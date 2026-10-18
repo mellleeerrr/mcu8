@@ -62,7 +62,9 @@ struct RoomState {
     /// Monotonic timestamp of when layout was applied (ms).
     layout_applied_at_ms: Option<u64>,
     /// Monotonic timestamp of the last render pass (ms).
-    last_render_ms: u64,
+    last_render_ms: Option<u64>,
+    /// Monotonic timestamp of the last audio processing pass (ms, 20ms cadence).
+    last_audio_ms: Option<u64>,
     /// Rendering and backpressure statistics.
     stats: McuRenderStats,
     /// Last composed frame, per subscriber (mock: the same composite for
@@ -92,7 +94,8 @@ impl RoomState {
             bridge: LayoutBridge::new(),
             elapsed_ms: 0,
             layout_applied_at_ms: None,
-            last_render_ms: 0,
+            last_render_ms: None,
+            last_audio_ms: None,
             stats: McuRenderStats::default(),
             composite: Frame::new(
                 CANVAS_SIZE.0,
@@ -172,31 +175,48 @@ impl RoomState {
     }
 
     /// Advances the pipeline at a specific monotonic timestamp `now_ms`.
-    /// Applies frame dropping backpressure if invoked faster than the ~30 fps budget.
-    fn tick_at(
-        &mut self,
-        now_ms: u64,
-        frames: &BTreeMap<u32, Frame>,
-        audio_inputs: &[(ParticipantId, Vec<f32>)],
-    ) -> bool {
-        if self.last_render_ms != 0 && now_ms < self.last_render_ms + 30 {
-            self.stats.frames_dropped += 1;
-            return false;
+    /// Audio runs on a 20ms cadence, and video applies ~30 fps frame-dropping backpressure.
+    fn tick_at(&mut self, now_ms: u64, frames: &BTreeMap<u32, Frame>, audio_inputs: &[(ParticipantId, Vec<f32>)]) -> bool {
+        self.tick_audio_at(now_ms, audio_inputs);
+        self.tick_video_at(now_ms, frames)
+    }
+
+    /// Advances the audio processing pass at a specific monotonic timestamp `now_ms` (20 ms cadence).
+    fn tick_audio_at(&mut self, now_ms: u64, audio_inputs: &[(ParticipantId, Vec<f32>)]) -> bool {
+        if let Some(last) = self.last_audio_ms {
+            if now_ms < last + 18 {
+                return false;
+            }
         }
-        self.last_render_ms = now_ms;
-        let applied_at = *self.layout_applied_at_ms.get_or_insert(now_ms);
-        self.elapsed_ms = now_ms.saturating_sub(applied_at);
-        self.process_media(frames, audio_inputs);
+        self.last_audio_ms = Some(now_ms);
+        self.process_audio(audio_inputs);
         true
     }
 
-    fn process_media(&mut self, frames: &BTreeMap<u32, Frame>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
+    /// Advances the video compositing pass at a specific monotonic timestamp `now_ms` (33 ms budget).
+    fn tick_video_at(&mut self, now_ms: u64, frames: &BTreeMap<u32, Frame>) -> bool {
+        if let Some(last) = self.last_render_ms {
+            if now_ms < last + 30 {
+                self.stats.frames_dropped += 1;
+                return false;
+            }
+        }
+        self.last_render_ms = Some(now_ms);
+        let applied_at = *self.layout_applied_at_ms.get_or_insert(now_ms);
+        self.elapsed_ms = now_ms.saturating_sub(applied_at);
+        self.process_video(frames);
+        true
+    }
+
+    fn process_video(&mut self, frames: &BTreeMap<u32, Frame>) {
         let t0 = std::time::Instant::now();
         let rects = self.slot_rects();
         self.composite = Compositor.compose(frames, &rects).into_frame();
         self.stats.last_duration_us = t0.elapsed().as_micros() as u64;
         self.stats.frames_rendered += 1;
+    }
 
+    fn process_audio(&mut self, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
         let slices: Vec<&[f32]> = audio_inputs.iter().map(|(_, v)| v.as_slice()).collect();
         let target_len = self.mixed_audio.len().max(960);
         let (full_mix, minus_mixes) = AudioMixer.mix_and_mix_minus(&slices, target_len);
@@ -245,6 +265,11 @@ impl RoomState {
         if let Some(spk) = current_speaker {
             self.active_speaker = Some(spk);
         }
+    }
+
+    fn process_media(&mut self, frames: &BTreeMap<u32, Frame>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
+        self.process_video(frames);
+        self.process_audio(audio_inputs);
     }
 }
 
@@ -314,6 +339,36 @@ impl McuEngine {
         }
     }
 
+    /// Advances only the audio pipeline at a specific monotonic timestamp `now_ms` (20 ms cadence).
+    /// Returns true if an audio tick was executed, or false if throttled within the 20 ms budget.
+    pub fn tick_audio_at(&self, room: RoomId, now_ms: u64) -> bool {
+        let mut g = self.rooms.lock().unwrap();
+        let state = match g.get_mut(&room) {
+            Some(s) => s,
+            None => return false,
+        };
+        let audio_map = self.audio.lock().unwrap().get(&room).cloned().unwrap_or_default();
+        let audio_inputs: Vec<(ParticipantId, Vec<f32>)> = state
+            .publisher_tracks
+            .keys()
+            .filter_map(|pid| audio_map.get(pid).cloned().map(|samples| (*pid, samples)))
+            .collect();
+        state.tick_audio_at(now_ms, &audio_inputs)
+    }
+
+    /// Advances only the video pipeline at a specific monotonic timestamp `now_ms` (33 ms budget).
+    /// Returns Some(Frame) if rendered, or None if dropped by frame-dropping backpressure.
+    pub fn tick_video_at(&self, room: RoomId, now_ms: u64) -> Option<Frame> {
+        let mut g = self.rooms.lock().unwrap();
+        let state = g.get_mut(&room)?;
+        let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
+        if state.tick_video_at(now_ms, &frames) {
+            Some(state.composite.clone())
+        } else {
+            None
+        }
+    }
+
     /// Returns the rendering and backpressure stats of a room (M3.6).
     pub fn stats(&self, room: RoomId) -> Option<McuRenderStats> {
         let g = self.rooms.lock().unwrap();
@@ -351,7 +406,12 @@ impl McuEngine {
 
     /// Returns whether the given participant is currently speaking.
     pub fn is_speaking(&self, room: RoomId, pid: ParticipantId) -> bool {
-        self.rooms.lock().unwrap().get(&room).and_then(|s| s.speaking_states.get(&pid).copied()).unwrap_or(false)
+        self.rooms
+            .lock()
+            .unwrap()
+            .get(&room)
+            .and_then(|s| s.speaking_states.get(&pid).copied())
+            .unwrap_or(false)
     }
 }
 
@@ -641,7 +701,11 @@ mod tests {
         // Custom slot assignment: presenter to slot 0, audience to slot 1
         assignments.insert(presenter, 0);
         assignments.insert(audience, 1);
-        let layout = LayoutDescriptor { layout_id: "focus".into(), version: 1, assignments };
+        let layout = LayoutDescriptor {
+            layout_id: "focus".into(),
+            version: 1,
+            assignments,
+        };
         e.apply_layout(rid, layout).await.unwrap();
 
         let rects = e.slot_rects(rid).expect("slot rects");
@@ -679,4 +743,45 @@ mod tests {
         assert_eq!(listener_audio.len(), 960);
         assert!((listener_audio[0] - 0.5f32).abs() < 1e-4);
     }
+
+    #[tokio::test]
+    async fn independent_audio_and_video_cadence() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let speaker = p(1);
+        let listener = p(2);
+        e.add_publisher(rid, speaker, vec![video_track(speaker)]).await.unwrap();
+        e.add_subscriber(rid, listener, sub_req()).await.unwrap();
+
+        // 1. Audio tick at 0 ms: accepted
+        e.set_audio(rid, speaker, vec![0.7f32; 960]);
+        assert!(e.tick_audio_at(rid, 0));
+        assert!(e.participant_audio(rid, listener).is_some());
+
+        // 2. Audio tick at 10 ms: throttled (within 20ms cadence)
+        assert!(!e.tick_audio_at(rid, 10));
+
+        // 3. Audio tick at 20 ms: accepted
+        assert!(e.tick_audio_at(rid, 20));
+
+        // 4. Video tick at 0 ms: accepted
+        assert!(e.tick_video_at(rid, 0).is_some());
+
+        // 5. Video tick at 20 ms: dropped by video backpressure (requires ~30 ms)
+        assert!(e.tick_video_at(rid, 20).is_none());
+
+        // 6. Video tick at 33 ms: accepted
+        assert!(e.tick_video_at(rid, 33).is_some());
+
+        // 7. tick_at at 40ms: audio runs at 40ms (20ms since last 20ms audio tick) even though video drops (40 < 33+30)
+        let stats_before = e.stats(rid).unwrap().frames_dropped;
+        let rendered = e.tick_at(rid, 40);
+        assert!(rendered.is_none(), "video frame dropped due to 30fps budget");
+        let stats_after = e.stats(rid).unwrap().frames_dropped;
+        assert_eq!(stats_after, stats_before + 1);
+        // But listener still has valid fresh audio!
+        assert!(e.participant_audio(rid, listener).is_some());
+    }
 }
+

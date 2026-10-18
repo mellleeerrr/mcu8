@@ -33,7 +33,10 @@ pub mod udp_loop;
 
 // Re-exports (flat API).
 pub use bwe::{BweConfig, BweEstimator, BweResult, TwccReportedPacket};
-pub use codec::{CodecEntry, CodecKind, CodecRegistry};
+pub use codec::{
+    parse_h264_rtp, parse_opus_rtp, parse_vp8_rtp, CodecEntry, CodecKind, CodecRegistry, H264RtpInfo, OpusRtpInfo,
+    Vp8RtpInfo,
+};
 pub use congestion::{CongestionConfig, CongestionLadder, CongestionLevel, LadderStep};
 pub use dtls::{CipherSuite, DtlsConfig, DtlsRole, DtlsSession, DtlsState, SrtpKeyingMaterial};
 pub use engine::SfuEngine;

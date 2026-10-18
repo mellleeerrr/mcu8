@@ -15,7 +15,9 @@ pub struct Rooms;
 impl Rooms {
     /// Вычисляет эффективный режим комнаты (явный override иначе глобальный режим).
     fn resolve_effective_mode(state: &AppState, override_mode: Option<RoomMode>) -> RoomMode {
-        override_mode.unwrap_or_else(|| state.mode.lock().expect("mode store poisoned").global_mode)
+        override_mode.unwrap_or_else(|| {
+            state.mode.lock().expect("mode store poisoned").global_mode
+        })
     }
 
     /// Создаёт комнату (per-room режим = `None`, т.е. глобальный).
@@ -42,10 +44,7 @@ impl Rooms {
     }
 
     /// Создаёт комнату с подтвержденной синхронной записью в Storage до ответа (M0-M1).
-    pub async fn create_async(
-        state: &AppState,
-        name: impl Into<String>,
-    ) -> Result<RoomRecord, vks_core::ports::storage::StorageError> {
+    pub async fn create_async(state: &AppState, name: impl Into<String>) -> Result<RoomRecord, vks_core::ports::storage::StorageError> {
         let id = RoomId::new();
         let record = RoomRecord::new(id, name, None);
         if let Some(storage) = &state.storage {
@@ -100,14 +99,33 @@ impl Rooms {
                     new_mode: m,
                     switch_epoch: mode_state.switch_epoch,
                 });
-                state.notify_admin(
-                    "room:mode_changed",
-                    serde_json::json!({
-                        "room_id": id.to_string(),
-                        "mode": m,
-                        "switch_epoch": mode_state.switch_epoch,
-                    }),
-                );
+                state.notify_admin("room:mode_changed", serde_json::json!({
+                    "room_id": id.to_string(),
+                    "mode": m,
+                    "switch_epoch": mode_state.switch_epoch,
+                }));
+
+                // Рассылаем RoomModeChanged всем WebRTC signaling сессиям в комнате через RoomHub
+                let proto_mode = match m {
+                    RoomMode::Sfu => vks_proto::media::RoomMode::Sfu,
+                    RoomMode::Mcu => vks_proto::media::RoomMode::Mcu,
+                };
+                let mode_msg = vks_proto::signaling::SignalingMessage {
+                    msg_id: 0,
+                    reply_to: 0,
+                    payload: Some(vks_proto::signaling::signaling_message::Payload::RoomModeChanged(
+                        vks_proto::signaling::RoomModeChanged {
+                            new_mode: proto_mode as i32,
+                            caps: None,
+                            switch_epoch: mode_state.switch_epoch,
+                            graceful: true,
+                        },
+                    )),
+                };
+                use prost::Message;
+                let payload_bytes = mode_msg.encode_to_vec();
+                state.room_hub.broadcast(id, None, payload_bytes.into());
+
                 true
             } else {
                 false
@@ -438,5 +456,31 @@ mod tests {
         Rooms::delete(&state, &created.id);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(!mock.rooms.lock().unwrap().contains_key(&created.id));
+    }
+
+    #[tokio::test]
+    async fn update_mode_broadcasts_room_mode_changed() {
+        use prost::Message;
+        let state = AppState::new();
+        let created = Rooms::create(&state, "mode-test-room");
+        let mut rx = state.room_hub.subscribe(&created.id);
+
+        // Switch to Mcu
+        let updated = Rooms::update(&state, &created.id, None, Some(RoomMode::Mcu), None, None).expect("room updated");
+        assert_eq!(updated.mode, Some(RoomMode::Mcu));
+
+        // Receive broadcast event
+        let event = rx.try_recv().expect("broadcast event received");
+        assert_eq!(event.sender_participant_id, None);
+
+        let msg = vks_proto::signaling::SignalingMessage::decode(&event.payload[..]).expect("decode signaling message");
+        match msg.payload {
+            Some(vks_proto::signaling::signaling_message::Payload::RoomModeChanged(rmc)) => {
+                assert_eq!(rmc.new_mode, vks_proto::media::RoomMode::Mcu as i32);
+                assert_eq!(rmc.switch_epoch, 1);
+                assert!(rmc.graceful);
+            }
+            other => panic!("expected RoomModeChanged, got {:?}", other),
+        }
     }
 }

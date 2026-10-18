@@ -484,6 +484,30 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                         let count = snapshot.len();
                                         vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(count), None);
 
+                                        // Late joiners: немедленно отправляем актуальный режим комнаты, если он отличается от SFU или комната переключалась
+                                        let (effective_mode, switch_epoch) = if let Ok(m) = state.mode.lock() {
+                                            (m.effective_mode(&rid), m.switch_epoch)
+                                        } else {
+                                            (vks_core::RoomMode::Sfu, 0)
+                                        };
+                                        if effective_mode != vks_core::RoomMode::Sfu || switch_epoch > 0 {
+                                            let proto_mode = match effective_mode {
+                                                vks_core::RoomMode::Sfu => vks_proto::media::RoomMode::Sfu,
+                                                vks_core::RoomMode::Mcu => vks_proto::media::RoomMode::Mcu,
+                                            };
+                                            let mode_msg = SignalingMessage {
+                                                msg_id: 0,
+                                                reply_to: 0,
+                                                payload: Some(Payload::RoomModeChanged(vks_proto::signaling::RoomModeChanged {
+                                                    new_mode: proto_mode as i32,
+                                                    caps: None,
+                                                    switch_epoch,
+                                                    graceful: true,
+                                                })),
+                                            };
+                                            replies.push(Envelope::new(mode_msg));
+                                        }
+
                                         // Рассылаем ParticipantJoined другим участникам комнаты
                                         if !pid_str.is_empty() {
                                             let joined_msg = SignalingMessage {
