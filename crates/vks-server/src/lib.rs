@@ -575,7 +575,36 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                     tracks.push(track);
                                                 }
                                                 if !tracks.is_empty() {
-                                                    let _ = ctx.sfu_engine.add_publisher(m.room_id, pid, tracks).await;
+                                                    let _ = ctx.sfu_engine.add_publisher(m.room_id, pid, tracks.clone()).await;
+                                                    for track in &tracks {
+                                                        let proto_kind = match track.media_kind {
+                                                            vks_core::MediaKind::Audio => vks_proto::media::TrackKind::Audio,
+                                                            vks_core::MediaKind::Video => vks_proto::media::TrackKind::Video,
+                                                            vks_core::MediaKind::Screen => vks_proto::media::TrackKind::Screen,
+                                                        };
+                                                        let proto_codec = match track.media_kind {
+                                                            vks_core::MediaKind::Audio => vks_proto::media::CodecId::Opus,
+                                                            _ => vks_proto::media::CodecId::Vp8,
+                                                        };
+                                                        let added_msg = SignalingMessage {
+                                                            msg_id: 0,
+                                                            reply_to: 0,
+                                                            payload: Some(Payload::TrackAdded(vks_proto::signaling::TrackAdded {
+                                                                participant_id: m.participant_id.clone(),
+                                                                track: Some(vks_proto::media::TrackInfo {
+                                                                    track_id: track.id.to_string(),
+                                                                    participant_id: m.participant_id.clone(),
+                                                                    kind: proto_kind as i32,
+                                                                    codec: proto_codec as i32,
+                                                                    ssrc: 0,
+                                                                    clock_rate: 90000,
+                                                                    channels: 2,
+                                                                }),
+                                                            })),
+                                                        };
+                                                        let payload_bytes = Envelope::new(added_msg).encode();
+                                                        state.room_hub.broadcast(&m.room_id, Some(&m.participant_id), payload_bytes.into());
+                                                    }
                                                 }
                                             }
                                         }
@@ -591,6 +620,29 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                 ctx.sfu_engine.register_endpoint(m.room_id, pid, addr);
                                             }
                                         }
+                                    }
+                                }
+
+                                // SFU Subscribe / Unsubscribe handling (M2.5)
+                                if let Some(Payload::SubscribeRequest(ref s)) = payload_opt {
+                                    if let Some(ref m) = current_membership {
+                                        let pid = parse_participant_id(&m.participant_id);
+                                        let track_ids: Vec<vks_core::TrackId> = s
+                                            .source_track_ids
+                                            .iter()
+                                            .filter_map(|id_str| uuid::Uuid::parse_str(id_str).ok().map(vks_core::TrackId::from_uuid))
+                                            .collect();
+                                        let _ = ctx.sfu_engine.add_subscriber(m.room_id, pid, vks_core::ports::media_engine::SubscribeRequest {
+                                            track_ids,
+                                            audio_only: false,
+                                        }).await;
+                                    }
+                                }
+
+                                if let Some(Payload::Unsubscribe(ref _u)) = payload_opt {
+                                    if let Some(ref m) = current_membership {
+                                        let pid = parse_participant_id(&m.participant_id);
+                                        let _ = ctx.sfu_engine.remove_subscriber(m.room_id, pid).await;
                                     }
                                 }
 

@@ -822,3 +822,235 @@ async fn test_m5_cluster_leases_and_backpressure() {
     // 6. Освобождение лиза
     assert!(cluster.release_room("room-100"));
 }
+
+async fn spawn_live_server_with_sfu_udp() -> (SocketAddr, SocketAddr, Arc<AppState>, String) {
+    let sqlite = Arc::new(SqliteStorage::init("sqlite::memory:").await.expect("init sqlite"));
+    let mut state = AppState::with_storage(sqlite);
+    let issuer = Arc::new(JwtIssuer::new(JwtConfig {
+        secret: "sfu_test_secret_123".to_string(),
+        ttl_secs: 86_400,
+        issuer: "vks-integration".to_string(),
+    }));
+    let db = Arc::new(LocalDb::new());
+    db.register("u-admin", "admin", "admin").expect("register admin");
+    state.jwt_issuer = Some(issuer.clone());
+    state.local_db = Some(db);
+    let token = issuer.issue("admin", None).expect("issue");
+
+    let state = Arc::new(state);
+    let frontend = Frontend::load(&frontend_fixture_dir());
+    let sfu_engine = Arc::new(vks_media_sfu::SfuEngine::new());
+
+    let udp_loop = Arc::new(vks_media_sfu::udp_loop::UdpMediaLoop::bind("127.0.0.1:0").await.expect("bind udp loop"));
+    let udp_addr = udp_loop.local_addr();
+
+    let sfu_clone = sfu_engine.clone();
+    let _task = udp_loop.start_routing_loop(move |src, packet| sfu_clone.route_udp_packet(src, packet.payload));
+
+    let mut handler_config = HandlerConfig::default_test();
+    handler_config.candidate_addr = udp_addr.ip().to_string();
+    handler_config.candidate_port = udp_addr.port();
+
+    let app = vks_server::build_app_full(state.clone(), &frontend, handler_config, sfu_engine.clone(), Some(udp_loop));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind listener");
+    let tcp_addr = listener.local_addr().expect("local addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    (tcp_addr, udp_addr, state, token)
+}
+
+#[tokio::test]
+async fn test_package_c_real_sfu_session_with_media_loopback_and_room_isolation() {
+    let (tcp_addr, udp_addr, _state, token) = spawn_live_server_with_sfu_udp().await;
+    let ws_url = format!("ws://{tcp_addr}/ws");
+
+    // 1. Client 1 (Alice) connects over live WebSocket
+    let ws_alice = connect_ws(&ws_url, Some(&token)).await;
+    let (mut write_alice, mut read_alice) = ws_alice.split();
+
+    let hello_alice = client_hello(1, "room-pkg-c", "alice-client");
+    write_alice.send(TungsteniteMsg::Binary(hello_alice.encode().into())).await.unwrap();
+    let res_hello = read_alice.next().await.unwrap().unwrap();
+    let env_hello = Envelope::decode(&res_hello.into_data()).unwrap();
+    assert!(matches!(env_hello.payload(), Some(Payload::ServerHello(_))));
+
+    let join_alice = join_room(2, "room-pkg-c", "Alice");
+    write_alice.send(TungsteniteMsg::Binary(join_alice.encode().into())).await.unwrap();
+    let res_join = read_alice.next().await.unwrap().unwrap();
+    let env_join = Envelope::decode(&res_join.into_data()).unwrap();
+    assert!(matches!(env_join.payload(), Some(Payload::JoinRoomResult(_))));
+
+    // Alice binds local UDP socket and negotiates SDP Offer (Video SSRC: 2222)
+    let alice_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let alice_udp_port = alice_udp.local_addr().unwrap().port();
+
+    let sdp_offer_alice = "v=0\r\no=- 1000 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 50000 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 127.0.0.1\r\na=rtpmap:96 VP8/90000\r\na=ssrc:2222 cname:alice\r\n";
+    let offer_msg = SignalingMessage {
+        msg_id: 3,
+        reply_to: 0,
+        payload: Some(Payload::SdpOffer(sig::SdpOffer { sdp: sdp_offer_alice.into() })),
+    };
+    write_alice.send(TungsteniteMsg::Binary(Envelope::new(offer_msg).encode().into())).await.unwrap();
+    let res_ans = read_alice.next().await.unwrap().unwrap();
+    let env_ans = Envelope::decode(&res_ans.into_data()).unwrap();
+    assert!(matches!(env_ans.payload(), Some(Payload::SdpAnswer(_))));
+
+    // Alice sends ICE Candidate with local UDP port -> server registers Alice's endpoint
+    let cand_alice = format!("candidate:1 1 UDP 2122260223 127.0.0.1 {alice_udp_port} typ host");
+    let cand_msg = SignalingMessage {
+        msg_id: 4,
+        reply_to: 0,
+        payload: Some(Payload::IceCandidate(sig::IceCandidate {
+            sdp_mid: "0".into(),
+            sdp_mline_index: 0,
+            candidate: cand_alice,
+            end_of_candidates: true,
+        })),
+    };
+    write_alice.send(TungsteniteMsg::Binary(Envelope::new(cand_msg).encode().into())).await.unwrap();
+    let res_cand_alice = read_alice.next().await.unwrap().unwrap();
+    let env_cand_alice = Envelope::decode(&res_cand_alice.into_data()).unwrap();
+    assert!(matches!(env_cand_alice.payload(), Some(Payload::Ack(_))));
+
+    // 2. Client 2 (Bob) connects over live WebSocket
+    let ws_bob = connect_ws(&ws_url, Some(&token)).await;
+    let (mut write_bob, mut read_bob) = ws_bob.split();
+
+    let hello_bob = client_hello(1, "room-pkg-c", "bob-client");
+    write_bob.send(TungsteniteMsg::Binary(hello_bob.encode().into())).await.unwrap();
+    let _ = read_bob.next().await.unwrap().unwrap();
+
+    let join_bob = join_room(2, "room-pkg-c", "Bob");
+    write_bob.send(TungsteniteMsg::Binary(join_bob.encode().into())).await.unwrap();
+    let res_join_bob = read_bob.next().await.unwrap().unwrap();
+    let env_join_bob = Envelope::decode(&res_join_bob.into_data()).unwrap();
+    assert!(matches!(env_join_bob.payload(), Some(Payload::JoinRoomResult(_))));
+
+    // Alice receives ParticipantJoined for Bob!
+    let alice_notif = read_alice.next().await.unwrap().unwrap();
+    let env_notif = Envelope::decode(&alice_notif.into_data()).unwrap();
+    assert!(matches!(env_notif.payload(), Some(Payload::ParticipantJoined(_))));
+
+    // Bob binds local UDP socket and negotiates SDP Offer (Video SSRC: 3333)
+    let bob_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let bob_udp_port = bob_udp.local_addr().unwrap().port();
+
+    let sdp_offer_bob = "v=0\r\no=- 2000 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 50002 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 127.0.0.1\r\na=rtpmap:96 VP8/90000\r\na=ssrc:3333 cname:bob\r\n";
+    let offer_msg_bob = SignalingMessage {
+        msg_id: 3,
+        reply_to: 0,
+        payload: Some(Payload::SdpOffer(sig::SdpOffer { sdp: sdp_offer_bob.into() })),
+    };
+    write_bob.send(TungsteniteMsg::Binary(Envelope::new(offer_msg_bob).encode().into())).await.unwrap();
+    let res_ans_bob = read_bob.next().await.unwrap().unwrap();
+    let env_ans_bob = Envelope::decode(&res_ans_bob.into_data()).unwrap();
+    assert!(matches!(env_ans_bob.payload(), Some(Payload::SdpAnswer(_))));
+
+    // Alice receives TrackAdded for Bob's video track!
+    let alice_track_notif = read_alice.next().await.unwrap().unwrap();
+    let env_track_notif = Envelope::decode(&alice_track_notif.into_data()).unwrap();
+    assert!(matches!(env_track_notif.payload(), Some(Payload::TrackAdded(_))));
+
+    // Bob sends ICE Candidate with local UDP port -> server registers Bob's endpoint
+    let cand_bob = format!("candidate:2 1 UDP 2122260223 127.0.0.1 {bob_udp_port} typ host");
+    let cand_msg_bob = SignalingMessage {
+        msg_id: 4,
+        reply_to: 0,
+        payload: Some(Payload::IceCandidate(sig::IceCandidate {
+            sdp_mid: "0".into(),
+            sdp_mline_index: 0,
+            candidate: cand_bob,
+            end_of_candidates: true,
+        })),
+    };
+    write_bob.send(TungsteniteMsg::Binary(Envelope::new(cand_msg_bob).encode().into())).await.unwrap();
+    let res_cand_bob = read_bob.next().await.unwrap().unwrap();
+    let env_cand_bob = Envelope::decode(&res_cand_bob.into_data()).unwrap();
+    assert!(matches!(env_cand_bob.payload(), Some(Payload::Ack(_))));
+
+    // Small delay to allow endpoint registration
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 3. Real UDP Media Forwarding: Alice -> Bob
+    let mut rtp_from_alice = vec![0x80, 0x60, 0x00, 0x01, 0x00, 0x00, 0x03, 0xe8];
+    rtp_from_alice.extend_from_slice(&2222u32.to_be_bytes()); // SSRC 2222
+    rtp_from_alice.extend_from_slice(b"ALICE_LIVE_VIDEO_FRAME_BYTES");
+    alice_udp.send_to(&rtp_from_alice, udp_addr).await.unwrap();
+
+    let mut buf = [0u8; 1024];
+    let (len, from_addr) = tokio::time::timeout(Duration::from_millis(500), bob_udp.recv_from(&mut buf))
+        .await
+        .expect("Bob timed out waiting for Alice's media packet")
+        .expect("bob recv");
+    assert_eq!(from_addr, udp_addr, "packet must arrive from server UDP media loop");
+    assert_eq!(&buf[..len], &rtp_from_alice[..], "packet payload must match Alice's exact RTP packet");
+
+    // 4. Real UDP Media Forwarding: Bob -> Alice & RTCP PLI verification (M2.6)
+    let mut rtp_from_bob = vec![0x80, 0x60, 0x00, 0x02, 0x00, 0x00, 0x07, 0xd0];
+    rtp_from_bob.extend_from_slice(&3333u32.to_be_bytes()); // SSRC 3333
+    rtp_from_bob.extend_from_slice(b"BOB_LIVE_VIDEO_FRAME_BYTES");
+    bob_udp.send_to(&rtp_from_bob, udp_addr).await.unwrap();
+
+    let mut got_bob_media = false;
+    let mut got_rtcp_pli = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(1000);
+    while tokio::time::Instant::now() < deadline {
+        let Ok(Ok((len_a, from_addr_a))) =
+            tokio::time::timeout(Duration::from_millis(200), alice_udp.recv_from(&mut buf)).await
+        else {
+            if got_bob_media {
+                break;
+            }
+            continue;
+        };
+        assert_eq!(from_addr_a, udp_addr);
+        // RTCP PLI packet sent by server to Alice requesting keyframe for SSRC 2222
+        if len_a == 12 && buf[1] == 206 {
+            let ssrc_target = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]);
+            assert_eq!(ssrc_target, 2222, "RTCP PLI must target Alice's video SSRC 2222");
+            got_rtcp_pli = true;
+            continue;
+        }
+        if &buf[..len_a] == &rtp_from_bob[..] {
+            got_bob_media = true;
+            break;
+        }
+    }
+    assert!(got_rtcp_pli, "Alice must receive RTCP PLI keyframe request triggered by Bob joining");
+    assert!(got_bob_media, "Alice must receive Bob's forwarded RTP packet");
+
+    // 5. Anti-spoofing and Room Isolation: Rogue UDP packet from unknown sender
+    let rogue_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut spoofed_pkt = vec![0x80, 0x60, 0x00, 0x03, 0x00, 0x00, 0x0a, 0x00];
+    spoofed_pkt.extend_from_slice(&2222u32.to_be_bytes()); // Alice's SSRC spoofed
+    spoofed_pkt.extend_from_slice(b"ROGUE_INJECTION_ATTEMPT");
+    rogue_udp.send_to(&spoofed_pkt, udp_addr).await.unwrap();
+
+    // Bob must NOT receive this spoofed packet!
+    let rogue_res = tokio::time::timeout(Duration::from_millis(100), bob_udp.recv_from(&mut buf)).await;
+    assert!(rogue_res.is_err(), "spoofed packet from rogue endpoint must be dropped by anti-spoofing");
+
+    // 6. Bob leaves room -> Alice receives ParticipantLeft and media forwarding terminates
+    let leave_msg = SignalingMessage {
+        msg_id: 5,
+        reply_to: 0,
+        payload: Some(Payload::LeaveRoom(sig::LeaveRoom { room_id: "room-pkg-c".into() })),
+    };
+    write_bob.send(TungsteniteMsg::Binary(Envelope::new(leave_msg).encode().into())).await.unwrap();
+    let res_leave_ack = read_bob.next().await.unwrap().unwrap();
+    let env_leave_ack = Envelope::decode(&res_leave_ack.into_data()).unwrap();
+    assert!(matches!(env_leave_ack.payload(), Some(Payload::Ack(_))));
+
+    let alice_left_notif = read_alice.next().await.unwrap().unwrap();
+    let env_left_notif = Envelope::decode(&alice_left_notif.into_data()).unwrap();
+    assert!(matches!(env_left_notif.payload(), Some(Payload::ParticipantLeft(_))));
+
+    // Alice sends another packet -> Bob must NOT receive it
+    alice_udp.send_to(&rtp_from_alice, udp_addr).await.unwrap();
+    let bob_after_leave = tokio::time::timeout(Duration::from_millis(100), bob_udp.recv_from(&mut buf)).await;
+    assert!(bob_after_leave.is_err(), "departed participant must no longer receive room media");
+}
