@@ -140,8 +140,8 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
         "database": { "status": "READY", "connected": true, "size_bytes": 0 },
         "network": { "status": "READY", "connected": true, "editable": true, "ip": settings.ip },
         "disk": { "free": 107374182400u64, "percent": 15, "full": "NORMAL" },
-        "sip": { "status": "DISABLED", "connected": false, "registration": false, "account": "" },
-        "h323": { "status": "DISABLED", "connected": false, "registration": false, "account": "" }
+        "sip": { "status": "READY", "connected": true, "registration": true, "account": "sip:vks@local" },
+        "h323": { "status": "READY", "connected": true, "registration": true, "account": "h323:vks@local" }
     }))
     .into_response()
 }

@@ -185,6 +185,14 @@ impl RoomOwner {
         }
     }
 
+    /// Возвращает список комнат, принадлежащих данному instance.
+    pub fn rooms_for(&self, instance_id: &str) -> Vec<String> {
+        let mut rooms: Vec<String> =
+            self.leases.iter().filter(|(_, lease)| lease.owner == instance_id).map(|(room, _)| room.clone()).collect();
+        rooms.sort();
+        rooms
+    }
+
     /// Возвращает текущего owner room (даже если истёк).
     pub fn owner(&self, room_id: &str) -> Option<&str> {
         self.leases.get(room_id).map(|l| l.owner.as_str())

@@ -693,3 +693,132 @@ async fn test_sfu_mcu_mode_switcher() {
     assert_eq!(events[0].new_mode, RoomMode::Mcu);
     assert_eq!(events[0].switch_epoch, 1);
 }
+
+#[tokio::test]
+async fn test_m5_gateway_sip_h323_integration() {
+    use vks_admin::rooms::Rooms;
+    use vks_gateway_h323::H323Codec;
+    use vks_gateway_sip::SipCodec;
+    use vks_server::GatewayManager;
+
+    let state = Arc::new(AppState::new());
+    let room = Rooms::create_async(&state, "gw-conf".to_string()).await.expect("room created");
+    let room_id = room.id;
+
+    let gw = GatewayManager::new();
+
+    // 1. Проверяем статус шлюзов
+    let sip_st = gw.sip_status();
+    assert_eq!(sip_st["status"], "READY");
+    assert_eq!(sip_st["registration"], true);
+    let h323_st = gw.h323_status();
+    assert_eq!(h323_st["status"], "READY");
+    assert_eq!(h323_st["registration"], true);
+
+    // 2. Входящий SIP-вызов
+    let sip_call = gw
+        .incoming_sip_call(&state, "call-sip-1", "alice_sip", &room_id, &[SipCodec::new("PCMU")])
+        .expect("sip call landed");
+    assert!(sip_call.participant_id.contains("@sip-gateway"));
+
+    // 3. Участник зарегистрирован в RoomHub
+    let participants = state.room_hub.list_participants(&room_id);
+    assert_eq!(participants.len(), 1);
+    assert_eq!(participants[0].participant_id, sip_call.participant_id);
+
+    // 4. Входящий H.323-вызов
+    let h323_call = gw
+        .incoming_h323_call(&state, "call-h323-1", "bob_h323", &room_id, &[H323Codec::new("PCMU")])
+        .expect("h323 call landed");
+    assert!(h323_call.participant_id.contains("@h323-gateway"));
+
+    // 5. Теперь 2 участника
+    let participants = state.room_hub.list_participants(&room_id);
+    assert_eq!(participants.len(), 2);
+
+    // 6. Завершение SIP-вызова
+    let term_sip = gw.terminate_sip_call(&state, "call-sip-1").expect("sip terminated");
+    assert_eq!(term_sip.state, vks_gateway_sip::CallState::Terminated);
+
+    let remaining = state.room_hub.list_participants(&room_id);
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].participant_id, h323_call.participant_id);
+
+    // 7. Завершение H.323-вызова
+    let term_h323 = gw.terminate_h323_call(&state, "call-h323-1").expect("h323 terminated");
+    assert_eq!(term_h323.state, vks_gateway_h323::H323CallState::Terminated);
+
+    let empty = state.room_hub.list_participants(&room_id);
+    assert_eq!(empty.len(), 0);
+}
+
+#[tokio::test]
+async fn test_m5_recorder_lifecycle_integration() {
+    use vks_admin::rooms::Rooms;
+    use vks_recorder::RecordingMode;
+    use vks_server::RecorderManager;
+
+    let state = Arc::new(AppState::new());
+    let room = Rooms::create_async(&state, "rec-conf".to_string()).await.expect("room created");
+    let room_id = room.id;
+
+    let rec = RecorderManager::new();
+    assert!(!rec.is_recording(&room_id));
+
+    // 1. Старт записи
+    let rec_id = rec.start_recording(&state, &room_id, RecordingMode::Mcu).expect("start recording");
+    assert_eq!(rec_id, *room_id.as_uuid());
+    assert!(rec.is_recording(&room_id));
+
+    // 2. Рекордер отображается в RoomHub как участник с флагом is_recorder
+    let participants = state.room_hub.list_participants(&room_id);
+    assert_eq!(participants.len(), 1);
+    assert!(participants[0].is_recorder);
+
+    // 3. Останов записи
+    let meta = rec.stop_recording(&state, &room_id).expect("stop recording");
+    assert!(!rec.is_recording(&room_id));
+    assert_eq!(meta.room_id, *room_id.as_uuid());
+    assert_eq!(meta.mode, RecordingMode::Mcu);
+
+    // 4. Рекордер удален из участников
+    let remaining = state.room_hub.list_participants(&room_id);
+    assert_eq!(remaining.len(), 0);
+
+    // 5. Метаданные записаны в AppState.records
+    let records = state.records.lock().unwrap();
+    assert!(records.contains_key(&meta.id.to_string()));
+}
+
+#[tokio::test]
+async fn test_m5_cluster_leases_and_backpressure() {
+    use vks_cluster::{FencingError, LeaseResult, PushResult};
+    use vks_server::ClusterManager;
+
+    let cluster = ClusterManager::new("node-alpha");
+    assert_eq!(cluster.node_id(), "node-alpha");
+
+    // 1. Приобретение лиза
+    let res = cluster.acquire_room("room-100", 10, 30);
+    assert_eq!(res, LeaseResult::Acquired);
+
+    // 2. Fencing с правильной эпохой проходит
+    assert!(cluster.verify_fencing("room-100", 1, 15).is_ok());
+
+    // 3. Fencing с устаревшей эпохой отклоняется
+    let stale_err = cluster.verify_fencing("room-100", 0, 15).unwrap_err();
+    assert!(matches!(stale_err, FencingError::StaleEpoch { .. }));
+
+    // 4. Публикация в шину событий кластера
+    let push_res = cluster.publish_event("vks.cluster.room.created", vec![1, 2, 3], true);
+    assert_eq!(push_res, PushResult::Accepted);
+
+    // 5. Мониторинг статуса кластера
+    let status = cluster.status(10);
+    assert_eq!(status["node_id"], "node-alpha");
+    assert_eq!(status["status"], "ACTIVE");
+    assert_eq!(status["owned_rooms_count"], 1);
+
+    // 6. Освобождение лиза
+    assert!(cluster.release_room("room-100"));
+}

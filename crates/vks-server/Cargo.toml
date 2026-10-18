@@ -20,6 +20,10 @@ vks-media-sfu = { path = "../vks-media-sfu" }
 vks-media-mcu = { path = "../vks-media-mcu" }
 vks-layout = { path = "../vks-layout" }
 vks-proto = { path = "../vks-proto" }
+vks-gateway-sip = { path = "../vks-gateway-sip" }
+vks-gateway-h323 = { path = "../vks-gateway-h323" }
+vks-recorder = { path = "../vks-recorder" }
+vks-cluster = { path = "../vks-cluster" }
 
 tokio = { workspace = true, features = ["full"] }
 axum = { workspace = true, features = ["ws"] }

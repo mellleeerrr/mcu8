@@ -28,8 +28,8 @@ use vks_common::config::Config;
 use vks_common::metrics::{init_default as init_metrics, FRONTEND_DENIED};
 use vks_common::tracing::{init as init_tracing, LogFormat};
 use vks_core::ports::Storage;
-use vks_server::build_app_full;
 use vks_server::frontend::Frontend;
+use vks_server::{build_app_with_services, ClusterManager, GatewayManager, RecorderManager};
 use vks_signaling::handler::HandlerConfig;
 use vks_signaling::sdp::RtpMap;
 use vks_storage::{MemoryStorage, PostgresStorage, SqliteStorage};
@@ -250,8 +250,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_ice_servers(ice_servers);
 
-    // 9. Сборка маршрутов (единая точка — vks_server::build_app_full)
-    let app = build_app_full(admin_state, &frontend, handler_config, sfu_engine.clone(), udp_loop.clone());
+    // 9. Инициализация менеджеров внешних протоколов M5 (SIP, H.323, запись, кластер)
+    let gateway_manager = Arc::new(GatewayManager::new());
+    let recorder_manager = Arc::new(RecorderManager::new());
+    let cluster_manager = Arc::new(ClusterManager::new(&config.server_name));
+
+    info!(
+        server = %config.server_name,
+        "SIP UAS, H.323 gateway, recorder and cluster managers initialized"
+    );
+
+    // 10. Сборка маршрутов (единая точка — vks_server::build_app_with_services)
+    let app = build_app_with_services(
+        admin_state,
+        &frontend,
+        handler_config,
+        sfu_engine.clone(),
+        udp_loop.clone(),
+        gateway_manager.clone(),
+        recorder_manager.clone(),
+        cluster_manager.clone(),
+    );
 
     // 10. Привязка сокета и запуск сервера
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;

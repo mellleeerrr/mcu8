@@ -16,7 +16,7 @@ pub type ClockMs = u64;
 
 /// Функция-часы: возвращает «сейчас» в мс. Параметризация времени
 /// делает запись детерминированной в тестах.
-pub type Clock = dyn Fn() -> ClockMs;
+pub type Clock = dyn Fn() -> ClockMs + Send + Sync;
 
 /// Вид сегмента записи (DEVELOPMENT_PLAN.md Фаза 7).
 ///
@@ -175,13 +175,13 @@ pub struct RecordingSession {
     ended_at_ms: Option<ClockMs>,
     id: Option<Uuid>,
     cached_meta: Option<RecordingMeta>,
-    now_ms: Box<dyn Fn() -> ClockMs>,
+    now_ms: Box<Clock>,
 }
 
 impl RecordingSession {
     /// Создаёт сессию с заданными часами. Начальное состояние —
     /// [`RecordingState::Idle`].
-    pub fn new(room_id: Uuid, now_ms: Box<dyn Fn() -> ClockMs>) -> Self {
+    pub fn new(room_id: Uuid, now_ms: Box<Clock>) -> Self {
         Self {
             room_id,
             mode: RecordingMode::Mcu,
@@ -382,14 +382,12 @@ mod tests {
     #[test]
     fn custom_clock_produces_expected_duration() {
         // Часы: первое обращение (start) → 0, второе (stop) → 1_500.
-        // `Cell` — потому что `Clock` = `Box<dyn Fn()>` (не FnMut).
-        let calls = std::rc::Rc::new(std::cell::Cell::new(0u32));
-        let calls_box = std::rc::Rc::clone(&calls);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let calls_box = std::sync::Arc::clone(&calls);
         let mut s = RecordingSession::new(
             room(),
             Box::new(move || {
-                let n = calls_box.get();
-                calls_box.set(n + 1);
+                let n = calls_box.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if n == 0 {
                     0
                 } else {
@@ -405,7 +403,7 @@ mod tests {
         assert_eq!(meta.ended_at_ms, 1_500);
         assert_eq!(meta.size_bytes, 42);
         assert_eq!(meta.segments, 1);
-        assert_eq!(calls.get(), 2);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -419,13 +417,12 @@ mod tests {
 
     #[test]
     fn stop_is_idempotent_and_preserves_timestamps() {
-        let calls = std::rc::Rc::new(std::cell::Cell::new(0u32));
-        let calls_box = std::rc::Rc::clone(&calls);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let calls_box = std::sync::Arc::clone(&calls);
         let mut s = RecordingSession::new(
             room(),
             Box::new(move || {
-                let n = calls_box.get();
-                calls_box.set(n + 1);
+                let n = calls_box.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 match n {
                     0 => 1_000,
                     1 => 3_000,
@@ -445,7 +442,7 @@ mod tests {
         assert_eq!(meta2.started_at_ms, 1_000);
         assert_eq!(meta2.ended_at_ms, 3_000);
         assert_eq!(meta2.duration_ms, 2_000);
-        assert_eq!(calls.get(), 2);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

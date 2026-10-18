@@ -5,7 +5,14 @@
 //! auth-at-handshake + лимиты) и статика фронтенда PNM (`/pnm/`, `/mcu/*`).
 //! Используется и `main.rs` (композиционный корень), и интеграционными тестами.
 
+pub mod cluster;
 pub mod frontend;
+pub mod gateways;
+pub mod recorder;
+
+pub use cluster::ClusterManager;
+pub use gateways::GatewayManager;
+pub use recorder::RecorderManager;
 
 use std::sync::Arc;
 
@@ -31,13 +38,16 @@ use vks_signaling::handler::{HandlerConfig, SignalingHandler};
 
 use crate::frontend::{statics_rel_path, Frontend};
 
-/// Контекст для WebSocket-сигналинга (состояние приложения + конфигурация сессии + медиа-движок + UDP-луп).
+/// Контекст для WebSocket-сигналинга (состояние приложения + конфигурация сессии + медиа-движок + UDP-луп + сервисы M5).
 #[derive(Clone)]
 pub struct WsContext {
     pub state: Arc<AppState>,
     pub handler_config: HandlerConfig,
     pub sfu_engine: Arc<vks_media_sfu::SfuEngine>,
     pub udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
+    pub gateways: Arc<GatewayManager>,
+    pub recorder: Arc<RecorderManager>,
+    pub cluster: Arc<ClusterManager>,
 }
 
 /// Собирает полное приложение сервера с тестовой конфигурацией по умолчанию.
@@ -46,7 +56,11 @@ pub fn build_app(state: Arc<AppState>, frontend: &Frontend) -> Router {
 }
 
 /// Собирает полное приложение сервера с заданной конфигурацией обработчика сигналинга.
-pub fn build_app_with_config(state: Arc<AppState>, frontend: &Frontend, handler_config: HandlerConfig) -> Router {
+pub fn build_app_with_config(
+    state: Arc<AppState>,
+    frontend: &Frontend,
+    handler_config: HandlerConfig,
+) -> Router {
     build_app_with_engine(state, frontend, handler_config, Arc::new(vks_media_sfu::SfuEngine::new()))
 }
 
@@ -61,11 +75,6 @@ pub fn build_app_with_engine(
 }
 
 /// Собирает полное приложение сервера с полной поддержкой WebRTC (SFU + UDP медиа-луп).
-///
-/// Слои (снаружи внутрь): HTTP-метрики → security-заголовки → `Cache-Control`/`Vary`
-/// (внутри [`Frontend::router`]) → роуты. Security-заголовки — **app-wide**, включая
-/// `/api/v1/*`, `/metrics` и `/ws` (§4.2 плана). Статика монтируется из `frontend`,
-/// поэтому тесты гоняют ровно ту же сборку, что и `main.rs`.
 pub fn build_app_full(
     state: Arc<AppState>,
     frontend: &Frontend,
@@ -73,14 +82,70 @@ pub fn build_app_full(
     sfu_engine: Arc<vks_media_sfu::SfuEngine>,
     udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
 ) -> Router {
+    build_app_with_services(
+        state,
+        frontend,
+        handler_config,
+        sfu_engine,
+        udp_loop,
+        Arc::new(GatewayManager::new()),
+        Arc::new(RecorderManager::new()),
+        Arc::new(ClusterManager::new("vks-node-1")),
+    )
+}
+
+/// Собирает полное приложение сервера с полной поддержкой всех сервисов M5 (шлюзы, рекордер, кластер).
+#[allow(clippy::too_many_arguments)]
+pub fn build_app_with_services(
+    state: Arc<AppState>,
+    frontend: &Frontend,
+    handler_config: HandlerConfig,
+    sfu_engine: Arc<vks_media_sfu::SfuEngine>,
+    udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
+    gateways: Arc<GatewayManager>,
+    recorder: Arc<RecorderManager>,
+    cluster: Arc<ClusterManager>,
+) -> Router {
     let csp = frontend.csp.clone();
-    let ws_ctx = WsContext { state: state.clone(), handler_config, sfu_engine, udp_loop };
+    let ws_ctx = WsContext {
+        state: state.clone(),
+        handler_config,
+        sfu_engine,
+        udp_loop,
+        gateways: gateways.clone(),
+        recorder: recorder.clone(),
+        cluster: cluster.clone(),
+    };
     // Сигналинг: auth-at-handshake и лимиты (T1.2) — внутри ws_handler.
     let signaling = Router::new().route("/ws", get(ws_handler)).with_state(ws_ctx);
+
+    // Дополнительные API M5 эндпоинты для мониторинга шлюзов и статуса кластера
+    let m5_api = Router::new()
+        .route("/api/v3/gateways/status", get(move || {
+            let gw = gateways.clone();
+            async move {
+                Json(serde_json::json!({
+                    "sip": gw.sip_status(),
+                    "h323": gw.h323_status()
+                }))
+            }
+        }))
+        .route("/api/v3/cluster/status", get(move || {
+            let cl = cluster.clone();
+            async move {
+                let now_sec = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                Json(cl.status(now_sec))
+            }
+        }));
+
     vks_admin::handlers::router(state.clone())
         // Адаптер legacy UI `/api/v3/*` (ADR-0027, фазы 2–3 плана).
         .merge(vks_admin::api_v3::router(state))
         .merge(signaling)
+        .merge(m5_api)
         .route("/metrics", get(metrics_handler))
         .merge(frontend.router())
         .layer(axum::middleware::from_fn(move |request: Request, next: Next| {
@@ -190,8 +255,7 @@ async fn ws_handler(State(ctx): State<WsContext>, headers: HeaderMap, ws: WebSoc
         return ws_error(StatusCode::UNAUTHORIZED, "unauthorized", "invalid, expired, or revoked token");
     };
     if let Ok(users) = ctx.state.users.lock() {
-        if let Some(u) = users.values().find(|u| u.id.to_string() == verified.user_id || u.username == verified.user_id)
-        {
+        if let Some(u) = users.values().find(|u| u.id.to_string() == verified.user_id || u.username == verified.user_id) {
             if u.deleted {
                 return ws_error(StatusCode::FORBIDDEN, "forbidden", "user account is deactivated");
             }
@@ -634,13 +698,10 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
         let payload_bytes = Envelope::new(left_msg).encode();
         state.room_hub.broadcast(&rid, Some(&pid_str), payload_bytes.into());
 
-        state.notify_admin(
-            "conferences:update",
-            serde_json::json!({
-                "id": rid.to_string(),
-                "participants_count": new_count
-            }),
-        );
+        state.notify_admin("conferences:update", serde_json::json!({
+            "id": rid.to_string(),
+            "participants_count": new_count
+        }));
     }
 }
 

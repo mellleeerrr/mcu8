@@ -122,8 +122,12 @@ fn select_rooms(state: &AppState, query: &SessionsQuery) -> (Vec<RoomRecord>, us
 }
 
 /// JSON сессии/конференции (мапперы `Fv`/`dy`/`zZ` мягкие).
-fn session_json(r: &RoomRecord, connections_limit: u32, is_stopped: bool) -> Value {
+fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_stopped: bool) -> Value {
     let (state_str, has_stopped) = if is_stopped { ("STOPPED", true) } else { ("ACTIVE", false) };
+    let participants = state.room_hub.list_participants(&r.id);
+    let sip_count = participants.iter().filter(|p| p.participant_id.contains("@sip-gateway")).count();
+    let h323_count = participants.iter().filter(|p| p.participant_id.contains("@h323-gateway")).count();
+    let is_recording = participants.iter().any(|p| p.is_recorder);
     json!({
         "id": r.id.to_string(),
         "display_name": r.name,
@@ -133,12 +137,12 @@ fn session_json(r: &RoomRecord, connections_limit: u32, is_stopped: bool) -> Val
         "has_stopped": has_stopped,
         // Секунды: карточки умножают на 1e3 (`startedAt*1e3`) для Date/duration.
         "started_at": r.created_ms / 1000,
-        "recording": false,
-        "videorecord": false,
+        "recording": is_recording,
+        "videorecord": is_recording,
         "broadcast": false,
         "owner_id": "",
-        "abonents": { "sip": 0, "h323": 0, "rtsp": 0, "vnc": 0, "media": 0, "file": 0 },
-        "contacts": { "users": 0, "sip": 0, "h323": 0, "rtsp": 0, "vnc": 0, "media": 0, "file": 0 },
+        "abonents": { "sip": sip_count, "h323": h323_count, "rtsp": 0, "vnc": 0, "media": 0, "file": 0 },
+        "contacts": { "users": 0, "sip": sip_count, "h323": h323_count, "rtsp": 0, "vnc": 0, "media": 0, "file": 0 },
         "payload": { "connections_limit": connections_limit }
     })
 }
@@ -162,7 +166,7 @@ fn sessions_payload(state: &AppState, query: &SessionsQuery) -> Value {
     let limit = connections_limit(state);
     let stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned");
     json!({
-        "sessions": items.iter().map(|r| session_json(r, limit, stopped.contains(&r.id))).collect::<Vec<_>>(),
+        "sessions": items.iter().map(|r| session_json(state, r, limit, stopped.contains(&r.id))).collect::<Vec<_>>(),
         "count": count
     })
 }
@@ -172,7 +176,7 @@ fn conferences_payload(state: &AppState, query: &SessionsQuery) -> Value {
     let limit = connections_limit(state);
     let stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned");
     json!({
-        "conferences": items.iter().map(|r| session_json(r, limit, stopped.contains(&r.id))).collect::<Vec<_>>(),
+        "conferences": items.iter().map(|r| session_json(state, r, limit, stopped.contains(&r.id))).collect::<Vec<_>>(),
         "count": count
     })
 }
@@ -190,7 +194,8 @@ pub async fn session(State(state): State<SharedState>, Path(id): Path<String>) -
         Some(room) => {
             let is_stopped =
                 state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
-            Json(json!({ "session": session_json(&room, connections_limit(&state), is_stopped) })).into_response()
+            Json(json!({ "session": session_json(&state, &room, connections_limit(&state), is_stopped) }))
+                .into_response()
         }
         None => error_json(404, "Session not found"),
     }
@@ -226,7 +231,7 @@ pub async fn start_session(
     state.notify_admin("sessions:started", json!({ "id": room.id.to_string() }));
     state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
     audit_room(&state, &verified.user_id, "session.started", &room.id.to_string());
-    Json(json!({ "session": session_json(&room, connections_limit(&state), false) })).into_response()
+    Json(json!({ "session": session_json(&state, &room, connections_limit(&state), false) })).into_response()
 }
 
 /// `POST /api/v3/sessions/quick` (или `/ui/sessions/quick`) — быстрый старт сессии.
@@ -251,7 +256,7 @@ pub async fn quick_session(
     state.notify_admin("conferences:created", json!({ "id": room.id.to_string() }));
     state.notify_admin("conferences", json!({ "action": "created", "id": room.id.to_string() }));
     audit_room(&state, &verified.user_id, "session.quick_started", &room.id.to_string());
-    Json(json!({ "session": session_json(&room, connections_limit(&state), false) })).into_response()
+    Json(json!({ "session": session_json(&state, &room, connections_limit(&state), false) })).into_response()
 }
 
 /// `DELETE /api/v3/sessions/{id}` (или `/ui/sessions/{id}`) — завершение сессии БЕЗ удаления конференции.
@@ -307,7 +312,7 @@ pub async fn create_conference(
     state.notify_admin("conferences:created", json!({ "id": record.id.to_string(), "display_name": record.name }));
     state.notify_admin("conferences", json!({ "action": "created", "id": record.id.to_string() }));
     audit_room(&state, &verified.user_id, "conference.created", &record.id.to_string());
-    Json(json!({ "conference": session_json(&record, connections_limit(&state), false) })).into_response()
+    Json(json!({ "conference": session_json(&state, &record, connections_limit(&state), false) })).into_response()
 }
 
 /// `GET /api/v3/conferences/{id}` → `{conference:{…}}` (404 JSON если нет).
@@ -317,7 +322,8 @@ pub async fn conference(State(state): State<SharedState>, Path(id): Path<String>
         Some(room) => {
             let is_stopped =
                 state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
-            Json(json!({ "conference": session_json(&room, connections_limit(&state), is_stopped) })).into_response()
+            Json(json!({ "conference": session_json(&state, &room, connections_limit(&state), is_stopped) }))
+                .into_response()
         }
         None => error_json(404, "Conference not found"),
     }
@@ -344,7 +350,7 @@ pub async fn update_conference(
     state.notify_admin("conferences:updated", json!({ "id": updated.id.to_string(), "display_name": updated.name }));
     state.notify_admin("conferences", json!({ "action": "updated", "id": updated.id.to_string() }));
     let is_stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&updated.id);
-    Json(json!({ "conference": session_json(&updated, connections_limit(&state), is_stopped) })).into_response()
+    Json(json!({ "conference": session_json(&state, &updated, connections_limit(&state), is_stopped) })).into_response()
 }
 
 /// `DELETE /api/v3/conferences/{id}` → 204 | 404 (аудит §4.5).
@@ -386,6 +392,15 @@ pub async fn session_abonents(State(state): State<SharedState>, Path(id): Path<S
     let connected: Vec<Value> = participants
         .iter()
         .map(|p| {
+            let (type_id, connection_url) = if p.is_recorder {
+                ("recorder", format!("recorder://{}", p.participant_id))
+            } else if p.participant_id.contains("@sip-gateway") {
+                ("sip", format!("sip://{}", p.display_name))
+            } else if p.participant_id.contains("@h323-gateway") {
+                ("h323", format!("h323://{}", p.display_name))
+            } else {
+                ("webrtc", format!("webrtc://{}", p.participant_id))
+            };
             json!({
                 "abonent_id": p.participant_id,
                 "connection_id": p.participant_id,
@@ -393,8 +408,8 @@ pub async fn session_abonents(State(state): State<SharedState>, Path(id): Path<S
                 "call_string_id": p.participant_id,
                 "video_layout_id": "grid",
                 "display_name": p.display_name,
-                "connection_url": format!("webrtc://{}", p.participant_id),
-                "type_id": if p.is_recorder { "recorder" } else { "webrtc" },
+                "connection_url": connection_url,
+                "type_id": type_id,
                 "connected_at": p.connected_at,
                 "payload": {
                     "settings": {
