@@ -322,6 +322,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &frontend,
         handler_config,
         sfu_engine.clone(),
+        _mcu_engine.clone(),
         udp_loop.clone(),
         gateway_manager.clone(),
         recorder_manager.clone(),

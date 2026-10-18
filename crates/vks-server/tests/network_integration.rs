@@ -626,6 +626,42 @@ async fn reqwest_like_get(addr: SocketAddr, path: &str, token: &str) -> String {
     }
 }
 
+async fn reqwest_like_request(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Option<&str>,
+) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let body_str = body.unwrap_or("");
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_str}",
+        body_str.len()
+    );
+    stream.write_all(request.as_bytes()).await.expect("write");
+
+    let mut response_buf = Vec::new();
+    stream.read_to_end(&mut response_buf).await.expect("read");
+    let full = String::from_utf8_lossy(&response_buf).into_owned();
+    let status = full
+        .lines()
+        .next()
+        .and_then(|l| {
+            let parts: Vec<&str> = l.split_whitespace().collect();
+            if parts.len() >= 2 {
+                parts[1].parse::<u16>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    let body = full.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+    (status, body)
+}
+
 #[tokio::test]
 async fn test_live_signaling_syncs_ui_sessions() {
     let (addr, _state, token) = spawn_live_server_with_auth().await;
@@ -1053,4 +1089,286 @@ async fn test_package_c_real_sfu_session_with_media_loopback_and_room_isolation(
     alice_udp.send_to(&rtp_from_alice, udp_addr).await.unwrap();
     let bob_after_leave = tokio::time::timeout(Duration::from_millis(100), bob_udp.recv_from(&mut buf)).await;
     assert!(bob_after_leave.is_err(), "departed participant must no longer receive room media");
+}
+
+async fn spawn_live_server_with_mcu_sfu(
+    mcu_engine: Arc<vks_media_mcu::McuEngine>,
+    sfu_engine: Arc<vks_media_sfu::SfuEngine>,
+) -> (SocketAddr, SocketAddr, Arc<AppState>, String) {
+    let mut state = AppState::new();
+    let issuer = Arc::new(JwtIssuer::new(vks_auth::jwt::JwtConfig {
+        secret: "mcu_pkg_d_secret_456".to_string(),
+        ttl_secs: 86_400,
+        issuer: "vks-integration".to_string(),
+    }));
+    let db = Arc::new(LocalDb::new());
+    db.register("u-admin", "admin", "admin").expect("register admin");
+    state.jwt_issuer = Some(issuer.clone());
+    state.local_db = Some(db);
+    Users::bootstrap_operator(&state, "admin");
+    let token = issuer.issue("admin", None).expect("issue");
+
+    let state = Arc::new(state);
+    let frontend = Frontend::load(&frontend_fixture_dir());
+
+    let udp_loop = Arc::new(vks_media_sfu::udp_loop::UdpMediaLoop::bind("127.0.0.1:0").await.expect("bind udp loop"));
+    let udp_addr = udp_loop.local_addr();
+
+    let sfu_clone = sfu_engine.clone();
+    let _task = udp_loop.start_routing_loop(move |src, packet| sfu_clone.route_udp_packet(src, packet.payload));
+
+    let mut handler_config = HandlerConfig::default_test();
+    handler_config.candidate_addr = udp_addr.ip().to_string();
+    handler_config.candidate_port = udp_addr.port();
+
+    let app = vks_server::build_app_with_mcu(
+        state.clone(),
+        &frontend,
+        handler_config,
+        sfu_engine.clone(),
+        mcu_engine.clone(),
+        Some(udp_loop),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind listener");
+    let tcp_addr = listener.local_addr().expect("local addr");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    (tcp_addr, udp_addr, state, token)
+}
+
+#[tokio::test]
+async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
+    let mcu_engine = Arc::new(vks_media_mcu::McuEngine::new());
+    let sfu_engine = Arc::new(vks_media_sfu::SfuEngine::new());
+    let (tcp_addr, _udp_addr, state, token) =
+        spawn_live_server_with_mcu_sfu(mcu_engine.clone(), sfu_engine.clone()).await;
+    let ws_url = format!("ws://{tcp_addr}/ws");
+
+    // 1. Client 1 (Alice) connects over live WebSocket
+    let ws_alice = connect_ws(&ws_url, Some(&token)).await;
+    let (mut write_alice, mut read_alice) = ws_alice.split();
+
+    let hello_alice = client_hello(1, "room-pkg-d", "alice-client");
+    write_alice.send(TungsteniteMsg::Binary(hello_alice.encode().into())).await.unwrap();
+    let res_hello = read_alice.next().await.unwrap().unwrap();
+    let env_hello = Envelope::decode(&res_hello.into_data()).unwrap();
+    assert!(matches!(env_hello.payload(), Some(Payload::ServerHello(_))));
+
+    let join_alice = join_room(2, "room-pkg-d", "Alice");
+    write_alice.send(TungsteniteMsg::Binary(join_alice.encode().into())).await.unwrap();
+    let res_join = read_alice.next().await.unwrap().unwrap();
+    let env_join = Envelope::decode(&res_join.into_data()).unwrap();
+    assert!(matches!(env_join.payload(), Some(Payload::JoinRoomResult(_))));
+
+    let sdp_offer_alice = "v=0\r\no=- 1000 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 50000 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 127.0.0.1\r\na=rtpmap:96 VP8/90000\r\na=ssrc:4001 cname:alice\r\n";
+    let offer_msg_alice = SignalingMessage {
+        msg_id: 3,
+        reply_to: 0,
+        payload: Some(Payload::SdpOffer(sig::SdpOffer { sdp: sdp_offer_alice.into() })),
+    };
+    write_alice.send(TungsteniteMsg::Binary(Envelope::new(offer_msg_alice).encode().into())).await.unwrap();
+    let res_ans = read_alice.next().await.unwrap().unwrap();
+    let env_ans = Envelope::decode(&res_ans.into_data()).unwrap();
+    assert!(matches!(env_ans.payload(), Some(Payload::SdpAnswer(_))));
+
+    // 2. Client 2 (Bob) connects over live WebSocket
+    let ws_bob = connect_ws(&ws_url, Some(&token)).await;
+    let (mut write_bob, mut read_bob) = ws_bob.split();
+
+    let hello_bob = client_hello(1, "room-pkg-d", "bob-client");
+    write_bob.send(TungsteniteMsg::Binary(hello_bob.encode().into())).await.unwrap();
+    let _ = read_bob.next().await.unwrap().unwrap();
+
+    let join_bob = join_room(2, "room-pkg-d", "Bob");
+    write_bob.send(TungsteniteMsg::Binary(join_bob.encode().into())).await.unwrap();
+    let res_join_bob = read_bob.next().await.unwrap().unwrap();
+    let env_join_bob = Envelope::decode(&res_join_bob.into_data()).unwrap();
+    assert!(matches!(env_join_bob.payload(), Some(Payload::JoinRoomResult(_))));
+
+    // Alice receives ParticipantJoined for Bob
+    let alice_notif = read_alice.next().await.unwrap().unwrap();
+    let env_notif = Envelope::decode(&alice_notif.into_data()).unwrap();
+    assert!(matches!(env_notif.payload(), Some(Payload::ParticipantJoined(_))));
+
+    let sdp_offer_bob = "v=0\r\no=- 2000 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio 50002 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 127.0.0.1\r\na=rtpmap:111 opus/48000/2\r\na=ssrc:5001 cname:bob\r\n";
+    let offer_msg_bob = SignalingMessage {
+        msg_id: 3,
+        reply_to: 0,
+        payload: Some(Payload::SdpOffer(sig::SdpOffer { sdp: sdp_offer_bob.into() })),
+    };
+    write_bob.send(TungsteniteMsg::Binary(Envelope::new(offer_msg_bob).encode().into())).await.unwrap();
+    let res_ans_bob = read_bob.next().await.unwrap().unwrap();
+    let env_ans_bob = Envelope::decode(&res_ans_bob.into_data()).unwrap();
+    assert!(matches!(env_ans_bob.payload(), Some(Payload::SdpAnswer(_))));
+
+    // Alice receives TrackAdded for Bob's audio track
+    let alice_track_notif = read_alice.next().await.unwrap().unwrap();
+    let env_track_notif = Envelope::decode(&alice_track_notif.into_data()).unwrap();
+    assert!(matches!(env_track_notif.payload(), Some(Payload::TrackAdded(_))));
+
+    // 3. REST API / Dynamic Roster Verification (M4.1)
+    let (code_ab, body_ab) =
+        reqwest_like_request(tcp_addr, "GET", "/api/v3/sessions/room-pkg-d/abonents", &token, None).await;
+    assert_eq!(code_ab, 200);
+    let abonents_json: serde_json::Value = serde_json::from_str(&body_ab).unwrap();
+    assert_eq!(abonents_json["count"], 2);
+    let connected = abonents_json["connected"].as_array().unwrap();
+    assert_eq!(connected.len(), 2);
+
+    let bob_abonent = connected.iter().find(|a| a["display_name"] == "Bob").unwrap();
+    let bob_pid = bob_abonent["abonent_id"].as_str().unwrap().to_string();
+    let alice_abonent = connected.iter().find(|a| a["display_name"] == "Alice").unwrap();
+    let alice_pid = alice_abonent["abonent_id"].as_str().unwrap().to_string();
+
+    assert_eq!(bob_abonent["payload"]["settings"]["audio_tx_enabled"], true);
+
+    // 4. Operator Commands: Mute Bob audio, Rename Alice, Engine Command (M4.2, M4.4)
+    let (code_mute, _) = reqwest_like_request(
+        tcp_addr,
+        "POST",
+        &format!("/api/v3/abonents/{bob_pid}/audio"),
+        &token,
+        Some(r#"{"enable":false}"#),
+    )
+    .await;
+    assert_eq!(code_mute, 200);
+
+    let (_, body_ab_muted) =
+        reqwest_like_request(tcp_addr, "GET", "/api/v3/sessions/room-pkg-d/abonents", &token, None).await;
+    let ab_muted_json: serde_json::Value = serde_json::from_str(&body_ab_muted).unwrap();
+    let bob_muted = ab_muted_json["connected"].as_array().unwrap().iter().find(|a| a["display_name"] == "Bob").unwrap();
+    assert_eq!(bob_muted["payload"]["settings"]["audio_tx_enabled"], false);
+
+    let (code_rename, _) = reqwest_like_request(
+        tcp_addr,
+        "PATCH",
+        &format!("/api/v3/abonents/{alice_pid}"),
+        &token,
+        Some(r#"{"display_name":"Alice In Wonderland"}"#),
+    )
+    .await;
+    assert_eq!(code_rename, 200);
+
+    let (code_cmd, body_cmd) =
+        reqwest_like_request(tcp_addr, "POST", "/api/v3/engine/command", &token, Some(r#"{"command":"recalibrate"}"#))
+            .await;
+    assert_eq!(code_cmd, 200);
+    let cmd_json: serde_json::Value = serde_json::from_str(&body_cmd).unwrap();
+    assert_eq!(cmd_json["status"], "ok");
+
+    // 5. Live SFU -> MCU Mode Switch Handover (M3.3, M3.8, M4.4)
+    let (code_mode, body_mode) = reqwest_like_request(
+        tcp_addr,
+        "POST",
+        "/api/v3/ui/video_layouts/mode",
+        &token,
+        Some(r#"{"session_id":"room-pkg-d","mode":"mcu"}"#),
+    )
+    .await;
+    assert_eq!(code_mode, 200);
+    let mode_json: serde_json::Value = serde_json::from_str(&body_mode).unwrap();
+    assert_eq!(mode_json["payload"]["mode"], "mcu");
+
+    // Alice and Bob both receive RoomModeChanged(new_mode: Mcu, switch_epoch: 1) on their live WebSockets!
+    let alice_mode_msg = read_alice.next().await.unwrap().unwrap();
+    let env_alice_mode = Envelope::decode(&alice_mode_msg.into_data()).unwrap();
+    match env_alice_mode.payload() {
+        Some(Payload::RoomModeChanged(rmc)) => {
+            assert_eq!(rmc.new_mode, vks_proto::media::RoomMode::Mcu as i32);
+            assert_eq!(rmc.switch_epoch, 1);
+        }
+        other => panic!("expected RoomModeChanged for Alice, got: {other:?}"),
+    }
+
+    let bob_mode_msg = read_bob.next().await.unwrap().unwrap();
+    let env_bob_mode = Envelope::decode(&bob_mode_msg.into_data()).unwrap();
+    match env_bob_mode.payload() {
+        Some(Payload::RoomModeChanged(rmc)) => {
+            assert_eq!(rmc.new_mode, vks_proto::media::RoomMode::Mcu as i32);
+            assert_eq!(rmc.switch_epoch, 1);
+        }
+        other => panic!("expected RoomModeChanged for Bob, got: {other:?}"),
+    }
+
+    // 6. McuEngine Media Pipeline: Clocked Mix-Minus Audio (20ms cadence) & Compositing (M3.2, M3.4, M3.6, M3.7)
+    let room_id = state.rooms.lock().unwrap().values().find(|r| r.name == "room-pkg-d").unwrap().id;
+    let alice_pid_core = vks_server::parse_participant_id(&alice_pid);
+    let bob_pid_core = vks_server::parse_participant_id(&bob_pid);
+
+    // Provide 960 audio samples (20ms @ 48kHz)
+    let alice_pcm = vec![0.4f32; 960];
+    let bob_pcm = vec![0.6f32; 960];
+    mcu_engine.set_audio(room_id, alice_pid_core, alice_pcm);
+    mcu_engine.set_audio(room_id, bob_pid_core, bob_pcm);
+
+    // Verify McuEngine advances audio on 20ms cadence
+    let stepped = mcu_engine.tick_audio_at(room_id, 100);
+    assert!(stepped, "McuEngine tick_audio_at should succeed on 20ms cadence");
+
+    // Mix-minus check: Alice receives Bob's audio, Bob receives Alice's audio
+    let alice_mix_minus = mcu_engine.participant_audio(room_id, alice_pid_core).expect("alice mix-minus");
+    assert_eq!(alice_mix_minus.len(), 960);
+    assert!(alice_mix_minus[0] > 0.0, "Alice must hear Bob's audio mix-minus");
+
+    let bob_mix_minus = mcu_engine.participant_audio(room_id, bob_pid_core).expect("bob mix-minus");
+    assert_eq!(bob_mix_minus.len(), 960);
+    assert!(bob_mix_minus[0] > 0.0, "Bob must hear Alice's audio mix-minus");
+
+    // Apply normalized layout transition (M3.7)
+    let mut assignments = std::collections::BTreeMap::new();
+    assignments.insert(alice_pid_core, 0);
+    assignments.insert(bob_pid_core, 1);
+    let layout_desc = vks_core::LayoutDescriptor { layout_id: "grid_2x2".into(), version: 1, assignments };
+    use vks_core::ports::media_engine::MediaEngine;
+    mcu_engine.apply_layout(room_id, layout_desc).await.expect("apply_layout");
+
+    // Tick video composite
+    let frame = mcu_engine.tick_video_at(room_id, 100);
+    assert!(frame.is_some(), "McuEngine composite video frame rendered");
+
+    // Render stats
+    let stats = mcu_engine.stats(room_id).expect("stats");
+    assert!(stats.frames_rendered >= 1);
+
+    // 7. Operator Forced Kick (M4.3)
+    let (code_kick, _) =
+        reqwest_like_request(tcp_addr, "DELETE", &format!("/api/v3/abonents/{bob_pid}"), &token, None).await;
+    assert_eq!(code_kick, 204);
+
+    // Bob receives ParticipantLeft { reason: 2 (kicked) } followed by WebSocket CloseFrame(4003)
+    let bob_kick_msg = read_bob.next().await.unwrap().unwrap();
+    let env_bob_kick = Envelope::decode(&bob_kick_msg.into_data()).unwrap();
+    match env_bob_kick.payload() {
+        Some(Payload::ParticipantLeft(left)) => {
+            assert_eq!(left.participant_id, bob_pid);
+            assert_eq!(left.reason, 2, "reason 2 indicates kicked by operator");
+        }
+        other => panic!("expected ParticipantLeft for Bob, got: {other:?}"),
+    }
+
+    let bob_close = read_bob.next().await.unwrap().unwrap();
+    assert!(
+        matches!(bob_close, TungsteniteMsg::Close(Some(ref frame)) if frame.code == 4003.into()),
+        "Bob must receive CloseFrame 4003"
+    );
+
+    // Alice receives ParticipantLeft for Bob
+    let alice_left_msg = read_alice.next().await.unwrap().unwrap();
+    let env_alice_left = Envelope::decode(&alice_left_msg.into_data()).unwrap();
+    match env_alice_left.payload() {
+        Some(Payload::ParticipantLeft(left)) => {
+            assert_eq!(left.participant_id, bob_pid);
+        }
+        other => panic!("expected ParticipantLeft on Alice socket, got: {other:?}"),
+    }
+
+    // Dynamic roster count drops to 1
+    let (_, body_after_kick) =
+        reqwest_like_request(tcp_addr, "GET", "/api/v3/sessions/room-pkg-d/abonents", &token, None).await;
+    let ab_after_kick: serde_json::Value = serde_json::from_str(&body_after_kick).unwrap();
+    assert_eq!(ab_after_kick["count"], 1);
 }

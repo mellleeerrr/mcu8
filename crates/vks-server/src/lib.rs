@@ -40,12 +40,13 @@ use vks_signaling::handler::{HandlerConfig, SignalingHandler};
 
 use crate::frontend::{statics_rel_path, Frontend};
 
-/// Контекст для WebSocket-сигналинга (состояние приложения + конфигурация сессии + медиа-движок + UDP-луп + сервисы M5).
+/// Контекст для WebSocket-сигналинга (состояние приложения + конфигурация сессии + медиа-движки SFU/MCU + UDP-луп + сервисы M5).
 #[derive(Clone)]
 pub struct WsContext {
     pub state: Arc<AppState>,
     pub handler_config: HandlerConfig,
     pub sfu_engine: Arc<vks_media_sfu::SfuEngine>,
+    pub mcu_engine: Arc<vks_media_mcu::McuEngine>,
     pub udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
     pub gateways: Arc<GatewayManager>,
     pub recorder: Arc<RecorderManager>,
@@ -80,11 +81,24 @@ pub fn build_app_full(
     sfu_engine: Arc<vks_media_sfu::SfuEngine>,
     udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
 ) -> Router {
+    build_app_with_mcu(state, frontend, handler_config, sfu_engine, Arc::new(vks_media_mcu::McuEngine::new()), udp_loop)
+}
+
+/// Собирает полное приложение сервера с полной поддержкой WebRTC (SFU + MCU + UDP медиа-луп).
+pub fn build_app_with_mcu(
+    state: Arc<AppState>,
+    frontend: &Frontend,
+    handler_config: HandlerConfig,
+    sfu_engine: Arc<vks_media_sfu::SfuEngine>,
+    mcu_engine: Arc<vks_media_mcu::McuEngine>,
+    udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
+) -> Router {
     build_app_with_services(
         state,
         frontend,
         handler_config,
         sfu_engine,
+        mcu_engine,
         udp_loop,
         Arc::new(GatewayManager::new()),
         Arc::new(RecorderManager::new()),
@@ -92,13 +106,14 @@ pub fn build_app_full(
     )
 }
 
-/// Собирает полное приложение сервера с полной поддержкой всех сервисов M5 (шлюзы, рекордер, кластер).
+/// Собирает полное приложение сервера с полной поддержкой всех сервисов M5 (шлюзы, рекордер, кластер) и медиа-движков SFU/MCU (Package D).
 #[allow(clippy::too_many_arguments)]
 pub fn build_app_with_services(
     state: Arc<AppState>,
     frontend: &Frontend,
     handler_config: HandlerConfig,
     sfu_engine: Arc<vks_media_sfu::SfuEngine>,
+    mcu_engine: Arc<vks_media_mcu::McuEngine>,
     udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
     gateways: Arc<GatewayManager>,
     recorder: Arc<RecorderManager>,
@@ -109,6 +124,7 @@ pub fn build_app_with_services(
         state: state.clone(),
         handler_config,
         sfu_engine,
+        mcu_engine,
         udp_loop,
         gateways: gateways.clone(),
         recorder: recorder.clone(),
@@ -303,7 +319,7 @@ fn parse_ice_candidate_addr(candidate: &str) -> Option<std::net::SocketAddr> {
 }
 
 /// Извлекает стабильный ParticipantId из строки сессии (детерминированный UUIDv5 для псевдонимов).
-fn parse_participant_id(pid_str: &str) -> vks_core::ParticipantId {
+pub fn parse_participant_id(pid_str: &str) -> vks_core::ParticipantId {
     let u = uuid::Uuid::parse_str(pid_str)
         .ok()
         .or_else(|| if pid_str.len() >= 36 { uuid::Uuid::parse_str(&pid_str[pid_str.len() - 36..]).ok() } else { None })
@@ -328,6 +344,7 @@ struct ActiveMembership {
 async fn cleanup_active_membership(
     membership: &mut Option<ActiveMembership>,
     sfu_engine: &vks_media_sfu::SfuEngine,
+    mcu_engine: &vks_media_mcu::McuEngine,
     state: &AppState,
     reason: u64,
 ) {
@@ -335,6 +352,8 @@ async fn cleanup_active_membership(
         let pid_val = parse_participant_id(&m.participant_id);
         let _ = sfu_engine.remove_subscriber(m.room_id, pid_val).await;
         let _ = sfu_engine.remove_publisher(m.room_id, pid_val).await;
+        let _ = mcu_engine.remove_subscriber(m.room_id, pid_val).await;
+        let _ = mcu_engine.remove_publisher(m.room_id, pid_val).await;
         let rem_opt = state.room_hub.unregister_participant(&m.room_id, &m.participant_id);
         state.room_hub.unsubscribe(&m.room_id);
         let count = rem_opt.unwrap_or(0);
@@ -510,9 +529,16 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                         SIGNALING_MESSAGES.with_label_values(&["uplink"]).inc();
                         match Envelope::decode(&bytes) {
                             Ok(env) => {
-                                let join_name = match env.payload() {
-                                    Some(Payload::JoinRoom(join)) => Some(join.room_id.clone()),
-                                    _ => None,
+                                let (join_name, join_display_name) = match env.payload() {
+                                    Some(Payload::JoinRoom(join)) => (
+                                        Some(join.room_id.clone()),
+                                        if join.display_name.is_empty() {
+                                            None
+                                        } else {
+                                            Some(join.display_name.clone())
+                                        },
+                                    ),
+                                    _ => (None, None),
                                 };
                                 let was_leave = matches!(env.payload(), Some(Payload::LeaveRoom(_)));
                                 let payload_opt = env.payload().clone();
@@ -576,6 +602,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                 }
                                                 if !tracks.is_empty() {
                                                     let _ = ctx.sfu_engine.add_publisher(m.room_id, pid, tracks.clone()).await;
+                                                    let _ = ctx.mcu_engine.add_publisher(m.room_id, pid, tracks.clone()).await;
                                                     for track in &tracks {
                                                         let proto_kind = match track.media_kind {
                                                             vks_core::MediaKind::Audio => vks_proto::media::TrackKind::Audio,
@@ -623,7 +650,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                     }
                                 }
 
-                                // SFU Subscribe / Unsubscribe handling (M2.5)
+                                // SFU / MCU Subscribe / Unsubscribe handling (M2.5, M3.4)
                                 if let Some(Payload::SubscribeRequest(ref s)) = payload_opt {
                                     if let Some(ref m) = current_membership {
                                         let pid = parse_participant_id(&m.participant_id);
@@ -633,6 +660,10 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             .filter_map(|id_str| uuid::Uuid::parse_str(id_str).ok().map(vks_core::TrackId::from_uuid))
                                             .collect();
                                         let _ = ctx.sfu_engine.add_subscriber(m.room_id, pid, vks_core::ports::media_engine::SubscribeRequest {
+                                            track_ids: track_ids.clone(),
+                                            audio_only: false,
+                                        }).await;
+                                        let _ = ctx.mcu_engine.add_subscriber(m.room_id, pid, vks_core::ports::media_engine::SubscribeRequest {
                                             track_ids,
                                             audio_only: false,
                                         }).await;
@@ -643,6 +674,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                     if let Some(ref m) = current_membership {
                                         let pid = parse_participant_id(&m.participant_id);
                                         let _ = ctx.sfu_engine.remove_subscriber(m.room_id, pid).await;
+                                        let _ = ctx.mcu_engine.remove_subscriber(m.room_id, pid).await;
                                     }
                                 }
 
@@ -664,7 +696,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                         };
                                         // Если клиент уже находился в другой комнате на этом сокете, вычищаем её
                                         if current_membership.is_some() {
-                                            cleanup_active_membership(&mut current_membership, &ctx.sfu_engine, &state, 0).await;
+                                            cleanup_active_membership(&mut current_membership, &ctx.sfu_engine, &ctx.mcu_engine, &state, 0).await;
                                         }
 
                                         let pid_str = handler.participant_id().map(str::to_string).unwrap_or_default();
@@ -679,7 +711,16 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             mode: vks_core::RoomMode::Sfu,
                                             caps: vks_core::ports::media_engine::RoomCaps::default(),
                                         }).await;
+                                        let _ = ctx.mcu_engine.create_room(vks_core::ports::media_engine::RoomMediaCfg {
+                                            room_id: rid,
+                                            mode: vks_core::RoomMode::Mcu,
+                                            caps: vks_core::ports::media_engine::RoomCaps::default(),
+                                        }).await;
                                         let _ = ctx.sfu_engine.add_subscriber(rid, pid, vks_core::ports::media_engine::SubscribeRequest {
+                                            track_ids: Vec::new(),
+                                            audio_only: false,
+                                        }).await;
+                                        let _ = ctx.mcu_engine.add_subscriber(rid, pid, vks_core::ports::media_engine::SubscribeRequest {
                                             track_ids: Vec::new(),
                                             audio_only: false,
                                         }).await;
@@ -696,9 +737,10 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap_or_default()
                                             .as_secs();
+                                        let display_name = join_display_name.unwrap_or_else(|| pid_str.clone());
                                         let p_snapshot = vks_admin::hub::ParticipantSnapshot {
                                             participant_id: pid_str.clone(),
-                                            display_name: pid_str.clone(),
+                                            display_name: display_name.clone(),
                                             is_recorder: false,
                                             is_speaking: false,
                                             track_ids: Vec::new(),
@@ -759,7 +801,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                 reply_to: 0,
                                                 payload: Some(Payload::ParticipantJoined(ParticipantJoined {
                                                     participant_id: pid_str.clone(),
-                                                    display_name: pid_str.clone(),
+                                                    display_name: display_name.clone(),
                                                     is_recorder: false,
                                                 })),
                                             };
@@ -775,7 +817,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                     }
                                 } else if left_ok {
                                     room_rx = None;
-                                    cleanup_active_membership(&mut current_membership, &ctx.sfu_engine, &state, 0).await;
+                                    cleanup_active_membership(&mut current_membership, &ctx.sfu_engine, &ctx.mcu_engine, &state, 0).await;
                                 }
 
                                 for reply in replies {
@@ -823,7 +865,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
     }
 
     drop(room_rx);
-    cleanup_active_membership(&mut current_membership, &ctx.sfu_engine, &state, 1).await;
+    cleanup_active_membership(&mut current_membership, &ctx.sfu_engine, &ctx.mcu_engine, &state, 1).await;
 }
 
 #[cfg(test)]

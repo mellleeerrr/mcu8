@@ -481,8 +481,14 @@ pub async fn switch_video_layout_mode(
     };
 
     if let Some(ref rid_str) = room_id_str {
-        if let Ok(u) = uuid::Uuid::parse_str(rid_str) {
-            let rid = vks_core::RoomId::from_uuid(u);
+        let rid_opt = if let Ok(u) = uuid::Uuid::parse_str(rid_str) {
+            Some(vks_core::RoomId::from_uuid(u))
+        } else if let Ok(rooms) = state.rooms.lock() {
+            rooms.values().find(|r| r.name == *rid_str || r.name.eq_ignore_ascii_case(rid_str)).map(|r| r.id)
+        } else {
+            None
+        };
+        if let Some(rid) = rid_opt {
             let _ = crate::rooms::Rooms::update_async(&state, &rid, None, Some(new_mode), None, None).await;
         }
     }
