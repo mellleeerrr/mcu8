@@ -46,11 +46,7 @@ pub fn build_app(state: Arc<AppState>, frontend: &Frontend) -> Router {
 }
 
 /// Собирает полное приложение сервера с заданной конфигурацией обработчика сигналинга.
-pub fn build_app_with_config(
-    state: Arc<AppState>,
-    frontend: &Frontend,
-    handler_config: HandlerConfig,
-) -> Router {
+pub fn build_app_with_config(state: Arc<AppState>, frontend: &Frontend, handler_config: HandlerConfig) -> Router {
     build_app_with_engine(state, frontend, handler_config, Arc::new(vks_media_sfu::SfuEngine::new()))
 }
 
@@ -78,12 +74,7 @@ pub fn build_app_full(
     udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
 ) -> Router {
     let csp = frontend.csp.clone();
-    let ws_ctx = WsContext {
-        state: state.clone(),
-        handler_config,
-        sfu_engine,
-        udp_loop,
-    };
+    let ws_ctx = WsContext { state: state.clone(), handler_config, sfu_engine, udp_loop };
     // Сигналинг: auth-at-handshake и лимиты (T1.2) — внутри ws_handler.
     let signaling = Router::new().route("/ws", get(ws_handler)).with_state(ws_ctx);
     vks_admin::handlers::router(state.clone())
@@ -199,7 +190,8 @@ async fn ws_handler(State(ctx): State<WsContext>, headers: HeaderMap, ws: WebSoc
         return ws_error(StatusCode::UNAUTHORIZED, "unauthorized", "invalid, expired, or revoked token");
     };
     if let Ok(users) = ctx.state.users.lock() {
-        if let Some(u) = users.values().find(|u| u.id.to_string() == verified.user_id || u.username == verified.user_id) {
+        if let Some(u) = users.values().find(|u| u.id.to_string() == verified.user_id || u.username == verified.user_id)
+        {
             if u.deleted {
                 return ws_error(StatusCode::FORBIDDEN, "forbidden", "user account is deactivated");
             }
@@ -285,6 +277,18 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                 if let Some(res) = broadcast_res {
                     match res {
                         Ok(event) => {
+                            if let Ok(env) = Envelope::decode(&event.payload) {
+                                if let Some(Payload::ParticipantLeft(ref left)) = env.payload() {
+                                    if left.participant_id == handler.participant_id().unwrap_or_default() && left.reason == 2 {
+                                        warn!(participant_id = %left.participant_id, "Participant was kicked by operator; closing connection");
+                                        let _ = sender.send(Message::Binary(event.payload.clone())).await;
+                                        let close_frame = CloseFrame { code: 4003, reason: "kicked by operator".into() };
+                                        let _ = sender.send(Message::Close(Some(close_frame))).await;
+                                        break 'session;
+                                    }
+                                }
+                            }
+
                             if event.sender_participant_id.as_deref() != handler.participant_id() {
                                 SIGNALING_MESSAGES.with_label_values(&["downlink"]).inc();
                                 if let Err(e) = sender.send(Message::Binary(event.payload.clone())).await {
@@ -455,12 +459,19 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                             }
                                         }
 
+                                        let now_secs = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs();
                                         let p_snapshot = vks_admin::hub::ParticipantSnapshot {
                                             participant_id: pid_str.clone(),
                                             display_name: pid_str.clone(),
                                             is_recorder: false,
                                             is_speaking: false,
                                             track_ids: Vec::new(),
+                                            is_audio_muted: false,
+                                            is_video_muted: false,
+                                            connected_at: now_secs,
                                         };
                                         let (rx, snapshot) = state.room_hub.register_participant(&rid, p_snapshot);
                                         room_rx = Some(rx);
@@ -623,10 +634,13 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
         let payload_bytes = Envelope::new(left_msg).encode();
         state.room_hub.broadcast(&rid, Some(&pid_str), payload_bytes.into());
 
-        state.notify_admin("conferences:update", serde_json::json!({
-            "id": rid.to_string(),
-            "participants_count": new_count
-        }));
+        state.notify_admin(
+            "conferences:update",
+            serde_json::json!({
+                "id": rid.to_string(),
+                "participants_count": new_count
+            }),
+        );
     }
 }
 

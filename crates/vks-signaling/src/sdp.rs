@@ -291,16 +291,9 @@ impl Sdp {
             let fmt_str = if media.payload_types.is_empty() {
                 String::new()
             } else {
-                format!(
-                    " {}",
-                    media.payload_types.iter().map(|pt| pt.to_string()).collect::<Vec<_>>().join(" ")
-                )
+                format!(" {}", media.payload_types.iter().map(|pt| pt.to_string()).collect::<Vec<_>>().join(" "))
             };
-            out.push_str(&format!(
-                "m={} {} UDP/TLS/RTP/SAVPF{fmt_str}\n",
-                media.kind.as_str(),
-                media.port
-            ));
+            out.push_str(&format!("m={} {} UDP/TLS/RTP/SAVPF{fmt_str}\n", media.kind.as_str(), media.port));
             out.push_str("c=IN IP4 0.0.0.0\n");
             out.push_str("a=rtcp-mux\n");
             if let Some(mid) = &media.mid {

@@ -24,7 +24,7 @@ use axum::{
     http::{Method, StatusCode, Uri},
     middleware,
     response::{IntoResponse, Response},
-    routing::{any, get, patch, post},
+    routing::{any, delete, get, patch, post},
     Json, Router,
 };
 
@@ -92,6 +92,16 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/ui/conferences/{id}/contacts", get(sessions::conference_contacts))
         .route("/api/v3/ui/video_layouts", get(shell::video_layouts))
         .route("/api/v3/video_layouts", get(shell::video_layouts))
+        .route("/api/v3/ui/video_layouts/mode", post(shell::switch_video_layout_mode))
+        .route("/api/v3/video_layouts/mode", post(shell::switch_video_layout_mode))
+        .route("/api/v3/ui/sessions/quick", post(sessions::quick_session))
+        .route("/api/v3/sessions/quick", post(sessions::quick_session))
+        .route("/api/v3/abonents/{id}", delete(sessions::remove_abonent).patch(sessions::edit_abonent))
+        .route("/api/v3/abonents/{id}/{setting}", post(sessions::switch_abonent_settings))
+        .route("/api/v3/sessions/{id}/abonents/{abonent_id}", delete(sessions::remove_session_abonent))
+        .route("/api/v3/ui/sessions/{id}/abonents/{abonent_id}", delete(sessions::remove_session_abonent))
+        .route("/api/v3/engine/command", post(shell::engine_command))
+        .route("/api/v3/engine/abonents", get(sessions::engine_abonents))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::token_middleware));
 
     Router::new()

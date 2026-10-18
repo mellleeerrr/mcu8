@@ -5085,6 +5085,7 @@ dependencies = [
  "axum",
  "bytes",
  "futures-util",
+ "prost",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -5097,6 +5098,7 @@ dependencies = [
  "vks-auth",
  "vks-common",
  "vks-core",
+ "vks-proto",
  "vks-storage",
 ]
 

@@ -208,7 +208,7 @@ pub fn parse_rtp_ssrc(data: &[u8]) -> Option<u32> {
 pub fn build_rtcp_pli(sender_ssrc: u32, media_ssrc: u32) -> [u8; 12] {
     let mut pkt = [0u8; 12];
     pkt[0] = 0x81; // V=2, P=0, FMT=1 (PLI)
-    pkt[1] = 206;  // PT=206 (PSFB / Payload-Specific Feedback)
+    pkt[1] = 206; // PT=206 (PSFB / Payload-Specific Feedback)
     pkt[2] = 0x00;
     pkt[3] = 0x02; // Length: 2 32-bit words following header
     pkt[4..8].copy_from_slice(&sender_ssrc.to_be_bytes());
@@ -317,4 +317,3 @@ mod tests {
         subscriber.shutdown();
     }
 }
-

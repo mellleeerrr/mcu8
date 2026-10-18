@@ -223,7 +223,34 @@ pub async fn start_session(
             Err(e) => return error_json(500, &format!("Storage error: {e}")),
         }
     };
+    state.notify_admin("sessions:started", json!({ "id": room.id.to_string() }));
+    state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
     audit_room(&state, &verified.user_id, "session.started", &room.id.to_string());
+    Json(json!({ "session": session_json(&room, connections_limit(&state), false) })).into_response()
+}
+
+/// `POST /api/v3/sessions/quick` (или `/ui/sessions/quick`) — быстрый старт сессии.
+pub async fn quick_session(
+    State(state): State<SharedState>,
+    Extension(verified): Extension<VerifiedJwt>,
+    body: Option<Json<Value>>,
+) -> Response {
+    track("sessions/quick");
+    let name = body
+        .as_ref()
+        .and_then(|b| b.get("display_name").or_else(|| b.get("name")))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Quick Session");
+    let room = match Rooms::create_async(&state, name.to_string()).await {
+        Ok(r) => r,
+        Err(e) => return error_json(500, &format!("Storage error: {e}")),
+    };
+    state.notify_admin("sessions:started", json!({ "id": room.id.to_string() }));
+    state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
+    state.notify_admin("conferences:created", json!({ "id": room.id.to_string() }));
+    state.notify_admin("conferences", json!({ "action": "created", "id": room.id.to_string() }));
+    audit_room(&state, &verified.user_id, "session.quick_started", &room.id.to_string());
     Json(json!({ "session": session_json(&room, connections_limit(&state), false) })).into_response()
 }
 
@@ -238,6 +265,8 @@ pub async fn stop_session(
         Some(room) => {
             let _ = Rooms::update_async(&state, &room.id, None, None, Some(0), Some(0)).await;
             state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").insert(room.id);
+            state.notify_admin("sessions:stopped", json!({ "id": room.id.to_string() }));
+            state.notify_admin("sessions", json!({ "action": "stopped", "id": room.id.to_string() }));
             audit_room(&state, &verified.user_id, "session.stopped", &room.id.to_string());
             StatusCode::NO_CONTENT.into_response()
         }
@@ -275,6 +304,8 @@ pub async fn create_conference(
         Ok(r) => r,
         Err(e) => return error_json(500, &format!("Storage error: {e}")),
     };
+    state.notify_admin("conferences:created", json!({ "id": record.id.to_string(), "display_name": record.name }));
+    state.notify_admin("conferences", json!({ "action": "created", "id": record.id.to_string() }));
     audit_room(&state, &verified.user_id, "conference.created", &record.id.to_string());
     Json(json!({ "conference": session_json(&record, connections_limit(&state), false) })).into_response()
 }
@@ -310,6 +341,8 @@ pub async fn update_conference(
     }
     audit_room(&state, &verified.user_id, "conference.updated", &room.id.to_string());
     let updated = find_room(&state, &id).unwrap_or(room);
+    state.notify_admin("conferences:updated", json!({ "id": updated.id.to_string(), "display_name": updated.name }));
+    state.notify_admin("conferences", json!({ "action": "updated", "id": updated.id.to_string() }));
     let is_stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&updated.id);
     Json(json!({ "conference": session_json(&updated, connections_limit(&state), is_stopped) })).into_response()
 }
@@ -325,6 +358,8 @@ pub async fn delete_conference(
         Some(room) => match Rooms::delete_async(&state, &room.id).await {
             Ok(true) => {
                 state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").remove(&room.id);
+                state.notify_admin("conferences:deleted", json!({ "id": room.id.to_string() }));
+                state.notify_admin("conferences", json!({ "action": "deleted", "id": room.id.to_string() }));
                 audit_room(&state, &verified.user_id, "conference.deleted", &room.id.to_string());
                 StatusCode::NO_CONTENT.into_response()
             }
@@ -341,8 +376,168 @@ pub async fn conference_contacts(Path(_id): Path<String>) -> Response {
     Json(json!({ "contacts": [], "count": 0 })).into_response()
 }
 
-/// `GET /api/v3/sessions/{id}/abonents` → `{abonents:[], count:0}`.
-pub async fn session_abonents(Path(_id): Path<String>) -> Response {
+/// `GET /api/v3/sessions/{id}/abonents` (и `/ui/sessions/{id}/abonents`) → динамический ростер абонентов.
+pub async fn session_abonents(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
     track("sessions/{id}/abonents");
+    let Some(room) = find_room(&state, &id) else {
+        return error_json(404, "Session not found");
+    };
+    let participants = state.room_hub.list_participants(&room.id);
+    let connected: Vec<Value> = participants
+        .iter()
+        .map(|p| {
+            json!({
+                "abonent_id": p.participant_id,
+                "connection_id": p.participant_id,
+                "contact_id": p.participant_id,
+                "call_string_id": p.participant_id,
+                "video_layout_id": "grid",
+                "display_name": p.display_name,
+                "connection_url": format!("webrtc://{}", p.participant_id),
+                "type_id": if p.is_recorder { "recorder" } else { "webrtc" },
+                "connected_at": p.connected_at,
+                "payload": {
+                    "settings": {
+                        "slot_render_type": "auto",
+                        "auto_call": false,
+                        "audio_rx_enabled": true,
+                        "audio_tx_enabled": !p.is_audio_muted,
+                        "volume_rx": 100,
+                        "volume_tx": 100,
+                        "video_rx_enabled": true,
+                        "video_tx_enabled": !p.is_video_muted,
+                        "crown": false,
+                        "hide_display_name": false
+                    }
+                }
+            })
+        })
+        .collect();
+    let count = connected.len();
+    Json(json!({
+        "abonents": connected.clone(),
+        "connected": connected,
+        "connecting": [],
+        "disconnected": [],
+        "scheduled": [],
+        "count": count
+    }))
+    .into_response()
+}
+
+/// Тело запроса переключения настроек абонента (`POST /api/v3/abonents/{id}/{setting}`).
+#[derive(Debug, Default, Deserialize)]
+pub struct SwitchAbonentSettingsRequest {
+    #[serde(default)]
+    pub enable: Option<bool>,
+    #[serde(default)]
+    pub outgoing: Option<bool>,
+    #[serde(default)]
+    pub volume: Option<u32>,
+}
+
+/// `POST /api/v3/abonents/{connection_id}/{settings_type}` — переключение mute микрофона/камеры.
+pub async fn switch_abonent_settings(
+    State(state): State<SharedState>,
+    Extension(verified): Extension<VerifiedJwt>,
+    Path((connection_id, setting_type)): Path<(String, String)>,
+    Json(body): Json<SwitchAbonentSettingsRequest>,
+) -> Response {
+    track("abonents/{id}/{setting}");
+    let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&connection_id) else {
+        return error_json(404, "Abonent not found");
+    };
+
+    let audio_muted = match setting_type.as_str() {
+        "audio" | "microphone" => Some(!body.enable.unwrap_or(true)),
+        _ => None,
+    };
+    let video_muted = match setting_type.as_str() {
+        "video" | "camera" => Some(!body.enable.unwrap_or(true)),
+        _ => None,
+    };
+
+    state.room_hub.update_participant_media(&room_id, &connection_id, audio_muted, video_muted, None);
+    audit_room(&state, &verified.user_id, &format!("abonent.{setting_type}"), &connection_id);
+    state.notify_admin(
+        &format!("session:{}:abonents", room_id),
+        json!({
+            "connection_id": connection_id,
+            "setting": setting_type,
+            "audio_muted": audio_muted,
+            "video_muted": video_muted,
+        }),
+    );
+    Json(json!({ "status": "ok" })).into_response()
+}
+
+/// `DELETE /api/v3/abonents/{connection_id}` — исключение участника (Kick).
+pub async fn remove_abonent(
+    State(state): State<SharedState>,
+    Extension(verified): Extension<VerifiedJwt>,
+    Path(connection_id): Path<String>,
+) -> Response {
+    track("abonents/{id}");
+    let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&connection_id) else {
+        return error_json(404, "Abonent not found");
+    };
+
+    Rooms::kick_participant(&state, &room_id, &connection_id);
+    audit_room(&state, &verified.user_id, "abonent.removed", &connection_id);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `DELETE /api/v3/sessions/{id}/abonents/{abonent_id}` (и `/ui/sessions/...`) — исключение абонента из сессии.
+pub async fn remove_session_abonent(
+    State(state): State<SharedState>,
+    Extension(verified): Extension<VerifiedJwt>,
+    Path((session_id, abonent_id)): Path<(String, String)>,
+) -> Response {
+    track("sessions/{id}/abonents/{abonent_id}");
+    let Some(room) = find_room(&state, &session_id) else {
+        return error_json(404, "Session not found");
+    };
+
+    Rooms::kick_participant(&state, &room.id, &abonent_id);
+    audit_room(&state, &verified.user_id, "abonent.removed", &abonent_id);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Тело запроса редактирования абонента.
+#[derive(Debug, Default, Deserialize)]
+pub struct EditAbonentRequest {
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// `PATCH /api/v3/abonents/{connection_id}` — переименование абонента.
+pub async fn edit_abonent(
+    State(state): State<SharedState>,
+    Extension(verified): Extension<VerifiedJwt>,
+    Path(connection_id): Path<String>,
+    Json(body): Json<EditAbonentRequest>,
+) -> Response {
+    track("abonents/{id}");
+    let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&connection_id) else {
+        return error_json(404, "Abonent not found");
+    };
+
+    if let Some(ref name) = body.display_name {
+        state.room_hub.update_participant_media(&room_id, &connection_id, None, None, Some(name.clone()));
+        audit_room(&state, &verified.user_id, "abonent.renamed", &connection_id);
+        state.notify_admin(
+            &format!("session:{}:abonents", room_id),
+            json!({
+                "connection_id": connection_id,
+                "display_name": name,
+            }),
+        );
+    }
+    Json(json!({ "status": "ok" })).into_response()
+}
+
+/// `GET /api/v3/engine/abonents` → `{abonents:[], count:0}`.
+pub async fn engine_abonents() -> Response {
+    track("engine/abonents");
     Json(json!({ "abonents": [], "count": 0 })).into_response()
 }

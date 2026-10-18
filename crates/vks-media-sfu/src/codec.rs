@@ -138,13 +138,7 @@ pub fn parse_h264_rtp(payload: &[u8]) -> Option<H264RtpInfo> {
         let is_fua_end = (fu_header & 0x40) != 0;
         let inner_nal_type = fu_header & 0x1F;
         let is_keyframe = is_fua_start && (inner_nal_type == 5 || inner_nal_type == 7);
-        Some(H264RtpInfo {
-            nal_unit_type: inner_nal_type,
-            is_keyframe,
-            is_fua: true,
-            is_fua_start,
-            is_fua_end,
-        })
+        Some(H264RtpInfo { nal_unit_type: inner_nal_type, is_keyframe, is_fua: true, is_fua_start, is_fua_end })
     } else if nal_type == 24 {
         // STAP-A
         if payload.len() < 4 {
@@ -152,23 +146,11 @@ pub fn parse_h264_rtp(payload: &[u8]) -> Option<H264RtpInfo> {
         }
         let inner_nal = payload[3] & 0x1F;
         let is_keyframe = inner_nal == 5 || inner_nal == 7;
-        Some(H264RtpInfo {
-            nal_unit_type: inner_nal,
-            is_keyframe,
-            is_fua: false,
-            is_fua_start: true,
-            is_fua_end: true,
-        })
+        Some(H264RtpInfo { nal_unit_type: inner_nal, is_keyframe, is_fua: false, is_fua_start: true, is_fua_end: true })
     } else {
         // Single NAL unit
         let is_keyframe = nal_type == 5 || nal_type == 7;
-        Some(H264RtpInfo {
-            nal_unit_type: nal_type,
-            is_keyframe,
-            is_fua: false,
-            is_fua_start: true,
-            is_fua_end: true,
-        })
+        Some(H264RtpInfo { nal_unit_type: nal_type, is_keyframe, is_fua: false, is_fua_start: true, is_fua_end: true })
     }
 }
 
@@ -248,12 +230,7 @@ pub fn parse_vp8_rtp(payload: &[u8]) -> Option<Vp8RtpInfo> {
         }
     }
 
-    Some(Vp8RtpInfo {
-        is_keyframe,
-        is_partition_start: s_bit,
-        partition_id: pid,
-        picture_id,
-    })
+    Some(Vp8RtpInfo { is_keyframe, is_partition_start: s_bit, partition_id: pid, picture_id })
 }
 
 /// Информация о RTP-пакете Opus (RFC 7587 / RFC 6716).
@@ -287,12 +264,7 @@ pub fn parse_opus_rtp(payload: &[u8]) -> Option<OpusRtpInfo> {
         24..=27 => 20,
         _ => 20,
     };
-    Some(OpusRtpInfo {
-        config,
-        is_stereo,
-        frame_count_code,
-        duration_ms,
-    })
+    Some(OpusRtpInfo { config, is_stereo, frame_count_code, duration_ms })
 }
 
 #[cfg(test)]

@@ -44,16 +44,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_metrics();
 
     // 3. Загрузка конфигурации
-    let config_path = std::env::args()
-        .nth(1)
-        .or_else(|| std::env::var("VKS_CONFIG_PATH").ok())
-        .or_else(|| {
-            if std::path::Path::new("configs/default.toml").exists() {
-                Some("configs/default.toml".to_string())
-            } else {
-                None
-            }
-        });
+    let config_path = std::env::args().nth(1).or_else(|| std::env::var("VKS_CONFIG_PATH").ok()).or_else(|| {
+        if std::path::Path::new("configs/default.toml").exists() {
+            Some("configs/default.toml".to_string())
+        } else {
+            None
+        }
+    });
 
     let config = match Config::load(config_path.as_deref()) {
         Ok(c) => {
@@ -108,7 +105,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else if !config.database_url.is_empty() {
         error!(url = %vks_common::config::redact_dsn(&config.database_url), "unsupported database scheme in database_url; aborting startup");
-        return Err(format!("unsupported database scheme in database_url: {}", vks_common::config::redact_dsn(&config.database_url)).into());
+        return Err(format!(
+            "unsupported database scheme in database_url: {}",
+            vks_common::config::redact_dsn(&config.database_url)
+        )
+        .into());
     } else {
         info!("using in-memory storage (database_url not configured)");
         Arc::new(MemoryStorage::new())
@@ -139,7 +140,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // LocalDb-оператор (dev-дефолт admin/admin; прод — VKS_ADMIN_PASSWORD).
     let local_db = Arc::new(LocalDb::new());
     match local_db.register(vks_core::BOOTSTRAP_ADMIN_USER_ID, &config.admin_login, &config.admin_password) {
-        Ok(_) => info!(login = %config.admin_login, id = vks_core::BOOTSTRAP_ADMIN_USER_ID, "local_db operator registered"),
+        Ok(_) => {
+            info!(login = %config.admin_login, id = vks_core::BOOTSTRAP_ADMIN_USER_ID, "local_db operator registered")
+        }
         Err(e) => warn!(error = %e, "local_db operator bootstrap skipped"),
     }
     if config.admin_password == "admin" {
@@ -206,9 +209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let local_addr = loop_handle.local_addr();
                 info!(addr = %local_addr, "WebRTC UDP media loop active");
                 let sfu = sfu_engine.clone();
-                let task = loop_handle.start_routing_loop(move |src, packet| {
-                    sfu.route_udp_packet(src, packet.payload)
-                });
+                let task = loop_handle.start_routing_loop(move |src, packet| sfu.route_udp_packet(src, packet.payload));
                 let ip = if local_addr.ip().is_unspecified() {
                     "127.0.0.1".to_string()
                 } else {

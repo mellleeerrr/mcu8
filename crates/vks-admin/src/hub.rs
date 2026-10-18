@@ -44,6 +44,12 @@ pub struct ParticipantSnapshot {
     pub is_recorder: bool,
     pub is_speaking: bool,
     pub track_ids: Vec<String>,
+    #[serde(default)]
+    pub is_audio_muted: bool,
+    #[serde(default)]
+    pub is_video_muted: bool,
+    #[serde(default)]
+    pub connected_at: u64,
 }
 
 #[derive(Debug)]
@@ -138,5 +144,40 @@ impl RoomHub {
     pub fn close_room(&self, room_id: &RoomId) {
         let mut map = self.channels.write().expect("RoomHub lock poisoned");
         map.remove(room_id);
+    }
+
+    /// Finds which room contains the given participant_id, returning (RoomId, ParticipantSnapshot).
+    pub fn find_participant_room(&self, participant_id: &str) -> Option<(RoomId, ParticipantSnapshot)> {
+        let map = self.channels.read().expect("RoomHub lock poisoned");
+        for (room_id, entry) in map.iter() {
+            if let Some(snap) = entry.participants.get(participant_id) {
+                return Some((*room_id, snap.clone()));
+            }
+        }
+        None
+    }
+
+    /// Atomically updates a participant's media state (audio/video mute or display name) in the roster.
+    pub fn update_participant_media(
+        &self,
+        room_id: &RoomId,
+        participant_id: &str,
+        audio_muted: Option<bool>,
+        video_muted: Option<bool>,
+        display_name: Option<String>,
+    ) -> Option<ParticipantSnapshot> {
+        let mut map = self.channels.write().expect("RoomHub lock poisoned");
+        let entry = map.get_mut(room_id)?;
+        let p = entry.participants.get_mut(participant_id)?;
+        if let Some(a) = audio_muted {
+            p.is_audio_muted = a;
+        }
+        if let Some(v) = video_muted {
+            p.is_video_muted = v;
+        }
+        if let Some(name) = display_name {
+            p.display_name = name;
+        }
+        Some(p.clone())
     }
 }

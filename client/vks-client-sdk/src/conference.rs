@@ -52,6 +52,7 @@ pub struct Conference {
     media: MediaEngine,
     session_id: ulid::Ulid,
     join_nonce: Option<String>,
+    nonce_acquired_at: Option<std::time::Instant>,
 }
 
 impl Conference {
@@ -64,6 +65,7 @@ impl Conference {
             media: MediaEngine::default(),
             session_id: vks_common::ids::ulid(),
             join_nonce: None,
+            nonce_acquired_at: None,
         }
     }
 
@@ -95,6 +97,12 @@ impl Conference {
     #[must_use]
     pub fn join_nonce(&self) -> Option<&str> {
         self.join_nonce.as_deref()
+    }
+
+    /// Проверка, истёк ли join_nonce (TTL 60 сек по SIGNALING_PROTOCOL §7).
+    #[must_use]
+    pub fn is_nonce_expired(&self) -> bool {
+        self.nonce_acquired_at.map(|t| t.elapsed() > Duration::from_secs(60)).unwrap_or(true)
     }
 
     /// Текущий режим media engine.
@@ -132,6 +140,7 @@ impl Conference {
             }
         };
         self.join_nonce = Some(join_result.join_nonce);
+        self.nonce_acquired_at = Some(std::time::Instant::now());
 
         // 3. Media engine → active.
         self.state = ConferenceState::Active;
@@ -164,12 +173,74 @@ impl Conference {
         }
     }
 
+    /// Авто-восстановление сессии (resume или чистый rejoin) с экспоненциальным backoff (1s -> 16s, max 5).
+    pub async fn reconnect_async(&mut self, client: &mut SignalingClient) -> Result<(), ConferenceError> {
+        if self.state == ConferenceState::Left {
+            return Ok(());
+        }
+        self.state = ConferenceState::Reconnecting;
+
+        let max_attempts = 5;
+        let mut attempts = 0;
+
+        while attempts < max_attempts {
+            if self.state == ConferenceState::Left {
+                return Ok(());
+            }
+
+            let delay = client.next_reconnect_delay();
+            tokio::time::sleep(delay).await;
+            attempts += 1;
+
+            if self.state == ConferenceState::Left {
+                return Ok(());
+            }
+
+            // 1. Попытка resume по join_nonce если TTL < 60s
+            if let Some(ref nonce) = self.join_nonce {
+                if !self.is_nonce_expired() {
+                    if let Ok(hello) = client.hello_with_resume_async(&self.cfg.token, Some(nonce)).await {
+                        if !hello.server_version.is_empty() {
+                            self.state = ConferenceState::Active;
+                            client.reset_reconnect();
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            self.join_nonce = None;
+            self.nonce_acquired_at = None;
+
+            // 2. Fallback: чистый Re-Join
+            if client.hello_async(&self.cfg.token).await.is_ok() {
+                if let Ok(jr) = client.join_room_async(&self.cfg.room_id, &self.cfg.display_name).await {
+                    self.join_nonce = Some(jr.join_nonce);
+                    self.nonce_acquired_at = Some(std::time::Instant::now());
+                    self.state = ConferenceState::Active;
+                    client.reset_reconnect();
+                    return Ok(());
+                }
+            }
+        }
+
+        self.state = ConferenceState::Left;
+        Err(ConferenceError::Signaling(crate::signaling_client::SignalingError::Transport(
+            "Max reconnect attempts reached".into(),
+        )))
+    }
+
+    /// Reconnect (sync wrapper).
+    pub fn reconnect(&mut self, client: &mut SignalingClient) -> Result<(), ConferenceError> {
+        crate::sync_helper::block_on(self.reconnect_async(client))
+    }
+
     /// Leave → Left (async, idempotent).
     pub async fn leave_async(&mut self, client: &SignalingClient) {
         if self.state == ConferenceState::Active || self.state == ConferenceState::Reconnecting {
             let _ = client.leave_room_async(&self.cfg.room_id).await;
         }
         self.join_nonce = None;
+        self.nonce_acquired_at = None;
         self.state = ConferenceState::Left;
     }
 
@@ -339,5 +410,23 @@ mod tests {
         c.leave(&mut good_client);
         assert_eq!(c.state(), ConferenceState::Left);
         assert!(c.join_nonce().is_none());
+    }
+
+    #[tokio::test]
+    async fn reconnect_recovers_active_state() {
+        let mut c = Conference::new(test_cfg());
+        let mut client = SignalingClient::with_transport(Arc::new(MockSignaling::ok()));
+        c.start_async(&client).await.unwrap();
+        assert_eq!(c.state(), ConferenceState::Active);
+        let nonce = c.join_nonce().unwrap().to_string();
+
+        // Simulate connection lost
+        c.on_connection_lost();
+        assert_eq!(c.state(), ConferenceState::Reconnecting);
+
+        // Run reconnect_async
+        c.reconnect_async(&mut client).await.unwrap();
+        assert_eq!(c.state(), ConferenceState::Active);
+        assert_eq!(c.join_nonce(), Some(nonce.as_str()));
     }
 }

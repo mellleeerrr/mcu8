@@ -395,3 +395,55 @@ pub async fn video_layouts() -> Response {
     }))
     .into_response()
 }
+
+/// Тело запроса переключения режима раскладки / топологии (`POST /api/v3/ui/video_layouts/mode`).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct SwitchVideoLayoutModeRequest {
+    pub session_id: Option<String>,
+    #[serde(alias = "conference_id")]
+    pub conference_id: Option<String>,
+    #[serde(alias = "new_mode", alias = "mode")]
+    pub mode: Option<String>,
+    pub video_layout_id: Option<String>,
+}
+
+/// `POST /api/v3/ui/video_layouts/mode` и `/api/v3/video_layouts/mode` — переключение MCU/SFU из UI.
+pub async fn switch_video_layout_mode(
+    State(state): State<SharedState>,
+    Json(body): Json<SwitchVideoLayoutModeRequest>,
+) -> Response {
+    track("ui/video_layouts/mode");
+    let room_id_str = body.session_id.or(body.conference_id);
+    let mode_str = body.mode.unwrap_or_else(|| "sfu".to_string());
+    let new_mode = match mode_str.to_lowercase().as_str() {
+        "mcu" => vks_core::RoomMode::Mcu,
+        _ => vks_core::RoomMode::Sfu,
+    };
+
+    if let Some(ref rid_str) = room_id_str {
+        if let Ok(u) = uuid::Uuid::parse_str(rid_str) {
+            let rid = vks_core::RoomId::from_uuid(u);
+            let _ = crate::rooms::Rooms::update_async(&state, &rid, None, Some(new_mode), None, None).await;
+        }
+    }
+
+    let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    Json(json!({
+        "id": body.video_layout_id.as_deref().unwrap_or("grid"),
+        "display_name": "Default",
+        "creator_id": "admin",
+        "created_at": now_secs,
+        "payload": {
+            "mode": mode_str,
+            "preset": "auto",
+            "type": "grid"
+        }
+    }))
+    .into_response()
+}
+
+/// `POST /api/v3/engine/command` — команды движка.
+pub async fn engine_command(Json(_body): Json<serde_json::Value>) -> Response {
+    track("engine/command");
+    Json(json!({ "status": "ok", "result": "ok" })).into_response()
+}

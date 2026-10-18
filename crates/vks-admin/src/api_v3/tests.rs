@@ -671,3 +671,117 @@ async fn shell_monitoring_shapes_and_lifecycle_m4() {
         send(&app, request("GET", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({}))).await;
     assert_eq!(final_check.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn m4_abonents_lifecycle_and_commands() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+
+    // 1. Quick session
+    let quick_resp = send(
+        &app,
+        request("POST", "/api/v3/sessions/quick", Some(&token), json!({ "display_name": "M4 Quick Session" })),
+    )
+    .await;
+    assert_eq!(quick_resp.status(), StatusCode::OK);
+    let quick_body = json_body(quick_resp).await;
+    let room_id_str = quick_body["session"]["id"].as_str().unwrap().to_string();
+    assert_eq!(quick_body["session"]["display_name"], "M4 Quick Session");
+    assert_eq!(quick_body["session"]["state"], "ACTIVE");
+
+    let room_id = vks_core::RoomId::from_uuid(uuid::Uuid::parse_str(&room_id_str).unwrap());
+
+    // 2. Register participant in RoomHub
+    let pid = "p-m4-test-1".to_string();
+    let p_snap = crate::hub::ParticipantSnapshot {
+        participant_id: pid.clone(),
+        display_name: "Bob".to_string(),
+        is_recorder: false,
+        is_speaking: false,
+        track_ids: vec!["t1".into()],
+        is_audio_muted: false,
+        is_video_muted: false,
+        connected_at: 1700000000,
+    };
+    let (_rx, _) = state.room_hub.register_participant(&room_id, p_snap);
+
+    // 3. GET abonents
+    let abonents_resp =
+        send(&app, request("GET", &format!("/api/v3/sessions/{room_id_str}/abonents"), Some(&token), json!({}))).await;
+    assert_eq!(abonents_resp.status(), StatusCode::OK);
+    let abonents_body = json_body(abonents_resp).await;
+    assert_eq!(abonents_body["count"], 1);
+    assert_eq!(abonents_body["connected"][0]["display_name"], "Bob");
+    assert_eq!(abonents_body["connected"][0]["payload"]["settings"]["audio_tx_enabled"], true);
+    assert_eq!(abonents_body["connected"][0]["payload"]["settings"]["video_tx_enabled"], true);
+
+    // 4. Mute Audio
+    let mute_audio =
+        send(&app, request("POST", &format!("/api/v3/abonents/{pid}/audio"), Some(&token), json!({ "enable": false })))
+            .await;
+    assert_eq!(mute_audio.status(), StatusCode::OK);
+
+    let check_mute_a =
+        send(&app, request("GET", &format!("/api/v3/sessions/{room_id_str}/abonents"), Some(&token), json!({}))).await;
+    let body_mute_a = json_body(check_mute_a).await;
+    assert_eq!(body_mute_a["connected"][0]["payload"]["settings"]["audio_tx_enabled"], false);
+
+    // 5. Mute Video
+    let mute_video =
+        send(&app, request("POST", &format!("/api/v3/abonents/{pid}/video"), Some(&token), json!({ "enable": false })))
+            .await;
+    assert_eq!(mute_video.status(), StatusCode::OK);
+
+    let check_mute_v =
+        send(&app, request("GET", &format!("/api/v3/sessions/{room_id_str}/abonents"), Some(&token), json!({}))).await;
+    let body_mute_v = json_body(check_mute_v).await;
+    assert_eq!(body_mute_v["connected"][0]["payload"]["settings"]["video_tx_enabled"], false);
+
+    // 6. Rename participant
+    let rename = send(
+        &app,
+        request("PATCH", &format!("/api/v3/abonents/{pid}"), Some(&token), json!({ "display_name": "Bob Renamed" })),
+    )
+    .await;
+    assert_eq!(rename.status(), StatusCode::OK);
+
+    let check_rename =
+        send(&app, request("GET", &format!("/api/v3/sessions/{room_id_str}/abonents"), Some(&token), json!({}))).await;
+    let body_rename = json_body(check_rename).await;
+    assert_eq!(body_rename["connected"][0]["display_name"], "Bob Renamed");
+
+    // 7. Video layout mode switch
+    let mode_switch = send(
+        &app,
+        request(
+            "POST",
+            "/api/v3/ui/video_layouts/mode",
+            Some(&token),
+            json!({
+                "session_id": room_id_str,
+                "new_mode": "mcu",
+                "video_layout_id": "grid"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(mode_switch.status(), StatusCode::OK);
+    let mode_body = json_body(mode_switch).await;
+    assert_eq!(mode_body["payload"]["mode"], "mcu");
+
+    // 8. Engine command
+    let eng_resp =
+        send(&app, request("POST", "/api/v3/engine/command", Some(&token), json!({ "command": "calibration" }))).await;
+    assert_eq!(eng_resp.status(), StatusCode::OK);
+
+    // 9. Kick participant
+    let kick_resp = send(&app, request("DELETE", &format!("/api/v3/abonents/{pid}"), Some(&token), json!({}))).await;
+    assert_eq!(kick_resp.status(), StatusCode::NO_CONTENT);
+
+    let after_kick =
+        send(&app, request("GET", &format!("/api/v3/sessions/{room_id_str}/abonents"), Some(&token), json!({}))).await;
+    let body_after_kick = json_body(after_kick).await;
+    assert_eq!(body_after_kick["count"], 0);
+    assert!(body_after_kick["connected"].as_array().unwrap().is_empty());
+}

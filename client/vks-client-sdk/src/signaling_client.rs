@@ -51,6 +51,14 @@ pub enum SignalingError {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SignalingTransport: Send + Sync {
+    /// Отправляет ClientHello с resume_nonce (для сессионного resume).
+    async fn client_hello_with_resume(
+        &self,
+        token: &str,
+        _resume_nonce: Option<&str>,
+    ) -> Result<ServerHello, SignalingError> {
+        self.client_hello(token).await
+    }
     /// Отправляет ClientHello (token) → ServerHello.
     async fn client_hello(&self, token: &str) -> Result<ServerHello, SignalingError>;
     /// Отправляет JoinRoom (room, name) → JoinRoomResult.
@@ -90,6 +98,15 @@ impl SignalingClient {
     /// ClientHello → ServerHello (async).
     pub async fn hello_async(&self, token: &str) -> Result<ServerHello, SignalingError> {
         self.transport.client_hello(token).await
+    }
+
+    /// ClientHello с resume_nonce (async).
+    pub async fn hello_with_resume_async(
+        &self,
+        token: &str,
+        resume_nonce: Option<&str>,
+    ) -> Result<ServerHello, SignalingError> {
+        self.transport.client_hello_with_resume(token, resume_nonce).await
     }
 
     /// JoinRoom → JoinRoomResult (async).

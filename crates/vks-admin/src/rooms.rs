@@ -15,9 +15,7 @@ pub struct Rooms;
 impl Rooms {
     /// Вычисляет эффективный режим комнаты (явный override иначе глобальный режим).
     fn resolve_effective_mode(state: &AppState, override_mode: Option<RoomMode>) -> RoomMode {
-        override_mode.unwrap_or_else(|| {
-            state.mode.lock().expect("mode store poisoned").global_mode
-        })
+        override_mode.unwrap_or_else(|| state.mode.lock().expect("mode store poisoned").global_mode)
     }
 
     /// Создаёт комнату (per-room режим = `None`, т.е. глобальный).
@@ -44,7 +42,10 @@ impl Rooms {
     }
 
     /// Создаёт комнату с подтвержденной синхронной записью в Storage до ответа (M0-M1).
-    pub async fn create_async(state: &AppState, name: impl Into<String>) -> Result<RoomRecord, vks_core::ports::storage::StorageError> {
+    pub async fn create_async(
+        state: &AppState,
+        name: impl Into<String>,
+    ) -> Result<RoomRecord, vks_core::ports::storage::StorageError> {
         let id = RoomId::new();
         let record = RoomRecord::new(id, name, None);
         if let Some(storage) = &state.storage {
@@ -99,11 +100,14 @@ impl Rooms {
                     new_mode: m,
                     switch_epoch: mode_state.switch_epoch,
                 });
-                state.notify_admin("room:mode_changed", serde_json::json!({
-                    "room_id": id.to_string(),
-                    "mode": m,
-                    "switch_epoch": mode_state.switch_epoch,
-                }));
+                state.notify_admin(
+                    "room:mode_changed",
+                    serde_json::json!({
+                        "room_id": id.to_string(),
+                        "mode": m,
+                        "switch_epoch": mode_state.switch_epoch,
+                    }),
+                );
 
                 // Рассылаем RoomModeChanged всем WebRTC signaling сессиям в комнате через RoomHub
                 let proto_mode = match m {
@@ -259,6 +263,38 @@ impl Rooms {
             bitrate_kbps: record.bitrate_kbps,
             mode,
         })
+    }
+
+    /// Kicks a participant from a room: broadcasts ParticipantLeft with reason 2 (kicked),
+    /// removes from RoomHub roster, updates participant count in storage, and notifies admin WS.
+    pub fn kick_participant(state: &AppState, room_id: &RoomId, participant_id: &str) -> bool {
+        let remaining = state.room_hub.unregister_participant(room_id, participant_id);
+
+        let left_msg = vks_proto::signaling::SignalingMessage {
+            msg_id: 0,
+            reply_to: 0,
+            payload: Some(vks_proto::signaling::signaling_message::Payload::ParticipantLeft(
+                vks_proto::signaling::ParticipantLeft {
+                    participant_id: participant_id.to_string(),
+                    reason: 2, // 2 = kicked
+                },
+            )),
+        };
+        use prost::Message;
+        let payload_bytes = left_msg.encode_to_vec();
+        state.room_hub.broadcast(room_id, None, payload_bytes.into());
+
+        if let Some(count) = remaining {
+            Self::update(state, room_id, None, None, Some(count), None);
+        }
+        state.notify_admin(
+            &format!("session:{}:abonents", room_id),
+            serde_json::json!({
+                "action": "kicked",
+                "participant_id": participant_id,
+            }),
+        );
+        true
     }
 }
 
