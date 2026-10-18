@@ -31,8 +31,8 @@ mod grid;
 mod rect;
 mod renderer;
 
-pub use core::{Layout, LayoutError, LayoutKind, ParticipantId, Slot, SlotId};
+pub use core::{Layout, LayoutError, LayoutKind, NormalizedLayout, NormalizedSlot, ParticipantId, Slot, SlotId};
 pub use focus::FocusLayout;
 pub use grid::GridLayout;
-pub use rect::{Canvas, Rect};
+pub use rect::{Canvas, NormalizedRect, Rect};
 pub use renderer::{DrawCommand, FrameMeta, Renderer};

@@ -24,7 +24,9 @@ pub struct MemoryStorage {
     core_layouts: RwLock<HashMap<String, vks_core::ports::storage::Layout>>,
     core_api_keys: RwLock<HashMap<String, vks_core::ports::storage::ApiKey>>,
     core_users: RwLock<HashMap<vks_core::UserId, vks_core::ports::storage::StoredUser>>,
+    core_credentials: RwLock<HashMap<vks_core::UserId, vks_core::ports::storage::UserCredentials>>,
     core_audit: RwLock<Vec<vks_core::ports::storage::AuditEntry>>,
+    server_settings: RwLock<Option<String>>,
 }
 
 impl MemoryStorage {
@@ -48,6 +50,16 @@ impl MemoryStorage {
 
     pub(crate) fn users_map(&self) -> &RwLock<HashMap<vks_core::UserId, vks_core::ports::storage::StoredUser>> {
         &self.core_users
+    }
+
+    pub(crate) fn credentials_map(
+        &self,
+    ) -> &RwLock<HashMap<vks_core::UserId, vks_core::ports::storage::UserCredentials>> {
+        &self.core_credentials
+    }
+
+    pub(crate) fn server_settings_slot(&self) -> &RwLock<Option<String>> {
+        &self.server_settings
     }
 
     pub(crate) fn audit_log(&self) -> &RwLock<Vec<vks_core::ports::storage::AuditEntry>> {

@@ -32,4 +32,4 @@ pub use media_engine::{
     RoomMediaHandle, SubscribeRequest, SubscriberHandle,
 };
 pub use rng::{DeterministicRng, Rng, RngError};
-pub use storage::{ApiKey, AuditEntry, Layout, Storage, StorageError, StoredUser};
+pub use storage::{ApiKey, AuditEntry, Layout, Storage, StorageError, StoredUser, UserCredentials};

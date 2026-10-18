@@ -128,16 +128,26 @@ pub async fn abonents_count(State(state): State<SharedState>) -> Response {
 pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
     track("ui/system/status");
     let settings = SettingsService::get(&state);
+    let readiness = crate::health::Readiness::from_state(&state).await;
+
+    let engine_status = if readiness.media { "READY" } else { "FAILED" };
+    let engine_desc = if readiness.media { "" } else { "Media engine degraded" };
+    let db_status = if readiness.db { "READY" } else { "FAILED" };
+
     Json(json!({
         "engine": {
-            "status": "READY",
-            "connected": true,
-            "description": "",
+            "status": engine_status,
+            "connected": readiness.media,
+            "description": engine_desc,
             "version": env!("CARGO_PKG_VERSION"),
             "type": "mcu",
             "name": settings.name
         },
-        "database": { "status": "READY", "connected": true, "size_bytes": 0 },
+        "database": {
+            "status": db_status,
+            "connected": readiness.db,
+            "size_bytes": 0
+        },
         "network": { "status": "READY", "connected": true, "editable": true, "ip": settings.ip },
         "disk": { "free": 107374182400u64, "percent": 15, "full": "NORMAL" },
         "sip": { "status": "READY", "connected": true, "registration": true, "account": "sip:vks@local" },
@@ -278,7 +288,7 @@ pub async fn update_settings_calls(
             current.turn = t;
         }
     }
-    let updated = SettingsService::set(&state, current);
+    let updated = SettingsService::set_async(&state, current).await;
     let ts_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     state.audit.lock().expect("audit store poisoned").record(crate::audit::AuditEntry {
         ts_ms,

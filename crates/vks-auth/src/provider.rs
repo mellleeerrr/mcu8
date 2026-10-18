@@ -161,7 +161,7 @@ pub fn create_auth_provider(
 impl AuthProvider for LocalAuth {
     async fn verify(&self, token: &str) -> Result<AuthenticatedUser, AuthError> {
         let (username, password) = split_credential(token)?;
-        let user = self.db.authenticate(&username, &password)?;
+        let user = self.db.authenticate_async(&username, &password).await?;
         Ok(AuthenticatedUser { id: user.id, username: user.username, source: AuthSource::Local })
     }
 

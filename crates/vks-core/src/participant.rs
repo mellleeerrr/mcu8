@@ -98,6 +98,16 @@ impl UserId {
     pub fn bootstrap_operator() -> Self {
         Self(Uuid::from_u128(1))
     }
+
+    /// Парсит идентификатор из строкового UUID.
+    pub fn parse(s: &str) -> Result<Self, uuid::Error> {
+        Uuid::parse_str(s).map(Self)
+    }
+
+    /// Парсит идентификатор из строкового UUID.
+    pub fn parse_str(s: &str) -> Result<Self, uuid::Error> {
+        Uuid::parse_str(s).map(Self)
+    }
 }
 
 /// Постоянный детерминированный строковый UUID встроенного bootstrap-оператора (admin).

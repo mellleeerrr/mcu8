@@ -543,7 +543,7 @@ pub async fn set_settings(
     headers: axum::http::HeaderMap,
     Json(body): Json<SetSettingsRequest>,
 ) -> Response {
-    let res = SettingsService::set(&state, body.settings.clone());
+    let res = SettingsService::set_async(&state, body.settings.clone()).await;
     let actor = extract_actor(&auth);
     let ip = extract_client_ip(&headers, &auth);
     state.record_audit_entry(actor, "set_settings", None, ip);

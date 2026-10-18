@@ -47,6 +47,20 @@ pub struct Config {
     pub ice_servers: Vec<String>,
 }
 
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum ConfigError {
+    #[error("invalid auth_provider '{0}': expected 'local', 'ldap', or 'oidc'")]
+    InvalidAuthProvider(String),
+    #[error("invalid default_room_mode '{0}': expected 'sfu' or 'mcu'")]
+    InvalidRoomMode(String),
+    #[error("invalid jwt_ttl_secs '{0}': must be positive")]
+    InvalidJwtTtl(i64),
+    #[error("invalid listen_addr '{0}': {1}")]
+    InvalidListenAddr(String, String),
+    #[error("invalid media_listen_addr '{0}': {1}")]
+    InvalidMediaListenAddr(String, String),
+}
+
 /// Маскирует строковые секреты.
 pub fn redact_secret(s: &str) -> &'static str {
     if s.is_empty() {
@@ -56,17 +70,56 @@ pub fn redact_secret(s: &str) -> &'static str {
     }
 }
 
-/// Маскирует учетные данные в DSN/URI: `postgres://user:pass@host/db` -> `postgres://user:***@host/db`.
+/// Маскирует учетные данные в DSN/URI:
+/// `postgres://user:pass@host/db` -> `postgres://user:***@host/db`
+/// `postgres://:pass@host/db` -> `postgres://:***@host/db`
+/// `postgres://user:@host/db` -> `postgres://user:***@host/db`
+/// `user:pass@host` -> `user:***@host`
+/// `sqlite://db?password=secret` -> `sqlite://db?password=***`
 pub fn redact_dsn(dsn: &str) -> String {
-    if let Some((scheme_and_creds, host_and_path)) = dsn.split_once('@') {
-        if let Some((scheme, creds)) = scheme_and_creds.split_once("://") {
+    if dsn.is_empty() {
+        return String::new();
+    }
+    let mut result = dsn.to_string();
+
+    // 1. Redact credentials before @
+    if let Some((before_at, host_and_path)) = result.split_once('@') {
+        if let Some((scheme, creds)) = before_at.split_once("://") {
             if let Some((user, _pass)) = creds.split_once(':') {
-                return format!("{scheme}://{user}:***@{host_and_path}");
+                result = format!("{scheme}://{user}:***@{host_and_path}");
+            } else {
+                result = format!("{scheme}://***@{host_and_path}");
             }
-            return format!("{scheme}://***@{host_and_path}");
+        } else if let Some((user, _pass)) = before_at.split_once(':') {
+            result = format!("{user}:***@{host_and_path}");
+        } else {
+            result = format!("***@{host_and_path}");
         }
     }
-    dsn.to_string()
+
+    // 2. Redact query parameters containing secrets/passwords/keys/tokens
+    if let Some((base, query)) = result.split_once('?') {
+        let mut redacted_params = Vec::new();
+        for param in query.split('&') {
+            if let Some((k, _v)) = param.split_once('=') {
+                let lower_k = k.to_lowercase();
+                if lower_k.contains("pass")
+                    || lower_k.contains("secret")
+                    || lower_k.contains("token")
+                    || lower_k.contains("key")
+                {
+                    redacted_params.push(format!("{k}=***"));
+                } else {
+                    redacted_params.push(param.to_string());
+                }
+            } else {
+                redacted_params.push(param.to_string());
+            }
+        }
+        result = format!("{base}?{}", redacted_params.join("&"));
+    }
+
+    result
 }
 
 impl std::fmt::Debug for Config {
@@ -133,6 +186,33 @@ impl Config {
         fig = fig.merge(Env::prefixed("VKS_").map(|key| Uncased::new(key.as_str().to_lowercase())));
 
         fig.extract()
+    }
+
+    /// Валидирует значения полей конфигурации (M0.3).
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let provider = self.auth_provider.trim().to_lowercase();
+        if provider != "local" && provider != "ldap" && provider != "oidc" {
+            return Err(ConfigError::InvalidAuthProvider(self.auth_provider.clone()));
+        }
+
+        let mode = self.default_room_mode.trim().to_lowercase();
+        if mode != "sfu" && mode != "mcu" {
+            return Err(ConfigError::InvalidRoomMode(self.default_room_mode.clone()));
+        }
+
+        if self.jwt_ttl_secs <= 0 {
+            return Err(ConfigError::InvalidJwtTtl(self.jwt_ttl_secs));
+        }
+
+        if let Err(e) = self.listen_addr.parse::<std::net::SocketAddr>() {
+            return Err(ConfigError::InvalidListenAddr(self.listen_addr.clone(), e.to_string()));
+        }
+
+        if let Err(e) = self.media_listen_addr.parse::<std::net::SocketAddr>() {
+            return Err(ConfigError::InvalidMediaListenAddr(self.media_listen_addr.clone(), e.to_string()));
+        }
+
+        Ok(())
     }
 }
 
@@ -276,5 +356,55 @@ default_room_mode = "mcu"
         assert!(!debug_str.contains("admin_cleartext_password"), "admin_password leaked in Debug");
         assert!(!debug_str.contains("mypassword"), "database_url password leaked in Debug");
         assert!(debug_str.contains("postgres://vks_user:***@localhost:5432/vks"));
+    }
+
+    #[test]
+    fn validate_accepts_valid_config() {
+        let cfg = Config::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_invalid_auth_provider() {
+        let cfg = Config { auth_provider: "invalid_provider".into(), ..Default::default() };
+        assert_eq!(cfg.validate(), Err(ConfigError::InvalidAuthProvider("invalid_provider".into())));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_room_mode() {
+        let cfg = Config { default_room_mode: "invalid_mode".into(), ..Default::default() };
+        assert_eq!(cfg.validate(), Err(ConfigError::InvalidRoomMode("invalid_mode".into())));
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_jwt_ttl() {
+        let cfg0 = Config { jwt_ttl_secs: 0, ..Default::default() };
+        assert_eq!(cfg0.validate(), Err(ConfigError::InvalidJwtTtl(0)));
+        let cfg_neg = Config { jwt_ttl_secs: -100, ..Default::default() };
+        assert_eq!(cfg_neg.validate(), Err(ConfigError::InvalidJwtTtl(-100)));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_socket_addrs() {
+        let cfg = Config { listen_addr: "not_an_ip".into(), ..Default::default() };
+        assert!(matches!(cfg.validate(), Err(ConfigError::InvalidListenAddr(_, _))));
+
+        let cfg2 = Config { media_listen_addr: "999.999.999.999:7777".into(), ..Default::default() };
+        assert!(matches!(cfg2.validate(), Err(ConfigError::InvalidMediaListenAddr(_, _))));
+    }
+
+    #[test]
+    fn redact_dsn_handles_query_passwords_and_edge_cases() {
+        assert_eq!(redact_dsn(""), "");
+        assert_eq!(
+            redact_dsn("sqlite://db.sqlite?cache=shared&password=secret123&mode=rwc"),
+            "sqlite://db.sqlite?cache=shared&password=***&mode=rwc"
+        );
+        assert_eq!(
+            redact_dsn("postgres://user:p@host:5432/db?sslmode=require&secret_key=abc"),
+            "postgres://user:***@host:5432/db?sslmode=require&secret_key=***"
+        );
+        assert_eq!(redact_dsn("user:password@host"), "user:***@host");
+        assert_eq!(redact_dsn("secret@host"), "***@host");
     }
 }

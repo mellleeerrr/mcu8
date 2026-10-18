@@ -20,6 +20,7 @@ pbkdf2 = "0.12"
 subtle = "2"
 rand = "0.8"
 async-trait = "0.1"
+tokio = { workspace = true }
 vks-core = { path = "../vks-core" }
 
 [dev-dependencies]

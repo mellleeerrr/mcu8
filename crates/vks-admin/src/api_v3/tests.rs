@@ -785,3 +785,89 @@ async fn m4_abonents_lifecycle_and_commands() {
     assert_eq!(body_after_kick["count"], 0);
     assert!(body_after_kick["connected"].as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_m0_ui_system_status_faults_and_password_persistence() {
+    let storage = std::sync::Arc::new(vks_storage::MemoryStorage::new());
+    let local_db = std::sync::Arc::new(vks_auth::local_db::LocalDb::new());
+    local_db.register(vks_core::BOOTSTRAP_ADMIN_USER_ID, "admin", "admin_pass").unwrap();
+
+    let mut state = AppState::with_storage(storage.clone());
+    state.local_db = Some(local_db.clone());
+    state.jwt_issuer = Some(std::sync::Arc::new(vks_auth::jwt::JwtIssuer::new(vks_auth::jwt::JwtConfig {
+        secret: "test_secret".to_string(),
+        ttl_secs: 3600,
+        issuer: "test".to_string(),
+    })));
+    crate::users::Users::bootstrap_operator_async(&state, "admin").await.unwrap();
+
+    let state = std::sync::Arc::new(state);
+    let app_router = app(state.clone());
+    let token = login_token(&app_router, "admin", "admin_pass").await;
+
+    // 1. Initial healthy status
+    let resp = send(&app_router, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert_eq!(body["engine"]["status"], "READY");
+    assert_eq!(body["engine"]["connected"], true);
+    assert_eq!(body["database"]["status"], "READY");
+    assert_eq!(body["database"]["connected"], true);
+
+    // 2. Inject media fault
+    state.inject_fault("media");
+    let resp = send(&app_router, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    let body = json_body(resp).await;
+    assert_eq!(body["engine"]["status"], "FAILED");
+    assert_eq!(body["engine"]["connected"], false);
+    assert_eq!(body["database"]["status"], "READY");
+    state.clear_fault("media");
+
+    // 3. Inject db fault
+    state.inject_fault("db");
+    let resp = send(&app_router, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    let body = json_body(resp).await;
+    assert_eq!(body["database"]["status"], "FAILED");
+    assert_eq!(body["database"]["connected"], false);
+    state.clear_fault("db");
+
+    // 4. Change password and verify persistence
+    let chg_resp = send(
+        &app_router,
+        request(
+            "PATCH",
+            "/api/v3/password",
+            Some(&token),
+            json!({
+                "username": "admin",
+                "old_password": "admin_pass",
+                "new_password": "new_secret_pwd_42"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(chg_resp.status(), StatusCode::OK);
+
+    // Check old login fails
+    let fail_resp = send(
+        &app_router,
+        request("POST", "/api/v3/login", None, json!({ "login": "admin", "password": "admin_pass" })),
+    )
+    .await;
+    assert_eq!(fail_resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Check new login succeeds
+    let new_token = login_token(&app_router, "admin", "new_secret_pwd_42").await;
+    assert!(!new_token.is_empty());
+
+    // 5. Verify credentials were saved in storage and hydrate into a fresh AppState
+    let fresh_local_db = std::sync::Arc::new(vks_auth::local_db::LocalDb::new());
+    let mut fresh_state = AppState::with_storage(storage.clone());
+    fresh_state.local_db = Some(fresh_local_db.clone());
+    fresh_state.jwt_issuer = state.jwt_issuer.clone();
+    fresh_state.sync_from_storage().await.unwrap();
+
+    let fresh_app = app(std::sync::Arc::new(fresh_state));
+    let restored_token = login_token(&fresh_app, "admin", "new_secret_pwd_42").await;
+    assert!(!restored_token.is_empty());
+}

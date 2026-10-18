@@ -182,6 +182,10 @@ pub struct AppState {
     pub admin_events: tokio::sync::broadcast::Sender<crate::hub::AdminBroadcastEvent>,
     /// Канал уведомлений об отзыве токенов/сессий в реальном времени (M1.2 / M1.8).
     pub revocation_tx: tokio::sync::broadcast::Sender<RevocationNotice>,
+    /// Флаг здоровья медиа-подсистемы (UDP media loop / pipelines) (M0.6 / M6.3).
+    pub media_healthy: std::sync::atomic::AtomicBool,
+    /// Набор активных инъекций сбоев (M0.6 / M6.3).
+    pub faults: Mutex<std::collections::HashSet<String>>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -199,6 +203,7 @@ impl std::fmt::Debug for AppState {
             .field("settings", &self.settings)
             .field("mode", &self.mode)
             .field("event_queue", &self.event_queue)
+            .field("media_healthy", &self.media_healthy.load(std::sync::atomic::Ordering::Relaxed))
             .finish()
     }
 }
@@ -231,7 +236,38 @@ impl AppState {
             room_hub: Arc::new(crate::hub::RoomHub::new()),
             admin_events: admin_tx,
             revocation_tx,
+            media_healthy: std::sync::atomic::AtomicBool::new(true),
+            faults: Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Внедряет сбой в подсистему для проверки деградации (M0.6 / M6.3).
+    pub fn inject_fault(&self, fault: impl Into<String>) {
+        if let Ok(mut f) = self.faults.lock() {
+            f.insert(fault.into());
+        }
+    }
+
+    /// Снимает внедренный ранее сбой (M0.6 / M6.3).
+    pub fn clear_fault(&self, fault: &str) {
+        if let Ok(mut f) = self.faults.lock() {
+            f.remove(fault);
+        }
+    }
+
+    /// Проверяет, активен ли сбой в указанной подсистеме (M0.6 / M6.3).
+    pub fn has_fault(&self, fault: &str) -> bool {
+        self.faults.lock().map(|f| f.contains(fault)).unwrap_or(false)
+    }
+
+    /// Устанавливает статус здоровья медиа-подсистемы (M0.6 / M6.3).
+    pub fn set_media_healthy(&self, healthy: bool) {
+        self.media_healthy.store(healthy, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Проверяет здоровье медиа-подсистемы (M0.6 / M6.3).
+    pub fn is_media_healthy(&self) -> bool {
+        self.media_healthy.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Отправляет push-уведомление администраторам (в `/api/v3/ws`).
@@ -414,6 +450,41 @@ impl AppState {
                         room: a.room,
                         ip: a.ip,
                     });
+                }
+            }
+
+            // M1.3: Hydrate user credentials and generation counters into LocalDb and users map
+            let creds = storage.list_user_credentials().await.unwrap_or_default();
+            if let Some(db) = &self.local_db {
+                let users_map = self.users.lock().map_err(|e| e.to_string())?;
+                for c in &creds {
+                    let username =
+                        users_map.get(&c.user_id).map(|u| u.username.clone()).unwrap_or_else(|| c.user_id.to_string());
+                    db.restore_user(
+                        &c.user_id.to_string(),
+                        &username,
+                        &c.password_hash_hex,
+                        &c.salt_hex,
+                        c.password_changed_at,
+                        Some(c.generation),
+                    );
+                }
+            }
+            {
+                let mut users_map = self.users.lock().map_err(|e| e.to_string())?;
+                for c in &creds {
+                    if let Some(u) = users_map.get_mut(&c.user_id) {
+                        u.generation = c.generation;
+                    }
+                }
+            }
+
+            // M1.5: Hydrate server settings
+            if let Ok(Some(settings_json)) = storage.get_settings().await {
+                if let Ok(loaded) = serde_json::from_str::<crate::settings::Settings>(&settings_json) {
+                    let mut current = self.settings.lock().map_err(|e| e.to_string())?;
+                    *current = loaded.clone();
+                    self.mode.lock().map_err(|e| e.to_string())?.global_mode = loaded.default_mode;
                 }
             }
         }

@@ -82,7 +82,14 @@ mod tests {
     }
 
     fn slot(pid: Option<u128>, x: u32, y: u32, w: u32, h: u32) -> Slot {
-        Slot { id: SlotId::new(0), participant_id: pid.map(ParticipantId::new), rect: Rect::new(x, y, w, h) }
+        Slot {
+            id: SlotId::new(0),
+            participant_id: pid.map(ParticipantId::new),
+            rect: Rect::new(x, y, w, h),
+            z_index: 0,
+            pinned: false,
+            is_focus: false,
+        }
     }
 
     fn pid(i: u128) -> ParticipantId {

@@ -113,6 +113,53 @@ impl Rect {
         let h = bottom.saturating_sub(y);
         Self::new(x, y, w, h)
     }
+
+    /// Преобразует пиксельный [`Rect`] в нормализованный [`NormalizedRect`] на заданном [`Canvas`] (M0.4).
+    pub fn to_normalized(&self, canvas: &Canvas) -> NormalizedRect {
+        if canvas.is_empty() {
+            return NormalizedRect::new(0.0, 0.0, 0.0, 0.0);
+        }
+        let cw = canvas.width as f64;
+        let ch = canvas.height as f64;
+        NormalizedRect::new(self.x as f64 / cw, self.y as f64 / ch, self.w as f64 / cw, self.h as f64 / ch)
+    }
+}
+
+/// Прямоугольник в нормализованных координатах `[0.0, 1.0]` (M0.4).
+///
+/// Каноническое представление геометрии слота, не зависящее от физического
+/// разрешения canvas. Одинаково применяется MCU compositor и клиентом.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct NormalizedRect {
+    /// x-координата левого верхнего угла (в долях [0.0, 1.0]).
+    pub x: f64,
+    /// y-координата левого верхнего угла (в долях [0.0, 1.0]).
+    pub y: f64,
+    /// Ширина (в долях [0.0, 1.0]).
+    pub w: f64,
+    /// Высота (в долях [0.0, 1.0]).
+    pub h: f64,
+}
+
+impl NormalizedRect {
+    /// Создает нормализованный rect с ограничением диапазона `[0.0, 1.0]`.
+    pub fn new(x: f64, y: f64, w: f64, h: f64) -> Self {
+        Self { x: x.clamp(0.0, 1.0), y: y.clamp(0.0, 1.0), w: w.clamp(0.0, 1.0), h: h.clamp(0.0, 1.0) }
+    }
+
+    /// Масштабирует нормализованный прямоугольник в пиксельный [`Rect`] на заданном [`Canvas`].
+    pub fn to_rect(&self, canvas: &Canvas) -> Rect {
+        if canvas.is_empty() {
+            return Rect::new(0, 0, 0, 0);
+        }
+        let cw = canvas.width as f64;
+        let ch = canvas.height as f64;
+        let x = (self.x * cw).round() as u32;
+        let y = (self.y * ch).round() as u32;
+        let w = (self.w * cw).round() as u32;
+        let h = (self.h * ch).round() as u32;
+        Rect::new(x, y, w, h).clamp(canvas)
+    }
 }
 
 #[cfg(test)]
@@ -174,5 +221,20 @@ mod tests {
         assert_eq!(Rect::new(0, 0, 200, 200).clamp(&canvas), canvas.as_rect());
         // partially outside on left/top (x < 0 underflows to near u32::MAX)
         assert_eq!(Rect::new(u32::MAX, 0, 10, 10).clamp(&canvas), Rect::new(100, 0, 0, 10));
+    }
+
+    #[test]
+    fn normalized_rect_roundtrip_and_scale() {
+        let canvas1080 = Canvas::new(1920, 1080);
+        let canvas720 = Canvas::new(1280, 720);
+        let orig = Rect::new(960, 540, 960, 540); // bottom right quadrant
+        let norm = orig.to_normalized(&canvas1080);
+        assert!((norm.x - 0.5).abs() < 1e-6);
+        assert!((norm.y - 0.5).abs() < 1e-6);
+        assert!((norm.w - 0.5).abs() < 1e-6);
+        assert!((norm.h - 0.5).abs() < 1e-6);
+
+        let scaled720 = norm.to_rect(&canvas720);
+        assert_eq!(scaled720, Rect::new(640, 360, 640, 360));
     }
 }

@@ -42,6 +42,31 @@
 
 ## Итерации
 
+### [2026-10-18] Итерация 5.4 — Пакет B: Контракты и честный runtime (M0.1–0.6, M1.3, M1.5, M1.6, M1.9, M6.3)
+
+#### Что сделано
+- **M0.1–M0.6 (Контракты, Fail-Fast конфигурация и честный runtime)**:
+  - `Config::validate()` с проверкой диапазонов портов, DSN баз данных, адресов привязки и путей к статике UI.
+  - Редакция чувствительных DSN (`redact_dsn`) для безопасного логирования без утечки паролей БД.
+  - Честный статус рантайма в `/api/v3/ui/system/status` и `/readyz`: опрос реального пинга БД (`storage.ping().await`), мониторинг здоровья медиа-петли SFU/MCU UDP и фреймворк инъекции неисправностей (`AppState::inject_fault` / `clear_fault`).
+  - Передача истинного `room_mode` и `caps` в `HandlerConfig` сигнального сервера.
+- **M1.3, M1.6 & M1.9 (Асинхронная аутентификация и персистентность учетных данных)**:
+  - Вынос криптографических операций Argon2 в `tokio::task::spawn_blocking` (`authenticate_async`, `set_password_async`, `register_async` в `LocalDb`), исключая блокировку reactor Tokio.
+  - Модель `UserCredentials` (`UserId`, `password_hash_hex`, `salt_hex`, `password_changed_at`, `generation`) и методы `upsert_user_credentials`, `get_user_credentials`, `list_user_credentials` в трейте `Storage`.
+  - SQL миграция `0004_user_credentials.sql` и реализация в `MemoryStorage` с полным набором roundtrip тестов.
+  - Автоматическая персистенция пароля при смене (`change_password`) и bootstrap оператора (`bootstrap_operator_async`).
+  - Восстановление учетных данных (`restore_user`) в `LocalDb` из `Storage` при гидрации состояния (`AppState::sync_from_storage`).
+- **M1.5 (Персистенция настроек и маскирование секретов)**:
+  - Асинхронное сохранение конфигурации в `SettingsService::set_async` через `storage.upsert_settings`.
+  - Рекурсивное маскирование (`redact_json_secrets`) и безопасное слияние (`merge_json_secrets`) чувствительных полей JSON (`pass`, `secret`, `token`, `key`).
+- **Layout & Media MCU Enhancements**:
+  - Обогащение `Slot` атрибутами `z_index`, `pinned` и `is_focus` с поддержкой нормализованных координат (`NormalizedLayout`, `NormalizedSlot`, `NormalizedRect`).
+  - Развязка аудио-каденса (строгие 20 мс) от рендеринга видео в `vks-media-mcu::Engine`.
+- **Верификация**:
+  - `cargo fmt --all -- --check` — чисто.
+  - `cargo clippy --workspace --all-targets -- -D warnings` — 0 замечаний.
+  - `cargo test --workspace` — все тесты пройдены успешно (0 ошибок).
+
 ### [2026-10-18] Итерация 5.3 — Комплексная модернизация и устранение архитектурного долга MCU/SFU (Milestones M0–M6)
 
 #### Что сделано

@@ -58,10 +58,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             c
         }
         Err(e) => {
-            warn!(error = %e, "failed to load config file, falling back to defaults");
-            Config::load(None).unwrap_or_default()
+            if config_path.is_some() {
+                error!(error = %e, path = ?config_path, "failed to load configured config file; aborting startup (fail-fast)");
+                return Err(e.into());
+            } else {
+                warn!(error = %e, "failed to load config file, falling back to defaults");
+                Config::load(None).unwrap_or_default()
+            }
         }
     };
+
+    // M0.3: Валидация конфигурации перед продолжением старта
+    config.validate()?;
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -116,10 +124,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 5. Инициализация состояния админ-сервера + bootstrap auth `/api/v3` (§4.3).
+    let local_db = Arc::new(LocalDb::new());
     let mut admin_state = AppState::with_storage(storage.clone());
+    admin_state.local_db = Some(local_db.clone());
 
     if let Err(e) = admin_state.sync_from_storage().await {
-        warn!(error = %e, "warning during storage synchronization");
+        if !config.storage_allow_fallback && !config.database_url.is_empty() {
+            error!(error = %e, "failed to synchronize admin state from storage; aborting startup (fail-fast)");
+            return Err(e.into());
+        } else {
+            warn!(error = %e, "warning during storage synchronization");
+        }
     }
 
     // JwtIssuer: пустой секрет → fail-closed (503 на `/api/v3/*`, включая login, и `/api/v1/*`).
@@ -138,12 +153,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // LocalDb-оператор (dev-дефолт admin/admin; прод — VKS_ADMIN_PASSWORD).
-    let local_db = Arc::new(LocalDb::new());
-    match local_db.register(vks_core::BOOTSTRAP_ADMIN_USER_ID, &config.admin_login, &config.admin_password) {
-        Ok(_) => {
-            info!(login = %config.admin_login, id = vks_core::BOOTSTRAP_ADMIN_USER_ID, "local_db operator registered")
+    if local_db.user(vks_core::BOOTSTRAP_ADMIN_USER_ID).is_err() {
+        match local_db.register(vks_core::BOOTSTRAP_ADMIN_USER_ID, &config.admin_login, &config.admin_password) {
+            Ok(_) => {
+                info!(login = %config.admin_login, id = vks_core::BOOTSTRAP_ADMIN_USER_ID, "local_db operator registered")
+            }
+            Err(e) => warn!(error = %e, "local_db operator bootstrap skipped"),
         }
-        Err(e) => warn!(error = %e, "local_db operator bootstrap skipped"),
+    } else {
+        info!(login = %config.admin_login, id = vks_core::BOOTSTRAP_ADMIN_USER_ID, "operator credentials restored from persistent storage");
     }
     if config.admin_password == "admin" {
         warn!("admin password is the dev default; set VKS_ADMIN_PASSWORD before production");
@@ -168,23 +186,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     admin_state.auth_provider = Some(auth_provider);
-    admin_state.local_db = Some(local_db);
+
     // Держим оператора в admin-хранилище users с детерминированным UserId::bootstrap_operator() и пишем в постоянное хранилище.
     if let Err(e) = vks_admin::users::Users::bootstrap_operator_async(&admin_state, &config.admin_login).await {
-        warn!(error = %e, "failed to bootstrap operator into storage, falling back to memory");
-        vks_admin::users::Users::bootstrap_operator(&admin_state, &config.admin_login);
+        if !config.storage_allow_fallback && !config.database_url.is_empty() {
+            error!(error = %e, "failed to bootstrap operator into storage; aborting startup (fail-fast)");
+            return Err(e.into());
+        } else {
+            warn!(error = %e, "failed to bootstrap operator into storage, falling back to memory");
+            vks_admin::users::Users::bootstrap_operator(&admin_state, &config.admin_login);
+        }
     }
 
     let initial_mode = match config.default_room_mode.to_lowercase().as_str() {
         "mcu" => vks_core::RoomMode::Mcu,
         _ => vks_core::RoomMode::Sfu,
     };
-    admin_state.mode.lock().unwrap().global_mode = initial_mode;
-    {
+    let effective_mode = {
         let mut s = admin_state.settings.lock().unwrap();
-        s.name = config.server_name.clone();
-        s.default_mode = initial_mode;
-    }
+        if s.name == "vks" {
+            s.name = config.server_name.clone();
+        }
+        if s.default_mode == vks_core::RoomMode::Sfu && initial_mode != vks_core::RoomMode::Sfu {
+            s.default_mode = initial_mode;
+            admin_state.mode.lock().unwrap().global_mode = initial_mode;
+        }
+        admin_state.mode.lock().unwrap().global_mode
+    };
     let admin_state = Arc::new(admin_state);
 
     // 6. Загрузка статики фронтенда PNM (fail-fast диагностика, но сервер не падает)
@@ -206,6 +234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (udp_loop, receive_task, candidate_addr, candidate_port) =
         match vks_media_sfu::udp_loop::UdpMediaLoop::bind(&config.media_listen_addr).await {
             Ok(loop_handle) => {
+                admin_state.set_media_healthy(true);
                 let local_addr = loop_handle.local_addr();
                 info!(addr = %local_addr, "WebRTC UDP media loop active");
                 let sfu = sfu_engine.clone();
@@ -219,6 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (Some(Arc::new(loop_handle)), Some(task), ip, port)
             }
             Err(e) => {
+                admin_state.set_media_healthy(false);
                 warn!(error = %e, addr = %config.media_listen_addr, "failed to bind UDP media loop");
                 (None, None, "127.0.0.1".to_string(), 0)
             }
@@ -235,6 +265,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
+    let proto_room_mode = match effective_mode {
+        vks_core::RoomMode::Mcu => vks_proto::media::RoomMode::Mcu as i32,
+        vks_core::RoomMode::Sfu => vks_proto::media::RoomMode::Sfu as i32,
+    };
+    let caps = vks_proto::media::RoomCaps {
+        room_mode: proto_room_mode,
+        video_codecs: vec![vks_proto::media::CodecId::Vp8 as i32, vks_proto::media::CodecId::H264 as i32],
+        audio_codecs: vec![vks_proto::media::CodecId::Opus as i32],
+        simulcast: true,
+        svc: false,
+        dtls_srtp: true,
+    };
+
     let handler_config = HandlerConfig::new(
         "srv-0001",
         &config.server_name,
@@ -248,7 +291,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             RtpMap { payload: 96, codec: "vp8".into(), clock: 90000, channels: 0 },
         ],
     )
-    .with_ice_servers(ice_servers);
+    .with_ice_servers(ice_servers)
+    .with_room_mode(proto_room_mode)
+    .with_caps(caps);
 
     let gateway_manager = Arc::new(GatewayManager::new());
     let recorder_manager = Arc::new(RecorderManager::new());

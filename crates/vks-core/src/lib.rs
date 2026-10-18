@@ -75,6 +75,7 @@ pub use ports::{
     SubscriptionHandle,
     SystemClock,
     User,
+    UserCredentials,
 };
 pub use room::{Room, RoomId, RoomMode, RoomState, RoomTransitionError};
 pub use session::{Session, SessionError, SessionEvent, SessionId, SessionState};

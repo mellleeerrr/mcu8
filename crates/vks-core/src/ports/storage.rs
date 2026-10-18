@@ -99,6 +99,21 @@ pub struct AuditEntry {
     pub ip: String,
 }
 
+/// Запись учетных данных пользователя для persistence (M1.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserCredentials {
+    /// Идентификатор пользователя.
+    pub user_id: UserId,
+    /// Хеш пароля (hex).
+    pub password_hash_hex: String,
+    /// Соль пароля (hex).
+    pub salt_hex: String,
+    /// Время последней смены пароля (unix seconds epoch).
+    pub password_changed_at: Option<i64>,
+    /// Монотонный счетчик поколения токенов пользователя.
+    pub generation: u64,
+}
+
 /// Порт Storage — CRUD для Room/Participant/Layout/ApiKey/User/Audit.
 ///
 /// Ядро использует этот порт для persistence; конкретные реализации —
@@ -213,6 +228,35 @@ pub trait Storage: Send + Sync + 'static {
 
     /// Список всех API-ключей.
     async fn list_api_keys(&self) -> Result<Vec<ApiKey>, StorageError>;
+
+    // --- User Credentials (M1.3) ---
+
+    /// Сохраняет или обновляет учетные данные пользователя.
+    async fn upsert_user_credentials(&self, _creds: &UserCredentials) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Загружает учетные данные пользователя по user_id.
+    async fn get_user_credentials(&self, _user_id: UserId) -> Result<Option<UserCredentials>, StorageError> {
+        Ok(None)
+    }
+
+    /// Список всех учетных данных пользователей.
+    async fn list_user_credentials(&self) -> Result<Vec<UserCredentials>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    // --- Server Settings (M1.5) ---
+
+    /// Сохраняет или обновляет настройки сервера (JSON).
+    async fn upsert_settings(&self, _settings_json: &str) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Загружает настройки сервера (JSON).
+    async fn get_settings(&self) -> Result<Option<String>, StorageError> {
+        Ok(None)
+    }
 
     // --- Helpers ---
 

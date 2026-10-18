@@ -23,7 +23,7 @@ fn string_to_user_id(id_str: &str) -> UserId {
 #[async_trait]
 impl CoreAuthProvider for LocalAuth {
     async fn verify(&self, creds: &Credentials) -> Result<CoreUser, CoreAuthError> {
-        match self.db().authenticate(&creds.username, &creds.password) {
+        match self.db().authenticate_async(&creds.username, &creds.password).await {
             Ok(u) => Ok(CoreUser {
                 id: string_to_user_id(&u.id),
                 username: u.username,

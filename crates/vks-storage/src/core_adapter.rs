@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use std::str::FromStr;
 
 use vks_core::participant::{Participant, ParticipantId, UserId};
-use vks_core::ports::storage::{ApiKey, AuditEntry, Layout, Storage, StorageError, StoredUser};
+use vks_core::ports::storage::{ApiKey, AuditEntry, Layout, Storage, StorageError, StoredUser, UserCredentials};
 use vks_core::room::{Room, RoomId, RoomMode};
 
 use crate::memory::MemoryStorage;
@@ -165,6 +165,28 @@ impl Storage for MemoryStorage {
         Ok(self.audit_log().read().unwrap().clone())
     }
 
+    async fn upsert_user_credentials(&self, creds: &UserCredentials) -> Result<(), StorageError> {
+        self.credentials_map().write().unwrap().insert(creds.user_id, creds.clone());
+        Ok(())
+    }
+
+    async fn get_user_credentials(&self, user_id: UserId) -> Result<Option<UserCredentials>, StorageError> {
+        Ok(self.credentials_map().read().unwrap().get(&user_id).cloned())
+    }
+
+    async fn list_user_credentials(&self) -> Result<Vec<UserCredentials>, StorageError> {
+        Ok(self.credentials_map().read().unwrap().values().cloned().collect())
+    }
+
+    async fn upsert_settings(&self, settings_json: &str) -> Result<(), StorageError> {
+        *self.server_settings_slot().write().unwrap() = Some(settings_json.to_string());
+        Ok(())
+    }
+
+    async fn get_settings(&self) -> Result<Option<String>, StorageError> {
+        Ok(self.server_settings_slot().read().unwrap().clone())
+    }
+
     async fn reset(&self) -> Result<(), StorageError> {
         self.rooms_map().write().unwrap().clear();
         self.room_mode_overrides_map().write().unwrap().clear();
@@ -172,7 +194,9 @@ impl Storage for MemoryStorage {
         self.layouts_map().write().unwrap().clear();
         self.api_keys_map().write().unwrap().clear();
         self.users_map().write().unwrap().clear();
+        self.credentials_map().write().unwrap().clear();
         self.audit_log().write().unwrap().clear();
+        *self.server_settings_slot().write().unwrap() = None;
         Ok(())
     }
 }
@@ -511,11 +535,97 @@ impl Storage for SqliteStorage {
             .collect())
     }
 
+    async fn upsert_user_credentials(&self, creds: &UserCredentials) -> Result<(), StorageError> {
+        let id_str = creds.user_id.to_string();
+        sqlx::query(
+            "INSERT INTO user_credentials (user_id, password_hash_hex, salt_hex, password_changed_at, generation)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (user_id) DO UPDATE SET password_hash_hex = $2, salt_hex = $3, password_changed_at = $4, generation = $5",
+        )
+        .bind(&id_str)
+        .bind(&creds.password_hash_hex)
+        .bind(&creds.salt_hex)
+        .bind(creds.password_changed_at)
+        .bind(creds.generation as i64)
+        .execute(self.pool())
+        .await
+        .map_err(to_storage_err)?;
+        Ok(())
+    }
+
+    async fn get_user_credentials(&self, user_id: UserId) -> Result<Option<UserCredentials>, StorageError> {
+        let id_str = user_id.to_string();
+        let row: Option<(String, String, String, Option<i64>, i64)> = sqlx::query_as(
+            "SELECT user_id, password_hash_hex, salt_hex, password_changed_at, generation FROM user_credentials WHERE user_id = $1",
+        )
+        .bind(&id_str)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(to_storage_err)?;
+
+        match row {
+            Some((_, password_hash_hex, salt_hex, password_changed_at, generation)) => Ok(Some(UserCredentials {
+                user_id,
+                password_hash_hex,
+                salt_hex,
+                password_changed_at,
+                generation: generation as u64,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    async fn list_user_credentials(&self) -> Result<Vec<UserCredentials>, StorageError> {
+        let rows: Vec<(String, String, String, Option<i64>, i64)> = sqlx::query_as(
+            "SELECT user_id, password_hash_hex, salt_hex, password_changed_at, generation FROM user_credentials",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(to_storage_err)?;
+
+        let mut res = Vec::with_capacity(rows.len());
+        for (id_str, password_hash_hex, salt_hex, password_changed_at, generation) in rows {
+            if let Ok(uid) = UserId::from_str(&id_str) {
+                res.push(UserCredentials {
+                    user_id: uid,
+                    password_hash_hex,
+                    salt_hex,
+                    password_changed_at,
+                    generation: generation as u64,
+                });
+            }
+        }
+        Ok(res)
+    }
+
+    async fn upsert_settings(&self, settings_json: &str) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO server_settings (id, data_json, updated_at)
+             VALUES ('current', $1, datetime('now'))
+             ON CONFLICT (id) DO UPDATE SET data_json = $1, updated_at = datetime('now')",
+        )
+        .bind(settings_json)
+        .execute(self.pool())
+        .await
+        .map_err(to_storage_err)?;
+        Ok(())
+    }
+
+    async fn get_settings(&self) -> Result<Option<String>, StorageError> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT data_json FROM server_settings WHERE id = 'current'")
+            .fetch_optional(self.pool())
+            .await
+            .map_err(to_storage_err)?;
+
+        Ok(row.map(|(data,)| data))
+    }
+
     async fn reset(&self) -> Result<(), StorageError> {
         sqlx::query("DELETE FROM room_mode_override").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_layouts").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_api_keys").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_users").execute(self.pool()).await.map_err(to_storage_err)?;
+        sqlx::query("DELETE FROM user_credentials").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_audit_log").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM server_settings").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM layouts").execute(self.pool()).await.map_err(to_storage_err)?;
@@ -862,11 +972,97 @@ impl Storage for PostgresStorage {
             .collect())
     }
 
+    async fn upsert_user_credentials(&self, creds: &UserCredentials) -> Result<(), StorageError> {
+        let id_str = creds.user_id.to_string();
+        sqlx::query(
+            "INSERT INTO user_credentials (user_id, password_hash_hex, salt_hex, password_changed_at, generation)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (user_id) DO UPDATE SET password_hash_hex = $2, salt_hex = $3, password_changed_at = $4, generation = $5",
+        )
+        .bind(&id_str)
+        .bind(&creds.password_hash_hex)
+        .bind(&creds.salt_hex)
+        .bind(creds.password_changed_at)
+        .bind(creds.generation as i64)
+        .execute(self.pool())
+        .await
+        .map_err(to_storage_err)?;
+        Ok(())
+    }
+
+    async fn get_user_credentials(&self, user_id: UserId) -> Result<Option<UserCredentials>, StorageError> {
+        let id_str = user_id.to_string();
+        let row: Option<(String, String, String, Option<i64>, i64)> = sqlx::query_as(
+            "SELECT user_id, password_hash_hex, salt_hex, password_changed_at, generation FROM user_credentials WHERE user_id = $1",
+        )
+        .bind(&id_str)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(to_storage_err)?;
+
+        match row {
+            Some((_, password_hash_hex, salt_hex, password_changed_at, generation)) => Ok(Some(UserCredentials {
+                user_id,
+                password_hash_hex,
+                salt_hex,
+                password_changed_at,
+                generation: generation as u64,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    async fn list_user_credentials(&self) -> Result<Vec<UserCredentials>, StorageError> {
+        let rows: Vec<(String, String, String, Option<i64>, i64)> = sqlx::query_as(
+            "SELECT user_id, password_hash_hex, salt_hex, password_changed_at, generation FROM user_credentials",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(to_storage_err)?;
+
+        let mut res = Vec::with_capacity(rows.len());
+        for (id_str, password_hash_hex, salt_hex, password_changed_at, generation) in rows {
+            if let Ok(uid) = UserId::from_str(&id_str) {
+                res.push(UserCredentials {
+                    user_id: uid,
+                    password_hash_hex,
+                    salt_hex,
+                    password_changed_at,
+                    generation: generation as u64,
+                });
+            }
+        }
+        Ok(res)
+    }
+
+    async fn upsert_settings(&self, settings_json: &str) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO server_settings (id, data_json, updated_at)
+             VALUES ('current', $1, NOW()::text)
+             ON CONFLICT (id) DO UPDATE SET data_json = $1, updated_at = NOW()::text",
+        )
+        .bind(settings_json)
+        .execute(self.pool())
+        .await
+        .map_err(to_storage_err)?;
+        Ok(())
+    }
+
+    async fn get_settings(&self) -> Result<Option<String>, StorageError> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT data_json FROM server_settings WHERE id = 'current'")
+            .fetch_optional(self.pool())
+            .await
+            .map_err(to_storage_err)?;
+
+        Ok(row.map(|(data,)| data))
+    }
+
     async fn reset(&self) -> Result<(), StorageError> {
         sqlx::query("DELETE FROM room_mode_override").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_layouts").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_api_keys").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_users").execute(self.pool()).await.map_err(to_storage_err)?;
+        sqlx::query("DELETE FROM user_credentials").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_audit_log").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM server_settings").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM layouts").execute(self.pool()).await.map_err(to_storage_err)?;
@@ -977,6 +1173,29 @@ mod tests {
         storage.append_audit(&audit_entry).await.expect("append_audit");
         let audit_records = storage.list_audit().await.expect("list_audit");
         assert!(audit_records.iter().any(|a| a.user == "contract-user" && a.action == "room.create"));
+
+        // Credentials (M1.3)
+        let creds = UserCredentials {
+            user_id,
+            password_hash_hex: "deadbeef01".to_string(),
+            salt_hex: "01020304".to_string(),
+            password_changed_at: Some(1700000000),
+            generation: 3,
+        };
+        storage.upsert_user_credentials(&creds).await.expect("upsert_user_credentials");
+        let loaded_creds = storage.get_user_credentials(user_id).await.expect("get_user_credentials").expect("exists");
+        assert_eq!(loaded_creds.password_hash_hex, "deadbeef01");
+        assert_eq!(loaded_creds.salt_hex, "01020304");
+        assert_eq!(loaded_creds.password_changed_at, Some(1700000000));
+        assert_eq!(loaded_creds.generation, 3);
+        let all_creds = storage.list_user_credentials().await.expect("list_user_credentials");
+        assert!(all_creds.iter().any(|c| c.user_id == user_id));
+
+        // Settings (M1.5)
+        let test_settings = "{\"name\":\"test_vks\",\"default_mode\":\"sfu\"}";
+        storage.upsert_settings(test_settings).await.expect("upsert_settings");
+        let loaded_settings = storage.get_settings().await.expect("get_settings").expect("exists");
+        assert_eq!(loaded_settings, test_settings);
 
         // Health probe (`/readyz`): реальный ping (SQL `SELECT 1`).
         storage.ping().await.expect("ping");

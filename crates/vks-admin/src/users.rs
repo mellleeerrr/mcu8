@@ -127,7 +127,24 @@ impl Users {
         state: &AppState,
         username: impl Into<String>,
     ) -> Result<UserRecord, vks_core::ports::storage::StorageError> {
-        Self::create_with_id_async(state, UserId::bootstrap_operator(), username, Role::Operator).await
+        let name = username.into();
+        let record = Self::create_with_id_async(state, UserId::bootstrap_operator(), name, Role::Operator).await?;
+        if let Some(storage) = &state.storage {
+            if let Some(db) = &state.local_db {
+                if let Ok(user) = db.user(vks_core::BOOTSTRAP_ADMIN_USER_ID) {
+                    let user_id = UserId::parse(&user.id).unwrap_or_else(|_| UserId::bootstrap_operator());
+                    let creds = vks_core::ports::storage::UserCredentials {
+                        user_id,
+                        password_hash_hex: user.password_hash_hex.clone(),
+                        salt_hex: user.salt_hex.clone(),
+                        password_changed_at: Some(db.password_changed_at(&user.id)),
+                        generation: db.generation(&user.id),
+                    };
+                    storage.upsert_user_credentials(&creds).await?;
+                }
+            }
+        }
+        Ok(record)
     }
 
     /// Обновляет username/role с подтвержденной записью в Storage (M0-M1).

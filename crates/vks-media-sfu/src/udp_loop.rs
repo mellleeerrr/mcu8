@@ -388,12 +388,10 @@ mod tests {
         req.extend_from_slice(&attr_len.to_be_bytes());
         req.extend_from_slice(user_bytes);
         // Padding
-        for _ in 0..(padded_len - attr_len) {
-            req.push(0);
-        }
+        req.resize(req.len() + (padded_len - attr_len) as usize, 0);
 
         // Set message length in header
-        let msg_len = (4 + padded_len) as u16;
+        let msg_len = 4 + padded_len;
         req[2..4].copy_from_slice(&msg_len.to_be_bytes());
 
         let parsed = parse_stun_username(&req);

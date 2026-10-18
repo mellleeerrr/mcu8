@@ -127,14 +127,12 @@ impl RoomState {
         };
 
         let max_slot = desc.assignments.values().copied().max().unwrap_or(0);
-        let total_slots = (max_slot as usize + 1).max(desc.assignments.len()).clamp(1, 64);
+        let total_slots = (max_slot as usize + 1).max(desc.assignments.len()).clamp(1, 128);
 
         let mut slot_to_pid = BTreeMap::new();
         for (pid, slot_id) in &desc.assignments {
-            if (*slot_id as usize) < total_slots {
-                let vpid = vks_layout::ParticipantId::new(pid.as_uuid().as_u128());
-                slot_to_pid.insert(*slot_id, vpid);
-            }
+            let vpid = vks_layout::ParticipantId::new(pid.as_uuid().as_u128());
+            slot_to_pid.insert(*slot_id, vpid);
         }
 
         let rects = match kind {
@@ -163,6 +161,11 @@ impl RoomState {
             let rect = rects.get(slot_id as usize).copied().unwrap_or_else(|| canvas.as_rect());
             let pid = slot_to_pid.get(&slot_id).copied();
             layout.slots.push(vks_layout::Slot::new(slot_id, pid, rect));
+        }
+        for (&slot_id, &vpid) in &slot_to_pid {
+            if layout.slots.iter().all(|s| s.id.as_u32() != slot_id) {
+                layout.slots.push(vks_layout::Slot::new(slot_id, Some(vpid), canvas.as_rect()));
+            }
         }
         layout
     }

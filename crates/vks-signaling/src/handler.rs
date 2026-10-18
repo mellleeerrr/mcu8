@@ -33,6 +33,8 @@ pub struct HandlerConfig {
     pub candidate_port: u16,
     pub rtp_maps: Vec<RtpMap>,
     pub ice_servers: Vec<sig::IceServer>,
+    pub room_mode: i32,
+    pub caps: Option<vks_proto::media::RoomCaps>,
 }
 
 impl HandlerConfig {
@@ -58,12 +60,36 @@ impl HandlerConfig {
             candidate_port,
             rtp_maps,
             ice_servers: Vec::new(),
+            room_mode: 1, // ROOM_MODE_SFU
+            caps: Some(vks_proto::media::RoomCaps {
+                room_mode: 1,
+                video_codecs: vec![1, 3], // VP8, H264
+                audio_codecs: vec![6],    // OPUS
+                simulcast: true,
+                svc: false,
+                dtls_srtp: true,
+            }),
         }
     }
 
     /// Задает список ICE-серверов (STUN/TURN).
     pub fn with_ice_servers(mut self, servers: Vec<sig::IceServer>) -> Self {
         self.ice_servers = servers;
+        self
+    }
+
+    /// Задает режим комнаты (M0.5, 1 = SFU, 2 = MCU).
+    pub fn with_room_mode(mut self, mode: i32) -> Self {
+        self.room_mode = mode;
+        if let Some(c) = &mut self.caps {
+            c.room_mode = mode;
+        }
+        self
+    }
+
+    /// Задает возможности комнаты (M0.5).
+    pub fn with_caps(mut self, caps: vks_proto::media::RoomCaps) -> Self {
+        self.caps = Some(caps);
         self
     }
 
@@ -82,6 +108,15 @@ impl HandlerConfig {
                 RtpMap { payload: 96, codec: "vp8".into(), clock: 90000, channels: 0 },
             ],
             ice_servers: Vec::new(),
+            room_mode: 1,
+            caps: Some(vks_proto::media::RoomCaps {
+                room_mode: 1,
+                video_codecs: vec![1, 3],
+                audio_codecs: vec![6],
+                simulcast: true,
+                svc: false,
+                dtls_srtp: true,
+            }),
         }
     }
 
@@ -202,8 +237,8 @@ impl SignalingHandler {
             max_supported: MAX_V2,
             server_id: self.config.server_id.clone(),
             server_name: self.config.server_name.clone(),
-            room_mode: 0,
-            caps: None,
+            room_mode: self.config.room_mode,
+            caps: self.config.caps.clone(),
             ice,
         };
         vec![Envelope::new(SignalingMessage { msg_id: 0, reply_to, payload: Some(Payload::ServerHello(server_hello)) })]

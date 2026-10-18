@@ -149,39 +149,59 @@ impl Default for Settings {
     }
 }
 
-impl Settings {
-    /// Возвращает безопасную копию настроек с замаскированными секретами.
-    pub fn redacted(&self) -> Self {
-        let mut copy = self.clone();
-        if let serde_json::Value::Object(ref mut map) = copy.auth.params {
-            for (key, val) in map.iter_mut() {
+fn redact_json_secrets(val: &mut serde_json::Value) {
+    match val {
+        serde_json::Value::Object(map) => {
+            for (key, v) in map.iter_mut() {
                 let lower = key.to_lowercase();
                 if lower.contains("pass")
                     || lower.contains("secret")
                     || lower.contains("token")
                     || lower.contains("key")
                 {
-                    *val = serde_json::Value::String("***".into());
+                    if v.is_string() {
+                        *v = serde_json::Value::String("***".into());
+                    }
+                } else {
+                    redact_json_secrets(v);
                 }
             }
         }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                redact_json_secrets(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn merge_json_secrets(new_val: &mut serde_json::Value, cur_val: &serde_json::Value) {
+    if let (serde_json::Value::Object(new_map), serde_json::Value::Object(cur_map)) = (new_val, cur_val) {
+        for (k, v) in new_map.iter_mut() {
+            if v.as_str() == Some("***") {
+                if let Some(existing) = cur_map.get(k) {
+                    *v = existing.clone();
+                }
+            } else if let Some(existing) = cur_map.get(k) {
+                merge_json_secrets(v, existing);
+            }
+        }
+    }
+}
+
+impl Settings {
+    /// Возвращает безопасную копию настроек с замаскированными секретами.
+    pub fn redacted(&self) -> Self {
+        let mut copy = self.clone();
+        redact_json_secrets(&mut copy.auth.params);
         copy
     }
 
     /// Объединяет новые настройки с текущими, сохраняя существующие секреты,
     /// если клиент прислал маскированное значение `"***"`.
     pub fn merge_preserving_secrets(&mut self, current: &Settings) {
-        if let (serde_json::Value::Object(ref mut new_map), serde_json::Value::Object(ref cur_map)) =
-            (&mut self.auth.params, &current.auth.params)
-        {
-            for (k, v) in new_map.iter_mut() {
-                if v.as_str() == Some("***") {
-                    if let Some(cur_val) = cur_map.get(k) {
-                        *v = cur_val.clone();
-                    }
-                }
-            }
-        }
+        merge_json_secrets(&mut self.auth.params, &current.auth.params);
     }
 }
 
@@ -203,6 +223,24 @@ impl SettingsService {
         // Синхронизируем глобальный режим с настройками.
         state.mode.lock().expect("mode store poisoned").global_mode = next.default_mode;
         next
+    }
+
+    /// Устанавливает новые настройки с сохранением в персистентное хранилище (M1.5).
+    pub async fn set_async(state: &crate::state::AppState, mut next: Settings) -> Settings {
+        let (merged, json_str) = {
+            let mut settings = state.settings.lock().expect("settings store poisoned");
+            next.merge_preserving_secrets(&settings);
+            *settings = next.clone();
+            state.mode.lock().expect("mode store poisoned").global_mode = next.default_mode;
+            let json = serde_json::to_string(&next).unwrap_or_default();
+            (next.clone(), json)
+        };
+        if let Some(storage) = &state.storage {
+            if let Err(e) = storage.upsert_settings(&json_str).await {
+                tracing::warn!(error = %e, "failed to persist settings to storage");
+            }
+        }
+        merged
     }
 }
 

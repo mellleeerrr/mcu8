@@ -160,6 +160,96 @@ impl LocalDb {
         Ok(updated)
     }
 
+    /// Asynchronously replace `username`'s password, offloading PBKDF2 to a worker thread (M1.3).
+    pub async fn set_password_async(&self, username: &str, new_password: &str) -> Result<User, LocalDbError> {
+        let pwd = new_password.to_string();
+        let (hash_hex, salt_hex) =
+            tokio::task::spawn_blocking(move || hash_password(&pwd)).await.map_err(|_| LocalDbError::AuthFailed)?;
+        let (id, updated) = {
+            let mut map = self.users.lock().unwrap();
+            let Some((id, user)) = map.iter_mut().find(|(_, u)| u.username == username) else {
+                return Err(LocalDbError::NotFound(username.to_string()));
+            };
+            user.password_hash_hex = hash_hex;
+            user.salt_hex = salt_hex;
+            (id.clone(), user.clone())
+        };
+        self.bump_generation(&id);
+        self.mark_password_changed(&id, now_unix_secs() + 1);
+        Ok(updated)
+    }
+
+    /// Asynchronously authenticate by username + password, offloading PBKDF2 to a worker thread (M1.3).
+    pub async fn authenticate_async(&self, username: &str, password: &str) -> Result<User, LocalDbError> {
+        let user_opt = {
+            let map = self.users.lock().unwrap();
+            map.values().find(|u| u.username == username).cloned()
+        };
+        let uname = username.to_string();
+        let pwd = password.to_string();
+        tokio::task::spawn_blocking(move || match user_opt {
+            Some(user) => {
+                let salt = hex_decode(&user.salt_hex).unwrap_or_default();
+                let (candidate_hash, _) = hash_password_with_salt(&salt, &pwd);
+                if subtle::ConstantTimeEq::ct_eq(user.password_hash_hex.as_bytes(), candidate_hash.as_bytes()).into() {
+                    Ok(user)
+                } else {
+                    Err(LocalDbError::AuthFailed)
+                }
+            }
+            None => {
+                let dummy_salt = [0u8; 16];
+                let _ = hash_password_with_salt(&dummy_salt, &pwd);
+                Err(LocalDbError::NotFound(uname))
+            }
+        })
+        .await
+        .map_err(|_| LocalDbError::AuthFailed)?
+    }
+
+    /// Asynchronously register a user, offloading PBKDF2 to a worker thread (M1.3).
+    pub async fn register_async(&self, id: &str, username: &str, password: &str) -> Result<User, LocalDbError> {
+        let pwd = password.to_string();
+        let (hash_hex, salt_hex) =
+            tokio::task::spawn_blocking(move || hash_password(&pwd)).await.map_err(|_| LocalDbError::AuthFailed)?;
+        let user = User { id: id.to_string(), username: username.to_string(), password_hash_hex: hash_hex, salt_hex };
+        let mut map = self.users.lock().unwrap();
+        if map.contains_key(id) {
+            return Err(LocalDbError::AlreadyExists(id.to_string()));
+        }
+        let clone = user.clone();
+        map.insert(id.to_string(), user);
+        drop(map);
+        self.generations.lock().unwrap().insert(id.to_string(), 1);
+        self.mark_password_changed(id, now_unix_secs());
+        Ok(clone)
+    }
+
+    /// Restore user credentials and marks from durable storage without rehashing (M1.3).
+    pub fn restore_user(
+        &self,
+        id: &str,
+        username: &str,
+        password_hash_hex: &str,
+        salt_hex: &str,
+        password_changed_at: Option<i64>,
+        generation: Option<u64>,
+    ) {
+        let user = User {
+            id: id.to_string(),
+            username: username.to_string(),
+            password_hash_hex: password_hash_hex.to_string(),
+            salt_hex: salt_hex.to_string(),
+        };
+        self.users.lock().unwrap().insert(id.to_string(), user);
+        if let Some(ts) = password_changed_at {
+            self.password_changed_at.lock().unwrap().insert(id.to_string(), ts);
+        }
+        if let Some(gen) = generation {
+            self.generations.lock().unwrap().insert(id.to_string(), gen);
+        }
+    }
+
     /// Internal: set the change mark for `user_id`.
     fn mark_password_changed(&self, user_id: &str, ts: i64) {
         self.password_changed_at.lock().unwrap().insert(user_id.to_string(), ts);
@@ -279,5 +369,35 @@ mod tests {
         db.register("u10", "erin", "pw").unwrap();
         db.record_password_change_at("u10", 1_700_000_000);
         assert_eq!(db.password_changed_at("u10"), 1_700_000_000);
+    }
+
+    #[tokio::test]
+    async fn async_authenticate_and_set_password() {
+        let db = LocalDb::new();
+        db.register_async("u20", "frank", "frank_pass").await.unwrap();
+        let user = db.authenticate_async("frank", "frank_pass").await.unwrap();
+        assert_eq!(user.id, "u20");
+
+        assert!(matches!(db.authenticate_async("frank", "wrong_pass").await, Err(LocalDbError::AuthFailed)));
+
+        db.set_password_async("frank", "new_frank_pass").await.unwrap();
+        assert!(db.authenticate_async("frank", "new_frank_pass").await.is_ok());
+        assert!(matches!(db.authenticate_async("frank", "frank_pass").await, Err(LocalDbError::AuthFailed)));
+    }
+
+    #[test]
+    fn restore_user_preserves_hashes_and_marks() {
+        let db = LocalDb::new();
+        let registered = db.register("u30", "grace", "grace_secret").unwrap();
+        let mark = db.password_changed_at("u30");
+        let gen = db.generation("u30");
+
+        let db2 = LocalDb::new();
+        db2.restore_user("u30", "grace", &registered.password_hash_hex, &registered.salt_hex, Some(mark), Some(gen));
+
+        assert_eq!(db2.password_changed_at("u30"), mark);
+        assert_eq!(db2.generation("u30"), gen);
+        let auth = db2.authenticate("grace", "grace_secret").unwrap();
+        assert_eq!(auth.id, "u30");
     }
 }

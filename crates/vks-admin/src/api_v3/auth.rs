@@ -269,7 +269,8 @@ pub async fn login(
             vks_core::ports::auth::Credentials { username: body.login.clone(), password: body.password.clone() };
         provider.verify(&creds).await.map(|u| u.id.to_string())
     } else if let Some(db) = state.local_db.clone() {
-        db.authenticate(&body.login, &body.password)
+        db.authenticate_async(&body.login, &body.password)
+            .await
             .map(|u| u.id)
             .map_err(|_| vks_core::ports::auth::AuthError::InvalidCredentials)
     } else {
@@ -309,7 +310,7 @@ pub async fn change_password(
     let Some(db) = state.local_db.clone() else {
         return error_json(503, "Authentication is not configured");
     };
-    let user = match db.authenticate(&body.username, &body.old_password) {
+    let user = match db.authenticate_async(&body.username, &body.old_password).await {
         Ok(u) => u,
         Err(_) => {
             LOGIN_ATTEMPTS.with_label_values(&["fail"]).inc();
@@ -320,14 +321,30 @@ pub async fn change_password(
     if body.new_password.is_empty() {
         return error_json(422, "New password must not be empty");
     }
-    if let Err(e) = db.set_password(&body.username, &body.new_password) {
-        tracing::error!(error = %e, "api_v3: password change failed");
-        return error_json(500, "Internal error");
-    }
+    let updated = match db.set_password_async(&body.username, &body.new_password).await {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!(error = %e, "api_v3: password change failed");
+            return error_json(500, "Internal error");
+        }
+    };
     let new_gen = db.generation(&user.id);
     if let Ok(mut users) = state.users.lock() {
         if let Some(u) = users.values_mut().find(|u| u.id.to_string() == user.id || u.username == user.username) {
             u.generation = new_gen;
+        }
+    }
+    if let Some(storage) = &state.storage {
+        let user_id = vks_core::UserId::parse(&updated.id).unwrap_or_else(|_| vks_core::UserId::bootstrap_operator());
+        let creds = vks_core::ports::storage::UserCredentials {
+            user_id,
+            password_hash_hex: updated.password_hash_hex.clone(),
+            salt_hex: updated.salt_hex.clone(),
+            password_changed_at: Some(db.password_changed_at(&updated.id)),
+            generation: new_gen,
+        };
+        if let Err(e) = storage.upsert_user_credentials(&creds).await {
+            tracing::warn!(error = %e, "failed to persist updated user credentials to storage");
         }
     }
     state.notify_revocation(&user.id, new_gen);

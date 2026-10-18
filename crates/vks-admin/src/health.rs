@@ -64,11 +64,16 @@ impl Readiness {
     ///   зависимостей (их отказ = паника процесса, её ловит liveness); глубокая
     ///   проверка data-plane появится при подключении движков в `AppState` (S2).
     pub async fn from_state(state: &crate::state::AppState) -> Self {
-        let db = match &state.storage {
-            None => true,
-            Some(storage) => storage.ping().await.is_ok(),
+        let db = if state.has_fault("db") {
+            false
+        } else {
+            match &state.storage {
+                None => true,
+                Some(storage) => storage.ping().await.is_ok(),
+            }
         };
-        let media = state.mode.lock().is_ok();
+        let media =
+            if state.has_fault("media") { false } else { state.is_media_healthy() && state.mode.lock().is_ok() };
         Self { db, media }
     }
 
@@ -127,6 +132,33 @@ mod tests {
         let r = Readiness::from_state(&state).await;
         assert!(r.db && r.media);
         assert_eq!(r.status_code(), 200);
+    }
+
+    #[tokio::test]
+    async fn fault_injection_degrades_readiness() {
+        let state = crate::state::AppState::new();
+        assert_eq!(Readiness::from_state(&state).await.status_code(), 200);
+
+        state.inject_fault("db");
+        let r_db = Readiness::from_state(&state).await;
+        assert!(!r_db.db);
+        assert_eq!(r_db.status_code(), 503);
+
+        state.clear_fault("db");
+        assert_eq!(Readiness::from_state(&state).await.status_code(), 200);
+
+        state.inject_fault("media");
+        let r_med = Readiness::from_state(&state).await;
+        assert!(!r_med.media);
+        assert_eq!(r_med.status_code(), 503);
+
+        state.clear_fault("media");
+        assert_eq!(Readiness::from_state(&state).await.status_code(), 200);
+
+        state.set_media_healthy(false);
+        assert_eq!(Readiness::from_state(&state).await.status_code(), 503);
+        state.set_media_healthy(true);
+        assert_eq!(Readiness::from_state(&state).await.status_code(), 200);
     }
 
     #[test]
