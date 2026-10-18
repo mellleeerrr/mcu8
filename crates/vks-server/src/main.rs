@@ -239,7 +239,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!(addr = %local_addr, "WebRTC UDP media loop active");
                 let sfu = sfu_engine.clone();
                 let task = loop_handle.start_routing_loop(move |src, packet| sfu.route_udp_packet(src, packet.payload));
-                let ip = if local_addr.ip().is_unspecified() {
+                let ip = if let Ok(cand) = std::env::var("VKS_CANDIDATE_ADDR") {
+                    cand
+                } else if local_addr.ip().is_unspecified() {
                     "127.0.0.1".to_string()
                 } else {
                     local_addr.ip().to_string()

@@ -4,8 +4,8 @@
 
 # Server identity
 server_name = "vks-mcu"
-listen_addr = "127.0.0.1:8080"
-media_listen_addr = "127.0.0.1:0"
+listen_addr = "0.0.0.0:8080"
+media_listen_addr = "0.0.0.0:40000"
 
 # Authentication & Identity (ADR-0009 / ADR-0022)
 # Supported auth_provider strategies: "local" | "ldap" | "oidc"
