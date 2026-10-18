@@ -433,6 +433,75 @@ impl McuEngine {
     pub fn is_speaking(&self, room: RoomId, pid: ParticipantId) -> bool {
         self.rooms.lock().unwrap().get(&room).and_then(|s| s.speaking_states.get(&pid).copied()).unwrap_or(false)
     }
+
+    /// Ensures a room exists in the MCU engine.
+    pub fn ensure_room(&self, room: RoomId) {
+        let mut g = self.rooms.lock().unwrap();
+        g.entry(room).or_insert_with(|| RoomState::new(RoomMode::Mcu, RoomCaps::default()));
+    }
+
+    /// Synchronously bridges a participant into the MCU room as both subscriber and publisher.
+    pub fn bridge_participant(&self, room: RoomId, pid: ParticipantId, tracks: Vec<MediaTrack>) {
+        let mut g = self.rooms.lock().unwrap();
+        let state = g.entry(room).or_insert_with(|| RoomState::new(RoomMode::Mcu, RoomCaps::default()));
+        state.subscribers.insert(pid);
+        if !tracks.is_empty() {
+            state.publisher_tracks.insert(pid, tracks);
+        }
+    }
+
+    /// Synchronously removes a bridged participant from the MCU room, purging layout and audio.
+    pub fn unbridge_participant(&self, room: RoomId, pid: ParticipantId) {
+        let mut g = self.rooms.lock().unwrap();
+        if let Some(state) = g.get_mut(&room) {
+            state.subscribers.remove(&pid);
+            state.publisher_tracks.remove(&pid);
+            state.vads.remove(&pid);
+            state.speaking_states.remove(&pid);
+            if state.active_speaker == Some(pid) {
+                state.active_speaker = None;
+            }
+            state.participant_audio.remove(&pid);
+            self.audio.lock().unwrap().entry(room).or_default().remove(&pid);
+
+            let removed_slot = state.layout.as_mut().and_then(|desc| desc.assignments.remove(&pid));
+            if let Some(slot_id) = removed_slot {
+                self.frames.lock().unwrap().entry(room).or_default().remove(&slot_id);
+            }
+
+            let vpid = vks_layout::ParticipantId::new(pid.as_uuid().as_u128());
+            for slot in &mut state.current_layout.slots {
+                if slot.participant_id == Some(vpid) {
+                    slot.participant_id = None;
+                    self.frames.lock().unwrap().entry(room).or_default().remove(&slot.id.as_u32());
+                }
+            }
+
+            if let Some(desc) = &state.layout {
+                let new_layout = RoomState::layout_from_descriptor(desc);
+                state.bridge.apply(&new_layout);
+                state.current_layout = new_layout;
+            }
+
+            let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
+            state.process_video(&frames);
+        }
+    }
+
+    /// Returns whether the participant is registered in the MCU room.
+    pub fn has_participant(&self, room: RoomId, pid: ParticipantId) -> bool {
+        self.rooms
+            .lock()
+            .unwrap()
+            .get(&room)
+            .map(|s| s.subscribers.contains(&pid) || s.publisher_tracks.contains_key(&pid))
+            .unwrap_or(false)
+    }
+
+    /// Returns whether the participant is registered as a publisher in the MCU room.
+    pub fn has_publisher(&self, room: RoomId, pid: ParticipantId) -> bool {
+        self.rooms.lock().unwrap().get(&room).map(|s| s.publisher_tracks.contains_key(&pid)).unwrap_or(false)
+    }
 }
 
 #[async_trait]

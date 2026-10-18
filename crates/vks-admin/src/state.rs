@@ -93,20 +93,8 @@ pub struct RevocationNotice {
     pub generation: u64,
 }
 
-/// Запись видео-записи (records, фаза 5).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecordEntry {
-    /// Идентикатор записи.
-    pub id: String,
-    /// Комната, к которой относится запись.
-    pub room_id: RoomId,
-    /// Время создания, ms epoch.
-    pub created_ms: u64,
-    /// Длительность, сек.
-    pub duration_sec: u32,
-    /// Размер, байты.
-    pub size_bytes: u64,
-}
+/// Запись видео-записи (records, M5.5).
+pub use vks_core::ports::storage::RecordEntry;
 
 /// Режим MCU/SFU (global + per-room override + epoch).
 ///

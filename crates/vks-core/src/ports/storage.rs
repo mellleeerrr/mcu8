@@ -114,6 +114,21 @@ pub struct UserCredentials {
     pub generation: u64,
 }
 
+/// Метаданные завершенной видео-записи для persistence (M5.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordEntry {
+    /// Идентификатор записи.
+    pub id: String,
+    /// Комната, к которой относится запись.
+    pub room_id: RoomId,
+    /// Время создания, ms epoch.
+    pub created_ms: u64,
+    /// Длительность, сек.
+    pub duration_sec: u32,
+    /// Размер, байты.
+    pub size_bytes: u64,
+}
+
 /// Порт Storage — CRUD для Room/Participant/Layout/ApiKey/User/Audit.
 ///
 /// Ядро использует этот порт для persistence; конкретные реализации —
@@ -256,6 +271,28 @@ pub trait Storage: Send + Sync + 'static {
     /// Загружает настройки сервера (JSON).
     async fn get_settings(&self) -> Result<Option<String>, StorageError> {
         Ok(None)
+    }
+
+    // --- Records (M5.5) ---
+
+    /// Сохраняет или обновляет запись.
+    async fn upsert_record(&self, _record: &RecordEntry) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Загружает запись по id.
+    async fn get_record(&self, _id: &str) -> Result<Option<RecordEntry>, StorageError> {
+        Ok(None)
+    }
+
+    /// Список всех записей.
+    async fn list_records(&self, _room_id: Option<RoomId>) -> Result<Vec<RecordEntry>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Удаляет запись по id.
+    async fn delete_record(&self, _id: &str) -> Result<(), StorageError> {
+        Ok(())
     }
 
     // --- Helpers ---

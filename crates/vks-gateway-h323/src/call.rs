@@ -142,12 +142,26 @@ impl H323Call {
 ///
 /// FFI-граница (H323Plus) — см. [`crate::ffi::H323PlusBridge`]; в этой
 /// волне шлюз детерминированный и без реального H.225-транспорта.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoomCallSlot {
+    call_id: String,
+    participant_name: String,
+}
+
+/// H.323-шлюз (в-memory) с mock-реестром WebRTC-комнат.
+///
+/// FFI-граница (H323Plus) — см. [`crate::ffi::H323PlusBridge`]; в этой
+/// волне шлюз детерминированный и без реального H.225-транспорта.
+/// Хранит привязку вызовов к комнатам по Call-ID, исключая
+/// ложное выталкивание участника при параллельных звонках (M5.1).
 #[derive(Debug, Default)]
 pub struct H323Gateway {
     /// Вызовы по callSignalIdentifier.
     calls: HashMap<String, H323Call>,
-    /// Mock-реестр комнат: room_id → имена участников.
-    rooms: HashMap<String, Vec<String>>,
+    /// Mock-реестр комнат: room_id → слоты вызовов (call_id, имя).
+    room_calls: HashMap<String, Vec<RoomCallSlot>>,
+    /// Кэш участников комнат для быстрого возврата &[String].
+    room_participants_cache: HashMap<String, Vec<String>>,
 }
 
 impl H323Gateway {
@@ -161,7 +175,7 @@ impl H323Gateway {
     ///
     /// # Errors
     /// [`Error::Conflict`] — если call-id уже существует.
-    /// [`Error::InvalidArgument`] — если оффер пуст или не содержит поддерживаемых кодеков.
+    /// [`Error::InvalidInput`] — если оффер пуст или не содержит поддерживаемых кодеков.
     pub fn on_setup(
         &mut self,
         call_id: impl Into<String>,
@@ -216,30 +230,56 @@ impl H323Gateway {
     }
 
     /// Release: Connect → Terminated; изолированно выводит участника только из привязанной комнаты,
-    /// не затрагивая параллельные вызовы того же абонента в других комнатах.
+    /// не затрагивая параллельные вызовы того же абонента в других комнатах или той же комнате.
+    /// Идемпотентен при повторном вызове (late Release).
     ///
     /// # Errors
-    /// [`Error::NotFound`] — если вызов не найден; [`Error::Conflict`] —
-    /// если не в `Connect`.
+    /// [`Error::NotFound`] — если вызов не найден.
     pub fn release(&mut self, call_id: &str) -> Result<H323Call, Error> {
-        let (participant_name, bound_room) = {
+        let bound_room = {
             let call = self.calls.get_mut(call_id).ok_or_else(|| Error::NotFound(call_id.to_owned()))?;
-            call.release()?;
-            let p_name = Self::participant_name_for(&call.from);
-            let b_room = call.room_id.take();
-            (p_name, b_room)
+            if call.state == H323CallState::Terminated {
+                return Ok(call.clone());
+            }
+            if call.state == H323CallState::Alerting
+                || call.state == H323CallState::Proceeding
+                || call.state == H323CallState::Idle
+            {
+                call.state = H323CallState::Terminated;
+            } else {
+                call.release()?;
+            }
+            call.room_id.take()
         };
 
         if let Some(room) = bound_room {
-            if let Some(participants) = self.rooms.get_mut(&room) {
-                if let Some(pos) = participants.iter().position(|name| name == &participant_name) {
-                    participants.remove(pos);
-                }
+            if let Some(slots) = self.room_calls.get_mut(&room) {
+                slots.retain(|s| s.call_id != call_id);
+                self.room_participants_cache
+                    .insert(room.clone(), slots.iter().map(|s| s.participant_name.clone()).collect());
             }
         }
 
+        let call = self.calls.get(call_id).expect("just transitioned").clone();
         tracing::info!(call_id = %call_id, "H.323 call terminated");
-        Ok(self.calls.get(call_id).expect("just transitioned").clone())
+        Ok(call)
+    }
+
+    /// Отменяет вызов до установления и освобождает ресурсы.
+    pub fn cancel(&mut self, call_id: &str) -> Result<H323Call, Error> {
+        self.release(call_id)
+    }
+
+    /// Завершает вызов по таймауту.
+    pub fn timeout(&mut self, call_id: &str) -> Result<H323Call, Error> {
+        self.release(call_id)
+    }
+
+    /// Удаляет завершенные вызовы из реестра для ограничения памяти.
+    pub fn prune_terminated(&mut self) -> usize {
+        let before = self.calls.len();
+        self.calls.retain(|_, call| call.state != H323CallState::Terminated);
+        before - self.calls.len()
     }
 
     /// «Приземляет» connected-вызов в WebRTC-комнату.
@@ -271,18 +311,20 @@ impl H323Gateway {
 
         // 2. Перенос: если вызов был в другой комнате — удаляем из старой
         if let Some(prev) = prev_room {
-            if let Some(participants) = self.rooms.get_mut(&prev) {
-                if let Some(pos) = participants.iter().position(|n| n == &name) {
-                    participants.remove(pos);
-                }
+            if let Some(slots) = self.room_calls.get_mut(&prev) {
+                slots.retain(|s| s.call_id != call_id);
+                self.room_participants_cache
+                    .insert(prev.clone(), slots.iter().map(|s| s.participant_name.clone()).collect());
             }
         }
 
-        // 3. Приземление в новую комнату
-        let list = self.rooms.entry(target_room.clone()).or_default();
-        if !list.contains(&name) {
-            list.push(name.clone());
+        // 3. Приземление в новую комнату строго по call_id
+        let slots = self.room_calls.entry(target_room.clone()).or_default();
+        if !slots.iter().any(|s| s.call_id == call_id) {
+            slots.push(RoomCallSlot { call_id: call_id.to_string(), participant_name: name.clone() });
         }
+        self.room_participants_cache
+            .insert(target_room.clone(), slots.iter().map(|s| s.participant_name.clone()).collect());
 
         tracing::info!(room_id = %target_room, call_id = %call_id, participant = %name, "H.323 call landed in room");
         Ok(self.calls.get(call_id).cloned().expect("exists"))
@@ -295,7 +337,7 @@ impl H323Gateway {
     /// Имена участников mock-реестра комнаты.
     #[must_use]
     pub fn room_participants(&self, room_id: &str) -> &[String] {
-        self.rooms.get(room_id).map_or(&[], Vec::as_slice)
+        self.room_participants_cache.get(room_id).map_or(&[], Vec::as_slice)
     }
 
     /// Имя participant'а в комнате для данного вызова (если существует).
@@ -466,5 +508,54 @@ mod tests {
         // Несовместимый оффер
         let err = g.on_setup("call-bad", "alice", &[H323Codec::new("AMR")]).expect_err("AMR rejected");
         assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn two_calls_same_from_in_same_room_no_ejection() {
+        let mut g = H323Gateway::new();
+        let offer = [H323Codec::new("PCMU")];
+
+        // Абонент alice совершает два звонка в ОДНУ комнату
+        g.on_setup("call-1", "alice", &offer).unwrap();
+        g.proceeding("call-1").unwrap();
+        g.connect("call-1").unwrap();
+        g.land_in_room("room-1", "call-1").unwrap();
+
+        g.on_setup("call-2", "alice", &offer).unwrap();
+        g.proceeding("call-2").unwrap();
+        g.connect("call-2").unwrap();
+        g.land_in_room("room-1", "call-2").unwrap();
+
+        assert_eq!(g.room_participants("room-1"), &["alice@h323-gateway", "alice@h323-gateway"]);
+
+        // Завершаем call-1: call-2 обязан остаться в room-1!
+        g.release("call-1").unwrap();
+        assert_eq!(g.room_participants("room-1"), &["alice@h323-gateway"]);
+        assert!(!g.has_active_call("call-1"));
+        assert!(g.has_active_call("call-2"));
+
+        // Late Release на call-1 идемпотентен
+        let late = g.release("call-1").expect("late release is idempotent");
+        assert_eq!(late.state, H323CallState::Terminated);
+
+        // Завершаем call-2
+        g.release("call-2").unwrap();
+        assert_eq!(g.room_participants("room-1"), &[] as &[String]);
+
+        let pruned = g.prune_terminated();
+        assert_eq!(pruned, 2);
+    }
+
+    #[test]
+    fn cancel_and_timeout_during_alerting() {
+        let mut g = H323Gateway::new();
+        let offer = [H323Codec::new("PCMU")];
+        g.on_setup("call-cancel", "alice", &offer).unwrap();
+        let call = g.cancel("call-cancel").expect("cancel succeeds");
+        assert_eq!(call.state, H323CallState::Terminated);
+
+        g.on_setup("call-timeout", "bob", &offer).unwrap();
+        let call = g.timeout("call-timeout").expect("timeout succeeds");
+        assert_eq!(call.state, H323CallState::Terminated);
     }
 }

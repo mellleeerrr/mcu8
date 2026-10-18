@@ -26,10 +26,14 @@ pub struct MemoryStorage {
     core_users: RwLock<HashMap<vks_core::UserId, vks_core::ports::storage::StoredUser>>,
     core_credentials: RwLock<HashMap<vks_core::UserId, vks_core::ports::storage::UserCredentials>>,
     core_audit: RwLock<Vec<vks_core::ports::storage::AuditEntry>>,
+    core_records: RwLock<HashMap<String, vks_core::ports::storage::RecordEntry>>,
     server_settings: RwLock<Option<String>>,
 }
 
 impl MemoryStorage {
+    pub(crate) fn records_map(&self) -> &RwLock<HashMap<String, vks_core::ports::storage::RecordEntry>> {
+        &self.core_records
+    }
     pub(crate) fn rooms_map(&self) -> &RwLock<HashMap<Uuid, Room>> {
         &self.rooms
     }

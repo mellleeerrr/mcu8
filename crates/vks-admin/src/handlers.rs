@@ -29,7 +29,7 @@ use crate::{
     mode::ModeService,
     rooms::Rooms,
     settings::SettingsService,
-    state::AppState,
+    state::{AppState, RecordEntry},
     users::{MockLdapProvider, Users},
 };
 
@@ -635,6 +635,60 @@ pub async fn export_audit(State(state): State<SharedState>, Query(query): Query<
     (StatusCode::OK, [(header::CONTENT_TYPE, "text/csv; charset=utf-8")], csv).into_response()
 }
 
+/// Query-параметры фильтрации записей.
+#[derive(Debug, Deserialize)]
+pub struct RecordQuery {
+    pub room_id: Option<String>,
+}
+
+/// `GET /api/v1/records` — список сохранённых записей (M5.5).
+pub async fn list_records(State(state): State<SharedState>, Query(query): Query<RecordQuery>) -> Response {
+    let target_room = query.room_id.and_then(|r| parse_room_id(&r).ok());
+    let mut records: Vec<RecordEntry> = state
+        .records
+        .lock()
+        .expect("records store poisoned")
+        .values()
+        .filter(|rec| target_room.is_none() || Some(rec.room_id) == target_room)
+        .cloned()
+        .collect();
+    records.sort_by(|a, b| b.created_ms.cmp(&a.created_ms));
+    json_ok(serde_json::json!({
+        "count": records.len(),
+        "records": records,
+    }))
+}
+
+/// `GET /api/v1/records/{id}` — получение метаданных записи по ID.
+pub async fn get_record(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
+    let found = state.records.lock().expect("records store poisoned").get(&id).cloned();
+    match found {
+        Some(entry) => json_ok(serde_json::to_value(entry).unwrap_or_default()),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error_code": "not_found", "error": format!("record {id} not found") })),
+        )
+            .into_response(),
+    }
+}
+
+/// `DELETE /api/v1/records/{id}` — удаление метаданных записи.
+pub async fn delete_record(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
+    let removed = state.records.lock().expect("records store poisoned").remove(&id);
+    if let Some(entry) = removed {
+        if let Some(ref storage) = state.storage {
+            let _ = storage.delete_record(&id).await;
+        }
+        json_ok(serde_json::json!({ "deleted": true, "id": entry.id }))
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error_code": "not_found", "error": format!("record {id} not found") })),
+        )
+            .into_response()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Router.
 // ---------------------------------------------------------------------------
@@ -667,6 +721,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v1/users/sync-ldap", post(sync_ldap))
         // Settings (v1).
         .route("/api/v1/settings", get(get_settings).post(set_settings))
+        // Records (v1, M5.5).
+        .route("/api/v1/records", get(list_records))
+        .route("/api/v1/records/{id}", get(get_record).delete(delete_record))
         // Audit (v1).
         .route("/api/v1/audit", get(list_audit).post(record_audit))
         .route("/api/v1/audit/export", get(export_audit))

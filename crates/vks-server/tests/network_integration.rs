@@ -1051,7 +1051,7 @@ async fn test_package_c_real_sfu_session_with_media_loopback_and_room_isolation(
             got_rtcp_pli = true;
             continue;
         }
-        if &buf[..len_a] == &rtp_from_bob[..] {
+        if buf[..len_a] == rtp_from_bob[..] {
             got_bob_media = true;
             break;
         }
@@ -1417,4 +1417,170 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
         reqwest_like_request(tcp_addr, "GET", "/api/v3/sessions/room-pkg-d/abonents", &token, None).await;
     let ab_after_kick: serde_json::Value = serde_json::from_str(&body_after_kick).unwrap();
     assert_eq!(ab_after_kick["count"], 1);
+}
+
+#[tokio::test]
+async fn test_m5_gateway_dual_call_same_from_isolation_and_mcu_bridging() {
+    use vks_admin::rooms::Rooms;
+    use vks_admin::state::AppState;
+    use vks_gateway_h323::{H323Codec, H323Gateway};
+    use vks_gateway_sip::{SipCodec, SipGateway};
+    use vks_media_mcu::McuEngine;
+    use vks_server::GatewayManager;
+
+    let state = Arc::new(AppState::new());
+    let room_1 = Rooms::create_async(&state, "gw-iso-1".to_string()).await.expect("room 1 created");
+    let room_2 = Rooms::create_async(&state, "gw-iso-2".to_string()).await.expect("room 2 created");
+
+    let mcu = Arc::new(McuEngine::new());
+    let gw = GatewayManager::new().with_mcu(Arc::clone(&mcu));
+
+    // 1. Strict codec offer rejection: unsupported codec returns Err
+    let mut sip_gw = SipGateway::new();
+    let unsupported_res = sip_gw.on_invite("call-bad", "alice", &[SipCodec::new("G729")]);
+    assert!(unsupported_res.is_err(), "Unsupported SIP codec offer must be rejected");
+
+    let mut h323_gw = H323Gateway::new();
+    let unsupported_h323 = h323_gw.on_setup("call-bad-h323", "bob", &[H323Codec::new("UNSUPPORTED_CODEC")]);
+    assert!(unsupported_h323.is_err(), "Unsupported H.323 codec offer must be rejected");
+
+    // 2. Same 'from' ("alice") places two calls: one to room_1, one to room_2
+    let call_sip_1 = gw
+        .incoming_sip_call(&state, "call-sip-1", "alice", &room_1.id, &[SipCodec::new("PCMU")])
+        .expect("call 1 accepted");
+    let call_sip_2 = gw
+        .incoming_sip_call(&state, "call-sip-2", "alice", &room_2.id, &[SipCodec::new("PCMU")])
+        .expect("call 2 accepted");
+
+    assert_ne!(call_sip_1.participant_id, call_sip_2.participant_id);
+    assert_eq!(state.room_hub.list_participants(&room_1.id).len(), 1);
+    assert_eq!(state.room_hub.list_participants(&room_2.id).len(), 1);
+
+    // Verify MCU engine bridging
+    let pid_1 = vks_server::parse_participant_id(&call_sip_1.participant_id);
+    let pid_2 = vks_server::parse_participant_id(&call_sip_2.participant_id);
+    assert!(mcu.has_participant(room_1.id, pid_1));
+    assert!(mcu.has_participant(room_2.id, pid_2));
+
+    // 3. Terminate call 1: room 1 drops to 0, but room 2 MUST stay intact (no cross-room ejection)
+    let term_1 = gw.terminate_sip_call(&state, "call-sip-1").expect("term call 1");
+    assert_eq!(term_1.call_id, "call-sip-1");
+    assert_eq!(state.room_hub.list_participants(&room_1.id).len(), 0);
+    assert_eq!(state.room_hub.list_participants(&room_2.id).len(), 1);
+    assert_eq!(state.room_hub.list_participants(&room_2.id)[0].participant_id, call_sip_2.participant_id);
+    assert!(!mcu.has_participant(room_1.id, pid_1));
+    assert!(mcu.has_participant(room_2.id, pid_2));
+
+    // 4. Terminate call 2 cleanly
+    let term_2 = gw.terminate_sip_call(&state, "call-sip-2").expect("term call 2");
+    assert_eq!(term_2.call_id, "call-sip-2");
+    assert_eq!(state.room_hub.list_participants(&room_2.id).len(), 0);
+    assert!(!mcu.has_participant(room_2.id, pid_2));
+}
+
+#[tokio::test]
+async fn test_m5_recorder_idempotent_stop_persistent_storage_and_playable_container() {
+    use vks_admin::rooms::Rooms;
+    use vks_admin::state::AppState;
+    use vks_core::ports::Storage;
+    use vks_recorder::container::{ContainerConfig, PlayableContainerWriter};
+    use vks_recorder::RecordingMode;
+    use vks_server::RecorderManager;
+
+    let storage = Arc::new(vks_storage::MemoryStorage::new());
+    let state = Arc::new(AppState::with_storage(storage.clone()));
+    let room = Rooms::create_async(&state, "rec-durable".to_string()).await.expect("room created");
+    let room_id = room.id;
+
+    let rec = RecorderManager::new();
+    let rec_id = rec.start_recording(&state, &room_id, RecordingMode::Mcu).expect("start recording");
+    assert_eq!(rec_id, *room_id.as_uuid());
+    assert!(rec.is_recording(&room_id));
+
+    // First stop
+    let meta_1 = rec.stop_recording_async(&state, &room_id).await.expect("first stop");
+    assert!(!rec.is_recording(&room_id));
+    assert_eq!(meta_1.room_id, *room_id.as_uuid());
+
+    // Second stop: MUST BE IDEMPOTENT (returns cached metadata without error or drift)
+    let meta_2 = rec.stop_recording_async(&state, &room_id).await.expect("second stop idempotent");
+    assert_eq!(meta_1.id, meta_2.id);
+    assert_eq!(meta_1.duration_ms, meta_2.duration_ms);
+    assert_eq!(meta_1.started_at_ms, meta_2.started_at_ms);
+    assert_eq!(meta_1.ended_at_ms, meta_2.ended_at_ms);
+
+    // Verify durable persistence in Storage port
+    let stored = storage.get_record(&meta_1.id.to_string()).await.expect("fetch from storage");
+    assert!(stored.is_some(), "RecordEntry must be persisted durably");
+    let entry = stored.unwrap();
+    assert_eq!(entry.id, meta_1.id.to_string());
+    assert_eq!(entry.room_id, room_id);
+
+    // Verify PlayableContainerWriter generates valid ISOBMFF container
+    let config = ContainerConfig {
+        width: 1280,
+        height: 720,
+        fps: 30,
+        sample_rate: 48000,
+        channels: 2,
+        max_size_bytes: 5 * 1024 * 1024,
+    };
+    let mut writer = PlayableContainerWriter::new(config);
+    writer.write_video_sample(&[0x00, 0x00, 0x00, 0x01, 0x65, 0x88], 33, true).unwrap();
+    writer.write_audio_sample(&[0xf8, 0xff, 0xfe], 20).unwrap();
+    let mp4_bytes = writer.finalize().unwrap();
+
+    assert!(mp4_bytes.len() > 64);
+    assert_eq!(&mp4_bytes[4..8], b"ftyp");
+    assert!(mp4_bytes.windows(4).any(|w| w == b"moov"));
+    assert!(mp4_bytes.windows(4).any(|w| w == b"mdat"));
+}
+
+#[tokio::test]
+async fn test_m5_cluster_monotonic_fencing_epoch_and_graceful_migration() {
+    use vks_cluster::{FencingError, LeaseResult};
+    use vks_server::ClusterManager;
+
+    let cluster_a = ClusterManager::with_heartbeat_deadline("node-a", 10);
+    let cluster_b = ClusterManager::with_shared(
+        "node-b",
+        Arc::clone(cluster_a.owner()),
+        Arc::clone(cluster_a.registry()),
+        Arc::clone(cluster_a.bus()),
+    );
+
+    // 1. node-a acquires room-mig-1 at tick 0 -> epoch 1
+    let r1 = cluster_a.acquire_room("room-mig-1", 0, 30);
+    assert_eq!(r1, LeaseResult::Acquired);
+    assert!(cluster_a.verify_fencing("room-mig-1", 1, 5).is_ok());
+
+    // 2. node-a releases room-mig-1
+    assert!(cluster_a.release_room("room-mig-1"));
+
+    // 3. node-b acquires room-mig-1 at tick 10 -> epoch must be 2 (never reset to 1)
+    let r2 = cluster_b.acquire_room("room-mig-1", 10, 30);
+    assert_eq!(r2, LeaseResult::Acquired);
+    assert!(cluster_b.verify_fencing("room-mig-1", 2, 15).is_ok());
+
+    // Stale epoch 1 rejected
+    assert_eq!(
+        cluster_b.verify_fencing("room-mig-1", 1, 15),
+        Err(FencingError::StaleEpoch { room_id: "room-mig-1".into(), current: 2, provided: 1 })
+    );
+
+    // 4. Graceful migration from node-b to node-c: epoch advances to 3
+    let lease_c = cluster_b.migrate_room("room-mig-1", "node-c", 20, 30).expect("migrate to node-c");
+    assert_eq!(lease_c.owner, "node-c");
+    assert_eq!(lease_c.epoch, 3);
+    assert_eq!(lease_c.expiry_tick, 50);
+
+    // 5. Configurable heartbeat deadline and dead node pruning
+    let cluster_monitor = ClusterManager::with_heartbeat_deadline("monitor-1", 5);
+    cluster_monitor.registry().lock().unwrap().heartbeat("dead-node", 0);
+    assert!(cluster_monitor.registry().lock().unwrap().is_alive("dead-node", 2));
+    assert!(cluster_monitor.registry().lock().unwrap().is_dead("dead-node", 10));
+
+    // send_heartbeat prunes dead nodes
+    cluster_monitor.send_heartbeat(10);
+    assert!(!cluster_monitor.registry().lock().unwrap().all().contains(&"dead-node".to_string()));
 }

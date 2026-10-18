@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use std::str::FromStr;
 
 use vks_core::participant::{Participant, ParticipantId, UserId};
-use vks_core::ports::storage::{ApiKey, AuditEntry, Layout, Storage, StorageError, StoredUser, UserCredentials};
+use vks_core::ports::storage::{
+    ApiKey, AuditEntry, Layout, RecordEntry, Storage, StorageError, StoredUser, UserCredentials,
+};
 use vks_core::room::{Room, RoomId, RoomMode};
 
 use crate::memory::MemoryStorage;
@@ -187,6 +189,26 @@ impl Storage for MemoryStorage {
         Ok(self.server_settings_slot().read().unwrap().clone())
     }
 
+    async fn upsert_record(&self, record: &RecordEntry) -> Result<(), StorageError> {
+        self.records_map().write().unwrap().insert(record.id.clone(), record.clone());
+        Ok(())
+    }
+
+    async fn get_record(&self, id: &str) -> Result<Option<RecordEntry>, StorageError> {
+        Ok(self.records_map().read().unwrap().get(id).cloned())
+    }
+
+    async fn list_records(&self, room_id: Option<RoomId>) -> Result<Vec<RecordEntry>, StorageError> {
+        let records = self.records_map().read().unwrap();
+        let res = records.values().filter(|r| room_id.is_none() || Some(r.room_id) == room_id).cloned().collect();
+        Ok(res)
+    }
+
+    async fn delete_record(&self, id: &str) -> Result<(), StorageError> {
+        self.records_map().write().unwrap().remove(id);
+        Ok(())
+    }
+
     async fn reset(&self) -> Result<(), StorageError> {
         self.rooms_map().write().unwrap().clear();
         self.room_mode_overrides_map().write().unwrap().clear();
@@ -195,6 +217,7 @@ impl Storage for MemoryStorage {
         self.api_keys_map().write().unwrap().clear();
         self.users_map().write().unwrap().clear();
         self.credentials_map().write().unwrap().clear();
+        self.records_map().write().unwrap().clear();
         self.audit_log().write().unwrap().clear();
         *self.server_settings_slot().write().unwrap() = None;
         Ok(())

@@ -31,10 +31,12 @@
 //! - **No `unsafe`** (CODE_STYLE §6).
 //! - English identifiers, Russian comments (CODE_STYLE §8).
 
+pub mod container;
 mod recording;
 mod retention;
 mod storage;
 
+pub use container::{ContainerConfig, ContainerError, PlayableContainerWriter};
 pub use recording::{
     Clock, ClockMs, RecordingError, RecordingMeta, RecordingMode, RecordingSession, RecordingState, Segment,
     SegmentKind,

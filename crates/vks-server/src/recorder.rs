@@ -22,6 +22,7 @@ use vks_signaling::Envelope;
 pub struct RecorderManager {
     sessions: Arc<Mutex<HashMap<RoomId, RecordingSession>>>,
     storage: Arc<Mutex<MemoryStore>>,
+    stopped_cache: Arc<Mutex<HashMap<RoomId, RecordingMeta>>>,
 }
 
 impl Default for RecorderManager {
@@ -33,7 +34,11 @@ impl Default for RecorderManager {
 impl RecorderManager {
     /// Создаёт новый менеджер записей.
     pub fn new() -> Self {
-        Self { sessions: Arc::new(Mutex::new(HashMap::new())), storage: Arc::new(Mutex::new(MemoryStore::new())) }
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            storage: Arc::new(Mutex::new(MemoryStore::new())),
+            stopped_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Проверяет, идёт ли сейчас запись в комнате.
@@ -97,6 +102,7 @@ impl RecorderManager {
 
         // 3. Сохраняем сессию
         guard.insert(*room_id, session);
+        self.stopped_cache.lock().unwrap().remove(room_id);
 
         // 4. Оповещение административного WebSocket
         let room_str = room_id.to_string();
@@ -122,10 +128,20 @@ impl RecorderManager {
     }
 
     /// Останавливает запись комнаты и сохраняет метаданные.
+    /// Повторный вызов идемпотентно возвращает сохранённые метаданные без ошибки.
     pub fn stop_recording(&self, state: &Arc<AppState>, room_id: &RoomId) -> Result<RecordingMeta, RecordingError> {
         let mut session = {
             let mut guard = self.sessions.lock().unwrap();
-            guard.remove(room_id).ok_or(RecordingError::NotStarted)?
+            match guard.remove(room_id) {
+                Some(s) => s,
+                None => {
+                    // Проверяем кэш недавно остановленных сессий (идемпотентность)
+                    if let Some(meta) = self.stopped_cache.lock().unwrap().get(room_id).cloned() {
+                        return Ok(meta);
+                    }
+                    return Err(RecordingError::NotStarted);
+                }
+            }
         };
 
         let meta = session.stop()?;
@@ -149,8 +165,9 @@ impl RecorderManager {
 
         // 3. Фиксация в хранилище записей
         self.storage.lock().unwrap().save(meta.clone());
+        self.stopped_cache.lock().unwrap().insert(*room_id, meta.clone());
 
-        // 4. Добавляем запись в состояние AppState.records
+        // 4. Добавляем запись в состояние AppState.records и персистируем в Storage
         let entry = RecordEntry {
             id: meta.id.to_string(),
             room_id: *room_id,
@@ -158,7 +175,13 @@ impl RecorderManager {
             duration_sec: (meta.duration_ms / 1000) as u32,
             size_bytes: meta.size_bytes,
         };
-        state.records.lock().unwrap().insert(entry.id.clone(), entry);
+        state.records.lock().unwrap().insert(entry.id.clone(), entry.clone());
+        if let Some(ref storage) = state.storage {
+            let st_clone = storage.clone();
+            tokio::spawn(async move {
+                let _ = st_clone.upsert_record(&entry).await;
+            });
+        }
 
         // 5. Оповещение административного WebSocket
         let room_str = room_id.to_string();
@@ -180,6 +203,26 @@ impl RecorderManager {
         );
 
         info!(room_id = %room_id, duration_ms = meta.duration_ms, "Recording stopped for room");
+        Ok(meta)
+    }
+
+    /// Асинхронно останавливает запись комнаты с гарантированным ожиданием сохранения в Storage.
+    pub async fn stop_recording_async(
+        &self,
+        state: &Arc<AppState>,
+        room_id: &RoomId,
+    ) -> Result<RecordingMeta, RecordingError> {
+        let meta = self.stop_recording(state, room_id)?;
+        if let Some(ref storage) = state.storage {
+            let entry = RecordEntry {
+                id: meta.id.to_string(),
+                room_id: *room_id,
+                created_ms: meta.started_at_ms,
+                duration_sec: (meta.duration_ms / 1000) as u32,
+                size_bytes: meta.size_bytes,
+            };
+            let _ = storage.upsert_record(&entry).await;
+        }
         Ok(meta)
     }
 }

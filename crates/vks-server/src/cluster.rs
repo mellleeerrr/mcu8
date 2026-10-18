@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
-use vks_cluster::{Bus, FencingError, InstanceRegistry, LeaseResult, Msg, PushResult, RoomOwner};
+use vks_cluster::{Bus, FencingError, InstanceRegistry, Lease, LeaseResult, Msg, PushResult, RoomOwner};
 
 /// Менеджер кластерного взаимодействия инстанса.
 #[derive(Clone)]
@@ -39,6 +39,43 @@ impl ClusterManager {
             registry: Arc::new(Mutex::new(registry)),
             bus: Arc::new(Bus::new()),
         }
+    }
+
+    /// Создаёт менеджер кластера с настраиваемым дедлайном heartbeat.
+    pub fn with_heartbeat_deadline(node_id: impl Into<String>, deadline_ticks: u64) -> Self {
+        let node_id = node_id.into();
+        let mut owner = RoomOwner::new();
+        let mut registry = InstanceRegistry::with_deadline(deadline_ticks);
+
+        let now_tick =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+
+        owner.register(&node_id, now_tick);
+        registry.heartbeat(&node_id, now_tick);
+
+        Self {
+            node_id,
+            owner: Arc::new(Mutex::new(owner)),
+            registry: Arc::new(Mutex::new(registry)),
+            bus: Arc::new(Bus::new()),
+        }
+    }
+
+    /// Создаёт узел кластера, подключенный к общему состоянию кластера (шинa, лизы, discovery).
+    pub fn with_shared(
+        node_id: impl Into<String>,
+        owner: Arc<Mutex<RoomOwner>>,
+        registry: Arc<Mutex<InstanceRegistry>>,
+        bus: Arc<Bus>,
+    ) -> Self {
+        let node_id = node_id.into();
+        let now_tick =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+
+        owner.lock().unwrap().register(&node_id, now_tick);
+        registry.lock().unwrap().heartbeat(&node_id, now_tick);
+
+        Self { node_id, owner, registry, bus }
     }
 
     /// Идентификатор текущего узла кластера.
@@ -78,6 +115,33 @@ impl ClusterManager {
         owner.release(room_id, &self.node_id)
     }
 
+    /// Корректно мигрирует владение комнатой на другой узел кластера и оповещает шину.
+    pub fn migrate_room(
+        &self,
+        room_id: &str,
+        to_node: &str,
+        now_tick: u64,
+        ttl_ticks: u64,
+    ) -> Result<Lease, FencingError> {
+        let mut owner = self.owner.lock().unwrap();
+        let lease = owner.migrate_room(room_id, &self.node_id, to_node, now_tick, ttl_ticks)?;
+
+        let payload = serde_json::json!({
+            "event": "room_migrated",
+            "room_id": room_id,
+            "from_node": self.node_id,
+            "to_node": to_node,
+            "epoch": lease.epoch,
+            "expiry_tick": lease.expiry_tick,
+        });
+
+        if let Ok(bytes) = serde_json::to_vec(&payload) {
+            let _ = self.publish_event("vks.cluster.room.migrated", bytes, true);
+        }
+
+        Ok(lease)
+    }
+
     /// Проверяет fencing токен комнаты перед операциями.
     pub fn verify_fencing(&self, room_id: &str, provided_epoch: u64, now_tick: u64) -> Result<(), FencingError> {
         let owner = self.owner.lock().unwrap();
@@ -88,6 +152,21 @@ impl ClusterManager {
     pub fn publish_event(&self, topic: &str, payload: Vec<u8>, critical: bool) -> PushResult {
         let msg = Msg::new(topic, payload, critical);
         self.bus.push_backpressure_with_limits(topic, msg, 10_000, 20_000)
+    }
+
+    /// Ссылка на шину кластера.
+    pub fn bus(&self) -> &Arc<Bus> {
+        &self.bus
+    }
+
+    /// Ссылка на реестр узлов кластера.
+    pub fn registry(&self) -> &Arc<Mutex<InstanceRegistry>> {
+        &self.registry
+    }
+
+    /// Ссылка на реестр владения комнатами.
+    pub fn owner(&self) -> &Arc<Mutex<RoomOwner>> {
+        &self.owner
     }
 
     /// Статус кластера для мониторинга.

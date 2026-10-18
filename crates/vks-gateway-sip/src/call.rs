@@ -129,14 +129,27 @@ impl SipCall {
 /// хранит только список participant-имён, чтобы проверять «приземление»
 /// вызова в комнату (ARCHITECTURE §2: gateway = participant, для
 /// клиентов прозрачно).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoomCallSlot {
+    call_id: String,
+    participant_name: String,
+}
+
+/// В-memory SIP-шлюз (UAS) с mock-реестром WebRTC-комнат.
+///
+/// Реестр комнат — замена реального room-реестра (vks-core/vks-storage):
+/// хранит привязку вызовов к комнатам по Call-ID, предотвращая
+/// ложное выталкивание участника при нескольких звонках одного абонента (M5.1).
 #[derive(Debug, Default)]
 pub struct SipGateway {
     /// UAS зарегистрирован (порт SIP открыт).
     uas_registered: bool,
     /// Активные вызовы по Call-ID.
     calls: HashMap<String, SipCall>,
-    /// Mock-реестр комнат: room_id → имена участников.
-    rooms: HashMap<String, Vec<String>>,
+    /// Mock-реестр комнат: room_id → слоты вызовов (call_id, имя).
+    room_calls: HashMap<String, Vec<RoomCallSlot>>,
+    /// Кэш участников комнат для эффективного возврата &[String].
+    room_participants_cache: HashMap<String, Vec<String>>,
 }
 
 impl SipGateway {
@@ -163,7 +176,7 @@ impl SipGateway {
     ///
     /// # Errors
     /// [`Error::Conflict`] — если UAS не зарегистрирован или Call-ID уже существует.
-    /// [`Error::InvalidArgument`] — если оффер пуст или не содержит поддерживаемых кодеков.
+    /// [`Error::InvalidInput`] — если оффер пуст или не содержит поддерживаемых кодеков.
     pub fn on_invite(
         &mut self,
         call_id: impl Into<String>,
@@ -210,32 +223,54 @@ impl SipGateway {
     }
 
     /// Завершает вызов (BYE) и изолированно выводит его только из привязанной комнаты,
-    /// не затрагивая параллельные вызовы того же абонента в других комнатах.
+    /// не затрагивая параллельные вызовы того же абонента в других комнатах или той же комнате.
+    /// Идемпотентен при повторном вызове (late BYE).
     ///
     /// # Errors
-    /// [`Error::NotFound`] — если вызов не найден; [`Error::Conflict`] —
-    /// если не в `Active`.
+    /// [`Error::NotFound`] — если вызов не найден.
     pub fn bye(&mut self, call_id: &str) -> Result<SipCall, Error> {
-        let (participant_name, bound_room) = {
+        let bound_room = {
             let call = self.calls.get_mut(call_id).ok_or_else(|| Error::NotFound(call_id.to_owned()))?;
-            call.bye()?;
-            let p_name = Self::participant_name_for(&call.from);
-            let b_room = call.room_id.take();
-            (p_name, b_room)
+            if call.state == CallState::Terminated {
+                return Ok(call.clone());
+            }
+            if call.state == CallState::Ringing || call.state == CallState::Idle {
+                call.state = CallState::Terminated;
+            } else {
+                call.bye()?;
+            }
+            call.room_id.take()
         };
 
-        // Удаляем участника строго из привязанной комнаты
+        // Удаляем вызов строго по call_id
         if let Some(room) = bound_room {
-            if let Some(participants) = self.rooms.get_mut(&room) {
-                if let Some(pos) = participants.iter().position(|name| name == &participant_name) {
-                    participants.remove(pos);
-                }
+            if let Some(slots) = self.room_calls.get_mut(&room) {
+                slots.retain(|s| s.call_id != call_id);
+                self.room_participants_cache
+                    .insert(room.clone(), slots.iter().map(|s| s.participant_name.clone()).collect());
             }
         }
 
         let call = self.calls.get(call_id).expect("just transitioned").clone();
         tracing::info!(call_id = %call_id, "SIP call terminated");
         Ok(call)
+    }
+
+    /// Отменяет вызов до установления (CANCEL) и освобождает ресурсы.
+    pub fn cancel(&mut self, call_id: &str) -> Result<SipCall, Error> {
+        self.bye(call_id)
+    }
+
+    /// Завершает вызов по таймауту.
+    pub fn timeout(&mut self, call_id: &str) -> Result<SipCall, Error> {
+        self.bye(call_id)
+    }
+
+    /// Удаляет завершенные вызовы из реестра для ограничения памяти.
+    pub fn prune_terminated(&mut self) -> usize {
+        let before = self.calls.len();
+        self.calls.retain(|_, call| call.state != CallState::Terminated);
+        before - self.calls.len()
     }
 
     /// «Приземляет» активный вызов в WebRTC-комнату.
@@ -265,20 +300,22 @@ impl SipGateway {
 
         let name = Self::participant_name_for(&from);
 
-        // 2. Перенос: если вызов был в другой комнате — удаляем из старой
+        // 2. Перенос: если вызов был в другой комнате — удаляем этот вызов из старой комнаты
         if let Some(prev) = prev_room {
-            if let Some(participants) = self.rooms.get_mut(&prev) {
-                if let Some(pos) = participants.iter().position(|n| n == &name) {
-                    participants.remove(pos);
-                }
+            if let Some(slots) = self.room_calls.get_mut(&prev) {
+                slots.retain(|s| s.call_id != call_id);
+                self.room_participants_cache
+                    .insert(prev.clone(), slots.iter().map(|s| s.participant_name.clone()).collect());
             }
         }
 
-        // 3. Приземление в новую комнату
-        let list = self.rooms.entry(target_room.clone()).or_default();
-        if !list.contains(&name) {
-            list.push(name.clone());
+        // 3. Приземление в новую комнату строго по call_id
+        let slots = self.room_calls.entry(target_room.clone()).or_default();
+        if !slots.iter().any(|s| s.call_id == call_id) {
+            slots.push(RoomCallSlot { call_id: call_id.to_string(), participant_name: name.clone() });
         }
+        self.room_participants_cache
+            .insert(target_room.clone(), slots.iter().map(|s| s.participant_name.clone()).collect());
 
         tracing::info!(room_id = %target_room, call_id = %call_id, participant = %name, "SIP call landed in room");
         Ok(self.calls.get(call_id).cloned().expect("exists"))
@@ -291,7 +328,7 @@ impl SipGateway {
     /// Имена участников mock-реестра комнаты.
     #[must_use]
     pub fn room_participants(&self, room_id: &str) -> &[String] {
-        self.rooms.get(room_id).map_or(&[], Vec::as_slice)
+        self.room_participants_cache.get(room_id).map_or(&[], Vec::as_slice)
     }
 
     /// Имя participant'а в комнате для данного вызова (если существует).
@@ -459,5 +496,53 @@ mod tests {
         // Несовместимый оффер
         let err = g.on_invite("call-bad", "alice", &[SipCodec::new("AMR")]).expect_err("AMR rejected");
         assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn two_calls_same_from_in_same_room_no_ejection() {
+        let mut g = gateway_with_uas();
+        let offer = [SipCodec::new("PCMU")];
+
+        // Абонент alice совершает два звонка в ОДНУ комнату (например, аудио и видео)
+        g.on_invite("call-1", "alice", &offer).unwrap();
+        g.accept("call-1").unwrap();
+        g.land_in_room("room-1", "call-1").unwrap();
+
+        g.on_invite("call-2", "alice", &offer).unwrap();
+        g.accept("call-2").unwrap();
+        g.land_in_room("room-1", "call-2").unwrap();
+
+        assert_eq!(g.room_participants("room-1"), &["alice@sip-gateway", "alice@sip-gateway"]);
+
+        // Завершаем call-1: call-2 обязан остаться в room-1!
+        g.bye("call-1").unwrap();
+        assert_eq!(g.room_participants("room-1"), &["alice@sip-gateway"]);
+        assert!(!g.has_call("call-1"));
+        assert!(g.has_call("call-2"));
+
+        // Late BYE на call-1 идемпотентен и не возвращает ошибку
+        let late = g.bye("call-1").expect("late BYE is idempotent");
+        assert_eq!(late.state, CallState::Terminated);
+
+        // Завершаем call-2
+        g.bye("call-2").unwrap();
+        assert_eq!(g.room_participants("room-1"), &[] as &[String]);
+
+        // Прунинг завершенных вызовов
+        let pruned = g.prune_terminated();
+        assert_eq!(pruned, 2);
+    }
+
+    #[test]
+    fn cancel_and_timeout_during_ringing() {
+        let mut g = gateway_with_uas();
+        let offer = [SipCodec::new("PCMU")];
+        g.on_invite("call-cancel", "alice", &offer).unwrap();
+        let call = g.cancel("call-cancel").expect("cancel succeeds");
+        assert_eq!(call.state, CallState::Terminated);
+
+        g.on_invite("call-timeout", "bob", &offer).unwrap();
+        let call = g.timeout("call-timeout").expect("timeout succeeds");
+        assert_eq!(call.state, CallState::Terminated);
     }
 }

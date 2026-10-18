@@ -23,6 +23,7 @@ use vks_signaling::Envelope;
 pub struct GatewayManager {
     sip: Arc<Mutex<SipGateway>>,
     h323: Arc<Mutex<H323Gateway>>,
+    mcu_engine: Option<Arc<vks_media_mcu::McuEngine>>,
 }
 
 impl Default for GatewayManager {
@@ -39,7 +40,13 @@ impl GatewayManager {
             warn!(error = %e, "SIP UAS already registered or conflict");
         }
         let h323 = H323Gateway::new();
-        Self { sip: Arc::new(Mutex::new(sip)), h323: Arc::new(Mutex::new(h323)) }
+        Self { sip: Arc::new(Mutex::new(sip)), h323: Arc::new(Mutex::new(h323)), mcu_engine: None }
+    }
+
+    /// Конфигурирует привязку к MCU движку для прозрачной композиции.
+    pub fn with_mcu(mut self, mcu_engine: Arc<vks_media_mcu::McuEngine>) -> Self {
+        self.mcu_engine = Some(mcu_engine);
+        self
     }
 
     /// Статус доступности SIP-шлюза для `ui_system_status`.
@@ -124,6 +131,21 @@ impl GatewayManager {
             }),
         );
 
+        // 5. Прозрачное подключение к MCU-микшеру и композитору
+        let pid_val = crate::parse_participant_id(&active_call.participant_id);
+        if let Some(ref mcu) = self.mcu_engine {
+            let mut tracks = vec![vks_core::track::Track::new(pid_val, vks_core::track::TrackKind::Audio)];
+            if active_call.sip_codec.name.to_lowercase().contains("264")
+                || active_call.sip_codec.name.to_lowercase().contains("vp8")
+                || sdp_offer
+                    .iter()
+                    .any(|c| c.name.to_lowercase().contains("264") || c.name.to_lowercase().contains("vp8"))
+            {
+                tracks.push(vks_core::track::Track::new(pid_val, vks_core::track::TrackKind::Video));
+            }
+            mcu.bridge_participant(*room_id, pid_val, tracks);
+        }
+
         info!(call_id = %call_id, room_id = %room_str, "SIP participant landed in room");
         Ok(active_call)
     }
@@ -136,6 +158,11 @@ impl GatewayManager {
         let room_id = state.room_hub.find_participant_room(&call.participant_id).map(|(r, _)| r);
 
         if let Some(rid) = room_id {
+            let pid_val = crate::parse_participant_id(&call.participant_id);
+            if let Some(ref mcu) = self.mcu_engine {
+                mcu.unbridge_participant(rid, pid_val);
+            }
+
             let left_count = state.room_hub.unregister_participant(&rid, &call.participant_id);
 
             let left_msg = SignalingMessage {
@@ -227,6 +254,21 @@ impl GatewayManager {
             }),
         );
 
+        // 5. Прозрачное подключение к MCU-микшеру и композитору
+        let pid_val = crate::parse_participant_id(&active_call.participant_id);
+        if let Some(ref mcu) = self.mcu_engine {
+            let mut tracks = vec![vks_core::track::Track::new(pid_val, vks_core::track::TrackKind::Audio)];
+            if active_call.h323_codec.name.to_lowercase().contains("264")
+                || active_call.h323_codec.name.to_lowercase().contains("vp8")
+                || h323_offer
+                    .iter()
+                    .any(|c| c.name.to_lowercase().contains("264") || c.name.to_lowercase().contains("vp8"))
+            {
+                tracks.push(vks_core::track::Track::new(pid_val, vks_core::track::TrackKind::Video));
+            }
+            mcu.bridge_participant(*room_id, pid_val, tracks);
+        }
+
         info!(call_id = %call_id, room_id = %room_str, "H.323 participant landed in room");
         Ok(active_call)
     }
@@ -239,6 +281,11 @@ impl GatewayManager {
         let room_id = state.room_hub.find_participant_room(&call.participant_id).map(|(r, _)| r);
 
         if let Some(rid) = room_id {
+            let pid_val = crate::parse_participant_id(&call.participant_id);
+            if let Some(ref mcu) = self.mcu_engine {
+                mcu.unbridge_participant(rid, pid_val);
+            }
+
             let left_count = state.room_hub.unregister_participant(&rid, &call.participant_id);
 
             let left_msg = SignalingMessage {
@@ -269,5 +316,10 @@ impl GatewayManager {
 
         info!(call_id = %call_id, "H.323 call terminated");
         Ok(call)
+    }
+
+    /// Возвращает ссылку на сконфигурированный McuEngine (если подключен).
+    pub fn mcu_engine(&self) -> Option<&Arc<vks_media_mcu::McuEngine>> {
+        self.mcu_engine.as_ref()
     }
 }

@@ -60,6 +60,8 @@ pub struct RoomOwner {
     instances: HashMap<String, u64>,
     /// room_id → Lease.
     leases: HashMap<String, Lease>,
+    /// room_id → последняя выделенная эпоха (монотонная, сохраняется при release/expire).
+    room_epochs: HashMap<String, u64>,
 }
 
 /// FNV-1a 64-bit hash (детерминированно, без внешних deps).
@@ -75,7 +77,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 impl RoomOwner {
     /// Создаёт пустой реестр.
     pub fn new() -> Self {
-        Self { instances: HashMap::new(), leases: HashMap::new() }
+        Self { instances: HashMap::new(), leases: HashMap::new(), room_epochs: HashMap::new() }
     }
 
     /// Регистрирует instance (instance_id → now_tick).
@@ -125,16 +127,21 @@ impl RoomOwner {
         match cur {
             None => {
                 let expiry = now_tick.saturating_add(ttl_ticks);
+                let epoch = self.room_epochs.entry(room_id.to_string()).or_insert(0);
+                *epoch = epoch.saturating_add(1);
+                let new_epoch = *epoch;
                 self.leases.insert(
                     room_id.to_string(),
-                    Lease { owner: instance_id.to_string(), expiry_tick: expiry, epoch: 1 },
+                    Lease { owner: instance_id.to_string(), expiry_tick: expiry, epoch: new_epoch },
                 );
                 LeaseResult::Acquired
             }
             Some(lease) => {
                 if now_tick >= lease.expiry_tick {
                     // Предыдущий лиз истёк: старый владелец теряет права независимо от ID.
-                    let new_epoch = lease.epoch.saturating_add(1);
+                    let epoch = self.room_epochs.entry(room_id.to_string()).or_insert(lease.epoch);
+                    *epoch = (*epoch).max(lease.epoch).saturating_add(1);
+                    let new_epoch = *epoch;
                     let expiry = now_tick.saturating_add(ttl_ticks);
                     self.leases.insert(
                         room_id.to_string(),
@@ -153,7 +160,9 @@ impl RoomOwner {
                     // Split-brain среди активных претендентов: lowest instance_id wins.
                     let winner = instance_id.min(&lease.owner);
                     if winner == instance_id {
-                        let new_epoch = lease.epoch.saturating_add(1);
+                        let epoch = self.room_epochs.entry(room_id.to_string()).or_insert(lease.epoch);
+                        *epoch = (*epoch).max(lease.epoch).saturating_add(1);
+                        let new_epoch = *epoch;
                         let new_expiry = now_tick.saturating_add(ttl_ticks);
                         self.leases.insert(
                             room_id.to_string(),
@@ -272,12 +281,53 @@ impl RoomOwner {
             return None;
         }
         let winner = claimants.iter().min().cloned()?;
-        let prev_epoch = self.leases.get(room_id).map(|l| l.epoch).unwrap_or(0);
+        let prev_epoch =
+            self.room_epochs.get(room_id).copied().or_else(|| self.leases.get(room_id).map(|l| l.epoch)).unwrap_or(0);
         let new_epoch = prev_epoch.saturating_add(1);
+        self.room_epochs.insert(room_id.to_string(), new_epoch);
         let expiry = now_tick.saturating_add(ttl_ticks);
 
         self.leases.insert(room_id.to_string(), Lease { owner: winner.clone(), expiry_tick: expiry, epoch: new_epoch });
         Some(SplitBrainResult::Winner(winner))
+    }
+
+    /// Корректная миграция владения комнатой с `from_instance` на `to_instance`.
+    /// Инкрементирует fencing-эпоху и выдаёт новый лиз.
+    pub fn migrate_room(
+        &mut self,
+        room_id: &str,
+        from_instance: &str,
+        to_instance: &str,
+        now_tick: u64,
+        ttl_ticks: u64,
+    ) -> Result<Lease, FencingError> {
+        let lease = self.leases.get(room_id).ok_or_else(|| FencingError::NoLease(room_id.to_string()))?;
+
+        if lease.owner != from_instance {
+            return Err(FencingError::NotOwner {
+                room_id: room_id.to_string(),
+                expected: lease.owner.clone(),
+                actual: from_instance.to_string(),
+            });
+        }
+
+        if now_tick >= lease.expiry_tick {
+            return Err(FencingError::LeaseExpired {
+                room_id: room_id.to_string(),
+                expiry_tick: lease.expiry_tick,
+                now_tick,
+            });
+        }
+
+        let epoch = self.room_epochs.entry(room_id.to_string()).or_insert(lease.epoch);
+        *epoch = (*epoch).max(lease.epoch).saturating_add(1);
+        let new_epoch = *epoch;
+        let new_expiry = now_tick.saturating_add(ttl_ticks);
+
+        self.register(to_instance, now_tick);
+        let new_lease = Lease { owner: to_instance.to_string(), expiry_tick: new_expiry, epoch: new_epoch };
+        self.leases.insert(room_id.to_string(), new_lease.clone());
+        Ok(new_lease)
     }
 }
 
@@ -476,5 +526,49 @@ mod tests {
         ro.acquire_lease("room-1", "i-1", 0, 30);
         ro.unregister("i-1");
         assert_eq!(ro.owner("room-1"), None);
+    }
+
+    #[test]
+    fn monotonic_epoch_across_release_and_reacquire() {
+        let mut ro = RoomOwner::new();
+        // 1. i-1 acquires room-1 at tick 0 -> epoch 1
+        assert_eq!(ro.acquire_lease("room-1", "i-1", 0, 30), LeaseResult::Acquired);
+        assert_eq!(ro.epoch("room-1"), Some(1));
+
+        // 2. i-1 releases room-1
+        assert!(ro.release("room-1", "i-1"));
+        assert_eq!(ro.owner("room-1"), None);
+
+        // 3. i-2 acquires room-1 at tick 10 -> epoch must be 2, NOT reset to 1!
+        assert_eq!(ro.acquire_lease("room-1", "i-2", 10, 30), LeaseResult::Acquired);
+        assert_eq!(ro.owner("room-1"), Some("i-2"));
+        assert_eq!(ro.epoch("room-1"), Some(2));
+
+        // 4. i-2 unregisters -> lease purged, but epoch remembered
+        ro.unregister("i-2");
+        assert_eq!(ro.owner("room-1"), None);
+
+        // 5. i-3 acquires -> epoch must be 3
+        assert_eq!(ro.acquire_lease("room-1", "i-3", 20, 30), LeaseResult::Acquired);
+        assert_eq!(ro.epoch("room-1"), Some(3));
+    }
+
+    #[test]
+    fn graceful_room_migration() {
+        let mut ro = RoomOwner::new();
+        ro.acquire_lease("room-1", "i-1", 0, 30);
+        assert_eq!(ro.epoch("room-1"), Some(1));
+
+        // Attempt migration by non-owner fails
+        let err = ro.migrate_room("room-1", "i-fake", "i-2", 5, 30).unwrap_err();
+        assert!(matches!(err, FencingError::NotOwner { .. }));
+
+        // Valid migration increments epoch and updates owner
+        let new_lease = ro.migrate_room("room-1", "i-1", "i-2", 5, 30).unwrap();
+        assert_eq!(new_lease.owner, "i-2");
+        assert_eq!(new_lease.epoch, 2);
+        assert_eq!(new_lease.expiry_tick, 35);
+        assert_eq!(ro.owner("room-1"), Some("i-2"));
+        assert_eq!(ro.epoch("room-1"), Some(2));
     }
 }

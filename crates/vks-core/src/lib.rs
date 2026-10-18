@@ -61,6 +61,7 @@ pub use ports::{
     MediaEngineError,
     MediaTrack,
     PublisherHandle,
+    RecordEntry,
     Rng,
     RngError,
     RoomCaps,
