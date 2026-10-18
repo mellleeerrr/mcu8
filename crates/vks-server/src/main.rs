@@ -250,10 +250,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_ice_servers(ice_servers);
 
-    // 9. Инициализация менеджеров внешних протоколов M5 (SIP, H.323, запись, кластер)
     let gateway_manager = Arc::new(GatewayManager::new());
     let recorder_manager = Arc::new(RecorderManager::new());
     let cluster_manager = Arc::new(ClusterManager::new(&config.server_name));
+
+    // Периодический heartbeat локального узла в кластере
+    let cm = cluster_manager.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let now_sec =
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            cm.send_heartbeat(now_sec);
+        }
+    });
 
     info!(
         server = %config.server_name,

@@ -56,11 +56,7 @@ pub fn build_app(state: Arc<AppState>, frontend: &Frontend) -> Router {
 }
 
 /// Собирает полное приложение сервера с заданной конфигурацией обработчика сигналинга.
-pub fn build_app_with_config(
-    state: Arc<AppState>,
-    frontend: &Frontend,
-    handler_config: HandlerConfig,
-) -> Router {
+pub fn build_app_with_config(state: Arc<AppState>, frontend: &Frontend, handler_config: HandlerConfig) -> Router {
     build_app_with_engine(state, frontend, handler_config, Arc::new(vks_media_sfu::SfuEngine::new()))
 }
 
@@ -121,25 +117,31 @@ pub fn build_app_with_services(
 
     // Дополнительные API M5 эндпоинты для мониторинга шлюзов и статуса кластера
     let m5_api = Router::new()
-        .route("/api/v3/gateways/status", get(move || {
-            let gw = gateways.clone();
-            async move {
-                Json(serde_json::json!({
-                    "sip": gw.sip_status(),
-                    "h323": gw.h323_status()
-                }))
-            }
-        }))
-        .route("/api/v3/cluster/status", get(move || {
-            let cl = cluster.clone();
-            async move {
-                let now_sec = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                Json(cl.status(now_sec))
-            }
-        }));
+        .route(
+            "/api/v3/gateways/status",
+            get(move || {
+                let gw = gateways.clone();
+                async move {
+                    Json(serde_json::json!({
+                        "sip": gw.sip_status(),
+                        "h323": gw.h323_status()
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/api/v3/cluster/status",
+            get(move || {
+                let cl = cluster.clone();
+                async move {
+                    let now_sec = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    Json(cl.status(now_sec))
+                }
+            }),
+        );
 
     vks_admin::handlers::router(state.clone())
         // Адаптер legacy UI `/api/v3/*` (ADR-0027, фазы 2–3 плана).
@@ -255,7 +257,8 @@ async fn ws_handler(State(ctx): State<WsContext>, headers: HeaderMap, ws: WebSoc
         return ws_error(StatusCode::UNAUTHORIZED, "unauthorized", "invalid, expired, or revoked token");
     };
     if let Ok(users) = ctx.state.users.lock() {
-        if let Some(u) = users.values().find(|u| u.id.to_string() == verified.user_id || u.username == verified.user_id) {
+        if let Some(u) = users.values().find(|u| u.id.to_string() == verified.user_id || u.username == verified.user_id)
+        {
             if u.deleted {
                 return ws_error(StatusCode::FORBIDDEN, "forbidden", "user account is deactivated");
             }
@@ -698,10 +701,13 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
         let payload_bytes = Envelope::new(left_msg).encode();
         state.room_hub.broadcast(&rid, Some(&pid_str), payload_bytes.into());
 
-        state.notify_admin("conferences:update", serde_json::json!({
-            "id": rid.to_string(),
-            "participants_count": new_count
-        }));
+        state.notify_admin(
+            "conferences:update",
+            serde_json::json!({
+                "id": rid.to_string(),
+                "participants_count": new_count
+            }),
+        );
     }
 }
 

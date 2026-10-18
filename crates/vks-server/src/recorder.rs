@@ -33,10 +33,7 @@ impl Default for RecorderManager {
 impl RecorderManager {
     /// Создаёт новый менеджер записей.
     pub fn new() -> Self {
-        Self {
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            storage: Arc::new(Mutex::new(MemoryStore::new())),
-        }
+        Self { sessions: Arc::new(Mutex::new(HashMap::new())), storage: Arc::new(Mutex::new(MemoryStore::new())) }
     }
 
     /// Проверяет, идёт ли сейчас запись в комнате.
@@ -125,11 +122,7 @@ impl RecorderManager {
     }
 
     /// Останавливает запись комнаты и сохраняет метаданные.
-    pub fn stop_recording(
-        &self,
-        state: &Arc<AppState>,
-        room_id: &RoomId,
-    ) -> Result<RecordingMeta, RecordingError> {
+    pub fn stop_recording(&self, state: &Arc<AppState>, room_id: &RoomId) -> Result<RecordingMeta, RecordingError> {
         let mut session = {
             let mut guard = self.sessions.lock().unwrap();
             guard.remove(room_id).ok_or(RecordingError::NotStarted)?

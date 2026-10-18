@@ -26,9 +26,12 @@ impl ClusterManager {
         let mut owner = RoomOwner::new();
         let mut registry = InstanceRegistry::new();
 
-        // Регистрируем локальный узел на тике 0
-        owner.register(&node_id, 0);
-        registry.heartbeat(&node_id, 0);
+        let now_tick =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+
+        // Регистрируем локальный узел на текущем тике
+        owner.register(&node_id, now_tick);
+        registry.heartbeat(&node_id, now_tick);
 
         Self {
             node_id,

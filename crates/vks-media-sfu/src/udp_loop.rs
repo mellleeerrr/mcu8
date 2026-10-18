@@ -296,7 +296,7 @@ mod tests {
         let sub_received_clone = sub_received.clone();
 
         let _sub_task = subscriber.start_receive_loop(move |_src, packet| {
-            if &packet.payload[..] == &[99, 88, 77] {
+            if packet.payload[..] == [99, 88, 77] {
                 sub_received_clone.store(true, Ordering::SeqCst);
             }
         });

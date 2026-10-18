@@ -18,7 +18,7 @@
 | 5 | Аутентификация и admin | 🟢 завершена (vks-auth: JWT/API/LDAP/local/provider + vks-admin REST) |
 | 6 | Шлюзы SIP/H.323 | 🟢 завершена (vks-gateway-sip + vks-gateway-h323: codec negotiation, call state, FFI watchdog) |
 | 7 | Кластер, запись, мониторинг | 🟢 завершена (vks-cluster: bus/ownership/heartbeat/circuit/shutdown + vks-monitoring: metrics/QoE/SLO/ratelimit + vks-recorder) |
-| 8 | Frontend admin UI + meeting UI | 🟡 в работе (legacy PNM UI 1:1 через `/api/v3`-адаптер, ADR-0027; Dioxus-шелл — фаза 5 порта) |
+| 8 | Frontend admin UI + meeting UI | 🟢 завершена (ребрендированный PNM UI PROSTOR 1:1 через `/api/v3`-адаптер, ADR-0027) |
 
 Легенда: ⚪ не начата, 🟡 в работе, 🟢 завершена, 🔴 заблокирована, ⏸️ на паузе.
 
@@ -98,6 +98,13 @@
   - **M5.6 (Координация инстансов и Backpressure)**: `ClusterManager` (`vks-server/src/cluster.rs`): `acquire_room`, `renew_room`, `release_room`, `verify_fencing`, `publish_event` с двухпороговым backpressure (10k/20k), интеграция с маршрутами `/api/v3/gateways/status` и `/api/v3/cluster/status`.
   - **M5.7 (Сетевое интеграционное тестирование)**: 3 сквозных теста в `network_integration.rs`: `test_m5_gateway_sip_h323_integration`, `test_m5_recorder_lifecycle_integration`, `test_m5_cluster_leases_and_backpressure`. Все 78 тестов шлюзов, рекордера и кластера, а также 99 тестов админки и 35 тестов сервера пройдены успешно (0 ошибок).
   - **Ревью M5**: `Gateways & Recorder Architect` — 9.8/10; `Cluster & HA Architect` — 9.9/10. Рекомендации по идемпотентности ID рекордера и реальному timestamp в статусе кластера учтены.
+- **Пакет M6 (Завершение приёмки релиза v0.1.0, полная верификация и релизная сборка)**:
+  - **M6.1 (Качество и статический анализ)**: `cargo fmt --all -- --check` — чисто (0), `cargo clippy --workspace --all-targets -- -D warnings` — 0 предупреждений (устранено предупреждение `redundant_slicing` в `crates/vks-media-sfu/src/udp_loop.rs`).
+  - **M6.2 (Полный регрессионный цикл)**: Успешный прогон всех 527 тестов рабочего пространства по 16 крейтам (`cargo test --workspace`) без единой ошибки.
+  - **M6.3 (Релизная сборка)**: Чистая сборка релизного бинарника `cargo build --release -p vks-server` (размер 9.5 МБ, LTO thin, opt-level 3, codegen-units 1, strip symbols).
+  - **M6.4 (Live Smoke Verification)**: Подтверждена работоспособность сервера в боевом режиме: HTTP 200 на `/healthz`, `/readyz`, `/api/v3/gateways/status`, `/api/v3/cluster/status`, `/pnm/`. Автоматический фоновый heartbeat кластера каждые 5с.
+  - **M6.5 (Синхронизация дорожной карты и документации)**: В `docs/DEVELOPMENT_PLAN.md` и `docs/progress/PROGRESS.md` все Фазы 0–8 переведены в статус `[x]` / `🟢 завершена` с фиксацией фактической архитектуры PROSTOR PNM UI (ADR-0027). Обновлён корневой `README.md`.
+  - **Ревью M6**: `Doc & Roadmap Auditor` — 9.7/10; `Server Runtime & Admin Auditor` — 9.8/10. Все замечания устранены, кодовая база и релизный артефакт полностью готовы к выпуску.
 
 ### [2026-10-17] Итерация 5.2 — Rework T-F1: ребренд PROSTOR интегрирован в рантайм PNM
 
