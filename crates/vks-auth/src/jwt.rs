@@ -99,14 +99,18 @@ impl JwtIssuer {
 
     /// Issue a token for `user_id`, optionally scoped to `room_id`.
     pub fn issue(&self, user_id: &str, room_id: Option<&str>) -> Result<String, JwtError> {
-        let now = now_unix();
-        let exp = now + self.config.ttl_secs;
+        self.issue_with_iat(user_id, room_id, now_unix())
+    }
+
+    /// Issue a token for `user_id` with an explicit `iat` timestamp.
+    pub fn issue_with_iat(&self, user_id: &str, room_id: Option<&str>, iat: i64) -> Result<String, JwtError> {
+        let exp = iat + self.config.ttl_secs;
         let claims = Claims {
             sub: user_id.to_string(),
             jti: Ulid::new().to_string(),
             room_id: room_id.map(str::to_string),
             exp,
-            iat: now,
+            iat,
             iss: Some(self.config.issuer.clone()),
         };
         jsonwebtoken::encode(&Header::new(jsonwebtoken::Algorithm::HS256), &claims, &self.encoding_key)

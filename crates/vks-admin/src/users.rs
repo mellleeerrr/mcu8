@@ -14,11 +14,27 @@ pub struct Users;
 impl Users {
     /// Создаёт пользователя (role из ADR-0022).
     pub fn create(state: &AppState, username: impl Into<String>, role: Role) -> UserRecord {
-        let id = UserId::new();
-        let record = UserRecord { id, username: username.into(), role, muted: false, deleted: false };
+        Self::create_with_id(state, UserId::new(), username, role)
+    }
+
+    /// Создаёт или обновляет пользователя с заданным [`UserId`] (идемпотентно).
+    pub fn create_with_id(state: &AppState, id: UserId, username: impl Into<String>, role: Role) -> UserRecord {
+        let name = username.into();
         let mut users = state.users.lock().expect("users store poisoned");
+        if let Some(existing) = users.get_mut(&id) {
+            existing.username = name.clone();
+            existing.role = role;
+            existing.deleted = false;
+            return existing.clone();
+        }
+        let record = UserRecord { id, username: name, role, muted: false, deleted: false };
         users.insert(id, record.clone());
         record
+    }
+
+    /// Регистрирует встроенного оператора с детерминированным UUID (идемпотентно).
+    pub fn bootstrap_operator(state: &AppState, username: impl Into<String>) -> UserRecord {
+        Self::create_with_id(state, UserId::bootstrap_operator(), username, Role::Operator)
     }
 
     /// Возвращает запись пользователя.

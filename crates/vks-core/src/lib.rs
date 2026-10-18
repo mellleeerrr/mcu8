@@ -32,7 +32,7 @@ pub mod track;
 pub mod transparency;
 
 // Re-exports for convenience (flat API).
-pub use participant::{Participant, ParticipantId, Permission, Permissions, Role, UserId};
+pub use participant::{Participant, ParticipantId, Permission, Permissions, Role, UserId, BOOTSTRAP_ADMIN_USER_ID};
 pub use ports::{
     // storage
     ApiKey,

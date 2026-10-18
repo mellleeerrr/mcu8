@@ -140,7 +140,7 @@ impl LocalDb {
             user.salt_hex = salt_hex;
             (id.clone(), user.clone())
         };
-        self.mark_password_changed(&id, now_unix_secs());
+        self.mark_password_changed(&id, now_unix_secs() + 1);
         Ok(updated)
     }
 

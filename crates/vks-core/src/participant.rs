@@ -94,10 +94,14 @@ impl UserId {
     }
 
     /// Возвращает внутренний [`Uuid`].
-    pub fn as_uuid(&self) -> &Uuid {
-        &self.0
+    /// Детерминированный идентификатор встроенного bootstrap-оператора.
+    pub fn bootstrap_operator() -> Self {
+        Self(Uuid::from_u128(1))
     }
 }
+
+/// Постоянный детерминированный строковый UUID встроенного bootstrap-оператора (admin).
+pub const BOOTSTRAP_ADMIN_USER_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 impl Default for UserId {
     fn default() -> Self {
@@ -121,9 +125,8 @@ impl std::str::FromStr for UserId {
 
 /// Роль участника (ADR-0022, RBAC matrix).
 ///
-/// Порядок убывания полномочий: `Operator` > `Moderator` >
-/// `Participant` > `Viewer`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+/// Порядок возрастания полномочий: `Viewer` < `Participant` < `Moderator` < `Operator`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     /// Полное управление сервером и всеми комнатами.
@@ -134,6 +137,18 @@ pub enum Role {
     Participant,
     /// Только наблюдение (подписка, без публикации).
     Viewer,
+}
+
+impl Ord for Role {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.level().cmp(&other.level())
+    }
+}
+
+impl PartialOrd for Role {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Role {

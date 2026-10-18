@@ -92,14 +92,18 @@ impl RoomHub {
         (rx, snapshot)
     }
 
-    /// Unregisters a participant from the room roster.
-    pub fn unregister_participant(&self, room_id: &RoomId, participant_id: &str) {
+    /// Unregisters a participant from the room roster, returning the remaining count if the room was found.
+    pub fn unregister_participant(&self, room_id: &RoomId, participant_id: &str) -> Option<usize> {
         let mut map = self.channels.write().expect("RoomHub lock poisoned");
         if let Some(entry) = map.get_mut(room_id) {
             entry.participants.remove(participant_id);
-            if entry.participants.is_empty() && entry.sender.receiver_count() == 0 {
+            let remaining = entry.participants.len();
+            if remaining == 0 && entry.sender.receiver_count() == 0 {
                 map.remove(room_id);
             }
+            Some(remaining)
+        } else {
+            None
         }
     }
 

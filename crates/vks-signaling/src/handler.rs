@@ -311,7 +311,6 @@ impl SignalingHandler {
             return vec![Envelope::error_reply(reply_to, "internal_error", &format!("left: {e}"), false)];
         }
         self.room_id = None;
-        self.participant_id = None;
         self.on_ack(reply_to)
     }
 

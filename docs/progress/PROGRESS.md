@@ -45,6 +45,12 @@
 ### [2026-10-18] Итерация 5.3 — Комплексная модернизация и устранение архитектурного долга MCU/SFU (Milestones M0–M6)
 
 #### Что сделано
+- **Пакет P0 (Критические исправления целостности, безопасности и ростера)**:
+  - **P0.1 (Operator Bootstrap ID)**: Детерминированный UUID оператора `BOOTSTRAP_ADMIN_USER_ID = "00000000-0000-0000-0000-000000000001"` и `UserId::bootstrap_operator()`, синхронизирующий `LocalDb` и `state.users` с поддержкой парсинга UUID во всех v1/v3 API.
+  - **P0.2 (API-key Scope Security & Role::Ord)**: Устранена инверсия привилегий в enum `Role`: явная реализация `Ord`/`PartialOrd` через `self.level()` (Viewer < Participant < Moderator < Operator), безопасный каскад ограничений `owner_role.min(...)` и отсечение ключей без валидных прав (включая `scopes: []`) с 403 Forbidden.
+  - **P0.3 (Unified Token Revocation & Anti-Race)**: Унифицированный метод валидации токенов `AppState::verify_token`, защищенный от таймстемп-гонки на секундном разрешении через опережающую установку `mark` в `LocalDb::set_password` и синхронизацию `iat` в `issue_token`. Защита эндпоинта WebRTC-сигналинга `/ws` от несанкционированного доступа деактивированных пользователей (403 Forbidden).
+  - **P0.4 (Frontend Dir Mounting & State Sync)**: Монтирование статики UI скорректировано на `client/pnm-frontend/deployed/pnm` в `configs/default.toml`, проброс `default_room_mode` и `server_name` в `AppState` (`mode.global_mode` и `settings`), вывод версии сборки при старте.
+  - **P0.5 (Roster Cleanup, Exactly-Once Disconnect & Anti-Zombie)**: Сохранение `participant_id` сессии при `LeaveRoom` в `vks-signaling`, учет членства через `current_membership: Option<(RoomId, String)>` с атомарным `.take()` в `vks-server`, возврат точного оставшегося количества участников `Option<usize>` из `RoomHub::unregister_participant`, дифференцированные коды причин `ParticipantLeft` (0 = штатный выход, 1 = таймаут/обрыв транспорта) и 15-секундный серверный keepalive ping.
 - **M0 & M1 (Форматирование, Базовый аудит и UI маршруты)**:
   - Приведение SDP к строгой спецификации RFC 8866 (`vks-signaling/src/sdp.rs`).
   - Добавлены REST-эндпоинты `/api/v3/ui/conferences/{id}` и `/video_layouts` (`vks-admin`).

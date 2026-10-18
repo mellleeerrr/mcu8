@@ -103,8 +103,12 @@ pub async fn jwt_auth_middleware(State(state): State<Arc<AppState>>, mut request
             owner_role
         } else if key_record.scopes.iter().any(|s| s == "write" || s == "moderator") {
             owner_role.min(Role::Moderator)
+        } else if key_record.scopes.iter().any(|s| s == "participant") {
+            owner_role.min(Role::Participant)
+        } else if key_record.scopes.iter().any(|s| s == "read" || s == "viewer") {
+            owner_role.min(Role::Viewer)
         } else {
-            Role::Viewer
+            return deny(StatusCode::FORBIDDEN, "forbidden", "api key has no valid scopes");
         };
 
         request.extensions_mut().insert(AuthContext {
@@ -117,7 +121,7 @@ pub async fn jwt_auth_middleware(State(state): State<Arc<AppState>>, mut request
     }
 
     // 2. JWT Bearer
-    let Some(issuer) = &state.jwt_issuer else {
+    let Some(_issuer) = &state.jwt_issuer else {
         return deny(
             StatusCode::SERVICE_UNAVAILABLE,
             "auth_unavailable",
@@ -136,11 +140,10 @@ pub async fn jwt_auth_middleware(State(state): State<Arc<AppState>>, mut request
         return deny(StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid Authorization header");
     };
 
-    let verified = match issuer.verify(token) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::debug!(error = %e, "jwt verification failed");
-            return deny(StatusCode::UNAUTHORIZED, "unauthorized", "invalid or expired token");
+    let verified = match state.verify_token(token) {
+        Some(v) => v,
+        None => {
+            return deny(StatusCode::UNAUTHORIZED, "unauthorized", "invalid, expired, or revoked token");
         }
     };
 

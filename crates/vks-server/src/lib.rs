@@ -147,7 +147,7 @@ async fn metrics_handler() -> Response {
 /// адаптер `/api/v3/ws`. Роль на этом шаге не проверяется: авторизация
 /// конкретных сигналинг-действий — зона FSM и следующих волн.
 async fn ws_handler(State(ctx): State<WsContext>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    let Some(issuer) = &ctx.state.jwt_issuer else {
+    let Some(_issuer) = &ctx.state.jwt_issuer else {
         return ws_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "auth_unavailable",
@@ -161,9 +161,17 @@ async fn ws_handler(State(ctx): State<WsContext>, headers: HeaderMap, ws: WebSoc
     let Some(token) = bearer else {
         return ws_error(StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid Authorization header");
     };
-    if let Err(e) = issuer.verify(token) {
-        tracing::debug!(error = %e, "ws jwt verification failed");
-        return ws_error(StatusCode::UNAUTHORIZED, "unauthorized", "invalid or expired token");
+    let Some(verified) = ctx.state.verify_token(token) else {
+        tracing::debug!("ws jwt verification failed or token revoked");
+        return ws_error(StatusCode::UNAUTHORIZED, "unauthorized", "invalid, expired, or revoked token");
+    };
+    if let Ok(users) = ctx.state.users.lock() {
+        if let Some(u) = users.values().find(|u| u.id.to_string() == verified.user_id || u.username == verified.user_id)
+        {
+            if u.deleted {
+                return ws_error(StatusCode::FORBIDDEN, "forbidden", "user account is deactivated");
+            }
+        }
     }
     // Транспортный потолок памяти на сообщение (см. MAX_WS_TRANSPORT_BYTES):
     // 64–256 КиБ — graceful close 4008 в handle_ws_socket, свыше — транспортный отсев.
@@ -196,14 +204,23 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
     let (mut sender, mut receiver) = socket.split();
     let mut handler = SignalingHandler::new(ctx.handler_config);
     let state = ctx.state;
-    let mut current_room: Option<vks_core::RoomId> = None;
+    let mut current_membership: Option<(vks_core::RoomId, String)> = None;
     let mut room_rx: Option<tokio::sync::broadcast::Receiver<vks_admin::hub::RoomBroadcastEvent>> = None;
+    let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ping_interval.tick().await;
     // Скользящее окно частоты сообщений (T1.2).
     let mut window_start = std::time::Instant::now();
     let mut window_count: usize = 0;
 
     'session: loop {
         tokio::select! {
+            _ = ping_interval.tick() => {
+                if let Err(e) = sender.send(Message::Ping(Vec::new().into())).await {
+                    warn!(error = %e, "failed to send server keepalive ping; closing");
+                    break 'session;
+                }
+            }
             // Fan-out push событий от других участников комнаты (Downlink)
             broadcast_res = async {
                 match &mut room_rx {
@@ -299,9 +316,32 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                             }
                                             found.unwrap_or_else(|| vks_admin::rooms::Rooms::create(&state, &name).id)
                                         };
-                                        current_room = Some(rid);
+                                        // Если клиент уже находился в другой комнате на этом сокете, вычищаем её
+                                        if let Some((old_rid, old_pid)) = current_membership.take() {
+                                            let _ = room_rx.take();
+                                            let rem_opt = state.room_hub.unregister_participant(&old_rid, &old_pid);
+                                            state.room_hub.unsubscribe(&old_rid);
+                                            let rem_count = rem_opt.unwrap_or(0);
+                                            vks_admin::rooms::Rooms::update(&state, &old_rid, None, None, Some(rem_count), None);
+                                            let left_msg = SignalingMessage {
+                                                msg_id: 0,
+                                                reply_to: 0,
+                                                payload: Some(Payload::ParticipantLeft(ParticipantLeft {
+                                                    participant_id: old_pid.clone(),
+                                                    reason: 0,
+                                                })),
+                                            };
+                                            let payload_bytes = Envelope::new(left_msg).encode();
+                                            state.room_hub.broadcast(&old_rid, Some(&old_pid), payload_bytes.into());
+                                            state.notify_admin("conferences:update", serde_json::json!({
+                                                "id": old_rid.to_string(),
+                                                "participants_count": rem_count
+                                            }));
+                                        }
 
                                         let pid_str = handler.participant_id().map(str::to_string).unwrap_or_default();
+                                        current_membership = Some((rid, pid_str.clone()));
+
                                         let p_snapshot = vks_admin::hub::ParticipantSnapshot {
                                             participant_id: pid_str.clone(),
                                             display_name: pid_str.clone(),
@@ -332,18 +372,18 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                         vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(count), None);
 
                                         // Рассылаем ParticipantJoined другим участникам комнаты
-                                        if let Some(pid) = handler.participant_id() {
+                                        if !pid_str.is_empty() {
                                             let joined_msg = SignalingMessage {
                                                 msg_id: 0,
                                                 reply_to: 0,
                                                 payload: Some(Payload::ParticipantJoined(ParticipantJoined {
-                                                    participant_id: pid.to_string(),
-                                                    display_name: pid.to_string(),
+                                                    participant_id: pid_str.clone(),
+                                                    display_name: pid_str.clone(),
                                                     is_recorder: false,
                                                 })),
                                             };
                                             let payload_bytes = Envelope::new(joined_msg).encode();
-                                            state.room_hub.broadcast(&rid, Some(pid), payload_bytes.into());
+                                            state.room_hub.broadcast(&rid, Some(&pid_str), payload_bytes.into());
                                         }
 
                                         // Уведомляем админский WebSocket (/api/v3/ws)
@@ -353,34 +393,28 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                         }));
                                     }
                                 } else if left_ok {
-                                    if let Some(rid) = current_room.take() {
-                                        if let Some(pid) = handler.participant_id() {
-                                            state.room_hub.unregister_participant(&rid, pid);
-                                        }
+                                    if let Some((rid, pid_str)) = current_membership.take() {
                                         room_rx = None;
+                                        let rem_opt = state.room_hub.unregister_participant(&rid, &pid_str);
                                         state.room_hub.unsubscribe(&rid);
-                                        if let Some(room) = vks_admin::rooms::Rooms::get(&state, &rid) {
-                                            let new_count = room.participants.saturating_sub(1);
-                                            vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(new_count), None);
+                                        let new_count = rem_opt.unwrap_or(0);
+                                        vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(new_count), None);
 
-                                            if let Some(pid) = handler.participant_id() {
-                                                let left_msg = SignalingMessage {
-                                                    msg_id: 0,
-                                                    reply_to: 0,
-                                                    payload: Some(Payload::ParticipantLeft(ParticipantLeft {
-                                                        participant_id: pid.to_string(),
-                                                        reason: 0,
-                                                    })),
-                                                };
-                                                let payload_bytes = Envelope::new(left_msg).encode();
-                                                state.room_hub.broadcast(&rid, Some(pid), payload_bytes.into());
-                                            }
+                                        let left_msg = SignalingMessage {
+                                            msg_id: 0,
+                                            reply_to: 0,
+                                            payload: Some(Payload::ParticipantLeft(ParticipantLeft {
+                                                participant_id: pid_str.clone(),
+                                                reason: 0,
+                                            })),
+                                        };
+                                        let payload_bytes = Envelope::new(left_msg).encode();
+                                        state.room_hub.broadcast(&rid, Some(&pid_str), payload_bytes.into());
 
-                                            state.notify_admin("conferences:update", serde_json::json!({
-                                                "id": rid.to_string(),
-                                                "participants_count": new_count
-                                            }));
-                                        }
+                                        state.notify_admin("conferences:update", serde_json::json!({
+                                            "id": rid.to_string(),
+                                            "participants_count": new_count
+                                        }));
                                     }
                                 }
 
@@ -429,36 +463,30 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
     }
 
     drop(room_rx);
-    if let Some(rid) = current_room.take() {
-        if let Some(pid) = handler.participant_id() {
-            state.room_hub.unregister_participant(&rid, pid);
-        }
+    if let Some((rid, pid_str)) = current_membership.take() {
+        let rem_opt = state.room_hub.unregister_participant(&rid, &pid_str);
         state.room_hub.unsubscribe(&rid);
-        if let Some(room) = vks_admin::rooms::Rooms::get(&state, &rid) {
-            let new_count = room.participants.saturating_sub(1);
-            vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(new_count), None);
+        let new_count = rem_opt.unwrap_or(0);
+        vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(new_count), None);
 
-            if let Some(pid) = handler.participant_id() {
-                let left_msg = SignalingMessage {
-                    msg_id: 0,
-                    reply_to: 0,
-                    payload: Some(Payload::ParticipantLeft(ParticipantLeft {
-                        participant_id: pid.to_string(),
-                        reason: 0,
-                    })),
-                };
-                let payload_bytes = Envelope::new(left_msg).encode();
-                state.room_hub.broadcast(&rid, Some(pid), payload_bytes.into());
-            }
+        let left_msg = SignalingMessage {
+            msg_id: 0,
+            reply_to: 0,
+            payload: Some(Payload::ParticipantLeft(ParticipantLeft {
+                participant_id: pid_str.clone(),
+                reason: 1, // Transport disconnect / timeout
+            })),
+        };
+        let payload_bytes = Envelope::new(left_msg).encode();
+        state.room_hub.broadcast(&rid, Some(&pid_str), payload_bytes.into());
 
-            state.notify_admin(
-                "conferences:update",
-                serde_json::json!({
-                    "id": rid.to_string(),
-                    "participants_count": new_count
-                }),
-            );
-        }
+        state.notify_admin(
+            "conferences:update",
+            serde_json::json!({
+                "id": rid.to_string(),
+                "participants_count": new_count
+            }),
+        );
     }
 }
 

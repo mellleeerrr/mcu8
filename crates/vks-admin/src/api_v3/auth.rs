@@ -170,18 +170,7 @@ pub async fn fail_closed_middleware(State(state): State<SharedState>, mut reques
 /// Общий путь для HTTP-middleware и WS-сообщений (§4.4: токен в каждом
 /// ws-сообщении). `None` — токен недействителен по любой причине.
 pub(crate) fn verify_access_token(state: &AppState, token: &str) -> Option<VerifiedJwt> {
-    if token.is_empty() {
-        return None;
-    }
-    let issuer = state.jwt_issuer.as_ref()?;
-    let verified = issuer.verify(token).ok()?;
-    if let Some(db) = &state.local_db {
-        if verified.iat < db.password_changed_at(&verified.user_id) {
-            // Токен выдан до смены пароля — инвалидирован (§4.3).
-            return None;
-        }
-    }
-    Some(verified)
+    state.verify_token(token)
 }
 
 /// Проверка `Authorization: Bearer <token>` (§4.3) + инвалидация токенов,
@@ -315,7 +304,9 @@ fn issue_token(state: &AppState, user_id: &str) -> Response {
     let Some(issuer) = &state.jwt_issuer else {
         return error_json(503, "Authentication is not configured");
     };
-    match issuer.issue(user_id, None) {
+    let min_iat = state.local_db.as_ref().map(|db| db.password_changed_at(user_id)).unwrap_or(0);
+    let iat = now_unix().max(min_iat);
+    match issuer.issue_with_iat(user_id, None, iat) {
         Ok(token) => Json(serde_json::json!({ "token": token })).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "api_v3: token issue failed");

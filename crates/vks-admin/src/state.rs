@@ -230,6 +230,25 @@ impl AppState {
         self.room_hub.broadcast(room, sender_pid, payload);
     }
 
+    /// Унифицированная валидация JWT access-токена (fail-closed, ADR-0009 / ADR-0021).
+    ///
+    /// Проверяет:
+    /// 1. Подпись, `exp` и `issuer` через `jwt_issuer`.
+    /// 2. Инвалидацию по смене пароля (`iat <= password_changed_at`).
+    pub fn verify_token(&self, token: &str) -> Option<vks_auth::jwt::VerifiedJwt> {
+        if token.is_empty() {
+            return None;
+        }
+        let issuer = self.jwt_issuer.as_ref()?;
+        let verified = issuer.verify(token).ok()?;
+        if let Some(db) = &self.local_db {
+            if verified.iat < db.password_changed_at(&verified.user_id) {
+                return None;
+            }
+        }
+        Some(verified)
+    }
+
     /// Добавляет доверенную запись в аудит-лог с серверной временной меткой.
     pub fn record_audit_entry(
         &self,

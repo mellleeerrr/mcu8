@@ -18,7 +18,7 @@ admin_login = "admin"
 admin_password = "admin_password"
 
 # Directory containing static files for PNM UI (ADR-0027)
-frontend_dir = "client/pnm-frontend/dist"
+frontend_dir = "client/pnm-frontend/deployed/pnm"
 
 # Storage & Persistence (PostgreSQL, SQLite or Memory)
 database_url = "sqlite::memory:"

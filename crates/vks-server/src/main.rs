@@ -64,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     info!(
+        version = env!("CARGO_PKG_VERSION"),
         server_name = %config.server_name,
         listen_addr = %config.listen_addr,
         room_mode = %config.default_room_mode,
@@ -134,8 +135,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // LocalDb-оператор (dev-дефолт admin/admin; прод — VKS_ADMIN_PASSWORD).
     let local_db = Arc::new(LocalDb::new());
-    match local_db.register("u-admin", &config.admin_login, &config.admin_password) {
-        Ok(_) => info!(login = %config.admin_login, "local_db operator registered"),
+    match local_db.register(vks_core::BOOTSTRAP_ADMIN_USER_ID, &config.admin_login, &config.admin_password) {
+        Ok(_) => {
+            info!(login = %config.admin_login, id = vks_core::BOOTSTRAP_ADMIN_USER_ID, "local_db operator registered")
+        }
         Err(e) => warn!(error = %e, "local_db operator bootstrap skipped"),
     }
     if config.admin_password == "admin" {
@@ -162,8 +165,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     admin_state.auth_provider = Some(auth_provider);
     admin_state.local_db = Some(local_db);
-    // `ui:users:search` (WS §4.4) читает admin-хранилище users — держим оператора и там.
-    vks_admin::users::Users::create(&admin_state, &config.admin_login, vks_core::Role::Operator);
+    // Держим оператора в admin-хранилище users с детерминированным UserId::bootstrap_operator().
+    vks_admin::users::Users::bootstrap_operator(&admin_state, &config.admin_login);
+
+    let initial_mode = match config.default_room_mode.to_lowercase().as_str() {
+        "mcu" => vks_core::RoomMode::Mcu,
+        _ => vks_core::RoomMode::Sfu,
+    };
+    admin_state.mode.lock().unwrap().global_mode = initial_mode;
+    {
+        let mut s = admin_state.settings.lock().unwrap();
+        s.name = config.server_name.clone();
+        s.default_mode = initial_mode;
+    }
 
     if let Err(e) = admin_state.sync_from_storage().await {
         warn!(error = %e, "warning during storage synchronization");
