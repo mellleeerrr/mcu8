@@ -44,6 +44,8 @@ pub struct Claims {
     pub iat: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iss: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aud: Option<String>,
     /// Monotonic generation counter to prevent same-second revocation race (M1.2).
     #[serde(default)]
     pub generation: u64,
@@ -57,6 +59,7 @@ pub struct VerifiedJwt {
     pub room_id: Option<String>,
     pub exp: i64,
     pub iat: i64,
+    pub aud: Option<String>,
     pub generation: u64,
 }
 
@@ -103,16 +106,21 @@ impl JwtIssuer {
 
     /// Issue a token for `user_id`, optionally scoped to `room_id`.
     pub fn issue(&self, user_id: &str, room_id: Option<&str>) -> Result<String, JwtError> {
-        self.issue_with_gen_and_iat(user_id, room_id, 0, now_unix())
+        self.issue_with_gen_and_iat(user_id, room_id, 1, now_unix())
     }
 
     /// Issue a token for `user_id` with an explicit `iat` timestamp.
     pub fn issue_with_iat(&self, user_id: &str, room_id: Option<&str>, iat: i64) -> Result<String, JwtError> {
-        self.issue_with_gen_and_iat(user_id, room_id, 0, iat)
+        self.issue_with_gen_and_iat(user_id, room_id, 1, iat)
     }
 
     /// Issue a token for `user_id` with monotonic generation counter (M1.2).
-    pub fn issue_with_generation(&self, user_id: &str, room_id: Option<&str>, generation: u64) -> Result<String, JwtError> {
+    pub fn issue_with_generation(
+        &self,
+        user_id: &str,
+        room_id: Option<&str>,
+        generation: u64,
+    ) -> Result<String, JwtError> {
         self.issue_with_gen_and_iat(user_id, room_id, generation, now_unix())
     }
 
@@ -132,6 +140,7 @@ impl JwtIssuer {
             exp,
             iat,
             iss: Some(self.config.issuer.clone()),
+            aud: None,
             generation,
         };
         jsonwebtoken::encode(&Header::new(jsonwebtoken::Algorithm::HS256), &claims, &self.encoding_key)
@@ -148,11 +157,12 @@ impl JwtIssuer {
         validation.leeway = 0;
         let data = jsonwebtoken::decode::<Claims>(token, &self.decoding_key, &validation)
             .map_err(|e| classify_error(e, &self.decoding_key, token))?;
-        // Validate `iss` ourselves (jsonwebtoken 9 has no issuer field).
-        if let Some(iss) = &data.claims.iss {
-            if iss != &self.config.issuer {
+        // Validate `iss`: must be present and match config.issuer (M1.2)
+        match &data.claims.iss {
+            Some(iss) if iss == &self.config.issuer => {}
+            _ => {
                 let jti = data.claims.jti.clone();
-                return Err(JwtError::Validation(jti, "issuer mismatch".to_string()));
+                return Err(JwtError::Validation(jti, "missing or invalid issuer".to_string()));
             }
         }
         let claims = data.claims;
@@ -162,6 +172,7 @@ impl JwtIssuer {
             room_id: claims.room_id,
             exp: claims.exp,
             iat: claims.iat,
+            aud: claims.aud,
             generation: claims.generation,
         })
     }
@@ -300,5 +311,33 @@ mod tests {
         assert_eq!(v.user_id, "operator-1");
         assert_eq!(v.room_id.as_deref(), Some("room-42"));
         assert_eq!(v.generation, 7);
+    }
+
+    #[test]
+    fn missing_or_wrong_issuer_rejected() {
+        let a = issuer("secret");
+        let claims = Claims {
+            sub: "user-1".into(),
+            jti: "jti-1".into(),
+            room_id: None,
+            exp: now_unix() + 300,
+            iat: now_unix(),
+            iss: None, // missing issuer!
+            aud: None,
+            generation: 1,
+        };
+        let token_missing_iss = jsonwebtoken::encode(
+            &Header::new(jsonwebtoken::Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(b"secret"),
+        )
+        .unwrap();
+        let err = a.verify(&token_missing_iss).unwrap_err();
+        assert!(matches!(err, JwtError::Validation(_, ref msg) if msg.contains("issuer")));
+
+        let b = JwtIssuer::new(JwtConfig { secret: "secret".into(), ttl_secs: 900, issuer: "other-iss".into() });
+        let token_wrong_iss = b.issue("user-1", None).unwrap();
+        let err2 = a.verify(&token_wrong_iss).unwrap_err();
+        assert!(matches!(err2, JwtError::Validation(_, ref msg) if msg.contains("issuer")));
     }
 }

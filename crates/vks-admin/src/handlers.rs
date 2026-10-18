@@ -146,7 +146,15 @@ fn extract_actor(auth: &Option<axum::extract::Extension<crate::auth_middleware::
     auth.as_ref().map(|a| a.subject.clone()).unwrap_or_else(|| "system".to_string())
 }
 
-fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
+fn extract_client_ip(
+    headers: &axum::http::HeaderMap,
+    auth: &Option<axum::extract::Extension<crate::auth_middleware::AuthContext>>,
+) -> String {
+    if let Some(a) = auth {
+        if !a.client_ip.is_empty() && a.client_ip != "unknown" {
+            return a.client_ip.clone();
+        }
+    }
     if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
         if let Some(first) = forwarded.split(',').next() {
             let trimmed = first.trim();
@@ -273,7 +281,7 @@ pub async fn create_room(
     match Rooms::create_async(&state, body.name).await {
         Ok(room) => {
             let actor = extract_actor(&auth);
-            let ip = extract_client_ip(&headers);
+            let ip = extract_client_ip(&headers, &auth);
             state.record_audit_entry(actor, "create_room", Some(room_name), ip);
             json_ok(room)
         }
@@ -317,7 +325,7 @@ pub async fn update_room(
     match Rooms::update_async(&state, &id, body.name, body.mode, body.participants, body.bitrate_kbps).await {
         Ok(Some(record)) => {
             let actor = extract_actor(&auth);
-            let ip = extract_client_ip(&headers);
+            let ip = extract_client_ip(&headers, &auth);
             state.record_audit_entry(actor, "update_room", Some(record.name.clone()), ip);
             json_ok(record)
         }
@@ -344,7 +352,7 @@ pub async fn delete_room(
     match Rooms::delete_async(&state, &id).await {
         Ok(true) => {
             let actor = extract_actor(&auth);
-            let ip = extract_client_ip(&headers);
+            let ip = extract_client_ip(&headers, &auth);
             state.record_audit_entry(actor, "delete_room", Some(id_str), ip);
             StatusCode::NO_CONTENT.into_response()
         }
@@ -420,7 +428,7 @@ pub async fn create_user(
     match Users::create_async(&state, body.username, body.role).await {
         Ok(user) => {
             let actor = extract_actor(&auth);
-            let ip = extract_client_ip(&headers);
+            let ip = extract_client_ip(&headers, &auth);
             state.record_audit_entry(actor, "create_user", Some(username), ip);
             json_ok(user)
         }
@@ -464,7 +472,7 @@ pub async fn update_user(
     match Users::update_async(&state, &id, body.username, body.role).await {
         Ok(Some(record)) => {
             let actor = extract_actor(&auth);
-            let ip = extract_client_ip(&headers);
+            let ip = extract_client_ip(&headers, &auth);
             state.record_audit_entry(actor, "update_user", None, ip);
             json_ok(record)
         }
@@ -491,7 +499,7 @@ pub async fn delete_user(
     match Users::delete_async(&state, &id).await {
         Ok(true) => {
             let actor = extract_actor(&auth);
-            let ip = extract_client_ip(&headers);
+            let ip = extract_client_ip(&headers, &auth);
             state.record_audit_entry(actor, "delete_user", None, ip);
             StatusCode::NO_CONTENT.into_response()
         }
@@ -537,7 +545,7 @@ pub async fn set_settings(
 ) -> Response {
     let res = SettingsService::set(&state, body.settings.clone());
     let actor = extract_actor(&auth);
-    let ip = extract_client_ip(&headers);
+    let ip = extract_client_ip(&headers, &auth);
     state.record_audit_entry(actor, "set_settings", None, ip);
     json_ok(res)
 }
@@ -552,10 +560,10 @@ pub async fn record_audit(
     let mut entry = body.entry;
     // Strict server anti-spoofing: server timestamp is unconditionally authoritative
     entry.ts_ms = crate::state::now_unix_ms();
-    if let Some(axum::extract::Extension(ctx)) = auth {
-        entry.user = ctx.subject;
+    if let Some(axum::extract::Extension(ctx)) = auth.as_ref() {
+        entry.user = ctx.subject.clone();
     }
-    let client_ip = extract_client_ip(&headers);
+    let client_ip = extract_client_ip(&headers, &auth);
     if entry.ip.trim().is_empty() || client_ip != "127.0.0.1" {
         entry.ip = client_ip;
     }
@@ -579,13 +587,7 @@ pub async fn list_audit(State(state): State<SharedState>, Query(query): Query<Au
         if let Ok(entries) = storage.list_audit().await {
             let mut temp_log = crate::audit::AuditLog::new();
             for e in entries {
-                temp_log.record(AuditEntry {
-                    ts_ms: e.ts_ms,
-                    user: e.user,
-                    action: e.action,
-                    room: e.room,
-                    ip: e.ip,
-                });
+                temp_log.record(AuditEntry { ts_ms: e.ts_ms, user: e.user, action: e.action, room: e.room, ip: e.ip });
             }
             let entries: Vec<AuditEntry> = temp_log.filter(&filter).into_iter().cloned().collect();
             return json_ok(entries);
@@ -603,13 +605,7 @@ pub async fn export_audit(State(state): State<SharedState>, Query(query): Query<
         if let Ok(entries) = storage.list_audit().await {
             let mut temp_log = crate::audit::AuditLog::new();
             for e in entries {
-                temp_log.record(AuditEntry {
-                    ts_ms: e.ts_ms,
-                    user: e.user,
-                    action: e.action,
-                    room: e.room,
-                    ip: e.ip,
-                });
+                temp_log.record(AuditEntry { ts_ms: e.ts_ms, user: e.user, action: e.action, room: e.room, ip: e.ip });
             }
             let csv = temp_log.export_csv(&filter);
             return (StatusCode::OK, [(header::CONTENT_TYPE, "text/csv; charset=utf-8")], csv).into_response();

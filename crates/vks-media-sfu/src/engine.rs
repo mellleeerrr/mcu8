@@ -182,15 +182,25 @@ impl SfuEngine {
         }
     }
 
-    /// Поиск трека по SSRC.
+    /// Поиск трека по SSRC в конкретной комнате.
+    pub fn resolve_ssrc_in_room(&self, room: RoomId, ssrc: u32) -> Option<(ParticipantId, TrackId)> {
+        let g = self.rooms.lock().unwrap();
+        g.get(&room).and_then(|r| r.ssrc_to_track.get(&ssrc).copied())
+    }
+
+    /// Поиск трека по SSRC (возвращает Some, только если SSRC уникален на сервере).
     pub fn resolve_ssrc(&self, ssrc: u32) -> Option<(RoomId, ParticipantId, TrackId)> {
         let g = self.rooms.lock().unwrap();
+        let mut found = None;
         for (&room_id, r) in g.iter() {
             if let Some(&(p_id, t_id)) = r.ssrc_to_track.get(&ssrc) {
-                return Some((room_id, p_id, t_id));
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((room_id, p_id, t_id));
             }
         }
-        None
+        found
     }
 
     /// Маршрутизация входящего UDP пакета подписчикам с поддержкой symmetric RTP.
@@ -210,7 +220,17 @@ impl SfuEngine {
             let g = self.rooms.lock().unwrap();
             if let Some(r) = g.get(&r_id) {
                 if let Some(s) = ssrc {
-                    r.ssrc_to_track.get(&s).map(|&(_, t_id)| (r_id, p_id, t_id))
+                    if let Some(&(registered_pub, t_id)) = r.ssrc_to_track.get(&s) {
+                        // Anti-spoofing within the room: verify sender p_id owns this SSRC
+                        if registered_pub == p_id {
+                            Some((r_id, p_id, t_id))
+                        } else {
+                            // Spoofing attempt: drop immediately
+                            return out;
+                        }
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -218,18 +238,33 @@ impl SfuEngine {
                 None
             }
         } else if let Some(ssrc_val) = ssrc {
+            // Unknown src: only allow if this SSRC uniquely exists in exactly ONE room across the server,
+            // preventing cross-room media leaks.
             let g = self.rooms.lock().unwrap();
-            g.iter().find_map(|(&r_id, r)| {
-                r.ssrc_to_track.get(&ssrc_val).map(|&(p_id, t_id)| (r_id, p_id, t_id))
-            })
+            let mut matches = Vec::new();
+            for (&r_id, r) in g.iter() {
+                if let Some(&(p_id, t_id)) = r.ssrc_to_track.get(&ssrc_val) {
+                    matches.push((r_id, p_id, t_id));
+                }
+            }
+            if matches.len() == 1 {
+                Some(matches[0])
+            } else {
+                None
+            }
         } else {
             None
         };
 
         let (room_id, pub_id, track_id) = if let Some(info) = target_info {
-            // Symmetric RTP auto-learning: обновляем SocketAddr источника ТОЛЬКО при реальной смене
-            if self.get_endpoint(info.0, info.1) != Some(src) {
+            // Anti-hijacking: only auto-learn endpoint if the publisher does NOT already have an active endpoint,
+            // or if the packet came from the already known address.
+            let current_ep = self.get_endpoint(info.0, info.1);
+            if current_ep.is_none() {
                 self.register_endpoint(info.0, info.1, src);
+            } else if current_ep != Some(src) && known_src.is_none() {
+                // An unknown source tried to overwrite an already-bound publisher's endpoint! Drop!
+                return out;
             }
             info
         } else if let Some((r_id, p_id)) = known_src {
@@ -239,6 +274,11 @@ impl SfuEngine {
                     if let Some(first) = tracks.first() {
                         let t_id = first.id;
                         if let Some(s) = ssrc {
+                            if let Some(&(registered_pub, _)) = r.ssrc_to_track.get(&s) {
+                                if registered_pub != p_id {
+                                    return out;
+                                }
+                            }
                             r.ssrc_to_track.insert(s, (p_id, t_id));
                         }
                         found = Some((r_id, p_id, t_id));
@@ -345,8 +385,14 @@ impl MediaEngine for SfuEngine {
 
         // Admission quota check: max_participants
         if let Some(max_p) = state.caps.max_participants {
-            let is_existing = state.publisher_tracks.contains_key(&publisher) || state.subscribers.contains_key(&publisher);
-            let total_unique = state.publisher_tracks.keys().chain(state.subscribers.keys()).collect::<std::collections::BTreeSet<_>>().len() as u32;
+            let is_existing =
+                state.publisher_tracks.contains_key(&publisher) || state.subscribers.contains_key(&publisher);
+            let total_unique = state
+                .publisher_tracks
+                .keys()
+                .chain(state.subscribers.keys())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len() as u32;
             if total_unique >= max_p && !is_existing {
                 return Err(MediaEngineError::Other(format!("room capacity exceeded: max {} participants", max_p)));
             }
@@ -411,8 +457,14 @@ impl MediaEngine for SfuEngine {
 
         // Admission quota check: max_participants
         if let Some(max_p) = state.caps.max_participants {
-            let is_existing = state.subscribers.contains_key(&subscriber) || state.publisher_tracks.contains_key(&subscriber);
-            let total_unique = state.subscribers.keys().chain(state.publisher_tracks.keys()).collect::<std::collections::BTreeSet<_>>().len() as u32;
+            let is_existing =
+                state.subscribers.contains_key(&subscriber) || state.publisher_tracks.contains_key(&subscriber);
+            let total_unique = state
+                .subscribers
+                .keys()
+                .chain(state.publisher_tracks.keys())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len() as u32;
             if total_unique >= max_p && !is_existing {
                 return Err(MediaEngineError::Other(format!("room capacity exceeded: max {} participants", max_p)));
             }
@@ -854,6 +906,68 @@ mod tests {
         assert_eq!(plis[0].0, pub_src);
         assert_eq!(plis[0].1.len(), 12);
     }
+
+    #[tokio::test]
+    async fn test_sfu_engine_rejects_ssrc_spoofing_and_hijacking() {
+        let e = SfuEngine::new();
+        let rid1 = RoomId::from_uuid("30000000-0000-0000-0000-000000000001".parse().unwrap());
+        let rid2 = RoomId::from_uuid("30000000-0000-0000-0000-000000000002".parse().unwrap());
+        e.create_room(cfg(rid1)).await.unwrap();
+        e.create_room(cfg(rid2)).await.unwrap();
+
+        let pub1 = p(1);
+        let pub2 = p(2);
+        let sub1 = p(3);
+
+        let vt1 = video_track(pub1);
+        let vt2 = video_track(pub2);
+
+        e.add_publisher(rid1, pub1, vec![vt1.clone()]).await.unwrap();
+        e.add_publisher(rid1, pub2, vec![vt2.clone()]).await.unwrap();
+        e.add_subscriber(rid1, sub1, sub_req()).await.unwrap();
+
+        let sub_addr: SocketAddr = "127.0.0.1:40002".parse().unwrap();
+        e.register_endpoint(rid1, sub1, sub_addr);
+
+        let pub1_addr: SocketAddr = "192.168.1.10:50001".parse().unwrap();
+        e.register_endpoint(rid1, pub1, pub1_addr);
+
+        let ssrc1 = 0x11112222u32;
+        e.register_ssrc(rid1, pub1, vt1.id, ssrc1);
+
+        let mut rtp1 = vec![0x80, 0x60, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00];
+        rtp1.extend_from_slice(&ssrc1.to_be_bytes());
+        rtp1.extend_from_slice(&[10, 20, 30, 40]);
+
+        // 1. Legitimate packet from pub1_addr reaches sub_addr
+        let routed = e.route_udp_packet(pub1_addr, Bytes::copy_from_slice(&rtp1));
+        assert_eq!(routed.len(), 1);
+
+        // 2. Anti-hijacking: Rogue unknown IP tries to send packet with pub1's SSRC -> dropped!
+        let rogue_addr: SocketAddr = "203.0.113.99:6666".parse().unwrap();
+        let routed_rogue = e.route_udp_packet(rogue_addr, Bytes::copy_from_slice(&rtp1));
+        assert_eq!(routed_rogue.len(), 0);
+        // Original endpoint unchanged
+        assert_eq!(e.get_endpoint(rid1, pub1), Some(pub1_addr));
+
+        // 3. Anti-spoofing within same room: pub2 sends RTP with pub1's SSRC -> dropped!
+        let pub2_addr: SocketAddr = "192.168.1.20:50002".parse().unwrap();
+        e.register_endpoint(rid1, pub2, pub2_addr);
+        let routed_spoof = e.route_udp_packet(pub2_addr, Bytes::copy_from_slice(&rtp1));
+        assert_eq!(routed_spoof.len(), 0);
+
+        // 4. Cross-room collision: register the SAME SSRC in rid2
+        let pub3 = p(4);
+        let vt3 = video_track(pub3);
+        e.add_publisher(rid2, pub3, vec![vt3.clone()]).await.unwrap();
+        e.register_ssrc(rid2, pub3, vt3.id, ssrc1);
+
+        // Unknown source with ambiguous colliding SSRC across 2 rooms is dropped
+        let unknown_src: SocketAddr = "10.0.0.99:9999".parse().unwrap();
+        let routed_ambiguous = e.route_udp_packet(unknown_src, Bytes::copy_from_slice(&rtp1));
+        assert_eq!(routed_ambiguous.len(), 0);
+        assert_eq!(e.resolve_ssrc(ssrc1), None); // None due to collision
+        assert_eq!(e.resolve_ssrc_in_room(rid1, ssrc1), Some((pub1, vt1.id)));
+        assert_eq!(e.resolve_ssrc_in_room(rid2, ssrc1), Some((pub3, vt3.id)));
+    }
 }
-
-

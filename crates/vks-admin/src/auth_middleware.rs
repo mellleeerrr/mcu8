@@ -46,6 +46,7 @@ pub struct AuthContext {
     pub scopes: Vec<String>,
     pub room_scope: Option<String>,
     pub generation: u64,
+    pub client_ip: String,
 }
 
 /// Middleware валидации JWT Bearer-токена и API-ключей.
@@ -53,13 +54,31 @@ pub struct AuthContext {
 /// Fail-closed (ADR-0009, ADR-0021): если auth не сконфигурирован,
 /// возвращает 503 Service Unavailable, исключая несанкционированный доступ.
 pub async fn jwt_auth_middleware(State(state): State<Arc<AppState>>, mut request: Request, next: Next) -> Response {
+    let ip = if let Some(axum::extract::ConnectInfo(addr)) =
+        request.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+    {
+        addr.ip().to_string()
+    } else if let Some(fwd) = request.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        fwd.split(',')
+            .next()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "127.0.0.1".to_string())
+    } else if let Some(real) = request.headers().get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        let trimmed = real.trim();
+        if !trimmed.is_empty() {
+            trimmed.to_string()
+        } else {
+            "127.0.0.1".to_string()
+        }
+    } else {
+        "127.0.0.1".to_string()
+    };
+
     // 1. Проверяем API-ключ в X-Api-Key или Authorization: Bearer vks_...
-    let api_key_candidate = request
-        .headers()
-        .get("x-api-key")
-        .and_then(|h| h.to_str().ok())
-        .map(str::trim)
-        .or_else(|| {
+    let api_key_candidate =
+        request.headers().get("x-api-key").and_then(|h| h.to_str().ok()).map(str::trim).or_else(|| {
             let auth = request.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
             let (scheme, token) = auth.split_once(' ')?;
             if scheme.eq_ignore_ascii_case("bearer") && token.trim().starts_with(vks_auth::api_key::KEY_PREFIX) {
@@ -124,6 +143,7 @@ pub async fn jwt_auth_middleware(State(state): State<Arc<AppState>>, mut request
             scopes: key_record.scopes,
             room_scope: None,
             generation: 0,
+            client_ip: ip,
         });
         return next.run(request).await;
     }
@@ -155,8 +175,16 @@ pub async fn jwt_auth_middleware(State(state): State<Arc<AppState>>, mut request
         }
     };
 
-    let role = crate::users::Users::resolve_role(&state, &verified.user_id)
-        .unwrap_or(Role::Viewer);
+    let is_deleted = if let Ok(users) = state.users.lock() {
+        users.values().any(|u| (u.id.to_string() == verified.user_id || u.username == verified.user_id) && u.deleted)
+    } else {
+        false
+    };
+    if is_deleted {
+        return deny(StatusCode::FORBIDDEN, "forbidden", "user account is deactivated");
+    }
+
+    let role = crate::users::Users::resolve_role(&state, &verified.user_id).unwrap_or(Role::Viewer);
 
     request.extensions_mut().insert(AuthContext {
         subject: verified.user_id.clone(),
@@ -165,6 +193,7 @@ pub async fn jwt_auth_middleware(State(state): State<Arc<AppState>>, mut request
         scopes: vec!["*".into()],
         room_scope: verified.room_id.clone(),
         generation: verified.generation,
+        client_ip: ip,
     });
     request.extensions_mut().insert(verified);
     next.run(request).await
@@ -241,6 +270,20 @@ pub async fn v1_rbac_middleware(State(state): State<Arc<AppState>>, request: Req
             "forbidden",
             &format!("role '{}' is not allowed on this endpoint (requires '{}')", role.as_str(), required.as_str()),
         );
+    }
+
+    if let Some(ctx) = request.extensions().get::<AuthContext>() {
+        if let Some(ref scope) = ctx.room_scope {
+            let path = request.uri().path();
+            if path.starts_with("/api/v1/rooms") {
+                let rest = path.strip_prefix("/api/v1/rooms").unwrap_or("");
+                let rest = rest.strip_prefix('/').unwrap_or("");
+                let target_room = rest.split('/').next().unwrap_or("");
+                if target_room.is_empty() || !target_room.eq_ignore_ascii_case(scope) {
+                    return deny(StatusCode::FORBIDDEN, "forbidden", "token room scope mismatch");
+                }
+            }
+        }
     }
 
     next.run(request).await
@@ -508,12 +551,8 @@ mod tests {
         let owner = user.id;
 
         // Key with read-only scope
-        let core_key = vks_core::ports::storage::ApiKey {
-            id: hash.clone(),
-            scopes: vec!["read".into()],
-            owner,
-            revoked: false,
-        };
+        let core_key =
+            vks_core::ports::storage::ApiKey { id: hash.clone(), scopes: vec!["read".into()], owner, revoked: false };
         storage.upsert_api_key(&core_key).await.unwrap();
 
         let app = rbac_app(Arc::new(state));
@@ -539,12 +578,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
         // Revoke key -> 401 UNAUTHORIZED
-        let revoked_key = vks_core::ports::storage::ApiKey {
-            id: hash,
-            scopes: vec!["read".into()],
-            owner,
-            revoked: true,
-        };
+        let revoked_key =
+            vks_core::ports::storage::ApiKey { id: hash, scopes: vec!["read".into()], owner, revoked: true };
         storage.upsert_api_key(&revoked_key).await.unwrap();
         let req = Request::builder()
             .uri("/api/v1/rooms")
@@ -556,4 +591,3 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
-

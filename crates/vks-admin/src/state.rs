@@ -236,18 +236,12 @@ impl AppState {
 
     /// Отправляет push-уведомление администраторам (в `/api/v3/ws`).
     pub fn notify_admin(&self, topic: &str, payload: serde_json::Value) {
-        let _ = self.admin_events.send(crate::hub::AdminBroadcastEvent {
-            topic: topic.to_string(),
-            payload,
-        });
+        let _ = self.admin_events.send(crate::hub::AdminBroadcastEvent { topic: topic.to_string(), payload });
     }
 
     /// Отправляет уведомление об отзыве токенов/сессий пользователя (M1.2).
     pub fn notify_revocation(&self, user_id: impl Into<String>, generation: u64) {
-        let _ = self.revocation_tx.send(RevocationNotice {
-            user_id: user_id.into(),
-            generation,
-        });
+        let _ = self.revocation_tx.send(RevocationNotice { user_id: user_id.into(), generation });
     }
 
     /// Рассылает сигнальное сообщение всем участникам комнаты.
@@ -269,19 +263,22 @@ impl AppState {
         let verified = issuer.verify(token).ok()?;
 
         // Проверка монотонного поколения для исключения same-second race (M1.2)
-        let user_gen = if let Ok(users) = self.users.lock() {
+        let (user_gen, is_deleted) = if let Ok(users) = self.users.lock() {
             users
                 .values()
                 .find(|u| u.id.to_string() == verified.user_id || u.username == verified.user_id)
-                .map(|u| u.generation)
+                .map(|u| (Some(u.generation), u.deleted))
+                .unwrap_or((None, false))
         } else {
-            None
+            (None, false)
         };
-        let expected_gen = user_gen.unwrap_or_else(|| {
-            self.local_db.as_ref().map(|db| db.generation(&verified.user_id)).unwrap_or(1)
-        });
-        if verified.generation > 0 && verified.generation < expected_gen {
-            return None;
+
+        if !is_deleted {
+            let expected_gen = user_gen
+                .unwrap_or_else(|| self.local_db.as_ref().map(|db| db.generation(&verified.user_id)).unwrap_or(1));
+            if verified.generation < expected_gen {
+                return None;
+            }
         }
 
         if let Some(db) = &self.local_db {

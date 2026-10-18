@@ -97,13 +97,19 @@ impl UdpMediaLoop {
 
                                 // 1. Автоматический ответ на STUN Binding Request (RFC 5389 / RFC 8445 ICE-lite)
                                 if is_stun_binding_request(&buf[..size]) {
-                                    if let Some(resp) = build_stun_binding_response(&buf[..size], src) {
-                                        let _ = socket.send_to(&resp, src).await;
-                                        // Оповещаем маршрутизатор о полученном STUN пакете для auto-punching подписчиков
-                                        let stun_dummy = RtpPacket::new(TrackId::default(), Bytes::new());
-                                        let _ = router(src, stun_dummy);
-                                        continue;
+                                    if let Some(username) = parse_stun_username(&buf[..size]) {
+                                        if !username.trim().is_empty() {
+                                            if let Some(resp) = build_stun_binding_response(&buf[..size], src) {
+                                                let _ = socket.send_to(&resp, src).await;
+                                                // Оповещаем маршрутизатор о полученном STUN пакете для auto-punching подписчиков
+                                                let stun_dummy = RtpPacket::new(TrackId::default(), Bytes::new());
+                                                let _ = router(src, stun_dummy);
+                                                continue;
+                                            }
+                                        }
                                     }
+                                    stats.packets_dropped.fetch_add(1, Ordering::Relaxed);
+                                    continue;
                                 }
 
                                 let payload = Bytes::copy_from_slice(&buf[..size]);
@@ -254,7 +260,7 @@ pub fn parse_rtp_ssrc(data: &[u8]) -> Option<u32> {
 pub fn build_rtcp_pli(sender_ssrc: u32, media_ssrc: u32) -> [u8; 12] {
     let mut pkt = [0u8; 12];
     pkt[0] = 0x81; // V=2, P=0, FMT=1 (PLI)
-    pkt[1] = 206;  // PT=206 (PSFB / Payload-Specific Feedback)
+    pkt[1] = 206; // PT=206 (PSFB / Payload-Specific Feedback)
     pkt[2] = 0x00;
     pkt[3] = 0x02; // Length: 2 32-bit words following header
     pkt[4..8].copy_from_slice(&sender_ssrc.to_be_bytes());
@@ -400,5 +406,28 @@ mod tests {
         assert_eq!(parse_stun_username(&req[..15]), None);
         assert_eq!(parse_stun_username(&req[..22]), None);
     }
-}
 
+    #[tokio::test]
+    async fn test_udp_media_loop_drops_unauthenticated_stun() {
+        let server = UdpMediaLoop::bind("127.0.0.1:0").await.unwrap();
+        let client = UdpMediaLoop::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr();
+
+        let _srv_task = server.start_routing_loop(|_src, _packet| Vec::new());
+
+        // Unauthenticated STUN request (without USERNAME attribute)
+        let unauthed_stun = vec![
+            0x00, 0x01, // Binding Request
+            0x00, 0x00, // Length = 0 (no attributes)
+            0x21, 0x12, 0xa4, 0x42, // Magic cookie
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, // Trans ID
+        ];
+
+        client.send_raw(server_addr, &unauthed_stun).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        assert_eq!(server.stats().packets_dropped.load(Ordering::Relaxed), 1);
+        server.shutdown();
+        client.shutdown();
+    }
+}

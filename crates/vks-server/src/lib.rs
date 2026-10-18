@@ -27,14 +27,14 @@ use futures_util::{SinkExt, StreamExt};
 use tracing::{info, warn};
 
 use vks_admin::state::AppState;
+use vks_auth::jwt::VerifiedJwt;
 use vks_common::metrics::{
     encode as encode_metrics, HTTP_REQUESTS, HTTP_REQUEST_DURATION, HTTP_RESPONSE_BYTES, SIGNALING_MESSAGES,
 };
 use vks_core::ports::media_engine::MediaEngine;
+use vks_core::Role;
 use vks_proto::signaling::signaling_message::Payload;
 use vks_proto::signaling::{ParticipantJoined, ParticipantLeft, SignalingMessage};
-use vks_auth::jwt::VerifiedJwt;
-use vks_core::Role;
 use vks_signaling::envelope::Envelope;
 use vks_signaling::handler::{HandlerConfig, SignalingHandler};
 
@@ -266,8 +266,7 @@ async fn ws_handler(State(ctx): State<WsContext>, headers: HeaderMap, ws: WebSoc
             }
         }
     }
-    let role = vks_admin::users::Users::resolve_role(&ctx.state, &verified.user_id)
-        .unwrap_or(Role::Participant);
+    let role = vks_admin::users::Users::resolve_role(&ctx.state, &verified.user_id).unwrap_or(Role::Participant);
     // Транспортный потолок памяти на сообщение (см. MAX_WS_TRANSPORT_BYTES):
     // 64–256 КиБ — graceful close 4008 в handle_ws_socket, свыше — транспортный отсев.
     ws.max_message_size(MAX_WS_TRANSPORT_BYTES).on_upgrade(move |socket| handle_ws_socket(socket, ctx, verified, role))
@@ -307,13 +306,7 @@ fn parse_ice_candidate_addr(candidate: &str) -> Option<std::net::SocketAddr> {
 fn parse_participant_id(pid_str: &str) -> vks_core::ParticipantId {
     let u = uuid::Uuid::parse_str(pid_str)
         .ok()
-        .or_else(|| {
-            if pid_str.len() >= 36 {
-                uuid::Uuid::parse_str(&pid_str[pid_str.len() - 36..]).ok()
-            } else {
-                None
-            }
-        })
+        .or_else(|| if pid_str.len() >= 36 { uuid::Uuid::parse_str(&pid_str[pid_str.len() - 36..]).ok() } else { None })
         .unwrap_or_else(|| {
             use sha2::{Digest, Sha256};
             let digest = Sha256::digest(pid_str.as_bytes());
@@ -387,10 +380,8 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
     let mut revocation_rx = state.revocation_tx.subscribe();
 
     // Token expiration deadline
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let now_unix =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
     let time_left = if verified.exp > now_unix {
         std::time::Duration::from_secs((verified.exp - now_unix) as u64)
     } else {
@@ -543,8 +534,8 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                     }
                                 }
 
-                                // SFU media negotiation: SDP Offer -> register publisher tracks & SSRCs (M1.1: Viewer cannot publish)
-                                if let Some(Payload::SdpOffer(ref o)) = payload_opt {
+                                // SFU media negotiation: SDP Offer pre-validation (M1.1: Viewer cannot publish)
+                                if let Some(Payload::SdpOffer(ref _o)) = payload_opt {
                                     if role == Role::Viewer {
                                         warn!(user_id = %verified.user_id, "Viewer role cannot publish media (SDP Offer rejected)");
                                         let err_reply = Envelope::error_reply(
@@ -556,44 +547,52 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                         let _ = sender.send(Message::Binary(err_reply.encode().into())).await;
                                         continue;
                                     }
-                                    if let Ok(sdp) = vks_signaling::sdp::Sdp::parse(&o.sdp) {
-                                        if let Some(ref m) = current_membership {
-                                            let pid = parse_participant_id(&m.participant_id);
-                                            let mut tracks = Vec::new();
-                                            for media in &sdp.media {
-                                                let track_kind = match media.kind {
-                                                    vks_signaling::sdp::MediaKind::Audio => vks_core::track::TrackKind::Audio,
-                                                    _ => vks_core::track::TrackKind::Video,
-                                                };
-                                                let track = vks_core::ports::media_engine::MediaTrack::new(pid, track_kind);
-                                                for ssrc_str in &media.ssrcs {
-                                                    if let Ok(ssrc) = ssrc_str.split_whitespace().next().unwrap_or("").parse::<u32>() {
-                                                        ctx.sfu_engine.register_ssrc(m.room_id, pid, track.id, ssrc);
-                                                    }
-                                                }
-                                                tracks.push(track);
-                                            }
-                                            if !tracks.is_empty() {
-                                                let _ = ctx.sfu_engine.add_publisher(m.room_id, pid, tracks).await;
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // SFU ICE candidate exchange -> register participant UDP endpoint
-                                if let Some(Payload::IceCandidate(ref c)) = payload_opt {
-                                    if let Some(ref m) = current_membership {
-                                        let pid = parse_participant_id(&m.participant_id);
-                                        if let Some(addr) = parse_ice_candidate_addr(&c.candidate) {
-                                            ctx.sfu_engine.register_endpoint(m.room_id, pid, addr);
-                                        }
-                                    }
                                 }
 
                                 // Запрос исполняет FSM; сайд-эффекты — только по успешному результату.
                                 let mut replies = handler.handle(env);
                                 let joined_ok = replies.iter().any(|r| matches!(r.payload(), Some(Payload::JoinRoomResult(_))));
                                 let left_ok = was_leave && replies.iter().any(|r| matches!(r.payload(), Some(Payload::Ack(_))));
+
+                                // Mutate SFU engine only AFTER handler.handle successfully accepts the offer
+                                if let Some(Payload::SdpOffer(ref o)) = payload_opt {
+                                    if replies.iter().any(|r| matches!(r.payload(), Some(Payload::SdpAnswer(_)))) {
+                                        if let Ok(sdp) = vks_signaling::sdp::Sdp::parse(&o.sdp) {
+                                            if let Some(ref m) = current_membership {
+                                                let pid = parse_participant_id(&m.participant_id);
+                                                let mut tracks = Vec::new();
+                                                for media in &sdp.media {
+                                                    let track_kind = match media.kind {
+                                                        vks_signaling::sdp::MediaKind::Audio => vks_core::track::TrackKind::Audio,
+                                                        _ => vks_core::track::TrackKind::Video,
+                                                    };
+                                                    let track = vks_core::ports::media_engine::MediaTrack::new(pid, track_kind);
+                                                    for ssrc_str in &media.ssrcs {
+                                                        if let Ok(ssrc) = ssrc_str.split_whitespace().next().unwrap_or("").parse::<u32>() {
+                                                            ctx.sfu_engine.register_ssrc(m.room_id, pid, track.id, ssrc);
+                                                        }
+                                                    }
+                                                    tracks.push(track);
+                                                }
+                                                if !tracks.is_empty() {
+                                                    let _ = ctx.sfu_engine.add_publisher(m.room_id, pid, tracks).await;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // SFU ICE candidate exchange -> register participant UDP endpoint only if accepted
+                                if let Some(Payload::IceCandidate(ref c)) = payload_opt {
+                                    if !replies.iter().any(|r| matches!(r.payload(), Some(Payload::Error(_)))) {
+                                        if let Some(ref m) = current_membership {
+                                            let pid = parse_participant_id(&m.participant_id);
+                                            if let Some(addr) = parse_ice_candidate_addr(&c.candidate) {
+                                                ctx.sfu_engine.register_endpoint(m.room_id, pid, addr);
+                                            }
+                                        }
+                                    }
+                                }
 
                                 if joined_ok {
                                     if let Some(name) = join_name {
@@ -857,4 +856,3 @@ mod tests {
         assert_eq!(pid_suffixed.to_string(), random_uuid.to_string());
     }
 }
-

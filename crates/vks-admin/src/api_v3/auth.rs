@@ -46,6 +46,12 @@ pub const BLOCK_SECS: i64 = 15 * 60;
 #[derive(Debug, Clone)]
 pub struct ClientIp(pub String);
 
+impl ClientIp {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Default)]
 struct LockoutInner {
     /// user+IP → таймстампы неудач (сек), FIFO-обрезка по окну.
@@ -190,8 +196,19 @@ pub async fn token_middleware(State(state): State<SharedState>, mut request: Req
         .unwrap_or("");
     match verify_access_token(&state, token) {
         Some(verified) => {
-            let role = crate::users::Users::resolve_role(&state, &verified.user_id)
-                .unwrap_or(vks_core::Role::Viewer);
+            let is_deleted = if let Ok(users) = state.users.lock() {
+                users
+                    .values()
+                    .any(|u| (u.id.to_string() == verified.user_id || u.username == verified.user_id) && u.deleted)
+            } else {
+                false
+            };
+            if is_deleted {
+                return error_json(403, "User account is deactivated");
+            }
+
+            let role = crate::users::Users::resolve_role(&state, &verified.user_id).unwrap_or(vks_core::Role::Viewer);
+            let ip = client_ip(request.headers(), request.extensions());
             let auth_ctx = crate::auth_middleware::AuthContext {
                 subject: verified.user_id.clone(),
                 role,
@@ -199,6 +216,7 @@ pub async fn token_middleware(State(state): State<SharedState>, mut request: Req
                 scopes: vec!["*".into()],
                 room_scope: verified.room_id.clone(),
                 generation: verified.generation,
+                client_ip: ip,
             };
             request.extensions_mut().insert(auth_ctx);
             request.extensions_mut().insert(verified);
@@ -247,13 +265,13 @@ pub async fn login(
     }
 
     let auth_result = if let Some(provider) = &state.auth_provider {
-        let creds = vks_core::ports::auth::Credentials {
-            username: body.login.clone(),
-            password: body.password.clone(),
-        };
+        let creds =
+            vks_core::ports::auth::Credentials { username: body.login.clone(), password: body.password.clone() };
         provider.verify(&creds).await.map(|u| u.id.to_string())
     } else if let Some(db) = state.local_db.clone() {
-        db.authenticate(&body.login, &body.password).map(|u| u.id).map_err(|_| vks_core::ports::auth::AuthError::InvalidCredentials)
+        db.authenticate(&body.login, &body.password)
+            .map(|u| u.id)
+            .map_err(|_| vks_core::ports::auth::AuthError::InvalidCredentials)
     } else {
         return error_json(503, "Authentication is not configured");
     };
@@ -327,9 +345,7 @@ fn issue_token(state: &AppState, user_id: &str) -> Response {
     } else {
         None
     };
-    let generation = gen.unwrap_or_else(|| {
-        state.local_db.as_ref().map(|db| db.generation(user_id)).unwrap_or(1)
-    });
+    let generation = gen.unwrap_or_else(|| state.local_db.as_ref().map(|db| db.generation(user_id)).unwrap_or(1));
     let min_iat = state.local_db.as_ref().map(|db| db.password_changed_at(user_id)).unwrap_or(0);
     let iat = now_unix().max(min_iat);
     match issuer.issue_with_gen_and_iat(user_id, None, generation, iat) {

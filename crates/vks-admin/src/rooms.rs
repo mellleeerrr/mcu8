@@ -14,9 +14,7 @@ pub struct Rooms;
 impl Rooms {
     /// Вычисляет эффективный режим комнаты (явный override иначе глобальный режим).
     fn resolve_effective_mode(state: &AppState, override_mode: Option<RoomMode>) -> RoomMode {
-        override_mode.unwrap_or_else(|| {
-            state.mode.lock().expect("mode store poisoned").global_mode
-        })
+        override_mode.unwrap_or_else(|| state.mode.lock().expect("mode store poisoned").global_mode)
     }
 
     /// Создаёт комнату (per-room режим = `None`, т.е. глобальный).
@@ -31,7 +29,10 @@ impl Rooms {
     }
 
     /// Создаёт комнату с подтвержденной синхронной записью в Storage до ответа (M0-M1).
-    pub async fn create_async(state: &AppState, name: impl Into<String>) -> Result<RoomRecord, vks_core::ports::storage::StorageError> {
+    pub async fn create_async(
+        state: &AppState,
+        name: impl Into<String>,
+    ) -> Result<RoomRecord, vks_core::ports::storage::StorageError> {
         let id = RoomId::new();
         let record = RoomRecord::new(id, name, None);
         if let Some(storage) = &state.storage {
@@ -86,11 +87,14 @@ impl Rooms {
                     new_mode: m,
                     switch_epoch: mode_state.switch_epoch,
                 });
-                state.notify_admin("room:mode_changed", serde_json::json!({
-                    "room_id": id.to_string(),
-                    "mode": m,
-                    "switch_epoch": mode_state.switch_epoch,
-                }));
+                state.notify_admin(
+                    "room:mode_changed",
+                    serde_json::json!({
+                        "room_id": id.to_string(),
+                        "mode": m,
+                        "switch_epoch": mode_state.switch_epoch,
+                    }),
+                );
 
                 // Рассылаем RoomModeChanged всем WebRTC signaling сессиям в комнате через RoomHub
                 let proto_mode = match m {

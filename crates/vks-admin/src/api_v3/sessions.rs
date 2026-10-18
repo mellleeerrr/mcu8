@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use vks_core::{Role, RoomId};
 
+use super::auth::ClientIp;
 use super::{error_json, track};
 use crate::auth_middleware::AuthContext;
 use crate::rooms::Rooms;
@@ -123,11 +124,7 @@ fn select_rooms(state: &AppState, query: &SessionsQuery) -> (Vec<RoomRecord>, us
 
 /// JSON сессии/конференции (мапперы `Fv`/`dy`/`zZ` мягкие).
 fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_stopped: bool) -> Value {
-    let (state_str, has_stopped) = if is_stopped {
-        ("STOPPED", true)
-    } else {
-        ("ACTIVE", false)
-    };
+    let (state_str, has_stopped) = if is_stopped { ("STOPPED", true) } else { ("ACTIVE", false) };
     let participants = state.room_hub.list_participants(&r.id);
     let sip_count = participants.iter().filter(|p| p.participant_id.contains("@sip-gateway")).count();
     let h323_count = participants.iter().filter(|p| p.participant_id.contains("@h323-gateway")).count();
@@ -157,8 +154,13 @@ fn connections_limit(state: &AppState) -> u32 {
 }
 
 fn find_room(state: &AppState, id: &str) -> Option<RoomRecord> {
-    let uuid = Uuid::parse_str(id).ok()?;
-    Rooms::get(state, &RoomId::from_uuid(uuid))
+    if let Ok(uuid) = Uuid::parse_str(id) {
+        if let Some(r) = Rooms::get(state, &RoomId::from_uuid(uuid)) {
+            return Some(r);
+        }
+    }
+    let rooms = state.rooms.lock().expect("rooms store poisoned");
+    rooms.values().find(|r| r.name == id || r.name.eq_ignore_ascii_case(id)).cloned()
 }
 
 #[allow(clippy::result_large_err)]
@@ -176,8 +178,9 @@ fn check_permission(auth: &AuthContext, target_room_id: Option<&str>) -> Result<
     }
 }
 
-fn audit_room(state: &AppState, user: &str, action: &str, room_id: &str) {
-    state.record_audit_entry(user, action, Some(room_id.to_string()), "127.0.0.1");
+fn audit_room(state: &AppState, user: &str, action: &str, room_id: &str, client_ip: Option<&str>) {
+    let ip = client_ip.unwrap_or("127.0.0.1");
+    state.record_audit_entry(user, action, Some(room_id.to_string()), ip);
 }
 
 fn sessions_payload(state: &AppState, query: &SessionsQuery) -> Value {
@@ -211,8 +214,10 @@ pub async fn session(State(state): State<SharedState>, Path(id): Path<String>) -
     track("sessions/{id}");
     match find_room(&state, &id) {
         Some(room) => {
-            let is_stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
-            Json(json!({ "session": session_json(&state, &room, connections_limit(&state), is_stopped) })).into_response()
+            let is_stopped =
+                state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
+            Json(json!({ "session": session_json(&state, &room, connections_limit(&state), is_stopped) }))
+                .into_response()
         }
         None => error_json(404, "Session not found"),
     }
@@ -228,6 +233,7 @@ pub async fn sessions(State(state): State<SharedState>, Query(query): Query<Sess
 pub async fn start_session(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
     Json(body): Json<StartSessionRequest>,
 ) -> Response {
     track("sessions");
@@ -250,7 +256,13 @@ pub async fn start_session(
     };
     state.notify_admin("sessions:started", json!({ "id": room.id.to_string() }));
     state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
-    audit_room(&state, &auth.subject, "session.started", &room.id.to_string());
+    audit_room(
+        &state,
+        &auth.subject,
+        "session.started",
+        &room.id.to_string(),
+        client_ip.as_ref().map(|c| c.0 .0.as_str()),
+    );
     Json(json!({ "session": session_json(&state, &room, connections_limit(&state), false) })).into_response()
 }
 
@@ -258,6 +270,7 @@ pub async fn start_session(
 pub async fn quick_session(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
     body: Option<Json<Value>>,
 ) -> Response {
     track("sessions/quick");
@@ -278,7 +291,13 @@ pub async fn quick_session(
     state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
     state.notify_admin("conferences:created", json!({ "id": room.id.to_string() }));
     state.notify_admin("conferences", json!({ "action": "created", "id": room.id.to_string() }));
-    audit_room(&state, &auth.subject, "session.quick_started", &room.id.to_string());
+    audit_room(
+        &state,
+        &auth.subject,
+        "session.quick_started",
+        &room.id.to_string(),
+        client_ip.as_ref().map(|c| c.0 .0.as_str()),
+    );
     Json(json!({ "session": session_json(&state, &room, connections_limit(&state), false) })).into_response()
 }
 
@@ -286,6 +305,7 @@ pub async fn quick_session(
 pub async fn stop_session(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
     Path(id): Path<String>,
 ) -> Response {
     track("sessions/{id}");
@@ -298,7 +318,13 @@ pub async fn stop_session(
             state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").insert(room.id);
             state.notify_admin("sessions:stopped", json!({ "id": room.id.to_string() }));
             state.notify_admin("sessions", json!({ "action": "stopped", "id": room.id.to_string() }));
-            audit_room(&state, &auth.subject, "session.stopped", &room.id.to_string());
+            audit_room(
+                &state,
+                &auth.subject,
+                "session.stopped",
+                &room.id.to_string(),
+                client_ip.as_ref().map(|c| c.0 .0.as_str()),
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         None => error_json(404, "Session not found"),
@@ -322,6 +348,7 @@ pub async fn ui_conferences(State(state): State<SharedState>, Query(query): Quer
 pub async fn create_conference(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
     Json(body): Json<CreateConferenceRequest>,
 ) -> Response {
     track("conferences");
@@ -340,7 +367,13 @@ pub async fn create_conference(
     };
     state.notify_admin("conferences:created", json!({ "id": record.id.to_string(), "display_name": record.name }));
     state.notify_admin("conferences", json!({ "action": "created", "id": record.id.to_string() }));
-    audit_room(&state, &auth.subject, "conference.created", &record.id.to_string());
+    audit_room(
+        &state,
+        &auth.subject,
+        "conference.created",
+        &record.id.to_string(),
+        client_ip.as_ref().map(|c| c.0 .0.as_str()),
+    );
     Json(json!({ "conference": session_json(&state, &record, connections_limit(&state), false) })).into_response()
 }
 
@@ -349,8 +382,10 @@ pub async fn conference(State(state): State<SharedState>, Path(id): Path<String>
     track("conferences/{id}");
     match find_room(&state, &id) {
         Some(room) => {
-            let is_stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
-            Json(json!({ "conference": session_json(&state, &room, connections_limit(&state), is_stopped) })).into_response()
+            let is_stopped =
+                state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
+            Json(json!({ "conference": session_json(&state, &room, connections_limit(&state), is_stopped) }))
+                .into_response()
         }
         None => error_json(404, "Conference not found"),
     }
@@ -360,6 +395,7 @@ pub async fn conference(State(state): State<SharedState>, Path(id): Path<String>
 pub async fn update_conference(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
     Path(id): Path<String>,
     Json(body): Json<PatchConferenceRequest>,
 ) -> Response {
@@ -375,7 +411,13 @@ pub async fn update_conference(
             return error_json(500, &format!("Storage error: {e}"));
         }
     }
-    audit_room(&state, &auth.subject, "conference.updated", &room.id.to_string());
+    audit_room(
+        &state,
+        &auth.subject,
+        "conference.updated",
+        &room.id.to_string(),
+        client_ip.as_ref().map(|c| c.0 .0.as_str()),
+    );
     let updated = find_room(&state, &id).unwrap_or(room);
     state.notify_admin("conferences:updated", json!({ "id": updated.id.to_string(), "display_name": updated.name }));
     state.notify_admin("conferences", json!({ "action": "updated", "id": updated.id.to_string() }));
@@ -387,6 +429,7 @@ pub async fn update_conference(
 pub async fn delete_conference(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
     Path(id): Path<String>,
 ) -> Response {
     track("conferences/{id}");
@@ -399,7 +442,13 @@ pub async fn delete_conference(
                 state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").remove(&room.id);
                 state.notify_admin("conferences:deleted", json!({ "id": room.id.to_string() }));
                 state.notify_admin("conferences", json!({ "action": "deleted", "id": room.id.to_string() }));
-                audit_room(&state, &auth.subject, "conference.deleted", &room.id.to_string());
+                audit_room(
+                    &state,
+                    &auth.subject,
+                    "conference.deleted",
+                    &room.id.to_string(),
+                    client_ip.as_ref().map(|c| c.0 .0.as_str()),
+                );
                 StatusCode::NO_CONTENT.into_response()
             }
             Ok(false) => error_json(404, "Conference not found"),
@@ -416,10 +465,7 @@ pub async fn conference_contacts(Path(_id): Path<String>) -> Response {
 }
 
 /// `GET /api/v3/sessions/{id}/abonents` (и `/ui/sessions/{id}/abonents`) → динамический ростер абонентов.
-pub async fn session_abonents(
-    State(state): State<SharedState>,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn session_abonents(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
     track("sessions/{id}/abonents");
     let Some(room) = find_room(&state, &id) else {
         return error_json(404, "Session not found");
@@ -491,6 +537,7 @@ pub struct SwitchAbonentSettingsRequest {
 pub async fn switch_abonent_settings(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
     Path((connection_id, setting_type)): Path<(String, String)>,
     Json(body): Json<SwitchAbonentSettingsRequest>,
 ) -> Response {
@@ -512,7 +559,13 @@ pub async fn switch_abonent_settings(
     };
 
     state.room_hub.update_participant_media(&room_id, &connection_id, audio_muted, video_muted, None);
-    audit_room(&state, &auth.subject, &format!("abonent.{setting_type}"), &connection_id);
+    audit_room(
+        &state,
+        &auth.subject,
+        &format!("abonent.{setting_type}"),
+        &connection_id,
+        client_ip.as_ref().map(|c| c.0 .0.as_str()),
+    );
     state.notify_admin(
         &format!("session:{}:abonents", room_id),
         json!({
@@ -529,6 +582,7 @@ pub async fn switch_abonent_settings(
 pub async fn remove_abonent(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
     Path(connection_id): Path<String>,
 ) -> Response {
     track("abonents/{id}");
@@ -540,7 +594,7 @@ pub async fn remove_abonent(
     }
 
     Rooms::kick_participant(&state, &room_id, &connection_id);
-    audit_room(&state, &auth.subject, "abonent.removed", &connection_id);
+    audit_room(&state, &auth.subject, "abonent.removed", &connection_id, client_ip.as_ref().map(|c| c.0 .0.as_str()));
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -548,6 +602,7 @@ pub async fn remove_abonent(
 pub async fn remove_session_abonent(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
     Path((session_id, abonent_id)): Path<(String, String)>,
 ) -> Response {
     track("sessions/{id}/abonents/{abonent_id}");
@@ -559,7 +614,7 @@ pub async fn remove_session_abonent(
     };
 
     Rooms::kick_participant(&state, &room.id, &abonent_id);
-    audit_room(&state, &auth.subject, "abonent.removed", &abonent_id);
+    audit_room(&state, &auth.subject, "abonent.removed", &abonent_id, client_ip.as_ref().map(|c| c.0 .0.as_str()));
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -574,6 +629,7 @@ pub struct EditAbonentRequest {
 pub async fn edit_abonent(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
     Path(connection_id): Path<String>,
     Json(body): Json<EditAbonentRequest>,
 ) -> Response {
@@ -587,7 +643,13 @@ pub async fn edit_abonent(
 
     if let Some(ref name) = body.display_name {
         state.room_hub.update_participant_media(&room_id, &connection_id, None, None, Some(name.clone()));
-        audit_room(&state, &auth.subject, "abonent.renamed", &connection_id);
+        audit_room(
+            &state,
+            &auth.subject,
+            "abonent.renamed",
+            &connection_id,
+            client_ip.as_ref().map(|c| c.0 .0.as_str()),
+        );
         state.notify_admin(
             &format!("session:{}:abonents", room_id),
             json!({
@@ -604,4 +666,3 @@ pub async fn engine_abonents() -> Response {
     track("engine/abonents");
     Json(json!({ "abonents": [], "count": 0 })).into_response()
 }
-

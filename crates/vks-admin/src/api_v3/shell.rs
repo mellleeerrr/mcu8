@@ -254,10 +254,13 @@ pub async fn settings_calls(State(state): State<SharedState>) -> Response {
 /// `PATCH /api/v3/settings/calls` — обновление параметров вызовов.
 pub async fn update_settings_calls(
     State(state): State<SharedState>,
-    Extension(verified): Extension<VerifiedJwt>,
+    Extension(auth): Extension<crate::auth_middleware::AuthContext>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     track("settings/calls");
+    if auth.role < vks_core::Role::Operator {
+        return super::error_json(403, "Forbidden: Operator role required");
+    }
     let source = body.get("payload").unwrap_or(&body);
     let mut current = SettingsService::get(&state);
     if let Some(codecs) = source.get("codecs") {
@@ -279,7 +282,7 @@ pub async fn update_settings_calls(
     let ts_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     state.audit.lock().expect("audit store poisoned").record(crate::audit::AuditEntry {
         ts_ms,
-        user: verified.user_id,
+        user: auth.subject,
         action: "settings.calls.updated".to_string(),
         room: None,
         ip: String::new(),
@@ -410,10 +413,19 @@ pub struct SwitchVideoLayoutModeRequest {
 /// `POST /api/v3/ui/video_layouts/mode` и `/api/v3/video_layouts/mode` — переключение MCU/SFU из UI.
 pub async fn switch_video_layout_mode(
     State(state): State<SharedState>,
+    Extension(auth): Extension<crate::auth_middleware::AuthContext>,
     Json(body): Json<SwitchVideoLayoutModeRequest>,
 ) -> Response {
     track("ui/video_layouts/mode");
+    if auth.role < vks_core::Role::Moderator {
+        return super::error_json(403, "Forbidden: Moderator role required");
+    }
     let room_id_str = body.session_id.or(body.conference_id);
+    if let (Some(ref user_room), Some(ref req_room)) = (&auth.room_scope, &room_id_str) {
+        if !req_room.eq_ignore_ascii_case(user_room) {
+            return super::error_json(403, "Forbidden: room_scope mismatch");
+        }
+    }
     let mode_str = body.mode.unwrap_or_else(|| "sfu".to_string());
     let new_mode = match mode_str.to_lowercase().as_str() {
         "mcu" => vks_core::RoomMode::Mcu,
@@ -443,7 +455,13 @@ pub async fn switch_video_layout_mode(
 }
 
 /// `POST /api/v3/engine/command` — команды движка.
-pub async fn engine_command(Json(_body): Json<serde_json::Value>) -> Response {
+pub async fn engine_command(
+    Extension(auth): Extension<crate::auth_middleware::AuthContext>,
+    Json(_body): Json<serde_json::Value>,
+) -> Response {
     track("engine/command");
+    if auth.role < vks_core::Role::Moderator {
+        return super::error_json(403, "Forbidden: Moderator role required");
+    }
     Json(json!({ "status": "ok", "result": "ok" })).into_response()
 }

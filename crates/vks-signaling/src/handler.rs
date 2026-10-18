@@ -219,10 +219,26 @@ impl SignalingHandler {
                 false,
             )];
         }
+        if join.room_id.trim().is_empty() {
+            return vec![Envelope::error_reply(reply_to, "invalid_room", "room_id cannot be empty", false)];
+        }
+        if let Some(ref expected_room) = self.room_id {
+            if !expected_room.is_empty() && expected_room != &join.room_id {
+                return vec![Envelope::error_reply(
+                    reply_to,
+                    "room_mismatch",
+                    &format!(
+                        "JoinRoom room_id '{}' does not match ClientHello room_id '{}'",
+                        join.room_id, expected_room
+                    ),
+                    false,
+                )];
+            }
+        }
         if let Err(e) = self.session.apply(SessionEvent::JoinRoom) {
             return vec![Envelope::error_reply(reply_to, "bad_state", &format!("join: {e}"), false)];
         }
-        let room_id = self.room_id.clone().unwrap_or(join.room_id.clone());
+        let room_id = join.room_id.clone();
         self.room_id = Some(room_id.clone());
         if let Err(e) = self.session.apply(SessionEvent::Joined) {
             return vec![Envelope::error_reply(reply_to, "internal_error", &format!("joined: {e}"), false)];
@@ -288,7 +304,7 @@ impl SignalingHandler {
         }
     }
 
-    fn on_ice_complete(&mut self, _c: &ProtoIceComplete, reply_to: u64) -> Vec<Envelope> {
+    fn on_ice_complete(&mut self, c: &ProtoIceComplete, reply_to: u64) -> Vec<Envelope> {
         if self.session.state() != SessionState::Negotiating {
             let state = self.session.state();
             return vec![Envelope::error_reply(
@@ -297,6 +313,9 @@ impl SignalingHandler {
                 &format!("IceComplete requires Negotiating (current: {state:?})"),
                 false,
             )];
+        }
+        if !c.success {
+            return vec![Envelope::error_reply(reply_to, "ice_failed", "ICE negotiation failed", false)];
         }
         if let Err(e) = self.session.apply(SessionEvent::IceComplete) {
             return vec![Envelope::error_reply(reply_to, "bad_state", &format!("ice: {e}"), false)];
@@ -518,5 +537,39 @@ mod tests {
             }
             other => panic!("expected ServerHello, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn join_room_mismatch_rejected() {
+        let mut handler = SignalingHandler::new(HandlerConfig::default_test());
+        handler.handle(hello(1, 1)); // sets room_id: "r1"
+        let resp = handler.handle(join(2, "different_room"));
+        assert!(matches!(resp[0].payload(), Some(Payload::Error(e)) if e.code == "room_mismatch"));
+    }
+
+    #[test]
+    fn join_empty_room_rejected() {
+        let mut handler = SignalingHandler::new(HandlerConfig::default_test());
+        handler.handle(hello(1, 1));
+        let resp = handler.handle(join(2, "   "));
+        assert!(matches!(resp[0].payload(), Some(Payload::Error(e)) if e.code == "invalid_room"));
+    }
+
+    #[test]
+    fn ice_complete_failure_rejected() {
+        let mut handler = SignalingHandler::new(HandlerConfig::default_test());
+        handler.handle(hello(1, 1));
+        handler.handle(join(2, "r1"));
+        handler.handle(offer(3, OFFER_2));
+        assert_eq!(handler.state(), SessionState::Negotiating);
+
+        let ice_failed = Envelope::new(SignalingMessage {
+            msg_id: 4,
+            reply_to: 0,
+            payload: Some(Payload::IceComplete(sig::IceComplete { success: false, rtt_ms: 0 })),
+        });
+        let resp = handler.handle(ice_failed);
+        assert_ne!(handler.state(), SessionState::MediaActive);
+        assert!(matches!(resp[0].payload(), Some(Payload::Error(e)) if e.code == "ice_failed"));
     }
 }
