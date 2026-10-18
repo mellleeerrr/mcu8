@@ -190,6 +190,17 @@ pub async fn token_middleware(State(state): State<SharedState>, mut request: Req
         .unwrap_or("");
     match verify_access_token(&state, token) {
         Some(verified) => {
+            let role = crate::users::Users::resolve_role(&state, &verified.user_id)
+                .unwrap_or(vks_core::Role::Viewer);
+            let auth_ctx = crate::auth_middleware::AuthContext {
+                subject: verified.user_id.clone(),
+                role,
+                auth_type: crate::auth_middleware::AuthType::Jwt,
+                scopes: vec!["*".into()],
+                room_scope: verified.room_id.clone(),
+                generation: verified.generation,
+            };
+            request.extensions_mut().insert(auth_ctx);
             request.extensions_mut().insert(verified);
             next.run(request).await
         }
@@ -236,13 +247,13 @@ pub async fn login(
     }
 
     let auth_result = if let Some(provider) = &state.auth_provider {
-        let creds =
-            vks_core::ports::auth::Credentials { username: body.login.clone(), password: body.password.clone() };
+        let creds = vks_core::ports::auth::Credentials {
+            username: body.login.clone(),
+            password: body.password.clone(),
+        };
         provider.verify(&creds).await.map(|u| u.id.to_string())
     } else if let Some(db) = state.local_db.clone() {
-        db.authenticate(&body.login, &body.password)
-            .map(|u| u.id)
-            .map_err(|_| vks_core::ports::auth::AuthError::InvalidCredentials)
+        db.authenticate(&body.login, &body.password).map(|u| u.id).map_err(|_| vks_core::ports::auth::AuthError::InvalidCredentials)
     } else {
         return error_json(503, "Authentication is not configured");
     };
@@ -295,6 +306,13 @@ pub async fn change_password(
         tracing::error!(error = %e, "api_v3: password change failed");
         return error_json(500, "Internal error");
     }
+    let new_gen = db.generation(&user.id);
+    if let Ok(mut users) = state.users.lock() {
+        if let Some(u) = users.values_mut().find(|u| u.id.to_string() == user.id || u.username == user.username) {
+            u.generation = new_gen;
+        }
+    }
+    state.notify_revocation(&user.id, new_gen);
     audit(&state, &body.username, &ip, "password.changed");
     issue_token(&state, &user.id)
 }
@@ -304,9 +322,17 @@ fn issue_token(state: &AppState, user_id: &str) -> Response {
     let Some(issuer) = &state.jwt_issuer else {
         return error_json(503, "Authentication is not configured");
     };
+    let gen = if let Ok(users) = state.users.lock() {
+        users.values().find(|u| u.id.to_string() == user_id || u.username == user_id).map(|u| u.generation)
+    } else {
+        None
+    };
+    let generation = gen.unwrap_or_else(|| {
+        state.local_db.as_ref().map(|db| db.generation(user_id)).unwrap_or(1)
+    });
     let min_iat = state.local_db.as_ref().map(|db| db.password_changed_at(user_id)).unwrap_or(0);
     let iat = now_unix().max(min_iat);
-    match issuer.issue_with_iat(user_id, None, iat) {
+    match issuer.issue_with_gen_and_iat(user_id, None, generation, iat) {
         Ok(token) => Json(serde_json::json!({ "token": token })).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "api_v3: token issue failed");

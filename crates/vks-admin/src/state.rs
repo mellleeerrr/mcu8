@@ -81,6 +81,16 @@ pub struct UserRecord {
     pub muted: bool,
     /// Soft-delete (GDPR 152-7: 1000d через 30).
     pub deleted: bool,
+    /// Монотонный счетчик поколения учетной записи (M1.2).
+    #[serde(default)]
+    pub generation: u64,
+}
+
+/// Уведомление об отзыве сессий и токенов пользователя в реальном времени (M1.2 / M1.8).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevocationNotice {
+    pub user_id: String,
+    pub generation: u64,
 }
 
 /// Запись видео-записи (records, фаза 5).
@@ -170,6 +180,8 @@ pub struct AppState {
     pub room_hub: Arc<crate::hub::RoomHub>,
     /// Канал административных событий для legacy UI WS (/api/v3/ws).
     pub admin_events: tokio::sync::broadcast::Sender<crate::hub::AdminBroadcastEvent>,
+    /// Канал уведомлений об отзыве токенов/сессий в реальном времени (M1.2 / M1.8).
+    pub revocation_tx: tokio::sync::broadcast::Sender<RevocationNotice>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -201,6 +213,7 @@ impl AppState {
     /// Создаёт новое состояние с дефолтными настройками без персистентного хранилища.
     pub fn new() -> Self {
         let (admin_tx, _admin_rx) = tokio::sync::broadcast::channel(crate::hub::ADMIN_CHANNEL_CAPACITY);
+        let (revocation_tx, _revocation_rx) = tokio::sync::broadcast::channel(256);
         Self {
             storage: None,
             auth_provider: None,
@@ -217,12 +230,24 @@ impl AppState {
             event_queue: crate::mode::ModeEventQueue::new(),
             room_hub: Arc::new(crate::hub::RoomHub::new()),
             admin_events: admin_tx,
+            revocation_tx,
         }
     }
 
     /// Отправляет push-уведомление администраторам (в `/api/v3/ws`).
     pub fn notify_admin(&self, topic: &str, payload: serde_json::Value) {
-        let _ = self.admin_events.send(crate::hub::AdminBroadcastEvent { topic: topic.to_string(), payload });
+        let _ = self.admin_events.send(crate::hub::AdminBroadcastEvent {
+            topic: topic.to_string(),
+            payload,
+        });
+    }
+
+    /// Отправляет уведомление об отзыве токенов/сессий пользователя (M1.2).
+    pub fn notify_revocation(&self, user_id: impl Into<String>, generation: u64) {
+        let _ = self.revocation_tx.send(RevocationNotice {
+            user_id: user_id.into(),
+            generation,
+        });
     }
 
     /// Рассылает сигнальное сообщение всем участникам комнаты.
@@ -230,17 +255,35 @@ impl AppState {
         self.room_hub.broadcast(room, sender_pid, payload);
     }
 
-    /// Унифицированная валидация JWT access-токена (fail-closed, ADR-0009 / ADR-0021).
+    /// Унифицированная валидация JWT access-токена (fail-closed, ADR-0009 / ADR-0021 / M1.2).
     ///
     /// Проверяет:
     /// 1. Подпись, `exp` и `issuer` через `jwt_issuer`.
-    /// 2. Инвалидацию по смене пароля (`iat <= password_changed_at`).
+    /// 2. Монотонный счетчик поколения (`generation >= current_user_generation`).
+    /// 3. Инвалидацию по смене пароля (`iat <= password_changed_at`).
     pub fn verify_token(&self, token: &str) -> Option<vks_auth::jwt::VerifiedJwt> {
         if token.is_empty() {
             return None;
         }
         let issuer = self.jwt_issuer.as_ref()?;
         let verified = issuer.verify(token).ok()?;
+
+        // Проверка монотонного поколения для исключения same-second race (M1.2)
+        let user_gen = if let Ok(users) = self.users.lock() {
+            users
+                .values()
+                .find(|u| u.id.to_string() == verified.user_id || u.username == verified.user_id)
+                .map(|u| u.generation)
+        } else {
+            None
+        };
+        let expected_gen = user_gen.unwrap_or_else(|| {
+            self.local_db.as_ref().map(|db| db.generation(&verified.user_id)).unwrap_or(1)
+        });
+        if verified.generation > 0 && verified.generation < expected_gen {
+            return None;
+        }
+
         if let Some(db) = &self.local_db {
             if verified.iat < db.password_changed_at(&verified.user_id) {
                 return None;
@@ -349,15 +392,32 @@ impl AppState {
             }
 
             let users = storage.list_users().await.map_err(|e| e.to_string())?;
-            let mut users_map = self.users.lock().map_err(|e| e.to_string())?;
-            for u in users {
-                users_map.entry(u.id).or_insert_with(|| UserRecord {
-                    id: u.id,
-                    username: u.username,
-                    role: u.role,
-                    muted: u.muted,
-                    deleted: u.deleted,
-                });
+            {
+                let mut users_map = self.users.lock().map_err(|e| e.to_string())?;
+                for u in users {
+                    users_map.entry(u.id).or_insert_with(|| UserRecord {
+                        id: u.id,
+                        username: u.username,
+                        role: u.role,
+                        muted: u.muted,
+                        deleted: u.deleted,
+                        generation: 1,
+                    });
+                }
+            }
+
+            // M1.7: Hydrate audit log from durable storage to eliminate audit amnesia after restart
+            let audit_entries = storage.list_audit().await.unwrap_or_default();
+            if let Ok(mut audit) = self.audit.lock() {
+                for a in audit_entries {
+                    audit.record(crate::audit::AuditEntry {
+                        ts_ms: a.ts_ms,
+                        user: a.user,
+                        action: a.action,
+                        room: a.room,
+                        ip: a.ip,
+                    });
+                }
             }
         }
         Ok(())

@@ -575,6 +575,22 @@ pub async fn record_audit(
 /// `GET /api/v1/audit?user=&action=&ip=&from_ms=&to_ms=` — filter.
 pub async fn list_audit(State(state): State<SharedState>, Query(query): Query<AuditQuery>) -> Response {
     let filter = query.into_filter();
+    if let Some(storage) = &state.storage {
+        if let Ok(entries) = storage.list_audit().await {
+            let mut temp_log = crate::audit::AuditLog::new();
+            for e in entries {
+                temp_log.record(AuditEntry {
+                    ts_ms: e.ts_ms,
+                    user: e.user,
+                    action: e.action,
+                    room: e.room,
+                    ip: e.ip,
+                });
+            }
+            let entries: Vec<AuditEntry> = temp_log.filter(&filter).into_iter().cloned().collect();
+            return json_ok(entries);
+        }
+    }
     let entries: Vec<AuditEntry> =
         state.audit.lock().expect("audit store poisoned").filter(&filter).into_iter().map(|e| (*e).clone()).collect();
     json_ok(entries)
@@ -583,6 +599,22 @@ pub async fn list_audit(State(state): State<SharedState>, Query(query): Query<Au
 /// `GET /api/v1/audit/export?user=&action=&ip=&from_ms=&to_ms=` — CSV export.
 pub async fn export_audit(State(state): State<SharedState>, Query(query): Query<AuditQuery>) -> Response {
     let filter = query.into_filter();
+    if let Some(storage) = &state.storage {
+        if let Ok(entries) = storage.list_audit().await {
+            let mut temp_log = crate::audit::AuditLog::new();
+            for e in entries {
+                temp_log.record(AuditEntry {
+                    ts_ms: e.ts_ms,
+                    user: e.user,
+                    action: e.action,
+                    room: e.room,
+                    ip: e.ip,
+                });
+            }
+            let csv = temp_log.export_csv(&filter);
+            return (StatusCode::OK, [(header::CONTENT_TYPE, "text/csv; charset=utf-8")], csv).into_response();
+        }
+    }
     let csv = state.audit.lock().expect("audit store poisoned").export_csv(&filter);
     (StatusCode::OK, [(header::CONTENT_TYPE, "text/csv; charset=utf-8")], csv).into_response()
 }

@@ -87,7 +87,8 @@ pub async fn ws_handler(
         tracing::warn!(client_ip = %ip, "api_v3 ws: connection rate limit exceeded");
         return error_json(429, "Too many connections");
     }
-    ws.max_message_size(MAX_FRAME_BYTES * 4).on_upgrade(move |socket| handle_socket(state, ip, socket))
+    ws.max_message_size(MAX_FRAME_BYTES * 4)
+        .on_upgrade(move |socket| handle_socket(state, ip, socket))
 }
 
 /// Сопоставляет подписку клиента с темой события (точное совпадение, wildcard `*` или разделитель `:`).
@@ -103,6 +104,10 @@ async fn handle_socket(state: SharedState, client_ip: String, socket: WebSocket)
     let (mut sender, mut receiver) = socket.split();
     let mut subscriptions: HashSet<String> = HashSet::new();
     let mut admin_rx = state.admin_events.subscribe();
+    let mut revocation_rx = state.revocation_tx.subscribe();
+    let mut active_user: Option<String> = None;
+    let mut active_gen: u64 = 0;
+    let mut active_exp: i64 = i64::MAX;
     let mut ping = tokio::time::interval(Duration::from_secs(PING_INTERVAL_SECS));
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Первый tick interval срабатывает сразу — пропускаем, чтобы не пинговать на старте.
@@ -116,6 +121,19 @@ async fn handle_socket(state: SharedState, client_ip: String, socket: WebSocket)
             _ = ping.tick() => {
                 if sender.send(Message::Ping(Vec::new().into())).await.is_err() {
                     break;
+                }
+            }
+            rev_notice = revocation_rx.recv() => {
+                if let Ok(notice) = rev_notice {
+                    if let Some(user_id) = &active_user {
+                        if notice.user_id == *user_id && notice.generation >= active_gen {
+                            tracing::warn!(user_id = %user_id, "api_v3 ws: active session revoked in real-time");
+                            let _ = sender.send(Message::Text(
+                                json!({ "error": { "code": 401, "description": "Session revoked" } }).to_string().into()
+                            )).await;
+                            break;
+                        }
+                    }
                 }
             }
             admin_msg = admin_rx.recv() => {
@@ -143,6 +161,13 @@ async fn handle_socket(state: SharedState, client_ip: String, socket: WebSocket)
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
+                if active_user.is_some() && now_sec >= active_exp {
+                    tracing::warn!(client_ip, "api_v3 ws: active token expired");
+                    let _ = sender.send(Message::Text(
+                        json!({ "error": { "code": 401, "description": "Token expired" } }).to_string().into()
+                    )).await;
+                    break;
+                }
                 if msg_window_sec != now_sec {
                     msg_window_sec = now_sec;
                     msg_count = 0;
@@ -162,13 +187,13 @@ async fn handle_socket(state: SharedState, client_ip: String, socket: WebSocket)
                     break;
                 }
 
-                let outcomes = match message {
+                let (outcomes, verified_info) = match message {
                     Message::Text(text) => process_frame(&state, &client_ip, text.as_str(), &mut subscriptions),
                     Message::Binary(bytes) => match std::str::from_utf8(&bytes) {
                         Ok(text) => process_frame(&state, &client_ip, text, &mut subscriptions),
-                        Err(_) => vec![WsOutcome::json(json!({
+                        Err(_) => (vec![WsOutcome::json(json!({
                             "error": { "code": 400, "description": "Malformed message" }
-                        }))],
+                        }))], None),
                     },
                     Message::Ping(payload) => {
                         if sender.send(Message::Pong(payload)).await.is_err() { break }
@@ -177,6 +202,11 @@ async fn handle_socket(state: SharedState, client_ip: String, socket: WebSocket)
                     Message::Pong(_) => continue,
                     Message::Close(_) => break,
                 };
+                if let Some((user_id, gen, exp)) = verified_info {
+                    active_user = Some(user_id);
+                    active_gen = gen;
+                    active_exp = exp;
+                }
                 let mut send_failed = false;
                 for outcome in outcomes {
                     if sender.send(Message::Text(outcome.0.into())).await.is_err() {
@@ -202,51 +232,64 @@ impl WsOutcome {
 }
 
 /// Обрабатывает один текстовый кадр; возвращает 0..n исходящих сообщений
-/// (ответ + возможные немедленные события подписки).
-///
-/// Тех.ошибки (нечитаемый JSON, неизвестный метод, слишком большой кадр) —
-/// коды ≠ 401, соединение сохраняется (§4.4).
+/// (ответ + возможные немедленные события подписки) и информацию об аутентифицированном токене.
 fn process_frame(
     state: &SharedState,
     client_ip: &str,
     raw: &str,
     subscriptions: &mut HashSet<String>,
-) -> Vec<WsOutcome> {
+) -> (Vec<WsOutcome>, Option<(String, u64, i64)>) {
     if raw.len() > MAX_FRAME_BYTES {
         tracing::warn!(client_ip, frame_bytes = raw.len(), "api_v3 ws: frame too large");
-        return vec![WsOutcome::json(json!({
+        return (vec![WsOutcome::json(json!({
             "error": { "code": 413, "description": "Frame too large" }
-        }))];
+        }))], None);
     }
 
     let Ok(message) = serde_json::from_str::<Value>(raw) else {
-        return vec![WsOutcome::json(json!({
+        return (vec![WsOutcome::json(json!({
             "error": { "code": 400, "description": "Malformed message" }
-        }))];
+        }))], None);
     };
 
     let id = message.get("id").cloned().unwrap_or(Value::Null);
     let Some(method) = message.get("method").and_then(Value::as_str) else {
-        return vec![WsOutcome::json(json!({
+        return (vec![WsOutcome::json(json!({
             "id": id, "error": { "code": 400, "description": "Missing method" }
-        }))];
+        }))], None);
     };
     let payload = message.get("payload").cloned().unwrap_or_else(|| json!({}));
 
     let Some(token) = message.get("access_token").and_then(Value::as_str) else {
-        return vec![WsOutcome::json(json!({
+        return (vec![WsOutcome::json(json!({
             "id": id, "error": { "code": 401, "description": "Unauthorized" }
-        }))];
+        }))], None);
     };
-    if verify_access_token(state, token).is_none() {
-        // 401 → UI эмитит logout; соединение не рвём (§4.4).
-        tracing::warn!(client_ip, method, "api_v3 ws: rejected message (invalid token)");
-        return vec![WsOutcome::json(json!({
-            "id": id, "error": { "code": 401, "description": "Unauthorized" }
-        }))];
+    let verified = match verify_access_token(state, token) {
+        Some(v) => v,
+        None => {
+            tracing::warn!(client_ip, method, "api_v3 ws: rejected message (invalid token)");
+            return (vec![WsOutcome::json(json!({
+                "id": id, "error": { "code": 401, "description": "Unauthorized" }
+            }))], None);
+        }
+    };
+
+    // Check account status in state.users
+    if let Ok(users) = state.users.lock() {
+        if let Some(u) = users.values().find(|u| u.id.to_string() == verified.user_id || u.username == verified.user_id) {
+            if u.deleted {
+                tracing::warn!(client_ip, user_id = %verified.user_id, "api_v3 ws: user account deactivated");
+                return (vec![WsOutcome::json(json!({
+                    "id": id, "error": { "code": 403, "description": "Account is deactivated" }
+                }))], None);
+            }
+        }
     }
 
-    match method {
+    let verified_tuple = Some((verified.user_id, verified.generation, verified.exp));
+
+    let outcomes = match method {
         "subscribe" => {
             if let Some(events) = payload.get("events").and_then(Value::as_object) {
                 for event in events.keys() {
@@ -282,7 +325,8 @@ fn process_frame(
         _ => vec![WsOutcome::json(json!({
             "id": id, "error": { "code": 404, "description": "Unknown method" }
         }))],
-    }
+    };
+    (outcomes, verified_tuple)
 }
 
 /// Обёртка ответа: `{"id": …, "payload": {…}}`.
@@ -352,11 +396,11 @@ mod tests {
         let mut subs = HashSet::new();
 
         let huge = "x".repeat(MAX_FRAME_BYTES + 1);
-        let out = process_frame(&state, "10.0.0.1", &huge, &mut subs);
+        let (out, _) = process_frame(&state, "10.0.0.1", &huge, &mut subs);
         assert_eq!(out.len(), 1);
         assert!(out[0].0.contains("\"code\":413"), "{}", out[0].0);
 
-        let out = process_frame(&state, "10.0.0.1", "not-json", &mut subs);
+        let (out, _) = process_frame(&state, "10.0.0.1", "not-json", &mut subs);
         assert!(out[0].0.contains("\"code\":400"), "{}", out[0].0);
     }
 
@@ -365,7 +409,7 @@ mod tests {
         let state: SharedState = std::sync::Arc::new(crate::state::AppState::new());
         let mut subs = HashSet::new();
         let frame = r#"{"method":"nope","payload":{},"id":"1"}"#;
-        let out = process_frame(&state, "10.0.0.1", frame, &mut subs);
+        let (out, _) = process_frame(&state, "10.0.0.1", frame, &mut subs);
         assert!(out[0].0.contains("\"code\":401"), "{}", out[0].0);
     }
 

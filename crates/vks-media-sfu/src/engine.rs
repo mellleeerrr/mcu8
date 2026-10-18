@@ -79,8 +79,6 @@ pub struct SfuEngine {
     codecs: CodecRegistry,
     /// Быстрый глобальный индекс: SocketAddr -> (RoomId, ParticipantId).
     addr_to_participant: Arc<Mutex<BTreeMap<SocketAddr, (RoomId, ParticipantId)>>>,
-    /// Быстрый глобальный индекс: SSRC -> (RoomId, ParticipantId, TrackId).
-    ssrc_index: Arc<Mutex<BTreeMap<u32, SsrcTrackTarget>>>,
 }
 
 impl Default for SfuEngine {
@@ -96,7 +94,6 @@ impl SfuEngine {
             rooms: Arc::new(Mutex::new(BTreeMap::new())),
             codecs: CodecRegistry::new(),
             addr_to_participant: Arc::new(Mutex::new(BTreeMap::new())),
-            ssrc_index: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -165,8 +162,10 @@ impl SfuEngine {
 
     /// Регистрация UDP эндпоинта участника в комнате.
     pub fn register_endpoint(&self, room: RoomId, participant: ParticipantId, addr: SocketAddr) {
-        if let Some(r) = self.rooms.lock().unwrap().get_mut(&room) {
-            r.endpoints.insert(participant, addr);
+        {
+            if let Some(r) = self.rooms.lock().unwrap().get_mut(&room) {
+                r.endpoints.insert(participant, addr);
+            }
         }
         self.addr_to_participant.lock().unwrap().insert(addr, (room, participant));
     }
@@ -181,12 +180,17 @@ impl SfuEngine {
         if let Some(r) = self.rooms.lock().unwrap().get_mut(&room) {
             r.ssrc_to_track.insert(ssrc, (participant, track));
         }
-        self.ssrc_index.lock().unwrap().insert(ssrc, (room, participant, track));
     }
 
     /// Поиск трека по SSRC.
     pub fn resolve_ssrc(&self, ssrc: u32) -> Option<(RoomId, ParticipantId, TrackId)> {
-        self.ssrc_index.lock().unwrap().get(&ssrc).copied()
+        let g = self.rooms.lock().unwrap();
+        for (&room_id, r) in g.iter() {
+            if let Some(&(p_id, t_id)) = r.ssrc_to_track.get(&ssrc) {
+                return Some((room_id, p_id, t_id));
+            }
+        }
+        None
     }
 
     /// Маршрутизация входящего UDP пакета подписчикам с поддержкой symmetric RTP.
@@ -198,8 +202,11 @@ impl SfuEngine {
         }
         let ssrc = parse_rtp_ssrc(&payload);
 
-        // 1. Приоритет 1: проверка по известному адресу источника (защита от коллизий SSRC между комнатами)
-        let from_known_src = if let Some(&(r_id, p_id)) = self.addr_to_participant.lock().unwrap().get(&src) {
+        // 1. Look up endpoint from addr_to_participant and drop lock immediately to prevent ABBA deadlock.
+        let known_src = self.addr_to_participant.lock().unwrap().get(&src).copied();
+
+        // 2. Identify target room, publisher, and track
+        let target_info = if let Some((r_id, p_id)) = known_src {
             let g = self.rooms.lock().unwrap();
             if let Some(r) = g.get(&r_id) {
                 if let Some(s) = ssrc {
@@ -210,15 +217,11 @@ impl SfuEngine {
             } else {
                 None
             }
-        } else {
-            None
-        };
-
-        // 2. Приоритет 2: глобальный SSRC индекс (для первого пакета нового паблишера)
-        let target_info = if let Some(info) = from_known_src {
-            Some(info)
         } else if let Some(ssrc_val) = ssrc {
-            self.ssrc_index.lock().unwrap().get(&ssrc_val).copied()
+            let g = self.rooms.lock().unwrap();
+            g.iter().find_map(|(&r_id, r)| {
+                r.ssrc_to_track.get(&ssrc_val).map(|&(p_id, t_id)| (r_id, p_id, t_id))
+            })
         } else {
             None
         };
@@ -229,7 +232,7 @@ impl SfuEngine {
                 self.register_endpoint(info.0, info.1, src);
             }
             info
-        } else if let Some(&(r_id, p_id)) = self.addr_to_participant.lock().unwrap().get(&src) {
+        } else if let Some((r_id, p_id)) = known_src {
             let mut found = None;
             if let Some(r) = self.rooms.lock().unwrap().get_mut(&r_id) {
                 if let Some(tracks) = r.publisher_tracks.get(&p_id) {
@@ -237,7 +240,6 @@ impl SfuEngine {
                         let t_id = first.id;
                         if let Some(s) = ssrc {
                             r.ssrc_to_track.insert(s, (p_id, t_id));
-                            self.ssrc_index.lock().unwrap().insert(s, (r_id, p_id, t_id));
                         }
                         found = Some((r_id, p_id, t_id));
                     }
@@ -312,12 +314,13 @@ impl MediaEngine for SfuEngine {
     }
 
     async fn destroy_room(&self, room: RoomId) -> Result<(), MediaEngineError> {
-        let mut g = self.rooms.lock().unwrap();
-        if let Some(_state) = g.remove(&room) {
+        let removed = {
+            let mut g = self.rooms.lock().unwrap();
+            g.remove(&room)
+        };
+        if removed.is_some() {
             let mut addr_map = self.addr_to_participant.lock().unwrap();
             addr_map.retain(|_, (r, _)| *r != room);
-            let mut ssrc_map = self.ssrc_index.lock().unwrap();
-            ssrc_map.retain(|_, (r, _, _)| *r != room);
         } else {
             return Err(MediaEngineError::RoomNotFound(room));
         }
@@ -342,14 +345,8 @@ impl MediaEngine for SfuEngine {
 
         // Admission quota check: max_participants
         if let Some(max_p) = state.caps.max_participants {
-            let is_existing =
-                state.publisher_tracks.contains_key(&publisher) || state.subscribers.contains_key(&publisher);
-            let total_unique = state
-                .publisher_tracks
-                .keys()
-                .chain(state.subscribers.keys())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len() as u32;
+            let is_existing = state.publisher_tracks.contains_key(&publisher) || state.subscribers.contains_key(&publisher);
+            let total_unique = state.publisher_tracks.keys().chain(state.subscribers.keys()).collect::<std::collections::BTreeSet<_>>().len() as u32;
             if total_unique >= max_p && !is_existing {
                 return Err(MediaEngineError::Other(format!("room capacity exceeded: max {} participants", max_p)));
             }
@@ -385,17 +382,19 @@ impl MediaEngine for SfuEngine {
     }
 
     async fn remove_publisher(&self, room: RoomId, publisher: ParticipantId) -> Result<(), MediaEngineError> {
-        let mut g = self.rooms.lock().unwrap();
-        let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
-        if let Some(tracks) = state.publisher_tracks.remove(&publisher) {
-            for t in tracks {
-                state.tracks.remove(&t.id);
-                state.forwarder.withdraw_track(t.id);
+        let endpoint = {
+            let mut g = self.rooms.lock().unwrap();
+            let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
+            if let Some(tracks) = state.publisher_tracks.remove(&publisher) {
+                for t in tracks {
+                    state.tracks.remove(&t.id);
+                    state.forwarder.withdraw_track(t.id);
+                }
             }
-        }
-        state.ssrc_to_track.retain(|_, (p, _)| *p != publisher);
-        self.ssrc_index.lock().unwrap().retain(|_, (r, p, _)| !(*r == room && *p == publisher));
-        if let Some(addr) = state.endpoints.remove(&publisher) {
+            state.ssrc_to_track.retain(|_, (p, _)| *p != publisher);
+            state.endpoints.remove(&publisher)
+        };
+        if let Some(addr) = endpoint {
             self.addr_to_participant.lock().unwrap().remove(&addr);
         }
         Ok(())
@@ -412,14 +411,8 @@ impl MediaEngine for SfuEngine {
 
         // Admission quota check: max_participants
         if let Some(max_p) = state.caps.max_participants {
-            let is_existing =
-                state.subscribers.contains_key(&subscriber) || state.publisher_tracks.contains_key(&subscriber);
-            let total_unique = state
-                .subscribers
-                .keys()
-                .chain(state.publisher_tracks.keys())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len() as u32;
+            let is_existing = state.subscribers.contains_key(&subscriber) || state.publisher_tracks.contains_key(&subscriber);
+            let total_unique = state.subscribers.keys().chain(state.publisher_tracks.keys()).collect::<std::collections::BTreeSet<_>>().len() as u32;
             if total_unique >= max_p && !is_existing {
                 return Err(MediaEngineError::Other(format!("room capacity exceeded: max {} participants", max_p)));
             }
@@ -453,11 +446,14 @@ impl MediaEngine for SfuEngine {
     }
 
     async fn remove_subscriber(&self, room: RoomId, subscriber: ParticipantId) -> Result<(), MediaEngineError> {
-        let mut g = self.rooms.lock().unwrap();
-        let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
-        state.forwarder.remove_subscriber(subscriber);
-        state.subscribers.remove(&subscriber);
-        if let Some(addr) = state.endpoints.remove(&subscriber) {
+        let endpoint = {
+            let mut g = self.rooms.lock().unwrap();
+            let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
+            state.forwarder.remove_subscriber(subscriber);
+            state.subscribers.remove(&subscriber);
+            state.endpoints.remove(&subscriber)
+        };
+        if let Some(addr) = endpoint {
             self.addr_to_participant.lock().unwrap().remove(&addr);
         }
         Ok(())
@@ -859,3 +855,5 @@ mod tests {
         assert_eq!(plis[0].1.len(), 12);
     }
 }
+
+

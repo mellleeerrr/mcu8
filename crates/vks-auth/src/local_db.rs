@@ -52,6 +52,7 @@ pub enum LocalDbError {
 pub struct LocalDb {
     users: Mutex<HashMap<String, User>>,
     password_changed_at: Mutex<HashMap<String, i64>>,
+    generations: Mutex<HashMap<String, u64>>,
 }
 
 impl LocalDb {
@@ -70,6 +71,7 @@ impl LocalDb {
         let clone = user.clone();
         map.insert(id.to_string(), user);
         drop(map);
+        self.generations.lock().unwrap().insert(id.to_string(), 1);
         self.mark_password_changed(id, now_unix_secs());
         Ok(clone)
     }
@@ -127,8 +129,21 @@ impl LocalDb {
         self.password_changed_at.lock().unwrap().get(user_id).copied().unwrap_or(0)
     }
 
+    /// Monotonic generation counter of `user_id` (default 1).
+    pub fn generation(&self, user_id: &str) -> u64 {
+        self.generations.lock().unwrap().get(user_id).copied().unwrap_or(1)
+    }
+
+    /// Explicitly bump monotonic generation counter (returns new generation).
+    pub fn bump_generation(&self, user_id: &str) -> u64 {
+        let mut map = self.generations.lock().unwrap();
+        let gen = map.entry(user_id.to_string()).or_insert(1);
+        *gen += 1;
+        *gen
+    }
+
     /// Replace `username`'s password (fresh salt + PBKDF2 hash) and bump the
-    /// change mark, invalidating previously issued tokens.
+    /// change mark and monotonic generation, invalidating previously issued tokens.
     pub fn set_password(&self, username: &str, new_password: &str) -> Result<User, LocalDbError> {
         let (hash_hex, salt_hex) = hash_password(new_password);
         let (id, updated) = {
@@ -140,6 +155,7 @@ impl LocalDb {
             user.salt_hex = salt_hex;
             (id.clone(), user.clone())
         };
+        self.bump_generation(&id);
         self.mark_password_changed(&id, now_unix_secs() + 1);
         Ok(updated)
     }

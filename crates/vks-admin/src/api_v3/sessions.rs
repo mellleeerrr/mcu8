@@ -16,10 +16,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use vks_auth::jwt::VerifiedJwt;
-use vks_core::RoomId;
+use vks_core::{Role, RoomId};
 
 use super::{error_json, track};
+use crate::auth_middleware::AuthContext;
 use crate::rooms::Rooms;
 use crate::settings::SettingsService;
 use crate::state::{AppState, RoomRecord, SharedState};
@@ -123,7 +123,11 @@ fn select_rooms(state: &AppState, query: &SessionsQuery) -> (Vec<RoomRecord>, us
 
 /// JSON сессии/конференции (мапперы `Fv`/`dy`/`zZ` мягкие).
 fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_stopped: bool) -> Value {
-    let (state_str, has_stopped) = if is_stopped { ("STOPPED", true) } else { ("ACTIVE", false) };
+    let (state_str, has_stopped) = if is_stopped {
+        ("STOPPED", true)
+    } else {
+        ("ACTIVE", false)
+    };
     let participants = state.room_hub.list_participants(&r.id);
     let sip_count = participants.iter().filter(|p| p.participant_id.contains("@sip-gateway")).count();
     let h323_count = participants.iter().filter(|p| p.participant_id.contains("@h323-gateway")).count();
@@ -155,6 +159,21 @@ fn connections_limit(state: &AppState) -> u32 {
 fn find_room(state: &AppState, id: &str) -> Option<RoomRecord> {
     let uuid = Uuid::parse_str(id).ok()?;
     Rooms::get(state, &RoomId::from_uuid(uuid))
+}
+
+#[allow(clippy::result_large_err)]
+fn check_permission(auth: &AuthContext, target_room_id: Option<&str>) -> Result<(), Response> {
+    if auth.role < Role::Moderator {
+        return Err(error_json(403, "Forbidden: insufficient permissions"));
+    }
+    if let Some(ref scope) = auth.room_scope {
+        match target_room_id {
+            Some(rid) if rid.eq_ignore_ascii_case(scope) => Ok(()),
+            _ => Err(error_json(403, "Forbidden: token room scope mismatch")),
+        }
+    } else {
+        Ok(())
+    }
 }
 
 fn audit_room(state: &AppState, user: &str, action: &str, room_id: &str) {
@@ -192,10 +211,8 @@ pub async fn session(State(state): State<SharedState>, Path(id): Path<String>) -
     track("sessions/{id}");
     match find_room(&state, &id) {
         Some(room) => {
-            let is_stopped =
-                state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
-            Json(json!({ "session": session_json(&state, &room, connections_limit(&state), is_stopped) }))
-                .into_response()
+            let is_stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
+            Json(json!({ "session": session_json(&state, &room, connections_limit(&state), is_stopped) })).into_response()
         }
         None => error_json(404, "Session not found"),
     }
@@ -210,10 +227,13 @@ pub async fn sessions(State(state): State<SharedState>, Query(query): Query<Sess
 /// `POST /api/v3/sessions` — старт сессии конференции (или создание быстрой сессии).
 pub async fn start_session(
     State(state): State<SharedState>,
-    Extension(verified): Extension<VerifiedJwt>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<StartSessionRequest>,
 ) -> Response {
     track("sessions");
+    if let Err(resp) = check_permission(&auth, body.conference_id.as_deref()) {
+        return resp;
+    }
     let room = if let Some(ref cid) = body.conference_id {
         match find_room(&state, cid) {
             Some(r) => {
@@ -230,17 +250,20 @@ pub async fn start_session(
     };
     state.notify_admin("sessions:started", json!({ "id": room.id.to_string() }));
     state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
-    audit_room(&state, &verified.user_id, "session.started", &room.id.to_string());
+    audit_room(&state, &auth.subject, "session.started", &room.id.to_string());
     Json(json!({ "session": session_json(&state, &room, connections_limit(&state), false) })).into_response()
 }
 
 /// `POST /api/v3/sessions/quick` (или `/ui/sessions/quick`) — быстрый старт сессии.
 pub async fn quick_session(
     State(state): State<SharedState>,
-    Extension(verified): Extension<VerifiedJwt>,
+    Extension(auth): Extension<AuthContext>,
     body: Option<Json<Value>>,
 ) -> Response {
     track("sessions/quick");
+    if let Err(resp) = check_permission(&auth, None) {
+        return resp;
+    }
     let name = body
         .as_ref()
         .and_then(|b| b.get("display_name").or_else(|| b.get("name")))
@@ -255,24 +278,27 @@ pub async fn quick_session(
     state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
     state.notify_admin("conferences:created", json!({ "id": room.id.to_string() }));
     state.notify_admin("conferences", json!({ "action": "created", "id": room.id.to_string() }));
-    audit_room(&state, &verified.user_id, "session.quick_started", &room.id.to_string());
+    audit_room(&state, &auth.subject, "session.quick_started", &room.id.to_string());
     Json(json!({ "session": session_json(&state, &room, connections_limit(&state), false) })).into_response()
 }
 
 /// `DELETE /api/v3/sessions/{id}` (или `/ui/sessions/{id}`) — завершение сессии БЕЗ удаления конференции.
 pub async fn stop_session(
     State(state): State<SharedState>,
-    Extension(verified): Extension<VerifiedJwt>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Response {
     track("sessions/{id}");
+    if let Err(resp) = check_permission(&auth, Some(&id)) {
+        return resp;
+    }
     match find_room(&state, &id) {
         Some(room) => {
             let _ = Rooms::update_async(&state, &room.id, None, None, Some(0), Some(0)).await;
             state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").insert(room.id);
             state.notify_admin("sessions:stopped", json!({ "id": room.id.to_string() }));
             state.notify_admin("sessions", json!({ "action": "stopped", "id": room.id.to_string() }));
-            audit_room(&state, &verified.user_id, "session.stopped", &room.id.to_string());
+            audit_room(&state, &auth.subject, "session.stopped", &room.id.to_string());
             StatusCode::NO_CONTENT.into_response()
         }
         None => error_json(404, "Session not found"),
@@ -295,10 +321,13 @@ pub async fn ui_conferences(State(state): State<SharedState>, Query(query): Quer
 /// что `POST /api/v1/rooms` (без дублирования логики).
 pub async fn create_conference(
     State(state): State<SharedState>,
-    Extension(verified): Extension<VerifiedJwt>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<CreateConferenceRequest>,
 ) -> Response {
     track("conferences");
+    if let Err(resp) = check_permission(&auth, None) {
+        return resp;
+    }
     let name = body
         .display_name
         .or(body.name)
@@ -311,7 +340,7 @@ pub async fn create_conference(
     };
     state.notify_admin("conferences:created", json!({ "id": record.id.to_string(), "display_name": record.name }));
     state.notify_admin("conferences", json!({ "action": "created", "id": record.id.to_string() }));
-    audit_room(&state, &verified.user_id, "conference.created", &record.id.to_string());
+    audit_room(&state, &auth.subject, "conference.created", &record.id.to_string());
     Json(json!({ "conference": session_json(&state, &record, connections_limit(&state), false) })).into_response()
 }
 
@@ -320,10 +349,8 @@ pub async fn conference(State(state): State<SharedState>, Path(id): Path<String>
     track("conferences/{id}");
     match find_room(&state, &id) {
         Some(room) => {
-            let is_stopped =
-                state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
-            Json(json!({ "conference": session_json(&state, &room, connections_limit(&state), is_stopped) }))
-                .into_response()
+            let is_stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
+            Json(json!({ "conference": session_json(&state, &room, connections_limit(&state), is_stopped) })).into_response()
         }
         None => error_json(404, "Conference not found"),
     }
@@ -332,11 +359,14 @@ pub async fn conference(State(state): State<SharedState>, Path(id): Path<String>
 /// `PATCH /api/v3/conferences/{id}` — обновление настроек конференции.
 pub async fn update_conference(
     State(state): State<SharedState>,
-    Extension(verified): Extension<VerifiedJwt>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Json(body): Json<PatchConferenceRequest>,
 ) -> Response {
     track("conferences/{id}");
+    if let Err(resp) = check_permission(&auth, Some(&id)) {
+        return resp;
+    }
     let Some(room) = find_room(&state, &id) else {
         return error_json(404, "Conference not found");
     };
@@ -345,7 +375,7 @@ pub async fn update_conference(
             return error_json(500, &format!("Storage error: {e}"));
         }
     }
-    audit_room(&state, &verified.user_id, "conference.updated", &room.id.to_string());
+    audit_room(&state, &auth.subject, "conference.updated", &room.id.to_string());
     let updated = find_room(&state, &id).unwrap_or(room);
     state.notify_admin("conferences:updated", json!({ "id": updated.id.to_string(), "display_name": updated.name }));
     state.notify_admin("conferences", json!({ "action": "updated", "id": updated.id.to_string() }));
@@ -356,17 +386,20 @@ pub async fn update_conference(
 /// `DELETE /api/v3/conferences/{id}` → 204 | 404 (аудит §4.5).
 pub async fn delete_conference(
     State(state): State<SharedState>,
-    Extension(verified): Extension<VerifiedJwt>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Response {
     track("conferences/{id}");
+    if let Err(resp) = check_permission(&auth, Some(&id)) {
+        return resp;
+    }
     match find_room(&state, &id) {
         Some(room) => match Rooms::delete_async(&state, &room.id).await {
             Ok(true) => {
                 state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").remove(&room.id);
                 state.notify_admin("conferences:deleted", json!({ "id": room.id.to_string() }));
                 state.notify_admin("conferences", json!({ "action": "deleted", "id": room.id.to_string() }));
-                audit_room(&state, &verified.user_id, "conference.deleted", &room.id.to_string());
+                audit_room(&state, &auth.subject, "conference.deleted", &room.id.to_string());
                 StatusCode::NO_CONTENT.into_response()
             }
             Ok(false) => error_json(404, "Conference not found"),
@@ -383,7 +416,10 @@ pub async fn conference_contacts(Path(_id): Path<String>) -> Response {
 }
 
 /// `GET /api/v3/sessions/{id}/abonents` (и `/ui/sessions/{id}/abonents`) → динамический ростер абонентов.
-pub async fn session_abonents(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
+pub async fn session_abonents(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Response {
     track("sessions/{id}/abonents");
     let Some(room) = find_room(&state, &id) else {
         return error_json(404, "Session not found");
@@ -454,7 +490,7 @@ pub struct SwitchAbonentSettingsRequest {
 /// `POST /api/v3/abonents/{connection_id}/{settings_type}` — переключение mute микрофона/камеры.
 pub async fn switch_abonent_settings(
     State(state): State<SharedState>,
-    Extension(verified): Extension<VerifiedJwt>,
+    Extension(auth): Extension<AuthContext>,
     Path((connection_id, setting_type)): Path<(String, String)>,
     Json(body): Json<SwitchAbonentSettingsRequest>,
 ) -> Response {
@@ -462,6 +498,9 @@ pub async fn switch_abonent_settings(
     let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&connection_id) else {
         return error_json(404, "Abonent not found");
     };
+    if let Err(resp) = check_permission(&auth, Some(&room_id.to_string())) {
+        return resp;
+    }
 
     let audio_muted = match setting_type.as_str() {
         "audio" | "microphone" => Some(!body.enable.unwrap_or(true)),
@@ -473,7 +512,7 @@ pub async fn switch_abonent_settings(
     };
 
     state.room_hub.update_participant_media(&room_id, &connection_id, audio_muted, video_muted, None);
-    audit_room(&state, &verified.user_id, &format!("abonent.{setting_type}"), &connection_id);
+    audit_room(&state, &auth.subject, &format!("abonent.{setting_type}"), &connection_id);
     state.notify_admin(
         &format!("session:{}:abonents", room_id),
         json!({
@@ -489,32 +528,38 @@ pub async fn switch_abonent_settings(
 /// `DELETE /api/v3/abonents/{connection_id}` — исключение участника (Kick).
 pub async fn remove_abonent(
     State(state): State<SharedState>,
-    Extension(verified): Extension<VerifiedJwt>,
+    Extension(auth): Extension<AuthContext>,
     Path(connection_id): Path<String>,
 ) -> Response {
     track("abonents/{id}");
     let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&connection_id) else {
         return error_json(404, "Abonent not found");
     };
+    if let Err(resp) = check_permission(&auth, Some(&room_id.to_string())) {
+        return resp;
+    }
 
     Rooms::kick_participant(&state, &room_id, &connection_id);
-    audit_room(&state, &verified.user_id, "abonent.removed", &connection_id);
+    audit_room(&state, &auth.subject, "abonent.removed", &connection_id);
     StatusCode::NO_CONTENT.into_response()
 }
 
 /// `DELETE /api/v3/sessions/{id}/abonents/{abonent_id}` (и `/ui/sessions/...`) — исключение абонента из сессии.
 pub async fn remove_session_abonent(
     State(state): State<SharedState>,
-    Extension(verified): Extension<VerifiedJwt>,
+    Extension(auth): Extension<AuthContext>,
     Path((session_id, abonent_id)): Path<(String, String)>,
 ) -> Response {
     track("sessions/{id}/abonents/{abonent_id}");
+    if let Err(resp) = check_permission(&auth, Some(&session_id)) {
+        return resp;
+    }
     let Some(room) = find_room(&state, &session_id) else {
         return error_json(404, "Session not found");
     };
 
     Rooms::kick_participant(&state, &room.id, &abonent_id);
-    audit_room(&state, &verified.user_id, "abonent.removed", &abonent_id);
+    audit_room(&state, &auth.subject, "abonent.removed", &abonent_id);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -528,7 +573,7 @@ pub struct EditAbonentRequest {
 /// `PATCH /api/v3/abonents/{connection_id}` — переименование абонента.
 pub async fn edit_abonent(
     State(state): State<SharedState>,
-    Extension(verified): Extension<VerifiedJwt>,
+    Extension(auth): Extension<AuthContext>,
     Path(connection_id): Path<String>,
     Json(body): Json<EditAbonentRequest>,
 ) -> Response {
@@ -536,10 +581,13 @@ pub async fn edit_abonent(
     let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&connection_id) else {
         return error_json(404, "Abonent not found");
     };
+    if let Err(resp) = check_permission(&auth, Some(&room_id.to_string())) {
+        return resp;
+    }
 
     if let Some(ref name) = body.display_name {
         state.room_hub.update_participant_media(&room_id, &connection_id, None, None, Some(name.clone()));
-        audit_room(&state, &verified.user_id, "abonent.renamed", &connection_id);
+        audit_room(&state, &auth.subject, "abonent.renamed", &connection_id);
         state.notify_admin(
             &format!("session:{}:abonents", room_id),
             json!({
@@ -556,3 +604,4 @@ pub async fn engine_abonents() -> Response {
     track("engine/abonents");
     Json(json!({ "abonents": [], "count": 0 })).into_response()
 }
+

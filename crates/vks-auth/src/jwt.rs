@@ -44,6 +44,9 @@ pub struct Claims {
     pub iat: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iss: Option<String>,
+    /// Monotonic generation counter to prevent same-second revocation race (M1.2).
+    #[serde(default)]
+    pub generation: u64,
 }
 
 /// Verification result.
@@ -54,6 +57,7 @@ pub struct VerifiedJwt {
     pub room_id: Option<String>,
     pub exp: i64,
     pub iat: i64,
+    pub generation: u64,
 }
 
 /// Errors for JWT operations. Messages expose only `jti` — never the token.
@@ -99,11 +103,27 @@ impl JwtIssuer {
 
     /// Issue a token for `user_id`, optionally scoped to `room_id`.
     pub fn issue(&self, user_id: &str, room_id: Option<&str>) -> Result<String, JwtError> {
-        self.issue_with_iat(user_id, room_id, now_unix())
+        self.issue_with_gen_and_iat(user_id, room_id, 0, now_unix())
     }
 
     /// Issue a token for `user_id` with an explicit `iat` timestamp.
     pub fn issue_with_iat(&self, user_id: &str, room_id: Option<&str>, iat: i64) -> Result<String, JwtError> {
+        self.issue_with_gen_and_iat(user_id, room_id, 0, iat)
+    }
+
+    /// Issue a token for `user_id` with monotonic generation counter (M1.2).
+    pub fn issue_with_generation(&self, user_id: &str, room_id: Option<&str>, generation: u64) -> Result<String, JwtError> {
+        self.issue_with_gen_and_iat(user_id, room_id, generation, now_unix())
+    }
+
+    /// Issue a token for `user_id` with explicit generation and iat timestamp.
+    pub fn issue_with_gen_and_iat(
+        &self,
+        user_id: &str,
+        room_id: Option<&str>,
+        generation: u64,
+        iat: i64,
+    ) -> Result<String, JwtError> {
         let exp = iat + self.config.ttl_secs;
         let claims = Claims {
             sub: user_id.to_string(),
@@ -112,6 +132,7 @@ impl JwtIssuer {
             exp,
             iat,
             iss: Some(self.config.issuer.clone()),
+            generation,
         };
         jsonwebtoken::encode(&Header::new(jsonwebtoken::Algorithm::HS256), &claims, &self.encoding_key)
             .map_err(|e| JwtError::Signing(e.to_string()))
@@ -141,6 +162,7 @@ impl JwtIssuer {
             room_id: claims.room_id,
             exp: claims.exp,
             iat: claims.iat,
+            generation: claims.generation,
         })
     }
 }
@@ -268,5 +290,15 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains(&claims.jti), "jti missing from: {msg}");
         assert!(!msg.contains(&token), "full token leaked");
+    }
+
+    #[test]
+    fn monotonic_generation_roundtrip() {
+        let a = issuer("gen-secret");
+        let token = a.issue_with_generation("operator-1", Some("room-42"), 7).unwrap();
+        let v = a.verify(&token).unwrap();
+        assert_eq!(v.user_id, "operator-1");
+        assert_eq!(v.room_id.as_deref(), Some("room-42"));
+        assert_eq!(v.generation, 7);
     }
 }

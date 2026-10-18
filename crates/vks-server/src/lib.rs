@@ -33,6 +33,8 @@ use vks_common::metrics::{
 use vks_core::ports::media_engine::MediaEngine;
 use vks_proto::signaling::signaling_message::Payload;
 use vks_proto::signaling::{ParticipantJoined, ParticipantLeft, SignalingMessage};
+use vks_auth::jwt::VerifiedJwt;
+use vks_core::Role;
 use vks_signaling::envelope::Envelope;
 use vks_signaling::handler::{HandlerConfig, SignalingHandler};
 
@@ -264,9 +266,11 @@ async fn ws_handler(State(ctx): State<WsContext>, headers: HeaderMap, ws: WebSoc
             }
         }
     }
+    let role = vks_admin::users::Users::resolve_role(&ctx.state, &verified.user_id)
+        .unwrap_or(Role::Participant);
     // Транспортный потолок памяти на сообщение (см. MAX_WS_TRANSPORT_BYTES):
     // 64–256 КиБ — graceful close 4008 в handle_ws_socket, свыше — транспортный отсев.
-    ws.max_message_size(MAX_WS_TRANSPORT_BYTES).on_upgrade(move |socket| handle_ws_socket(socket, ctx))
+    ws.max_message_size(MAX_WS_TRANSPORT_BYTES).on_upgrade(move |socket| handle_ws_socket(socket, ctx, verified, role))
 }
 
 /// JSON-конверт ошибки handshake (до upgrade).
@@ -299,13 +303,69 @@ fn parse_ice_candidate_addr(candidate: &str) -> Option<std::net::SocketAddr> {
     }
 }
 
-/// Извлекает стабильный ParticipantId из строки сессии.
+/// Извлекает стабильный ParticipantId из строки сессии (детерминированный UUIDv5 для псевдонимов).
 fn parse_participant_id(pid_str: &str) -> vks_core::ParticipantId {
-    uuid::Uuid::parse_str(pid_str)
+    let u = uuid::Uuid::parse_str(pid_str)
         .ok()
-        .or_else(|| pid_str.split('-').next_back().and_then(|u| uuid::Uuid::parse_str(u).ok()))
-        .map(vks_core::ParticipantId::from_uuid)
-        .unwrap_or_default()
+        .or_else(|| {
+            if pid_str.len() >= 36 {
+                uuid::Uuid::parse_str(&pid_str[pid_str.len() - 36..]).ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(pid_str.as_bytes());
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&digest[..16]);
+            bytes[6] = (bytes[6] & 0x0f) | 0x50; // Version 5
+            bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variant RFC 4122
+            uuid::Uuid::from_bytes(bytes)
+        });
+    vks_core::ParticipantId::from_uuid(u)
+}
+
+#[derive(Debug, Clone)]
+struct ActiveMembership {
+    room_id: vks_core::RoomId,
+    participant_id: String,
+}
+
+async fn cleanup_active_membership(
+    membership: &mut Option<ActiveMembership>,
+    sfu_engine: &vks_media_sfu::SfuEngine,
+    state: &AppState,
+    reason: u64,
+) {
+    if let Some(m) = membership.take() {
+        let pid_val = parse_participant_id(&m.participant_id);
+        let _ = sfu_engine.remove_subscriber(m.room_id, pid_val).await;
+        let _ = sfu_engine.remove_publisher(m.room_id, pid_val).await;
+        let rem_opt = state.room_hub.unregister_participant(&m.room_id, &m.participant_id);
+        state.room_hub.unsubscribe(&m.room_id);
+        let count = rem_opt.unwrap_or(0);
+        vks_admin::rooms::Rooms::update(state, &m.room_id, None, None, Some(count), None);
+
+        let left_msg = SignalingMessage {
+            msg_id: 0,
+            reply_to: 0,
+            payload: Some(Payload::ParticipantLeft(ParticipantLeft {
+                participant_id: m.participant_id.clone(),
+                reason,
+            })),
+        };
+        let payload_bytes = Envelope::new(left_msg).encode();
+        state.room_hub.broadcast(&m.room_id, Some(&m.participant_id), payload_bytes.into());
+
+        state.notify_admin(
+            "conferences:update",
+            serde_json::json!({
+                "id": m.room_id.to_string(),
+                "participants_count": count
+            }),
+        );
+    }
 }
 
 /// Обработка сессии WebSocket-сигналинга.
@@ -313,21 +373,54 @@ fn parse_participant_id(pid_str: &str) -> vks_core::ParticipantId {
 /// Сайд-эффекты комнаты (создание записи, счётчик участников) применяются только
 /// по **успешному** результату FSM (`JoinRoomResult`/`Ack` на `LeaveRoom`):
 /// отклонённый JoinRoom (например, до ClientHello) ничего не создаёт и не считает.
-async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
+async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJwt, role: Role) {
     let (mut sender, mut receiver) = socket.split();
     let mut handler = SignalingHandler::new(ctx.handler_config);
     let state = ctx.state;
-    let mut current_membership: Option<(vks_core::RoomId, String)> = None;
+    let mut current_membership: Option<ActiveMembership> = None;
     let mut room_rx: Option<tokio::sync::broadcast::Receiver<vks_admin::hub::RoomBroadcastEvent>> = None;
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping_interval.tick().await;
+
+    // Real-time token revocation subscription (M1.2)
+    let mut revocation_rx = state.revocation_tx.subscribe();
+
+    // Token expiration deadline
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let time_left = if verified.exp > now_unix {
+        std::time::Duration::from_secs((verified.exp - now_unix) as u64)
+    } else {
+        std::time::Duration::from_millis(1)
+    };
+    let token_deadline = tokio::time::sleep(time_left);
+    tokio::pin!(token_deadline);
+
     // Скользящее окно частоты сообщений (T1.2).
     let mut window_start = std::time::Instant::now();
     let mut window_count: usize = 0;
 
     'session: loop {
         tokio::select! {
+            () = &mut token_deadline => {
+                warn!(user_id = %verified.user_id, "WS token expired during session; closing connection");
+                let _ = sender.send(Message::Close(Some(CloseFrame { code: 4001, reason: "token expired".into() }))).await;
+                break 'session;
+            }
+            rev_res = revocation_rx.recv() => {
+                if let Ok(notice) = rev_res {
+                    if (notice.user_id == verified.user_id || notice.user_id == "*")
+                        && notice.generation >= verified.generation
+                    {
+                        warn!(user_id = %verified.user_id, "User session revoked via broadcast; closing WebSocket");
+                        let _ = sender.send(Message::Close(Some(CloseFrame { code: 4003, reason: "session revoked".into() }))).await;
+                        break 'session;
+                    }
+                }
+            }
             _ = ping_interval.tick() => {
                 if let Err(e) = sender.send(Message::Ping(Vec::new().into())).await {
                     warn!(error = %e, "failed to send server keepalive ping; closing");
@@ -399,6 +492,18 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
 
                 match msg {
                     Message::Binary(bytes) => {
+                        // Check if user account was deleted/deactivated during session
+                        let is_deactivated = if let Ok(users) = state.users.lock() {
+                            users.values().any(|u| (u.id.to_string() == verified.user_id || u.username == verified.user_id) && u.deleted)
+                        } else {
+                            false
+                        };
+                        if is_deactivated {
+                            warn!(user_id = %verified.user_id, "User account deactivated during session; closing WS");
+                            let _ = sender.send(Message::Close(Some(CloseFrame { code: 4003, reason: "account deactivated".into() }))).await;
+                            break 'session;
+                        }
+
                         // Лимит сообщения (§2.4: protobuf ≤64 КиБ) — до декодирования протокола.
                         if bytes.len() > MAX_WS_MESSAGE_BYTES {
                             warn!(
@@ -421,11 +526,39 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                 let was_leave = matches!(env.payload(), Some(Payload::LeaveRoom(_)));
                                 let payload_opt = env.payload().clone();
 
-                                // SFU media negotiation: SDP Offer -> register publisher tracks & SSRCs
+                                // Check room scope for JoinRoom (M1.1)
+                                if let Some(ref jname) = join_name {
+                                    if let Some(ref target) = verified.room_id {
+                                        if !jname.eq_ignore_ascii_case(target) {
+                                            warn!(room_id = %jname, allowed = %target, "JoinRoom rejected: room_id does not match token scope");
+                                            let err_reply = Envelope::error_reply(
+                                                env.msg_id(),
+                                                "forbidden",
+                                                "Token is not authorized for this room",
+                                                false,
+                                            );
+                                            let _ = sender.send(Message::Binary(err_reply.encode().into())).await;
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                // SFU media negotiation: SDP Offer -> register publisher tracks & SSRCs (M1.1: Viewer cannot publish)
                                 if let Some(Payload::SdpOffer(ref o)) = payload_opt {
+                                    if role == Role::Viewer {
+                                        warn!(user_id = %verified.user_id, "Viewer role cannot publish media (SDP Offer rejected)");
+                                        let err_reply = Envelope::error_reply(
+                                            env.msg_id(),
+                                            "forbidden",
+                                            "Viewer role is not allowed to publish media",
+                                            false,
+                                        );
+                                        let _ = sender.send(Message::Binary(err_reply.encode().into())).await;
+                                        continue;
+                                    }
                                     if let Ok(sdp) = vks_signaling::sdp::Sdp::parse(&o.sdp) {
-                                        if let Some((rid, ref pid_str)) = current_membership {
-                                            let pid = parse_participant_id(pid_str);
+                                        if let Some(ref m) = current_membership {
+                                            let pid = parse_participant_id(&m.participant_id);
                                             let mut tracks = Vec::new();
                                             for media in &sdp.media {
                                                 let track_kind = match media.kind {
@@ -435,13 +568,13 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                                 let track = vks_core::ports::media_engine::MediaTrack::new(pid, track_kind);
                                                 for ssrc_str in &media.ssrcs {
                                                     if let Ok(ssrc) = ssrc_str.split_whitespace().next().unwrap_or("").parse::<u32>() {
-                                                        ctx.sfu_engine.register_ssrc(rid, pid, track.id, ssrc);
+                                                        ctx.sfu_engine.register_ssrc(m.room_id, pid, track.id, ssrc);
                                                     }
                                                 }
                                                 tracks.push(track);
                                             }
                                             if !tracks.is_empty() {
-                                                let _ = ctx.sfu_engine.add_publisher(rid, pid, tracks).await;
+                                                let _ = ctx.sfu_engine.add_publisher(m.room_id, pid, tracks).await;
                                             }
                                         }
                                     }
@@ -449,10 +582,10 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
 
                                 // SFU ICE candidate exchange -> register participant UDP endpoint
                                 if let Some(Payload::IceCandidate(ref c)) = payload_opt {
-                                    if let Some((rid, ref pid_str)) = current_membership {
-                                        let pid = parse_participant_id(pid_str);
+                                    if let Some(ref m) = current_membership {
+                                        let pid = parse_participant_id(&m.participant_id);
                                         if let Some(addr) = parse_ice_candidate_addr(&c.candidate) {
-                                            ctx.sfu_engine.register_endpoint(rid, pid, addr);
+                                            ctx.sfu_engine.register_endpoint(m.room_id, pid, addr);
                                         }
                                     }
                                 }
@@ -479,33 +612,15 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                             found.unwrap_or_else(|| vks_admin::rooms::Rooms::create(&state, &name).id)
                                         };
                                         // Если клиент уже находился в другой комнате на этом сокете, вычищаем её
-                                        if let Some((old_rid, old_pid)) = current_membership.take() {
-                                            let _ = room_rx.take();
-                                            let old_pid_val = parse_participant_id(&old_pid);
-                                            let _ = ctx.sfu_engine.remove_subscriber(old_rid, old_pid_val).await;
-                                            let _ = ctx.sfu_engine.remove_publisher(old_rid, old_pid_val).await;
-                                            let rem_opt = state.room_hub.unregister_participant(&old_rid, &old_pid);
-                                            state.room_hub.unsubscribe(&old_rid);
-                                            let rem_count = rem_opt.unwrap_or(0);
-                                            vks_admin::rooms::Rooms::update(&state, &old_rid, None, None, Some(rem_count), None);
-                                            let left_msg = SignalingMessage {
-                                                msg_id: 0,
-                                                reply_to: 0,
-                                                payload: Some(Payload::ParticipantLeft(ParticipantLeft {
-                                                    participant_id: old_pid.clone(),
-                                                    reason: 0,
-                                                })),
-                                            };
-                                            let payload_bytes = Envelope::new(left_msg).encode();
-                                            state.room_hub.broadcast(&old_rid, Some(&old_pid), payload_bytes.into());
-                                            state.notify_admin("conferences:update", serde_json::json!({
-                                                "id": old_rid.to_string(),
-                                                "participants_count": rem_count
-                                            }));
+                                        if current_membership.is_some() {
+                                            cleanup_active_membership(&mut current_membership, &ctx.sfu_engine, &state, 0).await;
                                         }
 
                                         let pid_str = handler.participant_id().map(str::to_string).unwrap_or_default();
-                                        current_membership = Some((rid, pid_str.clone()));
+                                        current_membership = Some(ActiveMembership {
+                                            room_id: rid,
+                                            participant_id: pid_str.clone(),
+                                        });
 
                                         let pid = parse_participant_id(&pid_str);
                                         let _ = ctx.sfu_engine.create_room(vks_core::ports::media_engine::RoomMediaCfg {
@@ -608,32 +723,8 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                         }));
                                     }
                                 } else if left_ok {
-                                    if let Some((rid, pid_str)) = current_membership.take() {
-                                        room_rx = None;
-                                        let pid_val = parse_participant_id(&pid_str);
-                                        let _ = ctx.sfu_engine.remove_subscriber(rid, pid_val).await;
-                                        let _ = ctx.sfu_engine.remove_publisher(rid, pid_val).await;
-                                        let rem_opt = state.room_hub.unregister_participant(&rid, &pid_str);
-                                        state.room_hub.unsubscribe(&rid);
-                                        let new_count = rem_opt.unwrap_or(0);
-                                        vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(new_count), None);
-
-                                        let left_msg = SignalingMessage {
-                                            msg_id: 0,
-                                            reply_to: 0,
-                                            payload: Some(Payload::ParticipantLeft(ParticipantLeft {
-                                                participant_id: pid_str.clone(),
-                                                reason: 0,
-                                            })),
-                                        };
-                                        let payload_bytes = Envelope::new(left_msg).encode();
-                                        state.room_hub.broadcast(&rid, Some(&pid_str), payload_bytes.into());
-
-                                        state.notify_admin("conferences:update", serde_json::json!({
-                                            "id": rid.to_string(),
-                                            "participants_count": new_count
-                                        }));
-                                    }
+                                    room_rx = None;
+                                    cleanup_active_membership(&mut current_membership, &ctx.sfu_engine, &state, 0).await;
                                 }
 
                                 for reply in replies {
@@ -681,34 +772,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
     }
 
     drop(room_rx);
-    if let Some((rid, pid_str)) = current_membership.take() {
-        let pid_val = parse_participant_id(&pid_str);
-        let _ = ctx.sfu_engine.remove_subscriber(rid, pid_val).await;
-        let _ = ctx.sfu_engine.remove_publisher(rid, pid_val).await;
-        let rem_opt = state.room_hub.unregister_participant(&rid, &pid_str);
-        state.room_hub.unsubscribe(&rid);
-        let new_count = rem_opt.unwrap_or(0);
-        vks_admin::rooms::Rooms::update(&state, &rid, None, None, Some(new_count), None);
-
-        let left_msg = SignalingMessage {
-            msg_id: 0,
-            reply_to: 0,
-            payload: Some(Payload::ParticipantLeft(ParticipantLeft {
-                participant_id: pid_str.clone(),
-                reason: 1, // Transport disconnect / timeout
-            })),
-        };
-        let payload_bytes = Envelope::new(left_msg).encode();
-        state.room_hub.broadcast(&rid, Some(&pid_str), payload_bytes.into());
-
-        state.notify_admin(
-            "conferences:update",
-            serde_json::json!({
-                "id": rid.to_string(),
-                "participants_count": new_count
-            }),
-        );
-    }
+    cleanup_active_membership(&mut current_membership, &ctx.sfu_engine, &state, 1).await;
 }
 
 #[cfg(test)]
@@ -776,4 +840,21 @@ mod tests {
         assert!(other > 0, "PROPFIND must be aggregated under method=other");
         assert_eq!(propfind, 0, "raw non-whitelisted method must never appear as a label");
     }
+
+    #[test]
+    fn test_parse_participant_id_deterministic() {
+        let alias = "alice-web-client";
+        let pid1 = parse_participant_id(alias);
+        let pid2 = parse_participant_id(alias);
+        assert_eq!(pid1, pid2);
+
+        let random_uuid = uuid::Uuid::new_v4();
+        let pid_uuid = parse_participant_id(&random_uuid.to_string());
+        assert_eq!(pid_uuid.to_string(), random_uuid.to_string());
+
+        let suffixed = format!("prefix-{}", random_uuid);
+        let pid_suffixed = parse_participant_id(&suffixed);
+        assert_eq!(pid_suffixed.to_string(), random_uuid.to_string());
+    }
 }
+

@@ -251,15 +251,15 @@ impl SignalingHandler {
                 false,
             )];
         }
-        if let Err(e) = self.session.apply(SessionEvent::SdpOffer) {
-            return vec![Envelope::error_reply(reply_to, "bad_state", &format!("offer: {e}"), false)];
-        }
         let offer_doc = match Sdp::parse(&offer.sdp) {
             Ok(d) => d,
             Err(e) => {
                 return vec![Envelope::error_reply(reply_to, "sdp_parse_error", &e.to_string(), true)];
             }
         };
+        if let Err(e) = self.session.apply(SessionEvent::SdpOffer) {
+            return vec![Envelope::error_reply(reply_to, "bad_state", &format!("offer: {e}"), false)];
+        }
         let profile = self.config.answer_profile();
         let (answer_doc, rtp_maps) = offer_doc.sfu_answer(&profile);
         let answer = answer_doc.with_ice_candidates(&[profile.host_candidate]);

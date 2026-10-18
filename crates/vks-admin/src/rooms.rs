@@ -4,7 +4,6 @@
 // Viewer (Observer mode, read-only). Live status: participants +
 // bitrate (monitor, фаза 5).
 
-use std::sync::Arc;
 use vks_core::{RoomId, RoomMode};
 
 use crate::state::{AppState, RoomRecord};
@@ -15,7 +14,9 @@ pub struct Rooms;
 impl Rooms {
     /// Вычисляет эффективный режим комнаты (явный override иначе глобальный режим).
     fn resolve_effective_mode(state: &AppState, override_mode: Option<RoomMode>) -> RoomMode {
-        override_mode.unwrap_or_else(|| state.mode.lock().expect("mode store poisoned").global_mode)
+        override_mode.unwrap_or_else(|| {
+            state.mode.lock().expect("mode store poisoned").global_mode
+        })
     }
 
     /// Создаёт комнату (per-room режим = `None`, т.е. глобальный).
@@ -26,26 +27,11 @@ impl Rooms {
             let mut rooms = state.rooms.lock().expect("rooms store poisoned");
             rooms.insert(id, record.clone());
         }
-        if let Some(storage) = &state.storage {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let storage = Arc::clone(storage);
-                let effective_mode = Self::resolve_effective_mode(state, record.mode);
-                let mut cr = vks_core::Room::new(record.name.clone(), effective_mode);
-                cr.id = id;
-                cr.created_ms = record.created_ms;
-                drop(handle.spawn(async move {
-                    let _ = storage.upsert_room(&cr).await;
-                }));
-            }
-        }
         record
     }
 
     /// Создаёт комнату с подтвержденной синхронной записью в Storage до ответа (M0-M1).
-    pub async fn create_async(
-        state: &AppState,
-        name: impl Into<String>,
-    ) -> Result<RoomRecord, vks_core::ports::storage::StorageError> {
+    pub async fn create_async(state: &AppState, name: impl Into<String>) -> Result<RoomRecord, vks_core::ports::storage::StorageError> {
         let id = RoomId::new();
         let record = RoomRecord::new(id, name, None);
         if let Some(storage) = &state.storage {
@@ -88,7 +74,7 @@ impl Rooms {
         if let Some(n) = name {
             record.name = n;
         }
-        let mode_changed = if let Some(m) = mode {
+        let _mode_changed = if let Some(m) = mode {
             let old_effective = Self::resolve_effective_mode(state, record.mode);
             record.mode = Some(m);
             let mut mode_state = state.mode.lock().expect("mode store poisoned");
@@ -100,14 +86,11 @@ impl Rooms {
                     new_mode: m,
                     switch_epoch: mode_state.switch_epoch,
                 });
-                state.notify_admin(
-                    "room:mode_changed",
-                    serde_json::json!({
-                        "room_id": id.to_string(),
-                        "mode": m,
-                        "switch_epoch": mode_state.switch_epoch,
-                    }),
-                );
+                state.notify_admin("room:mode_changed", serde_json::json!({
+                    "room_id": id.to_string(),
+                    "mode": m,
+                    "switch_epoch": mode_state.switch_epoch,
+                }));
 
                 // Рассылаем RoomModeChanged всем WebRTC signaling сессиям в комнате через RoomHub
                 let proto_mode = match m {
@@ -145,27 +128,6 @@ impl Rooms {
             record.bitrate_kbps = b;
         }
         let updated = record.clone();
-        if let Some(storage) = &state.storage {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let storage = Arc::clone(storage);
-                let rid = *id;
-                let room_name = updated.name.clone();
-                let effective_mode = Self::resolve_effective_mode(state, updated.mode);
-                let created_ms = updated.created_ms;
-                let opt_override = updated.mode;
-                drop(handle.spawn(async move {
-                    let mut cr = vks_core::Room::new(room_name, effective_mode);
-                    cr.id = rid;
-                    cr.created_ms = created_ms;
-                    let _ = storage.upsert_room(&cr).await;
-                    if mode_changed {
-                        if let Some(m) = opt_override {
-                            let _ = storage.set_room_mode_override(rid, m).await;
-                        }
-                    }
-                }));
-            }
-        }
         Some(updated)
     }
 
@@ -180,16 +142,6 @@ impl Rooms {
             }
         }
         state.mode.lock().expect("mode store poisoned").room_mode_overrides.remove(id);
-        if let Some(storage) = &state.storage {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let storage = Arc::clone(storage);
-                let rid = *id;
-                drop(handle.spawn(async move {
-                    let _ = storage.delete_room_mode_override(rid).await;
-                    let _ = storage.delete_room(rid).await;
-                }));
-            }
-        }
         true
     }
 
@@ -481,16 +433,14 @@ mod tests {
             }
         }
 
-        let mock = Arc::new(MockStorage { rooms: std::sync::Mutex::new(std::collections::HashMap::new()) });
+        let mock = std::sync::Arc::new(MockStorage { rooms: std::sync::Mutex::new(std::collections::HashMap::new()) });
         let state = AppState::with_storage(mock.clone());
-        let created = Rooms::create(&state, "persisted-room");
+        let created = Rooms::create_async(&state, "persisted-room".to_string()).await.expect("create_async failed");
 
-        // Wait a moment for background task
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(mock.rooms.lock().unwrap().contains_key(&created.id));
 
-        Rooms::delete(&state, &created.id);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let deleted = Rooms::delete_async(&state, &created.id).await.expect("delete_async failed");
+        assert!(deleted);
         assert!(!mock.rooms.lock().unwrap().contains_key(&created.id));
     }
 

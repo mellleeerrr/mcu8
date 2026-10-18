@@ -109,10 +109,14 @@ impl UdpMediaLoop {
                                 let payload = Bytes::copy_from_slice(&buf[..size]);
                                 let packet = RtpPacket::new(TrackId::default(), payload);
                                 let targets = router(src, packet);
-                                for (dest, out_bytes) in targets {
-                                    if let Ok(sent) = socket.send_to(&out_bytes, dest).await {
-                                        stats.packets_sent.fetch_add(1, Ordering::Relaxed);
-                                        stats.bytes_sent.fetch_add(sent as u64, Ordering::Relaxed);
+                                if targets.is_empty() {
+                                    stats.packets_dropped.fetch_add(1, Ordering::Relaxed);
+                                } else {
+                                    for (dest, out_bytes) in targets {
+                                        if let Ok(sent) = socket.send_to(&out_bytes, dest).await {
+                                            stats.packets_sent.fetch_add(1, Ordering::Relaxed);
+                                            stats.bytes_sent.fetch_add(sent as u64, Ordering::Relaxed);
+                                        }
                                     }
                                 }
                             }
@@ -146,6 +150,48 @@ impl UdpMediaLoop {
 /// Проверяет, является ли датаграмма STUN Binding Request (RFC 5389 §6).
 pub fn is_stun_binding_request(data: &[u8]) -> bool {
     data.len() >= 20 && data[0] == 0x00 && data[1] == 0x01 && data[4..8] == [0x21, 0x12, 0xa4, 0x42]
+}
+
+/// Извлекает USERNAME из STUN-сообщения без аллокаций (RFC 5389 §15.3, Type = 0x0006).
+pub fn parse_stun_username(data: &[u8]) -> Option<&str> {
+    if data.len() < 20 {
+        return None;
+    }
+    let msg_len = u16::from_be_bytes([data[2], data[3]]) as usize;
+    let total_len = 20 + msg_len;
+    if data.len() < total_len {
+        return None;
+    }
+    let mut offset = 20;
+    while offset + 4 <= total_len {
+        let attr_type = u16::from_be_bytes([data[offset], data[offset + 1]]);
+        let attr_len = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize;
+        offset += 4;
+        if offset + attr_len > total_len {
+            return None;
+        }
+        if attr_type == 0x0006 {
+            let val_bytes = &data[offset..offset + attr_len];
+            return std::str::from_utf8(val_bytes).ok();
+        }
+        // STUN attributes are aligned to 4-byte boundaries
+        let padded_len = (attr_len + 3) & !3;
+        offset += padded_len;
+    }
+    None
+}
+
+/// Проверяет, аутентифицирован ли STUN-запрос по ожидаемому ICE ufrag (RFC 8445 §7.2.1).
+pub fn is_stun_request_authenticated(data: &[u8], expected_ufrag: &str) -> bool {
+    if let Some(username) = parse_stun_username(data) {
+        if let Some((server_ufrag, _client_ufrag)) = username.split_once(':') {
+            server_ufrag == expected_ufrag
+        } else {
+            username == expected_ufrag
+        }
+    } else {
+        false
+    }
 }
 
 /// Формирует STUN Binding Success Response с атрибутом XOR-MAPPED-ADDRESS (RFC 5389 §15.2).
@@ -208,7 +254,7 @@ pub fn parse_rtp_ssrc(data: &[u8]) -> Option<u32> {
 pub fn build_rtcp_pli(sender_ssrc: u32, media_ssrc: u32) -> [u8; 12] {
     let mut pkt = [0u8; 12];
     pkt[0] = 0x81; // V=2, P=0, FMT=1 (PLI)
-    pkt[1] = 206; // PT=206 (PSFB / Payload-Specific Feedback)
+    pkt[1] = 206;  // PT=206 (PSFB / Payload-Specific Feedback)
     pkt[2] = 0x00;
     pkt[3] = 0x02; // Length: 2 32-bit words following header
     pkt[4..8].copy_from_slice(&sender_ssrc.to_be_bytes());
@@ -316,4 +362,43 @@ mod tests {
         publisher.shutdown();
         subscriber.shutdown();
     }
+
+    #[test]
+    fn test_parse_stun_username_and_authentication() {
+        let username_str = "server-ufrag:client-ufrag";
+        let user_bytes = username_str.as_bytes();
+        let attr_len = user_bytes.len() as u16;
+        let padded_len = (attr_len + 3) & !3;
+
+        let mut req = vec![
+            0x00, 0x01, // Binding Request
+            0x00, 0x00, // Length placeholder (at 2..4)
+            0x21, 0x12, 0xa4, 0x42, // Magic cookie
+        ];
+        req.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]); // Trans ID (12 bytes)
+
+        // Attribute: USERNAME (0x0006)
+        req.extend_from_slice(&0x0006u16.to_be_bytes());
+        req.extend_from_slice(&attr_len.to_be_bytes());
+        req.extend_from_slice(user_bytes);
+        // Padding
+        for _ in 0..(padded_len - attr_len) {
+            req.push(0);
+        }
+
+        // Set message length in header
+        let msg_len = (4 + padded_len) as u16;
+        req[2..4].copy_from_slice(&msg_len.to_be_bytes());
+
+        let parsed = parse_stun_username(&req);
+        assert_eq!(parsed, Some("server-ufrag:client-ufrag"));
+
+        assert!(is_stun_request_authenticated(&req, "server-ufrag"));
+        assert!(!is_stun_request_authenticated(&req, "wrong-ufrag"));
+
+        // Test truncated STUN packet
+        assert_eq!(parse_stun_username(&req[..15]), None);
+        assert_eq!(parse_stun_username(&req[..22]), None);
+    }
 }
+

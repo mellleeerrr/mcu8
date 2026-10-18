@@ -27,7 +27,7 @@ impl Users {
             existing.deleted = false;
             return existing.clone();
         }
-        let record = UserRecord { id, username: name, role, muted: false, deleted: false };
+        let record = UserRecord { id, username: name, role, muted: false, deleted: false, generation: 1 };
         users.insert(id, record.clone());
         record
     }
@@ -49,29 +49,52 @@ impl Users {
 
     /// Обновляет username/role.
     pub fn update(state: &AppState, id: &UserId, username: Option<String>, role: Option<Role>) -> Option<UserRecord> {
-        let mut users = state.users.lock().expect("users store poisoned");
-        let record = users.get_mut(id)?;
-        if let Some(name) = username {
-            record.username = name;
+        let (updated_record, bumped) = {
+            let mut users = state.users.lock().expect("users store poisoned");
+            let record = users.get_mut(id)?;
+            let mut changed = false;
+            if let Some(name) = username {
+                if record.username != name {
+                    record.username = name;
+                    changed = true;
+                }
+            }
+            if let Some(r) = role {
+                if record.role != r {
+                    record.role = r;
+                    changed = true;
+                }
+            }
+            if changed {
+                record.generation += 1;
+            }
+            (record.clone(), if changed { Some(record.generation) } else { None })
+        };
+        if let Some(gen) = bumped {
+            state.notify_revocation(id.to_string(), gen);
         }
-        if let Some(r) = role {
-            record.role = r;
-        }
-        Some(record.clone())
+        Some(updated_record)
     }
 
     /// Soft-delete (GDPR 152-7: 1000d через 30 — в vks-storage).
     ///
     /// Возвращает `true`, если запись существовала и НЕ была уже удалена.
     pub fn delete(state: &AppState, id: &UserId) -> bool {
-        let mut users = state.users.lock().expect("users store poisoned");
-        match users.get_mut(id) {
-            Some(record) if !record.deleted => {
-                record.deleted = true;
-                true
+        let (deleted, gen) = {
+            let mut users = state.users.lock().expect("users store poisoned");
+            match users.get_mut(id) {
+                Some(record) if !record.deleted => {
+                    record.deleted = true;
+                    record.generation += 1;
+                    (true, Some(record.generation))
+                }
+                _ => (false, None),
             }
-            _ => false,
+        };
+        if let Some(g) = gen {
+            state.notify_revocation(id.to_string(), g);
         }
+        deleted
     }
 
     /// Создаёт пользователя с подтвержденной записью в Storage (M0-M1).
@@ -92,8 +115,13 @@ impl Users {
     ) -> Result<UserRecord, vks_core::ports::storage::StorageError> {
         let name = username.into();
         if let Some(storage) = &state.storage {
-            let stored =
-                vks_core::ports::storage::StoredUser { id, username: name.clone(), role, muted: false, deleted: false };
+            let stored = vks_core::ports::storage::StoredUser {
+                id,
+                username: name.clone(),
+                role,
+                muted: false,
+                deleted: false,
+            };
             storage.upsert_user(&stored).await?;
         }
         Ok(Self::create_with_id(state, id, name, role))
@@ -204,9 +232,10 @@ impl Users {
                     record.role = u.role;
                     record.muted = false;
                     record.deleted = false;
+                    record.generation = record.generation.saturating_add(1);
                 }
             } else {
-                let record = UserRecord { id: u.id, username: u.username, role: u.role, muted: false, deleted: false };
+                let record = UserRecord { id: u.id, username: u.username, role: u.role, muted: false, deleted: false, generation: 1 };
                 users.insert(record.id, record);
             }
         }
