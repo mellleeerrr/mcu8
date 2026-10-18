@@ -171,6 +171,23 @@ impl SipGateway {
         Ok(())
     }
 
+    /// Зарегистрирован ли SIP UAS (открыт ли порт/транспорт).
+    #[must_use]
+    pub fn is_registered(&self) -> bool {
+        self.uas_registered
+    }
+
+    /// Отменяет регистрацию SIP UAS (закрывает транспорт).
+    pub fn unregister(&mut self) {
+        self.uas_registered = false;
+        tracing::info!("SIP UAS unregistered");
+    }
+
+    /// Количество активных звонков.
+    pub fn active_calls_count(&self) -> usize {
+        self.calls.values().filter(|c| c.state == CallState::Active).count()
+    }
+
     /// Принимает входящий INVITE: создаёт вызов в `Ringing` и
     /// согласовывает кодеки (SIP SDP → WebRTC SDP).
     ///

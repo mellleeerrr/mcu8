@@ -644,6 +644,16 @@ pub struct RecordQuery {
 /// `GET /api/v1/records` — список сохранённых записей (M5.5).
 pub async fn list_records(State(state): State<SharedState>, Query(query): Query<RecordQuery>) -> Response {
     let target_room = query.room_id.and_then(|r| parse_room_id(&r).ok());
+    if let Some(storage) = &state.storage {
+        if let Ok(records) = storage.list_records(target_room).await {
+            let mut filtered = records;
+            filtered.sort_by(|a, b| b.created_ms.cmp(&a.created_ms));
+            return json_ok(serde_json::json!({
+                "count": filtered.len(),
+                "records": filtered,
+            }));
+        }
+    }
     let mut records: Vec<RecordEntry> = state
         .records
         .lock()
@@ -661,6 +671,11 @@ pub async fn list_records(State(state): State<SharedState>, Query(query): Query<
 
 /// `GET /api/v1/records/{id}` — получение метаданных записи по ID.
 pub async fn get_record(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
+    if let Some(storage) = &state.storage {
+        if let Ok(Some(entry)) = storage.get_record(&id).await {
+            return json_ok(serde_json::to_value(entry).unwrap_or_default());
+        }
+    }
     let found = state.records.lock().expect("records store poisoned").get(&id).cloned();
     match found {
         Some(entry) => json_ok(serde_json::to_value(entry).unwrap_or_default()),
@@ -674,12 +689,11 @@ pub async fn get_record(State(state): State<SharedState>, Path(id): Path<String>
 
 /// `DELETE /api/v1/records/{id}` — удаление метаданных записи.
 pub async fn delete_record(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
-    let removed = state.records.lock().expect("records store poisoned").remove(&id);
-    if let Some(entry) = removed {
-        if let Some(ref storage) = state.storage {
-            let _ = storage.delete_record(&id).await;
-        }
-        json_ok(serde_json::json!({ "deleted": true, "id": entry.id }))
+    let mem_removed = state.records.lock().expect("records store poisoned").remove(&id);
+    let storage_deleted =
+        if let Some(ref storage) = state.storage { storage.delete_record(&id).await.is_ok() } else { false };
+    if mem_removed.is_some() || storage_deleted {
+        json_ok(serde_json::json!({ "deleted": true, "id": id }))
     } else {
         (
             StatusCode::NOT_FOUND,

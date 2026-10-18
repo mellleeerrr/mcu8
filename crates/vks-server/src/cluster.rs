@@ -176,10 +176,11 @@ impl ClusterManager {
         let dead = reg.dead(now_tick);
         let owner = self.owner.lock().unwrap();
         let owned_rooms = owner.rooms_for(&self.node_id);
+        let is_alive = alive.contains(&self.node_id);
 
         serde_json::json!({
             "node_id": self.node_id,
-            "status": "ACTIVE",
+            "status": if is_alive { "ACTIVE" } else { "DEGRADED" },
             "alive_nodes": alive,
             "dead_nodes": dead,
             "owned_rooms_count": owned_rooms.len(),

@@ -1435,7 +1435,20 @@ async fn test_m5_gateway_dual_call_same_from_isolation_and_mcu_bridging() {
     let mcu = Arc::new(McuEngine::new());
     let gw = GatewayManager::new().with_mcu(Arc::clone(&mcu));
 
-    // 1. Strict codec offer rejection: unsupported codec returns Err
+    // 1. Dynamic gateway status: reflects actual registration
+    let sip_st = gw.sip_status();
+    assert_eq!(sip_st["status"], "READY");
+    assert_eq!(sip_st["connected"], true);
+    assert_eq!(sip_st["active_calls"], 0);
+
+    // Unregister reflects DISABLED
+    gw.sip().lock().unwrap().unregister();
+    let sip_st_unreg = gw.sip_status();
+    assert_eq!(sip_st_unreg["status"], "DISABLED");
+    assert_eq!(sip_st_unreg["connected"], false);
+    gw.sip().lock().unwrap().register_uas().expect("re-register");
+
+    // 2. Strict codec offer rejection: unsupported codec returns Err
     let mut sip_gw = SipGateway::new();
     let unsupported_res = sip_gw.on_invite("call-bad", "alice", &[SipCodec::new("G729")]);
     assert!(unsupported_res.is_err(), "Unsupported SIP codec offer must be rejected");
@@ -1444,7 +1457,7 @@ async fn test_m5_gateway_dual_call_same_from_isolation_and_mcu_bridging() {
     let unsupported_h323 = h323_gw.on_setup("call-bad-h323", "bob", &[H323Codec::new("UNSUPPORTED_CODEC")]);
     assert!(unsupported_h323.is_err(), "Unsupported H.323 codec offer must be rejected");
 
-    // 2. Same 'from' ("alice") places two calls: one to room_1, one to room_2
+    // 3. Same 'from' ("alice") places two calls: one to room_1, one to room_2
     let call_sip_1 = gw
         .incoming_sip_call(&state, "call-sip-1", "alice", &room_1.id, &[SipCodec::new("PCMU")])
         .expect("call 1 accepted");
@@ -1455,6 +1468,7 @@ async fn test_m5_gateway_dual_call_same_from_isolation_and_mcu_bridging() {
     assert_ne!(call_sip_1.participant_id, call_sip_2.participant_id);
     assert_eq!(state.room_hub.list_participants(&room_1.id).len(), 1);
     assert_eq!(state.room_hub.list_participants(&room_2.id).len(), 1);
+    assert_eq!(gw.sip_status()["active_calls"], 2);
 
     // Verify MCU engine bridging
     let pid_1 = vks_server::parse_participant_id(&call_sip_1.participant_id);
@@ -1462,7 +1476,7 @@ async fn test_m5_gateway_dual_call_same_from_isolation_and_mcu_bridging() {
     assert!(mcu.has_participant(room_1.id, pid_1));
     assert!(mcu.has_participant(room_2.id, pid_2));
 
-    // 3. Terminate call 1: room 1 drops to 0, but room 2 MUST stay intact (no cross-room ejection)
+    // 4. Terminate call 1: room 1 drops to 0, but room 2 MUST stay intact (no cross-room ejection)
     let term_1 = gw.terminate_sip_call(&state, "call-sip-1").expect("term call 1");
     assert_eq!(term_1.call_id, "call-sip-1");
     assert_eq!(state.room_hub.list_participants(&room_1.id).len(), 0);
@@ -1470,12 +1484,14 @@ async fn test_m5_gateway_dual_call_same_from_isolation_and_mcu_bridging() {
     assert_eq!(state.room_hub.list_participants(&room_2.id)[0].participant_id, call_sip_2.participant_id);
     assert!(!mcu.has_participant(room_1.id, pid_1));
     assert!(mcu.has_participant(room_2.id, pid_2));
+    assert_eq!(gw.sip_status()["active_calls"], 1);
 
-    // 4. Terminate call 2 cleanly
+    // 5. Terminate call 2 cleanly
     let term_2 = gw.terminate_sip_call(&state, "call-sip-2").expect("term call 2");
     assert_eq!(term_2.call_id, "call-sip-2");
     assert_eq!(state.room_hub.list_participants(&room_2.id).len(), 0);
     assert!(!mcu.has_participant(room_2.id, pid_2));
+    assert_eq!(gw.sip_status()["active_calls"], 0);
 }
 
 #[tokio::test]
@@ -1516,7 +1532,7 @@ async fn test_m5_recorder_idempotent_stop_persistent_storage_and_playable_contai
     assert_eq!(entry.id, meta_1.id.to_string());
     assert_eq!(entry.room_id, room_id);
 
-    // Verify PlayableContainerWriter generates valid ISOBMFF container
+    // Verify PlayableContainerWriter generates valid ISOBMFF container with complete sample tables
     let config = ContainerConfig {
         width: 1280,
         height: 720,
@@ -1526,14 +1542,26 @@ async fn test_m5_recorder_idempotent_stop_persistent_storage_and_playable_contai
         max_size_bytes: 5 * 1024 * 1024,
     };
     let mut writer = PlayableContainerWriter::new(config);
-    writer.write_video_sample(&[0x00, 0x00, 0x00, 0x01, 0x65, 0x88], 33, true).unwrap();
+    writer.write_video_sample(&[0x00, 0x00, 0x00, 0x01, 0x65, 0x88], 0, true).unwrap();
     writer.write_audio_sample(&[0xf8, 0xff, 0xfe], 20).unwrap();
+    writer.write_video_sample(&[0x00, 0x00, 0x00, 0x01, 0x41, 0x99], 33, false).unwrap();
+    writer.write_audio_sample(&[0xf8, 0xff, 0xfd], 40).unwrap();
     let mp4_bytes = writer.finalize().unwrap();
 
     assert!(mp4_bytes.len() > 64);
     assert_eq!(&mp4_bytes[4..8], b"ftyp");
     assert!(mp4_bytes.windows(4).any(|w| w == b"moov"));
     assert!(mp4_bytes.windows(4).any(|w| w == b"mdat"));
+    assert!(mp4_bytes.windows(4).any(|w| w == b"stts"));
+    assert!(mp4_bytes.windows(4).any(|w| w == b"stss"));
+    assert!(mp4_bytes.windows(4).any(|w| w == b"stsc"));
+    assert!(mp4_bytes.windows(4).any(|w| w == b"stsz"));
+    assert!(mp4_bytes.windows(4).any(|w| w == b"stco"));
+
+    // Save and retrieve container artifact in RecorderManager
+    rec.save_container(&meta_1.id.to_string(), mp4_bytes.clone());
+    let fetched = rec.get_container(&meta_1.id.to_string());
+    assert_eq!(fetched, Some(mp4_bytes));
 }
 
 #[tokio::test]
@@ -1548,6 +1576,10 @@ async fn test_m5_cluster_monotonic_fencing_epoch_and_graceful_migration() {
         Arc::clone(cluster_a.registry()),
         Arc::clone(cluster_a.bus()),
     );
+
+    // Initial status: ACTIVE when registered
+    cluster_a.send_heartbeat(0);
+    assert_eq!(cluster_a.status(0)["status"], "ACTIVE");
 
     // 1. node-a acquires room-mig-1 at tick 0 -> epoch 1
     let r1 = cluster_a.acquire_room("room-mig-1", 0, 30);
@@ -1583,4 +1615,11 @@ async fn test_m5_cluster_monotonic_fencing_epoch_and_graceful_migration() {
     // send_heartbeat prunes dead nodes
     cluster_monitor.send_heartbeat(10);
     assert!(!cluster_monitor.registry().lock().unwrap().all().contains(&"dead-node".to_string()));
+
+    // Pruned/unregistered node reports DEGRADED
+    let degraded_status = cluster_monitor.status(10);
+    assert_eq!(degraded_status["status"], "ACTIVE"); // monitor-1 is active
+    let dead_cluster = ClusterManager::with_heartbeat_deadline("dead-cluster", 5);
+    dead_cluster.send_heartbeat(0);
+    assert_eq!(dead_cluster.status(20)["status"], "DEGRADED"); // expired heartbeat is DEGRADED
 }

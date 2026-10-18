@@ -51,22 +51,38 @@ impl GatewayManager {
 
     /// Статус доступности SIP-шлюза для `ui_system_status`.
     pub fn sip_status(&self) -> serde_json::Value {
+        let sip = self.sip.lock().unwrap();
+        let is_registered = sip.is_registered();
         serde_json::json!({
-            "status": "READY",
-            "connected": true,
-            "registration": true,
+            "status": if is_registered { "READY" } else { "DISABLED" },
+            "connected": is_registered,
+            "registration": is_registered,
+            "active_calls": sip.active_calls_count(),
             "account": "sip:vks@local"
         })
     }
 
     /// Статус доступности H.323-шлюза для `ui_system_status`.
     pub fn h323_status(&self) -> serde_json::Value {
+        let h323 = self.h323.lock().unwrap();
+        let is_registered = h323.is_registered();
         serde_json::json!({
-            "status": "READY",
-            "connected": true,
-            "registration": true,
+            "status": if is_registered { "READY" } else { "DISABLED" },
+            "connected": is_registered,
+            "registration": is_registered,
+            "active_calls": h323.active_calls_count(),
             "account": "h323:vks@local"
         })
+    }
+
+    /// Ссылка на внутренний экземпляр SIP-шлюза.
+    pub fn sip(&self) -> &Arc<Mutex<SipGateway>> {
+        &self.sip
+    }
+
+    /// Ссылка на внутренний экземпляр H.323-шлюза.
+    pub fn h323(&self) -> &Arc<Mutex<H323Gateway>> {
+        &self.h323
     }
 
     /// Принимает входящий SIP-вызов и приземляет его в комнату.

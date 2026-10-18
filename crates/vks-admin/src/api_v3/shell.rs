@@ -566,7 +566,15 @@ pub async fn engine_command(
 /// `GET /api/v3/ui/records` & `GET /api/v3/records` (M5.5).
 pub async fn ui_records(State(state): State<SharedState>) -> Response {
     track("ui/records");
-    let records: Vec<_> = state.records.lock().unwrap().values().cloned().collect();
+    let records: Vec<_> = if let Some(ref storage) = state.storage {
+        if let Ok(recs) = storage.list_records(None).await {
+            recs
+        } else {
+            state.records.lock().unwrap().values().cloned().collect()
+        }
+    } else {
+        state.records.lock().unwrap().values().cloned().collect()
+    };
     Json(json!({
         "count": records.len(),
         "records": records,

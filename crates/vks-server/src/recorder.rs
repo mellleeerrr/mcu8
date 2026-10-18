@@ -23,6 +23,7 @@ pub struct RecorderManager {
     sessions: Arc<Mutex<HashMap<RoomId, RecordingSession>>>,
     storage: Arc<Mutex<MemoryStore>>,
     stopped_cache: Arc<Mutex<HashMap<RoomId, RecordingMeta>>>,
+    containers: Arc<Mutex<HashMap<String, Vec<u8>>>>,
 }
 
 impl Default for RecorderManager {
@@ -38,6 +39,7 @@ impl RecorderManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             storage: Arc::new(Mutex::new(MemoryStore::new())),
             stopped_cache: Arc::new(Mutex::new(HashMap::new())),
+            containers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -51,6 +53,16 @@ impl RecorderManager {
     pub fn active_recordings(&self) -> Vec<RoomId> {
         let guard = self.sessions.lock().unwrap();
         guard.keys().copied().collect()
+    }
+
+    /// Сохраняет готовый медиаконтейнер записи в хранилище артефактов.
+    pub fn save_container(&self, record_id: &str, data: Vec<u8>) {
+        self.containers.lock().unwrap().insert(record_id.to_string(), data);
+    }
+
+    /// Извлекает медиаконтейнер записи по ID.
+    pub fn get_container(&self, record_id: &str) -> Option<Vec<u8>> {
+        self.containers.lock().unwrap().get(record_id).cloned()
     }
 
     /// Начинает запись комнаты в заданном режиме (MCU-композит или SFU multi-track).
@@ -127,9 +139,12 @@ impl RecorderManager {
         Ok(room_uuid)
     }
 
-    /// Останавливает запись комнаты и сохраняет метаданные.
-    /// Повторный вызов идемпотентно возвращает сохранённые метаданные без ошибки.
-    pub fn stop_recording(&self, state: &Arc<AppState>, room_id: &RoomId) -> Result<RecordingMeta, RecordingError> {
+    fn stop_recording_internal(
+        &self,
+        state: &Arc<AppState>,
+        room_id: &RoomId,
+        spawn_bg_persistence: bool,
+    ) -> Result<(RecordingMeta, Option<RecordEntry>), RecordingError> {
         let mut session = {
             let mut guard = self.sessions.lock().unwrap();
             match guard.remove(room_id) {
@@ -137,7 +152,7 @@ impl RecorderManager {
                 None => {
                     // Проверяем кэш недавно остановленных сессий (идемпотентность)
                     if let Some(meta) = self.stopped_cache.lock().unwrap().get(room_id).cloned() {
-                        return Ok(meta);
+                        return Ok((meta, None));
                     }
                     return Err(RecordingError::NotStarted);
                 }
@@ -145,6 +160,9 @@ impl RecorderManager {
         };
 
         let meta = session.stop()?;
+        if let Some(bytes) = session.container_bytes() {
+            self.save_container(&meta.id.to_string(), bytes.to_vec());
+        }
 
         let rec_participant_id = format!("recorder-{room_id}");
 
@@ -176,11 +194,15 @@ impl RecorderManager {
             size_bytes: meta.size_bytes,
         };
         state.records.lock().unwrap().insert(entry.id.clone(), entry.clone());
-        if let Some(ref storage) = state.storage {
-            let st_clone = storage.clone();
-            tokio::spawn(async move {
-                let _ = st_clone.upsert_record(&entry).await;
-            });
+
+        if spawn_bg_persistence {
+            if let Some(ref storage) = state.storage {
+                let st_clone = storage.clone();
+                let entry_clone = entry.clone();
+                tokio::spawn(async move {
+                    let _ = st_clone.upsert_record(&entry_clone).await;
+                });
+            }
         }
 
         // 5. Оповещение административного WebSocket
@@ -203,6 +225,13 @@ impl RecorderManager {
         );
 
         info!(room_id = %room_id, duration_ms = meta.duration_ms, "Recording stopped for room");
+        Ok((meta, Some(entry)))
+    }
+
+    /// Останавливает запись комнаты и сохраняет метаданные.
+    /// Повторный вызов идемпотентно возвращает сохранённые метаданные без ошибки.
+    pub fn stop_recording(&self, state: &Arc<AppState>, room_id: &RoomId) -> Result<RecordingMeta, RecordingError> {
+        let (meta, _) = self.stop_recording_internal(state, room_id, true)?;
         Ok(meta)
     }
 
@@ -212,15 +241,8 @@ impl RecorderManager {
         state: &Arc<AppState>,
         room_id: &RoomId,
     ) -> Result<RecordingMeta, RecordingError> {
-        let meta = self.stop_recording(state, room_id)?;
-        if let Some(ref storage) = state.storage {
-            let entry = RecordEntry {
-                id: meta.id.to_string(),
-                room_id: *room_id,
-                created_ms: meta.started_at_ms,
-                duration_sec: (meta.duration_ms / 1000) as u32,
-                size_bytes: meta.size_bytes,
-            };
+        let (meta, entry_opt) = self.stop_recording_internal(state, room_id, false)?;
+        if let (Some(ref storage), Some(entry)) = (&state.storage, entry_opt) {
             let _ = storage.upsert_record(&entry).await;
         }
         Ok(meta)

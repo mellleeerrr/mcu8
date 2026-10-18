@@ -175,6 +175,8 @@ pub struct RecordingSession {
     ended_at_ms: Option<ClockMs>,
     id: Option<Uuid>,
     cached_meta: Option<RecordingMeta>,
+    container_writer: Option<crate::container::PlayableContainerWriter>,
+    finalized_container: Option<Vec<u8>>,
     now_ms: Box<Clock>,
 }
 
@@ -191,6 +193,8 @@ impl RecordingSession {
             ended_at_ms: None,
             id: None,
             cached_meta: None,
+            container_writer: None,
+            finalized_container: None,
             now_ms,
         }
     }
@@ -223,6 +227,59 @@ impl RecordingSession {
         Ok(())
     }
 
+    /// Прикрепляет к сессии генератор воспроизводимого MP4 контейнера.
+    pub fn enable_container(&mut self, config: crate::container::ContainerConfig) {
+        self.container_writer = Some(crate::container::PlayableContainerWriter::new(config));
+    }
+
+    /// Записывает видео-сэмпл в прикреплённый контейнер и сегмент в сессию.
+    pub fn write_video_sample(
+        &mut self,
+        data: &[u8],
+        timestamp_ms: u64,
+        is_keyframe: bool,
+    ) -> Result<(), crate::container::ContainerError> {
+        if self.state != RecordingState::Running {
+            return Err(crate::container::ContainerError::AlreadyFinalized);
+        }
+        if let Some(ref mut writer) = self.container_writer {
+            writer.write_video_sample(data, timestamp_ms, is_keyframe)?;
+        }
+        let _ = self.append_segment(Segment::new(
+            self.segments.len() as u64,
+            SegmentKind::CompositeVideo,
+            data.len() as u64,
+            timestamp_ms,
+        ));
+        Ok(())
+    }
+
+    /// Записывает аудио-сэмпл в прикреплённый контейнер и сегмент в сессию.
+    pub fn write_audio_sample(
+        &mut self,
+        data: &[u8],
+        timestamp_ms: u64,
+    ) -> Result<(), crate::container::ContainerError> {
+        if self.state != RecordingState::Running {
+            return Err(crate::container::ContainerError::AlreadyFinalized);
+        }
+        if let Some(ref mut writer) = self.container_writer {
+            writer.write_audio_sample(data, timestamp_ms)?;
+        }
+        let _ = self.append_segment(Segment::new(
+            self.segments.len() as u64,
+            SegmentKind::Audio,
+            data.len() as u64,
+            timestamp_ms,
+        ));
+        Ok(())
+    }
+
+    /// Возвращает байты готового MP4 файла, если контейнер был подключён и запись остановлена.
+    pub fn container_bytes(&self) -> Option<&[u8]> {
+        self.finalized_container.as_deref()
+    }
+
     /// Останавливает запись и возвращает финальные метаданные.
     /// Повторный вызов в состоянии [`RecordingState::Stopped`] идемпотентно
     /// возвращает зафиксированные метаданные без искажения времени.
@@ -240,6 +297,13 @@ impl RecordingSession {
         let id = self.id.expect("id set on start");
         self.ended_at_ms = Some(ended);
         self.state = RecordingState::Stopped;
+
+        if let Some(mut writer) = self.container_writer.take() {
+            if let Ok(bytes) = writer.finalize() {
+                self.finalized_container = Some(bytes);
+            }
+        }
+
         let meta = RecordingMeta {
             id,
             room_id: self.room_id,

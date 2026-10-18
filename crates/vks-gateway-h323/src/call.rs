@@ -154,8 +154,10 @@ struct RoomCallSlot {
 /// волне шлюз детерминированный и без реального H.225-транспорта.
 /// Хранит привязку вызовов к комнатам по Call-ID, исключая
 /// ложное выталкивание участника при параллельных звонках (M5.1).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct H323Gateway {
+    /// Зарегистрирован ли H.323 шлюз.
+    registered: bool,
     /// Вызовы по callSignalIdentifier.
     calls: HashMap<String, H323Call>,
     /// Mock-реестр комнат: room_id → слоты вызовов (call_id, имя).
@@ -164,17 +166,55 @@ pub struct H323Gateway {
     room_participants_cache: HashMap<String, Vec<String>>,
 }
 
+impl Default for H323Gateway {
+    fn default() -> Self {
+        Self {
+            registered: true,
+            calls: HashMap::new(),
+            room_calls: HashMap::new(),
+            room_participants_cache: HashMap::new(),
+        }
+    }
+}
+
 impl H323Gateway {
     /// Создаёт новый шлюз.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Регистрирует H.323 шлюз (открывает сигнальный транспорт Q.931).
+    pub fn register(&mut self) -> Result<(), Error> {
+        if self.registered {
+            return Err(Error::Conflict("H.323 gateway already registered".into()));
+        }
+        self.registered = true;
+        tracing::info!("H.323 gateway registered");
+        Ok(())
+    }
+
+    /// Зарегистрирован ли H.323 шлюз.
+    #[must_use]
+    pub fn is_registered(&self) -> bool {
+        self.registered
+    }
+
+    /// Отменяет регистрацию H.323 шлюза.
+    pub fn unregister(&mut self) {
+        self.registered = false;
+        tracing::info!("H.323 gateway unregistered");
+    }
+
+    /// Количество активных звонков.
+    pub fn active_calls_count(&self) -> usize {
+        self.calls.values().filter(|c| c.state == H323CallState::Connect).count()
+    }
+
     /// Принимает входящий Setup: создаёт вызов в `Alerting`,
     /// согласовывает кодеки (H.323 capability → WebRTC SDP).
     ///
     /// # Errors
-    /// [`Error::Conflict`] — если call-id уже существует.
+    /// [`Error::Conflict`] — если шлюз не зарегистрирован или call-id уже существует.
     /// [`Error::InvalidInput`] — если оффер пуст или не содержит поддерживаемых кодеков.
     pub fn on_setup(
         &mut self,
@@ -182,6 +222,9 @@ impl H323Gateway {
         from: impl Into<String>,
         h323_offer: &[H323Codec],
     ) -> Result<H323Call, Error> {
+        if !self.registered {
+            return Err(Error::Conflict("H.323 gateway is not registered".into()));
+        }
         let call_id = call_id.into();
         if self.calls.contains_key(&call_id) {
             return Err(Error::Conflict(format!("duplicate call id {call_id}")));
