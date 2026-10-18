@@ -135,6 +135,7 @@ impl SignalingHandler {
             Some(Payload::ClientHello(h)) => self.on_client_hello(h, reply_to),
             Some(Payload::JoinRoom(j)) => self.on_join_room(j, reply_to),
             Some(Payload::SdpOffer(o)) => self.on_sdp_offer(o, reply_to),
+            Some(Payload::IceCandidate(_)) => self.on_ice_candidate(reply_to),
             Some(Payload::IceComplete(c)) => self.on_ice_complete(c, reply_to),
             Some(Payload::LeaveRoom(_)) => self.on_leave_room(reply_to),
             Some(Payload::SubscribeRequest(_)) => self.on_subscribe_room(reply_to),
@@ -144,7 +145,6 @@ impl SignalingHandler {
             Some(Payload::ServerHello(_))
             | Some(Payload::JoinRoomResult(_))
             | Some(Payload::SdpAnswer(_))
-            | Some(Payload::IceCandidate(_))
             | Some(Payload::SubscribeResponse(_))
             | Some(Payload::TrackAdded(_))
             | Some(Payload::TrackRemoved(_))
@@ -269,6 +269,23 @@ impl SignalingHandler {
             .collect();
         let answer_msg = SdpAnswer { sdp: answer.to_sdp_text(), rtp_map: proto_maps };
         vec![Envelope::new(SignalingMessage { msg_id: 0, reply_to, payload: Some(Payload::SdpAnswer(answer_msg)) })]
+    }
+
+    fn on_ice_candidate(&mut self, reply_to: u64) -> Vec<Envelope> {
+        let state = self.session.state();
+        if !matches!(state, SessionState::Negotiating | SessionState::MediaActive | SessionState::InRoom) {
+            return vec![Envelope::error_reply(
+                reply_to,
+                "bad_state",
+                &format!("IceCandidate requires active session (current: {state:?})"),
+                false,
+            )];
+        }
+        if reply_to != 0 {
+            self.on_ack(reply_to)
+        } else {
+            Vec::new()
+        }
     }
 
     fn on_ice_complete(&mut self, _c: &ProtoIceComplete, reply_to: u64) -> Vec<Envelope> {

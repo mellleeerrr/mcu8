@@ -28,7 +28,7 @@ use vks_common::config::Config;
 use vks_common::metrics::{init_default as init_metrics, FRONTEND_DENIED};
 use vks_common::tracing::{init as init_tracing, LogFormat};
 use vks_core::ports::Storage;
-use vks_server::build_app_with_config;
+use vks_server::build_app_full;
 use vks_server::frontend::Frontend;
 use vks_signaling::handler::HandlerConfig;
 use vks_signaling::sdp::RtpMap;
@@ -197,7 +197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 7. Инициализация WebRTC медиа-движков и UDP медиа-лупа (M2.1, M2.4)
-    let _sfu_engine = Arc::new(vks_media_sfu::SfuEngine::new());
+    let sfu_engine = Arc::new(vks_media_sfu::SfuEngine::new());
     let _mcu_engine = Arc::new(vks_media_mcu::McuEngine::new());
 
     let (udp_loop, receive_task, candidate_addr, candidate_port) =
@@ -205,8 +205,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(loop_handle) => {
                 let local_addr = loop_handle.local_addr();
                 info!(addr = %local_addr, "WebRTC UDP media loop active");
-                let task = loop_handle.start_receive_loop(move |src, packet| {
-                    tracing::trace!(src = %src, track = %packet.track, len = packet.payload.len(), "received UDP media packet");
+                let sfu = sfu_engine.clone();
+                let task = loop_handle.start_routing_loop(move |src, packet| {
+                    sfu.route_udp_packet(src, packet.payload)
                 });
                 let ip = if local_addr.ip().is_unspecified() {
                     "127.0.0.1".to_string()
@@ -248,8 +249,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_ice_servers(ice_servers);
 
-    // 9. Сборка маршрутов (единая точка — vks_server::build_app_with_config)
-    let app = build_app_with_config(admin_state, &frontend, handler_config);
+    // 9. Сборка маршрутов (единая точка — vks_server::build_app_full)
+    let app = build_app_full(admin_state, &frontend, handler_config, sfu_engine.clone(), udp_loop.clone());
 
     // 10. Привязка сокета и запуск сервера
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;

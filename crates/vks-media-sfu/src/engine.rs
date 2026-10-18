@@ -12,9 +12,11 @@
 //! использует как «sent» + feedback.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use vks_core::ports::media_engine::{
     LayoutDescriptor, MediaEngine, MediaEngineError, MediaTrack, PublisherHandle, RoomCaps, RoomMediaCfg,
     RoomMediaHandle, SubscribeRequest, SubscriberHandle,
@@ -26,6 +28,7 @@ use crate::codec::CodecRegistry;
 use crate::congestion::{CongestionLadder, CongestionLevel};
 use crate::forwarder::{ForwardTarget, Forwarder, ForwarderConfig, RtpPacket};
 use crate::simulcast::{SimulcastLayer, SimulcastSelector};
+use crate::udp_loop::{build_rtcp_pli, parse_rtp_ssrc};
 
 /// Per-room SFU state.
 #[derive(Debug)]
@@ -39,6 +42,10 @@ struct RoomState {
     tracks: BTreeMap<TrackId, MediaTrack>,
     /// Subscriber → BWE/selector/congestion (per-subscriber downlink).
     subscribers: BTreeMap<ParticipantId, SubscriberState>,
+    /// Endpoints подписчиков и паблишеров (UDP SocketAddr).
+    endpoints: BTreeMap<ParticipantId, SocketAddr>,
+    /// Маппинг SSRC -> (паблишер, трек).
+    ssrc_to_track: BTreeMap<u32, (ParticipantId, TrackId)>,
 }
 
 /// Per-subscriber media state (downlink BWE).
@@ -60,6 +67,9 @@ fn track_matches_subscription(req: &SubscribeRequest, track: &MediaTrack) -> boo
         && (req.track_ids.is_empty() || req.track_ids.contains(&track.id))
 }
 
+/// Запись в индексе SSRC: (комната, паблишер, трек).
+pub type SsrcTrackTarget = (RoomId, ParticipantId, TrackId);
+
 /// SFU engine (impl [`MediaEngine`]).
 #[derive(Debug)]
 pub struct SfuEngine {
@@ -67,6 +77,10 @@ pub struct SfuEngine {
     rooms: Arc<Mutex<BTreeMap<RoomId, RoomState>>>,
     /// Codec registry (feature-gated, ADR-0017).
     codecs: CodecRegistry,
+    /// Быстрый глобальный индекс: SocketAddr -> (RoomId, ParticipantId).
+    addr_to_participant: Arc<Mutex<BTreeMap<SocketAddr, (RoomId, ParticipantId)>>>,
+    /// Быстрый глобальный индекс: SSRC -> (RoomId, ParticipantId, TrackId).
+    ssrc_index: Arc<Mutex<BTreeMap<u32, SsrcTrackTarget>>>,
 }
 
 impl Default for SfuEngine {
@@ -78,7 +92,12 @@ impl Default for SfuEngine {
 impl SfuEngine {
     /// Создаёт engine (full-mesh).
     pub fn new() -> Self {
-        Self { rooms: Arc::new(Mutex::new(BTreeMap::new())), codecs: CodecRegistry::new() }
+        Self {
+            rooms: Arc::new(Mutex::new(BTreeMap::new())),
+            codecs: CodecRegistry::new(),
+            addr_to_participant: Arc::new(Mutex::new(BTreeMap::new())),
+            ssrc_index: Arc::new(Mutex::new(BTreeMap::new())),
+        }
     }
 
     /// Codec registry (immutable).
@@ -143,6 +162,128 @@ impl SfuEngine {
             .collect::<Vec<_>>();
         Some(out)
     }
+
+    /// Регистрация UDP эндпоинта участника в комнате.
+    pub fn register_endpoint(&self, room: RoomId, participant: ParticipantId, addr: SocketAddr) {
+        if let Some(r) = self.rooms.lock().unwrap().get_mut(&room) {
+            r.endpoints.insert(participant, addr);
+        }
+        self.addr_to_participant.lock().unwrap().insert(addr, (room, participant));
+    }
+
+    /// Получение UDP эндпоинта участника.
+    pub fn get_endpoint(&self, room: RoomId, participant: ParticipantId) -> Option<SocketAddr> {
+        self.rooms.lock().unwrap().get(&room).and_then(|r| r.endpoints.get(&participant).copied())
+    }
+
+    /// Регистрация SSRC трека участника для автоматической маршрутизации.
+    pub fn register_ssrc(&self, room: RoomId, participant: ParticipantId, track: TrackId, ssrc: u32) {
+        if let Some(r) = self.rooms.lock().unwrap().get_mut(&room) {
+            r.ssrc_to_track.insert(ssrc, (participant, track));
+        }
+        self.ssrc_index.lock().unwrap().insert(ssrc, (room, participant, track));
+    }
+
+    /// Поиск трека по SSRC.
+    pub fn resolve_ssrc(&self, ssrc: u32) -> Option<(RoomId, ParticipantId, TrackId)> {
+        self.ssrc_index.lock().unwrap().get(&ssrc).copied()
+    }
+
+    /// Маршрутизация входящего UDP пакета подписчикам с поддержкой symmetric RTP.
+    pub fn route_udp_packet(&self, src: SocketAddr, payload: Bytes) -> Vec<(SocketAddr, Bytes)> {
+        let mut out = Vec::new();
+        if payload.is_empty() {
+            // STUN ping keepalive
+            return out;
+        }
+        let ssrc = parse_rtp_ssrc(&payload);
+
+        // 1. Приоритет 1: проверка по известному адресу источника (защита от коллизий SSRC между комнатами)
+        let from_known_src = if let Some(&(r_id, p_id)) = self.addr_to_participant.lock().unwrap().get(&src) {
+            let g = self.rooms.lock().unwrap();
+            if let Some(r) = g.get(&r_id) {
+                if let Some(s) = ssrc {
+                    r.ssrc_to_track.get(&s).map(|&(_, t_id)| (r_id, p_id, t_id))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 2. Приоритет 2: глобальный SSRC индекс (для первого пакета нового паблишера)
+        let target_info = if let Some(info) = from_known_src {
+            Some(info)
+        } else if let Some(ssrc_val) = ssrc {
+            self.ssrc_index.lock().unwrap().get(&ssrc_val).copied()
+        } else {
+            None
+        };
+
+        let (room_id, pub_id, track_id) = if let Some(info) = target_info {
+            // Symmetric RTP auto-learning: обновляем SocketAddr источника ТОЛЬКО при реальной смене
+            if self.get_endpoint(info.0, info.1) != Some(src) {
+                self.register_endpoint(info.0, info.1, src);
+            }
+            info
+        } else if let Some(&(r_id, p_id)) = self.addr_to_participant.lock().unwrap().get(&src) {
+            let mut found = None;
+            if let Some(r) = self.rooms.lock().unwrap().get_mut(&r_id) {
+                if let Some(tracks) = r.publisher_tracks.get(&p_id) {
+                    if let Some(first) = tracks.first() {
+                        let t_id = first.id;
+                        if let Some(s) = ssrc {
+                            r.ssrc_to_track.insert(s, (p_id, t_id));
+                            self.ssrc_index.lock().unwrap().insert(s, (r_id, p_id, t_id));
+                        }
+                        found = Some((r_id, p_id, t_id));
+                    }
+                }
+            }
+            if let Some(info) = found {
+                info
+            } else {
+                return out;
+            }
+        } else {
+            return out;
+        };
+
+        if let Some(r) = self.rooms.lock().unwrap().get(&room_id) {
+            let subscribers = r.forwarder.subscribers_of(&track_id);
+            for sub_id in subscribers {
+                if sub_id != &pub_id {
+                    if let Some(&sub_addr) = r.endpoints.get(sub_id) {
+                        out.push((sub_addr, payload.clone()));
+                    }
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Генерация RTCP PLI пакетов для видео-паблишеров комнаты (для мгновенного keyframe новому подписчику).
+    pub fn generate_pli_for_room_publishers(&self, room: RoomId) -> Vec<(SocketAddr, Bytes)> {
+        let mut plis = Vec::new();
+        let g = self.rooms.lock().unwrap();
+        if let Some(r) = g.get(&room) {
+            for (ssrc, (pub_id, track_id)) in &r.ssrc_to_track {
+                if let Some(track) = r.tracks.get(track_id) {
+                    if track.media_kind == vks_core::MediaKind::Video {
+                        if let Some(&pub_addr) = r.endpoints.get(pub_id) {
+                            let pli_bytes = build_rtcp_pli(0, *ssrc);
+                            plis.push((pub_addr, Bytes::copy_from_slice(&pli_bytes)));
+                        }
+                    }
+                }
+            }
+        }
+        plis
+    }
 }
 
 #[async_trait]
@@ -163,6 +304,8 @@ impl MediaEngine for SfuEngine {
             publisher_tracks: BTreeMap::new(),
             tracks: BTreeMap::new(),
             subscribers: BTreeMap::new(),
+            endpoints: BTreeMap::new(),
+            ssrc_to_track: BTreeMap::new(),
         };
         g.insert(cfg.room_id, state);
         Ok(RoomMediaHandle { room: cfg.room_id, mode: cfg.mode })
@@ -170,7 +313,12 @@ impl MediaEngine for SfuEngine {
 
     async fn destroy_room(&self, room: RoomId) -> Result<(), MediaEngineError> {
         let mut g = self.rooms.lock().unwrap();
-        if g.remove(&room).is_none() {
+        if let Some(_state) = g.remove(&room) {
+            let mut addr_map = self.addr_to_participant.lock().unwrap();
+            addr_map.retain(|_, (r, _)| *r != room);
+            let mut ssrc_map = self.ssrc_index.lock().unwrap();
+            ssrc_map.retain(|_, (r, _, _)| *r != room);
+        } else {
             return Err(MediaEngineError::RoomNotFound(room));
         }
         Ok(())
@@ -194,14 +342,8 @@ impl MediaEngine for SfuEngine {
 
         // Admission quota check: max_participants
         if let Some(max_p) = state.caps.max_participants {
-            let is_existing =
-                state.publisher_tracks.contains_key(&publisher) || state.subscribers.contains_key(&publisher);
-            let total_unique = state
-                .publisher_tracks
-                .keys()
-                .chain(state.subscribers.keys())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len() as u32;
+            let is_existing = state.publisher_tracks.contains_key(&publisher) || state.subscribers.contains_key(&publisher);
+            let total_unique = state.publisher_tracks.keys().chain(state.subscribers.keys()).collect::<std::collections::BTreeSet<_>>().len() as u32;
             if total_unique >= max_p && !is_existing {
                 return Err(MediaEngineError::Other(format!("room capacity exceeded: max {} participants", max_p)));
             }
@@ -245,6 +387,11 @@ impl MediaEngine for SfuEngine {
                 state.forwarder.withdraw_track(t.id);
             }
         }
+        state.ssrc_to_track.retain(|_, (p, _)| *p != publisher);
+        self.ssrc_index.lock().unwrap().retain(|_, (r, p, _)| !(*r == room && *p == publisher));
+        if let Some(addr) = state.endpoints.remove(&publisher) {
+            self.addr_to_participant.lock().unwrap().remove(&addr);
+        }
         Ok(())
     }
 
@@ -259,14 +406,8 @@ impl MediaEngine for SfuEngine {
 
         // Admission quota check: max_participants
         if let Some(max_p) = state.caps.max_participants {
-            let is_existing =
-                state.subscribers.contains_key(&subscriber) || state.publisher_tracks.contains_key(&subscriber);
-            let total_unique = state
-                .subscribers
-                .keys()
-                .chain(state.publisher_tracks.keys())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len() as u32;
+            let is_existing = state.subscribers.contains_key(&subscriber) || state.publisher_tracks.contains_key(&subscriber);
+            let total_unique = state.subscribers.keys().chain(state.publisher_tracks.keys()).collect::<std::collections::BTreeSet<_>>().len() as u32;
             if total_unique >= max_p && !is_existing {
                 return Err(MediaEngineError::Other(format!("room capacity exceeded: max {} participants", max_p)));
             }
@@ -304,6 +445,9 @@ impl MediaEngine for SfuEngine {
         let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
         state.forwarder.remove_subscriber(subscriber);
         state.subscribers.remove(&subscriber);
+        if let Some(addr) = state.endpoints.remove(&subscriber) {
+            self.addr_to_participant.lock().unwrap().remove(&addr);
+        }
         Ok(())
     }
 
@@ -660,4 +804,48 @@ mod tests {
         let err = e.add_publisher(rid, pub3, vec![video_track(pub3)]).await.unwrap_err();
         assert!(matches!(err, MediaEngineError::Other(msg) if msg.contains("capacity exceeded")));
     }
+
+    #[tokio::test]
+    async fn test_sfu_engine_route_udp_packet_with_symmetric_rtp() {
+        let e = SfuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+
+        let pub1 = p(1);
+        let sub1 = p(2);
+        let vt = video_track(pub1);
+        let track_id = vt.id;
+
+        e.add_publisher(rid, pub1, vec![vt]).await.unwrap();
+        e.add_subscriber(rid, sub1, sub_req()).await.unwrap();
+
+        let sub_addr: SocketAddr = "127.0.0.1:40001".parse().unwrap();
+        e.register_endpoint(rid, sub1, sub_addr);
+
+        let ssrc = 0xabcdef12u32;
+        e.register_ssrc(rid, pub1, track_id, ssrc);
+
+        // Build RTP packet with ssrc
+        let mut rtp = vec![0x80, 0x60, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00];
+        rtp.extend_from_slice(&ssrc.to_be_bytes());
+        rtp.extend_from_slice(&[1, 2, 3, 4]); // payload
+
+        let pub_src: SocketAddr = "192.168.1.50:50002".parse().unwrap();
+        let routed = e.route_udp_packet(pub_src, Bytes::copy_from_slice(&rtp));
+
+        assert_eq!(routed.len(), 1);
+        assert_eq!(routed[0].0, sub_addr);
+        assert_eq!(&routed[0].1[..], &rtp[..]);
+
+        // Symmetric RTP: publisher endpoint auto-learned
+        assert_eq!(e.get_endpoint(rid, pub1), Some(pub_src));
+
+        // PLI generation
+        let plis = e.generate_pli_for_room_publishers(rid);
+        assert_eq!(plis.len(), 1);
+        assert_eq!(plis[0].0, pub_src);
+        assert_eq!(plis[0].1.len(), 12);
+    }
 }
+
+

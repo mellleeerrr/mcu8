@@ -282,6 +282,8 @@ impl Sdp {
         out.push_str(&format!("v={}\n", self.version));
         out.push_str(&format!("o={}\n", self.origin));
         out.push_str(&format!("s={}\n", self.session_name));
+        out.push_str("c=IN IP4 0.0.0.0\n");
+        out.push_str("t=0 0\n");
         for attr in &self.session_attrs {
             out.push_str(&format!("a={attr}\n"));
         }
@@ -289,14 +291,27 @@ impl Sdp {
             let fmt_str = if media.payload_types.is_empty() {
                 String::new()
             } else {
-                format!(" {}", media.payload_types.iter().map(|pt| pt.to_string()).collect::<Vec<_>>().join(" "))
+                format!(
+                    " {}",
+                    media.payload_types.iter().map(|pt| pt.to_string()).collect::<Vec<_>>().join(" ")
+                )
             };
-            out.push_str(&format!("m={} {} UDP/TLS/RTP/SAVPF{fmt_str}\n", media.kind.as_str(), media.port));
+            out.push_str(&format!(
+                "m={} {} UDP/TLS/RTP/SAVPF{fmt_str}\n",
+                media.kind.as_str(),
+                media.port
+            ));
+            out.push_str("c=IN IP4 0.0.0.0\n");
+            out.push_str("a=rtcp-mux\n");
             if let Some(mid) = &media.mid {
                 out.push_str(&format!("a=mid:{mid}\n"));
             }
             for rtp in &media.rtp_maps {
-                out.push_str(&format!("a=rtpmap:{} {}/{}/{}\n", rtp.payload, rtp.codec, rtp.clock, rtp.channels));
+                if media.kind == MediaKind::Audio && rtp.channels > 1 {
+                    out.push_str(&format!("a=rtpmap:{} {}/{}/{}\n", rtp.payload, rtp.codec, rtp.clock, rtp.channels));
+                } else {
+                    out.push_str(&format!("a=rtpmap:{} {}/{}\n", rtp.payload, rtp.codec, rtp.clock));
+                }
             }
             if let Some(msid) = &media.msid {
                 out.push_str(&format!("a=msid:{msid}\n"));
@@ -306,6 +321,9 @@ impl Sdp {
             }
             for c in &media.candidates {
                 out.push_str(&format!("a=candidate:{c}\n"));
+            }
+            if !media.candidates.is_empty() {
+                out.push_str("a=end-of-candidates\n");
             }
             if let Some(ufrag) = &media.ice_ufrag {
                 out.push_str(&format!("a=ice-ufrag:{ufrag}\n"));

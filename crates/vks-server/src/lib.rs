@@ -23,6 +23,7 @@ use vks_admin::state::AppState;
 use vks_common::metrics::{
     encode as encode_metrics, HTTP_REQUESTS, HTTP_REQUEST_DURATION, HTTP_RESPONSE_BYTES, SIGNALING_MESSAGES,
 };
+use vks_core::ports::media_engine::MediaEngine;
 use vks_proto::signaling::signaling_message::Payload;
 use vks_proto::signaling::{ParticipantJoined, ParticipantLeft, SignalingMessage};
 use vks_signaling::envelope::Envelope;
@@ -30,11 +31,13 @@ use vks_signaling::handler::{HandlerConfig, SignalingHandler};
 
 use crate::frontend::{statics_rel_path, Frontend};
 
-/// Контекст для WebSocket-сигналинга (состояние приложения + конфигурация сессии).
+/// Контекст для WebSocket-сигналинга (состояние приложения + конфигурация сессии + медиа-движок + UDP-луп).
 #[derive(Clone)]
 pub struct WsContext {
     pub state: Arc<AppState>,
     pub handler_config: HandlerConfig,
+    pub sfu_engine: Arc<vks_media_sfu::SfuEngine>,
+    pub udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
 }
 
 /// Собирает полное приложение сервера с тестовой конфигурацией по умолчанию.
@@ -43,14 +46,44 @@ pub fn build_app(state: Arc<AppState>, frontend: &Frontend) -> Router {
 }
 
 /// Собирает полное приложение сервера с заданной конфигурацией обработчика сигналинга.
+pub fn build_app_with_config(
+    state: Arc<AppState>,
+    frontend: &Frontend,
+    handler_config: HandlerConfig,
+) -> Router {
+    build_app_with_engine(state, frontend, handler_config, Arc::new(vks_media_sfu::SfuEngine::new()))
+}
+
+/// Собирает полное приложение сервера с заданной конфигурацией сигналинга и инстансом SFU-движка.
+pub fn build_app_with_engine(
+    state: Arc<AppState>,
+    frontend: &Frontend,
+    handler_config: HandlerConfig,
+    sfu_engine: Arc<vks_media_sfu::SfuEngine>,
+) -> Router {
+    build_app_full(state, frontend, handler_config, sfu_engine, None)
+}
+
+/// Собирает полное приложение сервера с полной поддержкой WebRTC (SFU + UDP медиа-луп).
 ///
 /// Слои (снаружи внутрь): HTTP-метрики → security-заголовки → `Cache-Control`/`Vary`
 /// (внутри [`Frontend::router`]) → роуты. Security-заголовки — **app-wide**, включая
 /// `/api/v1/*`, `/metrics` и `/ws` (§4.2 плана). Статика монтируется из `frontend`,
 /// поэтому тесты гоняют ровно ту же сборку, что и `main.rs`.
-pub fn build_app_with_config(state: Arc<AppState>, frontend: &Frontend, handler_config: HandlerConfig) -> Router {
+pub fn build_app_full(
+    state: Arc<AppState>,
+    frontend: &Frontend,
+    handler_config: HandlerConfig,
+    sfu_engine: Arc<vks_media_sfu::SfuEngine>,
+    udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
+) -> Router {
     let csp = frontend.csp.clone();
-    let ws_ctx = WsContext { state: state.clone(), handler_config };
+    let ws_ctx = WsContext {
+        state: state.clone(),
+        handler_config,
+        sfu_engine,
+        udp_loop,
+    };
     // Сигналинг: auth-at-handshake и лимиты (T1.2) — внутри ws_handler.
     let signaling = Router::new().route("/ws", get(ws_handler)).with_state(ws_ctx);
     vks_admin::handlers::router(state.clone())
@@ -166,8 +199,7 @@ async fn ws_handler(State(ctx): State<WsContext>, headers: HeaderMap, ws: WebSoc
         return ws_error(StatusCode::UNAUTHORIZED, "unauthorized", "invalid, expired, or revoked token");
     };
     if let Ok(users) = ctx.state.users.lock() {
-        if let Some(u) = users.values().find(|u| u.id.to_string() == verified.user_id || u.username == verified.user_id)
-        {
+        if let Some(u) = users.values().find(|u| u.id.to_string() == verified.user_id || u.username == verified.user_id) {
             if u.deleted {
                 return ws_error(StatusCode::FORBIDDEN, "forbidden", "user account is deactivated");
             }
@@ -194,6 +226,28 @@ const MAX_WS_TRANSPORT_BYTES: usize = MAX_WS_MESSAGE_BYTES * 4;
 
 /// Лимит частоты: не более 60 сообщений/сек на соединение.
 const MAX_WS_MESSAGES_PER_SEC: usize = 60;
+
+/// Парсит IP и порт из строки SDP ICE-кандидата.
+fn parse_ice_candidate_addr(candidate: &str) -> Option<std::net::SocketAddr> {
+    let s = candidate.strip_prefix("candidate:").unwrap_or(candidate).trim();
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.len() >= 6 {
+        let ip = parts[4];
+        let port = parts[5].parse::<u16>().ok()?;
+        format!("{ip}:{port}").parse().ok()
+    } else {
+        None
+    }
+}
+
+/// Извлекает стабильный ParticipantId из строки сессии.
+fn parse_participant_id(pid_str: &str) -> vks_core::ParticipantId {
+    uuid::Uuid::parse_str(pid_str)
+        .ok()
+        .or_else(|| pid_str.split('-').next_back().and_then(|u| uuid::Uuid::parse_str(u).ok()))
+        .map(vks_core::ParticipantId::from_uuid)
+        .unwrap_or_default()
+}
 
 /// Обработка сессии WebSocket-сигналинга.
 ///
@@ -294,6 +348,43 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                     _ => None,
                                 };
                                 let was_leave = matches!(env.payload(), Some(Payload::LeaveRoom(_)));
+                                let payload_opt = env.payload().clone();
+
+                                // SFU media negotiation: SDP Offer -> register publisher tracks & SSRCs
+                                if let Some(Payload::SdpOffer(ref o)) = payload_opt {
+                                    if let Ok(sdp) = vks_signaling::sdp::Sdp::parse(&o.sdp) {
+                                        if let Some((rid, ref pid_str)) = current_membership {
+                                            let pid = parse_participant_id(pid_str);
+                                            let mut tracks = Vec::new();
+                                            for media in &sdp.media {
+                                                let track_kind = match media.kind {
+                                                    vks_signaling::sdp::MediaKind::Audio => vks_core::track::TrackKind::Audio,
+                                                    _ => vks_core::track::TrackKind::Video,
+                                                };
+                                                let track = vks_core::ports::media_engine::MediaTrack::new(pid, track_kind);
+                                                for ssrc_str in &media.ssrcs {
+                                                    if let Ok(ssrc) = ssrc_str.split_whitespace().next().unwrap_or("").parse::<u32>() {
+                                                        ctx.sfu_engine.register_ssrc(rid, pid, track.id, ssrc);
+                                                    }
+                                                }
+                                                tracks.push(track);
+                                            }
+                                            if !tracks.is_empty() {
+                                                let _ = ctx.sfu_engine.add_publisher(rid, pid, tracks).await;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // SFU ICE candidate exchange -> register participant UDP endpoint
+                                if let Some(Payload::IceCandidate(ref c)) = payload_opt {
+                                    if let Some((rid, ref pid_str)) = current_membership {
+                                        let pid = parse_participant_id(pid_str);
+                                        if let Some(addr) = parse_ice_candidate_addr(&c.candidate) {
+                                            ctx.sfu_engine.register_endpoint(rid, pid, addr);
+                                        }
+                                    }
+                                }
 
                                 // Запрос исполняет FSM; сайд-эффекты — только по успешному результату.
                                 let mut replies = handler.handle(env);
@@ -319,6 +410,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                         // Если клиент уже находился в другой комнате на этом сокете, вычищаем её
                                         if let Some((old_rid, old_pid)) = current_membership.take() {
                                             let _ = room_rx.take();
+                                            let old_pid_val = parse_participant_id(&old_pid);
+                                            let _ = ctx.sfu_engine.remove_subscriber(old_rid, old_pid_val).await;
+                                            let _ = ctx.sfu_engine.remove_publisher(old_rid, old_pid_val).await;
                                             let rem_opt = state.room_hub.unregister_participant(&old_rid, &old_pid);
                                             state.room_hub.unsubscribe(&old_rid);
                                             let rem_count = rem_opt.unwrap_or(0);
@@ -341,6 +435,25 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
 
                                         let pid_str = handler.participant_id().map(str::to_string).unwrap_or_default();
                                         current_membership = Some((rid, pid_str.clone()));
+
+                                        let pid = parse_participant_id(&pid_str);
+                                        let _ = ctx.sfu_engine.create_room(vks_core::ports::media_engine::RoomMediaCfg {
+                                            room_id: rid,
+                                            mode: vks_core::RoomMode::Sfu,
+                                            caps: vks_core::ports::media_engine::RoomCaps::default(),
+                                        }).await;
+                                        let _ = ctx.sfu_engine.add_subscriber(rid, pid, vks_core::ports::media_engine::SubscribeRequest {
+                                            track_ids: Vec::new(),
+                                            audio_only: false,
+                                        }).await;
+
+                                        // RTCP PLI: запрашиваем ключевые кадры у видео-паблишеров для устранения чёрного экрана
+                                        if let Some(udp) = &ctx.udp_loop {
+                                            let plis = ctx.sfu_engine.generate_pli_for_room_publishers(rid);
+                                            for (dest, pli_bytes) in plis {
+                                                let _ = udp.send_raw(dest, &pli_bytes).await;
+                                            }
+                                        }
 
                                         let p_snapshot = vks_admin::hub::ParticipantSnapshot {
                                             participant_id: pid_str.clone(),
@@ -395,6 +508,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
                                 } else if left_ok {
                                     if let Some((rid, pid_str)) = current_membership.take() {
                                         room_rx = None;
+                                        let pid_val = parse_participant_id(&pid_str);
+                                        let _ = ctx.sfu_engine.remove_subscriber(rid, pid_val).await;
+                                        let _ = ctx.sfu_engine.remove_publisher(rid, pid_val).await;
                                         let rem_opt = state.room_hub.unregister_participant(&rid, &pid_str);
                                         state.room_hub.unsubscribe(&rid);
                                         let new_count = rem_opt.unwrap_or(0);
@@ -464,6 +580,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
 
     drop(room_rx);
     if let Some((rid, pid_str)) = current_membership.take() {
+        let pid_val = parse_participant_id(&pid_str);
+        let _ = ctx.sfu_engine.remove_subscriber(rid, pid_val).await;
+        let _ = ctx.sfu_engine.remove_publisher(rid, pid_val).await;
         let rem_opt = state.room_hub.unregister_participant(&rid, &pid_str);
         state.room_hub.unsubscribe(&rid);
         let new_count = rem_opt.unwrap_or(0);
@@ -480,13 +599,10 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext) {
         let payload_bytes = Envelope::new(left_msg).encode();
         state.room_hub.broadcast(&rid, Some(&pid_str), payload_bytes.into());
 
-        state.notify_admin(
-            "conferences:update",
-            serde_json::json!({
-                "id": rid.to_string(),
-                "participants_count": new_count
-            }),
-        );
+        state.notify_admin("conferences:update", serde_json::json!({
+            "id": rid.to_string(),
+            "participants_count": new_count
+        }));
     }
 }
 
