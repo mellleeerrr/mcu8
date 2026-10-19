@@ -1038,3 +1038,196 @@ async fn test_m0_custom_layouts_api_keys_and_gateway_cluster_status() {
     assert_eq!(body["cluster"]["lease_valid"], false);
     state.clear_fault("lease");
 }
+
+#[tokio::test]
+async fn step2_call_strings_and_invite_vertical() {
+    let (state, _) = test_state();
+    let app_router = app(state.clone());
+    let token = login_token(&app_router, "admin", "s3cret").await;
+
+    // 1. Create conference
+    let create_resp = send(
+        &app_router,
+        request("POST", "/api/v3/conferences", Some(&token), json!({ "display_name": "Vertical 192 Conf" })),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::OK);
+    let create_body = json_body(create_resp).await;
+    let conf_id = create_body["conference"]["id"].as_str().unwrap().to_string();
+
+    // 2. Start session
+    let start_resp =
+        send(&app_router, request("POST", "/api/v3/sessions", Some(&token), json!({ "conference_id": conf_id }))).await;
+    assert_eq!(start_resp.status(), StatusCode::OK);
+
+    // 3. Test POST /api/v3/ui/conferences/{id}/call_strings
+    let cs_conf_resp = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/ui/conferences/{conf_id}/call_strings"),
+            Some(&token),
+            json!({ "uri": "192.168.1.132", "display_name": "Terminal 132" }),
+        ),
+    )
+    .await;
+    assert_eq!(cs_conf_resp.status(), StatusCode::OK);
+    let cs_conf_body = json_body(cs_conf_resp).await;
+    assert_eq!(cs_conf_body["call_string"]["uri"], "sip:192.168.1.132");
+    assert_eq!(cs_conf_body["call_string"]["display_name"], "Terminal 132");
+    assert!(cs_conf_body["call_string"]["id"].is_string());
+
+    // 4. Test validation error (empty uri) returns 400 with details array
+    let val_err_resp = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/ui/conferences/{conf_id}/call_strings"),
+            Some(&token),
+            json!({ "uri": "   " }),
+        ),
+    )
+    .await;
+    assert_eq!(val_err_resp.status(), StatusCode::BAD_REQUEST);
+    let val_err_body = json_body(val_err_resp).await;
+    assert_eq!(val_err_body["error"]["code"], 400);
+    assert_eq!(val_err_body["error"]["details"][0]["reason"], "invalid.uri");
+    assert_eq!(val_err_body["error"]["details"][0]["position"], "uri");
+
+    // 5. Test stray brace URL rewrite: GET /api/v3/conferences/{id}}/contacts
+    let stray_resp = send(
+        &app_router,
+        request("GET", &format!("/api/v3/conferences/{conf_id}}}/contacts"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(stray_resp.status(), StatusCode::OK, "Stray brace route must not return 404/501");
+    let stray_body = json_body(stray_resp).await;
+    assert_eq!(stray_body["count"], 0);
+
+    // 6. Test standby abonent: POST /api/v3/ui/sessions/{id}/call_strings/without_call
+    let standby_resp = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/ui/sessions/{conf_id}/call_strings/without_call"),
+            Some(&token),
+            json!({ "uri": "sip:192.168.1.150", "display_name": "Standby Box" }),
+        ),
+    )
+    .await;
+    assert_eq!(standby_resp.status(), StatusCode::OK);
+
+    // Verify standby appears in session abonents
+    let abonents_resp =
+        send(&app_router, request("GET", &format!("/api/v3/sessions/{conf_id}/abonents"), Some(&token), json!({})))
+            .await;
+    assert_eq!(abonents_resp.status(), StatusCode::OK);
+    let abonents_body = json_body(abonents_resp).await;
+    assert_eq!(abonents_body["count"], 1);
+    assert_eq!(abonents_body["scheduled"][0]["display_name"], "Standby Box");
+    assert_eq!(abonents_body["scheduled"][0]["uri"], "sip:192.168.1.150");
+    assert_eq!(abonents_body["scheduled"][0]["payload"]["audio_tx_enabled"], true);
+    assert_eq!(abonents_body["scheduled"][0]["payload"]["settings"]["audio_tx_enabled"], true);
+
+    // 7. Test active outbound dial: POST /api/v3/ui/sessions/{id}/call_strings
+    let dial_resp = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/ui/sessions/{conf_id}/call_strings"),
+            Some(&token),
+            json!({ "uri": "192.168.1.132", "display_name": "Live 132" }),
+        ),
+    )
+    .await;
+    assert_eq!(dial_resp.status(), StatusCode::OK);
+    let dial_body = json_body(dial_resp).await;
+    assert_eq!(dial_body["call_string"]["uri"], "sip:192.168.1.132");
+
+    // 8. Test In-Flight Guard: Immediate duplicate dial returns 409
+    let dup_resp = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/ui/sessions/{conf_id}/call_strings"),
+            Some(&token),
+            json!({ "uri": "sip:192.168.1.132" }),
+        ),
+    )
+    .await;
+    assert_eq!(dup_resp.status(), StatusCode::CONFLICT);
+    let dup_body = json_body(dup_resp).await;
+    assert_eq!(dup_body["error"]["code"], 409);
+    assert_eq!(dup_body["error"]["description"], "The specified call string is used in session");
+
+    // 9. Test Recall/Invite batch: POST /api/v3/sessions/{id}/invite/call_strings/list
+    let recall_resp = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/sessions/{conf_id}/invite/call_strings/list"),
+            Some(&token),
+            json!({ "call_strings": [{ "uri": "sip:192.168.1.150", "display_name": "Standby Box" }] }),
+        ),
+    )
+    .await;
+    assert_eq!(recall_resp.status(), StatusCode::OK);
+
+    // 10. Verify GET /api/v3/call_strings and /ui/call_strings
+    let cs_get = send(&app_router, request("GET", "/api/v3/call_strings", Some(&token), json!({}))).await;
+    assert_eq!(cs_get.status(), StatusCode::OK);
+    let cs_get_ui = send(&app_router, request("GET", "/api/v3/ui/call_strings", Some(&token), json!({}))).await;
+    assert_eq!(cs_get_ui.status(), StatusCode::OK);
+
+    // 11. Test POST /api/v3/conferences/{id}/invite/call_string/list (batch template invite)
+    let batch_conf_resp = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/conferences/{conf_id}/invite/call_string/list"),
+            Some(&token),
+            json!({
+                "call_strings": [
+                    { "uri": "192.168.1.160", "display_name": "Box 160" },
+                    { "uri": "192.168.1.161", "display_name": "Box 161" }
+                ]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(batch_conf_resp.status(), StatusCode::OK);
+
+    // 12. Test Role-Based Access Control (< Operator -> 403 Forbidden)
+    crate::users::Users::create(&state, "restricted_user", vks_core::Role::Moderator);
+    let restricted_token = state.jwt_issuer.as_ref().unwrap().issue("restricted_user", None).expect("issue token");
+    let forbidden_resp = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/ui/conferences/{conf_id}/call_strings"),
+            Some(&restricted_token),
+            json!({ "uri": "192.168.1.170", "display_name": "Forbidden Terminal" }),
+        ),
+    )
+    .await;
+    assert_eq!(forbidden_resp.status(), StatusCode::FORBIDDEN);
+
+    // 13. Test Room Capacity Limit (Too many connections -> 409 Conflict)
+    let mut curr_settings = crate::settings::SettingsService::get(&state);
+    curr_settings.limits.max_participants_per_room = 1;
+    crate::settings::SettingsService::set(&state, curr_settings);
+    let limit_resp = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/ui/sessions/{conf_id}/call_strings"),
+            Some(&token),
+            json!({ "uri": "192.168.1.199", "display_name": "Over-limit Terminal" }),
+        ),
+    )
+    .await;
+    assert_eq!(limit_resp.status(), StatusCode::CONFLICT);
+    let limit_body = json_body(limit_resp).await;
+    assert_eq!(limit_body["error"]["code"], 409);
+    assert_eq!(limit_body["error"]["description"], "Too many connections");
+}

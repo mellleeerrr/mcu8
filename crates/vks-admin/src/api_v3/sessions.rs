@@ -153,18 +153,24 @@ fn connections_limit(state: &AppState) -> u32 {
     SettingsService::get(state).limits.max_participants_per_room
 }
 
-fn find_room(state: &AppState, id: &str) -> Option<RoomRecord> {
-    if let Ok(uuid) = Uuid::parse_str(id) {
+/// Очищает ID от лишних пробелов и фигурных скобок (вендорный баг фронтенда: `{id}}`).
+pub fn sanitize_id(id: &str) -> &str {
+    id.trim().trim_start_matches('{').trim_end_matches('}')
+}
+
+pub fn find_room(state: &AppState, id: &str) -> Option<RoomRecord> {
+    let clean = sanitize_id(id);
+    if let Ok(uuid) = Uuid::parse_str(clean) {
         if let Some(r) = Rooms::get(state, &RoomId::from_uuid(uuid)) {
             return Some(r);
         }
     }
     let rooms = state.rooms.lock().expect("rooms store poisoned");
-    rooms.values().find(|r| r.name == id || r.name.eq_ignore_ascii_case(id)).cloned()
+    rooms.values().find(|r| r.name == clean || r.name.eq_ignore_ascii_case(clean)).cloned()
 }
 
 #[allow(clippy::result_large_err)]
-fn check_permission(auth: &AuthContext, target_room_id: Option<&str>) -> Result<(), Response> {
+pub fn check_permission(auth: &AuthContext, target_room_id: Option<&str>) -> Result<(), Response> {
     if auth.role < Role::Moderator {
         return Err(error_json(403, "Forbidden: insufficient permissions"));
     }
@@ -464,59 +470,190 @@ pub async fn conference_contacts(Path(_id): Path<String>) -> Response {
     Json(json!({ "contacts": [], "count": 0 })).into_response()
 }
 
+/// Сериализует снапшот участника в DTO абонента, полностью совместимый с мапперами фронтенда (`dY`/`Lh`).
+pub fn participant_to_abonent_json(p: &crate::hub::ParticipantSnapshot) -> Value {
+    let (proto, connection_url, uri) = if p.is_recorder {
+        ("recorder", format!("recorder://{}", p.participant_id), format!("recorder:{}", p.participant_id))
+    } else if p.participant_id.contains("@sip-gateway") {
+        let uri =
+            if p.display_name.starts_with("sip:") { p.display_name.clone() } else { format!("sip:{}", p.display_name) };
+        ("sip", format!("sip://{}", p.display_name), uri)
+    } else if p.participant_id.contains("@h323-gateway") {
+        let uri = if p.display_name.starts_with("h323:") {
+            p.display_name.clone()
+        } else {
+            format!("h323:{}", p.display_name)
+        };
+        ("h323", format!("h323://{}", p.display_name), uri)
+    } else {
+        ("webrtc", format!("webrtc://{}", p.participant_id), format!("webrtc:{}", p.participant_id))
+    };
+
+    let settings = json!({
+        "slot_render_type": "auto",
+        "auto_call": false,
+        "audio_rx_enabled": true,
+        "audio_tx_enabled": !p.is_audio_muted,
+        "volume_rx": 100,
+        "volume_tx": 100,
+        "video_rx_enabled": true,
+        "video_tx_enabled": !p.is_video_muted,
+        "crown": false,
+        "hide_display_name": false
+    });
+
+    let details = json!({
+        "audio": {
+            "rx": { "bitrate": 64000, "codec": "OPUS", "loss": 0.0, "jitter": 0 },
+            "tx": { "bitrate": 64000, "codec": "OPUS", "loss": 0.0, "jitter": 0 }
+        },
+        "video": {
+            "rx": { "bitrate": 1500000, "codec": "H264", "loss": 0.0, "jitter": 0, "resolution": "1280x720", "fps": 30 },
+            "tx": { "bitrate": 1500000, "codec": "H264", "loss": 0.0, "jitter": 0, "resolution": "1280x720", "fps": 30 }
+        },
+        "content": {
+            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0 },
+            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0 }
+        }
+    });
+
+    json!({
+        "abonent_id": p.participant_id,
+        "connection_id": p.participant_id,
+        "contact_id": p.participant_id,
+        "call_string_id": p.participant_id,
+        "video_layout_id": "grid",
+        "display_name": p.display_name,
+        "connection_url": connection_url,
+        "uri": uri,
+        "type_id": "OUTGOING",
+        "protocol": proto,
+        "contact_type": "call_strings",
+        "crown": false,
+        "connected_at": p.connected_at,
+        "details": details,
+        "payload": {
+            "slot_render_type": "auto",
+            "auto_call": false,
+            "audio_rx_enabled": true,
+            "audio_tx_enabled": !p.is_audio_muted,
+            "volume_rx": 100,
+            "volume_tx": 100,
+            "video_rx_enabled": true,
+            "video_tx_enabled": !p.is_video_muted,
+            "crown": false,
+            "hide_display_name": false,
+            "settings": settings
+        }
+    })
+}
+
+/// Сериализует запись строки вызова (in-flight или standby) в формат абонента.
+pub fn call_record_to_abonent_json(r: &super::call_strings::CallStringRecord, state_str: &str) -> Value {
+    let uri = if r.uri.contains(':') { r.uri.clone() } else { format!("sip:{}", r.uri) };
+    let proto = uri.split(':').next().unwrap_or("sip");
+    let settings = json!({
+        "slot_render_type": "auto",
+        "auto_call": false,
+        "audio_rx_enabled": true,
+        "audio_tx_enabled": true,
+        "volume_rx": 100,
+        "volume_tx": 100,
+        "video_rx_enabled": true,
+        "video_tx_enabled": true,
+        "crown": false,
+        "hide_display_name": false
+    });
+    let details = json!({
+        "audio": {
+            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0 },
+            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0 }
+        },
+        "video": {
+            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "resolution": "0x0", "fps": 0 },
+            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "resolution": "0x0", "fps": 0 }
+        },
+        "content": {
+            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0 },
+            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0 }
+        }
+    });
+
+    json!({
+        "abonent_id": r.id,
+        "connection_id": r.id,
+        "contact_id": r.id,
+        "call_string_id": r.id,
+        "video_layout_id": "grid",
+        "display_name": r.display_name,
+        "connection_url": uri,
+        "uri": uri,
+        "type_id": "OUTGOING",
+        "protocol": proto,
+        "contact_type": "call_strings",
+        "state": state_str,
+        "crown": false,
+        "connected_at": r.created_at,
+        "details": details,
+        "payload": {
+            "slot_render_type": "auto",
+            "auto_call": false,
+            "audio_rx_enabled": true,
+            "audio_tx_enabled": true,
+            "volume_rx": 100,
+            "volume_tx": 100,
+            "video_rx_enabled": true,
+            "video_tx_enabled": true,
+            "crown": false,
+            "hide_display_name": false,
+            "settings": settings
+        }
+    })
+}
+
 /// `GET /api/v3/sessions/{id}/abonents` (и `/ui/sessions/{id}/abonents`) → динамический ростер абонентов.
 pub async fn session_abonents(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
     track("sessions/{id}/abonents");
-    let Some(room) = find_room(&state, &id) else {
+    let clean_id = sanitize_id(&id);
+    let Some(room) = find_room(&state, clean_id) else {
         return error_json(404, "Session not found");
     };
+
     let participants = state.room_hub.list_participants(&room.id);
-    let connected: Vec<Value> = participants
+    let connected: Vec<Value> = participants.iter().map(participant_to_abonent_json).collect();
+
+    let in_flight_map = state.api_v3.in_flight_calls.lock().expect("in_flight_calls poisoned");
+    let connecting: Vec<Value> = in_flight_map
         .iter()
-        .map(|p| {
-            let (type_id, connection_url) = if p.is_recorder {
-                ("recorder", format!("recorder://{}", p.participant_id))
-            } else if p.participant_id.contains("@sip-gateway") {
-                ("sip", format!("sip://{}", p.display_name))
-            } else if p.participant_id.contains("@h323-gateway") {
-                ("h323", format!("h323://{}", p.display_name))
-            } else {
-                ("webrtc", format!("webrtc://{}", p.participant_id))
-            };
-            json!({
-                "abonent_id": p.participant_id,
-                "connection_id": p.participant_id,
-                "contact_id": p.participant_id,
-                "call_string_id": p.participant_id,
-                "video_layout_id": "grid",
-                "display_name": p.display_name,
-                "connection_url": connection_url,
-                "type_id": type_id,
-                "connected_at": p.connected_at,
-                "payload": {
-                    "settings": {
-                        "slot_render_type": "auto",
-                        "auto_call": false,
-                        "audio_rx_enabled": true,
-                        "audio_tx_enabled": !p.is_audio_muted,
-                        "volume_rx": 100,
-                        "volume_tx": 100,
-                        "video_rx_enabled": true,
-                        "video_tx_enabled": !p.is_video_muted,
-                        "crown": false,
-                        "hide_display_name": false
-                    }
-                }
-            })
-        })
+        .filter(|((rid, _), _)| *rid == room.id)
+        .map(|(_, record)| call_record_to_abonent_json(record, "connecting"))
         .collect();
-    let count = connected.len();
+    drop(in_flight_map);
+
+    let scheduled_map = state.api_v3.scheduled_calls.lock().expect("scheduled_calls poisoned");
+    let scheduled: Vec<Value> = scheduled_map
+        .get(&room.id)
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|r| call_record_to_abonent_json(r, "scheduled"))
+        .collect();
+    drop(scheduled_map);
+
+    let disconnected: Vec<Value> = Vec::new();
+
+    let mut all_abonents = Vec::new();
+    all_abonents.extend(connected.clone());
+    all_abonents.extend(connecting.clone());
+    all_abonents.extend(scheduled.clone());
+    let count = all_abonents.len();
+
     Json(json!({
-        "abonents": connected.clone(),
+        "abonents": all_abonents,
         "connected": connected,
-        "connecting": [],
-        "disconnected": [],
-        "scheduled": [],
+        "connecting": connecting,
+        "disconnected": disconnected,
+        "scheduled": scheduled,
         "count": count
     }))
     .into_response()
@@ -669,40 +806,7 @@ pub async fn engine_abonents(State(state): State<SharedState>) -> Response {
     let mut all_abonents = Vec::new();
     for rid in room_ids {
         for p in state.room_hub.list_participants(&rid) {
-            let (type_id, connection_url) = if p.is_recorder {
-                ("recorder", format!("recorder://{}", p.participant_id))
-            } else if p.participant_id.contains("@sip-gateway") {
-                ("sip", format!("sip://{}", p.display_name))
-            } else if p.participant_id.contains("@h323-gateway") {
-                ("h323", format!("h323://{}", p.display_name))
-            } else {
-                ("webrtc", format!("webrtc://{}", p.participant_id))
-            };
-            all_abonents.push(json!({
-                "abonent_id": p.participant_id,
-                "connection_id": p.participant_id,
-                "contact_id": p.participant_id,
-                "call_string_id": p.participant_id,
-                "video_layout_id": "grid",
-                "display_name": p.display_name,
-                "connection_url": connection_url,
-                "type_id": type_id,
-                "connected_at": p.connected_at,
-                "payload": {
-                    "settings": {
-                        "slot_render_type": "auto",
-                        "auto_call": false,
-                        "audio_rx_enabled": true,
-                        "audio_tx_enabled": !p.is_audio_muted,
-                        "volume_rx": 100,
-                        "volume_tx": 100,
-                        "video_rx_enabled": true,
-                        "video_tx_enabled": !p.is_video_muted,
-                        "crown": false,
-                        "hide_display_name": false
-                    }
-                }
-            }));
+            all_abonents.push(participant_to_abonent_json(&p));
         }
     }
     let count = all_abonents.len();

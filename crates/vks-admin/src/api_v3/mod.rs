@@ -13,6 +13,7 @@
 
 pub mod auth;
 pub mod boot;
+pub mod call_strings;
 pub mod sessions;
 pub mod shell;
 pub mod ws;
@@ -43,6 +44,29 @@ pub struct ApiV3State {
     pub ws_ratelimit: ws::WsRateLimit,
     /// Идентификаторы остановленных сессий (M4.3).
     pub stopped_sessions: std::sync::Mutex<std::collections::HashSet<vks_core::RoomId>>,
+    /// Активные исходящие вызовы в процессе дозвона (In-Flight Guard).
+    pub in_flight_calls:
+        std::sync::Mutex<std::collections::HashMap<(vks_core::RoomId, String), call_strings::CallStringRecord>>,
+    /// Запланированные контакты (StandBy / without_call).
+    pub scheduled_calls:
+        std::sync::Mutex<std::collections::HashMap<vks_core::RoomId, Vec<call_strings::CallStringRecord>>>,
+}
+
+/// Нормализует опечатку вендорного фронтенда PNM (`}/contacts` -> `/contacts`) до роутинга.
+async fn normalize_stray_brace_middleware(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let uri = req.uri().clone();
+    let path = uri.path();
+    if path.contains("}/contacts") {
+        let new_path = path.replace("}/contacts", "/contacts");
+        let new_uri_str = if let Some(query) = uri.query() { format!("{}?{}", new_path, query) } else { new_path };
+        if let Ok(parsed) = new_uri_str.parse::<axum::http::Uri>() {
+            *req.uri_mut() = parsed;
+        }
+    }
+    next.run(req).await
 }
 
 /// Собирает `Router` адаптера `/api/v3/*`.
@@ -90,6 +114,19 @@ pub fn router(state: SharedState) -> Router {
             get(sessions::conference).patch(sessions::update_conference).delete(sessions::delete_conference),
         )
         .route("/api/v3/ui/conferences/{id}/contacts", get(sessions::conference_contacts))
+        // Call strings & Contacts (V1-V3, ADR-0027).
+        .route("/api/v3/ui/conferences/{id}/call_strings", post(call_strings::create_conference_call_string))
+        .route("/api/v3/conferences/{id}/invite/call_string/list", post(call_strings::invite_conference_call_strings))
+        .route("/api/v3/ui/sessions/{id}/call_strings", post(call_strings::create_session_call_string))
+        .route(
+            "/api/v3/ui/sessions/{id}/call_strings/without_call",
+            post(call_strings::create_session_call_string_standby),
+        )
+        .route("/api/v3/sessions/{id}/invite/call_strings/list", post(call_strings::invite_session_call_strings_list))
+        .route("/api/v3/call_strings", get(call_strings::list_call_strings))
+        .route("/api/v3/ui/call_strings", get(call_strings::list_call_strings))
+        .route("/api/v3/sessions/{id}/contacts", get(sessions::conference_contacts))
+        .route("/api/v3/ui/sessions/{id}/contacts", get(sessions::conference_contacts))
         .route("/api/v3/ui/video_layouts", get(shell::video_layouts))
         .route("/api/v3/video_layouts", get(shell::video_layouts))
         .route("/api/v3/ui/video_layouts/mode", post(shell::switch_video_layout_mode))
@@ -103,6 +140,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/ui/sessions/{id}/abonents/{abonent_id}", delete(sessions::remove_session_abonent))
         .route("/api/v3/engine/command", post(shell::engine_command))
         .route("/api/v3/engine/abonents", get(sessions::engine_abonents))
+        .layer(middleware::from_fn(normalize_stray_brace_middleware))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::token_middleware));
 
     Router::new()

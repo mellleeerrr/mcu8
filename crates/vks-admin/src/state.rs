@@ -130,6 +130,13 @@ impl ModeState {
     }
 }
 
+#[async_trait::async_trait]
+pub trait OutboundDialer: Send + Sync {
+    /// Инициирует исходящий вызов абонента в указанную комнату по URI/строке вызова.
+    /// Возвращает идентификатор участника (participant_id).
+    async fn dial(&self, room_id: RoomId, uri: &str, display_name: Option<&str>) -> Result<String, String>;
+}
+
 /// Состояние админ-сервера (in-memory stores + mode).
 ///
 /// Обёрнуто в `Arc` на уровне `Router` (axum: `State(Arc<AppState>)`).
@@ -148,6 +155,8 @@ pub struct AppState {
     pub local_db: Option<Arc<vks_auth::local_db::LocalDb>>,
     /// Состояние адаптера `/api/v3` (lockout логина, rate-limit WS).
     pub api_v3: crate::api_v3::ApiV3State,
+    /// Исходящий дозвонщик (SIP/H.323 шлюзы) (V1-V4).
+    pub outbound_dialer: Option<Arc<dyn OutboundDialer>>,
     /// Комнаты (id → запись).
     pub rooms: Mutex<BTreeMap<RoomId, RoomRecord>>,
     /// Пользователи (id → запись).
@@ -184,6 +193,7 @@ impl std::fmt::Debug for AppState {
             .field("has_storage", &self.storage.is_some())
             .field("has_jwt_issuer", &self.jwt_issuer.is_some())
             .field("has_local_db", &self.local_db.is_some())
+            .field("has_outbound_dialer", &self.outbound_dialer.is_some())
             .field("api_v3", &self.api_v3)
             .field("rooms", &self.rooms)
             .field("users", &self.users)
@@ -216,6 +226,7 @@ impl AppState {
             jwt_issuer: None,
             local_db: None,
             api_v3: crate::api_v3::ApiV3State::default(),
+            outbound_dialer: None,
             rooms: Mutex::new(BTreeMap::new()),
             users: Mutex::new(BTreeMap::new()),
             layouts: Mutex::new(BTreeMap::new()),
@@ -231,6 +242,12 @@ impl AppState {
             media_healthy: std::sync::atomic::AtomicBool::new(true),
             faults: Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Подключает исходящий дозвонщик шлюзов (V1-V4).
+    pub fn with_dialer(mut self, dialer: Arc<dyn OutboundDialer>) -> Self {
+        self.outbound_dialer = Some(dialer);
+        self
     }
 
     /// Внедряет сбой в подсистему для проверки деградации (M0.6 / M6.3).
