@@ -18,6 +18,33 @@ use vks_proto::signaling::signaling_message::Payload;
 use vks_proto::signaling::{ParticipantJoined, ParticipantLeft, SignalingMessage};
 use vks_signaling::Envelope;
 
+/// Атомарные элементы управления медиа-потоками абонента (Mute, Volume, DTMF).
+#[derive(Clone)]
+pub struct GatewayMediaControls {
+    pub audio_tx_muted: Arc<std::sync::atomic::AtomicBool>,
+    pub audio_rx_muted: Arc<std::sync::atomic::AtomicBool>,
+    pub video_tx_muted: Arc<std::sync::atomic::AtomicBool>,
+    pub video_rx_muted: Arc<std::sync::atomic::AtomicBool>,
+    pub volume_tx: Arc<std::sync::atomic::AtomicU32>, // 0..200 (100 = 100%)
+    pub volume_rx: Arc<std::sync::atomic::AtomicU32>,
+    pub dtmf_sender: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+impl Default for GatewayMediaControls {
+    fn default() -> Self {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            audio_tx_muted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            audio_rx_muted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            video_tx_muted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            video_rx_muted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            volume_tx: Arc::new(std::sync::atomic::AtomicU32::new(100)),
+            volume_rx: Arc::new(std::sync::atomic::AtomicU32::new(100)),
+            dtmf_sender: tx,
+        }
+    }
+}
+
 /// Сессия исходящего или входящего шлюзового вызова.
 #[derive(Clone)]
 pub struct GatewayCallSession {
@@ -28,6 +55,7 @@ pub struct GatewayCallSession {
     pub uri: String,
     pub active_sip: Option<vks_gateway_sip::ActiveSipSession>,
     pub cancel_flag: Arc<std::sync::atomic::AtomicBool>,
+    pub controls: GatewayMediaControls,
 }
 
 /// Потокобезопасный реестр сессий шлюза по participant_id и call_id.
@@ -220,6 +248,15 @@ impl GatewayManager {
         let mut sip = self.sip.lock().map_err(|_| Error::Conflict("SIP lock poisoned".into()))?;
         let call = sip.bye(call_id)?;
 
+        // Очищаем реестр и отменяем фоновый RTP-таск
+        if let Ok(mut reg) = self.registry.lock() {
+            if let Some(pid) = reg.by_call.remove(call_id) {
+                if let Some(sess) = reg.by_participant.remove(&pid) {
+                    sess.cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+
         let room_id = state.room_hub.find_participant_room(&call.participant_id).map(|(r, _)| r);
 
         if let Some(rid) = room_id {
@@ -405,6 +442,16 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         let pid_str = format!("sip-{}@sip-gateway", uuid::Uuid::new_v4());
         let effective_name = display_name.filter(|s| !s.trim().is_empty()).unwrap_or(trimmed).to_string();
         let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (dtmf_tx, mut dtmf_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let controls = GatewayMediaControls {
+            audio_tx_muted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            audio_rx_muted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            video_tx_muted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            video_rx_muted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            volume_tx: Arc::new(std::sync::atomic::AtomicU32::new(100)),
+            volume_rx: Arc::new(std::sync::atomic::AtomicU32::new(100)),
+            dtmf_sender: dtmf_tx,
+        };
 
         // 1. Выделяем RTP порт для медиа-моста
         let (active_sip, rtp_port_opt) = if let Some(port_pair) = self.port_pool.allocate_pair(&self.candidate_ip).await
@@ -423,6 +470,7 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                         let pool_ref = self.port_pool.clone();
                         let cancel_rx = cancel_flag.clone();
                         let pid_copy = pid_str.clone();
+                        let ctrl = controls.clone();
 
                         tokio::spawn(async move {
                             let rtp_sock = port_pair.rtp_socket;
@@ -447,14 +495,59 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
 
                             while !cancel_rx.load(std::sync::atomic::Ordering::Relaxed) {
                                 tokio::select! {
+                                    Some(seq) = dtmf_rx.recv() => {
+                                        for ch in seq.chars().take(32) {
+                                            let event = match ch {
+                                                '0'..='9' => ch as u8 - b'0',
+                                                '*' => 10,
+                                                '#' => 11,
+                                                'A' | 'a' => 12,
+                                                'B' | 'b' => 13,
+                                                'C' | 'c' => 14,
+                                                'D' | 'd' => 15,
+                                                _ => continue,
+                                            };
+                                            let dtmf_start_ts = rtp_ts;
+                                            for (i, dur, end_flag) in [
+                                                (0, 160u16, false),
+                                                (1, 320u16, false),
+                                                (2, 480u16, true),
+                                                (3, 480u16, true),
+                                            ] {
+                                                let mut dtmf_pkt = [0u8; 16];
+                                                let marker = i == 0;
+                                                vks_gateway_sip::write_rtp_header(&mut dtmf_pkt[..12], 101, rtp_seq, dtmf_start_ts, rtp_ssrc, marker);
+                                                rtp_seq = rtp_seq.wrapping_add(1);
+
+                                                dtmf_pkt[12] = event;
+                                                dtmf_pkt[13] = if end_flag { 0x8a } else { 0x0a };
+                                                dtmf_pkt[14..16].copy_from_slice(&dur.to_be_bytes());
+
+                                                let _ = rtp_sock.send_to(&dtmf_pkt, remote_target).await;
+                                                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                                            }
+                                            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                                        }
+                                    }
                                     _ = send_interval.tick() => {
                                         // McuEngine -> Терминал (N-1 Mix-minus)
-                                        let pcm_48k = mcu_media.participant_audio(room_id, pid_val).unwrap_or_default();
+                                        let rx_muted = ctrl.audio_rx_muted.load(std::sync::atomic::Ordering::Relaxed);
                                         let mut ulaw_samples = [0xFFu8; 160]; // 0xFF = тишина в G.711 µ-law
-                                        if !pcm_48k.is_empty() {
-                                            let mut pcm_8k = [0.0f32; 160];
-                                            vks_gateway_sip::downsample_48k_to_8k(&pcm_48k, &mut pcm_8k);
-                                            vks_gateway_sip::encode_ulaw(&pcm_8k, &mut ulaw_samples);
+
+                                        if !rx_muted {
+                                            let pcm_48k = mcu_media.participant_audio(room_id, pid_val).unwrap_or_default();
+                                            if !pcm_48k.is_empty() {
+                                                let mut pcm_8k = [0.0f32; 160];
+                                                vks_gateway_sip::downsample_48k_to_8k(&pcm_48k, &mut pcm_8k);
+                                                let vol_rx = ctrl.volume_rx.load(std::sync::atomic::Ordering::Relaxed);
+                                                if vol_rx != 100 {
+                                                    let scale = (vol_rx as f32) / 100.0;
+                                                    for s in pcm_8k.iter_mut() {
+                                                        *s = (*s * scale).tanh();
+                                                    }
+                                                }
+                                                vks_gateway_sip::encode_ulaw(&pcm_8k, &mut ulaw_samples);
+                                            }
                                         }
 
                                         let mut hdr = [0u8; 12];
@@ -473,14 +566,26 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                                             if let Some((_pt, _seq, _ts, _ssrc, offset)) = vks_gateway_sip::parse_rtp_header(&in_buf[..len]) {
                                                 let payload = &in_buf[offset..len];
                                                 if !payload.is_empty() {
-                                                    let mut dec_8k = [0.0f32; 160];
-                                                    let count = payload.len().min(160);
-                                                    for i in 0..count {
-                                                        dec_8k[i] = vks_gateway_sip::ulaw_to_f32(payload[i]);
+                                                    let tx_muted = ctrl.audio_tx_muted.load(std::sync::atomic::Ordering::Relaxed);
+                                                    if tx_muted {
+                                                        mcu_media.set_audio(room_id, pid_val, vec![0.0f32; 960]);
+                                                    } else {
+                                                        let mut dec_8k = [0.0f32; 160];
+                                                        let count = payload.len().min(160);
+                                                        for i in 0..count {
+                                                            dec_8k[i] = vks_gateway_sip::ulaw_to_f32(payload[i]);
+                                                        }
+                                                        let vol_tx = ctrl.volume_tx.load(std::sync::atomic::Ordering::Relaxed);
+                                                        if vol_tx != 100 {
+                                                            let scale = (vol_tx as f32) / 100.0;
+                                                            for s in dec_8k.iter_mut() {
+                                                                *s = (*s * scale).tanh();
+                                                            }
+                                                        }
+                                                        let mut up_48k = [0.0f32; 960];
+                                                        vks_gateway_sip::upsample_8k_to_48k(&dec_8k, &mut up_48k);
+                                                        mcu_media.set_audio(room_id, pid_val, up_48k.to_vec());
                                                     }
-                                                    let mut up_48k = [0.0f32; 960];
-                                                    vks_gateway_sip::upsample_8k_to_48k(&dec_8k, &mut up_48k);
-                                                    mcu_media.set_audio(room_id, pid_val, up_48k.to_vec());
                                                 }
                                             }
                                         }
@@ -520,6 +625,7 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                 uri: trimmed.to_string(),
                 active_sip,
                 cancel_flag,
+                controls,
             };
             reg.by_call.insert(call_id.clone(), pid_str.clone());
             reg.by_participant.insert(pid_str.clone(), session);
@@ -614,5 +720,73 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
 
         info!(pid = %participant_id, call_id = %session.call_id, "Gateway call terminated via hangup");
         true
+    }
+
+    fn set_media_control(
+        &self,
+        participant_id: &str,
+        audio_tx_muted: Option<bool>,
+        audio_rx_muted: Option<bool>,
+        video_tx_muted: Option<bool>,
+        video_rx_muted: Option<bool>,
+        volume_tx: Option<u32>,
+        volume_rx: Option<u32>,
+    ) -> bool {
+        let (room_id, controls) = {
+            let reg = match self.registry.lock() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            let Some(sess) = reg.by_participant.get(participant_id) else {
+                return false;
+            };
+            (sess.room_id, sess.controls.clone())
+        };
+
+        if let Some(m) = audio_tx_muted {
+            controls.audio_tx_muted.store(m, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(m) = audio_rx_muted {
+            controls.audio_rx_muted.store(m, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(m) = video_tx_muted {
+            controls.video_tx_muted.store(m, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(m) = video_rx_muted {
+            controls.video_rx_muted.store(m, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(v) = volume_tx {
+            controls.volume_tx.store(v.clamp(0, 200), std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(v) = volume_rx {
+            controls.volume_rx.store(v.clamp(0, 200), std::sync::atomic::Ordering::Relaxed);
+        }
+
+        let state_opt = self.state.read().ok().and_then(|w| w.as_ref().and_then(|weak| weak.upgrade()));
+        if let Some(state) = state_opt {
+            state.room_hub.update_participant_media(&room_id, participant_id, audio_tx_muted, video_tx_muted, None);
+        }
+        true
+    }
+
+    fn send_dtmf(&self, participant_id: &str, sequence: &str) -> Result<(), String> {
+        let controls = {
+            let reg = self.registry.lock().map_err(|_| "Registry lock poisoned".to_string())?;
+            let sess = reg
+                .by_participant
+                .get(participant_id)
+                .ok_or_else(|| format!("Participant {participant_id} not found"))?;
+            sess.controls.clone()
+        };
+        controls.dtmf_sender.send(sequence.to_string()).map_err(|e| format!("DTMF queue error: {e}"))
+    }
+
+    fn send_fecc(&self, participant_id: &str, command: &str) -> Result<(), String> {
+        let reg = self.registry.lock().map_err(|_| "Registry lock poisoned".to_string())?;
+        if !reg.by_participant.contains_key(participant_id) {
+            return Err(format!("Participant {participant_id} not found"));
+        }
+        tracing::info!(participant_id = %participant_id, command = %command, "FECC camera control command routed to gateway");
+        Ok(())
     }
 }

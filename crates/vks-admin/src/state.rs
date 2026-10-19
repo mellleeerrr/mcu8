@@ -140,6 +140,31 @@ pub trait OutboundDialer: Send + Sync {
     fn hangup(&self, _participant_id: &str) -> bool {
         false
     }
+
+    /// Управляет медиа-потоками абонента (Mute TX/RX, регулировка громкости).
+    #[allow(clippy::too_many_arguments)]
+    fn set_media_control(
+        &self,
+        _participant_id: &str,
+        _audio_tx_muted: Option<bool>,
+        _audio_rx_muted: Option<bool>,
+        _video_tx_muted: Option<bool>,
+        _video_rx_muted: Option<bool>,
+        _volume_tx: Option<u32>,
+        _volume_rx: Option<u32>,
+    ) -> bool {
+        false
+    }
+
+    /// Передаёт DTMF-последовательность терминалу через RFC 4733 / telephone-event.
+    fn send_dtmf(&self, _participant_id: &str, _sequence: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Передаёт команды Far End Camera Control (FECC / PTZ).
+    fn send_fecc(&self, _participant_id: &str, _command: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Состояние админ-сервера (in-memory stores + mode).

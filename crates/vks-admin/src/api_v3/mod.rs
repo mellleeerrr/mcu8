@@ -50,6 +50,32 @@ pub struct ApiV3State {
     /// Запланированные контакты (StandBy / without_call).
     pub scheduled_calls:
         std::sync::Mutex<std::collections::HashMap<vks_core::RoomId, Vec<call_strings::CallStringRecord>>>,
+    /// Персистентные настройки медиа абонентов (volume, mute rx/tx).
+    pub abonent_settings: std::sync::Mutex<std::collections::HashMap<String, AbonentMediaState>>,
+}
+
+/// Состояние медиа-настроек абонента (громкость, mute).
+#[derive(Debug, Clone)]
+pub struct AbonentMediaState {
+    pub audio_rx_muted: bool,
+    pub audio_tx_muted: bool,
+    pub video_rx_muted: bool,
+    pub video_tx_muted: bool,
+    pub volume_rx: u32,
+    pub volume_tx: u32,
+}
+
+impl Default for AbonentMediaState {
+    fn default() -> Self {
+        Self {
+            audio_rx_muted: false,
+            audio_tx_muted: false,
+            video_rx_muted: false,
+            video_tx_muted: false,
+            volume_rx: 100,
+            volume_tx: 100,
+        }
+    }
 }
 
 /// Нормализует опечатку вендорного фронтенда PNM (`}/contacts` -> `/contacts`) до роутинга.
@@ -125,8 +151,18 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/sessions/{id}/invite/call_strings/list", post(call_strings::invite_session_call_strings_list))
         .route("/api/v3/call_strings", get(call_strings::list_call_strings))
         .route("/api/v3/ui/call_strings", get(call_strings::list_call_strings))
-        .route("/api/v3/sessions/{id}/contacts", get(sessions::conference_contacts))
-        .route("/api/v3/ui/sessions/{id}/contacts", get(sessions::conference_contacts))
+        .route(
+            "/api/v3/sessions/{id}/contacts",
+            get(sessions::conference_contacts).delete(sessions::remove_session_contacts_batch),
+        )
+        .route(
+            "/api/v3/ui/sessions/{id}/contacts",
+            get(sessions::conference_contacts).delete(sessions::remove_session_contacts_batch),
+        )
+        .route("/api/v3/sessions/{id}/contacts/list", delete(sessions::remove_session_contacts_batch))
+        .route("/api/v3/ui/sessions/{id}/contacts/list", delete(sessions::remove_session_contacts_batch))
+        .route("/api/v3/sessions/{id}/contacts/{contact_id}", delete(sessions::remove_session_contact))
+        .route("/api/v3/ui/sessions/{id}/contacts/{contact_id}", delete(sessions::remove_session_contact))
         .route("/api/v3/ui/video_layouts", get(shell::video_layouts))
         .route("/api/v3/video_layouts", get(shell::video_layouts))
         .route("/api/v3/ui/video_layouts/mode", post(shell::switch_video_layout_mode))
@@ -134,8 +170,12 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/sessions/quick", post(sessions::quick_session))
         .route("/api/v3/ui/records", get(shell::ui_records))
         .route("/api/v3/records", get(shell::ui_records))
+        .route("/api/v3/abonents", get(sessions::list_abonents))
+        .route("/api/v3/abonents/previews", get(sessions::abonents_previews))
         .route("/api/v3/abonents/{id}", delete(sessions::remove_abonent).patch(sessions::edit_abonent))
         .route("/api/v3/abonents/{id}/{setting}", post(sessions::switch_abonent_settings))
+        .route("/api/v3/abonents/{id}/dtmf", post(sessions::send_abonent_dtmf))
+        .route("/api/v3/abonents/{id}/fecc", post(sessions::send_abonent_fecc))
         .route("/api/v3/sessions/{id}/abonents/{abonent_id}", delete(sessions::remove_session_abonent))
         .route("/api/v3/ui/sessions/{id}/abonents/{abonent_id}", delete(sessions::remove_session_abonent))
         .route("/api/v3/engine/command", post(shell::engine_command))

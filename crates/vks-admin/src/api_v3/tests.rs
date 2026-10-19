@@ -21,6 +21,7 @@ use tower::ServiceExt;
 
 use vks_auth::jwt::{JwtConfig, JwtIssuer};
 use vks_auth::local_db::LocalDb;
+use vks_core::RoomId;
 
 use super::router;
 use crate::state::{AppState, SharedState};
@@ -1230,4 +1231,309 @@ async fn step2_call_strings_and_invite_vertical() {
     let limit_body = json_body(limit_resp).await;
     assert_eq!(limit_body["error"]["code"], 409);
     assert_eq!(limit_body["error"]["description"], "Too many connections");
+}
+
+type MediaControlRecord = (String, Option<bool>, Option<bool>, Option<u32>, Option<u32>);
+
+#[derive(Default)]
+struct MockStep4Dialer {
+    last_dtmf: std::sync::Mutex<Option<(String, String)>>,
+    last_fecc: std::sync::Mutex<Option<(String, String)>>,
+    last_media_control: std::sync::Mutex<Option<MediaControlRecord>>,
+}
+
+#[async_trait::async_trait]
+impl crate::state::OutboundDialer for MockStep4Dialer {
+    async fn dial(&self, _room_id: RoomId, _uri: &str, _display_name: Option<&str>) -> Result<String, String> {
+        Ok("sip-mock-pid@sip-gateway".to_string())
+    }
+
+    fn set_media_control(
+        &self,
+        participant_id: &str,
+        audio_tx_muted: Option<bool>,
+        audio_rx_muted: Option<bool>,
+        _video_tx_muted: Option<bool>,
+        _video_rx_muted: Option<bool>,
+        volume_tx: Option<u32>,
+        volume_rx: Option<u32>,
+    ) -> bool {
+        *self.last_media_control.lock().unwrap() =
+            Some((participant_id.to_string(), audio_tx_muted, audio_rx_muted, volume_tx, volume_rx));
+        true
+    }
+
+    fn send_dtmf(&self, participant_id: &str, sequence: &str) -> Result<(), String> {
+        *self.last_dtmf.lock().unwrap() = Some((participant_id.to_string(), sequence.to_string()));
+        Ok(())
+    }
+
+    fn send_fecc(&self, participant_id: &str, command: &str) -> Result<(), String> {
+        *self.last_fecc.lock().unwrap() = Some((participant_id.to_string(), command.to_string()));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn step4_abonent_media_controls_dtmf_fecc_and_standby() {
+    let (state, _) = test_state();
+    let mock_dialer = std::sync::Arc::new(MockStep4Dialer::default());
+    state.set_dialer(mock_dialer.clone());
+
+    let app_router = app(state.clone());
+    let token = login_token(&app_router, "admin", "s3cret").await;
+
+    // 1. Создаем комнату и начинаем сессию
+    let create_resp = send(
+        &app_router,
+        request("POST", "/api/v3/conferences", Some(&token), json!({ "display_name": "Step 4 Room" })),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::OK);
+    let create_body = json_body(create_resp).await;
+    let conf_id = create_body["conference"]["id"].as_str().unwrap().to_string();
+
+    let start_resp =
+        send(&app_router, request("POST", "/api/v3/sessions", Some(&token), json!({ "conference_id": conf_id }))).await;
+    assert_eq!(start_resp.status(), StatusCode::OK);
+
+    let room_id = RoomId::from_uuid(uuid::Uuid::parse_str(&conf_id).expect("valid uuid"));
+
+    // 2. Регистрируем участника в RoomHub
+    let pid = "sip-123@sip-gateway".to_string();
+    state.room_hub.register_participant(
+        &room_id,
+        crate::hub::ParticipantSnapshot {
+            participant_id: pid.clone(),
+            display_name: "Hardware Terminal 132".to_string(),
+            is_recorder: false,
+            is_speaking: false,
+            track_ids: vec!["audio".into(), "video".into()],
+            is_audio_muted: false,
+            is_video_muted: false,
+            connected_at: 1000,
+        },
+    );
+
+    // 3. Проверяем GET /api/v3/abonents и GET /api/v3/abonents/previews
+    let ab_resp = send(&app_router, request("GET", "/api/v3/abonents", Some(&token), json!({}))).await;
+    assert_eq!(ab_resp.status(), StatusCode::OK);
+    let ab_body = json_body(ab_resp).await;
+    assert!(ab_body["count"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(ab_body["connections"], ab_body["count"]);
+    let found = ab_body["abonents"].as_array().unwrap().iter().any(|a| a["id"] == pid);
+    assert!(found, "registered participant must appear in /api/v3/abonents");
+
+    let prev_resp = send(&app_router, request("GET", "/api/v3/abonents/previews", Some(&token), json!({}))).await;
+    assert_eq!(prev_resp.status(), StatusCode::OK);
+    let prev_body = json_body(prev_resp).await;
+    assert!(prev_body["previews"].is_array());
+
+    // 4. Проверяем POST /api/v3/abonents/{id}/audio (mute TX mic)
+    let mute_tx_resp = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/abonents/{pid}/audio"),
+            Some(&token),
+            json!({ "enable": false, "outgoing": true }),
+        ),
+    )
+    .await;
+    assert_eq!(mute_tx_resp.status(), StatusCode::OK);
+    let last_ctrl = mock_dialer.last_media_control.lock().unwrap().take().expect("media control called");
+    assert_eq!(last_ctrl.0, pid);
+    assert_eq!(last_ctrl.1, Some(true), "audio_tx_muted should be true");
+
+    // 5. Проверяем POST /api/v3/abonents/{id}/microphone (mute RX speaker)
+    let mute_rx_resp = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/abonents/{pid}/microphone"),
+            Some(&token),
+            json!({ "enable": false, "outgoing": false }),
+        ),
+    )
+    .await;
+    assert_eq!(mute_rx_resp.status(), StatusCode::OK);
+    let last_ctrl = mock_dialer.last_media_control.lock().unwrap().take().expect("media control called");
+    assert_eq!(last_ctrl.2, Some(true), "audio_rx_muted should be true");
+
+    // 6. Проверяем POST /api/v3/abonents/{id}/volume (volume RX)
+    let vol_resp = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/abonents/{pid}/volume"),
+            Some(&token),
+            json!({ "volume": 80, "outgoing": false }),
+        ),
+    )
+    .await;
+    assert_eq!(vol_resp.status(), StatusCode::OK);
+    let last_ctrl = mock_dialer.last_media_control.lock().unwrap().take().expect("media control called");
+    assert_eq!(last_ctrl.4, Some(80), "volume_rx should be 80");
+
+    // Проверяем, что GET /api/v3/abonents и GET /api/v3/engine/abonents возвращают сохраненную громкость 80
+    let list_resp = send(&app_router, request("GET", "/api/v3/abonents", Some(&token), json!({}))).await;
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let list_body = json_body(list_resp).await;
+    let abonent_item =
+        list_body["abonents"].as_array().unwrap().iter().find(|a| a["id"] == pid).expect("abonent found in roster");
+    assert_eq!(abonent_item["payload"]["volume_rx"], 80);
+
+    // 7. Проверяем POST /api/v3/abonents/{id}/dtmf
+    let dtmf_resp = send(
+        &app_router,
+        request("POST", &format!("/api/v3/abonents/{pid}/dtmf"), Some(&token), json!({ "sequence": "123#*" })),
+    )
+    .await;
+    assert_eq!(dtmf_resp.status(), StatusCode::OK);
+    let last_dtmf = mock_dialer.last_dtmf.lock().unwrap().take().expect("dtmf called");
+    assert_eq!(last_dtmf.0, pid);
+    assert_eq!(last_dtmf.1, "123#*");
+
+    // Валидация DTMF: пустой или слишком длинный (>32)
+    let dtmf_empty = send(
+        &app_router,
+        request("POST", &format!("/api/v3/abonents/{pid}/dtmf"), Some(&token), json!({ "sequence": "   " })),
+    )
+    .await;
+    assert_eq!(dtmf_empty.status(), StatusCode::BAD_REQUEST);
+
+    let dtmf_toolong = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/abonents/{pid}/dtmf"),
+            Some(&token),
+            json!({ "sequence": "12345678901234567890123456789012345" }),
+        ),
+    )
+    .await;
+    assert_eq!(dtmf_toolong.status(), StatusCode::BAD_REQUEST);
+
+    // 8. Проверяем POST /api/v3/abonents/{id}/fecc
+    let fecc_resp = send(
+        &app_router,
+        request("POST", &format!("/api/v3/abonents/{pid}/fecc"), Some(&token), json!({ "action": "zoom_in" })),
+    )
+    .await;
+    assert_eq!(fecc_resp.status(), StatusCode::OK);
+    let last_fecc = mock_dialer.last_fecc.lock().unwrap().take().expect("fecc called");
+    assert_eq!(last_fecc.0, pid);
+    assert_eq!(last_fecc.1, "zoom_in");
+
+    // Валидация FECC: пустая команда
+    let fecc_empty = send(
+        &app_router,
+        request("POST", &format!("/api/v3/abonents/{pid}/fecc"), Some(&token), json!({ "command": "" })),
+    )
+    .await;
+    assert_eq!(fecc_empty.status(), StatusCode::BAD_REQUEST);
+
+    // 9. Проверяем StandBy: добавление и удаление отдельного контакта
+    let standby_add = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/ui/sessions/{conf_id}/call_strings/without_call"),
+            Some(&token),
+            json!({ "uri": "sip:192.168.1.188", "display_name": "Standby Box" }),
+        ),
+    )
+    .await;
+    assert_eq!(standby_add.status(), StatusCode::OK);
+    let sb_body = json_body(standby_add).await;
+    let contact_id = sb_body["call_string"]["id"].as_str().unwrap().to_string();
+
+    // Проверяем, что контакт есть в StandBy
+    {
+        let map = state.api_v3.scheduled_calls.lock().unwrap();
+        assert_eq!(map.get(&room_id).unwrap().len(), 1);
+    }
+
+    // Удаляем единичный контакт: DELETE /api/v3/sessions/{id}/contacts/{contact_id}
+    let del_resp = send(
+        &app_router,
+        request("DELETE", &format!("/api/v3/sessions/{conf_id}/contacts/{contact_id}"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+
+    {
+        let map = state.api_v3.scheduled_calls.lock().unwrap();
+        assert_eq!(map.get(&room_id).unwrap().len(), 0);
+    }
+
+    // 10. Проверяем пакетное удаление: DELETE /api/v3/sessions/{id}/contacts
+    let _ = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/ui/sessions/{conf_id}/call_strings/without_call"),
+            Some(&token),
+            json!({ "uri": "sip:192.168.1.189", "display_name": "Standby Box 2" }),
+        ),
+    )
+    .await;
+    let _ = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/ui/sessions/{conf_id}/call_strings/without_call"),
+            Some(&token),
+            json!({ "uri": "sip:192.168.1.190", "display_name": "Standby Box 3" }),
+        ),
+    )
+    .await;
+
+    // Пустой batch delete не должен удалять контакты (защита от потери данных)
+    let empty_batch_del = send(
+        &app_router,
+        request("DELETE", &format!("/api/v3/sessions/{conf_id}/contacts"), Some(&token), json!({ "contacts": [] })),
+    )
+    .await;
+    assert_eq!(empty_batch_del.status(), StatusCode::NO_CONTENT);
+    {
+        let map = state.api_v3.scheduled_calls.lock().unwrap();
+        assert_eq!(map.get(&room_id).unwrap().len(), 2, "empty batch delete must NOT clear StandBy");
+    }
+
+    let batch_del_resp = send(
+        &app_router,
+        request(
+            "DELETE",
+            &format!("/api/v3/sessions/{conf_id}/contacts"),
+            Some(&token),
+            json!({ "contacts": ["sip:192.168.1.189", "sip:192.168.1.190"] }),
+        ),
+    )
+    .await;
+    assert_eq!(batch_del_resp.status(), StatusCode::NO_CONTENT);
+
+    {
+        let map = state.api_v3.scheduled_calls.lock().unwrap();
+        assert_eq!(map.get(&room_id).unwrap().len(), 0);
+    }
+
+    // 11. Проверяем Role-Based Access Control (< Operator -> 403 Forbidden)
+    crate::users::Users::create(&state, "step4_restricted_user", vks_core::Role::Moderator);
+    let restricted_token =
+        state.jwt_issuer.as_ref().unwrap().issue("step4_restricted_user", None).expect("issue token");
+
+    let rbac_dtmf = send(
+        &app_router,
+        request("POST", &format!("/api/v3/abonents/{pid}/dtmf"), Some(&restricted_token), json!({ "sequence": "9" })),
+    )
+    .await;
+    assert_eq!(rbac_dtmf.status(), StatusCode::FORBIDDEN);
+
+    let rbac_settings = send(
+        &app_router,
+        request("POST", &format!("/api/v3/abonents/{pid}/audio"), Some(&restricted_token), json!({ "enable": false })),
+    )
+    .await;
+    assert_eq!(rbac_settings.status(), StatusCode::FORBIDDEN);
 }

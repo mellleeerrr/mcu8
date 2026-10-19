@@ -471,7 +471,10 @@ pub async fn conference_contacts(Path(_id): Path<String>) -> Response {
 }
 
 /// Сериализует снапшот участника в DTO абонента, полностью совместимый с мапперами фронтенда (`dY`/`Lh`).
-pub fn participant_to_abonent_json(p: &crate::hub::ParticipantSnapshot) -> Value {
+pub fn participant_to_abonent_json_with_settings(
+    p: &crate::hub::ParticipantSnapshot,
+    media_opt: Option<&super::AbonentMediaState>,
+) -> Value {
     let (proto, connection_url, uri) = if p.is_recorder {
         ("recorder", format!("recorder://{}", p.participant_id), format!("recorder:{}", p.participant_id))
     } else if p.participant_id.contains("@sip-gateway") {
@@ -489,15 +492,22 @@ pub fn participant_to_abonent_json(p: &crate::hub::ParticipantSnapshot) -> Value
         ("webrtc", format!("webrtc://{}", p.participant_id), format!("webrtc:{}", p.participant_id))
     };
 
+    let audio_rx_enabled = media_opt.map(|m| !m.audio_rx_muted).unwrap_or(true);
+    let audio_tx_enabled = media_opt.map(|m| !m.audio_tx_muted).unwrap_or(!p.is_audio_muted);
+    let video_rx_enabled = media_opt.map(|m| !m.video_rx_muted).unwrap_or(true);
+    let video_tx_enabled = media_opt.map(|m| !m.video_tx_muted).unwrap_or(!p.is_video_muted);
+    let volume_rx = media_opt.map(|m| m.volume_rx).unwrap_or(100);
+    let volume_tx = media_opt.map(|m| m.volume_tx).unwrap_or(100);
+
     let settings = json!({
         "slot_render_type": "auto",
         "auto_call": false,
-        "audio_rx_enabled": true,
-        "audio_tx_enabled": !p.is_audio_muted,
-        "volume_rx": 100,
-        "volume_tx": 100,
-        "video_rx_enabled": true,
-        "video_tx_enabled": !p.is_video_muted,
+        "audio_rx_enabled": audio_rx_enabled,
+        "audio_tx_enabled": audio_tx_enabled,
+        "volume_rx": volume_rx,
+        "volume_tx": volume_tx,
+        "video_rx_enabled": video_rx_enabled,
+        "video_tx_enabled": video_tx_enabled,
         "crown": false,
         "hide_display_name": false
     });
@@ -518,6 +528,7 @@ pub fn participant_to_abonent_json(p: &crate::hub::ParticipantSnapshot) -> Value
     });
 
     json!({
+        "id": p.participant_id,
         "abonent_id": p.participant_id,
         "connection_id": p.participant_id,
         "contact_id": p.participant_id,
@@ -535,17 +546,22 @@ pub fn participant_to_abonent_json(p: &crate::hub::ParticipantSnapshot) -> Value
         "payload": {
             "slot_render_type": "auto",
             "auto_call": false,
-            "audio_rx_enabled": true,
-            "audio_tx_enabled": !p.is_audio_muted,
-            "volume_rx": 100,
-            "volume_tx": 100,
-            "video_rx_enabled": true,
-            "video_tx_enabled": !p.is_video_muted,
+            "audio_rx_enabled": audio_rx_enabled,
+            "audio_tx_enabled": audio_tx_enabled,
+            "volume_rx": volume_rx,
+            "volume_tx": volume_tx,
+            "video_rx_enabled": video_rx_enabled,
+            "video_tx_enabled": video_tx_enabled,
             "crown": false,
             "hide_display_name": false,
             "settings": settings
         }
     })
+}
+
+/// Сериализует снимок участника в формат абонента PNM UI.
+pub fn participant_to_abonent_json(p: &crate::hub::ParticipantSnapshot) -> Value {
+    participant_to_abonent_json_with_settings(p, None)
 }
 
 /// Сериализует запись строки вызова (in-flight или standby) в формат абонента.
@@ -580,6 +596,7 @@ pub fn call_record_to_abonent_json(r: &super::call_strings::CallStringRecord, st
     });
 
     json!({
+        "id": r.id,
         "abonent_id": r.id,
         "connection_id": r.id,
         "contact_id": r.id,
@@ -620,7 +637,14 @@ pub async fn session_abonents(State(state): State<SharedState>, Path(id): Path<S
     };
 
     let participants = state.room_hub.list_participants(&room.id);
-    let connected: Vec<Value> = participants.iter().map(participant_to_abonent_json).collect();
+    let settings_map = state.api_v3.abonent_settings.lock().ok();
+    let connected: Vec<Value> = participants
+        .iter()
+        .map(|p| {
+            let media = settings_map.as_ref().and_then(|m| m.get(&p.participant_id));
+            participant_to_abonent_json_with_settings(p, media)
+        })
+        .collect();
 
     let in_flight_map = state.api_v3.in_flight_calls.lock().expect("in_flight_calls poisoned");
     let connecting: Vec<Value> = in_flight_map
@@ -670,7 +694,7 @@ pub struct SwitchAbonentSettingsRequest {
     pub volume: Option<u32>,
 }
 
-/// `POST /api/v3/abonents/{connection_id}/{settings_type}` — переключение mute микрофона/камеры.
+/// `POST /api/v3/abonents/{connection_id}/{settings_type}` — переключение mute микрофона/камеры и громкости.
 pub async fn switch_abonent_settings(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
@@ -679,6 +703,9 @@ pub async fn switch_abonent_settings(
     Json(body): Json<SwitchAbonentSettingsRequest>,
 ) -> Response {
     track("abonents/{id}/{setting}");
+    if auth.role < Role::Operator {
+        return error_json(403, "Forbidden: Operator role required");
+    }
     let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&connection_id) else {
         return error_json(404, "Abonent not found");
     };
@@ -686,16 +713,84 @@ pub async fn switch_abonent_settings(
         return resp;
     }
 
-    let audio_muted = match setting_type.as_str() {
-        "audio" | "microphone" => Some(!body.enable.unwrap_or(true)),
-        _ => None,
-    };
-    let video_muted = match setting_type.as_str() {
-        "video" | "camera" => Some(!body.enable.unwrap_or(true)),
-        _ => None,
+    let is_outgoing = body.outgoing.unwrap_or(true);
+    let mut audio_tx_muted = None;
+    let mut audio_rx_muted = None;
+    let mut video_tx_muted = None;
+    let mut video_rx_muted = None;
+    let mut vol_tx = None;
+    let mut vol_rx = None;
+
+    match setting_type.as_str() {
+        "audio" | "microphone" => {
+            let muted = !body.enable.unwrap_or(true);
+            if is_outgoing {
+                audio_tx_muted = Some(muted);
+            } else {
+                audio_rx_muted = Some(muted);
+            }
+        }
+        "video" | "camera" => {
+            let muted = !body.enable.unwrap_or(true);
+            if is_outgoing {
+                video_tx_muted = Some(muted);
+            } else {
+                video_rx_muted = Some(muted);
+            }
+        }
+        "volume" => {
+            if let Some(vol) = body.volume {
+                if is_outgoing {
+                    vol_tx = Some(vol);
+                } else {
+                    vol_rx = Some(vol);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // Сохраняем актуальные настройки абонента для ростера
+    if let Ok(mut settings_map) = state.api_v3.abonent_settings.lock() {
+        let entry = settings_map.entry(connection_id.clone()).or_default();
+        if let Some(m) = audio_tx_muted {
+            entry.audio_tx_muted = m;
+        }
+        if let Some(m) = audio_rx_muted {
+            entry.audio_rx_muted = m;
+        }
+        if let Some(m) = video_tx_muted {
+            entry.video_tx_muted = m;
+        }
+        if let Some(m) = video_rx_muted {
+            entry.video_rx_muted = m;
+        }
+        if let Some(v) = vol_tx {
+            entry.volume_tx = v;
+        }
+        if let Some(v) = vol_rx {
+            entry.volume_rx = v;
+        }
+    }
+
+    let handled_by_dialer = if let Some(dialer) = state.outbound_dialer() {
+        dialer.set_media_control(
+            &connection_id,
+            audio_tx_muted,
+            audio_rx_muted,
+            video_tx_muted,
+            video_rx_muted,
+            vol_tx,
+            vol_rx,
+        )
+    } else {
+        false
     };
 
-    state.room_hub.update_participant_media(&room_id, &connection_id, audio_muted, video_muted, None);
+    if !handled_by_dialer {
+        state.room_hub.update_participant_media(&room_id, &connection_id, audio_tx_muted, video_tx_muted, None);
+    }
+
     audit_room(
         &state,
         &auth.subject,
@@ -708,8 +803,9 @@ pub async fn switch_abonent_settings(
         json!({
             "connection_id": connection_id,
             "setting": setting_type,
-            "audio_muted": audio_muted,
-            "video_muted": video_muted,
+            "audio_muted": audio_tx_muted,
+            "video_muted": video_tx_muted,
+            "volume": body.volume,
         }),
     );
     Json(json!({ "status": "ok" })).into_response()
@@ -803,10 +899,12 @@ pub async fn engine_abonents(State(state): State<SharedState>) -> Response {
     track("engine/abonents");
     let room_ids: Vec<RoomId> =
         if let Ok(rooms) = state.rooms.lock() { rooms.keys().copied().collect() } else { Vec::new() };
+    let settings_map = state.api_v3.abonent_settings.lock().ok();
     let mut all_abonents = Vec::new();
     for rid in room_ids {
         for p in state.room_hub.list_participants(&rid) {
-            all_abonents.push(participant_to_abonent_json(&p));
+            let media = settings_map.as_ref().and_then(|m| m.get(&p.participant_id));
+            all_abonents.push(participant_to_abonent_json_with_settings(&p, media));
         }
     }
     let count = all_abonents.len();
@@ -815,4 +913,277 @@ pub async fn engine_abonents(State(state): State<SharedState>) -> Response {
         "count": count
     }))
     .into_response()
+}
+
+/// `GET /api/v3/abonents` → список всех активных абонентов (для PNM UI).
+pub async fn list_abonents(State(state): State<SharedState>) -> Response {
+    track("abonents");
+    let room_ids: Vec<RoomId> =
+        if let Ok(rooms) = state.rooms.lock() { rooms.keys().copied().collect() } else { Vec::new() };
+    let settings_map = state.api_v3.abonent_settings.lock().ok();
+    let mut all_abonents = Vec::new();
+    for rid in room_ids {
+        for p in state.room_hub.list_participants(&rid) {
+            let media = settings_map.as_ref().and_then(|m| m.get(&p.participant_id));
+            all_abonents.push(participant_to_abonent_json_with_settings(&p, media));
+        }
+    }
+    let count = all_abonents.len();
+    Json(json!({
+        "abonents": all_abonents,
+        "count": count,
+        "connections": count
+    }))
+    .into_response()
+}
+
+/// `GET /api/v3/abonents/previews` → список превью потоков (PNM UI).
+pub async fn abonents_previews() -> Response {
+    track("abonents/previews");
+    Json(json!({
+        "previews": []
+    }))
+    .into_response()
+}
+
+/// `DELETE /api/v3/sessions/{id}/contacts/{contact_id}` — удаление одного контакта из StandBy.
+pub async fn remove_session_contact(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
+    Path((id, contact_id)): Path<(String, String)>,
+) -> Response {
+    track("sessions/{id}/contacts/{contact_id}");
+    if auth.role < Role::Operator {
+        return error_json(403, "Forbidden: Operator role required");
+    }
+    let clean_id = sanitize_id(&id);
+    let Some(room) = find_room(&state, clean_id) else {
+        return error_json(404, "Session not found");
+    };
+    if let Err(resp) = check_permission(&auth, Some(&room.id.to_string())) {
+        return resp;
+    }
+
+    let removed = {
+        let mut map = state.api_v3.scheduled_calls.lock().expect("scheduled_calls poisoned");
+        if let Some(list) = map.get_mut(&room.id) {
+            let before = list.len();
+            let contact_clean = contact_id.trim_start_matches("sip:");
+            list.retain(|c| {
+                c.id != contact_id && c.uri != contact_id && c.uri.trim_start_matches("sip:") != contact_clean
+            });
+            list.len() < before
+        } else {
+            false
+        }
+    };
+
+    if removed {
+        audit_room(
+            &state,
+            &auth.subject,
+            "contact.removed_from_standby",
+            &contact_id,
+            client_ip.as_ref().map(|c| c.0 .0.as_str()),
+        );
+        state.notify_admin(
+            &format!("session:{}:abonents", room.id),
+            json!({
+                "action": "standby_removed",
+                "room_id": room.id.to_string(),
+                "contact_id": contact_id
+            }),
+        );
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Тело запроса пакетного удаления контактов из StandBy.
+#[derive(Debug, Default, Deserialize)]
+pub struct DeleteContactsBatchPayload {
+    #[serde(default)]
+    pub contacts: Vec<String>,
+    #[serde(default)]
+    pub data: Option<DeleteContactsBatchData>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DeleteContactsBatchData {
+    #[serde(default)]
+    pub contacts: Vec<String>,
+}
+
+/// `DELETE /api/v3/sessions/{id}/contacts` и `/contacts/list` — пакетное удаление из StandBy.
+pub async fn remove_session_contacts_batch(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
+    Path(id): Path<String>,
+    body: Option<Json<DeleteContactsBatchPayload>>,
+) -> Response {
+    track("sessions/{id}/contacts:batch");
+    if auth.role < Role::Operator {
+        return error_json(403, "Forbidden: Operator role required");
+    }
+    let clean_id = sanitize_id(&id);
+    let Some(room) = find_room(&state, clean_id) else {
+        return error_json(404, "Session not found");
+    };
+    if let Err(resp) = check_permission(&auth, Some(&room.id.to_string())) {
+        return resp;
+    }
+
+    let to_remove: std::collections::HashSet<String> = if let Some(Json(b)) = body {
+        if !b.contacts.is_empty() {
+            b.contacts.into_iter().collect()
+        } else if let Some(d) = b.data {
+            d.contacts.into_iter().collect()
+        } else {
+            std::collections::HashSet::new()
+        }
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let count_removed = {
+        let mut map = state.api_v3.scheduled_calls.lock().expect("scheduled_calls poisoned");
+        if let Some(list) = map.get_mut(&room.id) {
+            let before = list.len();
+            if to_remove.is_empty() {
+                0
+            } else {
+                list.retain(|c| {
+                    let clean = c.uri.trim_start_matches("sip:");
+                    !to_remove.contains(&c.id)
+                        && !to_remove.contains(&c.uri)
+                        && !to_remove.contains(&format!("sip:{}", c.uri))
+                        && !to_remove.contains(clean)
+                });
+                before.saturating_sub(list.len())
+            }
+        } else {
+            0
+        }
+    };
+
+    if count_removed > 0 {
+        audit_room(
+            &state,
+            &auth.subject,
+            "contacts.batch_removed_from_standby",
+            &format!("count:{}", count_removed),
+            client_ip.as_ref().map(|c| c.0 .0.as_str()),
+        );
+        state.notify_admin(
+            &format!("session:{}:abonents", room.id),
+            json!({
+                "action": "standby_batch_removed",
+                "room_id": room.id.to_string(),
+                "removed_count": count_removed
+            }),
+        );
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Тело запроса отправки DTMF.
+#[derive(Debug, Default, Deserialize)]
+pub struct DtmfPayload {
+    #[serde(default, alias = "dtmf", alias = "key")]
+    pub sequence: Option<String>,
+}
+
+/// `POST /api/v3/abonents/{id}/dtmf` — передача DTMF последовательности терминалу.
+pub async fn send_abonent_dtmf(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
+    Path(id): Path<String>,
+    Json(body): Json<DtmfPayload>,
+) -> Response {
+    track("abonents/{id}/dtmf");
+    if auth.role < Role::Operator {
+        return error_json(403, "Forbidden: Operator role required");
+    }
+    let seq = body.sequence.unwrap_or_default().trim().to_string();
+    if seq.is_empty() {
+        return error_json(400, "Missing DTMF sequence");
+    }
+    if seq.len() > 32 {
+        return error_json(400, "DTMF sequence exceeds maximum length of 32");
+    }
+
+    let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&id) else {
+        return error_json(404, "Abonent not found");
+    };
+    if let Err(resp) = check_permission(&auth, Some(&room_id.to_string())) {
+        return resp;
+    }
+
+    if let Some(dialer) = state.outbound_dialer() {
+        if let Err(e) = dialer.send_dtmf(&id, &seq) {
+            return error_json(500, &format!("Failed to send DTMF: {e}"));
+        }
+    }
+
+    audit_room(
+        &state,
+        &auth.subject,
+        "abonent.dtmf",
+        &format!("{}:{}", id, seq),
+        client_ip.as_ref().map(|c| c.0 .0.as_str()),
+    );
+
+    Json(json!({ "status": "ok", "sequence": seq })).into_response()
+}
+
+/// Тело запроса FECC (Far End Camera Control).
+#[derive(Debug, Default, Deserialize)]
+pub struct FeccPayload {
+    #[serde(default, alias = "action")]
+    pub command: Option<String>,
+}
+
+/// `POST /api/v3/abonents/{id}/fecc` — передача команд управления камерой.
+pub async fn send_abonent_fecc(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
+    Path(id): Path<String>,
+    Json(body): Json<FeccPayload>,
+) -> Response {
+    track("abonents/{id}/fecc");
+    if auth.role < Role::Operator {
+        return error_json(403, "Forbidden: Operator role required");
+    }
+    let cmd = body.command.unwrap_or_default().trim().to_string();
+    if cmd.is_empty() {
+        return error_json(400, "Missing FECC command");
+    }
+
+    let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&id) else {
+        return error_json(404, "Abonent not found");
+    };
+    if let Err(resp) = check_permission(&auth, Some(&room_id.to_string())) {
+        return resp;
+    }
+
+    if let Some(dialer) = state.outbound_dialer() {
+        if let Err(e) = dialer.send_fecc(&id, &cmd) {
+            return error_json(500, &format!("Failed to send FECC: {e}"));
+        }
+    }
+
+    audit_room(
+        &state,
+        &auth.subject,
+        "abonent.fecc",
+        &format!("{}:{}", id, cmd),
+        client_ip.as_ref().map(|c| c.0 .0.as_str()),
+    );
+
+    Json(json!({ "status": "ok" })).into_response()
 }

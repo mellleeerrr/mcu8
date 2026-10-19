@@ -1744,3 +1744,110 @@ async fn test_step3_gateway_dial_outbound_sip_uac_media_bridge() {
     // Ждем завершения term_task
     let _ = tokio::time::timeout(Duration::from_secs(3), term_task).await.expect("term_task finished");
 }
+
+#[tokio::test]
+async fn test_step4_gateway_media_controls_dtmf_rtp() {
+    use tokio::net::UdpSocket;
+    use vks_admin::rooms::Rooms;
+    use vks_admin::state::OutboundDialer;
+    use vks_media_mcu::McuEngine;
+    use vks_server::GatewayManager;
+
+    let term_sip_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("bind mock sip"));
+    let term_sip_addr = term_sip_sock.local_addr().unwrap();
+
+    let term_rtp_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("bind mock rtp"));
+    let term_rtp_addr = term_rtp_sock.local_addr().unwrap();
+
+    let sip_sock_clone = term_sip_sock.clone();
+    let term_task = tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        let (len, src) = sip_sock_clone.recv_from(&mut buf).await.expect("recv invite");
+        let invite_str = String::from_utf8_lossy(&buf[..len]);
+        assert!(invite_str.starts_with("INVITE"));
+
+        let via = invite_str.lines().find(|l| l.starts_with("Via:")).map(|l| l[4..].trim().to_string()).unwrap();
+        let from = invite_str.lines().find(|l| l.starts_with("From:")).map(|l| l[5..].trim().to_string()).unwrap();
+        let to = invite_str.lines().find(|l| l.starts_with("To:")).map(|l| l[3..].trim().to_string()).unwrap();
+        let call_id =
+            invite_str.lines().find(|l| l.starts_with("Call-ID:")).map(|l| l[8..].trim().to_string()).unwrap();
+        let cseq = invite_str.lines().find(|l| l.starts_with("CSeq:")).map(|l| l[5..].trim().to_string()).unwrap();
+
+        let sdp_answer = format!(
+            "v=0\r\no=- 2000 2000 IN IP4 127.0.0.1\r\ns=MockTerminal\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\n",
+            term_rtp_addr.port()
+        );
+
+        let ok_resp = format!(
+            "SIP/2.0 200 OK\r\nVia: {via}\r\nFrom: {from}\r\nTo: {to};tag=mocktag\r\nCall-ID: {call_id}\r\nCSeq: {cseq}\r\nContact: <sip:127.0.0.1:{}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+            sip_sock_clone.local_addr().unwrap().port(),
+            sdp_answer.len(),
+            sdp_answer
+        );
+        sip_sock_clone.send_to(ok_resp.as_bytes(), src).await.unwrap();
+
+        let (ack_len, _) = sip_sock_clone.recv_from(&mut buf).await.expect("recv ack");
+        let ack_str = String::from_utf8_lossy(&buf[..ack_len]);
+        assert!(ack_str.starts_with("ACK"));
+
+        let (bye_len, bye_src) = sip_sock_clone.recv_from(&mut buf).await.expect("recv bye");
+        let bye_str = String::from_utf8_lossy(&buf[..bye_len]);
+        assert!(bye_str.starts_with("BYE"));
+
+        let bye_via = bye_str.lines().find(|l| l.starts_with("Via:")).map(|l| l[4..].trim().to_string()).unwrap();
+        let bye_from = bye_str.lines().find(|l| l.starts_with("From:")).map(|l| l[5..].trim().to_string()).unwrap();
+        let bye_to = bye_str.lines().find(|l| l.starts_with("To:")).map(|l| l[3..].trim().to_string()).unwrap();
+        let bye_cseq = bye_str.lines().find(|l| l.starts_with("CSeq:")).map(|l| l[5..].trim().to_string()).unwrap();
+        let bye_ok = format!(
+            "SIP/2.0 200 OK\r\nVia: {bye_via}\r\nFrom: {bye_from}\r\nTo: {bye_to}\r\nCall-ID: {call_id}\r\nCSeq: {bye_cseq}\r\nContent-Length: 0\r\n\r\n"
+        );
+        sip_sock_clone.send_to(bye_ok.as_bytes(), bye_src).await.unwrap();
+    });
+
+    let admin_state = Arc::new(AppState::new());
+    let room = Rooms::create(&admin_state, "Room for DTMF Test");
+    let mcu_engine = Arc::new(McuEngine::new());
+    let gateway_manager = Arc::new(GatewayManager::new().with_mcu(mcu_engine.clone()).with_candidate_ip("127.0.0.1"));
+    gateway_manager.bind_state(Arc::downgrade(&admin_state));
+    admin_state.set_dialer(gateway_manager.clone());
+
+    let target_uri = format!("sip:127.0.0.1:{}", term_sip_addr.port());
+    let pid = gateway_manager.dial(room.id, &target_uri, Some("DTMF Terminal")).await.expect("dial");
+
+    // Тестируем set_media_control (Mute & Volume)
+    let ctrl_res = gateway_manager.set_media_control(&pid, Some(true), Some(false), None, None, Some(85), Some(110));
+    assert!(ctrl_res, "set_media_control must succeed");
+
+    // Отправляем DTMF "5"
+    let dtmf_res = gateway_manager.send_dtmf(&pid, "5");
+    assert!(dtmf_res.is_ok(), "send_dtmf must succeed");
+
+    // Ожидаем DTMF пакет на сокете терминала
+    let mut rtp_buf = [0u8; 1500];
+    let mut got_dtmf = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok((len, _))) =
+            tokio::time::timeout(Duration::from_millis(200), term_rtp_sock.recv_from(&mut rtp_buf)).await
+        {
+            if len >= 16 {
+                let pt = rtp_buf[1] & 0x7F;
+                if pt == 101 {
+                    let event = rtp_buf[12];
+                    assert_eq!(event, 5, "DTMF event digit 5");
+                    got_dtmf = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(got_dtmf, "Terminal must receive RFC 4733 telephone-event (PT 101) for DTMF digit 5");
+
+    let fecc_res = gateway_manager.send_fecc(&pid, "pan_left");
+    assert!(fecc_res.is_ok(), "send_fecc must succeed");
+
+    let hung_up = gateway_manager.hangup(&pid);
+    assert!(hung_up, "hangup must return true");
+    let _ = tokio::time::timeout(Duration::from_secs(3), term_task).await.expect("term_task finished");
+}
