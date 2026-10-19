@@ -1623,3 +1623,124 @@ async fn test_m5_cluster_monotonic_fencing_epoch_and_graceful_migration() {
     dead_cluster.send_heartbeat(0);
     assert_eq!(dead_cluster.status(20)["status"], "DEGRADED"); // expired heartbeat is DEGRADED
 }
+
+#[tokio::test]
+async fn test_step3_gateway_dial_outbound_sip_uac_media_bridge() {
+    use tokio::net::UdpSocket;
+    use vks_admin::rooms::Rooms;
+    use vks_admin::state::OutboundDialer;
+    use vks_media_mcu::McuEngine;
+    use vks_server::GatewayManager;
+
+    // 1. Создаем мок SIP терминал на 127.0.0.1
+    let term_sip_sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind term sip");
+    let term_sip_addr = term_sip_sock.local_addr().unwrap();
+
+    let term_rtp_sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind term rtp");
+    let term_rtp_port = term_rtp_sock.local_addr().unwrap().port();
+
+    let term_task = tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        // 1. Ожидаем INVITE
+        let (len, src) = term_sip_sock.recv_from(&mut buf).await.expect("recv invite");
+        let req = String::from_utf8_lossy(&buf[..len]);
+        assert!(req.starts_with("INVITE"));
+        assert!(req.contains("Call-ID:"));
+
+        // Извлекаем Call-ID, From, Via, CSeq
+        let call_id = req.lines().find(|l| l.starts_with("Call-ID:")).map(|l| l[8..].trim().to_string()).unwrap();
+        let from = req.lines().find(|l| l.starts_with("From:")).map(|l| l[5..].trim().to_string()).unwrap();
+        let via = req.lines().find(|l| l.starts_with("Via:")).map(|l| l[4..].trim().to_string()).unwrap();
+        let cseq = req.lines().find(|l| l.starts_with("CSeq:")).map(|l| l[5..].trim().to_string()).unwrap();
+
+        // Отправляем 180 Ringing
+        let ringing = format!(
+            "SIP/2.0 180 Ringing\r\nVia: {via}\r\nFrom: {from}\r\nTo: <sip:127.0.0.1>;tag=term-tag-123\r\nCall-ID: {call_id}\r\nCSeq: {cseq}\r\nContent-Length: 0\r\n\r\n"
+        );
+        term_sip_sock.send_to(ringing.as_bytes(), src).await.unwrap();
+
+        // Формируем 200 OK с SDP Answer
+        let sdp_answer = format!(
+            "v=0\r\no=term 1 1 IN IP4 127.0.0.1\r\ns=Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n",
+            term_rtp_port
+        );
+        let ok_resp = format!(
+            "SIP/2.0 200 OK\r\nVia: {via}\r\nFrom: {from}\r\nTo: <sip:127.0.0.1>;tag=term-tag-123\r\nCall-ID: {call_id}\r\nCSeq: {cseq}\r\nContact: <sip:term@127.0.0.1:{}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+            term_sip_addr.port(),
+            sdp_answer.len(),
+            sdp_answer
+        );
+        term_sip_sock.send_to(ok_resp.as_bytes(), src).await.unwrap();
+
+        // 2. Ожидаем ACK
+        let (ack_len, _) = term_sip_sock.recv_from(&mut buf).await.expect("recv ack");
+        let ack_str = String::from_utf8_lossy(&buf[..ack_len]);
+        assert!(ack_str.starts_with("ACK"));
+
+        // 3. Ожидаем BYE в конце
+        let (bye_len, bye_src) = term_sip_sock.recv_from(&mut buf).await.expect("recv bye");
+        let bye_str = String::from_utf8_lossy(&buf[..bye_len]);
+        assert!(bye_str.starts_with("BYE"));
+
+        let bye_via = bye_str.lines().find(|l| l.starts_with("Via:")).map(|l| l[4..].trim().to_string()).unwrap();
+        let bye_from = bye_str.lines().find(|l| l.starts_with("From:")).map(|l| l[5..].trim().to_string()).unwrap();
+        let bye_to = bye_str.lines().find(|l| l.starts_with("To:")).map(|l| l[3..].trim().to_string()).unwrap();
+        let bye_cseq = bye_str.lines().find(|l| l.starts_with("CSeq:")).map(|l| l[5..].trim().to_string()).unwrap();
+        let bye_ok = format!(
+            "SIP/2.0 200 OK\r\nVia: {bye_via}\r\nFrom: {bye_from}\r\nTo: {bye_to}\r\nCall-ID: {call_id}\r\nCSeq: {bye_cseq}\r\nContent-Length: 0\r\n\r\n"
+        );
+        term_sip_sock.send_to(bye_ok.as_bytes(), bye_src).await.unwrap();
+    });
+
+    // 2. Ожидаем RTP пакеты от сервера на мок терминале
+    let rtp_task = tokio::spawn(async move {
+        let mut rtp_buf = [0u8; 1500];
+        // Должен прийти хотя бы 1 RTP пакет с тишиной (µ-law 0xFF) от сервера
+        let (rtp_len, rtp_src) = tokio::time::timeout(Duration::from_secs(3), term_rtp_sock.recv_from(&mut rtp_buf))
+            .await
+            .expect("timeout waiting for server RTP")
+            .expect("recv rtp packet");
+
+        assert!(rtp_len >= 12, "RTP packet must have at least 12-byte header");
+        let payload_type = rtp_buf[1] & 0x7F;
+        assert_eq!(payload_type, 0, "Payload type must be PCMU (0)");
+        assert_eq!(rtp_buf[12], 0xFF, "Comfort noise must be 0xFF for µ-law silence");
+
+        // Отправляем ответный RTP пакет серверу
+        let mut resp_rtp = [0u8; 172];
+        vks_gateway_sip::write_rtp_header(&mut resp_rtp[..12], 0, 100, 1000, 0x12345678, false);
+        resp_rtp[12..].fill(0xFF);
+        let _ = term_rtp_sock.send_to(&resp_rtp, rtp_src).await;
+    });
+
+    // 3. Серверная часть
+    let admin_state = Arc::new(AppState::new());
+    let room = Rooms::create(&admin_state, "Room for Dial Test");
+    let mcu_engine = Arc::new(McuEngine::new());
+    let gateway_manager = Arc::new(GatewayManager::new().with_mcu(mcu_engine.clone()).with_candidate_ip("127.0.0.1"));
+    gateway_manager.bind_state(Arc::downgrade(&admin_state));
+    admin_state.set_dialer(gateway_manager.clone());
+
+    let target_uri = format!("sip:127.0.0.1:{}", term_sip_addr.port());
+    let dial_res = gateway_manager.dial(room.id, &target_uri, Some("Test Terminal 132")).await;
+    assert!(dial_res.is_ok(), "dial must succeed: {:?}", dial_res);
+
+    let pid = dial_res.unwrap();
+    assert!(pid.starts_with("sip-"));
+
+    // Проверяем, что участник зарегистрирован в RoomHub
+    let participants = admin_state.room_hub.list_participants(&room.id);
+    assert_eq!(participants.len(), 1);
+    assert_eq!(participants[0].participant_id, pid);
+    assert_eq!(participants[0].display_name, "Test Terminal 132");
+
+    // Ждем подтверждения RTP
+    rtp_task.await.expect("rtp_task completed successfully");
+
+    // 4. Завершаем вызов через hangup
+    let hung_up = gateway_manager.hangup(&pid);
+    assert!(hung_up, "hangup must return true");
+
+    // Ждем завершения term_task
+    let _ = tokio::time::timeout(Duration::from_secs(3), term_task).await.expect("term_task finished");
+}

@@ -299,7 +299,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "sfuufrag",
         "sfupwd",
         "sha-256 FF:00:11",
-        candidate_addr,
+        candidate_addr.clone(),
         candidate_port,
         vec![
             RtpMap { payload: 111, codec: "opus".into(), clock: 48000, channels: 2 },
@@ -310,7 +310,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_room_mode(proto_room_mode)
     .with_caps(caps);
 
-    let gateway_manager = Arc::new(GatewayManager::new().with_mcu(mcu_engine.clone()));
+    let gateway_manager =
+        Arc::new(GatewayManager::new().with_mcu(mcu_engine.clone()).with_candidate_ip(&candidate_addr));
+    gateway_manager.bind_state(Arc::downgrade(&admin_state));
+    admin_state.set_dialer(gateway_manager.clone());
     let recorder_manager = Arc::new(RecorderManager::new());
     let cluster_manager = Arc::new(ClusterManager::new(&config.server_name));
 

@@ -119,6 +119,9 @@ pub fn build_app_with_services(
     recorder: Arc<RecorderManager>,
     cluster: Arc<ClusterManager>,
 ) -> Router {
+    gateways.bind_state(Arc::downgrade(&state));
+    state.set_dialer(gateways.clone());
+
     let csp = frontend.csp.clone();
     let ws_ctx = WsContext {
         state: state.clone(),

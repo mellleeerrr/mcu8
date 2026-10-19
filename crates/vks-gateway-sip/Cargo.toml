@@ -20,6 +20,7 @@ description = "VKS SIP gateway: SIP UAS (rvoip) bridged into WebRTC rooms"
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
+tokio.workspace = true
 uuid.workspace = true
 vks-core = { path = "../vks-core" }
 vks-common = { path = "../vks-common" }

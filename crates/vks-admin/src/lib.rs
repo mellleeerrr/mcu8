@@ -24,6 +24,7 @@ pub mod state;
 pub mod users;
 
 // Re-exports for convenience (flat API).
+pub use async_trait::async_trait;
 pub use audit::{AuditEntry, AuditFilter, AuditLog};
 pub use auth_middleware::jwt_auth_middleware;
 pub use handlers::{router, SharedState};

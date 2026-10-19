@@ -226,6 +226,10 @@ impl Rooms {
     pub fn kick_participant(state: &AppState, room_id: &RoomId, participant_id: &str) -> bool {
         let remaining = state.room_hub.unregister_participant(room_id, participant_id);
 
+        if let Some(dialer) = state.outbound_dialer() {
+            dialer.hangup(participant_id);
+        }
+
         let left_msg = vks_proto::signaling::SignalingMessage {
             msg_id: 0,
             reply_to: 0,

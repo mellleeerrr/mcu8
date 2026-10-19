@@ -27,6 +27,7 @@ vks-cluster = { path = "../vks-cluster" }
 
 tokio = { workspace = true, features = ["full"] }
 axum = { workspace = true, features = ["ws"] }
+async-trait = "0.1"
 futures-util = "0.3"
 tracing.workspace = true
 tracing-subscriber = { workspace = true }

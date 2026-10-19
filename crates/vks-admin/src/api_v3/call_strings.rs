@@ -281,7 +281,7 @@ pub async fn create_session_call_string(
     state.record_audit_entry(&auth.subject, "session.outbound_invite", Some(format!("{}:{}", room.id, uri)), ip);
 
     // 3. Инициируем вызов через OutboundDialer (асинхронно в фоне с RAII guard)
-    let dialer_opt = state.outbound_dialer.clone();
+    let dialer_opt = state.outbound_dialer();
     let dial_state = state.clone();
     let dial_room_id = room.id;
     let dial_uri = uri.clone();
@@ -414,7 +414,7 @@ pub async fn invite_session_call_strings_list(
     );
 
     let max_participants = SettingsService::get(&state).limits.max_participants_per_room as usize;
-    let dialer_opt = state.outbound_dialer.clone();
+    let dialer_opt = state.outbound_dialer();
 
     for item in body.call_strings {
         let raw_uri = item.uri.as_deref().unwrap_or("").trim();

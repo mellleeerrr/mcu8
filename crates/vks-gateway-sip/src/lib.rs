@@ -24,6 +24,15 @@
 
 pub mod call;
 pub mod codec;
+pub mod rtp_bridge;
+pub mod sip_message;
+pub mod uac;
 
 pub use call::{CallState, SipCall, SipGateway};
 pub use codec::{CodecMap, NegotiatedCodec, SipCodec, WebRtcCodec};
+pub use rtp_bridge::{
+    build_plain_sdp, decode_ulaw, downsample_48k_to_8k, encode_ulaw, parse_remote_media_ports, parse_rtp_header,
+    ulaw_to_f32, upsample_8k_to_48k, write_rtp_header, PortPair, RtpPortPool,
+};
+pub use sip_message::{build_ack, build_bye, build_cancel, build_invite, SipResponse};
+pub use uac::{ActiveSipSession, SipDialError, SipUacClient};
