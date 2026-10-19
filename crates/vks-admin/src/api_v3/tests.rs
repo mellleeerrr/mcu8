@@ -1537,3 +1537,122 @@ async fn step4_abonent_media_controls_dtmf_fecc_and_standby() {
     .await;
     assert_eq!(rbac_settings.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn step6_conference_8_tabs_settings_persistence() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+
+    // 1. Создаем конференцию с начальными настройками нескольких вкладок
+    let create_resp = send(
+        &app,
+        request(
+            "POST",
+            "/api/v3/conferences",
+            Some(&token),
+            json!({
+                "display_name": "Multi-Tab Conference",
+                "pin": "4321",
+                "description": "Initial Conference Description",
+                "owner_id": "user-admin",
+                "auto_call": true,
+                "layout": "grid",
+                "payload": {
+                    "skin": "modern",
+                    "codec": "OPUS",
+                    "auto_record": true
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::OK);
+    let create_body = json_body(create_resp).await;
+    let conf = &create_body["conference"];
+    let conf_id = conf["id"].as_str().unwrap().to_string();
+
+    assert_eq!(conf["display_name"], "Multi-Tab Conference");
+    assert_eq!(conf["pin"], "4321");
+    assert_eq!(conf["has_pin"], true);
+    assert_eq!(conf["description"], "Initial Conference Description");
+    assert_eq!(conf["owner_id"], "user-admin");
+    assert_eq!(conf["auto_call"], true);
+    assert_eq!(conf["payload"]["skin"], "modern");
+    assert_eq!(conf["payload"]["codec"], "OPUS");
+    assert_eq!(conf["payload"]["auto_record"], true);
+
+    // 2. Обновляем настройки 8 вкладок через PATCH /api/v3/conferences/{id}
+    let patch_resp = send(
+        &app,
+        request(
+            "PATCH",
+            &format!("/api/v3/conferences/{conf_id}"),
+            Some(&token),
+            json!({
+                "display_name": "Updated 8-Tabs Conf",
+                "pin": "9999",
+                "description": "Updated Description for Tab 1",
+                "layout": "mosaic-4",
+                "skin": "dark-blue",
+                "show_names": true,
+                "frame_border": false,
+                "codec": "G711U",
+                "agc": true,
+                "noise_suppression": true,
+                "auto_record": false,
+                "record_layout": "speaker-only",
+                "storage_path": "/var/recordings/vks",
+                "rtmp_url": "rtmp://live.broadcast.local/mcu/stream1",
+                "hls_enabled": true,
+                "stun_turn_server": "stun:192.168.1.93:3478",
+                "sip_proxy": "192.168.1.132:5060",
+                "payload": {
+                    "custom_ui_accordion": "advanced",
+                    "bitrate_preset": "hd"
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+    let patch_body = json_body(patch_resp).await;
+    let patched_conf = &patch_body["conference"];
+
+    assert_eq!(patched_conf["display_name"], "Updated 8-Tabs Conf");
+    assert_eq!(patched_conf["pin"], "9999");
+    assert_eq!(patched_conf["has_pin"], true);
+    assert_eq!(patched_conf["description"], "Updated Description for Tab 1");
+    assert_eq!(patched_conf["layout"], "mosaic-4");
+    assert_eq!(patched_conf["skin"], "dark-blue");
+    assert_eq!(patched_conf["show_names"], true);
+    assert_eq!(patched_conf["frame_border"], false);
+    assert_eq!(patched_conf["codec"], "G711U");
+    assert_eq!(patched_conf["rtmp_url"], "rtmp://live.broadcast.local/mcu/stream1");
+    assert_eq!(patched_conf["hls_enabled"], true);
+    assert_eq!(patched_conf["stun_turn_server"], "stun:192.168.1.93:3478");
+    assert_eq!(patched_conf["sip_proxy"], "192.168.1.132:5060");
+    assert_eq!(patched_conf["payload"]["custom_ui_accordion"], "advanced");
+    assert_eq!(patched_conf["payload"]["bitrate_preset"], "hd");
+
+    // 3. Запрашиваем GET /api/v3/conferences/{id} и проверяем сохранение всех полей
+    let get_resp = send(&app, request("GET", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({}))).await;
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let get_body = json_body(get_resp).await;
+    let fetched_conf = &get_body["conference"];
+
+    assert_eq!(fetched_conf["display_name"], "Updated 8-Tabs Conf");
+    assert_eq!(fetched_conf["pin"], "9999");
+    assert_eq!(fetched_conf["layout"], "mosaic-4");
+    assert_eq!(fetched_conf["rtmp_url"], "rtmp://live.broadcast.local/mcu/stream1");
+    assert_eq!(fetched_conf["payload"]["custom_ui_accordion"], "advanced");
+
+    // 4. Удаляем конференцию
+    let del_resp =
+        send(&app, request("DELETE", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({}))).await;
+    assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+
+    let get_after_del =
+        send(&app, request("GET", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({}))).await;
+    assert_eq!(get_after_del.status(), StatusCode::NOT_FOUND);
+}

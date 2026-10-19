@@ -105,15 +105,8 @@ impl H323UacClient {
                     remote_port = Some(port);
                 }
 
-                if msg.message_type == MSG_CONNECT || msg.message_type == MSG_ALERTING {
-                    let final_port = remote_port.unwrap_or(5004);
-                    return Ok(ActiveH323Session {
-                        call_id,
-                        call_ref,
-                        remote_ip: target_addr.ip().to_string(),
-                        remote_audio_port: Some(final_port),
-                        tcp_stream: Arc::new(Mutex::new(Some(stream))),
-                    });
+                if msg.message_type == MSG_CONNECT || (msg.message_type == MSG_ALERTING && remote_port.is_some()) {
+                    break;
                 } else if msg.message_type == MSG_RELEASE_COMPLETE {
                     return Err(Error::Conflict("Call rejected by remote H.323 terminal (RELEASE COMPLETE)".into()));
                 }

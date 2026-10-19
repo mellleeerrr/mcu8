@@ -95,33 +95,47 @@ impl UdpMediaLoop {
                                 stats.packets_received.fetch_add(1, Ordering::Relaxed);
                                 stats.bytes_received.fetch_add(size as u64, Ordering::Relaxed);
 
-                                // 1. Автоматический ответ на STUN Binding Request (RFC 5389 / RFC 8445 ICE-lite)
-                                if is_stun_binding_request(&buf[..size]) {
-                                    if let Some(username) = parse_stun_username(&buf[..size]) {
-                                        if !username.trim().is_empty() {
-                                            if let Some(resp) = build_stun_binding_response(&buf[..size], src) {
-                                                let _ = socket.send_to(&resp, src).await;
-                                                // Оповещаем маршрутизатор о полученном STUN пакете для auto-punching подписчиков
-                                                let stun_dummy = RtpPacket::new(TrackId::default(), Bytes::new());
-                                                let _ = router(src, stun_dummy);
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                    stats.packets_dropped.fetch_add(1, Ordering::Relaxed);
+                                if size == 0 {
                                     continue;
                                 }
-
-                                let payload = Bytes::copy_from_slice(&buf[..size]);
-                                let packet = RtpPacket::new(TrackId::default(), payload);
-                                let targets = router(src, packet);
-                                if targets.is_empty() {
-                                    stats.packets_dropped.fetch_add(1, Ordering::Relaxed);
-                                } else {
-                                    for (dest, out_bytes) in targets {
-                                        if let Ok(sent) = socket.send_to(&out_bytes, dest).await {
-                                            stats.packets_sent.fetch_add(1, Ordering::Relaxed);
-                                            stats.bytes_sent.fetch_add(sent as u64, Ordering::Relaxed);
+                                let first_byte = buf[0];
+                                match first_byte {
+                                    0..=3 if is_stun_binding_request(&buf[..size]) => {
+                                        // 1. Автоматический ответ на STUN Binding Request (RFC 5389 / RFC 8445 ICE-lite)
+                                        if let Some(username) = parse_stun_username(&buf[..size]) {
+                                            if !username.trim().is_empty() {
+                                                if let Some(resp) = build_stun_binding_response(&buf[..size], src) {
+                                                    let _ = socket.send_to(&resp, src).await;
+                                                    // Оповещаем маршрутизатор о полученном STUN пакете для auto-punching подписчиков
+                                                    let stun_dummy = RtpPacket::new(TrackId::default(), Bytes::new());
+                                                    let _ = router(src, stun_dummy);
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        stats.packets_dropped.fetch_add(1, Ordering::Relaxed);
+                                        continue;
+                                    }
+                                    20..=63 => {
+                                        // 2. DTLS packets (RFC 7983 §7): Handshake (22), Alert (21), AppData (23)
+                                        let dtls_dummy = RtpPacket::new(TrackId::default(), Bytes::new());
+                                        let _ = router(src, dtls_dummy);
+                                        continue;
+                                    }
+                                    _ => {
+                                        // 3. RTP / RTCP (RFC 3550 / RFC 7983) или медиа-пакеты
+                                        let payload = Bytes::copy_from_slice(&buf[..size]);
+                                        let packet = RtpPacket::new(TrackId::default(), payload);
+                                        let targets = router(src, packet);
+                                        if targets.is_empty() {
+                                            stats.packets_dropped.fetch_add(1, Ordering::Relaxed);
+                                        } else {
+                                            for (dest, out_bytes) in targets {
+                                                if let Ok(sent) = socket.send_to(&out_bytes, dest).await {
+                                                    stats.packets_sent.fetch_add(1, Ordering::Relaxed);
+                                                    stats.bytes_sent.fetch_add(sent as u64, Ordering::Relaxed);
+                                                }
+                                            }
                                         }
                                     }
                                 }

@@ -567,72 +567,63 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         };
 
         // 1. Выделяем RTP порт для медиа-моста и инициируем вызов
-        let (active_sip, active_h323, rtp_port_opt, call_id) =
-            if let Some(port_pair) = self.port_pool.allocate_pair(&self.candidate_ip).await {
-                let rtp_port = port_pair.rtp_port;
-                if is_h323 {
-                    match self.h323_uac_client.dial(trimmed, rtp_port, std::time::Duration::from_secs(5)).await {
-                        Ok(h323_sess) => {
-                            let rem_ip = h323_sess.remote_ip.clone();
-                            let rem_port = h323_sess.remote_audio_port.unwrap_or(5004);
-                            let cid = h323_sess.call_id.clone();
-                            if let Some(ref mcu) = self.mcu_engine {
-                                spawn_rtp_media_bridge(RtpBridgeSession {
-                                    room_id,
-                                    participant_id_str: pid_str.clone(),
-                                    participant_id_val: crate::parse_participant_id(&pid_str),
-                                    remote_media_ip: rem_ip,
-                                    remote_audio_port: rem_port,
-                                    rtp_socket: port_pair.rtp_socket,
-                                    rtp_port,
-                                    port_pool: self.port_pool.clone(),
-                                    mcu_engine: mcu.clone(),
-                                    controls: controls.clone(),
-                                    cancel_flag: cancel_flag.clone(),
-                                    dtmf_rx,
-                                });
-                            }
-                            (None, Some(h323_sess), Some(rtp_port), cid)
-                        }
-                        Err(e) => {
-                            self.port_pool.release_port(rtp_port);
-                            return Err(format!("H.323 outbound dial failed: {e}"));
-                        }
-                    }
-                } else {
-                    let sdp_offer = vks_gateway_sip::build_plain_sdp(&self.candidate_ip, rtp_port, None);
-                    match self.uac_client.dial(trimmed, &sdp_offer, std::time::Duration::from_secs(5)).await {
-                        Ok(sip_sess) => {
-                            let rem_ip = sip_sess.remote_media_ip.clone();
-                            let rem_port = sip_sess.remote_audio_port.unwrap_or(5004);
-                            let cid = sip_sess.call_id.clone();
-                            if let Some(ref mcu) = self.mcu_engine {
-                                spawn_rtp_media_bridge(RtpBridgeSession {
-                                    room_id,
-                                    participant_id_str: pid_str.clone(),
-                                    participant_id_val: crate::parse_participant_id(&pid_str),
-                                    remote_media_ip: rem_ip,
-                                    remote_audio_port: rem_port,
-                                    rtp_socket: port_pair.rtp_socket,
-                                    rtp_port,
-                                    port_pool: self.port_pool.clone(),
-                                    mcu_engine: mcu.clone(),
-                                    controls: controls.clone(),
-                                    cancel_flag: cancel_flag.clone(),
-                                    dtmf_rx,
-                                });
-                            }
-                            (Some(sip_sess), None, Some(rtp_port), cid)
-                        }
-                        Err(e) => {
-                            self.port_pool.release_port(rtp_port);
-                            return Err(format!("SIP outbound dial failed: {e}"));
-                        }
-                    }
-                }
+        let (active_sip, active_h323, rtp_port_opt, call_id) = if let Some(port_pair) =
+            self.port_pool.allocate_pair(&self.candidate_ip).await
+        {
+            let rtp_port = port_pair.rtp_port;
+            let dial_res = if is_h323 {
+                self.h323_uac_client
+                    .dial(trimmed, rtp_port, std::time::Duration::from_secs(5))
+                    .await
+                    .map(|sess| {
+                        (None, Some(sess.clone()), sess.remote_ip, sess.remote_audio_port.unwrap_or(5004), sess.call_id)
+                    })
+                    .map_err(|e| format!("H.323 outbound dial failed: {e}"))
             } else {
-                (None, None, None, format!("call-out-{}", uuid::Uuid::new_v4()))
+                let sdp_offer = vks_gateway_sip::build_plain_sdp(&self.candidate_ip, rtp_port, None);
+                self.uac_client
+                    .dial(trimmed, &sdp_offer, std::time::Duration::from_secs(5))
+                    .await
+                    .map(|sess| {
+                        (
+                            Some(sess.clone()),
+                            None,
+                            sess.remote_media_ip,
+                            sess.remote_audio_port.unwrap_or(5004),
+                            sess.call_id,
+                        )
+                    })
+                    .map_err(|e| format!("SIP outbound dial failed: {e}"))
             };
+
+            match dial_res {
+                Ok((sip_opt, h323_opt, rem_ip, rem_port, cid)) => {
+                    if let Some(ref mcu) = self.mcu_engine {
+                        spawn_rtp_media_bridge(RtpBridgeSession {
+                            room_id,
+                            participant_id_str: pid_str.clone(),
+                            participant_id_val: crate::parse_participant_id(&pid_str),
+                            remote_media_ip: rem_ip,
+                            remote_audio_port: rem_port,
+                            rtp_socket: port_pair.rtp_socket,
+                            rtp_port,
+                            port_pool: self.port_pool.clone(),
+                            mcu_engine: mcu.clone(),
+                            controls: controls.clone(),
+                            cancel_flag: cancel_flag.clone(),
+                            dtmf_rx,
+                        });
+                    }
+                    (sip_opt, h323_opt, Some(rtp_port), cid)
+                }
+                Err(err_msg) => {
+                    self.port_pool.release_port(rtp_port);
+                    return Err(err_msg);
+                }
+            }
+        } else {
+            (None, None, None, format!("call-out-{}", uuid::Uuid::new_v4()))
+        };
 
         // 2. Регистрируем в реестре вызовов
         {

@@ -62,6 +62,9 @@ pub struct CreateConferenceRequest {
     /// Доп. payload UI (игнорируется).
     #[serde(default)]
     pub payload: Option<Value>,
+    /// Дополнительные поля 8 вкладок конференции
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Тело `PATCH /api/v3/conferences/{id}`.
@@ -76,6 +79,9 @@ pub struct PatchConferenceRequest {
     /// Доп. payload UI.
     #[serde(default)]
     pub payload: Option<Value>,
+    /// Дополнительные поля 8 вкладок конференции
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Тело `POST /api/v3/sessions`.
@@ -129,7 +135,23 @@ fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_sto
     let sip_count = participants.iter().filter(|p| p.participant_id.contains("@sip-gateway")).count();
     let h323_count = participants.iter().filter(|p| p.participant_id.contains("@h323-gateway")).count();
     let is_recording = participants.iter().any(|p| p.is_recorder);
-    json!({
+
+    // Извлекаем сохраненные настройки 8 вкладок для комнаты
+    let stored_settings =
+        state.api_v3.conference_settings.lock().ok().and_then(|m| m.get(&r.id).cloned()).unwrap_or_else(|| json!({}));
+
+    let mut payload_map = stored_settings.as_object().cloned().unwrap_or_default();
+    if !payload_map.contains_key("connections_limit") {
+        payload_map.insert("connections_limit".to_string(), json!(connections_limit));
+    }
+
+    let pin_val = stored_settings.get("pin").and_then(|v| v.as_str()).unwrap_or("");
+    let description_val = stored_settings.get("description").and_then(|v| v.as_str()).unwrap_or("");
+    let owner_id_val = stored_settings.get("owner_id").and_then(|v| v.as_str()).unwrap_or("");
+    let layout_val = stored_settings.get("layout").and_then(|v| v.as_str()).unwrap_or("grid");
+    let auto_call_val = stored_settings.get("auto_call").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let mut base_obj = json!({
         "id": r.id.to_string(),
         "display_name": r.name,
         "participants": r.participants,
@@ -141,11 +163,28 @@ fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_sto
         "recording": is_recording,
         "videorecord": is_recording,
         "broadcast": false,
-        "owner_id": "",
+        "owner_id": owner_id_val,
+        "pin": pin_val,
+        "has_pin": !pin_val.is_empty(),
+        "description": description_val,
+        "layout": layout_val,
+        "auto_call": auto_call_val,
         "abonents": { "sip": sip_count, "h323": h323_count, "rtsp": 0, "vnc": 0, "media": 0, "file": 0 },
         "contacts": { "users": 0, "sip": sip_count, "h323": h323_count, "rtsp": 0, "vnc": 0, "media": 0, "file": 0 },
-        "payload": { "connections_limit": connections_limit }
-    })
+        "payload": payload_map
+    });
+
+    if let Some(obj) = base_obj.as_object_mut() {
+        if let Some(stored_obj) = stored_settings.as_object() {
+            for (k, v) in stored_obj {
+                if !obj.contains_key(k) {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+
+    base_obj
 }
 
 /// Лимит подключений комнаты (`payload.connections_limit`, из наших настроек).
@@ -371,6 +410,27 @@ pub async fn create_conference(
         Ok(r) => r,
         Err(e) => return error_json(500, &format!("Storage error: {e}")),
     };
+    {
+        let mut initial_settings = json!({});
+        if let Some(cur_obj) = initial_settings.as_object_mut() {
+            if let Some(ref pin) = body.pin {
+                cur_obj.insert("pin".to_string(), json!(pin));
+            }
+            if let Some(ref p) = body.payload {
+                if let Some(obj) = p.as_object() {
+                    for (k, v) in obj {
+                        cur_obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            for (k, v) in body.extra {
+                cur_obj.insert(k, v);
+            }
+        }
+        if let Ok(mut settings_map) = state.api_v3.conference_settings.lock() {
+            settings_map.insert(record.id, initial_settings);
+        }
+    }
     state.notify_admin("conferences:created", json!({ "id": record.id.to_string(), "display_name": record.name }));
     state.notify_admin("conferences", json!({ "action": "created", "id": record.id.to_string() }));
     audit_room(
@@ -417,6 +477,31 @@ pub async fn update_conference(
             return error_json(500, &format!("Storage error: {e}"));
         }
     }
+
+    {
+        if let Ok(mut settings_map) = state.api_v3.conference_settings.lock() {
+            let current = settings_map.entry(room.id).or_insert_with(|| json!({}));
+            if !current.is_object() {
+                *current = json!({});
+            }
+            if let Some(cur_obj) = current.as_object_mut() {
+                if let Some(ref pin) = body.pin {
+                    cur_obj.insert("pin".to_string(), json!(pin));
+                }
+                if let Some(ref p) = body.payload {
+                    if let Some(obj) = p.as_object() {
+                        for (k, v) in obj {
+                            cur_obj.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                for (k, v) in body.extra {
+                    cur_obj.insert(k, v);
+                }
+            }
+        }
+    }
+
     audit_room(
         &state,
         &auth.subject,
@@ -446,6 +531,7 @@ pub async fn delete_conference(
         Some(room) => match Rooms::delete_async(&state, &room.id).await {
             Ok(true) => {
                 state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").remove(&room.id);
+                state.api_v3.conference_settings.lock().ok().map(|mut m| m.remove(&room.id));
                 state.notify_admin("conferences:deleted", json!({ "id": room.id.to_string() }));
                 state.notify_admin("conferences", json!({ "action": "deleted", "id": room.id.to_string() }));
                 audit_room(

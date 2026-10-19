@@ -87,6 +87,8 @@ pub struct Media {
     pub ice_pwd: Option<String>,
     /// `a=fingerprint:sha-256 ...` (DTLS).
     pub fingerprint: Option<String>,
+    /// `a=setup:passive` / `a=setup:active` / `a=setup:actpass` (RFC 8842 / DTLS).
+    pub setup: Option<String>,
     /// direction `a=sendonly`/`a=recvonly`/`a=sendrecv`.
     pub direction: Option<String>,
     /// `a=candidate:...` (RFC 8839 / RFC 5245 ICE-кандидаты).
@@ -211,6 +213,7 @@ impl Sdp {
                 ice_ufrag: None,
                 ice_pwd: None,
                 fingerprint: None,
+                setup: None,
                 direction: None,
                 candidates: Vec::new(),
             };
@@ -234,6 +237,7 @@ impl Sdp {
             ice_ufrag: None,
             ice_pwd: None,
             fingerprint: None,
+            setup: None,
             direction: None,
             candidates: Vec::new(),
         }
@@ -265,6 +269,7 @@ impl Sdp {
             Some(("ice-ufrag", rest)) => media.ice_ufrag = Some(rest.trim().to_string()),
             Some(("ice-pwd", rest)) => media.ice_pwd = Some(rest.trim().to_string()),
             Some(("fingerprint", rest)) => media.fingerprint = Some(rest.trim().to_string()),
+            Some(("setup", rest)) => media.setup = Some(rest.trim().to_string()),
             Some(("sendrecv", _)) | Some(("sendonly", _)) | Some(("recvonly", _)) => {}
             _ => {
                 // direction может прийти без значения ("a=sendrecv").
@@ -327,6 +332,9 @@ impl Sdp {
             if let Some(fp) = &media.fingerprint {
                 out.push_str(&format!("a=fingerprint:{fp}\n"));
             }
+            if let Some(setup) = &media.setup {
+                out.push_str(&format!("a=setup:{setup}\n"));
+            }
             if let Some(direction) = &media.direction {
                 out.push_str(&format!("a={direction}\n"));
             }
@@ -374,11 +382,16 @@ impl Sdp {
             session_attrs: vec!["group:BUNDLE 0-{}".to_string() /* patched below */],
             media: Vec::new(),
         };
+        let bundle_port = if profile.host_candidate.port > 0 { profile.host_candidate.port } else { 9 };
         for (i, media) in self.media.iter().enumerate() {
+            let direction = match media.direction.as_deref() {
+                Some("sendonly") => "recvonly",
+                Some("recvonly") => "sendonly",
+                _ => "sendrecv",
+            };
             let mut m = Media {
                 kind: media.kind,
-                // ICE-порт 0: транспорт — WebRTC-конвенция (STUN/DTLS отдельно).
-                port: 0,
+                port: bundle_port,
                 payload_types: profile.rtp_maps.iter().map(|r| r.payload).collect(),
                 mid: media.mid.clone().or_else(|| Some(i.to_string())),
                 msid: Some(format!("sfu-out {i}")),
@@ -387,7 +400,8 @@ impl Sdp {
                 ice_ufrag: Some(profile.ufrag.clone()),
                 ice_pwd: Some(profile.pwd.clone()),
                 fingerprint: Some(profile.fingerprint.clone()),
-                direction: Some("recvonly".to_string()),
+                setup: Some("passive".to_string()),
+                direction: Some(direction.to_string()),
                 candidates: Vec::new(),
             };
             let _ = &mut m;
@@ -449,6 +463,7 @@ mod tests {
                     ice_ufrag: Some("aufrag".into()),
                     ice_pwd: Some("apwd".into()),
                     fingerprint: Some("sha-256 AA:BB:CC".into()),
+                    setup: Some("actpass".into()),
                     direction: Some("sendrecv".into()),
                     candidates: Vec::new(),
                 },
@@ -463,6 +478,7 @@ mod tests {
                     ice_ufrag: Some("aufrag".into()),
                     ice_pwd: Some("apwd".into()),
                     fingerprint: Some("sha-256 AA:BB:CC".into()),
+                    setup: Some("actpass".into()),
                     direction: Some("sendrecv".into()),
                     candidates: Vec::new(),
                 },

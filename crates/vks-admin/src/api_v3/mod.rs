@@ -52,6 +52,8 @@ pub struct ApiV3State {
         std::sync::Mutex<std::collections::HashMap<vks_core::RoomId, Vec<call_strings::CallStringRecord>>>,
     /// Персистентные настройки медиа абонентов (volume, mute rx/tx).
     pub abonent_settings: std::sync::Mutex<std::collections::HashMap<String, AbonentMediaState>>,
+    /// Настройки всех 8 вкладок конференции (M1.5 / F1 / F2 / F6).
+    pub conference_settings: std::sync::Mutex<std::collections::HashMap<vks_core::RoomId, serde_json::Value>>,
 }
 
 /// Состояние медиа-настроек абонента (громкость, mute).
