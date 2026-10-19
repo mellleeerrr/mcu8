@@ -270,10 +270,9 @@ impl Sdp {
             Some(("ice-pwd", rest)) => media.ice_pwd = Some(rest.trim().to_string()),
             Some(("fingerprint", rest)) => media.fingerprint = Some(rest.trim().to_string()),
             Some(("setup", rest)) => media.setup = Some(rest.trim().to_string()),
-            Some(("sendrecv", _)) | Some(("sendonly", _)) | Some(("recvonly", _)) => {}
             _ => {
-                // direction может прийти без значения ("a=sendrecv").
-                if matches!(attr, "sendrecv" | "sendonly" | "recvonly") {
+                // direction может прийти без значения ("a=sendrecv", "a=inactive").
+                if matches!(attr, "sendrecv" | "sendonly" | "recvonly" | "inactive") {
                     media.direction = Some(attr.to_string());
                 }
             }
@@ -382,16 +381,18 @@ impl Sdp {
             session_attrs: vec!["group:BUNDLE 0-{}".to_string() /* patched below */],
             media: Vec::new(),
         };
-        let bundle_port = if profile.host_candidate.port > 0 { profile.host_candidate.port } else { 9 };
+        let bundle_port = profile.host_candidate.port.max(9);
         for (i, media) in self.media.iter().enumerate() {
             let direction = match media.direction.as_deref() {
                 Some("sendonly") => "recvonly",
                 Some("recvonly") => "sendonly",
+                Some("inactive") => "inactive",
                 _ => "sendrecv",
             };
-            let mut m = Media {
+            let port = if media.port == 0 { 0 } else { bundle_port };
+            let m = Media {
                 kind: media.kind,
-                port: bundle_port,
+                port,
                 payload_types: profile.rtp_maps.iter().map(|r| r.payload).collect(),
                 mid: media.mid.clone().or_else(|| Some(i.to_string())),
                 msid: Some(format!("sfu-out {i}")),
@@ -404,12 +405,11 @@ impl Sdp {
                 direction: Some(direction.to_string()),
                 candidates: Vec::new(),
             };
-            let _ = &mut m;
             answer.media.push(m);
         }
-        // BUNDLE group из настоящих mids.
+        // BUNDLE group из настоящих mids и объявление RFC 8445 ice-lite.
         let mids: Vec<String> = answer.media.iter().map(|m| m.mid.clone().unwrap_or_else(|| "0".into())).collect();
-        answer.session_attrs = vec![format!("group:BUNDLE {}", mids.join(" "))];
+        answer.session_attrs = vec![format!("group:BUNDLE {}", mids.join(" ")), "ice-lite".to_string()];
         (answer, profile.rtp_maps.clone())
     }
 
@@ -559,7 +559,20 @@ mod tests {
         let parsed = Sdp::parse(&text).expect("parse");
         assert_eq!(parsed.media.len(), 2);
         assert!(parsed.session_attrs.iter().any(|a| a.starts_with("group:BUNDLE")));
+        assert!(parsed.session_attrs.iter().any(|a| a == "ice-lite"));
         assert_eq!(parsed.media[0].payload_types, vec![111, 96]);
+    }
+
+    #[test]
+    fn sfu_answer_handles_inactive_and_port_zero() {
+        let mut offer = two_line_offer();
+        offer.media[0].direction = Some("inactive".into());
+        offer.media[1].port = 0; // rejected stream
+        let profile = sfu_profile();
+        let (answer, _) = offer.sfu_answer(&profile);
+        assert_eq!(answer.media[0].direction.as_deref(), Some("inactive"));
+        assert_eq!(answer.media[0].port, 49152);
+        assert_eq!(answer.media[1].port, 0); // RFC 3264 §6
     }
 
     #[test]

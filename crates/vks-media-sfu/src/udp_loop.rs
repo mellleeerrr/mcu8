@@ -100,16 +100,15 @@ impl UdpMediaLoop {
                                 }
                                 let first_byte = buf[0];
                                 match first_byte {
-                                    0..=3 if is_stun_binding_request(&buf[..size]) => {
+                                    0..=3 => {
                                         // 1. Автоматический ответ на STUN Binding Request (RFC 5389 / RFC 8445 ICE-lite)
-                                        if let Some(username) = parse_stun_username(&buf[..size]) {
-                                            if !username.trim().is_empty() {
-                                                if let Some(resp) = build_stun_binding_response(&buf[..size], src) {
-                                                    let _ = socket.send_to(&resp, src).await;
-                                                    // Оповещаем маршрутизатор о полученном STUN пакете для auto-punching подписчиков
-                                                    let stun_dummy = RtpPacket::new(TrackId::default(), Bytes::new());
-                                                    let _ = router(src, stun_dummy);
-                                                    continue;
+                                        if is_stun_binding_request(&buf[..size]) {
+                                            if let Some(username) = parse_stun_username(&buf[..size]) {
+                                                if !username.trim().is_empty() {
+                                                    if let Some(resp) = build_stun_binding_response(&buf[..size], src) {
+                                                        let _ = socket.send_to(&resp, src).await;
+                                                        continue;
+                                                    }
                                                 }
                                             }
                                         }
@@ -118,8 +117,7 @@ impl UdpMediaLoop {
                                     }
                                     20..=63 => {
                                         // 2. DTLS packets (RFC 7983 §7): Handshake (22), Alert (21), AppData (23)
-                                        let dtls_dummy = RtpPacket::new(TrackId::default(), Bytes::new());
-                                        let _ = router(src, dtls_dummy);
+                                        stats.packets_dropped.fetch_add(1, Ordering::Relaxed);
                                         continue;
                                     }
                                     _ => {
