@@ -819,6 +819,9 @@ pub async fn remove_abonent(
     Path(connection_id): Path<String>,
 ) -> Response {
     track("abonents/{id}");
+    if auth.role < Role::Operator {
+        return error_json(403, "Forbidden: insufficient permissions");
+    }
     let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&connection_id) else {
         return error_json(404, "Abonent not found");
     };
@@ -839,12 +842,21 @@ pub async fn remove_session_abonent(
     Path((session_id, abonent_id)): Path<(String, String)>,
 ) -> Response {
     track("sessions/{id}/abonents/{abonent_id}");
+    if auth.role < Role::Operator {
+        return error_json(403, "Forbidden: insufficient permissions");
+    }
     if let Err(resp) = check_permission(&auth, Some(&session_id)) {
         return resp;
     }
     let Some(room) = find_room(&state, &session_id) else {
         return error_json(404, "Session not found");
     };
+
+    let belongs_to_room =
+        state.room_hub.find_participant_room(&abonent_id).map(|(rid, _)| rid == room.id).unwrap_or(false);
+    if !belongs_to_room {
+        return error_json(404, "Abonent not found in this session");
+    }
 
     Rooms::kick_participant(&state, &room.id, &abonent_id);
     audit_room(&state, &auth.subject, "abonent.removed", &abonent_id, client_ip.as_ref().map(|c| c.0 .0.as_str()));
@@ -894,9 +906,7 @@ pub async fn edit_abonent(
     Json(json!({ "status": "ok" })).into_response()
 }
 
-/// `GET /api/v3/engine/abonents` → `{abonents:[...], count:N}`.
-pub async fn engine_abonents(State(state): State<SharedState>) -> Response {
-    track("engine/abonents");
+fn collect_all_abonents_json(state: &SharedState) -> (Vec<serde_json::Value>, usize) {
     let room_ids: Vec<RoomId> =
         if let Ok(rooms) = state.rooms.lock() { rooms.keys().copied().collect() } else { Vec::new() };
     let settings_map = state.api_v3.abonent_settings.lock().ok();
@@ -908,8 +918,15 @@ pub async fn engine_abonents(State(state): State<SharedState>) -> Response {
         }
     }
     let count = all_abonents.len();
+    (all_abonents, count)
+}
+
+/// `GET /api/v3/engine/abonents` → `{abonents:[...], count:N}`.
+pub async fn engine_abonents(State(state): State<SharedState>) -> Response {
+    track("engine/abonents");
+    let (abonents, count) = collect_all_abonents_json(&state);
     Json(json!({
-        "abonents": all_abonents,
+        "abonents": abonents,
         "count": count
     }))
     .into_response()
@@ -918,19 +935,9 @@ pub async fn engine_abonents(State(state): State<SharedState>) -> Response {
 /// `GET /api/v3/abonents` → список всех активных абонентов (для PNM UI).
 pub async fn list_abonents(State(state): State<SharedState>) -> Response {
     track("abonents");
-    let room_ids: Vec<RoomId> =
-        if let Ok(rooms) = state.rooms.lock() { rooms.keys().copied().collect() } else { Vec::new() };
-    let settings_map = state.api_v3.abonent_settings.lock().ok();
-    let mut all_abonents = Vec::new();
-    for rid in room_ids {
-        for p in state.room_hub.list_participants(&rid) {
-            let media = settings_map.as_ref().and_then(|m| m.get(&p.participant_id));
-            all_abonents.push(participant_to_abonent_json_with_settings(&p, media));
-        }
-    }
-    let count = all_abonents.len();
+    let (abonents, count) = collect_all_abonents_json(&state);
     Json(json!({
-        "abonents": all_abonents,
+        "abonents": abonents,
         "count": count,
         "connections": count
     }))

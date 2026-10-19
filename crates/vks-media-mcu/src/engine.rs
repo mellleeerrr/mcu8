@@ -329,6 +329,15 @@ impl McuEngine {
         self.audio.lock().unwrap().entry(room).or_default().insert(pid, samples);
     }
 
+    /// Injects a PCM audio slice for a participant reusing existing buffer capacity (zero-allocation hot path).
+    pub fn set_audio_slice(&self, room: RoomId, pid: ParticipantId, samples: &[f32]) {
+        let mut audio_guard = self.audio.lock().unwrap();
+        let map = audio_guard.entry(room).or_default();
+        let entry = map.entry(pid).or_insert_with(|| Vec::with_capacity(samples.len()));
+        entry.clear();
+        entry.extend_from_slice(samples);
+    }
+
     /// Advances the room's pipeline (30 fps tick) and returns the composite
     /// frame. Deterministic for a given input sequence.
     pub fn tick(&self, room: RoomId) -> Option<Frame> {
@@ -416,6 +425,28 @@ impl McuEngine {
                 None
             }
         })
+    }
+
+    /// Copies the personal N-1 mix-minus audio into a mutable slice without heap allocation.
+    pub fn copy_participant_audio(&self, room: RoomId, pid: ParticipantId, out: &mut [f32]) -> bool {
+        let g = self.rooms.lock().unwrap();
+        let state = match g.get(&room) {
+            Some(s) => s,
+            None => return false,
+        };
+        if let Some(src) = state.participant_audio.get(&pid) {
+            let n = src.len().min(out.len());
+            out[..n].copy_from_slice(&src[..n]);
+            true
+        } else if (state.subscribers.contains(&pid) || state.publisher_tracks.contains_key(&pid))
+            && !state.mixed_audio.is_empty()
+        {
+            let n = state.mixed_audio.len().min(out.len());
+            out[..n].copy_from_slice(&state.mixed_audio[..n]);
+            true
+        } else {
+            false
+        }
     }
 
     /// Returns the global room audio mix (for recording / monitoring).

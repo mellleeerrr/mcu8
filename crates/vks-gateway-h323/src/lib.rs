@@ -28,7 +28,14 @@
 pub mod call;
 pub mod codec;
 pub mod ffi;
+pub mod q931;
+pub mod uac;
 
 pub use call::{H323Call, H323CallState, H323Gateway};
 pub use codec::{H323Codec, H323CodecMap, NegotiatedCodec, WebRtcCodec};
 pub use ffi::{FfiResult, H323PlusBridge, ModuleState, Watchdog, PRODUCTION_WATCHDOG_LIMIT};
+pub use q931::{
+    build_q931_release_complete, build_q931_setup, encode_tpkt, parse_q931_message, Q931Message, MSG_ALERTING,
+    MSG_CALL_PROCEEDING, MSG_CONNECT, MSG_RELEASE_COMPLETE, MSG_SETUP,
+};
+pub use uac::{ActiveH323Session, H323UacClient};

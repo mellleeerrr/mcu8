@@ -1851,3 +1851,101 @@ async fn test_step4_gateway_media_controls_dtmf_rtp() {
     assert!(hung_up, "hangup must return true");
     let _ = tokio::time::timeout(Duration::from_secs(3), term_task).await.expect("term_task finished");
 }
+
+#[tokio::test]
+async fn test_step5_gateway_dial_outbound_h323_media_bridge() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, UdpSocket};
+    use vks_admin::rooms::Rooms;
+    use vks_admin::state::OutboundDialer;
+    use vks_gateway_h323::q931::{encode_tpkt, parse_q931_message, MSG_RELEASE_COMPLETE, MSG_SETUP};
+    use vks_media_mcu::McuEngine;
+    use vks_server::GatewayManager;
+
+    let term_tcp_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock h323 tcp");
+    let term_tcp_addr = term_tcp_listener.local_addr().unwrap();
+
+    let term_rtp_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("bind mock rtp"));
+    let term_rtp_addr = term_rtp_sock.local_addr().unwrap();
+
+    let term_task = tokio::spawn(async move {
+        let (mut socket, _peer) = term_tcp_listener.accept().await.expect("accept h323 tcp");
+        let mut buf = [0u8; 4096];
+        let n = socket.read(&mut buf).await.expect("read q931 setup");
+        assert!(n >= 4, "setup packet received");
+
+        let setup_msg = parse_q931_message(&buf[..n]).expect("parse q931 setup");
+        assert_eq!(setup_msg.message_type, MSG_SETUP, "must be Q.931 SETUP");
+
+        // Send CONNECT with FastStart
+        let mut conn_q931 = Vec::new();
+        conn_q931.push(0x08); // Q.931
+        conn_q931.push(0x02);
+        conn_q931.extend_from_slice(&setup_msg.call_reference.to_be_bytes());
+        conn_q931.push(0x07); // CONNECT
+
+        // User-User IE (0x7e) with FastStart tag 0xa0
+        let mut uu_body = Vec::new();
+        uu_body.push(0x05); // H.225
+        uu_body.push(0xa0); // FastStart tag
+        let mut fs_body = Vec::new();
+        fs_body.push(0x01); // logicalChannelNumber 1
+        fs_body.push(0x00); // G.711 PCMU
+        fs_body.extend_from_slice(&[127, 0, 0, 1]);
+        fs_body.extend_from_slice(&term_rtp_addr.port().to_be_bytes());
+
+        uu_body.push(fs_body.len() as u8);
+        uu_body.extend_from_slice(&fs_body);
+
+        conn_q931.push(0x7e);
+        conn_q931.push(uu_body.len() as u8);
+        conn_q931.extend_from_slice(&uu_body);
+
+        let conn_pkt = encode_tpkt(&conn_q931);
+        socket.write_all(&conn_pkt).await.expect("write connect");
+
+        // Wait for RELEASE COMPLETE
+        let mut rel_buf = [0u8; 512];
+        let rel_len = socket.read(&mut rel_buf).await.expect("read release");
+        if rel_len >= 4 {
+            let rel_msg = parse_q931_message(&rel_buf[..rel_len]).expect("parse release complete");
+            assert_eq!(rel_msg.message_type, MSG_RELEASE_COMPLETE);
+        }
+    });
+
+    let admin_state = Arc::new(AppState::new());
+    let room = Rooms::create(&admin_state, "Room for H.323 Test");
+    let mcu_engine = Arc::new(McuEngine::new());
+    let gateway_manager = Arc::new(GatewayManager::new().with_mcu(mcu_engine.clone()).with_candidate_ip("127.0.0.1"));
+    gateway_manager.bind_state(Arc::downgrade(&admin_state));
+    admin_state.set_dialer(gateway_manager.clone());
+
+    let target_uri = format!("h323://127.0.0.1:{}", term_tcp_addr.port());
+    let pid = gateway_manager.dial(room.id, &target_uri, Some("H.323 Terminal 132")).await.expect("h323 dial");
+
+    assert!(pid.starts_with("h323-"), "Participant ID must have h323- prefix");
+    assert_eq!(admin_state.room_hub.list_participants(&room.id).len(), 1, "Must be registered in RoomHub");
+
+    // Wait for RTP audio packet on mock terminal
+    let mut rtp_packet_buf = [0u8; 1500];
+    let (rtp_len, _) = tokio::time::timeout(Duration::from_secs(3), term_rtp_sock.recv_from(&mut rtp_packet_buf))
+        .await
+        .expect("RTP recv within 3s")
+        .expect("RTP recv ok");
+    assert!(rtp_len >= 12, "RTP packet size >= 12");
+    assert_eq!(rtp_packet_buf[1] & 0x7F, 0, "Payload type 0 (PCMU)");
+
+    // Hangup
+    let hung_up = gateway_manager.hangup(&pid);
+    assert!(hung_up, "hangup must return true");
+
+    assert_eq!(
+        admin_state.room_hub.list_participants(&room.id).len(),
+        0,
+        "Participant must be unmapped from RoomHub (0 ghost participants)"
+    );
+
+    let _ = tokio::time::timeout(Duration::from_secs(3), term_task).await.expect("term_task finished");
+}
