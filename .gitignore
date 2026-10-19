@@ -16,3 +16,9 @@ client/pnm-frontend/source/
 # Архив исходников PNM (31 MB) хранится вне git; восстановление — scripts/import-pnm-frontend.sh
 client/pnm-frontend/archive/
 vks-server.log
+
+# SQLite local runtime database
+*.db
+*.db-wal
+*.db-shm
+*.sqlite

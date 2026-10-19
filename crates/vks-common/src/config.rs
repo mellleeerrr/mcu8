@@ -45,6 +45,8 @@ pub struct Config {
     pub storage_allow_fallback: bool,
     /// Список адресов ICE-серверов (STUN/TURN, e.g. "stun:stun.l.google.com:19302") (`VKS_ICE_SERVERS`).
     pub ice_servers: Vec<String>,
+    /// Публичный или LAN IP кандидата WebRTC для анонса в SDP (`VKS_CANDIDATE_ADDR`).
+    pub candidate_addr: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -59,6 +61,8 @@ pub enum ConfigError {
     InvalidListenAddr(String, String),
     #[error("invalid media_listen_addr '{0}': {1}")]
     InvalidMediaListenAddr(String, String),
+    #[error("invalid candidate_addr '{0}': must be a valid IP address")]
+    InvalidCandidateAddr(String),
 }
 
 /// Маскирует строковые секреты.
@@ -164,6 +168,7 @@ impl std::fmt::Debug for Config {
             .field("media_listen_addr", &self.media_listen_addr)
             .field("storage_allow_fallback", &self.storage_allow_fallback)
             .field("ice_servers", &self.ice_servers)
+            .field("candidate_addr", &self.candidate_addr)
             .finish()
     }
 }
@@ -185,6 +190,7 @@ impl Default for Config {
             media_listen_addr: "127.0.0.1:0".into(),
             storage_allow_fallback: false,
             ice_servers: Vec::new(),
+            candidate_addr: None,
         }
     }
 }
@@ -237,6 +243,13 @@ impl Config {
             return Err(ConfigError::InvalidMediaListenAddr(self.media_listen_addr.clone(), e.to_string()));
         }
 
+        if let Some(ref cand) = self.candidate_addr {
+            let trimmed = cand.trim();
+            if !trimmed.is_empty() && trimmed.parse::<std::net::IpAddr>().is_err() {
+                return Err(ConfigError::InvalidCandidateAddr(cand.clone()));
+            }
+        }
+
         Ok(())
     }
 }
@@ -262,6 +275,7 @@ mod tests {
         assert_eq!(c.admin_login, "admin");
         assert_eq!(c.admin_password, "admin");
         assert_eq!(c.media_listen_addr, "127.0.0.1:0");
+        assert_eq!(c.candidate_addr, None);
     }
 
     #[test]
@@ -416,6 +430,27 @@ default_room_mode = "mcu"
 
         let cfg2 = Config { media_listen_addr: "999.999.999.999:7777".into(), ..Default::default() };
         assert!(matches!(cfg2.validate(), Err(ConfigError::InvalidMediaListenAddr(_, _))));
+    }
+
+    #[test]
+    fn validate_candidate_addr_accepts_valid_ip() {
+        let mut cfg = Config { candidate_addr: Some("192.168.1.93".into()), ..Default::default() };
+        assert!(cfg.validate().is_ok());
+
+        cfg.candidate_addr = Some("::1".into());
+        assert!(cfg.validate().is_ok());
+
+        cfg.candidate_addr = Some("".into());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_candidate_addr_rejects_invalid_ip() {
+        let mut cfg = Config { candidate_addr: Some("not-an-ip".into()), ..Default::default() };
+        assert_eq!(cfg.validate(), Err(ConfigError::InvalidCandidateAddr("not-an-ip".into())));
+
+        cfg.candidate_addr = Some("192.168.1.999".into());
+        assert_eq!(cfg.validate(), Err(ConfigError::InvalidCandidateAddr("192.168.1.999".into())));
     }
 
     #[test]

@@ -98,9 +98,9 @@ pub fn build_app_with_mcu(
         frontend,
         handler_config,
         sfu_engine,
-        mcu_engine,
+        mcu_engine.clone(),
         udp_loop,
-        Arc::new(GatewayManager::new()),
+        Arc::new(GatewayManager::new().with_mcu(mcu_engine)),
         Arc::new(RecorderManager::new()),
         Arc::new(ClusterManager::new("vks-node-1")),
     )

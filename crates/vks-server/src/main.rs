@@ -231,30 +231,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sfu_engine = Arc::new(vks_media_sfu::SfuEngine::new());
     let mcu_engine = Arc::new(vks_media_mcu::McuEngine::new());
 
-    let (udp_loop, receive_task, candidate_addr, candidate_port) =
-        match vks_media_sfu::udp_loop::UdpMediaLoop::bind(&config.media_listen_addr).await {
-            Ok(loop_handle) => {
-                admin_state.set_media_healthy(true);
-                let local_addr = loop_handle.local_addr();
-                info!(addr = %local_addr, "WebRTC UDP media loop active");
-                let sfu = sfu_engine.clone();
-                let task = loop_handle.start_routing_loop(move |src, packet| sfu.route_udp_packet(src, packet.payload));
-                let ip = if let Ok(cand) = std::env::var("VKS_CANDIDATE_ADDR") {
-                    cand
-                } else if local_addr.ip().is_unspecified() {
-                    "127.0.0.1".to_string()
-                } else {
-                    local_addr.ip().to_string()
-                };
-                let port = local_addr.port();
-                (Some(Arc::new(loop_handle)), Some(task), ip, port)
+    let (udp_loop, receive_task, candidate_addr, candidate_port) = match vks_media_sfu::udp_loop::UdpMediaLoop::bind(
+        &config.media_listen_addr,
+    )
+    .await
+    {
+        Ok(loop_handle) => {
+            admin_state.set_media_healthy(true);
+            let local_addr = loop_handle.local_addr();
+            info!(addr = %local_addr, "WebRTC UDP media loop active");
+            let sfu = sfu_engine.clone();
+            let task = loop_handle.start_routing_loop(move |src, packet| sfu.route_udp_packet(src, packet.payload));
+            let ip = config
+                .candidate_addr
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    if local_addr.ip().is_unspecified() {
+                        "127.0.0.1".into()
+                    } else {
+                        local_addr.ip().to_string()
+                    }
+                });
+            let port = local_addr.port();
+            info!(candidate_ip = %ip, candidate_port = %port, "WebRTC SDP ICE candidate configured");
+            if ip == "127.0.0.1" && local_addr.ip().is_unspecified() {
+                warn!("WebRTC candidate IP defaulted to 127.0.0.1 while listening on 0.0.0.0; external endpoints (e.g. 192.168.1.132) will fail to connect. Set candidate_addr in config or VKS_CANDIDATE_ADDR env.");
             }
-            Err(e) => {
-                admin_state.set_media_healthy(false);
-                warn!(error = %e, addr = %config.media_listen_addr, "failed to bind UDP media loop");
-                (None, None, "127.0.0.1".to_string(), 0)
-            }
-        };
+            (Some(Arc::new(loop_handle)), Some(task), ip, port)
+        }
+        Err(e) => {
+            admin_state.set_media_healthy(false);
+            warn!(error = %e, addr = %config.media_listen_addr, "failed to bind UDP media loop");
+            (None, None, "127.0.0.1".to_string(), 0)
+        }
+    };
 
     // 8. Конфигурация обработчика сигналинга с реальными ICE/кодек атрибутами
     let ice_servers: Vec<vks_proto::signaling::IceServer> = config
@@ -297,7 +310,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_room_mode(proto_room_mode)
     .with_caps(caps);
 
-    let gateway_manager = Arc::new(GatewayManager::new());
+    let gateway_manager = Arc::new(GatewayManager::new().with_mcu(mcu_engine.clone()));
     let recorder_manager = Arc::new(RecorderManager::new());
     let cluster_manager = Arc::new(ClusterManager::new(&config.server_name));
 
