@@ -44,7 +44,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_metrics();
 
     // 3. Загрузка конфигурации
-    let config_path = std::env::args().nth(1).or_else(|| std::env::var("VKS_CONFIG_PATH").ok()).or_else(|| {
+    let mut args = std::env::args().skip(1);
+    let mut config_path = None;
+    while let Some(arg) = args.next() {
+        if arg == "-c" || arg == "--config" {
+            config_path = args.next();
+            break;
+        } else if !arg.starts_with('-') && config_path.is_none() {
+            config_path = Some(arg);
+        }
+    }
+    let config_path = config_path.or_else(|| std::env::var("VKS_CONFIG_PATH").ok()).or_else(|| {
         if std::path::Path::new("configs/default.toml").exists() {
             Some("configs/default.toml".to_string())
         } else {
