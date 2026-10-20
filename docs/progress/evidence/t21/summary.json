@@ -1,11 +1,14 @@
 {
- "generated_at": "2026-10-20T21:55:47.481Z",
+ "generated_at": "2026-10-20T22:29:00.353Z",
  "ok": true,
  "build": {
-  "git_head": "9a4216fa17ad631f1decd1cd7a328b963e8a4b56",
+  "git_head": "4597e35875da90092d9d5042a013b71b5583be40",
+  "git_head_ct": 1792535108,
   "git_dirty": false,
-  "binary_sha256": "66f72870d279c1029f1efb8aa36d689cc5d5693d1214bb1c589eb5d1b794638e",
-  "server_pid": 686509
+  "binary_sha256": "b3c2e7851c746aa0d826635224bccaf8b332b6674744ea891d9b77baa44c8d5a",
+  "binary_mtime": 1792535256,
+  "binary_path": "/proc/702470/exe",
+  "server_pid": 702470
  },
  "acceptance": {
   "users_list": true,
@@ -26,7 +29,8 @@
   "screenshots": true,
   "expected_credentials_404": true,
   "expected_credentials_known_users": true,
-  "clean_build": true
+  "clean_build": true,
+  "binary_built_after_head": true
  },
  "steps": [
   {
@@ -96,25 +100,28 @@
   "other_console_errors": 0,
   "http_errors": 0,
   "expected_credentials_404": 2,
+  "expected_credential_user_ids": [
+   "2a4d3811-1000-465a-9f58-e2816f868575"
+  ],
   "steps": 15,
   "screenshots": 9
  },
  "user": {
-  "name": "T21 Пользователь 268125",
-  "login": "t21_268125",
-  "id": "aa37f763-3a80-4f7b-9c06-f3bcb61c4555",
-  "deleted_in_cleanup": true
+  "name": "T21 Пользователь 261067",
+  "login": "t21_261067",
+  "id": "2a4d3811-1000-465a-9f58-e2816f868575",
+  "deleted_in_user_delete_ui": true
  },
  "group": {
-  "name": "T21 Группа 268125",
-  "id": "602735ce-6adf-4d37-95b9-54cc0277b8ae",
+  "name": "T21 Группа 261067",
+  "id": "c1bcab9e-fd55-44aa-b24c-a932ed74fe2b",
   "deleted_in_cleanup": true
  },
  "ws_users_search": [
   {
    "request": {
     "method": "ui:users:search",
-    "id": "f926895f-ca4b-4888-a019-56726b204274",
+    "id": "e1ee400b-a5de-43a2-98c0-05e4fd96dc22",
     "payload": {
      "page": 1,
      "page_size": 100,
@@ -126,7 +133,7 @@
   {
    "request": {
     "method": "ui:users:search",
-    "id": "e7093c93-0c6a-41de-b147-6f467a9fe95f",
+    "id": "905bd1a9-b5c0-4c0e-9702-a5c2ecb1972c",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     }
@@ -157,7 +164,7 @@
   {
    "request": {
     "method": "ui:users:search",
-    "id": "00dc90e5-adef-4910-aeee-52b448cea3d3",
+    "id": "82d76a89-01ce-4e92-b4e7-4fb5af8cda8e",
     "payload": {
      "page": 1,
      "page_size": 100,
@@ -171,18 +178,18 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "aa37f763-3a80-4f7b-9c06-f3bcb61c4555"
+     "2a4d3811-1000-465a-9f58-e2816f868575"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 268125"
+     "T21 Пользователь 261067"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
-    "id": "544706f8-ba09-444a-92d1-8918d4aae6ab",
+    "id": "03dc65bb-f08d-402e-a1c0-7fbcfe8efe21",
     "payload": {
      "page": 1,
      "page_size": 100,
@@ -196,18 +203,18 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "aa37f763-3a80-4f7b-9c06-f3bcb61c4555"
+     "2a4d3811-1000-465a-9f58-e2816f868575"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 268125"
+     "T21 Пользователь 261067"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
-    "id": "1b255a33-b8ed-4f4a-8382-7ef11e375846",
+    "id": "9e780951-bc54-400f-93c3-bcc9801f7d37",
     "payload": {
      "page": 1,
      "page_size": 100,
@@ -219,7 +226,7 @@
   {
    "request": {
     "method": "ui:users:search",
-    "id": "95a20ed6-2aa6-4764-9dea-d825b783e831",
+    "id": "b5b05ec1-3d6b-4f88-a3ac-01155f4b06d9",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     }
@@ -230,11 +237,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "aa37f763-3a80-4f7b-9c06-f3bcb61c4555"
+     "2a4d3811-1000-465a-9f58-e2816f868575"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 268125"
+     "T21 Пользователь 261067"
     ]
    }
   },
@@ -243,18 +250,18 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "aa37f763-3a80-4f7b-9c06-f3bcb61c4555"
+     "2a4d3811-1000-465a-9f58-e2816f868575"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 268125"
+     "T21 Пользователь 261067"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
-    "id": "4fcaf94f-304f-4cd6-b4d0-49c4d98b18ca",
+    "id": "04abfbf5-2f85-40bf-ba96-d99e8e104bfa",
     "payload": {
      "page": 1,
      "page_size": 100,
@@ -266,7 +273,7 @@
   {
    "request": {
     "method": "ui:users:search",
-    "id": "b5bf60c1-15b0-4074-aa91-60b5bdeb0f7f",
+    "id": "426cbe6d-7b8e-453b-ab57-23387c4cac38",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     }
@@ -277,11 +284,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "aa37f763-3a80-4f7b-9c06-f3bcb61c4555"
+     "2a4d3811-1000-465a-9f58-e2816f868575"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 268125"
+     "T21 Пользователь 261067"
     ]
    }
   },
@@ -290,18 +297,18 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "aa37f763-3a80-4f7b-9c06-f3bcb61c4555"
+     "2a4d3811-1000-465a-9f58-e2816f868575"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 268125"
+     "T21 Пользователь 261067"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
-    "id": "9d5c35e9-3083-457a-acd0-eee43c0ee445",
+    "id": "5bec80ff-2f71-4cf1-86bf-3fb9f31091a4",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     }
@@ -312,20 +319,20 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "aa37f763-3a80-4f7b-9c06-f3bcb61c4555"
+     "2a4d3811-1000-465a-9f58-e2816f868575"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 268125"
+     "T21 Пользователь 261067"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
-    "id": "160145ba-8fc6-4520-9369-6c7a760a6f59",
+    "id": "2a5bc2ef-728d-40e1-ab7a-b1d90679b887",
     "payload": {
-     "group_id": "602735ce-6adf-4d37-95b9-54cc0277b8ae",
+     "group_id": "c1bcab9e-fd55-44aa-b24c-a932ed74fe2b",
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
@@ -336,7 +343,7 @@
   {
    "request": {
     "method": "ui:users:search",
-    "id": "1311a466-3d12-445b-a641-c708c3838ea6",
+    "id": "67d461ed-57cd-4ad4-9c70-96f946b3df93",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     }
@@ -354,25 +361,25 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "aa37f763-3a80-4f7b-9c06-f3bcb61c4555"
+     "2a4d3811-1000-465a-9f58-e2816f868575"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 268125"
+     "T21 Пользователь 261067"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
-    "id": "3a15f927-38aa-4b1d-bd54-934efffb3353",
+    "id": "e880c9f1-dabe-49c5-9374-ce2608051bc4",
     "payload": {
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
      "sort_order": 0,
      "exclude_groups": [
-      "602735ce-6adf-4d37-95b9-54cc0277b8ae"
+      "c1bcab9e-fd55-44aa-b24c-a932ed74fe2b"
      ]
     }
    }
@@ -382,18 +389,18 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "aa37f763-3a80-4f7b-9c06-f3bcb61c4555"
+     "2a4d3811-1000-465a-9f58-e2816f868575"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 268125"
+     "T21 Пользователь 261067"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
-    "id": "11926ac3-36c1-4109-90a7-3445945cbe45",
+    "id": "ef684ede-c2c6-437d-af71-1e28c8da808a",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     }
@@ -402,9 +409,9 @@
   {
    "request": {
     "method": "ui:users:search",
-    "id": "6a43456d-6999-4dc2-b21e-1e7ac07abaa2",
+    "id": "f8e31edf-9934-4898-b1bc-60e00b7503b9",
     "payload": {
-     "group_id": "602735ce-6adf-4d37-95b9-54cc0277b8ae",
+     "group_id": "c1bcab9e-fd55-44aa-b24c-a932ed74fe2b",
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
@@ -427,17 +434,17 @@
    "response": {
     "count": 1,
     "ids": [
-     "aa37f763-3a80-4f7b-9c06-f3bcb61c4555"
+     "2a4d3811-1000-465a-9f58-e2816f868575"
     ],
     "names": [
-     "T21 Пользователь 268125"
+     "T21 Пользователь 261067"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
-    "id": "11c85916-fe64-41ab-95b3-7564b2f1f019",
+    "id": "c7ead54d-88c0-4f00-ac95-105244d79143",
     "payload": {
      "page": 1,
      "page_size": 100,
@@ -449,7 +456,7 @@
   {
    "request": {
     "method": "ui:users:search",
-    "id": "b1684b20-86e4-4045-b558-5c8de2809135",
+    "id": "23a0f4be-6a84-410b-b1d6-aaad024d80fc",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     }
@@ -460,11 +467,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "aa37f763-3a80-4f7b-9c06-f3bcb61c4555"
+     "2a4d3811-1000-465a-9f58-e2816f868575"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 268125"
+     "T21 Пользователь 261067"
     ]
    }
   },
@@ -482,7 +489,7 @@
   {
    "request": {
     "method": "ui:users:search",
-    "id": "35123183-cde4-4dd2-b35d-432e0e39ed83",
+    "id": "9bbc193f-6ec6-4312-9cdd-4fb8a52370f1",
     "payload": {
      "page": 1,
      "page_size": 100,
