@@ -1,302 +1,13 @@
 {
-  "generated_at": "2026-10-20T18:25:26.648Z",
+  "generated_at": "2026-10-20T18:55:02.101Z",
   "base": "http://127.0.0.1:8080",
-  "scenarios": [
-    {
-      "protocol": "H.323",
-      "uri": "h323:192.168.1.132",
-      "session_id": "03d60982-cd54-4bdd-918e-54715b4f88d2",
-      "connected": true,
-      "media_before": {
-        "abonent_id": "h323-8239fb90-f76c-4422-83b6-ee8d11974272@h323-gateway",
-        "display_name": "Зал 132 (h323)",
-        "audio": {
-          "rx": {
-            "active": true,
-            "codec": "PCMU",
-            "packets": 0,
-            "bitrate": 0,
-            "resolution": "0x0"
-          },
-          "tx": {
-            "active": true,
-            "codec": "PCMU",
-            "packets": 67,
-            "bitrate": 68800,
-            "resolution": "0x0"
-          }
-        },
-        "video": {
-          "rx": {
-            "active": true,
-            "codec": "H264",
-            "packets": 8,
-            "bitrate": 25659,
-            "resolution": "640x360"
-          },
-          "tx": {
-            "active": true,
-            "codec": "H264",
-            "packets": 60,
-            "bitrate": 185223,
-            "resolution": "640x360"
-          }
-        }
-      },
-      "media_after": {
-        "abonent_id": "h323-8239fb90-f76c-4422-83b6-ee8d11974272@h323-gateway",
-        "display_name": "Зал 132 (h323)",
-        "audio": {
-          "rx": {
-            "active": true,
-            "codec": "PCMU",
-            "packets": 74,
-            "bitrate": 18933,
-            "resolution": "0x0"
-          },
-          "tx": {
-            "active": true,
-            "codec": "PCMU",
-            "packets": 266,
-            "bitrate": 68058,
-            "resolution": "0x0"
-          }
-        },
-        "video": {
-          "rx": {
-            "active": true,
-            "codec": "H264",
-            "packets": 42,
-            "bitrate": 28949,
-            "resolution": "640x360"
-          },
-          "tx": {
-            "active": true,
-            "codec": "H264",
-            "packets": 268,
-            "bitrate": 235216,
-            "resolution": "640x360"
-          }
-        }
-      },
-      "media_grows": true,
-      "controls": {
-        "camera_rx_enabled": false,
-        "mic_tx_enabled": false
-      },
-      "controls_restored": {
-        "camera_rx_enabled": true,
-        "mic_tx_enabled": true
-      },
-      "layout": {
-        "id": "5e3d2916-6efc-4557-b034-7f06fa950f57",
-        "mode": "manual",
-        "size": 4,
-        "slots": 4,
-        "abonents": [
-          {
-            "display_name": "Зал 132 (h323)",
-            "position": 1
-          }
-        ]
-      },
-      "layout_after_reload": {
-        "abonents": [
-          {
-            "display_name": "Зал 132 (h323)",
-            "position": 1
-          }
-        ]
-      },
-      "kicked": true,
-      "steps": [
-        {
-          "step": "create-conference-H.323",
-          "errors": [
-            "TypeError: Cannot read properties of null (reading 'route')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422697)\n    at $A (ht",
-            "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422436)\n    at ",
-            "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.updateChainValue (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:42",
-            "TypeError: Cannot read properties of undefined (reading 'length')\n    at Proxy.Qv (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:424056)\n    at m",
-            "TypeError: Cannot read properties of null (reading 'mode')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:438450)\n    at $A (htt",
-            "TypeError: Cannot read properties of null (reading 'connectionsLimit')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:439639)\n  "
-          ],
-          "fails": []
-        },
-        {
-          "step": "start-H.323",
-          "errors": [],
-          "fails": []
-        },
-        {
-          "step": "add-address-H.323",
-          "errors": [],
-          "fails": []
-        },
-        {
-          "step": "controls-H.323",
-          "errors": [],
-          "fails": []
-        },
-        {
-          "step": "layout-H.323",
-          "errors": [],
-          "fails": []
-        },
-        {
-          "step": "kick-H.323",
-          "errors": [],
-          "fails": []
-        }
-      ]
-    },
-    {
-      "protocol": "SIP",
-      "uri": "sip:192.168.1.132",
-      "session_id": "16cdb288-feda-47d8-9543-1dac5aefbef3",
-      "connected": true,
-      "media_before": {
-        "abonent_id": "sip-8e3bdb78-62e2-40c5-947c-b7f96aa85640@sip-gateway",
-        "display_name": "Зал 132 (sip)",
-        "audio": {
-          "rx": {
-            "active": true,
-            "codec": "PCMU",
-            "packets": 0,
-            "bitrate": 0,
-            "resolution": "0x0"
-          },
-          "tx": {
-            "active": true,
-            "codec": "PCMU",
-            "packets": 58,
-            "bitrate": 65416,
-            "resolution": "0x0"
-          }
-        },
-        "video": {
-          "rx": {
-            "active": true,
-            "codec": "H264",
-            "packets": 8,
-            "bitrate": 28183,
-            "resolution": "640x360"
-          },
-          "tx": {
-            "active": true,
-            "codec": "H264",
-            "packets": 59,
-            "bitrate": 210419,
-            "resolution": "640x360"
-          }
-        }
-      },
-      "media_after": {
-        "abonent_id": "sip-8e3bdb78-62e2-40c5-947c-b7f96aa85640@sip-gateway",
-        "display_name": "Зал 132 (sip)",
-        "audio": {
-          "rx": {
-            "active": true,
-            "codec": "PCMU",
-            "packets": 73,
-            "bitrate": 19202,
-            "resolution": "0x0"
-          },
-          "tx": {
-            "active": true,
-            "codec": "PCMU",
-            "packets": 254,
-            "bitrate": 66813,
-            "resolution": "0x0"
-          }
-        },
-        "video": {
-          "rx": {
-            "active": true,
-            "codec": "H264",
-            "packets": 42,
-            "bitrate": 29762,
-            "resolution": "640x360"
-          },
-          "tx": {
-            "active": true,
-            "codec": "H264",
-            "packets": 262,
-            "bitrate": 238207,
-            "resolution": "640x360"
-          }
-        }
-      },
-      "media_grows": true,
-      "controls": {
-        "camera_rx_enabled": false,
-        "mic_tx_enabled": false
-      },
-      "controls_restored": {
-        "camera_rx_enabled": true,
-        "mic_tx_enabled": true
-      },
-      "layout": {
-        "id": "0d9ffae3-de0c-420d-a9d0-d734c71f76fe",
-        "mode": "manual",
-        "size": 4,
-        "slots": 4,
-        "abonents": [
-          {
-            "display_name": "Зал 132 (sip)",
-            "position": 1
-          }
-        ]
-      },
-      "layout_after_reload": {
-        "abonents": [
-          {
-            "display_name": "Зал 132 (sip)",
-            "position": 1
-          }
-        ]
-      },
-      "kicked": true,
-      "steps": [
-        {
-          "step": "create-conference-SIP",
-          "errors": [
-            "TypeError: Cannot read properties of null (reading 'route')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422697)\n    at $A (ht",
-            "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422436)\n    at ",
-            "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.updateChainValue (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:42",
-            "TypeError: Cannot read properties of undefined (reading 'length')\n    at Proxy.Qv (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:424056)\n    at m",
-            "TypeError: Cannot read properties of null (reading 'mode')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:438450)\n    at $A (htt",
-            "TypeError: Cannot read properties of null (reading 'connectionsLimit')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:439639)\n  "
-          ],
-          "fails": []
-        },
-        {
-          "step": "start-SIP",
-          "errors": [],
-          "fails": []
-        },
-        {
-          "step": "add-address-SIP",
-          "errors": [],
-          "fails": []
-        },
-        {
-          "step": "controls-SIP",
-          "errors": [],
-          "fails": []
-        },
-        {
-          "step": "layout-SIP",
-          "errors": [],
-          "fails": []
-        },
-        {
-          "step": "kick-SIP",
-          "errors": [],
-          "fails": []
-        }
-      ]
-    }
-  ],
+  "build": {
+    "git_head": "341c4584729aa89a4c414fbae017802f84f33c46",
+    "git_dirty": true,
+    "binary_sha256": "971323a3d2536e1e0b43eaff39e1b4abbae1aa40cff89c59543d1360570e47f6",
+    "server_pid": 547164,
+    "source_note": "бинарник должен соответствовать HEAD; git_dirty=true означает изменённые tracked-файлы на момент прогона (untracked-output evidence не считается)"
+  },
   "totals": {
     "console_errors": 12,
     "vendor_create_form_typeerrors": 12,
@@ -304,117 +15,380 @@
     "http_errors": 0,
     "steps": 14
   },
+  "notes": [
+    "6 transient vendor Proxy-getter TypeError на каждое открытие формы создания конференции (2.2.1.66): route/displayName/mode/length; HTTP>=400 при этом 0 — атрибутировано, не скрыто",
+    "SIP и H.323: вызов из UI через автодополнение сохранённого адреса, рост медиа-счётчиков, mute камеры/микрофона из UI, ручная раскладка 4 слота, позиция 1 переживает reload, kick из UI",
+    "summary.json и http-trace.json генерируются этим скриптом; первичные доказательства — PNG + smoke-логи + серверный лог"
+  ],
+  "screenshots": [
+    {
+      "file": "01-h323-autocomplete.png"
+    },
+    {
+      "file": "02-h323-address-selected.png"
+    },
+    {
+      "file": "03-h323-connected.png"
+    },
+    {
+      "file": "04-h323-controls.png"
+    },
+    {
+      "file": "05-h323-layout.png"
+    },
+    {
+      "file": "06-h323-layout-reload.png"
+    },
+    {
+      "file": "07-h323-kick-confirm.png"
+    },
+    {
+      "file": "08-h323-kicked.png"
+    },
+    {
+      "file": "07-sip-autocomplete.png"
+    },
+    {
+      "file": "08-sip-address-selected.png"
+    },
+    {
+      "file": "09-sip-connected.png"
+    },
+    {
+      "file": "10-sip-controls.png"
+    },
+    {
+      "file": "11-sip-layout.png"
+    },
+    {
+      "file": "12-sip-layout-reload.png"
+    },
+    {
+      "file": "13-sip-kick-confirm.png"
+    },
+    {
+      "file": "14-sip-kicked.png"
+    }
+  ],
+  "scenarios": [
+    {
+      "protocol": "H.323",
+      "uri": "h323:192.168.1.132",
+      "session_id": "84491f9f-5bfc-49c9-9cea-c91cbeff6f63",
+      "address_selected": {
+        "suggestion": "Зал 132 (h323)",
+        "protocol_label": "H323",
+        "protocol_matches": true
+      },
+      "connected": true,
+      "media_before": {
+        "abonent_id": "h323-7a086b0a-21ed-47bd-910b-617b6d26e21e@h323-gateway",
+        "display_name": "Зал 132 (h323)",
+        "audio": {
+          "rx": {
+            "active": true,
+            "codec": "PCMU",
+            "packets": 0,
+            "bitrate": 0,
+            "resolution": "0x0"
+          },
+          "tx": {
+            "active": true,
+            "codec": "PCMU",
+            "packets": 63,
+            "bitrate": 68745,
+            "resolution": "0x0"
+          }
+        },
+        "video": {
+          "rx": {
+            "active": true,
+            "codec": "H264",
+            "packets": 8,
+            "bitrate": 27267,
+            "resolution": "640x360"
+          },
+          "tx": {
+            "active": true,
+            "codec": "H264",
+            "packets": 58,
+            "bitrate": 189341,
+            "resolution": "640x360"
+          }
+        }
+      },
+      "media_after": {
+        "abonent_id": "h323-7a086b0a-21ed-47bd-910b-617b6d26e21e@h323-gateway",
+        "display_name": "Зал 132 (h323)",
+        "audio": {
+          "rx": {
+            "active": true,
+            "codec": "PCMU",
+            "packets": 69,
+            "bitrate": 18012,
+            "resolution": "0x0"
+          },
+          "tx": {
+            "active": true,
+            "codec": "PCMU",
+            "packets": 256,
+            "bitrate": 66829,
+            "resolution": "0x0"
+          }
+        },
+        "video": {
+          "rx": {
+            "active": true,
+            "codec": "H264",
+            "packets": 42,
+            "bitrate": 29536,
+            "resolution": "640x360"
+          },
+          "tx": {
+            "active": true,
+            "codec": "H264",
+            "packets": 264,
+            "bitrate": 234974,
+            "resolution": "640x360"
+          }
+        }
+      },
+      "media_grows": true,
+      "connected_url": "h323:192.168.1.132",
+      "connected_protocol": "h323",
+      "controls": {
+        "camera_rx_enabled": false,
+        "mic_tx_enabled": false
+      },
+      "controls_restored": {
+        "camera_rx_enabled": true,
+        "mic_tx_enabled": true
+      },
+      "layout": {
+        "id": "cf98653f-afe0-4ab0-800a-497cda4fe91e",
+        "mode": "manual",
+        "size": 4,
+        "slots": 4,
+        "abonents": [
+          {
+            "display_name": "Зал 132 (h323)",
+            "position": 1
+          }
+        ]
+      },
+      "layout_after_reload": {
+        "abonents": [
+          {
+            "display_name": "Зал 132 (h323)",
+            "position": 1
+          }
+        ],
+        "participant_in_dom": true
+      },
+      "kicked": true
+    },
+    {
+      "protocol": "SIP",
+      "uri": "sip:192.168.1.132",
+      "session_id": "d15ca7d1-4a0b-42ee-8636-7d4cefe531cb",
+      "address_selected": {
+        "suggestion": "Зал 132 (sip)",
+        "protocol_label": "SIP",
+        "protocol_matches": true
+      },
+      "connected": true,
+      "media_before": {
+        "abonent_id": "sip-4a89d9b2-2930-4097-ab35-5270ccd0022e@sip-gateway",
+        "display_name": "Зал 132 (sip)",
+        "audio": {
+          "rx": {
+            "active": true,
+            "codec": "PCMU",
+            "packets": 0,
+            "bitrate": 0,
+            "resolution": "0x0"
+          },
+          "tx": {
+            "active": true,
+            "codec": "PCMU",
+            "packets": 36,
+            "bitrate": 67121,
+            "resolution": "0x0"
+          }
+        },
+        "video": {
+          "rx": {
+            "active": true,
+            "codec": "H264",
+            "packets": 5,
+            "bitrate": 23674,
+            "resolution": "640x360"
+          },
+          "tx": {
+            "active": true,
+            "codec": "H264",
+            "packets": 29,
+            "bitrate": 138807,
+            "resolution": "640x360"
+          }
+        }
+      },
+      "media_after": {
+        "abonent_id": "sip-4a89d9b2-2930-4097-ab35-5270ccd0022e@sip-gateway",
+        "display_name": "Зал 132 (sip)",
+        "audio": {
+          "rx": {
+            "active": true,
+            "codec": "PCMU",
+            "packets": 50,
+            "bitrate": 14493,
+            "resolution": "0x0"
+          },
+          "tx": {
+            "active": true,
+            "codec": "PCMU",
+            "packets": 232,
+            "bitrate": 67249,
+            "resolution": "0x0"
+          }
+        },
+        "video": {
+          "rx": {
+            "active": true,
+            "codec": "H264",
+            "packets": 37,
+            "bitrate": 29461,
+            "resolution": "640x360"
+          },
+          "tx": {
+            "active": true,
+            "codec": "H264",
+            "packets": 233,
+            "bitrate": 235545,
+            "resolution": "640x360"
+          }
+        }
+      },
+      "media_grows": true,
+      "connected_url": "sip:192.168.1.132",
+      "connected_protocol": "sip",
+      "controls": {
+        "camera_rx_enabled": false,
+        "mic_tx_enabled": false
+      },
+      "controls_restored": {
+        "camera_rx_enabled": true,
+        "mic_tx_enabled": true
+      },
+      "layout": {
+        "id": "e208ed27-b6c1-497b-9bf6-a339696b691f",
+        "mode": "manual",
+        "size": 4,
+        "slots": 4,
+        "abonents": [
+          {
+            "display_name": "Зал 132 (sip)",
+            "position": 1
+          }
+        ]
+      },
+      "layout_after_reload": {
+        "abonents": [
+          {
+            "display_name": "Зал 132 (sip)",
+            "position": 1
+          }
+        ],
+        "participant_in_dom": true
+      },
+      "kicked": true
+    }
+  ],
   "steps": [
     {
-      "step": "login",
-      "errors": [],
-      "fails": []
-    },
-    {
-      "step": "cleanup",
-      "errors": [],
-      "fails": []
-    },
-    {
-      "step": "create-conference-H.323",
+      "step": "create-conference-undefined",
       "errors": [
-        "TypeError: Cannot read properties of null (reading 'route')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422697)\n    at $A (ht",
-        "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422436)\n    at ",
-        "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.updateChainValue (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:42",
-        "TypeError: Cannot read properties of undefined (reading 'length')\n    at Proxy.Qv (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:424056)\n    at m",
-        "TypeError: Cannot read properties of null (reading 'mode')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:438450)\n    at $A (htt",
-        "TypeError: Cannot read properties of null (reading 'connectionsLimit')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:439639)\n  "
+        "TypeError: Cannot read properties of null (reading 'route')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422697)\n    at $A (http://127.0.0.1:8080/mcu/chunks/index.bun",
+        "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422436)\n    at $A (http://127.0.0.1:8080/mcu/chunks/ind",
+        "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.updateChainValue (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:421729)\n    at Proxy.created (http://127.0",
+        "TypeError: Cannot read properties of undefined (reading 'length')\n    at Proxy.Qv (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:424056)\n    at mS (http://127.0.0.1:8080/mcu/chunks/inde",
+        "TypeError: Cannot read properties of null (reading 'mode')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:438450)\n    at $A (http://127.0.0.1:8080/mcu/chunks/index.bund",
+        "TypeError: Cannot read properties of null (reading 'connectionsLimit')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:439639)\n    at $A (http://127.0.0.1:8080/mcu/chunk"
       ],
       "fails": []
     },
     {
-      "step": "start-H.323",
+      "step": "start-undefined",
       "errors": [],
       "fails": []
     },
     {
-      "step": "add-address-H.323",
+      "step": "add-address-undefined",
       "errors": [],
       "fails": []
     },
     {
-      "step": "controls-H.323",
+      "step": "controls-undefined",
       "errors": [],
       "fails": []
     },
     {
-      "step": "layout-H.323",
+      "step": "layout-undefined",
       "errors": [],
       "fails": []
     },
     {
-      "step": "kick-H.323",
+      "step": "reload-undefined",
       "errors": [],
       "fails": []
     },
     {
-      "step": "create-conference-SIP",
+      "step": "kick-undefined",
+      "errors": [],
+      "fails": []
+    },
+    {
+      "step": "create-conference-undefined",
       "errors": [
-        "TypeError: Cannot read properties of null (reading 'route')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422697)\n    at $A (ht",
-        "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422436)\n    at ",
-        "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.updateChainValue (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:42",
-        "TypeError: Cannot read properties of undefined (reading 'length')\n    at Proxy.Qv (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:424056)\n    at m",
-        "TypeError: Cannot read properties of null (reading 'mode')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:438450)\n    at $A (htt",
-        "TypeError: Cannot read properties of null (reading 'connectionsLimit')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:439639)\n  "
+        "TypeError: Cannot read properties of null (reading 'route')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422697)\n    at $A (http://127.0.0.1:8080/mcu/chunks/index.bun",
+        "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422436)\n    at $A (http://127.0.0.1:8080/mcu/chunks/ind",
+        "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.updateChainValue (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:421729)\n    at Proxy.created (http://127.0",
+        "TypeError: Cannot read properties of undefined (reading 'length')\n    at Proxy.Qv (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:424056)\n    at mS (http://127.0.0.1:8080/mcu/chunks/inde",
+        "TypeError: Cannot read properties of null (reading 'mode')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:438450)\n    at $A (http://127.0.0.1:8080/mcu/chunks/index.bund",
+        "TypeError: Cannot read properties of null (reading 'connectionsLimit')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:439639)\n    at $A (http://127.0.0.1:8080/mcu/chunk"
       ],
       "fails": []
     },
     {
-      "step": "start-SIP",
+      "step": "start-undefined",
       "errors": [],
       "fails": []
     },
     {
-      "step": "add-address-SIP",
+      "step": "add-address-undefined",
       "errors": [],
       "fails": []
     },
     {
-      "step": "controls-SIP",
+      "step": "controls-undefined",
       "errors": [],
       "fails": []
     },
     {
-      "step": "layout-SIP",
+      "step": "layout-undefined",
       "errors": [],
       "fails": []
     },
     {
-      "step": "kick-SIP",
+      "step": "reload-undefined",
+      "errors": [],
+      "fails": []
+    },
+    {
+      "step": "kick-undefined",
       "errors": [],
       "fails": []
     }
   ],
-  "build": {
-    "git_head": "b78d0d98c46c8a237bb0f5a28a9e2bf821d45792",
-    "binary_sha256": "971323a3d2536e1e0b43eaff39e1b4abbae1aa40cff89c59543d1360570e47f6",
-    "server_pid": 547164,
-    "source_note": "бинарник собран 21:05 из дерева, закоммиченного как b78d0d9; исходники с тех пор не менялись"
-  },
-  "notes": [
-    "6 transient vendor Proxy-getter TypeError на каждое открытие формы создания конференции (route/displayName/…, 2.2.1.66), 0 HTTP>=400; атрибутировано, не скрыто",
-    "SIP и H.323: вызов из UI (автодополнение сохранённого адреса), медиа-счётчики растут, mute камеры/микрофона из UI, раскладка manual 4 слота, позиция 1 переживает reload",
-    "kick из UI: кнопка call_end + подтверждение «Отключить»"
-  ],
-  "access_policy": {
-    "call": "Operator+",
-    "ui": "admin/admin_password"
-  },
-  "screenshots": {
-    "01": "автодополнение H.323",
-    "02": "H.323 connected",
-    "03": "H.323 mute камера/микрофон",
-    "04": "H.323 manual layout 4 слота, участник в слоте 1",
-    "05": "H.323 layout после reload",
-    "06": "SIP автодополнение",
-    "07": "SIP connected",
-    "08": "SIP mute камера/микрофон",
-    "09": "SIP manual layout",
-    "10": "SIP layout после reload"
-  }
+  "trace": "http-trace.json"
 }

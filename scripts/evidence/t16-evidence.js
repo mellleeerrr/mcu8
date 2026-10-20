@@ -163,7 +163,13 @@ function buildFacts() {
     await page.waitForTimeout(1200);
     const modal = page.locator('.tc-modal-container').filter({ hasText: 'Добавить участника по адресу' }).last();
     const modalText = (await modal.innerText()).slice(0, 500);
-    const protocolLabel = modalText.match(/Протокол\s*([A-Za-z0-9.]+)/)?.[1]?.toUpperCase().replaceAll('.', '') ?? null;
+    const selectProtocol = await modal.evaluate((el) => {
+      const select = el.querySelector('select');
+      if (!select) return null;
+      return select.selectedOptions?.[0]?.textContent?.trim() || select.value || null;
+    }).catch(() => null);
+    const protocolLabel = (selectProtocol || modalText).match(/H\.?323|SIP|RTSP|VNC/i)?.[0]
+      ?.toUpperCase().replaceAll('.', '') ?? null;
     rec.address_selected = {
       suggestion: sc.suggestion,
       protocol_label: protocolLabel,
