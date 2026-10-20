@@ -1,0 +1,63 @@
+{
+ "task": "T2.2",
+ "ok": true,
+ "started_at": "2026-10-20T23:20:42.963Z",
+ "build": {
+  "git_head": "04cad6a085c1a8514a07f4c9a1b81ad497bd7b94",
+  "git_head_ct": 1792538322,
+  "git_dirty": false,
+  "binary_sha256": "d175c7e6a43a8e806a8c935517fb9e265047296289099e45f08916430f1d55c7",
+  "binary_mtime": 1792538382,
+  "binary_path": "/proc/727158/exe",
+  "server_pid": 727158
+ },
+ "acceptance": {
+  "conference_dtmf": true,
+  "conference_route": true,
+  "history_list_schema": true,
+  "history_dtmf_route": true,
+  "history_detail_calls": true,
+  "ui_session_history": true,
+  "ui_call_history": true,
+  "export_zip": true,
+  "export_csv_header": true,
+  "history_pagination": true,
+  "history_list_ui": true,
+  "history_detail_ui": true,
+  "history_export_ui": true,
+  "history_clean": true,
+  "history_clean_ui": true,
+  "clean_build": true,
+  "binary_built_after_head": true
+ },
+ "totals": {
+  "steps": 12,
+  "screenshots": 3,
+  "http_errors": 0,
+  "console_errors": 0,
+  "vendor_console_errors": 0
+ },
+ "error": null,
+ "export": {
+  "filename": "Conference_history_2026-10-20.zip",
+  "ui_filename": "Conference_history_T22History_442963.zip"
+ },
+ "finished_at": "2026-10-20T23:21:17.379Z",
+ "steps": [
+  "conference-create",
+  "session-start",
+  "call-string-create",
+  "session-stop",
+  "history-list-api",
+  "history-detail-api",
+  "history-export-api",
+  "history-list-ui",
+  "history-detail-ui",
+  "history-export-ui",
+  "history-clean-api",
+  "history-empty-ui"
+ ],
+ "http_error_samples": [],
+ "console_error_samples": [],
+ "vendor_error_samples": []
+}

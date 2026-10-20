@@ -25,7 +25,8 @@
 | `history_clean` | `POST /api/v3/call_history/clean` → backup-ZIP, список пуст |
 | `history_clean_ui` | после очистки UI-список пуст без ошибок (PNG 03) |
 
-Итог: **ok=true**, 15/15 acceptance, 12 шагов, 3 PNG, 0 HTTP ≥ 400,
+Итог: **ok=true**, 17/17 acceptance (включая `clean_build` и
+`binary_built_after_head`), 12 шагов, 3 PNG, 0 HTTP ≥ 400,
 0 console-ошибок (vendor-allowlist не понадобился).
 
 ## Реализация (backend)
