@@ -414,7 +414,7 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 | T1.5 | «Добавить по адресу»: autocomplete, адресная книга, `/ui/sessions/{id}/audiochannels` | 🟢 | vendor не имеет `/pnm/addresses` и `/ui/addresses` — вместо них глобальная книга: `GET/POST/PATCH/DELETE /api/v3/call_strings[/{id}]` (+`/ui`), фильтры/пагинация/сортировка, WS `ui:call_strings:search`, автодополнение по `uri/protocols`; аудиоканалы: list с `page/page_size/search/sort`, счётчики speakers/listeners, `/ui`-алиасы; evidence `docs/progress/evidence/t15/` |
 | T1.6 | Приёмка SIP+H.323 из UI + `scripts/smoke_v3.sh` + evidence | 🟢 | evidence `docs/progress/evidence/t16/`; acceptance-gate `ok=true` (connected, рост RTP, 3 контрола off/restored, раскладка 4/поз.1, reload, kick, 14 уникальных шагов, 16 PNG); smoke 24/31/31 |
 | T1.7 | Тест boot-reconcile `stopped_sessions` (логика уже есть) | 🟢 | тест: persisted-сессии STOPPED после старта, start → ACTIVE, рестарт → снова STOPPED |
-| T2.1 | Справочник: groups, users CRUD, credentials, addresses | ⚪ | — |
+| T2.1 | Справочник: groups, users CRUD, roles, credentials, addresses | 🟢 | `bdef85c` (код+тесты, 18 directory-тестов), `905833d` (evidence: ok=true, 15 шагов/9 PNG, 2 ожидаемых 404, 1 vendor allowlist); см. `docs/progress/evidence/t21/` |
 | T2.2 | История: call_history (+ui, export, clean), session_history | ⚪ | — |
 | T2.3 | Администрирование: settings/calls/{sip,h323}, video, rtp, http, styles, smtp, security, time/tz/ntp | ⚪ | — |
 | T2.4 | Наблюдаемость/сервис: stats (/proc), network, log_events, roles, license, videorecords, terminals read-only; destructive → явный отказ | ⚪ | — |
@@ -426,3 +426,13 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 до живого участника с ростом медиа-счётчиков; участник ставится в любой слот и
 переживает reload; 0 console errors и 0 необъявленных 501 на сценарии; калибровки
 нет в меню; `smoke_v3.sh` зелёный; CI на master.
+
+### Известный pre-existing дефект тестов (не T2.1)
+
+`cargo test -p vks-server --test network_integration
+test_package_d_mcu_pipeline_handover_and_pnm_control_events` падает `422` на
+`POST /api/v3/ui/video_layouts/mode` **и на HEAD `5ebbf3b`** (проверено чистым
+worktree) — регрессия ранних фаз M3/M4, не связана со справочником. Берётся в
+T2.2/T3.1: разобрать контракт `switch_video_layout_mode` (тело
+`{session_id,mode}` отвергается extractor'ом → 422) и починить либо явно
+переписать тест под фактический контракт.
