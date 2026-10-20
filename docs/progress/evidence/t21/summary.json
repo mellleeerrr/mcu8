@@ -1,6 +1,12 @@
 {
- "generated_at": "2026-10-20T20:28:26.495Z",
+ "generated_at": "2026-10-20T20:36:35.363Z",
  "ok": true,
+ "build": {
+  "git_head": "1defb6f5370df3917192db5269bef9fc8456b049",
+  "git_dirty": false,
+  "binary_sha256": "12c647a7be35c650ab72890899071e0b518737b0dd8b4553c40e688b1693967a",
+  "server_pid": 626371
+ },
  "acceptance": {
   "users_list": true,
   "user_created": true,
@@ -66,14 +72,14 @@
   "screenshots": 8
  },
  "user": {
-  "name": "T21 Пользователь 036437",
-  "login": "t21_036437",
-  "id": "67ece86a-4bfd-46e6-b99d-f1dadc9cc325",
+  "name": "T21 Пользователь 525070",
+  "login": "t21_525070",
+  "id": "998e5067-2e3a-4573-9390-2d4c360f3f7c",
   "deleted_in_cleanup": true
  },
  "group": {
-  "name": "T21 Группа 036437",
-  "id": "c1ae1093-0832-4c55-b5f1-c61ee6d3d3a2",
+  "name": "T21 Группа 525070",
+  "id": "230ea92f-9ecb-47e3-9e94-d1c0144c7067",
   "deleted_in_cleanup": true
  },
  "ws_users_search": [
@@ -86,8 +92,8 @@
      "sort_field": "display_name",
      "sort_order": 0
     },
-    "id": "fadf3877-6ffe-460c-90bd-d2e269567b02",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "72dea460-20e1-4bd0-b891-6f0a7c1835e0",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -96,8 +102,8 @@
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     },
-    "id": "e31a2cdf-fe4e-4f85-bdb7-abace9412328",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "6a7da1ef-5612-4eaa-8104-900c4e2a2882",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -131,8 +137,8 @@
      "sort_field": "display_name",
      "sort_order": 0
     },
-    "id": "b180db2b-0d00-4fcd-8020-7dfd187ee233",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "0207de5e-e9ee-499c-a5d2-778b1c485c10",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -140,11 +146,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "67ece86a-4bfd-46e6-b99d-f1dadc9cc325"
+     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 036437"
+     "T21 Пользователь 525070"
     ]
    }
   },
@@ -157,8 +163,8 @@
      "sort_field": "display_name",
      "sort_order": 0
     },
-    "id": "99467df5-e249-4860-957f-976e81c98b2d",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "4816d526-c081-4721-b1f8-70765364e330",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -166,11 +172,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "67ece86a-4bfd-46e6-b99d-f1dadc9cc325"
+     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 036437"
+     "T21 Пользователь 525070"
     ]
    }
   },
@@ -183,8 +189,8 @@
      "sort_field": "display_name",
      "sort_order": 0
     },
-    "id": "1fdf3424-a1d2-41e1-b836-8be1fd325e71",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "261d303d-c50e-405a-a0dc-9dba06cf86f8",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -193,8 +199,8 @@
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     },
-    "id": "c445bf7b-986a-4322-b2fc-aa8afff82241",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "68e1f347-d944-4ff7-9a08-78c55d8d127f",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -202,11 +208,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "67ece86a-4bfd-46e6-b99d-f1dadc9cc325"
+     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 036437"
+     "T21 Пользователь 525070"
     ]
    }
   },
@@ -215,11 +221,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "67ece86a-4bfd-46e6-b99d-f1dadc9cc325"
+     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 036437"
+     "T21 Пользователь 525070"
     ]
    }
   },
@@ -232,8 +238,8 @@
      "sort_field": "display_name",
      "sort_order": 0
     },
-    "id": "677fa6d3-c489-4377-b6ae-bf1941aee43d",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "d533e6a4-a4bd-4e1b-b16b-db419851f523",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -242,8 +248,8 @@
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     },
-    "id": "67bcc471-97c5-4a00-91aa-b2dabe73c82d",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "3c1e013c-0ced-4993-a659-b7890631949c",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -251,11 +257,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "67ece86a-4bfd-46e6-b99d-f1dadc9cc325"
+     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 036437"
+     "T21 Пользователь 525070"
     ]
    }
   },
@@ -264,11 +270,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "67ece86a-4bfd-46e6-b99d-f1dadc9cc325"
+     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 036437"
+     "T21 Пользователь 525070"
     ]
    }
   },
@@ -278,8 +284,8 @@
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     },
-    "id": "9b717334-cf28-437a-8a56-da8130dd7b44",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "7cc52b51-149c-4760-b65e-2683fd8a1b73",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -287,11 +293,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "67ece86a-4bfd-46e6-b99d-f1dadc9cc325"
+     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 036437"
+     "T21 Пользователь 525070"
     ]
    }
   },
@@ -299,14 +305,14 @@
    "request": {
     "method": "ui:users:search",
     "payload": {
-     "group_id": "c1ae1093-0832-4c55-b5f1-c61ee6d3d3a2",
+     "group_id": "230ea92f-9ecb-47e3-9e94-d1c0144c7067",
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
      "sort_order": 0
     },
-    "id": "7be287ec-cfd8-4f5d-b877-d0536c73e250",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "664c1c9c-9663-439b-a140-41594614d509",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -315,8 +321,8 @@
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     },
-    "id": "82173e09-4bf1-4374-b8d6-815a5b01322b",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "a7df7e99-ba18-4706-b2b3-ff5ad157d546",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -331,11 +337,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "67ece86a-4bfd-46e6-b99d-f1dadc9cc325"
+     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 036437"
+     "T21 Пользователь 525070"
     ]
    }
   },
@@ -348,11 +354,11 @@
      "sort_field": "display_name",
      "sort_order": 0,
      "exclude_groups": [
-      "c1ae1093-0832-4c55-b5f1-c61ee6d3d3a2"
+      "230ea92f-9ecb-47e3-9e94-d1c0144c7067"
      ]
     },
-    "id": "1d816edb-7420-4b69-a311-f02de35ff162",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "c6d63b43-5b9f-4b0c-9ae5-20c6c02cfe2c",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -360,11 +366,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "67ece86a-4bfd-46e6-b99d-f1dadc9cc325"
+     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 036437"
+     "T21 Пользователь 525070"
     ]
    }
   },
@@ -374,22 +380,22 @@
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     },
-    "id": "8e10ce53-2d92-46be-a7ce-0f0c0db6e75f",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "8c994949-187b-40ab-8220-f5a3f5e52440",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
    "request": {
     "method": "ui:users:search",
     "payload": {
-     "group_id": "c1ae1093-0832-4c55-b5f1-c61ee6d3d3a2",
+     "group_id": "230ea92f-9ecb-47e3-9e94-d1c0144c7067",
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
      "sort_order": 0
     },
-    "id": "fa9bc0a0-6f3a-4a63-a95e-f7b8c222780e",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "f7333769-d471-4fcc-a741-c3aabc85775f",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -407,10 +413,10 @@
    "response": {
     "count": 1,
     "ids": [
-     "67ece86a-4bfd-46e6-b99d-f1dadc9cc325"
+     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
     ],
     "names": [
-     "T21 Пользователь 036437"
+     "T21 Пользователь 525070"
     ]
    }
   },
@@ -423,8 +429,8 @@
      "sort_field": "display_name",
      "sort_order": 0
     },
-    "id": "648b3eb9-0b4a-44a2-8dfa-c7c9cc94a121",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "5b8c7c4f-eb86-469a-be12-c0b7eccdea43",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -433,8 +439,8 @@
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
     },
-    "id": "3953231e-eeb5-453d-9621-86126bf8e118",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REZZR05NNlBBOVpDWEs0Mk1ZUVFZQSIsImV4cCI6MTc5MjYxNDQ0MCwiaWF0IjoxNzkyNTI4MDQwLCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0._tXsot_lDuEmQv0G3v0VQ1LUrT9JRxKX3U8_xYIV2bo"
+    "id": "11a964c6-3e55-4574-8893-b75dcf2a940b",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
    }
   },
   {
@@ -442,11 +448,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "67ece86a-4bfd-46e6-b99d-f1dadc9cc325"
+     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 036437"
+     "T21 Пользователь 525070"
     ]
    }
   },
