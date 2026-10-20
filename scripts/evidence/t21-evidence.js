@@ -70,6 +70,7 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
   const httpErrors = [];
   let expectedCredentials404 = 0;
   const expectedCredentialUsers = new Set();
+  const knownUserIds = new Set();
   const screenshots = [];
   const wsUsersSearch = [];
   let step = null;
@@ -196,6 +197,7 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
     createdUser = await findUser(USER_NAME);
     if (!createdUser) throw new Error('пользователь не создан: ' + USER_NAME);
     evidenceIds.user_id = createdUser.id;
+    knownUserIds.add(createdUser.id);
     await shot('02-user-created');
 
     // 3. карточка пользователя: вкладки info/profile/addresses/credentials
@@ -379,7 +381,10 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
       // Ровно два реальных vendor-запроса credentials завершаются 404 (пустое
       // состояние). Регрессия «404 для всех» больше не проходит гейт.
       expected_credentials_404: expectedCredentials404 === 2,
-      expected_credentials_distinct_users: expectedCredentialUsers.size === 2,
+      // Оба ожидаемых 404 относятся к пользователям, созданным этим прогоном
+      // (а не к произвольным/чужим id) — иначе allowlist маскировал бы регрессию.
+      expected_credentials_known_users:
+        expectedCredentialUsers.size > 0 && [...expectedCredentialUsers].every((id) => knownUserIds.has(id)),
       // Артефакт коммитится только с чистого дерева; иначе provenance недостоверен.
       clean_build: build.git_dirty === false && build.git_head.length === 40 && build.binary_sha256 !== null,
     };
