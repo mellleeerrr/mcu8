@@ -5,12 +5,12 @@ use axum::http::StatusCode;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use super::{ws_users_search, ADMIN_ROLE_ID, OPERATOR_ROLE_ID};
+use super::{ws_users_search, DirectoryUser, ADMIN_ROLE_ID, OPERATOR_ROLE_ID};
 use crate::api_v3::resources::ResourceState;
 use crate::api_v3::tests::{app, json_body, login_token, request, send, test_state};
 use crate::users::Users;
 use vks_core::ports::storage::Storage;
-use vks_core::Role;
+use vks_core::{Role, UserId};
 
 async fn created_user(app: &axum::Router, token: &str, display_name: &str) -> String {
     let response = send(
@@ -1070,4 +1070,136 @@ async fn role_and_group_update_and_credentials_lifecycle() {
     let login =
         send(&app, request("POST", "/api/v3/login", None, json!({"login": "lifecycle", "password": "secret2"}))).await;
     assert_eq!(login.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn profile_login_rename_keeps_session_after_persist() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let admin = login_token(&app, "admin", "s3cret").await;
+    let id = created_user(&app, &admin, "Переименовываемая учётка").await;
+    let created = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/users/{id}/credentials"),
+            Some(&admin),
+            json!({"login": "before_rename", "password": "secret7"}),
+        ),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED, "{:?}", json_body(created).await);
+    let login =
+        send(&app, request("POST", "/api/v3/login", None, json!({"login": "before_rename", "password": "secret7"})))
+            .await;
+    assert_eq!(login.status(), StatusCode::OK);
+    let user_token = json_body(login).await["token"].as_str().unwrap().to_string();
+    // Production-расклад: LocalDb id == core Users id. После переименования
+    // логина persist обязан найти LocalDb-строку по сохранённому id, а не логину.
+    let response = send(
+        &app,
+        request(
+            "PATCH",
+            "/api/v3/profile/credentials",
+            Some(&user_token),
+            json!({"login": "after_rename", "old_password": "secret7", "new_password": "secret8"}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "{:?}", json_body(response).await);
+    let login =
+        send(&app, request("POST", "/api/v3/login", None, json!({"login": "after_rename", "password": "secret8"})))
+            .await;
+    assert_eq!(login.status(), StatusCode::OK);
+    assert_eq!(Users::resolve_role(&state, &id), Some(Role::Participant));
+}
+
+#[tokio::test]
+async fn builtin_role_override_is_not_duplicated_in_list() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let response = send(
+        &app,
+        request(
+            "PATCH",
+            &format!("/api/v3/roles/{ADMIN_ROLE_ID}"),
+            Some(&token),
+            json!({"description": "custom admin"}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "{:?}", json_body(response).await);
+    let body = json_body(send(&app, request("GET", "/api/v3/roles", Some(&token), json!({}))).await).await;
+    let admins: Vec<_> = body["roles"].as_array().unwrap().iter().filter(|r| r["id"] == ADMIN_ROLE_ID).collect();
+    assert_eq!(admins.len(), 1, "built-in override не должен дублироваться в GET /roles");
+    assert_eq!(admins[0]["description"], "custom admin");
+    assert_eq!(body["count"], 2, "ровно две built-in роли");
+}
+
+#[tokio::test]
+async fn delete_role_keeps_implicit_builtin_for_legacy_profile() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let user_id = created_user(&app, &token, "Legacy роли").await;
+    let role =
+        send(&app, request("POST", "/api/v3/roles", Some(&token), json!({"display_name": "Legacy custom"}))).await;
+    let role_id = json_body(role).await["role"]["id"].as_str().unwrap().to_string();
+    {
+        // Имитируем legacy/LDAP-профиль: только кастомная роль, а internal-роль
+        // Operator (неявный Administrator) в профиле не материализована.
+        let mut resources = state.api_v3.resources.lock().await;
+        let uid = UserId::parse(&user_id).unwrap();
+        Users::update_async(&state, &uid, None, Some(Role::Operator)).await.unwrap();
+        resources.directory.users.insert(
+            user_id.clone(),
+            DirectoryUser {
+                display_name: "Legacy роли".into(),
+                roles: vec![role_id.clone()],
+                created_at: 1,
+                ..DirectoryUser::default()
+            },
+        );
+    }
+    let response = send(&app, request("DELETE", &format!("/api/v3/roles/{role_id}"), Some(&token), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = user_body(&app, &token, &user_id).await;
+    assert!(
+        body["user"]["roles"].as_array().unwrap().iter().any(|r| r["id"] == ADMIN_ROLE_ID),
+        "Administrator материализуется, даже если профиль содержал только кастомную роль"
+    );
+}
+
+#[tokio::test]
+async fn detach_primary_address_clears_it() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let id = created_user(&app, &token, "Primary detach").await;
+    let created = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/ui/users/{id}/call_strings"),
+            Some(&token),
+            json!({"uri": "sip:detach@example.com"}),
+        ),
+    )
+    .await;
+    let address_id = json_body(created).await["call_string"]["id"].as_str().unwrap().to_string();
+    let response = send(
+        &app,
+        request("POST", &format!("/api/v3/users/{id}/call_strings/{address_id}/favorite"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = send(
+        &app,
+        request("DELETE", &format!("/api/v3/users/{id}/call_strings/{address_id}"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = user_body(&app, &token, &id).await;
+    assert!(body["user"]["address"].is_null(), "detach обязан очистить primary address");
 }

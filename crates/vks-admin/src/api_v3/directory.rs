@@ -17,6 +17,26 @@
 //! `GET/POST/PATCH/DELETE /users/{u}/credentials`, `GET/PATCH /profile/credentials`,
 //! `POST /ui/users/{u}/call_strings`, `POST/DELETE /users/{u}/call_strings/{a}`.
 
+mod accounts;
+mod addresses;
+mod groups;
+mod roles;
+
+pub use accounts::{
+    create_user_credentials, delete_user_credentials, get_user_credentials, profile_credentials,
+    update_profile_credentials, update_user_credentials,
+};
+pub(crate) use addresses::ws_user_call_strings;
+pub use addresses::{
+    attach_user_call_string, create_user_call_string, detach_user_call_string, favorite_user_call_string,
+    list_user_call_strings, unfavorite_user_call_string, update_user_call_string,
+};
+use groups::group_json;
+pub use groups::{
+    add_user_to_group, create_group, delete_group, get_group, list_groups, remove_user_from_group, update_group,
+};
+pub use roles::{add_user_role, create_role, delete_role, get_role, list_roles, remove_user_role, update_role};
+
 use std::collections::{BTreeMap, HashMap};
 
 use axum::{
@@ -28,11 +48,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use vks_core::ports::storage::UserCredentials;
 use vks_core::{Role, UserId};
 
 use super::auth::ClientIp;
-use super::call_strings::default_contact_payload;
 use super::resources::{self, AddressRecord};
 use super::{error_json, sort_and_page, track, ListParams};
 use crate::auth_middleware::AuthContext;
@@ -44,6 +62,33 @@ pub const ADMIN_ROLE_ID: &str = "770fada3-71d8-4176-a969-e12ec2059e64";
 /// Роль «Operator» (vendor default role, undeletable).
 pub const OPERATOR_ROLE_ID: &str = "425eda58-e25d-4418-b924-5a490be734ba";
 const NIL_ID: &str = "00000000-0000-0000-0000-000000000000";
+
+fn all_role_ids(directory: &DirectoryState) -> Vec<String> {
+    let builtin: Vec<&str> = default_roles().iter().map(|(id, _, _)| *id).collect();
+    let mut ids: Vec<String> = builtin.iter().map(|id| (*id).to_string()).collect();
+    // Built-in override (description/permissions) хранится под тем же id в
+    // directory.roles — его нельзя отдавать вторым элементом списка.
+    ids.extend(directory.roles.keys().filter(|id| !builtin.contains(&id.as_str())).cloned());
+    ids
+}
+
+fn id_list(params: &Value, keys: &[&str]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for key in keys {
+        match params.get(*key) {
+            Some(Value::Array(items)) => {
+                ids.extend(
+                    items.iter().filter_map(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
+                );
+            }
+            Some(Value::String(raw)) => {
+                ids.extend(raw.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string));
+            }
+            _ => {}
+        }
+    }
+    ids
+}
 
 fn default_roles() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
@@ -271,12 +316,14 @@ fn is_deletable(viewer: Option<&str>, id: &str) -> bool {
     id != vks_core::BOOTSTRAP_ADMIN_USER_ID && viewer != Some(id)
 }
 
-fn sorted_users(
+/// Строки пользователей без сортировки/пагинации: порядок задаёт общий
+/// `sort_and_page` в вызывающем списке (не дублируем компараторы).
+fn user_rows(
     state: &crate::state::AppState,
     directory: &DirectoryState,
     viewer: Option<&str>,
 ) -> Vec<(crate::state::UserRecord, Value)> {
-    let mut rows: Vec<_> = Users::list(state)
+    Users::list(state)
         .into_iter()
         .map(|user| {
             let role = user.role;
@@ -285,12 +332,7 @@ fn sorted_users(
             let profile = match profile(directory, &user) {
                 Some(profile) => profile,
                 None => {
-                    fallback = DirectoryUser {
-                        display_name: default_display_name(&user),
-                        created_at: 0,
-                        roles: role_name(role).map(|r| vec![r.to_string()]).unwrap_or_default(),
-                        ..DirectoryUser::default()
-                    };
+                    fallback = fallback_profile(&user, 0);
                     &fallback
                 }
             };
@@ -298,15 +340,7 @@ fn sorted_users(
             value["id"] = json!(user.id.to_string());
             (user, value)
         })
-        .collect();
-    rows.sort_by(|a, b| {
-        a.1["display_name"]
-            .as_str()
-            .unwrap_or_default()
-            .to_lowercase()
-            .cmp(&b.1["display_name"].as_str().unwrap_or_default().to_lowercase())
-    });
-    rows
+        .collect()
 }
 
 fn default_display_name(user: &crate::state::UserRecord) -> String {
@@ -314,6 +348,18 @@ fn default_display_name(user: &crate::state::UserRecord) -> String {
         "Administrator".to_string()
     } else {
         user.username.clone()
+    }
+}
+
+/// Профиль по умолчанию для пользователя без сохранённого `DirectoryUser`:
+/// один источник для списка, карточки и мутаций (неявная built-in роль уже
+/// материализована — как её отдал бы `profile_json`).
+fn fallback_profile(user: &crate::state::UserRecord, created_at: u64) -> DirectoryUser {
+    DirectoryUser {
+        display_name: default_display_name(user),
+        created_at,
+        roles: role_name(user.role).map(|role| vec![role.to_string()]).unwrap_or_default(),
+        ..DirectoryUser::default()
     }
 }
 
@@ -441,17 +487,6 @@ fn profile_json(
     value
 }
 
-fn group_json(id: &str, group: &DirectoryGroup, directory: &DirectoryState) -> Value {
-    let size = directory.users.values().filter(|u| u.groups.iter().any(|g| g == id)).count();
-    json!({
-        "id": id,
-        "display_name": group.display_name,
-        "size": size,
-        "creator_id": group.creator_id,
-        "created_at": group.created_at,
-    })
-}
-
 /// `GET /api/v3/users` — список пользователей (HTTP-аналог WS `ui:users:search`).
 pub async fn list_users(
     State(state): State<SharedState>,
@@ -489,7 +524,7 @@ fn filtered_users(
     let exclude_users = id_list(params, &["exclude_users", "users_exclude"]);
     // Vendor `includeUsers → users`: это include/intersection, НЕ exclude.
     let include_users = id_list(params, &["users"]);
-    let mut rows: Vec<Value> = sorted_users(state, directory, viewer)
+    let rows: Vec<Value> = user_rows(state, directory, viewer)
         .into_iter()
         .filter(|(user, value)| {
             if !search.is_empty() {
@@ -546,26 +581,9 @@ fn filtered_users(
         })
         .map(|(_, value)| value)
         .collect();
-    rows.sort_by(|a, b| {
-        let cmp = if list.sort_field == "created_at" {
-            a["created_at"].as_u64().unwrap_or(0).cmp(&b["created_at"].as_u64().unwrap_or(0))
-        } else {
-            a["display_name"]
-                .as_str()
-                .unwrap_or_default()
-                .to_lowercase()
-                .cmp(&b["display_name"].as_str().unwrap_or_default().to_lowercase())
-        };
-        if list.sort_order == 1 {
-            cmp.reverse()
-        } else {
-            cmp
-        }
-    });
-    let count = rows.len();
-    let start = list.page.saturating_sub(1).saturating_mul(list.page_size);
-    let users = rows.into_iter().skip(start).take(list.page_size.max(1)).collect();
-    (count, users)
+    // Поиск уже отфильтрован выше (login/email/phone), поэтому общий хелпер
+    // отвечает только за сортировку/страницу.
+    sort_and_page(rows, "", &list.sort_field, list.sort_order, list.page, list.page_size)
 }
 
 fn user_detail(
@@ -578,11 +596,7 @@ fn user_detail(
     let profile = match profile(directory, user) {
         Some(profile) => profile,
         None => {
-            fallback = DirectoryUser {
-                display_name: default_display_name(user),
-                roles: role_name(user.role).map(|r| vec![r.to_string()]).unwrap_or_default(),
-                ..DirectoryUser::default()
-            };
+            fallback = fallback_profile(user, 0);
             &fallback
         }
     };
@@ -680,11 +694,7 @@ async fn commit_directory<T>(
 /// Гарантирует профиль пользователя в справочнике (единый дефолт для всех
 /// мутаций: display_name/created_at), устраняя 6 копий `or_insert_with`.
 fn ensure_profile<'a>(directory: &'a mut DirectoryState, user: &crate::state::UserRecord) -> &'a mut DirectoryUser {
-    directory.users.entry(user.id.to_string()).or_insert_with(|| DirectoryUser {
-        display_name: default_display_name(user),
-        created_at: now_secs(),
-        ..DirectoryUser::default()
-    })
+    directory.users.entry(user.id.to_string()).or_insert_with(|| fallback_profile(user, now_secs()))
 }
 
 fn string_list(value: Option<&Value>) -> Vec<String> {
@@ -868,1427 +878,6 @@ pub async fn delete_user(
     Json(json!({"status": "ok"})).into_response()
 }
 
-// --- Группы ---------------------------------------------------------------
-
-/// Список id из параметров vendor-UI: массив, строка через запятую или
-/// одиночное значение (`exclude_users`, `users_exclude`, `exclude_groups`…).
-fn id_list(params: &Value, keys: &[&str]) -> Vec<String> {
-    let mut ids = Vec::new();
-    for key in keys {
-        match params.get(*key) {
-            Some(Value::Array(items)) => {
-                ids.extend(
-                    items.iter().filter_map(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
-                );
-            }
-            Some(Value::String(raw)) => {
-                ids.extend(raw.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string));
-            }
-            _ => {}
-        }
-    }
-    ids
-}
-
-/// `GET /api/v3/groups` → `{count, groups}`.
-pub async fn list_groups(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    track("groups.list");
-    if let Some(response) = require_read(&auth) {
-        return response;
-    }
-    let params = Value::Object(params.into_iter().map(|(k, v)| (k, Value::String(v))).collect());
-    let list = ListParams::parse(&params);
-    // Vendor 2.2.1.66 (`InfoMainDescription`) фильтрует группы параметром
-    // `display_name`; `search` оставлен как алиас (контракт T2.1 в тестах/curl).
-    let search = params
-        .get("display_name")
-        .or_else(|| params.get("search"))
-        .or_else(|| params.get("query"))
-        .and_then(Value::as_str)
-        .unwrap_or(&list.search)
-        .to_lowercase();
-    let user_id = params.get("user_id").and_then(Value::as_str).unwrap_or_default().to_string();
-    let exclude_users = id_list(&params, &["users_exclude", "exclude_users"]);
-    let resources = state.api_v3.resources.lock().await;
-    let groups: Vec<Value> = resources
-        .directory
-        .groups
-        .iter()
-        .map(|(id, group)| group_json(id, group, &resources.directory))
-        .filter(|value| {
-            let gid = value["id"].as_str().unwrap_or_default();
-            let members: Vec<&str> = resources
-                .directory
-                .users
-                .iter()
-                .filter(|(_, u)| u.groups.iter().any(|g| g == gid))
-                .map(|(uid, _)| uid.as_str())
-                .collect();
-            if !user_id.is_empty() && !members.contains(&user_id.as_str()) {
-                return false;
-            }
-            if exclude_users.iter().any(|excluded| members.contains(&excluded.as_str())) {
-                return false;
-            }
-            true
-        })
-        .collect();
-    let (count, groups) = sort_and_page(groups, &search, &list.sort_field, list.sort_order, list.page, list.page_size);
-    Json(json!({"count": count, "groups": groups})).into_response()
-}
-
-/// `POST /api/v3/groups` → `{group: {...}}`.
-pub async fn create_group(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    payload: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    track("groups.create");
-    let body = match json_body(payload) {
-        Ok(body) => body,
-        Err(response) => return response,
-    };
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let display_name = body["display_name"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or_default();
-    if display_name.is_empty() {
-        return error_json(400, "display_name is required");
-    }
-    if display_name.chars().count() > 128 {
-        return error_json(400, "display_name is too long");
-    }
-    let id = uuid::Uuid::new_v4().to_string();
-    let group = DirectoryGroup {
-        display_name: display_name.to_string(),
-        created_at: now_secs(),
-        creator_id: Some(auth.subject.clone()),
-    };
-    if let Err(response) = commit_directory(&state, |resources| {
-        if resources.directory.groups.values().any(|g| g.display_name.to_lowercase() == display_name.to_lowercase()) {
-            return Err(error_json(409, "Group with the same name already exists"));
-        }
-        resources.directory.groups.insert(id.clone(), group);
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    let value = {
-        let resources = state.api_v3.resources.lock().await;
-        resources.directory.groups.get(&id).map(|group| group_json(&id, group, &resources.directory)).unwrap()
-    };
-    state.record_audit_entry(
-        &auth.subject,
-        "group.created",
-        Some(id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    (StatusCode::CREATED, Json(json!({"group": value}))).into_response()
-}
-
-/// `GET /api/v3/groups/{id}` → `{group: {...}}`.
-pub async fn get_group(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    Path(id): Path<String>,
-) -> Response {
-    track("groups.get");
-    if let Some(response) = require_read(&auth) {
-        return response;
-    }
-    let resources = state.api_v3.resources.lock().await;
-    match resources.directory.groups.get(&id) {
-        Some(group) => Json(json!({"group": group_json(&id, group, &resources.directory)})).into_response(),
-        None => error_json(404, "Group not found"),
-    }
-}
-
-/// `PATCH /api/v3/groups/{id}`.
-pub async fn update_group(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path(id): Path<String>,
-    payload: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    track("groups.update");
-    let body = match json_body(payload) {
-        Ok(body) => body,
-        Err(response) => return response,
-    };
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let display_name = body["display_name"].as_str().map(str::trim).filter(|s| !s.is_empty());
-    if body.get("display_name").is_some() && display_name.is_none() {
-        return error_json(400, "display_name must not be empty");
-    }
-    if display_name.is_some_and(|d| d.chars().count() > 128) {
-        return error_json(400, "display_name is too long");
-    }
-    if let Err(response) = commit_directory(&state, |resources| {
-        if !resources.directory.groups.contains_key(&id) {
-            return Err(error_json(404, "Group not found"));
-        }
-        if let Some(display) = display_name {
-            let clash = resources
-                .directory
-                .groups
-                .iter()
-                .any(|(gid, g)| gid != &id && g.display_name.to_lowercase() == display.to_lowercase());
-            if clash {
-                return Err(error_json(409, "Group with the same name already exists"));
-            }
-            if let Some(group) = resources.directory.groups.get_mut(&id) {
-                group.display_name = display.to_string();
-            }
-        }
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    let value = {
-        let resources = state.api_v3.resources.lock().await;
-        resources.directory.groups.get(&id).map(|group| group_json(&id, group, &resources.directory)).unwrap()
-    };
-    state.record_audit_entry(
-        &auth.subject,
-        "group.updated",
-        Some(id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"group": value})).into_response()
-}
-
-/// `DELETE /api/v3/groups/{id}` — удаляет группу и членство во всех профилях.
-pub async fn delete_group(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path(id): Path<String>,
-) -> Response {
-    track("groups.delete");
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    if let Err(response) = commit_directory(&state, |resources| {
-        if !resources.directory.groups.contains_key(&id) {
-            return Err(error_json(404, "Group not found"));
-        }
-        resources.directory.groups.remove(&id);
-        for user in resources.directory.users.values_mut() {
-            user.groups.retain(|g| g != &id);
-        }
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    state.record_audit_entry(
-        &auth.subject,
-        "group.deleted",
-        Some(id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"status": "ok"})).into_response()
-}
-
-/// `POST /api/v3/users/{id}/groups/{group_id}` — добавить в группу.
-pub async fn add_user_to_group(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path((user_id, group_id)): Path<(String, String)>,
-) -> Response {
-    track("users.groups.add");
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    change_group_membership(state, auth, client_ip, user_id, group_id, true).await
-}
-
-/// `DELETE /api/v3/users/{id}/groups/{group_id}` — убрать из группы.
-pub async fn remove_user_from_group(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path((user_id, group_id)): Path<(String, String)>,
-) -> Response {
-    track("users.groups.remove");
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    change_group_membership(state, auth, client_ip, user_id, group_id, false).await
-}
-
-async fn change_group_membership(
-    state: SharedState,
-    auth: AuthContext,
-    client_ip: Option<Extension<ClientIp>>,
-    user_id: String,
-    group_id: String,
-    add: bool,
-) -> Response {
-    let Some(user) = find_user(&state, &user_id) else {
-        return error_json(404, "User not found");
-    };
-    let user_id = user.id.to_string();
-    if let Err(response) = commit_directory(&state, |resources| {
-        if !resources.directory.groups.contains_key(&group_id) {
-            return Err(error_json(404, "Group not found"));
-        }
-        let profile = ensure_profile(&mut resources.directory, &user);
-        if add {
-            if !profile.groups.iter().any(|g| g == &group_id) {
-                profile.groups.push(group_id.clone());
-            }
-        } else {
-            profile.groups.retain(|g| g != &group_id);
-        }
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    state.record_audit_entry(
-        &auth.subject,
-        if add { "user.group.added" } else { "user.group.removed" },
-        Some(user_id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"status": "ok"})).into_response()
-}
-
-// --- Роли -----------------------------------------------------------------
-
-/// Идентификаторы всех ролей: built-in + кастомные.
-fn all_role_ids(directory: &DirectoryState) -> Vec<String> {
-    let mut ids: Vec<String> = default_roles().iter().map(|(id, _, _)| id.to_string()).collect();
-    ids.extend(directory.roles.keys().cloned());
-    ids
-}
-
-/// `GET /api/v3/roles` → `{count, roles}`.
-pub async fn list_roles(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    track("roles.list");
-    if let Some(response) = require_read(&auth) {
-        return response;
-    }
-    let params = Value::Object(params.into_iter().map(|(k, v)| (k, Value::String(v))).collect());
-    let list = ListParams::parse(&params);
-    let user_id = params.get("user_id").and_then(Value::as_str).unwrap_or_default().to_string();
-    let search = params
-        .get("search")
-        .or_else(|| params.get("display_name"))
-        .and_then(Value::as_str)
-        .unwrap_or(&list.search)
-        .to_lowercase();
-    // Роли, которые уже назначены указанным пользователям, не предлагаются в
-    // попапе назначения (`users_exclude`).
-    let exclude_users = id_list(&params, &["users_exclude", "exclude_users"]);
-    let resources = state.api_v3.resources.lock().await;
-    let users = Users::list(&state);
-    let target_roles = if user_id.is_empty() {
-        None
-    } else {
-        match find_user(&state, &user_id) {
-            Some(user) => Some(role_ids_for(&resources.directory, &user)),
-            None => return error_json(404, "User not found"),
-        }
-    };
-    let excluded_roles: Vec<String> = exclude_users
-        .iter()
-        .filter_map(|uid| find_user(&state, uid))
-        .flat_map(|user| role_ids_for(&resources.directory, &user))
-        .collect();
-    let roles: Vec<Value> = all_role_ids(&resources.directory)
-        .into_iter()
-        .filter(|id| {
-            target_roles.as_ref().map(|roles| roles.iter().any(|r| r == id)).unwrap_or(true)
-                && !excluded_roles.iter().any(|r| r == id)
-        })
-        .filter_map(|id| role_json(&resources.directory, &users, &id))
-        .filter(|value| {
-            search.is_empty()
-                || value["display_name"].as_str().unwrap_or_default().to_lowercase().contains(&search)
-                || value["description"].as_str().unwrap_or_default().to_lowercase().contains(&search)
-        })
-        .collect();
-    let (count, roles) = sort_and_page(roles, &search, &list.sort_field, list.sort_order, list.page, list.page_size);
-    Json(json!({"count": count, "roles": roles})).into_response()
-}
-
-/// `GET /api/v3/roles/{id}` → `{role: {...}}` (включая `permissions`).
-pub async fn get_role(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    Path(id): Path<String>,
-) -> Response {
-    track("roles.get");
-    if let Some(response) = require_read(&auth) {
-        return response;
-    }
-    let resources = state.api_v3.resources.lock().await;
-    let users = Users::list(&state);
-    match role_json(&resources.directory, &users, &id) {
-        Some(role) => Json(json!({"role": role})).into_response(),
-        None => error_json(404, "Role not found"),
-    }
-}
-
-/// `POST /api/v3/roles` — создать кастомную роль.
-pub async fn create_role(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    payload: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    track("roles.create");
-    let body = match json_body(payload) {
-        Ok(body) => body,
-        Err(response) => return response,
-    };
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let display_name = body["display_name"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or_default();
-    if display_name.is_empty() {
-        return error_json(400, "display_name is required");
-    }
-    if display_name.chars().count() > 128 {
-        return error_json(400, "display_name is too long");
-    }
-    let mut permissions: Vec<String> = body["permissions"]
-        .as_array()
-        .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
-        .unwrap_or_default();
-    if permissions.is_empty() {
-        permissions = default_role_permissions("custom");
-    }
-    let id = uuid::Uuid::new_v4().to_string();
-    if let Err(response) = commit_directory(&state, |resources| {
-        if resources.directory.roles.values().any(|r| r.display_name.to_lowercase() == display_name.to_lowercase())
-            || default_roles().iter().any(|(_, name, _)| name.to_lowercase() == display_name.to_lowercase())
-        {
-            return Err(error_json(409, "Role with the same name already exists"));
-        }
-        resources.directory.roles.insert(
-            id.clone(),
-            DirectoryRole {
-                display_name: display_name.to_string(),
-                description: body["description"].as_str().map(str::to_string).unwrap_or_default(),
-                permissions,
-                created_at: now_secs(),
-                creator_id: Some(auth.subject.clone()),
-            },
-        );
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    let role = {
-        let resources = state.api_v3.resources.lock().await;
-        let users = Users::list(&state);
-        role_json(&resources.directory, &users, &id)
-    };
-    state.record_audit_entry(
-        &auth.subject,
-        "role.created",
-        Some(id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    (StatusCode::CREATED, Json(json!({"role": role}))).into_response()
-}
-
-/// `PATCH /api/v3/roles/{id}` — переименовать/описать/изменить права кастомной
-/// роли. Built-in роли неизменяемы по имени/правам (vendor `Undeletable`), но
-/// описание отредактировать можно.
-pub async fn update_role(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path(id): Path<String>,
-    payload: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    track("roles.update");
-    let body = match json_body(payload) {
-        Ok(body) => body,
-        Err(response) => return response,
-    };
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let builtin = default_roles().iter().any(|(rid, _, _)| rid == &id);
-    let display_name = body["display_name"].as_str().map(str::trim).filter(|s| !s.is_empty());
-    if body.get("display_name").is_some() && display_name.is_none() {
-        return error_json(400, "display_name must not be empty");
-    }
-    if display_name.is_some_and(|d| d.chars().count() > 128) {
-        return error_json(400, "display_name is too long");
-    }
-    if let Err(response) = commit_directory(&state, |resources| {
-        if builtin {
-            let Some((_, name, _)) = default_roles().into_iter().find(|(rid, _, _)| rid == &id) else {
-                return Err(error_json(404, "Role not found"));
-            };
-            if display_name.is_some_and(|d| d != name) {
-                return Err(error_json(403, "Built-in role cannot be renamed"));
-            }
-        } else if !resources.directory.roles.contains_key(&id) {
-            return Err(error_json(404, "Role not found"));
-        }
-        if !builtin {
-            if let Some(display) = display_name {
-                let clash = all_role_ids(&resources.directory).into_iter().any(|rid| {
-                    rid != id
-                        && role_json(&resources.directory, &Users::list(&state), &rid)
-                            .and_then(|role| role["display_name"].as_str().map(|n| n.to_lowercase()))
-                            .is_some_and(|n| n == display.to_lowercase())
-                });
-                if clash {
-                    return Err(error_json(409, "Role with the same name already exists"));
-                }
-                if let Some(role) = resources.directory.roles.get_mut(&id) {
-                    role.display_name = display.to_string();
-                }
-            }
-            if body.get("description").is_some() {
-                if let Some(role) = resources.directory.roles.get_mut(&id) {
-                    role.description = body["description"].as_str().map(str::to_string).unwrap_or_default();
-                }
-            }
-            if let Some(permissions) = body["permissions"].as_array() {
-                let permissions: Vec<String> =
-                    permissions.iter().filter_map(Value::as_str).map(str::to_string).collect();
-                if let Some(role) = resources.directory.roles.get_mut(&id) {
-                    role.permissions = permissions;
-                }
-            }
-        } else if body.get("description").is_some() || body.get("permissions").is_some() {
-            // Built-in роль editable: сохраняем переопределение описания/прав, имя
-            // остаётся каноническим. Пустое описание возвращает vendor-текст.
-            let Some((_, name, default_description)) = default_roles().into_iter().find(|(rid, _, _)| rid == &id)
-            else {
-                return Err(error_json(404, "Role not found"));
-            };
-            let entry = resources.directory.roles.entry(id.clone()).or_insert_with(|| DirectoryRole {
-                display_name: name.to_string(),
-                description: default_description.to_string(),
-                permissions: default_role_permissions(&id),
-                created_at: now_secs(),
-                creator_id: Some(auth.subject.clone()),
-            });
-            entry.display_name = name.to_string();
-            if body.get("description").is_some() {
-                entry.description = body["description"].as_str().unwrap_or_default().to_string();
-                if entry.description.is_empty() {
-                    entry.description = default_description.to_string();
-                }
-            }
-            if let Some(permissions) = body["permissions"].as_array() {
-                entry.permissions = permissions.iter().filter_map(Value::as_str).map(str::to_string).collect();
-                if entry.permissions.is_empty() {
-                    entry.permissions = default_role_permissions(&id);
-                }
-            }
-        }
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    let role = {
-        let resources = state.api_v3.resources.lock().await;
-        let users = Users::list(&state);
-        role_json(&resources.directory, &users, &id)
-    };
-    state.record_audit_entry(
-        &auth.subject,
-        "role.updated",
-        Some(id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"role": role})).into_response()
-}
-
-/// `DELETE /api/v3/roles/{id}` — удалить кастомную роль и снять её со всех
-/// пользователей. Built-in роли неудаляемы.
-pub async fn delete_role(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path(id): Path<String>,
-) -> Response {
-    track("roles.delete");
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    if default_roles().iter().any(|(rid, _, _)| rid == &id) {
-        return error_json(403, "Built-in role cannot be deleted");
-    }
-    let mut updates: Vec<(UserId, Role)> = Vec::new();
-    {
-        let mut resources = state.api_v3.resources.lock().await;
-        if !resources.directory.roles.contains_key(&id) {
-            return error_json(404, "Role not found");
-        }
-        let previous = resources.clone();
-        resources.directory.roles.remove(&id);
-        for user in Users::list(&state) {
-            if let Some(profile) = resources.directory.users.get_mut(&user.id.to_string()) {
-                // Материализуем неявную built-in роль (как change_role), иначе
-                // профиль с единственной кастомной ролью терял бы доступ.
-                if profile.roles.is_empty() {
-                    if let Some(builtin) = role_name(user.role) {
-                        profile.roles.push(builtin.to_string());
-                    }
-                }
-                if profile.roles.iter().any(|r| r == &id) {
-                    profile.roles.retain(|r| r != &id);
-                    let new_internal = internal_role(&profile.roles);
-                    if new_internal != user.role {
-                        updates.push((user.id, new_internal));
-                    }
-                }
-            }
-        }
-        if let Err(response) = resources::commit(&state, &mut resources, previous).await {
-            return response;
-        }
-    }
-    for (user_id, role) in updates {
-        if let Err(error) = Users::update_async(&state, &user_id, None, Some(role)).await {
-            tracing::error!(error = %error, "directory: role cleanup persistence failed");
-            // Роль уже удалена из профилей; без обновления internal-роли часть
-            // пользователей сохранит повышенные права до рестарта — не 200.
-            return error_json(500, "Storage error");
-        }
-    }
-    state.record_audit_entry(
-        &auth.subject,
-        "role.deleted",
-        Some(id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"status": "ok"})).into_response()
-}
-
-/// `POST/DELETE /api/v3/users/{id}/roles/{role_id}`.
-pub async fn add_user_role(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path((user_id, role_id)): Path<(String, String)>,
-) -> Response {
-    track("users.roles.add");
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    change_role(state, auth, client_ip, user_id, role_id, true).await
-}
-
-pub async fn remove_user_role(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path((user_id, role_id)): Path<(String, String)>,
-) -> Response {
-    track("users.roles.remove");
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    change_role(state, auth, client_ip, user_id, role_id, false).await
-}
-
-async fn change_role(
-    state: SharedState,
-    auth: AuthContext,
-    client_ip: Option<Extension<ClientIp>>,
-    user_id: String,
-    role_id: String,
-    add: bool,
-) -> Response {
-    let Some(user) = find_user(&state, &user_id) else {
-        return error_json(404, "User not found");
-    };
-    let user_id = user.id.to_string();
-    // Снять Administrator нельзя только с встроенного администратора
-    // (`BOOTSTRAP_ADMIN_USER_ID`); у обычных пользователей vendor-UI предлагает
-    // удаление чипа роли (`isDeletable=true`), поэтому 403 для всех был регрессией.
-    let self_id = caller_id(&state, &auth.subject);
-    if !add
-        && role_id == ADMIN_ROLE_ID
-        && (user.id == vks_core::UserId::bootstrap_operator() || self_id.as_deref() == Some(user_id.as_str()))
-    {
-        return error_json(403, "The Administrator role cannot be removed from the built-in administrator or yourself");
-    }
-    let roles;
-    let new_internal;
-    {
-        let mut resources = state.api_v3.resources.lock().await;
-        if !all_role_ids(&resources.directory).iter().any(|id| id == &role_id) {
-            return error_json(404, "Role not found");
-        }
-        let previous = resources.clone();
-        let mut profile = resources.directory.users.get(&user_id).cloned().unwrap_or_else(|| DirectoryUser {
-            display_name: default_display_name(&user),
-            created_at: now_secs(),
-            ..DirectoryUser::default()
-        });
-        // Материализуем неявную built-in роль перед изменением: профиль с пустым
-        // `roles` представляет роль из `Users` (Administrator/Operator), и без
-        // материализации добавление Operator понижало бы Administrator.
-        if profile.roles.is_empty() {
-            if let Some(current) = role_name(user.role) {
-                profile.roles.push(current.to_string());
-            }
-        }
-        if add {
-            if !profile.roles.iter().any(|r| r == &role_id) {
-                profile.roles.push(role_id.clone());
-            }
-        } else {
-            profile.roles.retain(|r| r != &role_id);
-        }
-        roles = profile.roles.clone();
-        new_internal = internal_role(&roles);
-        // Сначала идентичность, затем профиль: при сбое второго шага роль в
-        // `Users` откатывается, чтобы они не разошлись.
-        if new_internal != user.role {
-            if let Err(error) = Users::update_async(&state, &user.id, None, Some(new_internal)).await {
-                tracing::error!(error = %error, "directory: role update persistence failed");
-                return error_json(500, "Storage error");
-            }
-        }
-        resources.directory.users.insert(user_id.clone(), profile);
-        if let Err(response) = resources::commit(&state, &mut resources, previous).await {
-            if new_internal != user.role {
-                let _ = Users::update_async(&state, &user.id, None, Some(user.role)).await;
-            }
-            return response;
-        }
-    }
-    state.record_audit_entry(
-        &auth.subject,
-        if add { "user.role.added" } else { "user.role.removed" },
-        Some(user_id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"status": "ok", "roles": roles})).into_response()
-}
-
-// --- Учётные записи -------------------------------------------------------
-
-fn credential_json(login: &str) -> Value {
-    json!({"login": login, "expire_at": 0, "block_at": 0})
-}
-
-fn local_login(state: &crate::state::AppState, user: &crate::state::UserRecord) -> Option<String> {
-    let db = state.local_db.as_ref()?;
-    db.user(&user.id.to_string())
-        .ok()
-        .map(|u| u.username)
-        // bootstrap: LocalDb-запись может быть заведена под id `u-admin`, а
-        // `Users`-запись создана с другим id; резолвим по логину.
-        .or_else(|| db.user_by_name(&user.username).ok().map(|u| u.username))
-}
-
-/// Синхронизирует in-memory поколение пользователя с LocalDb: старые токены
-/// (generation < новое) перестают проходить проверку немедленно, а не только
-/// после рестарта/чтения из durable credentials.
-fn sync_generation(state: &crate::state::AppState, user_id: &str, generation: u64) {
-    if let Ok(mut users) = state.users.lock() {
-        if let Some(user) = users.values_mut().find(|u| u.id.to_string() == user_id) {
-            // Только вперёд: иначе LDAP-sync с меньшим generation «воскресил» бы
-            // отозванные токены.
-            user.generation = user.generation.max(generation);
-        }
-    }
-}
-
-/// `GET /api/v3/users/{id}/credentials`.
-pub async fn get_user_credentials(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    Path(id): Path<String>,
-) -> Response {
-    track("users.credentials.get");
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let Some(user) = find_user(&state, &id) else {
-        return error_json(404, "User not found");
-    };
-    match local_login(&state, &user) {
-        Some(login) => Json(credential_json(&login)).into_response(),
-        None => error_json(404, "Credentials not found"),
-    }
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct CredentialsBody {
-    #[serde(default)]
-    pub login: Option<String>,
-    #[serde(default)]
-    pub password: Option<String>,
-    #[serde(default, alias = "newPassword", alias = "new_password")]
-    pub new_password: Option<String>,
-}
-
-/// `POST /api/v3/users/{id}/credentials` — создать логин/пароль.
-pub async fn create_user_credentials(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path(id): Path<String>,
-    payload: Result<Json<CredentialsBody>, axum::extract::rejection::JsonRejection>,
-) -> Response {
-    track("users.credentials.create");
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let Json(body) = match payload {
-        Ok(body) => body,
-        Err(rejection) => return error_json(400, &format!("Invalid credentials body: {rejection}")),
-    };
-    let Some(user) = find_user(&state, &id) else {
-        return error_json(404, "User not found");
-    };
-    let Some(db) = state.local_db.clone() else {
-        return error_json(503, "Authentication is not configured");
-    };
-    if db.user(&user.id.to_string()).is_ok() {
-        return error_json(409, "Credentials already exist");
-    }
-    let login = body.login.as_deref().map(str::trim).unwrap_or_default();
-    let password = body.password.as_deref().or(body.new_password.as_deref()).unwrap_or_default();
-    if login.is_empty() {
-        return error_json(400, "login is required");
-    }
-    if login.chars().count() < 3 {
-        return error_json(400, "login is too short");
-    }
-    if password.is_empty() {
-        return error_json(400, "password is required");
-    }
-    if db.user_by_name(login).is_ok() {
-        return error_json(409, "Login already exists");
-    }
-    let user_id = user.id.to_string();
-    if let Err(error) = db.register(&user_id, login, password) {
-        tracing::warn!(error = %error, "directory: local credential registration failed");
-        return error_json(409, "Login already exists");
-    }
-    if let Err(error) = persist_credentials(&state, &user.id).await {
-        tracing::error!(error = %error, "directory: credential persistence failed");
-        return error_json(500, "Storage error");
-    }
-    if let Err(error) = Users::update_async(&state, &user.id, Some(login.to_string()), None).await {
-        tracing::error!(error = %error, "directory: login rename persistence failed");
-        return error_json(500, "Storage error");
-    }
-    if let Err(response) = commit_directory(&state, |resources| {
-        ensure_profile(&mut resources.directory, &user).login = Some(login.to_string());
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    state.record_audit_entry(
-        &auth.subject,
-        "user.credentials.created",
-        Some(user_id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    (StatusCode::CREATED, Json(credential_json(login))).into_response()
-}
-
-async fn persist_credentials(state: &crate::state::AppState, user_id: &UserId) -> Result<(), String> {
-    let Some(db) = state.local_db.as_ref() else { return Ok(()) };
-    // bootstrap: LocalDb-запись может быть заведена под логином (`admin`), а не
-    // под core-id пользователя.
-    let username = state
-        .users
-        .lock()
-        .map_err(|e| e.to_string())?
-        .values()
-        .find(|u| u.id == *user_id)
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| user_id.to_string());
-    let user = db.user(&user_id.to_string()).or_else(|_| db.user_by_name(&username)).map_err(|e| e.to_string())?;
-    if let Some(storage) = &state.storage {
-        storage
-            .upsert_user_credentials(&UserCredentials {
-                user_id: *user_id,
-                password_hash_hex: user.password_hash_hex,
-                salt_hex: user.salt_hex,
-                password_changed_at: Some(db.password_changed_at(&user_id.to_string())),
-                generation: db.generation(&user_id.to_string()),
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-/// `PATCH /api/v3/users/{id}/credentials` — смена пароля.
-pub async fn update_user_credentials(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path(id): Path<String>,
-    payload: Result<Json<CredentialsBody>, JsonRejection>,
-) -> Response {
-    track("users.credentials.update");
-    let Json(body) = match payload {
-        Ok(body) => body,
-        Err(rejection) => return error_json(400, &format!("Invalid credentials body: {rejection}")),
-    };
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let Some(user) = find_user(&state, &id) else {
-        return error_json(404, "User not found");
-    };
-    let Some(db) = state.local_db.clone() else {
-        return error_json(503, "Authentication is not configured");
-    };
-    // bootstrap: LocalDb-запись может жить под id `u-admin`, а не под core-id.
-    let Ok(current) = db.user(&user.id.to_string()).or_else(|_| db.user_by_name(&user.username)) else {
-        return error_json(404, "Credentials not found");
-    };
-    let new_login = body.login.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let password = body.password.as_deref().or(body.new_password.as_deref()).unwrap_or_default();
-    if new_login.is_none() && password.is_empty() {
-        return error_json(400, "login or password is required");
-    }
-    let mut login = current.username.clone();
-    if let Some(requested) = new_login {
-        if requested != current.username {
-            if db.user_by_name(requested).is_ok() {
-                return error_json(409, "Login already exists");
-            }
-            if let Err(error) = db.rename_user(&current.id, requested) {
-                tracing::warn!(error = %error, "directory: login rename failed");
-                return error_json(409, "Login cannot be changed");
-            }
-            login = requested.to_string();
-            // `Users.username` — внутренний уникальный ключ RBAC, не логин
-            // LocalDb; переименование логина его не меняет.
-        }
-    }
-    if !password.is_empty() {
-        if let Err(error) = db.set_password_async(&login, password).await {
-            tracing::warn!(error = %error, "directory: password update failed");
-            return error_json(500, "Internal error");
-        }
-    }
-    if let Err(response) = commit_directory(&state, |resources| {
-        ensure_profile(&mut resources.directory, &user).login = Some(login.clone());
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    if let Err(error) = persist_credentials(&state, &user.id).await {
-        tracing::error!(error = %error, "directory: credential persistence failed");
-        return error_json(500, "Storage error");
-    }
-    let generation = db.generation(&user.id.to_string());
-    sync_generation(&state, &user.id.to_string(), generation);
-    state.notify_revocation(user.id.to_string(), generation);
-    state.record_audit_entry(
-        &auth.subject,
-        "user.credentials.updated",
-        Some(user.id.to_string()),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"status": "ok"})).into_response()
-}
-
-/// `DELETE /api/v3/users/{id}/credentials` — удалить логин.
-pub async fn delete_user_credentials(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path(id): Path<String>,
-) -> Response {
-    track("users.credentials.delete");
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let Some(user) = find_user(&state, &id) else {
-        return error_json(404, "User not found");
-    };
-    if user.id.to_string() == vks_core::BOOTSTRAP_ADMIN_USER_ID {
-        return error_json(403, "The built-in administrator credentials cannot be removed");
-    }
-    let user_id = user.id.to_string();
-    let Some(db) = state.local_db.clone() else {
-        return error_json(503, "Authentication is not configured");
-    };
-    // bootstrap: id в LocalDb может быть `u-admin` (не core-id).
-    let local = db.user(&user_id).or_else(|_| db.user_by_name(&user.username)).ok();
-    let Some(local) = local else {
-        return error_json(404, "Credentials not found");
-    };
-    if !db.remove_user(&local.id) {
-        return error_json(404, "Credentials not found");
-    }
-    if let Some(storage) = &state.storage {
-        if let Err(error) = storage.delete_user_credentials(user.id).await {
-            tracing::error!(error = %error, "directory: delete credentials persistence failed");
-            return error_json(500, "Storage error");
-        }
-    }
-    if let Err(response) = commit_directory(&state, |resources| {
-        if let Some(profile) = resources.directory.users.get_mut(&user_id) {
-            profile.login = None;
-        }
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    let generation = db.generation(&local.id);
-    sync_generation(&state, &user_id, generation);
-    state.notify_revocation(user_id.clone(), generation);
-    state.record_audit_entry(
-        &auth.subject,
-        "user.credentials.deleted",
-        Some(user_id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"status": "ok"})).into_response()
-}
-
-fn caller_user(state: &crate::state::AppState, auth: &AuthContext) -> Option<crate::state::UserRecord> {
-    Users::resolve(state, &auth.subject)
-}
-
-/// `GET /api/v3/profile/credentials` — учётная запись текущего пользователя.
-pub async fn profile_credentials(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-) -> Response {
-    track("profile.credentials.get");
-    let Some(user) = caller_user(&state, &auth) else {
-        return error_json(404, "User not found");
-    };
-    match local_login(&state, &user) {
-        Some(login) => Json(credential_json(&login)).into_response(),
-        None => error_json(404, "Credentials not found"),
-    }
-}
-
-/// `PATCH /api/v3/profile/credentials` — смена собственного пароля.
-///
-/// Vendor-UI при неизменённом логине отправляет `"login": null`; `null`
-/// означает «не менять», а не смену логина на пустой.
-pub async fn update_profile_credentials(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    payload: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    track("profile.credentials.update");
-    let body = match json_body(payload) {
-        Ok(body) => body,
-        Err(response) => return response,
-    };
-    let Some(user) = caller_user(&state, &auth) else {
-        return error_json(404, "User not found");
-    };
-    let Some(db) = state.local_db.clone() else {
-        return error_json(503, "Authentication is not configured");
-    };
-    let Some(current_login) = local_login(&state, &user) else {
-        return error_json(404, "Credentials not found");
-    };
-    let requested_login = body.get("login").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
-    let old_password = body["old_password"].as_str().or_else(|| body["confirm_password"].as_str()).unwrap_or_default();
-    let new_password = body["new_password"].as_str().or_else(|| body["password"].as_str()).unwrap_or_default();
-    if new_password.is_empty() && requested_login.is_none() {
-        return error_json(400, "new password is required");
-    }
-    if old_password.is_empty() {
-        return error_json(400, "old password is required");
-    }
-    match db.authenticate_async(&current_login, old_password).await {
-        Ok(_) => {}
-        Err(_) => return error_json(404, "Incorrect old password"),
-    }
-    let mut login = current_login.clone();
-    if let Some(requested) = requested_login {
-        if requested != current_login {
-            if db.user_by_name(requested).is_ok() {
-                return error_json(409, "Login already exists");
-            }
-            let local_id = db.user_by_name(&current_login).map(|u| u.id).unwrap_or_else(|_| user.id.to_string());
-            if let Err(error) = db.rename_user(&local_id, requested) {
-                tracing::warn!(error = %error, "directory: login rename failed");
-                return error_json(409, "Login cannot be changed");
-            }
-            login = requested.to_string();
-            // см. update_user_credentials: внутренний username не переименовываем.
-        }
-    }
-    if !new_password.is_empty() {
-        if let Err(error) = db.set_password_async(&login, new_password).await {
-            tracing::error!(error = %error, "directory: profile password update failed");
-            return error_json(500, "Internal error");
-        }
-    }
-    if let Err(response) = commit_directory(&state, |resources| {
-        ensure_profile(&mut resources.directory, &user).login = Some(login.clone());
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    if let Err(error) = persist_credentials(&state, &user.id).await {
-        tracing::error!(error = %error, "directory: credential persistence failed");
-        return error_json(500, "Storage error");
-    }
-    let generation = db
-        .user_by_name(&login)
-        .map(|local| db.generation(&local.id))
-        .unwrap_or_else(|_| db.generation(&user.id.to_string()));
-    sync_generation(&state, &user.id.to_string(), generation);
-    state.notify_revocation(user.id.to_string(), generation);
-    state.record_audit_entry(
-        &auth.subject,
-        "profile.credentials.updated",
-        Some(user.id.to_string()),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"status": "ok"})).into_response()
-}
-
-// --- Личные адресные книги -------------------------------------------------
-
-fn user_addresses_json(records: impl Iterator<Item = (String, AddressRecord)>) -> Vec<Value> {
-    records.map(|(id, address)| super::call_strings::address_value(&id, &address)).collect()
-}
-
-/// `GET /api/v3/users/{id}/call_strings`.
-pub async fn list_user_call_strings(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    Path(id): Path<String>,
-) -> Response {
-    track("users.call_strings.list");
-    if let Some(response) = require_read(&auth) {
-        return response;
-    }
-    let Some(user) = find_user(&state, &id) else {
-        return error_json(404, "User not found");
-    };
-    let user_id = user.id.to_string();
-    let resources = state.api_v3.resources.lock().await;
-    let records = resources
-        .directory
-        .user_addresses
-        .get(&user_id)
-        .map(|map| map.iter().map(|(id, a)| (id.clone(), a.clone())).collect::<Vec<_>>())
-        .unwrap_or_default();
-    let count = records.len();
-    Json(json!({"count": count, "call_strings": user_addresses_json(records.into_iter())})).into_response()
-}
-
-/// `POST /api/v3/users/{id}/call_strings/{address_id}` — привязать существующий
-/// глобальный адрес к личной адресной книге пользователя.
-pub async fn attach_user_call_string(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path((user_id, address_id)): Path<(String, String)>,
-) -> Response {
-    track("users.call_strings.attach");
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let Some(user) = find_user(&state, &user_id) else {
-        return error_json(404, "User not found");
-    };
-    let user_id = user.id.to_string();
-    if let Err(response) = commit_directory(&state, |resources| {
-        let Some(address) = resources.addresses.get(&address_id).cloned() else {
-            return Err(error_json(404, "Call string not found"));
-        };
-        resources.directory.user_addresses.entry(user_id.clone()).or_default().insert(address_id.clone(), address);
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    state.record_audit_entry(
-        &auth.subject,
-        "user.call_string.attached",
-        Some(user_id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"status": "ok"})).into_response()
-}
-
-/// `DELETE /api/v3/users/{id}/call_strings/{address_id}` — отвязать адрес
-/// (глобальная книга не затрагивается).
-pub async fn detach_user_call_string(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path((user_id, address_id)): Path<(String, String)>,
-) -> Response {
-    track("users.call_strings.detach");
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let Some(user) = find_user(&state, &user_id) else {
-        return error_json(404, "User not found");
-    };
-    let user_id = user.id.to_string();
-    if let Err(response) = commit_directory(&state, |resources| {
-        let removed =
-            resources.directory.user_addresses.get_mut(&user_id).and_then(|map| map.remove(&address_id)).is_some();
-        if !removed {
-            return Err(error_json(404, "Call string not found"));
-        }
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    state.record_audit_entry(
-        &auth.subject,
-        "user.call_string.detached",
-        Some(user_id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"status": "ok"})).into_response()
-}
-
-/// `POST /api/v3/users/{id}/call_strings/{address_id}/favorite` — назначить
-/// основной (primary) личный адрес; vendor показывает «звёздочку» при >1 адресе
-/// и ожидает этот вызов. `DELETE` — снять primary, если он совпадает.
-pub async fn favorite_user_call_string(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path((user_id, address_id)): Path<(String, String)>,
-) -> Response {
-    track("users.call_strings.favorite");
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let Some(user) = find_user(&state, &user_id) else {
-        return error_json(404, "User not found");
-    };
-    let user_id = user.id.to_string();
-    if let Err(response) = commit_directory(&state, |resources| {
-        let present = resources.directory.user_addresses.get(&user_id).is_some_and(|map| map.contains_key(&address_id));
-        if !present {
-            return Err(error_json(404, "Call string not found"));
-        }
-        ensure_profile(&mut resources.directory, &user).primary_address = Some(address_id.clone());
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    state.record_audit_entry(
-        &auth.subject,
-        "user.call_string.favorited",
-        Some(user_id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"status": "ok", "address_id": address_id})).into_response()
-}
-
-/// `DELETE …/favorite` — снять основной адрес (идемпотентно).
-pub async fn unfavorite_user_call_string(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path((user_id, address_id)): Path<(String, String)>,
-) -> Response {
-    track("users.call_strings.unfavorite");
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let Some(user) = find_user(&state, &user_id) else {
-        return error_json(404, "User not found");
-    };
-    let user_id = user.id.to_string();
-    if let Err(response) = commit_directory(&state, |resources| {
-        if let Some(profile) = resources.directory.users.get_mut(&user_id) {
-            if profile.primary_address.as_deref() == Some(address_id.as_str()) {
-                profile.primary_address = None;
-            }
-        }
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    state.record_audit_entry(
-        &auth.subject,
-        "user.call_string.unfavorited",
-        Some(user_id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"status": "ok"})).into_response()
-}
-
-/// Проверка адреса: протокол (или host) обязателен, пробелы/управляющие символы
-/// запрещены. `canonical_uri` сам добавляет `sip:`, поэтому проверяем остаток.
-fn validate_call_string_uri(uri: &str) -> Result<(), String> {
-    if uri.is_empty() || uri.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err("uri is invalid".to_string());
-    }
-    let canonical = super::call_strings::canonical_uri(uri);
-    let rest = canonical.split_once(':').map(|(_, rest)| rest).unwrap_or_default();
-    if rest.trim().is_empty() || rest == ":" {
-        return Err("uri is invalid".to_string());
-    }
-    Ok(())
-}
-
-/// `PATCH /api/v3/ui/users/{id}/call_strings/{address_id}` — редактировать
-/// личный адрес (display_name/uri/payload). Глобальная книга не затрагивается.
-pub async fn update_user_call_string(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path((user_id, address_id)): Path<(String, String)>,
-    payload: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    track("users.call_strings.update");
-    let body = match json_body(payload) {
-        Ok(body) => body,
-        Err(response) => return response,
-    };
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let Some(user) = find_user(&state, &user_id) else {
-        return error_json(404, "User not found");
-    };
-    let user_id = user.id.to_string();
-    let updated = match commit_directory(&state, |resources| {
-        let Some(existing) =
-            resources.directory.user_addresses.get(&user_id).and_then(|map| map.get(&address_id)).cloned()
-        else {
-            return Err(error_json(404, "Call string not found"));
-        };
-        let mut updated = existing;
-        if let Some(uri) = body["uri"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-            if let Err(error) = validate_call_string_uri(uri) {
-                return Err(error_json(400, &error));
-            }
-            updated.uri = uri.to_string();
-        }
-        if let Some(display_name) = body["display_name"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-            updated.display_name = display_name.to_string();
-        }
-        if body.get("payload").is_some() {
-            updated.payload = default_contact_payload(body.get("payload"));
-        }
-        if let Some(map) = resources.directory.user_addresses.get_mut(&user_id) {
-            map.insert(address_id.clone(), updated.clone());
-        }
-        Ok(updated)
-    })
-    .await
-    {
-        Ok(updated) => updated,
-        Err(response) => return response,
-    };
-    state.record_audit_entry(
-        &auth.subject,
-        "user.call_string.updated",
-        Some(user_id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    Json(json!({"call_string": super::call_strings::address_value(&address_id, &updated)})).into_response()
-}
-
-/// `POST /api/v3/ui/users/{id}/call_strings` — создать адрес сразу в личной книге.
-pub async fn create_user_call_string(
-    State(state): State<SharedState>,
-    Extension(auth): Extension<AuthContext>,
-    client_ip: Option<Extension<ClientIp>>,
-    Path(user_id): Path<String>,
-    payload: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    track("users.call_strings.create");
-    let body = match json_body(payload) {
-        Ok(body) => body,
-        Err(response) => return response,
-    };
-    if let Some(response) = require_manage(&auth) {
-        return response;
-    }
-    let Some(user) = find_user(&state, &user_id) else {
-        return error_json(404, "User not found");
-    };
-    let uri = body["uri"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or_default();
-    if uri.is_empty() {
-        return error_json(400, "uri is required");
-    }
-    if let Err(error) = validate_call_string_uri(uri) {
-        return error_json(400, &error);
-    }
-    let display_name =
-        body["display_name"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(uri).to_string();
-    let id = uuid::Uuid::new_v4().to_string();
-    let payload = default_contact_payload(body.get("payload"));
-    let address = AddressRecord { id: id.clone(), uri: uri.to_string(), display_name, created_at: now_secs(), payload };
-    let user_id = user.id.to_string();
-    let address_clone = address.clone();
-    if let Err(response) = commit_directory(&state, |resources| {
-        resources.directory.user_addresses.entry(user_id.clone()).or_default().insert(id.clone(), address_clone);
-        Ok(())
-    })
-    .await
-    {
-        return response;
-    }
-    state.record_audit_entry(
-        &auth.subject,
-        "user.call_string.created",
-        Some(user_id),
-        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
-    );
-    (StatusCode::CREATED, Json(json!({"call_string": super::call_strings::address_value(&id, &address)})))
-        .into_response()
-}
-
 // --- WebSocket ------------------------------------------------------------
 
 /// `ui:users:search` — список пользователей для левой панели справочника.
@@ -2306,45 +895,6 @@ pub(crate) async fn ws_users_search(
     let viewer = caller_id(state, subject);
     let (count, users) = filtered_users(state, &resources.directory, payload, viewer.as_deref());
     Ok(json!({"users": users, "count": count}))
-}
-
-/// `ui:call_strings:search` с `contact_id` — личная адресная книга пользователя.
-pub(crate) async fn ws_user_call_strings(
-    state: &SharedState,
-    subject: &str,
-    payload: &Value,
-    contact_id: &str,
-) -> Result<Value, (u16, &'static str)> {
-    let role = Users::resolve_role(state, subject).ok_or((403, "Forbidden"))?;
-    if role < Role::Moderator {
-        return Err((403, "Forbidden: insufficient permissions"));
-    }
-    let user = find_user(state, contact_id).ok_or((404, "User not found"))?;
-    let user_id = user.id.to_string();
-    let resources = state.api_v3.resources.lock().await;
-    let records = resources
-        .directory
-        .user_addresses
-        .get(&user_id)
-        .map(|map| map.iter().map(|(id, a)| (id.clone(), a.clone())).collect::<Vec<_>>())
-        .unwrap_or_default();
-    let values = user_addresses_json(records.into_iter());
-    let list = ListParams::parse(payload);
-    let search = payload
-        .get("search")
-        .or_else(|| payload.get("query"))
-        .and_then(Value::as_str)
-        .unwrap_or(&list.search)
-        .to_lowercase();
-    let uri_filter = payload.get("uri").and_then(Value::as_str).unwrap_or_default().to_lowercase();
-    let values: Vec<Value> = values
-        .into_iter()
-        .filter(|value| {
-            uri_filter.is_empty() || value["uri"].as_str().unwrap_or_default().to_lowercase().contains(&uri_filter)
-        })
-        .collect();
-    let (count, value) = sort_and_page(values, &search, &list.sort_field, list.sort_order, list.page, list.page_size);
-    Ok(json!({"call_strings": value, "count": count}))
 }
 
 #[cfg(test)]

@@ -27,7 +27,9 @@
 | `cleanup` | группа удалена и отсутствует в поиске; created-сущности не остаются | ✅ |
 
 `summary.json → ok=true` — строгий гейт: все acceptance-флаги,
-0 HTTP ≥ 400 (кроме ровно двух ожидаемых credentials-404, см. ниже),
+0 HTTP ≥ 400 кроме ровно двух ожидаемых credentials-404 (статусы `/login`,
+включая намеренный 401 в шаге `self-password`, считаются частью шага и не
+попадают в глобальные HTTP-ошибки),
 0 неатрибутированных console errors, `expected_credentials_404 === 2`
 (оба 404 — только для пользователей, созданных этим прогоном),
 `expected_credentials_known_users` и `clean_build` (`git_dirty=false`,
@@ -57,7 +59,7 @@
 
 ## Что покрыто кодом/тестами вне UI-прогона
 
-26 тестов справочника (23 HTTP-интеграционных в `directory_tests.rs` + 3
+30 тестов справочника (27 HTTP-интеграционных в `directory_tests.rs` + 3
 inline `#[cfg(test)]` в `directory.rs`) дополнительно проверяют: каскадное удаление (credentials/профиль/членства/адреса, login
 удалённого → 401), флаги `defaults.deletable`, `room_scope` не читает
 глобальный справочник, WS у Moderator, CRUD ролей, сохранение неявной роли

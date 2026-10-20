@@ -15,7 +15,20 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
-const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const OUT_PRELIGHT = process.env.EVIDENCE_DIR || 'docs/progress/evidence/t21';
+let chromium;
+try {
+  chromium = require(process.env.PLAYWRIGHT_MODULE || 'playwright').chromium;
+} catch (e) {
+  // Ошибка загрузки Playwright не должна оставлять предыдущий ok:true артефакт.
+  fs.mkdirSync(OUT_PRELIGHT, { recursive: true });
+  fs.writeFileSync(
+    path.join(OUT_PRELIGHT, 'summary.json'),
+    JSON.stringify({ ok: false, phase: 'playwright-require', error: String(e) }, null, 1) + '\n',
+  );
+  console.error(e);
+  process.exit(1);
+}
 
 const BASE = (process.env.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
 const OUT = process.env.EVIDENCE_DIR || 'docs/progress/evidence/t21';
@@ -30,8 +43,11 @@ const sh = (cmd) => { try { return execSync(cmd, { encoding: 'utf8' }).trim(); }
 // всегда был бы true из-за самих результатов прогона.
 const build = {
   git_head: sh('git rev-parse HEAD'),
+  git_head_ct: Number(sh('git log -1 --format=%ct HEAD')) || 0,
   git_dirty: sh('git status --porcelain') !== '',
   binary_sha256: null,
+  binary_mtime: null,
+  binary_path: null,
   server_pid: null,
 };
 {
@@ -41,6 +57,8 @@ const build = {
     try {
       build.server_pid = Number(pid);
       build.binary_sha256 = crypto.createHash('sha256').update(fs.readFileSync(exe)).digest('hex');
+      build.binary_mtime = Math.floor(fs.statSync(exe).mtimeMs / 1000);
+      build.binary_path = exe;
       break;
     } catch { /* процесс без доступа к exe — пробуем следующий */ }
   }
@@ -384,9 +402,13 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
       // Оба ожидаемых 404 относятся к пользователям, созданным этим прогоном
       // (а не к произвольным/чужим id) — иначе allowlist маскировал бы регрессию.
       expected_credentials_known_users:
-        expectedCredentialUsers.size > 0 && [...expectedCredentialUsers].every((id) => knownUserIds.has(id)),
+        expectedCredentialUsers.size === 2 && [...expectedCredentialUsers].every((id) => knownUserIds.has(id)),
       // Артефакт коммитится только с чистого дерева; иначе provenance недостоверен.
       clean_build: build.git_dirty === false && build.git_head.length === 40 && build.binary_sha256 !== null,
+      // Бинарник собран ПОСЛЕ коммита, на котором сделан прогон: иначе evidence
+      // мог быть снят со старой сборки, не соответствующей исходникам.
+      binary_built_after_head:
+        build.binary_mtime !== null && build.git_head_ct > 0 && build.binary_mtime >= build.git_head_ct,
     };
     const ok = httpErrors.length === 0 && otherErrors.length === 0 && Object.values(acceptance).every(Boolean);
     const summary = {
@@ -401,10 +423,11 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
         other_console_errors: otherErrors.length,
         http_errors: httpErrors.length,
         expected_credentials_404: expectedCredentials404,
+        expected_credential_user_ids: [...expectedCredentialUsers],
         steps: steps.length,
         screenshots: screenshots.length,
       },
-      user: { name: USER_NAME, login: LOGIN_NAME, id: evidenceIds.user_id, deleted_in_cleanup: true },
+      user: { name: USER_NAME, login: LOGIN_NAME, id: evidenceIds.user_id, deleted_in_user_delete_ui: true },
       group: { name: GROUP_NAME, id: evidenceIds.group_id, deleted_in_cleanup: true },
       ws_users_search: wsUsersSearch,
       http_error_samples: httpErrors.slice(0, 10),
@@ -459,4 +482,13 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
     } catch (e) { console.error('cleanup: ' + e.message); }
     await browser.close();
   }
-})().catch((e) => { console.error(e); process.exit(1); });
+})().catch((e) => {
+  console.error(e);
+  // Любой сбой вне основного try (например, launch Chromium) тоже пишет ok:false.
+  fs.mkdirSync(OUT_PRELIGHT, { recursive: true });
+  fs.writeFileSync(
+    path.join(OUT_PRELIGHT, 'summary.json'),
+    JSON.stringify({ ok: false, phase: 'uncaught', error: String((e && e.stack) || e) }, null, 1) + '\n',
+  );
+  process.exit(1);
+});
