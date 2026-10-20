@@ -1,0 +1,30 @@
+== smoke_v3: http://127.0.0.1:8080
+  ok  healthz
+  ok  login (admin)
+  ok  conference created (023f31ec-544c-4f6c-9e85-db0c5d3abd6c)
+  ok  session started (023f31ec-544c-4f6c-9e85-db0c5d3abd6c)
+  ok  session visible in ui/sessions
+  ok  address created (cs-1a62c097-b89d-482b-b88e-2121cd033504)
+  ok  address searchable by uri substring
+  ok  address included by protocols=sip filter
+  ok  address excluded by protocols=h323 filter
+  ok  address patched
+  ok  address deleted
+  ok  audiochannel created (5f52eba7-0292-4153-a063-9a12a524a55a)
+  ok  audiochannel attached and visible
+  ok  audiochannel detached
+  ok  layout created (c59d62c7-266b-455c-8f68-e3ea870aabd0)
+  ok  layout visible in session layouts
+  ok  layout attached, slots empty until live call
+  ok  layout detached from session
+== live call: sip:192.168.1.132 (timeout 90s)
+  ok  call connected (sip-fd0aeba0-89dc-4638-ae9f-2b1da90e1239@sip-gateway)
+  ok  RTP audio counters grow (rx 0->30, tx 5->212)
+  ok  microphone muted (audio.tx.enabled=false)
+  ok  camera off (video.tx.enabled=false)
+  ok  volume control applied (audio.rx.volume=-60)
+  ok  abonent kicked from session
+  ok  session stopped (state STOPPED)
+  ok  conference deleted (GET 404)
+  ok  cleanup complete
+PASS: 27 проверок

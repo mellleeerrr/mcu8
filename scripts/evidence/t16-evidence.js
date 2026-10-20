@@ -37,10 +37,10 @@ function buildFacts() {
   const run = (cmd) => execSync(cmd, { cwd: path.resolve(__dirname, '../..') }).toString().trim();
   return {
     git_head: run('git rev-parse HEAD'),
-    git_dirty: run('git status --porcelain').length > 0,
+    git_dirty: run('git status --porcelain --untracked-files=no').length > 0,
     binary_sha256: run('sha256sum target/release/vks-server').split(/\s+/)[0],
     server_pid: Number(process.env.SERVER_PID || execSync('pgrep -f target/release/vks-server | head -1').toString().trim()),
-    source_note: 'бинарник должен соответствовать HEAD; git_dirty=true означает сборку из незакоммиченного дерева',
+    source_note: 'бинарник должен соответствовать HEAD; git_dirty=true означает изменённые tracked-файлы на момент прогона (untracked-output evidence не считается)',
   };
 }
 
