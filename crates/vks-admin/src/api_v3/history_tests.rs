@@ -130,11 +130,15 @@ async fn stopping_and_deleting_sessions_writes_history() {
     let app = app(state.clone());
     let token = login_token(&app, "admin", "s3cret").await;
 
+    // Остановка реально запущенной сессии → Manual + vendor-идентификаторы.
     let created = json_body(
         send(&app, request("POST", "/api/v3/conferences", Some(&token), json!({"display_name": "Стоп"}))).await,
     )
     .await;
     let room_id = created["conference"]["id"].as_str().unwrap().to_string();
+    let started =
+        send(&app, request("POST", "/api/v3/sessions", Some(&token), json!({"conference_id": room_id}))).await;
+    assert_eq!(started.status(), StatusCode::OK);
     let response = send(&app, request("DELETE", &format!("/api/v3/sessions/{room_id}"), Some(&token), json!({}))).await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
@@ -142,18 +146,36 @@ async fn stopping_and_deleting_sessions_writes_history() {
     assert_eq!(body["count"], 1);
     assert_eq!(body["sessions"][0]["display_name"], "Стоп");
     assert_eq!(body["sessions"][0]["stop_reason"], "Manual");
+    assert!(body["sessions"][0]["dtmf"]
+        .as_str()
+        .is_some_and(|dtmf| dtmf.len() == 9 && dtmf.chars().all(|c| c.is_ascii_digit())));
 
-    // повторная остановка не создаёт дубль
+    // Повторная остановка не создаёт дубль (room_id+started_ms).
     let _ = send(&app, request("DELETE", &format!("/api/v3/sessions/{room_id}"), Some(&token), json!({}))).await;
     let body = json_body(send(&app, request("GET", "/api/v3/call_history", Some(&token), json!({}))).await).await;
-    assert_eq!(body["count"], 1, "dedupe по room_id+started_at");
+    assert_eq!(body["count"], 1, "dedupe по room_id+started_ms");
 
-    // удаление активной сессии пишет reason=Deleted
+    // Конференция, которую никогда не запускали, в историю не попадает.
+    let never = json_body(
+        send(&app, request("POST", "/api/v3/conferences", Some(&token), json!({"display_name": "НеЗапуск"}))).await,
+    )
+    .await;
+    let never_id = never["conference"]["id"].as_str().unwrap().to_string();
+    let response =
+        send(&app, request("DELETE", &format!("/api/v3/conferences/{never_id}"), Some(&token), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let body = json_body(send(&app, request("GET", "/api/v3/call_history", Some(&token), json!({}))).await).await;
+    assert_eq!(body["count"], 1, "never-started delete не пишет историю");
+
+    // Удаление активной (запущенной) сессии пишет reason=Deleted.
     let created = json_body(
         send(&app, request("POST", "/api/v3/conferences", Some(&token), json!({"display_name": "Удал"}))).await,
     )
     .await;
     let active_id = created["conference"]["id"].as_str().unwrap().to_string();
+    let started =
+        send(&app, request("POST", "/api/v3/sessions", Some(&token), json!({"conference_id": active_id}))).await;
+    assert_eq!(started.status(), StatusCode::OK);
 
     let response =
         send(&app, request("DELETE", &format!("/api/v3/conferences/{active_id}"), Some(&token), json!({}))).await;
@@ -167,6 +189,31 @@ async fn stopping_and_deleting_sessions_writes_history() {
     assert_eq!(body["count"], 2);
     assert_eq!(body["sessions"][0]["display_name"], "Удал");
     assert_eq!(body["sessions"][0]["stop_reason"], "Deleted");
+}
+
+#[tokio::test]
+async fn quick_session_gets_identity_and_history_entry() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let quick = json_body(
+        send(&app, request("POST", "/api/v3/sessions/quick", Some(&token), json!({"display_name": "Quick T22"}))).await,
+    )
+    .await;
+    let room_id = quick["session"]["id"].as_str().unwrap().to_string();
+    let dtmf = quick["session"]["primary_dtmf"]["name"].as_str().unwrap_or_default().to_string();
+    assert_eq!(dtmf.len(), 9, "{quick}");
+    let route = quick["session"]["primary_route"]["name"].as_str().unwrap_or_default();
+    assert_eq!(route, "Quick T22");
+
+    let stopped = send(&app, request("DELETE", &format!("/api/v3/sessions/{room_id}"), Some(&token), json!({}))).await;
+    assert_eq!(stopped.status(), StatusCode::NO_CONTENT);
+    let body = json_body(send(&app, request("GET", "/api/v3/call_history", Some(&token), json!({}))).await).await;
+    assert_eq!(body["count"], 1);
+    assert_eq!(body["sessions"][0]["dtmf"], dtmf);
+    assert_eq!(body["sessions"][0]["route"], "Quick T22");
+    assert_eq!(body["sessions"][0]["creator"]["contact_type"], "users");
+    assert_ne!(body["sessions"][0]["creator"]["id"], "");
 }
 
 #[tokio::test]
@@ -290,4 +337,64 @@ async fn session_export_returns_downloadable_zip() {
 
     let missing = send(&app, request("GET", "/api/v3/call_history/unknown/export", Some(&token), json!({}))).await;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+/// Дата-фильтр vendor-UI (`date_from`/`date_to`, секунды) реально сужает
+/// список и экспорт; clean инвалидирует ранее выданные архивы.
+#[tokio::test]
+async fn date_filter_and_clean_invalidate_exports() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let room = Rooms::create_async(&state, "Дата-фильтр").await.unwrap();
+    record_stopped(&state, &room, "caller", "Manual").await;
+
+    let future = (crate::state::now_unix_ms() / 1000 + 86_400) as i64;
+    let body = json_body(
+        send(&app, request("GET", &format!("/api/v3/call_history?date_from={future}"), Some(&token), json!({}))).await,
+    )
+    .await;
+    assert_eq!(body["count"], 0, "{body}");
+    let body = json_body(
+        send(&app, request("GET", "/api/v3/call_history?date_from=1&date_to=4102444800", Some(&token), json!({})))
+            .await,
+    )
+    .await;
+    assert_eq!(body["count"], 1);
+    let export = json_body(
+        send(&app, request("GET", "/api/v3/call_history/export?date_from=4102444800", Some(&token), json!({}))).await,
+    )
+    .await;
+    let filename = export["filename"].as_str().unwrap().to_string();
+    assert!(filename.ends_with(".zip"));
+    assert!(filename.contains("Conference_history_"));
+    // Имя содержит случайный токен (Uuid без дефисов) — не угадывается.
+    let token_part = filename.trim_end_matches(".zip").rsplit('_').next().unwrap();
+    assert_eq!(token_part.len(), 32, "{filename}");
+
+    let download = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!("/static/call_history/{filename}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(download.status(), StatusCode::OK);
+
+    let clean = send(&app, request("POST", "/api/v3/call_history/clean", Some(&token), json!({}))).await;
+    assert_eq!(clean.status(), StatusCode::OK);
+    let missing = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!("/static/call_history/{filename}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND, "clean должен инвалидировать старые выгрузки");
 }

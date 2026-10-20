@@ -213,6 +213,13 @@ const summary = {
         session.stopper && typeof session.stopper.display_name === 'string' &&
         session.payload && typeof session.payload.bitrate === 'number';
       summary.acceptance.history_dtmf_route = session.dtmf === dtmf && session.route === CONF_NAME;
+      // Vendor-UI шлёт date_from/date_to (секунды): будущая дата → 0, широкий
+      // диапазон → запись на месте (иначе фильтр дат в UI — no-op).
+      const future = Math.floor(Date.now() / 1000) + 86400;
+      const none = await api(`/api/v3/call_history?date_from=${future}`);
+      const wide = await api('/api/v3/call_history?date_from=1&date_to=4102444800');
+      summary.acceptance.history_date_filter =
+        none.status === 200 && none.json.count === 0 && wide.status === 200 && wide.json.count >= 1;
       return session;
     });
 
@@ -245,13 +252,25 @@ const summary = {
       if (exported.status !== 200) throw new Error(`export ${exported.status}`);
       const filename = exported.json.filename;
       if (!filename || !filename.endsWith('.zip')) throw new Error(`export filename: ${filename}`);
-      summary.export = { filename };
       const download = await page.request.get(BASE + `/static/call_history/${filename}`);
       if (download.status() !== 200) throw new Error(`static export ${download.status()}`);
       const bytes = await download.body();
       const csvHeader = Buffer.from('Название', 'utf8');
       summary.acceptance.export_zip = bytes.length > 100 && bytes.subarray(0, 4).equals(Buffer.from('PK\x03\x04'));
-      summary.acceptance.export_csv_header = bytes.includes(csvHeader);
+      // Реальная проверка архива: unzip -t + извлечённый CSV (а не только PK).
+      const zipPath = path.join(OUT, '.export-check.zip');
+      fs.writeFileSync(zipPath, bytes);
+      const test = sh(`unzip -t ${JSON.stringify(zipPath)} 2>&1`);
+      const unzipDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 't22-unzip-'));
+      sh(`unzip -o -q ${JSON.stringify(zipPath)} -d ${JSON.stringify(unzipDir)} 2>&1`);
+      const csvFile = fs.readdirSync(unzipDir).find((name) => name.endsWith('.csv'));
+      const csvText = csvFile ? fs.readFileSync(path.join(unzipDir, csvFile), 'utf8') : '';
+      fs.rmSync(unzipDir, { recursive: true, force: true });
+      fs.unlinkSync(zipPath);
+      summary.acceptance.export_zip_integrity = /No errors detected|OK/.test(test) && csvText.startsWith('Название;ID;Маршрут;');
+      summary.acceptance.export_csv_rows =
+        csvText.includes(CONF_NAME) && csvText.includes('Administrator') && csvText.includes(dtmf);
+      summary.export = { ...(summary.export || {}), filename, csv_bytes: Buffer.byteLength(csvText) };
       const pageSize = await api('/api/v3/call_history?page_size=1');
       summary.acceptance.history_pagination =
         pageSize.status === 200 && Array.isArray(pageSize.json.sessions) && pageSize.json.sessions.length <= 1 && pageSize.json.count >= 1;
@@ -290,12 +309,20 @@ const summary = {
       const row = page.locator('.history-table-item').filter({ hasText: CONF_NAME }).first();
       await row.waitFor({ timeout: 10000 });
       const downloadPromise = page.waitForEvent('download', { timeout: 15000 });
+      const responsePromise = page.waitForResponse(
+        (response) => response.url().includes(`/api/v3/call_history/${historyId}/export`),
+        { timeout: 15000 },
+      );
       await row.locator('button').last().click();
-      const download = await downloadPromise;
+      const [download, response] = await Promise.all([downloadPromise, responsePromise]);
       const filename = download.suggestedFilename();
       if (!filename.endsWith('.zip')) throw new Error(`UI export filename: ${filename}`);
+      if (response.status() !== 200) throw new Error(`UI session export ${response.status()}`);
+      const pathOnDisk = await download.path();
+      const test = sh(`unzip -t ${JSON.stringify(pathOnDisk)} 2>&1`);
       summary.export = { ...(summary.export || {}), ui_filename: filename };
-      summary.acceptance.history_export_ui = true;
+      summary.acceptance.history_export_ui =
+        /No errors detected|OK/.test(test) && filename.includes('Conference_history_') && response.url().includes('/export');
     });
 
     // 8. clean через API и пустой список в UI
@@ -307,6 +334,11 @@ const summary = {
       if (!backup || !backup.includes('backup')) throw new Error(`clean backup filename: ${backup}`);
       const check = await api('/api/v3/call_history');
       summary.acceptance.history_clean = check.status === 200 && check.json.count === 0;
+      // Старые выгрузки инвалидируются clean (иначе утёкший URL живёт вечно).
+      const stale = summary.export && summary.export.filename
+        ? await page.request.get(BASE + `/static/call_history/${summary.export.filename}`)
+        : null;
+      summary.acceptance.export_invalidated_after_clean = !!stale && stale.status() === 404;
       return cleaned.json;
     });
     await record('history-empty-ui', async () => {

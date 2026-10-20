@@ -38,6 +38,10 @@ pub struct HistorySession {
     pub room_id: String,
     pub display_name: String,
     pub started_at: i64,
+    /// Точное время старта в мс: дедуп повторной остановки не должен склеивать
+    /// два старта в одну секунду.
+    #[serde(default)]
+    pub started_ms: u64,
     pub stopped_at: i64,
     pub stop_reason: String,
     #[serde(default)]
@@ -87,8 +91,14 @@ const MAX_SESSIONS: usize = 500;
 
 impl HistoryState {
     fn record(&mut self, session: HistorySession) {
-        // Повторная остановка уже записанной сессии не создаёт дубль.
-        if self.sessions.iter().any(|s| s.room_id == session.room_id && s.started_at == session.started_at) {
+        // Повторная остановка уже записанной сессии не создаёт дубль; сравнение
+        // по мс (а не секундам) не склеивает соседние старты.
+        let started_ms =
+            if session.started_ms != 0 { session.started_ms } else { (session.started_at.max(0) as u64) * 1000 };
+        if self.sessions.iter().any(|s| {
+            let existing_ms = if s.started_ms != 0 { s.started_ms } else { (s.started_at.max(0) as u64) * 1000 };
+            s.room_id == session.room_id && existing_ms == started_ms
+        }) {
             return;
         }
         self.sessions.insert(0, session);
@@ -112,6 +122,11 @@ pub struct HistoryQuery {
     pub search: Option<String>,
     pub started_at: Option<i64>,
     pub stopped_at: Option<i64>,
+    /// Vendor-UI присылает `date_from`/`date_to` (см. api.bundle `f()`).
+    #[serde(default, alias = "dateFrom")]
+    pub date_from: Option<i64>,
+    #[serde(default, alias = "dateTo")]
+    pub date_to: Option<i64>,
     pub from: Option<i64>,
     pub to: Option<i64>,
     pub creator_id: Option<String>,
@@ -120,8 +135,8 @@ pub struct HistoryQuery {
 impl HistoryQuery {
     fn filtered<'a>(&self, sessions: &'a [HistorySession]) -> Vec<&'a HistorySession> {
         let needle = self.display_name.as_deref().or(self.search.as_deref()).map(str::to_lowercase);
-        let from = self.started_at.or(self.from);
-        let to = self.stopped_at.or(self.to);
+        let from = self.started_at.or(self.from).or(self.date_from);
+        let to = self.stopped_at.or(self.to).or(self.date_to);
         let mut rows: Vec<&HistorySession> = sessions
             .iter()
             .filter(|s| {
@@ -186,42 +201,29 @@ async fn contact_json(state: &AppState, id: &str) -> Value {
     })
 }
 
-fn route_label(state: &AppState, room_id: &RoomId) -> Option<String> {
-    state
-        .api_v3
-        .conference_settings
-        .lock()
-        .ok()
-        .and_then(|settings| settings.get(room_id).cloned())
-        .and_then(|settings| settings.get("route").and_then(Value::as_str).map(str::to_string))
-        .filter(|route| !route.is_empty())
+fn conference_settings(state: &AppState, room_id: &RoomId) -> Option<Value> {
+    state.api_v3.conference_settings.lock().ok().and_then(|settings| settings.get(room_id).cloned())
 }
 
-fn dtmf_label(state: &AppState, room_id: &RoomId) -> Option<String> {
-    state
-        .api_v3
-        .conference_settings
-        .lock()
-        .ok()
-        .and_then(|settings| settings.get(room_id).cloned())
-        .and_then(|settings| settings.get("dtmf").and_then(Value::as_str).map(str::to_string))
-        .filter(|dtmf| !dtmf.is_empty())
+fn setting_str(settings: &Option<Value>, key: &str) -> Option<String> {
+    settings
+        .as_ref()
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
 }
 
-fn creator_id(state: &AppState, room_id: &RoomId) -> String {
-    state
-        .api_v3
-        .conference_settings
-        .lock()
-        .ok()
-        .and_then(|settings| settings.get(room_id).cloned())
-        .and_then(|settings| {
-            settings.get("creator_id").or_else(|| settings.get("owner_id")).and_then(Value::as_str).map(str::to_string)
-        })
-        .unwrap_or_default()
+fn creator_id(settings: &Option<Value>) -> String {
+    setting_str(settings, "creator_id").or_else(|| setting_str(settings, "owner_id")).unwrap_or_default()
 }
 
-fn session_calls(state: &AppState, room: &RoomRecord, stopped_at: i64) -> Vec<HistoryCall> {
+fn session_calls(
+    state: &AppState,
+    room: &RoomRecord,
+    stopped_at: i64,
+    participants: &[crate::hub::ParticipantSnapshot],
+) -> Vec<HistoryCall> {
     let attempts = state.api_v3.call_attempts.lock().map(|attempts| attempts.clone()).unwrap_or_default();
     let mut calls = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -231,9 +233,23 @@ fn session_calls(state: &AppState, room: &RoomRecord, stopped_at: i64) -> Vec<Hi
         }
         let finished = attempt.completed_at.map(|ts| ts as i64).unwrap_or(stopped_at);
         let finish_reason = native_stop_reason(attempt.failure_reason.as_deref().unwrap_or("Ended By Remote"));
+        // Время вызова — когда адрес создан/начат, а не старт всей сессии.
+        let started_at = (attempt.record.created_at as i64).min(finished).max(0);
+        let abonents: Vec<Value> = attempt
+            .participant_id
+            .as_deref()
+            .and_then(|participant_id| participants.iter().find(|p| p.participant_id == participant_id))
+            .map(|participant| {
+                vec![json!({
+                    "id": participant.participant_id,
+                    "display_name": participant.display_name,
+                    "connected_at": participant.connected_at,
+                })]
+            })
+            .unwrap_or_default();
         let invitation = json!({
             "display_name": attempt.record.display_name,
-            "created_at": room.created_ms as i64 / 1000,
+            "created_at": started_at,
             "finished_at": finished,
             "connection_url": uri,
             "abonent_id": attempt.participant_id,
@@ -244,36 +260,42 @@ fn session_calls(state: &AppState, room: &RoomRecord, stopped_at: i64) -> Vec<Hi
         });
         calls.push(HistoryCall {
             id: attempt.record.id,
-            started_at: room.created_ms as i64 / 1000,
+            started_at,
             deleted_at: Some(stopped_at),
             display_name: attempt.record.display_name,
             connection_url: uri,
             payload: attempt.record.payload,
             contact: None,
             invitations: vec![invitation],
-            abonents: Vec::new(),
+            abonents,
         });
     }
     calls.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()).then(a.id.cmp(&b.id)));
     calls
 }
 
-/// Записать остановленную сессию в историю и сохранить configuration-document.
 /// Вызывается ДО очистки `call_attempts`/участников, чтобы снимок был полным.
-pub async fn record_stopped(state: &SharedState, room: &RoomRecord, stopped_by: &str, reason: &str) {
+pub async fn record_stopped(state: &SharedState, room: &RoomRecord, stopped_by: &str, reason: &str) -> Option<String> {
+    record_stopped_with_settings(state, room, stopped_by, reason, None).await
+}
+
+/// Как [`record_stopped`], но с уже снятым снимком настроек: delete-путь
+/// удаляет настройки до записи, поэтому передаёт их явно.
+pub async fn record_stopped_with_settings(
+    state: &SharedState,
+    room: &RoomRecord,
+    stopped_by: &str,
+    reason: &str,
+    settings_override: Option<Value>,
+) -> Option<String> {
     let started_at = room.created_ms as i64 / 1000;
     let stopped_at = (now_unix_ms() / 1000) as i64;
     let participants = state.room_hub.list_participants(&room.id);
     let abonents_count = participants.len() as u32;
-    let calls = session_calls(state, room, stopped_at);
+    let calls = session_calls(state, room, stopped_at, &participants);
+    let settings = settings_override.or_else(|| conference_settings(state, &room.id));
     let payload = {
-        let stored = state
-            .api_v3
-            .conference_settings
-            .lock()
-            .ok()
-            .and_then(|settings| settings.get(&room.id).cloned())
-            .unwrap_or_else(|| json!({}));
+        let stored = settings.clone().unwrap_or_else(|| json!({}));
         let mut payload = Value::Object(conference_payload_defaults());
         if let (Some(target), Some(stored)) = (payload.as_object_mut(), stored.as_object()) {
             for (key, value) in stored {
@@ -287,25 +309,34 @@ pub async fn record_stopped(state: &SharedState, room: &RoomRecord, stopped_by: 
         room_id: room.id.to_string(),
         display_name: room.name.clone(),
         started_at,
+        started_ms: room.created_ms,
         stopped_at,
         stop_reason: reason.to_string(),
         abonents_count,
-        creator_id: creator_id(state, &room.id),
+        creator_id: creator_id(&settings),
         stopped_by: stopped_by.to_string(),
         calls,
-        dtmf: dtmf_label(state, &room.id),
-        route: route_label(state, &room.id),
+        dtmf: setting_str(&settings, "dtmf"),
+        route: setting_str(&settings, "route"),
         payload,
     };
-    let (previous, updated) = {
-        let mut resources = state.api_v3.resources.lock().await;
-        let previous = resources.clone();
-        resources.history.record(session);
-        (previous, resources.clone())
-    };
-    if let Err(error) = super::resources::persist(state, &updated).await {
-        *state.api_v3.resources.lock().await = previous;
+    let session_id = session.id.clone();
+    let mut resources = state.api_v3.resources.lock().await;
+    let previous = resources.clone();
+    resources.history.record(session);
+    if let Err(error) = super::resources::persist(state, &resources).await {
+        *resources = previous;
         tracing::warn!(error = %error, "history: persist failed");
+        return None;
+    }
+    Some(session_id)
+}
+
+fn nullable_id(id: &str) -> Value {
+    if id.is_empty() {
+        Value::Null
+    } else {
+        json!(id)
     }
 }
 
@@ -318,7 +349,7 @@ fn session_list_json(session: &HistorySession, creator: &Value, stopper: &Value)
         "stop_reason": session.stop_reason,
         "abonents": session.abonents_count,
         "creator_id": session.creator_id,
-        "stopped_by": session.stopped_by,
+        "stopped_by": nullable_id(&session.stopped_by),
         "creator": creator,
         "stopper": stopper,
         "dtmf": session.dtmf,
@@ -379,7 +410,7 @@ pub async fn detail(
             "stop_reason": session.stop_reason,
             "abonents_count": session.abonents_count,
             "creator_id": session.creator_id,
-            "stopped_by": session.stopped_by,
+            "stopped_by": nullable_id(&session.stopped_by),
             "creator": creator,
             "stopper": stopper,
             "dtmf": session.dtmf,
@@ -448,7 +479,10 @@ pub async fn ui_call_history(
     if descending {
         calls.reverse();
     }
-    Json(json!({ "count": calls.len(), "call_strings": calls })).into_response()
+    let count = calls.len();
+    let (offset, size) = query.pagination();
+    let page: Vec<HistoryCall> = calls.into_iter().skip(offset).take(size).collect();
+    Json(json!({ "count": count, "call_strings": page })).into_response()
 }
 
 /// `GET /api/v3/call_history/export` → `{filename}`; файл отдаётся по
@@ -466,9 +500,16 @@ pub async fn export(
         let resources = state.api_v3.resources.lock().await;
         query.filtered(&resources.history.sessions).into_iter().cloned().collect::<Vec<_>>()
     };
-    let filename = format!("Conference_history_{}.zip", format_date_utc((now_unix_ms() / 1000) as i64));
-    let archive = build_history_zip(&filename.replace(".zip", ".csv"), &sessions);
-    state.api_v3.history_exports.lock().expect("history_exports poisoned").insert(filename.clone(), archive);
+    let names = contact_names(&state).await;
+    // Случайный токен: имя файла нельзя угадать, даже если роут статики
+    // vendor-совместимо отдаёт архивы без заголовка (UI скачивает через <a>).
+    let filename = format!(
+        "Conference_history_{}_{}.zip",
+        format_date_utc((now_unix_ms() / 1000) as i64),
+        uuid::Uuid::new_v4().simple()
+    );
+    let archive = build_history_zip(&filename.replace(".zip", ".csv"), &sessions, &names);
+    store_export(&state, &filename, archive);
     Json(json!({ "filename": filename })).into_response()
 }
 
@@ -487,9 +528,14 @@ pub async fn export_session(
     let Some(session) = session else {
         return super::error_json(404, "Session not found");
     };
-    let filename = format!("Conference_history_{}.zip", sanitize_filename(&session.display_name));
-    let archive = build_history_zip(&filename.replace(".zip", ".csv"), std::slice::from_ref(&session));
-    state.api_v3.history_exports.lock().expect("history_exports poisoned").insert(filename.clone(), archive);
+    let names = contact_names(&state).await;
+    let filename = format!(
+        "Conference_history_{}_{}.zip",
+        sanitize_filename(&session.display_name),
+        uuid::Uuid::new_v4().simple()
+    );
+    let archive = build_history_zip(&filename.replace(".zip", ".csv"), std::slice::from_ref(&session), &names);
+    store_export(&state, &filename, archive);
     Json(json!({ "filename": filename })).into_response()
 }
 
@@ -499,24 +545,38 @@ pub async fn clean(State(state): State<SharedState>, Extension(auth): Extension<
     if auth.role < Role::Operator || auth.room_scope.is_some() {
         return super::error_json(403, "Forbidden: Operator role required");
     }
-    let (previous, updated) = {
-        let mut resources = state.api_v3.resources.lock().await;
-        if resources.history.sessions.is_empty() {
-            return Json(json!({ "filename": Value::Null })).into_response();
-        }
-        let previous = resources.clone();
-        resources.history.sessions.clear();
-        (previous, resources.clone())
-    };
+    let names = contact_names(&state).await;
+    let mut resources = state.api_v3.resources.lock().await;
+    if resources.history.sessions.is_empty() {
+        return Json(json!({ "filename": Value::Null })).into_response();
+    }
+    let previous = resources.clone();
+    resources.history.sessions.clear();
     let stamp = format_date_utc((now_unix_ms() / 1000) as i64).replace('-', "");
-    let filename = format!("Conference_history_backup_{stamp}_{}.zip", now_unix_ms() % 100_000);
-    let archive = build_history_zip(&filename.replace(".zip", ".csv"), &previous.history.sessions);
-    state.api_v3.history_exports.lock().expect("history_exports poisoned").insert(filename.clone(), archive);
-    if let Err(error) = super::resources::persist(&state, &updated).await {
-        *state.api_v3.resources.lock().await = previous;
+    let filename = format!("Conference_history_backup_{stamp}_{}.zip", uuid::Uuid::new_v4().simple());
+    let archive = build_history_zip(&filename.replace(".zip", ".csv"), &previous.history.sessions, &names);
+    // Старые выгрузки больше не должны оставаться скачиваемыми после clean.
+    if let Ok(mut exports) = state.api_v3.history_exports.lock() {
+        exports.clear();
+        exports.insert(filename.clone(), archive);
+    }
+    if let Err(error) = super::resources::persist(&state, &resources).await {
+        *resources = previous;
+        drop(resources);
         return super::error_json(500, &format!("Storage error: {error}"));
     }
     Json(json!({ "filename": filename })).into_response()
+}
+
+/// Кладёт архив в bounded-карту: не более 32 файлов (старые вытесняются
+/// целиком при переполнении), чтобы память не росла с каждой выгрузкой.
+fn store_export(state: &AppState, filename: &str, archive: Vec<u8>) {
+    if let Ok(mut exports) = state.api_v3.history_exports.lock() {
+        if exports.len() >= 32 {
+            exports.clear();
+        }
+        exports.insert(filename.to_string(), archive);
+    }
 }
 
 /// `GET /static/call_history/{filename}` — скачивание ZIP (vendor отдаёт без
@@ -564,19 +624,42 @@ fn sanitize_filename(name: &str) -> String {
     }
 }
 
+/// Имена контактов для CSV: профиль справочника → Users (bootstrap =
+/// Administrator) → id. Vendor пишет в колонках «Запуск/Остановка» имена, а не
+/// UUID; ID-колонка — DTMF (тот же ID, что в UI), fallback — id сессии.
+async fn contact_names(state: &AppState) -> std::collections::HashMap<String, String> {
+    let mut names = std::collections::HashMap::new();
+    if let Ok(users) = state.users.lock() {
+        for user in users.values() {
+            let name = if user.id == vks_core::UserId::bootstrap_operator() {
+                "Administrator".to_string()
+            } else {
+                user.username.clone()
+            };
+            names.insert(user.id.to_string(), name);
+        }
+    }
+    let resources = state.api_v3.resources.lock().await;
+    for (id, profile) in &resources.directory.users {
+        names.insert(id.clone(), profile.display_name.clone());
+    }
+    names
+}
+
 /// CSV как у vendor: разделитель `;`, русские заголовки, даты
 /// `ДД.ММ.ГГГГ ЧЧ:ММ:СС` (UTC — системная TZ сервера не фиксирована).
-fn build_history_csv(sessions: &[HistorySession]) -> Vec<u8> {
+fn build_history_csv(sessions: &[HistorySession], names: &std::collections::HashMap<String, String>) -> Vec<u8> {
     let mut text =
         String::from("Название;ID;Маршрут;Время начала;Время окончания;Длительность;Участники;Запуск;Остановка\n");
     for session in sessions {
         let duration = (session.stopped_at - session.started_at).max(0);
-        let run = contact_label(session, &session.creator_id);
-        let stop = contact_label(session, &session.stopped_by);
+        let run = names.get(&session.creator_id).cloned().unwrap_or_else(|| session.creator_id.clone());
+        let stop = names.get(&session.stopped_by).cloned().unwrap_or_else(|| session.stopped_by.clone());
+        let id = session.dtmf.clone().unwrap_or_else(|| session.id.clone());
         text.push_str(&format!(
             "{};{};{};{};{};{};{};{};{}\n",
             csv_escape(&session.display_name),
-            csv_escape(&session.id),
+            csv_escape(&id),
             csv_escape(session.route.as_deref().unwrap_or("")),
             format_datetime(session.started_at),
             format_datetime(session.stopped_at),
@@ -589,27 +672,24 @@ fn build_history_csv(sessions: &[HistorySession]) -> Vec<u8> {
     text.into_bytes()
 }
 
-/// Имя контакта для CSV: профиль справочника по id, иначе id (vendor отдаёт
-/// `Administrator`; после удаления пользователя останется id — честнее пустоты).
-fn contact_label(_session: &HistorySession, id: &str) -> String {
-    if id.is_empty() {
-        String::new()
-    } else {
-        id.to_string()
-    }
-}
-
 fn csv_escape(value: &str) -> String {
+    // CSV-инъекция: ведущие =/+/-/@/TAB/CR Excel выполняет как формулу.
+    let value =
+        if value.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{value}") } else { value.to_string() };
     if value.contains([';', '"', '\n', '\r']) {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
-        value.to_string()
+        value
     }
 }
 
 /// ZIP (method store, как у vendor) с единственным CSV внутри.
-fn build_history_zip(csv_name: &str, sessions: &[HistorySession]) -> Vec<u8> {
-    let data = build_history_csv(sessions);
+fn build_history_zip(
+    csv_name: &str,
+    sessions: &[HistorySession],
+    names: &std::collections::HashMap<String, String>,
+) -> Vec<u8> {
+    let data = build_history_csv(sessions, names);
     let name = csv_name.as_bytes();
     let crc = crc32(&data);
     let (dos_time, dos_date) = dos_timestamp((now_unix_ms() / 1000) as i64);
@@ -643,8 +723,10 @@ fn build_history_zip(csv_name: &str, sessions: &[HistorySession]) -> Vec<u8> {
     out.extend_from_slice(&0u16.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
+    // Local header offset: единственная запись начинается с 0 (а не с позиции
+    // central directory — иначе unzip считает архивы «overlapped»).
     out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&central_offset.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(name);
     let central_size = out.len() as u32 - central_offset;
     out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
@@ -724,6 +806,7 @@ mod tests {
             room_id: format!("room-{name}"),
             display_name: name.to_string(),
             started_at: started,
+            started_ms: (started.max(0) as u64) * 1000,
             stopped_at: stopped,
             stop_reason: "Manual".into(),
             abonents_count: 2,
@@ -765,26 +848,47 @@ mod tests {
     fn csv_has_vendor_headers_and_escapes_values() {
         let mut evil = session("Name;with\"quotes", 0, 61);
         evil.route = Some("route;1".into());
-        let csv = String::from_utf8(build_history_csv(&[evil])).unwrap();
+        evil.dtmf = Some("123456789".into());
+        let mut names = std::collections::HashMap::new();
+        names.insert("creator".to_string(), "Administrator".to_string());
+        names.insert("stopper".to_string(), "Operator".to_string());
+        let csv = String::from_utf8(build_history_csv(&[evil], &names)).unwrap();
         assert!(csv
             .starts_with("Название;ID;Маршрут;Время начала;Время окончания;Длительность;Участники;Запуск;Остановка\n"));
         assert!(csv.contains("\"Name;with\"\"quotes\""));
+        assert!(csv.contains("123456789"), "ID-колонка = DTMF, как в UI: {csv}");
+        assert!(csv.contains("Administrator;Operator"), "имена вместо UUID: {csv}");
         assert!(csv.contains("00:01:01"));
         assert!(csv.contains("01.01.1970 00:00:00"));
+        // CSV-инъекция нейтрализуется апострофом.
+        let mut formula = session("=1+1", 0, 1);
+        formula.dtmf = None;
+        let csv = String::from_utf8(build_history_csv(&[formula], &names)).unwrap();
+        assert!(csv.contains("'=1+1"), "{csv}");
     }
 
     #[test]
     fn zip_is_valid_store_archive_with_single_csv() {
-        let archive = build_history_zip("Conference_history_2026-01-01.csv", &[session("Alpha", 0, 5)]);
+        let names = std::collections::HashMap::new();
+        let archive = build_history_zip("Conference_history_2026-01-01.csv", &[session("Alpha", 0, 5)], &names);
         assert_eq!(&archive[..4], b"PK\x03\x04");
-        assert_eq!(&archive[archive.len() - 22..archive.len() - 18], b"PK\x05\x06");
-        let name = b"Conference_history_2026-01-01.csv";
-        let found = archive.windows(name.len()).any(|w| w == name);
-        assert!(found);
-        // CRC/размеры локального заголовка согласованы с фактическим CSV.
-        let data = build_history_csv(&[session("Alpha", 0, 5)]);
-        assert_eq!(u32::from_le_bytes(archive[18..22].try_into().unwrap()) as usize, data.len());
-        assert_eq!(u32::from_le_bytes(archive[22..26].try_into().unwrap()) as usize, data.len());
+        let eocd = archive.len() - 22;
+        assert_eq!(&archive[eocd..eocd + 4], b"PK\x05\x06");
+        let cd_offset = u32::from_le_bytes(archive[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        assert_eq!(&archive[cd_offset..cd_offset + 4], b"PK\x01\x02");
+        // Central entry: local-header offset = 0 (иначе unzip: overlapped components).
+        let local_offset = u32::from_le_bytes(archive[cd_offset + 42..cd_offset + 46].try_into().unwrap());
+        assert_eq!(local_offset, 0);
+        let name_len = u16::from_le_bytes(archive[26..28].try_into().unwrap()) as usize;
+        let extra_len = u16::from_le_bytes(archive[28..30].try_into().unwrap()) as usize;
+        let data_start = 30 + name_len + extra_len;
+        let data_len = u32::from_le_bytes(archive[18..22].try_into().unwrap()) as usize;
+        let local_crc = u32::from_le_bytes(archive[14..18].try_into().unwrap());
+        let expected = build_history_csv(&[session("Alpha", 0, 5)], &names);
+        // Реальное извлечение: CRC и байты CSV совпадают с записанными.
+        assert_eq!(&archive[data_start..data_start + data_len], expected.as_slice());
+        assert_eq!(local_crc, crc32(&expected));
+        assert_eq!(u32::from_le_bytes(archive[22..26].try_into().unwrap()) as usize, expected.len());
     }
 
     #[test]

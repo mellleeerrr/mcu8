@@ -403,7 +403,11 @@ pub async fn start_session(
                     state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").remove(&r.id);
                 if was_stopped {
                     // Повторный запуск — новая сессия в истории (новый started_at).
-                    crate::rooms::Rooms::reset_created_ms(&state, &r.id).await.ok().flatten().unwrap_or(r)
+                    match crate::rooms::Rooms::reset_created_ms(&state, &r.id).await {
+                        Ok(Some(record)) => record,
+                        Ok(None) => return error_json(404, "Conference not found"),
+                        Err(error) => return error_json(500, &format!("Storage error: {error}")),
+                    }
                 } else {
                     r
                 }
@@ -417,7 +421,7 @@ pub async fn start_session(
         }
     };
     if let Ok(mut settings) = state.api_v3.conference_settings.lock() {
-        ensure_conference_identity(&mut settings, &room);
+        ensure_conference_identity(&mut settings, &room, &auth.subject, true);
     }
     // A live room inherits its definition resources; template contacts remain stable.
     if let Err(response) = prepare_session_resources(&state, &room.id.to_string(), &auth.subject).await {
@@ -500,6 +504,11 @@ pub async fn quick_session(
         Ok(r) => r,
         Err(e) => return error_json(500, &format!("Storage error: {e}")),
     };
+    // Быстрая сессия — полноценная сессия: creator/route/DTMF и маркер старта,
+    // иначе карточка и история показывают «ID: -», а delete не знает о старте.
+    if let Ok(mut settings) = state.api_v3.conference_settings.lock() {
+        ensure_conference_identity(&mut settings, &room, &auth.subject, true);
+    }
     // Быстрая сессия тоже имеет «Общую» раскладку — иначе UI-сессия падает на `.some`.
     if let Err(response) = prepare_session_resources(&state, &room.id.to_string(), &auth.subject).await {
         return response;
@@ -627,12 +636,22 @@ fn free_dtmf(settings: &std::collections::HashMap<vks_core::RoomId, Value>) -> S
 
 /// Дозаполняет route/dtmf у сессии, созданной до T2.2 или через quick-start:
 /// иначе history/карточка показывают «ID: -», а vendor-UI ждёт реальные значения.
-fn ensure_conference_identity(settings: &mut std::collections::HashMap<vks_core::RoomId, Value>, room: &RoomRecord) {
+fn ensure_conference_identity(
+    settings: &mut std::collections::HashMap<vks_core::RoomId, Value>,
+    room: &RoomRecord,
+    creator: &str,
+    mark_started: bool,
+) {
     let missing_dtmf = settings.get(&room.id).and_then(|value| value.get("dtmf")).is_none_or(|value| value.is_null());
     let code = missing_dtmf.then(|| free_dtmf(settings));
     let entry = settings.entry(room.id).or_insert_with(|| json!({}));
     let Some(object) = entry.as_object_mut() else { return };
     object.entry("route").or_insert_with(|| json!(room.name));
+    object.entry("creator_id").or_insert_with(|| json!(creator));
+    object.entry("owner_id").or_insert_with(|| json!(creator));
+    if mark_started {
+        object.insert("started_at".to_string(), json!(crate::state::now_unix_ms() / 1000));
+    }
     if let Some(code) = code {
         object.insert("dtmf".to_string(), json!(code));
     }
@@ -803,12 +822,47 @@ pub async fn delete_conference(
     }
     match find_room(&state, &id) {
         Some(room) => {
-            // `record_stopped` дедуплицирует уже остановленную сессию (room+started_at),
-            // поэтому вызов безопасен и для только что созданной (ещё не запущенной)
-            // конференции — она попадёт в историю как `Deleted`.
-            super::history::record_stopped(&state, &room, &auth.subject, "Deleted").await;
+            let settings_snapshot =
+                state.api_v3.conference_settings.lock().ok().and_then(|settings| settings.get(&room.id).cloned());
+            // В историю попадает только реально запущенная сессия (маркер
+            // `started_at` ставится стартом/quick-start), и только если удаление
+            // действительно состоялось.
+            let started = settings_snapshot.as_ref().is_some_and(|settings| settings.get("started_at").is_some());
+            let participant_ids: Vec<String> = state
+                .room_hub
+                .list_participants(&room.id)
+                .into_iter()
+                .map(|participant| participant.participant_id)
+                .collect();
             match Rooms::delete_async(&state, &room.id).await {
                 Ok(true) => {
+                    if started {
+                        super::history::record_stopped_with_settings(
+                            &state,
+                            &room,
+                            &auth.subject,
+                            "Deleted",
+                            settings_snapshot,
+                        )
+                        .await;
+                    }
+                    super::call_strings::cancel_pending_calls(&state, &room.id);
+                    for participant in &participant_ids {
+                        Rooms::kick_participant(&state, &room.id, participant);
+                    }
+                    state.api_v3.scheduled_calls.lock().expect("scheduled_calls poisoned").remove(&room.id);
+                    state
+                        .api_v3
+                        .in_flight_calls
+                        .lock()
+                        .expect("in_flight_calls poisoned")
+                        .retain(|(room_id, _), _| *room_id != room.id);
+                    state
+                        .api_v3
+                        .call_attempts
+                        .lock()
+                        .expect("call_attempts poisoned")
+                        .retain(|(room_id, _), _| *room_id != room.id);
                     state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").remove(&room.id);
                     state.api_v3.conference_settings.lock().ok().map(|mut m| m.remove(&room.id));
                     super::resources::purge_room_resources(&state, &room.id.to_string()).await;

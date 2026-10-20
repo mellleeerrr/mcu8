@@ -79,7 +79,7 @@ pub async fn profile(State(state): State<SharedState>, Extension(verified): Exte
             "role": role.as_str(),
             "permissions": permissions,
             "locale_id": "ru_RU",
-            "time_zone_id": "UTC",
+            "time_zone_id": system_timezone(),
             "groups": [],
             "emails": [],
             "phones": [],
@@ -279,21 +279,39 @@ pub async fn engine_diagnostics() -> Response {
 pub async fn system_time() -> Response {
     track("system/time");
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    // Vendor-UI форматирует время списка по `time.timezone`; «UTC» при
+    // локальном браузере давал расхождение со страницей детали.
+    let timezone = system_timezone();
     let time_obj = json!({
         "time": now,
-        "timezone": "UTC",
+        "timezone": timezone,
         "ntp": false,
         "ntp_name": "",
         "ntp_synchronized": false
     });
     Json(json!({
         "time": time_obj,
-        "timezone": "UTC",
+        "timezone": timezone,
         "ntp": false,
         "ntp_name": "",
         "ntp_synchronized": false
     }))
     .into_response()
+}
+
+/// IANA-таймзона хоста: `TZ` → `/etc/timezone` → UTC.
+fn system_timezone() -> String {
+    if let Ok(tz) = std::env::var("TZ") {
+        let tz = tz.trim().trim_start_matches(':');
+        if !tz.is_empty() {
+            return tz.to_string();
+        }
+    }
+    std::fs::read_to_string("/etc/timezone")
+        .ok()
+        .map(|tz| tz.trim().to_string())
+        .filter(|tz| !tz.is_empty())
+        .unwrap_or_else(|| "UTC".to_string())
 }
 
 /// `GET /api/v3/settings/calls` → кодеки/лимиты/TURN из наших `Settings` (§4.5).
