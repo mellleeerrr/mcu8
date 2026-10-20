@@ -528,3 +528,55 @@ layout, attach abonent) → вкладка «Раскладки» и перез�
 Доказательства: `docs/progress/evidence/acceptance/` — `summary.json` (id, медиастатистика,
 API-мутации, пошаговая атрибуция) и скриншоты `01-session-started.png` …
 `07-after-reload.png`.
+
+## 8. Прогресс порта: T1.5 (2026-10-20)
+
+### 8.1. Автодополнение и адресная книга
+
+- Vendor-контракт (бандл 2.2.1.66): автодополнение «Добавить по адресу» — это
+  `GET /api/v3/ui/call_strings?page=1&page_size=5&sort_field=created_at&sort_order=1&uri=<текст>&is_binded=true`
+  (debounce 300 мс, минимум 1 символ; `protocols` — CSV, только когда протокол не auto),
+  ответ `{count, call_strings:[{id,uri,display_name,created_at,busy,payload,contact}]}`.
+  Никаких `/pnm/addresses` и `/api/v3/ui/addresses` у vendor нет: `/pnm/addresses`
+  редиректит на список сессий, а адреса живут в глобальной книге и вкладке Addresses
+  карточки пользователя (`/addressbook/users/{id}`).
+- Реализовано: `ResourceState.addresses` (персистентно в configuration document,
+  `deserialize_addresses` толерантно чинит/чистит битые записи), CRUD `/api/v3/call_strings[/{id}]`
+  и `/api/v3/ui/call_strings[...]` (201/204, 400 на валидацию, 403 для Viewer,
+  канонизация `uri`, слияние `payload` по протоколам). Список поддерживает
+  `page/page_size/sort_field/sort_order/search/protocols/uri/includeAddresses/excludeAddresses`;
+  `page/sort` — общий `ListParams`, `PATCH`/`DELETE` резолвят и глобальные адреса,
+  и контакты комнаты (vendor `editAddress(addressId)`);
+  WS `ui:call_strings:search` (`process_frame` стал async) использует тот же
+  источник, фильтры, дефолты (`page_size=100`) и `AuthContext` (`room_scope` +
+  `Users::resolve_role`), поэтому таблица адресов и автодополнение не расходятся.
+  Чтение книги — Moderator+ (как глобальные ресурсы), запись — Operator и только
+  не-room-scoped токеном. Vendor-параметр `is_binded` игнорируется: книга глобальная,
+  привязки к пользователю — T2.1.
+- Проверено в браузере: сохранённый `h323:192.168.1.132` («Зал 132 (h323)») появляется
+  подсказкой при вводе `192.168`; клик заполняет протокол H.323, адрес и имя; «Добавить»
+  поднимает реальный H.323-вызов (PCMU + H.264 640x360 rx/tx).
+
+### 8.2. Аудиоканалы
+
+- Вкладка «Аудиоканалы» получает `GET /sessions/{id}/audiochannels` с
+  `page/page_size/sort_field/sort_order/search`; список теперь честно фильтруется,
+  сортируется и пагинируется. `speakers`/`listeners` в записи — счётчики из массивов
+  `payload`, пересчитываются при create/PATCH и при загрузке после рестарта.
+- Create: `POST /api/v3/audiochannels` (201) → attach `POST /sessions/{id}/audiochannels/{id}`
+  (204); после перезагрузки канал остаётся в таблице. Привязки аудиоканалов больше не
+  теряются при `normalize_loaded` (prune учитывает оба типа ресурсов, а не только раскладки).
+- `/ui/sessions/{id}/audiochannels` и `/ui/conferences/{id}/audiochannels[/{id}]` —
+  алиасы для полноты контракта; vendor зовёт без `/ui`.
+
+### 8.3. Приёмка и ограничения
+
+- Прогон `docs/progress/evidence/t15/`: release pid 539438, sha256 `0cc776ba…`
+  (git head/сборка — в `summary.json → build`), сессия `ac17184d-…`, канал
+  `d50789a4-…`, автодополнение «Зал 132 (h323)», H.323 `192.168.1.132` connected
+  (PCMU rx/tx ~176/349 пакетов, H.264 640x360 rx/tx ~59/371), 0 ошибок на шагах
+  аудио/адреса; 6 transient vendor TypeError на шаге открытия формы создания
+  конференции (известная категория, 0 HTTP≥400).
+- Отложено в T2.1: `contact_id` и `/api/v3/ui/users/{id}/call_strings` (адресная книга
+  пользователя, вкладка Addresses), `is_binded`-привязки. `busy` в выдаче всегда false,
+  дубли адресов не отклоняются — P3-бэклог.

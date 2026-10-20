@@ -379,7 +379,7 @@ async fn send(app: &Router, req: Request<Body>) -> Response {
     app.clone().oneshot(req).await.expect("oneshot")
 }
 
-async fn json_body(response: Response) -> Value {
+pub(crate) async fn json_body(response: Response) -> Value {
     let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.expect("body");
     serde_json::from_slice(&bytes).expect("json body")
 }
@@ -1679,6 +1679,26 @@ async fn step2_call_strings_and_invite_vertical() {
     let limit_body = json_body(limit_resp).await;
     assert_eq!(limit_body["error"]["code"], 409);
     assert_eq!(limit_body["error"]["description"], "Too many connections");
+
+    // 14. Лимит комнаты (`conference_settings.connections_limit`) приоритетнее
+    // системного умолчания: системный лимит поднимаем, комнатный ставим 1.
+    let mut curr_settings = crate::settings::SettingsService::get(&state);
+    curr_settings.limits.max_participants_per_room = 50;
+    crate::settings::SettingsService::set(&state, curr_settings);
+    let room = conf_id.parse::<RoomId>().unwrap();
+    state.api_v3.conference_settings.lock().unwrap().insert(room, json!({"connections_limit": 1}));
+    let room_limit_resp = send(
+        &app_router,
+        request(
+            "POST",
+            &format!("/api/v3/ui/sessions/{conf_id}/call_strings"),
+            Some(&token),
+            json!({ "uri": "192.168.1.200", "display_name": "Room-limit Terminal" }),
+        ),
+    )
+    .await;
+    assert_eq!(room_limit_resp.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(room_limit_resp).await["error"]["description"], "Too many connections");
 }
 
 type MediaControlRecord = (String, Option<bool>, Option<bool>, Option<u32>, Option<u32>);

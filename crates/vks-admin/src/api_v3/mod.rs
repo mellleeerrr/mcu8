@@ -160,12 +160,22 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/v3/conferences/{id}/audiochannels", get(resources::list_linked))
         .route("/api/v3/sessions/{id}/audiochannels", get(resources::list_linked))
+        .route("/api/v3/ui/conferences/{id}/audiochannels", get(resources::list_linked))
+        .route("/api/v3/ui/sessions/{id}/audiochannels", get(resources::list_linked))
         .route(
             "/api/v3/conferences/{id}/audiochannels/{resource_id}",
             get(resources::get_linked).patch(resources::edit_linked).post(resources::attach).delete(resources::detach),
         )
         .route(
             "/api/v3/sessions/{id}/audiochannels/{resource_id}",
+            get(resources::get_linked).patch(resources::edit_linked).post(resources::attach).delete(resources::detach),
+        )
+        .route(
+            "/api/v3/ui/conferences/{id}/audiochannels/{resource_id}",
+            get(resources::get_linked).patch(resources::edit_linked).post(resources::attach).delete(resources::detach),
+        )
+        .route(
+            "/api/v3/ui/sessions/{id}/audiochannels/{resource_id}",
             get(resources::get_linked).patch(resources::edit_linked).post(resources::attach).delete(resources::detach),
         )
         .route("/api/v3/sessions/{id}/video_layouts/{resource_id}/abonents", get(resources::layout_abonents))
@@ -216,10 +226,20 @@ pub fn router(state: SharedState) -> Router {
             post(call_strings::create_session_call_string_standby),
         )
         .route("/api/v3/sessions/{id}/invite/call_strings/list", post(call_strings::invite_session_call_strings_list))
-        .route("/api/v3/call_strings", get(call_strings::list_call_strings))
-        .route("/api/v3/ui/call_strings", get(call_strings::list_call_strings))
-        .route("/api/v3/call_strings/{id}", get(call_strings::get_call_string))
-        .route("/api/v3/ui/call_strings/{id}", get(call_strings::get_call_string))
+        .route("/api/v3/call_strings", get(call_strings::list_call_strings).post(call_strings::create_call_string))
+        .route("/api/v3/ui/call_strings", get(call_strings::list_call_strings).post(call_strings::create_call_string))
+        .route(
+            "/api/v3/call_strings/{id}",
+            get(call_strings::get_call_string)
+                .patch(call_strings::update_call_string)
+                .delete(call_strings::delete_call_string),
+        )
+        .route(
+            "/api/v3/ui/call_strings/{id}",
+            get(call_strings::get_call_string)
+                .patch(call_strings::update_call_string)
+                .delete(call_strings::delete_call_string),
+        )
         .route(
             "/api/v3/sessions/{id}/contacts",
             get(sessions::conference_contacts).delete(sessions::remove_session_contacts_batch),
@@ -270,6 +290,112 @@ pub fn router(state: SharedState) -> Router {
         // Fail-closed: jwt_issuer=None → 503 на **весь** /api/v3 (включая login и ws).
         .layer(middleware::from_fn_with_state(state.clone(), auth::fail_closed_middleware))
         .with_state(state)
+}
+
+/// Общий контракт списков PNM: подстрочный поиск по имени/uri, сортировка
+/// (`created_at`/`display_name`, `sort_order=1` — по убыванию) и пагинация.
+/// Используется адресной книгой и списками ресурсов, чтобы формы не расходились.
+pub(crate) fn sort_and_page(
+    mut items: Vec<serde_json::Value>,
+    search: &str,
+    sort_field: &str,
+    sort_order: i64,
+    page: usize,
+    page_size: usize,
+) -> (usize, Vec<serde_json::Value>) {
+    if !search.is_empty() {
+        let needle = search.to_lowercase();
+        items.retain(|item| {
+            let name = item["display_name"].as_str().unwrap_or_default().to_lowercase();
+            let uri = item["uri"].as_str().unwrap_or_default().to_lowercase();
+            name.contains(&needle) || uri.contains(&needle)
+        });
+    }
+    items.sort_by(|left, right| {
+        let order = if sort_field == "created_at" {
+            left["created_at"].as_u64().unwrap_or(0).cmp(&right["created_at"].as_u64().unwrap_or(0))
+        } else {
+            left["display_name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .cmp(&right["display_name"].as_str().unwrap_or_default().to_lowercase())
+        };
+        if sort_order == 1 {
+            order.reverse()
+        } else {
+            order
+        }
+    });
+    let count = items.len();
+    let size = page_size.max(1);
+    let start = page.saturating_sub(1).saturating_mul(size);
+    (count, items.into_iter().skip(start).take(size).collect())
+}
+
+/// Общие query-параметры списков PNM: `search`, `sort_field`, `sort_order`
+/// (`1` — по убыванию), `page`, `page_size` (дефолт 100). Один парсер для
+/// HTTP-query и WS-payload, чтобы формы списков не расходились.
+/// Дефолтный размер страницы списков PNM (UI всегда шлёт `page_size`).
+pub(crate) const DEFAULT_PAGE_SIZE: usize = 100;
+
+#[derive(Debug, Clone)]
+pub(crate) struct ListParams {
+    pub search: String,
+    pub sort_field: String,
+    pub sort_order: i64,
+    pub page: usize,
+    pub page_size: usize,
+}
+
+impl ListParams {
+    /// `params` — JSON-объект (WS) или сконвертированная query-карта (HTTP).
+    pub(crate) fn parse(params: &serde_json::Value) -> Self {
+        let text = |key: &str| {
+            params
+                .get(key)
+                .map(|value| match value {
+                    serde_json::Value::String(raw) => raw.clone(),
+                    serde_json::Value::Null => String::new(),
+                    value => value.to_string(),
+                })
+                .filter(|value| !value.is_empty())
+                .unwrap_or_default()
+        };
+        let number = |key: &str| {
+            params.get(key).and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|raw| raw.parse().ok()))
+                    .or_else(|| value.as_i64().and_then(|raw| u64::try_from(raw).ok()))
+            })
+        };
+        let sort_order = params
+            .get("sort_order")
+            .and_then(|value| value.as_i64().or_else(|| value.as_str().and_then(|raw| raw.parse().ok())))
+            .unwrap_or(0);
+        let page = number("page").unwrap_or(1).max(1) as usize;
+        let page_size = number("page_size")
+            .and_then(|size| usize::try_from(size).ok())
+            .filter(|size| *size > 0)
+            .unwrap_or(DEFAULT_PAGE_SIZE);
+        Self { search: text("search"), sort_field: text("sort_field"), sort_order, page, page_size }
+    }
+
+    /// Query-карта Axum → те же правила, что у WS-payload.
+    pub(crate) fn from_query(params: &std::collections::HashMap<String, String>) -> Self {
+        let object = params.iter().map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())));
+        Self::parse(&serde_json::Value::Object(object.collect()))
+    }
+
+    /// `sort_field` по умолчанию: `created_at` для адресов/аудио, иначе имя.
+    pub(crate) fn sort_field_or(&self, fallback: &str) -> String {
+        if self.sort_field.is_empty() {
+            fallback.to_string()
+        } else {
+            self.sort_field.clone()
+        }
+    }
 }
 
 /// Учитывает вызов endpoint'а: `vks_api_v3_requests_total{endpoint}` (§4.7).

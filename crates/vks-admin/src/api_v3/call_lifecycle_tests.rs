@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::*;
+use crate::api_v3::tests::json_body as response_json;
 use crate::auth_middleware::AuthType;
 use crate::state::{AppState, OutboundDialer};
 
@@ -219,4 +220,234 @@ fn missing_gateway_never_admits_a_fake_connected_participant() {
     assert!(state.api_v3.call_attempts.lock().unwrap().is_empty());
     assert!(state.api_v3.in_flight_calls.lock().unwrap().is_empty());
     assert!(state.room_hub.list_participants(&room).is_empty());
+}
+
+fn operator_auth(role: Role) -> AuthContext {
+    AuthContext {
+        subject: "operator".into(),
+        role,
+        auth_type: AuthType::Jwt,
+        scopes: vec!["*".into()],
+        room_scope: None,
+        generation: 0,
+        client_ip: "127.0.0.1".into(),
+    }
+}
+
+/// T1.5: адресная книга — CRUD, фильтры UI (`uri`, `protocols`, `search`,
+/// пагинация), персистентность и ремонт битых записей при загрузке.
+#[tokio::test]
+async fn address_book_crud_filters_and_persists() {
+    let mut state = AppState::new();
+    state.storage = Some(Arc::new(vks_storage::memory::MemoryStorage::new()));
+    let state = Arc::new(state);
+    crate::users::Users::bootstrap_operator(&state, "operator");
+    let auth = operator_auth(Role::Operator);
+    let create = |uri: &str| {
+        create_call_string(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Json(json!({"uri": uri, "payload": {"sip": {"bitrate": 2048}}})),
+        )
+    };
+
+    let first = create("192.168.1.50").await;
+    assert_eq!(first.status(), StatusCode::CREATED);
+    let first = response_json(first).await;
+    let sip = first["call_string"].clone();
+    assert_eq!(sip["uri"], "sip:192.168.1.50");
+    assert_eq!(sip["display_name"], "192.168.1.50");
+    assert_eq!(sip["contact"]["contact_type"], "call_strings");
+    assert_eq!(sip["payload"]["sip"]["bitrate"], 2048);
+
+    let second = create("h323:192.168.1.60").await;
+    let second = response_json(second).await["call_string"].clone();
+    assert_eq!(second["display_name"], "192.168.1.60");
+
+    let list = |params: &[(&str, &str)]| {
+        let params: HashMap<String, String> =
+            params.iter().map(|(key, value)| (key.to_string(), value.to_string())).collect();
+        list_call_strings(State(state.clone()), Extension(auth.clone()), Query(params))
+    };
+    let filtered = response_json(list(&[("uri", "1.50"), ("protocols", "sip")]).await).await;
+    assert_eq!(filtered["count"], 1, "{filtered}");
+    assert_eq!(filtered["call_strings"][0]["id"], sip["id"]);
+
+    let by_name = response_json(list(&[("search", "1.60")]).await).await;
+    assert_eq!(by_name["count"], 1, "{by_name}");
+    assert_eq!(by_name["call_strings"][0]["id"], second["id"]);
+
+    let paged = response_json(
+        list(&[("page", "2"), ("page_size", "1"), ("sort_field", "created_at"), ("sort_order", "0")]).await,
+    )
+    .await;
+    assert_eq!(paged["count"], 2);
+    assert_eq!(paged["call_strings"].as_array().map(Vec::len), Some(1));
+
+    let id = sip["id"].as_str().unwrap().to_string();
+    let patched = update_call_string(
+        State(state.clone()),
+        Extension(auth.clone()),
+        Path(id.clone()),
+        Json(json!({"display_name": "Зал", "payload": {"sip": {"bitrate": 4096}}})),
+    )
+    .await;
+    let patched = response_json(patched).await["call_string"].clone();
+    assert_eq!(patched["display_name"], "Зал");
+    assert_eq!(patched["payload"]["sip"]["bitrate"], 4096);
+    assert_eq!(patched["uri"], "sip:192.168.1.50");
+
+    let ws = ws_search(&state, "operator", None, &json!({"search": "зал", "page_size": 5})).await.unwrap();
+    assert_eq!(ws["count"], 1, "{ws}");
+    assert_eq!(ws["call_strings"][0]["id"], id);
+
+    let forbidden = update_call_string(
+        State(state.clone()),
+        Extension(operator_auth(Role::Viewer)),
+        Path(id.clone()),
+        Json(json!({"display_name": "x"})),
+    )
+    .await;
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+    assert_eq!(
+        delete_call_string(State(state.clone()), Extension(auth.clone()), Path(id.clone())).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        delete_call_string(State(state.clone()), Extension(auth.clone()), Path(id.clone())).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(state.api_v3.resources.lock().await.addresses.len(), 1);
+    let raw = state
+        .storage
+        .as_ref()
+        .unwrap()
+        .get_configuration_document(super::super::resources::CONFIGURATION_KEY)
+        .await
+        .unwrap()
+        .unwrap();
+    let stored: Value = serde_json::from_str(&raw).unwrap();
+    let stored_id = second["id"].as_str().unwrap();
+    assert_eq!(stored["resources"]["addresses"][stored_id]["uri"], "h323:192.168.1.60");
+    assert_eq!(stored["resources"]["addresses"][stored_id]["payload"]["sip"]["bitrate"], 2048);
+}
+
+/// T1.5: чтение книги — Moderator+, запись — Operator без room_scope; пустой
+/// payload WS и «космический» page не ломают ответы.
+#[tokio::test]
+async fn address_book_access_page_bounds_and_ws_defaults() {
+    let state = Arc::new(AppState::new());
+    crate::users::Users::bootstrap_operator(&state, "operator");
+    crate::users::Users::create(&state, "viewer", Role::Viewer);
+    let auth = operator_auth(Role::Operator);
+    for index in 0..3 {
+        let response = create_call_string(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Json(json!({"uri": format!("sip:10.0.0.{index}")})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+    let viewer = operator_auth(Role::Viewer);
+    let denied = list_call_strings(State(state.clone()), Extension(viewer.clone()), Query(HashMap::new())).await;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        ws_search(&state, "operator", None, &json!({})).await.unwrap()["call_strings"].as_array().map(Vec::len),
+        Some(3)
+    );
+    assert_eq!(ws_search(&state, "viewer", None, &json!({})).await.unwrap_err().0, 403);
+    let params: HashMap<String, String> =
+        [("page".to_string(), usize::MAX.to_string()), ("page_size".to_string(), "2".to_string())].into();
+    let response = list_call_strings(State(state.clone()), Extension(auth.clone()), Query(params)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_json(response).await["count"], 3);
+
+    let empty = create_call_string(State(state.clone()), Extension(auth.clone()), Json(json!({"uri": "sip:"}))).await;
+    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+}
+
+/// T1.5: `PATCH`/`DELETE /call_strings/{id}` работают и для контактов комнаты
+/// (vendor `editAddress(addressId)` в редакторе контакта), с проверкой комнаты.
+#[tokio::test]
+async fn address_patch_and_delete_resolve_room_contacts() {
+    let state = Arc::new(AppState::new());
+    let room = RoomId::new();
+    let contact = json!({
+        "id": "cs-contact", "contact_id": "cs-contact", "contact_type": "call_strings",
+        "uri": "sip:192.168.1.132", "connection_url": "sip:192.168.1.132",
+        "display_name": "Зал 132", "created_at": 5,
+        "payload": {"call_string": {"sip": {"bitrate": 1}}},
+        "call_string": {"id": "cs-contact", "uri": "sip:192.168.1.132", "display_name": "Зал 132"}
+    });
+    state.api_v3.resources.lock().await.contacts.insert(room.to_string(), vec![contact]);
+    let auth = operator_auth(Role::Operator);
+    let patched = update_call_string(
+        State(state.clone()),
+        Extension(auth.clone()),
+        Path("cs-contact".into()),
+        Json(json!({"payload": {"sip": {"bitrate": 9}}})),
+    )
+    .await;
+    assert_eq!(patched.status(), StatusCode::OK);
+    let patched = response_json(patched).await;
+    assert_eq!(patched["call_string"]["payload"]["sip"]["bitrate"], 9);
+    assert_eq!(patched["call_string"]["display_name"], "Зал 132");
+
+    let mut viewer = operator_auth(Role::Viewer);
+    viewer.room_scope = Some(room.to_string());
+    let forbidden = update_call_string(
+        State(state.clone()),
+        Extension(viewer),
+        Path("cs-contact".into()),
+        Json(json!({"display_name": "x"})),
+    )
+    .await;
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+    assert_eq!(
+        delete_call_string(State(state.clone()), Extension(auth), Path("cs-contact".into())).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert!(state.api_v3.resources.lock().await.contacts[&room.to_string()].is_empty());
+}
+
+/// T1.5: битые persisted-записи адресной книги не роняют `ResourceState`
+/// (а с ним layout'ы): чинятся поля, отбрасываются записи без uri.
+#[test]
+fn address_records_tolerate_broken_persisted_document() {
+    let raw = json!({"addresses": {
+        "good": {"uri": "h323:192.168.1.132", "payload": {"h323": {"bitrate": 4096}, "sip": "broken"}},
+        "broken": {"uri": 42},
+        "empty": {}
+    }});
+    let loaded: crate::api_v3::resources::ResourceState = serde_json::from_value(raw).expect("tolerant load");
+    assert_eq!(loaded.addresses.len(), 1);
+    let good = &loaded.addresses["good"];
+    assert_eq!(good.uri, "h323:192.168.1.132");
+    assert_eq!(good.display_name, "h323:192.168.1.132");
+    assert_eq!(good.payload["h323"]["bitrate"], 4096);
+    assert!(good.payload.get("sip").is_none(), "не-объектные протоколы отбрасываются");
+}
+
+/// T1.5: битый persisted payload протокола не должен ронять PATCH (release abort).
+#[tokio::test]
+async fn address_patch_tolerates_broken_stored_protocol_payload() {
+    let state = Arc::new(AppState::new());
+    let auth = operator_auth(Role::Operator);
+    let created =
+        create_call_string(State(state.clone()), Extension(auth.clone()), Json(json!({"uri": "sip:192.168.1.77"})))
+            .await;
+    let id = response_json(created).await["call_string"]["id"].as_str().unwrap().to_string();
+    state.api_v3.resources.lock().await.addresses.get_mut(&id).unwrap().payload = json!({"sip": "broken"});
+    let patched = update_call_string(
+        State(state.clone()),
+        Extension(auth.clone()),
+        Path(id.clone()),
+        Json(json!({"payload": {"sip": {"bitrate": 64}}})),
+    )
+    .await;
+    assert_eq!(patched.status(), StatusCode::OK);
+    assert_eq!(response_json(patched).await["call_string"]["payload"]["sip"]["bitrate"], 64);
 }

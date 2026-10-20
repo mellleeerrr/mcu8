@@ -197,9 +197,9 @@ async fn handle_socket(state: SharedState, client_ip: String, socket: WebSocket)
                 }
 
                 let (outcomes, verified_info) = match message {
-                    Message::Text(text) => process_frame(&state, &client_ip, text.as_str(), &mut subscriptions),
+                    Message::Text(text) => process_frame(&state, &client_ip, text.as_str(), &mut subscriptions).await,
                     Message::Binary(bytes) => match std::str::from_utf8(&bytes) {
-                        Ok(text) => process_frame(&state, &client_ip, text, &mut subscriptions),
+                        Ok(text) => process_frame(&state, &client_ip, text, &mut subscriptions).await,
                         Err(_) => (vec![WsOutcome::json(json!({
                             "error": { "code": 400, "description": "Malformed message" }
                         }))], None),
@@ -258,7 +258,7 @@ impl WsOutcome {
 
 /// Обрабатывает один текстовый кадр; возвращает 0..n исходящих сообщений
 /// (ответ + возможные немедленные события подписки) и информацию об аутентифицированном токене.
-fn process_frame(
+async fn process_frame(
     state: &SharedState,
     client_ip: &str,
     raw: &str,
@@ -331,8 +331,6 @@ fn process_frame(
         }
     }
 
-    let verified_tuple = Some((verified.user_id, verified.generation, verified.exp));
-
     let outcomes = match method {
         "subscribe" => {
             if let Some(events) = payload.get("events").and_then(Value::as_object) {
@@ -359,7 +357,15 @@ fn process_frame(
             vec![ok_reply(&id, &json!({}))]
         }
         "ui:users:search" => vec![ok_reply(&id, &users_search(state, &payload))],
-        "ui:call_strings:search" => vec![ok_reply(&id, &json!({ "call_strings": [], "count": 0 }))],
+        "ui:call_strings:search" => {
+            match super::call_strings::ws_search(state, &verified.user_id, verified.room_id.as_deref(), &payload).await
+            {
+                Ok(result) => vec![ok_reply(&id, &result)],
+                Err((code, description)) => {
+                    vec![WsOutcome::json(json!({"id": id, "error": {"code": code, "description": description}}))]
+                }
+            }
+        }
         "ui:files:search" => vec![ok_reply(&id, &json!({ "files": [], "count": 0 }))],
         "terminals:configurations:install" | "terminals:firmwares:install" => {
             vec![WsOutcome::json(json!({
@@ -370,7 +376,7 @@ fn process_frame(
             "id": id, "error": { "code": 404, "description": "Unknown method" }
         }))],
     };
-    (outcomes, verified_tuple)
+    (outcomes, Some((verified.user_id, verified.generation, verified.exp)))
 }
 
 /// Обёртка ответа: `{"id": …, "payload": {…}}`.
@@ -433,27 +439,27 @@ mod tests {
         assert!(rl.allow("10.0.0.1", now + 1000));
     }
 
-    #[test]
-    fn process_frame_rejects_oversized_and_malformed() {
+    #[tokio::test]
+    async fn process_frame_rejects_oversized_and_malformed() {
         let state = crate::state::AppState::new();
         let state: SharedState = std::sync::Arc::new(state);
         let mut subs = HashSet::new();
 
         let huge = "x".repeat(MAX_FRAME_BYTES + 1);
-        let (out, _) = process_frame(&state, "10.0.0.1", &huge, &mut subs);
+        let (out, _) = process_frame(&state, "10.0.0.1", &huge, &mut subs).await;
         assert_eq!(out.len(), 1);
         assert!(out[0].0.contains("\"code\":413"), "{}", out[0].0);
 
-        let (out, _) = process_frame(&state, "10.0.0.1", "not-json", &mut subs);
+        let (out, _) = process_frame(&state, "10.0.0.1", "not-json", &mut subs).await;
         assert!(out[0].0.contains("\"code\":400"), "{}", out[0].0);
     }
 
-    #[test]
-    fn process_frame_requires_token_even_for_unknown_methods() {
+    #[tokio::test]
+    async fn process_frame_requires_token_even_for_unknown_methods() {
         let state: SharedState = std::sync::Arc::new(crate::state::AppState::new());
         let mut subs = HashSet::new();
         let frame = r#"{"method":"nope","payload":{},"id":"1"}"#;
-        let (out, _) = process_frame(&state, "10.0.0.1", frame, &mut subs);
+        let (out, _) = process_frame(&state, "10.0.0.1", frame, &mut subs).await;
         assert!(out[0].0.contains("\"code\":401"), "{}", out[0].0);
     }
 

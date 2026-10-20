@@ -26,6 +26,65 @@ pub struct ResourceState {
     pub links: BTreeMap<String, Vec<String>>,
     pub schedules: BTreeMap<String, Value>,
     pub contacts: BTreeMap<String, Vec<Value>>,
+    /// Глобальная адресная книга (`/api/v3/call_strings`): сохранённые адреса
+    /// переживают рестарт и участвуют в автодополнении «Добавить по адресу».
+    #[serde(default, deserialize_with = "deserialize_addresses")]
+    pub addresses: BTreeMap<String, AddressRecord>,
+}
+
+/// Толерантная загрузка адресной книги: битые/старые записи не роняют весь
+/// `ResourceState` (а с ним и layout'ы) — чинятся недостающие поля, отбрасываются
+/// записи без `uri` и не-объектные значения протоколов.
+fn deserialize_addresses<'de, D>(deserializer: D) -> Result<BTreeMap<String, AddressRecord>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|(id, value)| address_record_from_value(&id, &value).map(|record| (record.id.clone(), record)))
+        .collect())
+}
+
+fn address_record_from_value(stored_id: &str, value: &Value) -> Option<AddressRecord> {
+    let uri = value["uri"].as_str().map(str::trim).filter(|uri| !uri.is_empty())?.to_string();
+    let display_name = value["display_name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| uri.clone());
+    let mut payload = serde_json::Map::new();
+    if let Some(protocols) = value["payload"].as_object() {
+        for (protocol, options) in protocols {
+            if options.is_object() {
+                payload.insert(protocol.clone(), options.clone());
+            }
+        }
+    }
+    Some(AddressRecord {
+        id: value["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| stored_id.to_string()),
+        uri,
+        display_name,
+        created_at: value["created_at"].as_u64().unwrap_or(0),
+        payload: Value::Object(payload),
+    })
+}
+
+/// Сохранённый адрес: `payload` — плоская карта протоколов (sip/h323/…),
+/// как её понимает UI-маппер `lh`; наружу отдаётся вложенной в `call_string`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AddressRecord {
+    pub id: String,
+    pub uri: String,
+    pub display_name: String,
+    pub created_at: u64,
+    pub payload: Value,
 }
 
 pub const CONFIGURATION_KEY: &str = "pnm-definitions-v1";
@@ -134,13 +193,30 @@ pub(crate) fn preset_size(preset: &str) -> Option<u32> {
     base.rsplit('_').next().and_then(|tail| tail.parse().ok())
 }
 
+/// `speakers`/`listeners` в записи — счётчики для таблицы UI; источник истины —
+/// массивы в payload (их правят редакторы канала).
+fn recalc_audio_counts(record: &mut Value) {
+    let payload = &record["payload"];
+    if !payload.get("speakers").is_some_and(Value::is_array) && !payload.get("listeners").is_some_and(Value::is_array) {
+        return;
+    }
+    let (speakers, listeners) =
+        (payload["speakers"].as_array().map_or(0, Vec::len), payload["listeners"].as_array().map_or(0, Vec::len));
+    record["speakers"] = json!(speakers);
+    record["listeners"] = json!(listeners);
+}
+
+fn default_audio_payload() -> Value {
+    json!({"type":"default", "vad":true, "autofill_speakers":true, "autofill_listeners":true,
+        "speakers":[], "listeners":[], "blacklist":[], "whitelist":[], "attachmode":"BLACKLIST"})
+}
+
 fn normalize_resource(kind: &str, body: &Value, creator: &str) -> Value {
     let mut payload = if kind == "video_layouts" {
         json!({"mode":"auto", "preset":"preset_default_13", "type":"default", "slots":[],
             "size":13, "autoscroll":0})
     } else {
-        json!({"type":"default", "vad":true, "autofill_speakers":true, "autofill_listeners":true,
-            "speakers":[], "listeners":[], "blacklist":[], "whitelist":[], "attachmode":"BLACKLIST"})
+        default_audio_payload()
     };
     if let Some(values) = body.get("payload").and_then(Value::as_object) {
         merge_json(&mut payload, &Value::Object(values.clone()));
@@ -154,12 +230,14 @@ fn normalize_resource(kind: &str, body: &Value, creator: &str) -> Value {
         result["abonents"] = layout_record_abonents(Vec::new());
         result["contacts"] = json!({"count":0,"contacts":[]});
         recalc_layout_size(&mut result);
+    } else {
+        recalc_audio_counts(&mut result);
     }
     result
 }
 
 /// PNM editors send partial nested payloads; changing one option must keep siblings.
-fn merge_json(target: &mut Value, patch: &Value) {
+pub(crate) fn merge_json(target: &mut Value, patch: &Value) {
     if let (Some(target), Some(patch)) = (target.as_object_mut(), patch.as_object()) {
         for (key, value) in patch {
             match target.get_mut(key) {
@@ -479,8 +557,19 @@ pub fn normalize_loaded(resources: &mut ResourceState) {
         }
         true
     });
+    resources.audiochannels.retain(|_, channel| {
+        if !channel.is_object() {
+            return false;
+        }
+        if !channel["payload"].is_object() {
+            channel["payload"] = default_audio_payload();
+        }
+        recalc_audio_counts(channel);
+        true
+    });
     resources.links.retain(|_, ids| {
-        ids.retain(|id| resources.layouts.contains_key(id));
+        // Привязки живут и для раскладок, и для аудиоканалов; висячие id чистим.
+        ids.retain(|id| resources.layouts.contains_key(id) || resources.audiochannels.contains_key(id));
         !ids.is_empty()
     });
 }
@@ -611,6 +700,7 @@ fn update_resource(record: &mut Value, body: &Value) -> Result<(), String> {
     }
     if record["id"].is_string() && record["payload"].is_object() {
         recalc_layout_size(record);
+        recalc_audio_counts(record);
     }
     Ok(())
 }
@@ -649,6 +739,7 @@ pub async fn list_global(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
     OriginalUri(uri): OriginalUri,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     if let Err(response) = check_permission(&auth, None) {
         return response;
@@ -656,7 +747,21 @@ pub async fn list_global(
     let kind = kind(uri.path());
     let resources = state.api_v3.resources.lock().await;
     let items: Vec<_> = collection(&resources, kind).values().cloned().collect();
-    Json(json!({kind:items,"count":items.len()})).into_response()
+    let (count, items) = page_records(items, &params);
+    Json(json!({kind:items,"count":count})).into_response()
+}
+
+/// `page`/`page_size`/`search`/`sort_field`/`sort_order` — общий контракт списков PNM.
+fn page_records(items: Vec<Value>, params: &HashMap<String, String>) -> (usize, Vec<Value>) {
+    let list = super::ListParams::from_query(params);
+    super::sort_and_page(
+        items,
+        &list.search,
+        &list.sort_field_or("display_name"),
+        list.sort_order,
+        list.page,
+        list.page_size,
+    )
 }
 
 pub async fn get_global(
@@ -730,6 +835,7 @@ pub async fn list_linked(
     Extension(auth): Extension<AuthContext>,
     OriginalUri(uri): OriginalUri,
     Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let Some(room) = find_room(&state, &id) else {
         return error_json(404, "Conference or session not found");
@@ -751,8 +857,11 @@ pub async fn list_linked(
         for record in &mut items {
             with_layout_abonents(&state, record, &room.id);
         }
+        Json(json!({kind:items,"count":items.len()})).into_response()
+    } else {
+        let (count, items) = page_records(items, &params);
+        Json(json!({kind:items,"count":count})).into_response()
     }
-    Json(json!({kind:items,"count":items.len()})).into_response()
 }
 
 /// A resource UUID alone does not grant access through an unrelated conference.

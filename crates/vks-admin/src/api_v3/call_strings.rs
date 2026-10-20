@@ -7,8 +7,10 @@
 //! - Повторный вызов (Recall / Invite) абонентов из списков StandBy / disconnected.
 //! - Строгие форматы ошибок 400 (validation details) и 409 (conflict descriptions).
 
+use std::collections::HashMap;
+
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -20,8 +22,9 @@ use uuid::Uuid;
 use vks_core::{Role, RoomId};
 
 use super::auth::ClientIp;
+use super::resources::{AddressRecord, ResourceState};
 use super::sessions::{check_permission, find_room, sanitize_id};
-use super::{error_json, track};
+use super::{error_json, track, ListParams};
 use crate::auth_middleware::AuthContext;
 use crate::settings::SettingsService;
 use crate::state::SharedState;
@@ -115,23 +118,11 @@ pub fn default_contact_payload(payload: Option<&Value>) -> Value {
 }
 
 fn merged_contact_payload(previous: Option<&Value>, patch: Option<&Value>) -> Value {
-    fn merge(target: &mut Value, patch: &Value) {
-        if let (Some(target), Some(patch)) = (target.as_object_mut(), patch.as_object()) {
-            for (key, value) in patch {
-                if let Some(existing) = target.get_mut(key).filter(|existing| existing.is_object() && value.is_object())
-                {
-                    merge(existing, value);
-                } else {
-                    target.insert(key.clone(), value.clone());
-                }
-            }
-        }
-    }
     let mut payload = default_contact_payload(previous);
-    if let Some(patch) = patch {
-        merge(&mut payload, patch);
+    if let Some(patch) = patch.filter(|patch| patch.is_object()) {
+        super::resources::merge_json(&mut payload, patch);
     }
-    default_contact_payload(Some(&payload))
+    payload
 }
 
 /// Гибкий элемент строки вызова с поддержкой алиасов Serde для совместимости с различными версиями DTO фронтенда.
@@ -321,8 +312,24 @@ pub(super) fn queue_call(
     if in_flight.contains_key(&key) || connected {
         return Err(Box::new(conflict_error("The specified call string is used in session")));
     }
+    // Лимит комнаты (payload конференции) приоритетнее системного умолчания.
+    let limit = state
+        .api_v3
+        .conference_settings
+        .lock()
+        .ok()
+        .and_then(|settings| {
+            settings.get(&room_id).and_then(|values| {
+                values
+                    .get("connections_limit")
+                    .or_else(|| values.get("payload").and_then(|payload| payload.get("connections_limit")))
+                    .and_then(Value::as_u64)
+            })
+        })
+        .unwrap_or_else(|| SettingsService::get(state).limits.max_participants_per_room as u64)
+        as usize;
     let current = participants.len() + in_flight.keys().filter(|(rid, _)| *rid == room_id).count();
-    if current >= SettingsService::get(state).limits.max_participants_per_room as usize {
+    if current >= limit {
         return Err(Box::new(conflict_error("Too many connections")));
     }
     record.payload = default_contact_payload(Some(&record.payload));
@@ -755,9 +762,14 @@ fn lookup_session_record(state: &SharedState, room_id: &RoomId, id: Option<&str>
 }
 
 fn address_book_record(record: &CallStringRecord) -> Value {
-    let payload = default_contact_payload(Some(&record.payload));
+    // Producers хранят уже нормализованный contact-payload; fallback — для записей,
+    // пришедших из старых/внешних writers.
+    let payload = match record.payload.get("call_string") {
+        Some(call_string) if call_string.is_object() => call_string.clone(),
+        _ => default_contact_payload(Some(&record.payload))["call_string"].clone(),
+    };
     json!({"id":record.id,"uri":record.uri,"display_name":record.display_name,"created_at":record.created_at,
-        "busy":false,"payload":payload["call_string"],"contact":{"id":record.id,"type":"call_strings",
+        "busy":false,"payload":payload,"contact":{"id":record.id,"type":"call_strings",
             "contact_type":"call_strings","display_name":record.display_name}})
 }
 
@@ -765,6 +777,9 @@ async fn address_book_records(state: &SharedState, auth: &AuthContext) -> Vec<Va
     let mut records = std::collections::BTreeMap::new();
     {
         let resources = state.api_v3.resources.lock().await;
+        for (id, address) in &resources.addresses {
+            records.insert(id.clone(), address_book_record(&stored_address_record(address)));
+        }
         for (room_id, contacts) in &resources.contacts {
             if check_permission(auth, Some(room_id)).is_err() {
                 continue;
@@ -805,11 +820,367 @@ async fn address_book_records(state: &SharedState, auth: &AuthContext) -> Vec<Va
     records.into_values().collect()
 }
 
-/// `GET /api/v3/call_strings` и `GET /api/v3/ui/call_strings` — список сохраненных строк вызова в адресной книге.
-pub async fn list_call_strings(State(state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
+/// Адрес из глобальной адресной книги: payload хранится как protocol-map
+/// (sip/h323/…), наружу отдаётся вложенным в полный контактный payload.
+fn stored_address_record(address: &AddressRecord) -> CallStringRecord {
+    CallStringRecord {
+        id: address.id.clone(),
+        uri: address.uri.clone(),
+        display_name: address.display_name.clone(),
+        created_at: address.created_at,
+        payload: default_contact_payload(Some(&json!({"call_string": address.payload}))),
+    }
+}
+
+#[derive(Debug)]
+struct AddressFilter {
+    list: ListParams,
+    protocols: Vec<String>,
+    include: Vec<String>,
+    exclude: Vec<String>,
+    uri: String,
+}
+
+fn csv(value: &Value) -> Vec<String> {
+    match value {
+        Value::Array(items) => items.iter().filter_map(Value::as_str).map(|item| item.to_ascii_lowercase()).collect(),
+        Value::String(raw) => {
+            raw.split(',').map(|part| part.trim().to_ascii_lowercase()).filter(|part| !part.is_empty()).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Один парсер для HTTP-query и WS-payload: общие `page/sort` — [`ListParams`],
+/// сверху фильтры адресной книги (`protocols`, include/exclude, `uri`).
+impl AddressFilter {
+    fn from_value(params: &Value) -> Self {
+        let list = |key: &str| params.get(key).map(csv).unwrap_or_default();
+        Self {
+            list: ListParams::parse(params),
+            protocols: list("protocols"),
+            include: list("includeAddresses").into_iter().chain(list("call_strings")).collect(),
+            exclude: list("excludeAddresses"),
+            uri: params.get("uri").and_then(Value::as_str).unwrap_or_default().to_string(),
+        }
+    }
+
+    /// Семантика vendor-поиска: подстрока в имени/адресе (`sort_and_page`),
+    /// фильтр по протоколам и явные include/exclude по id.
+    fn matches(&self, record: &Value) -> bool {
+        let id = record["id"].as_str().unwrap_or_default();
+        if !self.include.is_empty() && !self.include.iter().any(|item| item == id) {
+            return false;
+        }
+        if self.exclude.iter().any(|item| item == id) {
+            return false;
+        }
+        let uri = record["uri"].as_str().unwrap_or_default();
+        if !self.uri.is_empty() && !uri.to_lowercase().contains(&self.uri.to_lowercase()) {
+            return false;
+        }
+        if !self.protocols.is_empty() {
+            let protocol = uri.split_once(':').map(|(scheme, _)| scheme.to_ascii_lowercase()).unwrap_or_default();
+            if !self.protocols.iter().any(|item| item == &protocol) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn apply(&self, mut records: Vec<Value>) -> (usize, Vec<Value>) {
+        records.retain(|record| self.matches(record));
+        let list = &self.list;
+        super::sort_and_page(records, &list.search, &list.sort_field, list.sort_order, list.page, list.page_size)
+    }
+}
+
+/// `ui:call_strings:search` — тот же источник/фильтры, что у HTTP-списка,
+/// но по WebSocket-каналу (его использует автодополнение и адресная книга).
+pub(crate) async fn ws_search(
+    state: &SharedState,
+    user_id: &str,
+    room_scope: Option<&str>,
+    payload: &Value,
+) -> Result<Value, (u16, &'static str)> {
+    let auth = AuthContext {
+        subject: user_id.to_string(),
+        role: crate::users::Users::resolve_role(state, user_id).unwrap_or(Role::Viewer),
+        auth_type: crate::auth_middleware::AuthType::Jwt,
+        scopes: Vec::new(),
+        room_scope: room_scope.map(str::to_string),
+        generation: 0,
+        client_ip: "127.0.0.1".to_string(),
+    };
+    if check_permission(&auth, None).is_err() {
+        return Err((403, "Forbidden: insufficient permissions"));
+    }
+    let (count, records) = AddressFilter::from_value(payload).apply(address_book_records(state, &auth).await);
+    Ok(json!({"call_strings": records, "count": count}))
+}
+
+/// `GET /api/v3/call_strings` и `GET /api/v3/ui/call_strings` — адресная книга:
+/// сохранённые адреса, контакты комнат и отложенные вызовы с фильтрами UI.
+pub async fn list_call_strings(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
     track("call_strings");
-    let records = address_book_records(&state, &auth).await;
-    Json(json!({"count":records.len(),"call_strings":records})).into_response()
+    if let Err(response) = check_permission(&auth, None) {
+        return response;
+    }
+    let params = Value::Object(params.into_iter().map(|(key, value)| (key, Value::String(value))).collect());
+    let (count, call_strings) = AddressFilter::from_value(&params).apply(address_book_records(&state, &auth).await);
+    Json(json!({"count":count,"call_strings":call_strings})).into_response()
+}
+
+fn address_payload(previous: Option<&Value>, patch: Option<&Value>) -> Value {
+    let mut payload = previous.cloned().unwrap_or_else(|| json!({}));
+    if !payload.is_object() {
+        payload = json!({});
+    }
+    if let Some(protocols) = patch.and_then(Value::as_object) {
+        for (protocol, options) in protocols {
+            super::resources::merge_json(&mut payload[protocol], options);
+        }
+    }
+    payload
+}
+
+fn can_write_address_book(auth: &AuthContext) -> bool {
+    auth.role >= Role::Operator && auth.room_scope.is_none()
+}
+
+fn address_fields(body: &Value) -> Result<(String, String, Option<Value>), (&'static str, &'static str)> {
+    let raw = body["uri"].as_str().unwrap_or_default().trim();
+    if raw.is_empty() {
+        return Err(("uri is required", "uri"));
+    }
+    let uri = canonical_uri(raw);
+    let (protocol, address) = uri.split_once(':').unwrap_or_default();
+    if !matches!(protocol, "sip" | "h323" | "rtsp" | "vnc" | "media" | "file") {
+        return Err(("uri protocol must be sip, h323, rtsp, vnc, media or file", "uri"));
+    }
+    if address.is_empty() {
+        return Err(("uri address is required", "uri"));
+    }
+    for field in ["uri", "display_name"] {
+        if let Some(value) = body.get(field) {
+            if !value.is_null() && !value.is_string() {
+                return Err(("field must be a string", if field == "uri" { "uri" } else { "display_name" }));
+            }
+        }
+    }
+    let payload = match body.get("payload") {
+        None | Some(Value::Null) => None,
+        Some(payload) if payload.is_object() => Some(payload.clone()),
+        Some(_) => return Err(("payload must be an object", "payload")),
+    };
+    if let Some(protocols) = payload.as_ref().and_then(Value::as_object) {
+        if protocols.values().any(|options| !options.is_object()) {
+            return Err(("payload protocol options must be an object", "payload"));
+        }
+    }
+    let display_name =
+        body["display_name"].as_str().map(str::trim).filter(|value| !value.is_empty()).unwrap_or(address).to_string();
+    Ok((uri, display_name, payload))
+}
+
+/// `POST /api/v3/call_strings` — сохранить адрес в адресную книгу.
+pub async fn create_call_string(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !can_write_address_book(&auth) {
+        return error_json(403, "Forbidden: insufficient permissions");
+    }
+    if !body.is_object() {
+        return validation_error("body must be an object", "body");
+    }
+    let (uri, display_name, patch) = match address_fields(&body) {
+        Ok(values) => values,
+        Err((reason, position)) => return validation_error(reason, position),
+    };
+    let id = format!("cs-{}", Uuid::new_v4());
+    let record = AddressRecord {
+        id: id.clone(),
+        uri,
+        display_name,
+        created_at: now_unix_sec(),
+        payload: address_payload(None, patch.as_ref()),
+    };
+    let mut resources = state.api_v3.resources.lock().await;
+    let previous = resources.clone();
+    resources.addresses.insert(id, record.clone());
+    if let Err(response) = super::resources::commit(&state, &mut resources, previous).await {
+        return response;
+    }
+    (StatusCode::CREATED, Json(json!({"call_string": address_book_record(&stored_address_record(&record))})))
+        .into_response()
+}
+
+/// Куда указывает id из адресной книги: глобальное хранилище или контакт комнаты.
+enum AddressTarget {
+    Global,
+    Contact { room_id: String, index: usize },
+}
+
+fn address_target(resources: &ResourceState, id: &str) -> Option<AddressTarget> {
+    if resources.addresses.contains_key(id) {
+        return Some(AddressTarget::Global);
+    }
+    for (room_id, contacts) in &resources.contacts {
+        if let Some(index) = contacts.iter().position(|contact| contact["id"].as_str() == Some(id)) {
+            return Some(AddressTarget::Contact { room_id: room_id.clone(), index });
+        }
+    }
+    None
+}
+
+fn contact_write_allowed(auth: &AuthContext, room_id: &str) -> Option<Response> {
+    if auth.role < Role::Operator {
+        return Some(error_json(403, "Forbidden: Operator role required to manage call strings"));
+    }
+    check_permission(auth, Some(room_id)).err()
+}
+
+/// `PATCH /api/v3/call_strings/{id}` — правка адреса: глобальная книга или
+/// контакт комнаты (vendor `editAddress(addressId)` для контактов).
+pub async fn update_call_string(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut resources = state.api_v3.resources.lock().await;
+    let Some(target) = address_target(&resources, &id) else {
+        return error_json(404, "Call string not found");
+    };
+    match target {
+        AddressTarget::Global => {
+            if !can_write_address_book(&auth) {
+                return error_json(403, "Forbidden: insufficient permissions");
+            }
+            let Some(current) = resources.addresses.get(&id).cloned() else {
+                return error_json(404, "Call string not found");
+            };
+            if !body.is_object() {
+                return validation_error("body must be an object", "body");
+            }
+            let mut candidate = body.clone();
+            if candidate.get("uri").is_none_or(Value::is_null) {
+                candidate["uri"] = json!(current.uri);
+            }
+            if candidate.get("display_name").is_none_or(Value::is_null) {
+                candidate["display_name"] = json!(current.display_name);
+            }
+            let (uri, display_name, patch) = match address_fields(&candidate) {
+                Ok(values) => values,
+                Err((reason, position)) => return validation_error(reason, position),
+            };
+            let previous = resources.clone();
+            let record = AddressRecord {
+                id,
+                uri,
+                display_name,
+                created_at: current.created_at,
+                payload: address_payload(Some(&current.payload), patch.as_ref()),
+            };
+            resources.addresses.insert(record.id.clone(), record.clone());
+            if let Err(response) = super::resources::commit(&state, &mut resources, previous).await {
+                return response;
+            }
+            Json(json!({"call_string": address_book_record(&stored_address_record(&record))})).into_response()
+        }
+        AddressTarget::Contact { room_id, index } => {
+            if let Some(response) = contact_write_allowed(&auth, &room_id) {
+                return response;
+            }
+            let Some(current) = resources.contacts.get(&room_id).and_then(|contacts| contacts.get(index)).cloned()
+            else {
+                return error_json(404, "Call string not found");
+            };
+            let flat_payload = current["payload"].get("call_string").cloned().unwrap_or_else(|| json!({}));
+            if !body.is_object() {
+                return validation_error("body must be an object", "body");
+            }
+            let mut candidate = body.clone();
+            if candidate.get("uri").is_none_or(Value::is_null) {
+                candidate["uri"] = current["uri"].clone();
+            }
+            if candidate.get("display_name").is_none_or(Value::is_null) {
+                candidate["display_name"] = current["display_name"].clone();
+            }
+            let (uri, display_name, patch) = match address_fields(&candidate) {
+                Ok(values) => values,
+                Err((reason, position)) => return validation_error(reason, position),
+            };
+            let payload = default_contact_payload(Some(&json!({
+                "call_string": address_payload(Some(&flat_payload), patch.as_ref())
+            })));
+            let previous = resources.clone();
+            if let Some(contact) = resources.contacts.get_mut(&room_id).and_then(|contacts| contacts.get_mut(index)) {
+                contact["uri"] = json!(uri);
+                contact["connection_url"] = json!(uri);
+                contact["display_name"] = json!(display_name);
+                contact["payload"] = payload.clone();
+                if contact["call_string"].is_object() {
+                    contact["call_string"]["uri"] = json!(uri);
+                    contact["call_string"]["display_name"] = json!(display_name);
+                }
+            }
+            if let Err(response) = super::resources::commit(&state, &mut resources, previous).await {
+                return response;
+            }
+            let record = CallStringRecord {
+                id,
+                uri,
+                display_name,
+                created_at: current["created_at"].as_u64().unwrap_or_else(now_unix_sec),
+                payload,
+            };
+            Json(json!({"call_string": address_book_record(&record)})).into_response()
+        }
+    }
+}
+
+/// `DELETE /api/v3/call_strings/{id}` — удалить адрес из адресной книги.
+pub async fn delete_call_string(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Response {
+    let mut resources = state.api_v3.resources.lock().await;
+    let Some(target) = address_target(&resources, &id) else {
+        return error_json(404, "Call string not found");
+    };
+    match target {
+        AddressTarget::Global => {
+            if !can_write_address_book(&auth) {
+                return error_json(403, "Forbidden: insufficient permissions");
+            }
+            let previous = resources.clone();
+            resources.addresses.remove(&id);
+            if let Err(response) = super::resources::commit(&state, &mut resources, previous).await {
+                return response;
+            }
+        }
+        AddressTarget::Contact { room_id, index } => {
+            if let Some(response) = contact_write_allowed(&auth, &room_id) {
+                return response;
+            }
+            let previous = resources.clone();
+            if let Some(contacts) = resources.contacts.get_mut(&room_id) {
+                contacts.remove(index);
+            }
+            if let Err(response) = super::resources::commit(&state, &mut resources, previous).await {
+                return response;
+            }
+        }
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn get_call_string(
@@ -817,6 +1188,9 @@ pub async fn get_call_string(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Response {
+    if let Err(response) = check_permission(&auth, None) {
+        return response;
+    }
     match address_book_records(&state, &auth).await.into_iter().find(|record| record["id"].as_str() == Some(&id)) {
         Some(record) => Json(json!({"call_string":record})).into_response(),
         None => error_json(404, "Call string not found"),

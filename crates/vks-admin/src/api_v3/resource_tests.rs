@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use axum::body::to_bytes;
-
 use super::*;
+use crate::api_v3::tests::json_body as body;
 use crate::auth_middleware::AuthType;
+
 use crate::rooms::Rooms;
 use crate::state::AppState;
 
@@ -27,11 +27,6 @@ fn operator() -> AuthContext {
 
 fn uri(path: &str) -> OriginalUri {
     OriginalUri(path.parse().unwrap())
-}
-
-async fn body(response: Response) -> Value {
-    let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-    serde_json::from_slice(&bytes).unwrap()
 }
 
 #[tokio::test]
@@ -331,6 +326,51 @@ async fn pnm_layout_abonents_attach_detach_and_malformed_payloads() {
     assert_eq!(abonents["abonents"][0]["position"], 2);
 }
 
+/// Вкладка аудиоканалов ходит в `list_linked`: пагинация/поиск должны работать
+/// и для привязанных к комнате записей, не только для глобальной коллекции.
+#[tokio::test]
+async fn pnm_linked_audiochannels_list_filters_and_pages() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Linked audio definitions").await.unwrap();
+    let path = format!("/api/v3/conferences/{}/audiochannels", room.id);
+    for (name, created_at) in [("Зал", 10), ("Сцена", 20)] {
+        let response = create(
+            State(state.clone()),
+            Extension(operator()),
+            uri(&path),
+            Json(json!({"display_name": name, "payload": {}})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let id = body(response).await["audiochannel"]["id"].as_str().unwrap().to_string();
+        {
+            let mut resources = state.api_v3.resources.lock().await;
+            resources.audiochannels.get_mut(&id).unwrap()["created_at"] = json!(created_at);
+        }
+        let response =
+            attach(State(state.clone()), Extension(operator()), uri(&path), Path((room.id.to_string(), id))).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+    let list = |params: HashMap<String, String>| {
+        list_linked(State(state.clone()), Extension(operator()), uri(&path), Path(room.id.to_string()), Query(params))
+    };
+    let searched = body(list(HashMap::from([("search".to_string(), "зал".to_string())])).await).await;
+    assert_eq!(searched["count"], 1, "{searched}");
+    assert_eq!(searched["audiochannels"][0]["display_name"], "Зал");
+    let paged = body(
+        list(HashMap::from([
+            ("page".to_string(), "2".to_string()),
+            ("page_size".to_string(), "1".to_string()),
+            ("sort_field".to_string(), "created_at".to_string()),
+            ("sort_order".to_string(), "1".to_string()),
+        ]))
+        .await,
+    )
+    .await;
+    assert_eq!(paged["count"], 2);
+    assert_eq!(paged["audiochannels"][0]["display_name"], "Зал");
+}
+
 /// T1.4: auto-раскладка показывает живой ростер; «Общая» наследуется сессией один раз
 /// (без orphan-записи), `normalize_loaded` чинит битые записи и висячие ссылки.
 #[tokio::test]
@@ -559,4 +599,84 @@ async fn pnm_room_purge_removes_scoped_resources() {
             "scoped-ссылки удалённой комнаты удалены"
         );
     }
+}
+
+/// После рестарта привязки аудиоканалов не должны теряться: prune в
+/// `normalize_loaded` знает про оба вида ресурсов.
+#[test]
+fn pnm_normalize_keeps_audiochannel_links_and_drops_dangling() {
+    let mut resources = ResourceState::default();
+    resources.audiochannels.insert("audio-1".into(), json!({"id": "audio-1", "payload": {}}));
+    resources.layouts.insert("layout-1".into(), json!({"id": "layout-1", "payload": {"type": "default"}}));
+    resources.links.insert("sessions:r1:audiochannels".into(), vec!["audio-1".into(), "gone".into()]);
+    resources.links.insert("sessions:r1:video_layouts".into(), vec!["layout-1".into()]);
+    resources.links.insert("sessions:r2:audiochannels".into(), vec!["gone".into()]);
+
+    normalize_loaded(&mut resources);
+
+    assert_eq!(resources.links.get("sessions:r1:audiochannels"), Some(&vec!["audio-1".to_string()]));
+    assert_eq!(resources.links.get("sessions:r1:video_layouts"), Some(&vec!["layout-1".to_string()]));
+    assert!(!resources.links.contains_key("sessions:r2:audiochannels"), "пустые привязки удалены");
+}
+
+/// Аудиоканал: счётчики таблицы считаются из payload, список поддерживает
+/// page/page_size/search/sort (контракт вкладки «Аудиоканалы»).
+#[tokio::test]
+async fn pnm_audiochannels_list_filters_and_counts_speakers_listeners() {
+    let state = Arc::new(crate::state::AppState::new());
+    let auth = AuthContext {
+        subject: "operator".into(),
+        role: vks_core::Role::Operator,
+        auth_type: crate::auth_middleware::AuthType::Jwt,
+        scopes: vec!["*".into()],
+        room_scope: None,
+        generation: 0,
+        client_ip: "127.0.0.1".into(),
+    };
+    let mut resources = state.api_v3.resources.lock().await;
+    resources.audiochannels.insert(
+        "a1".into(),
+        json!({"id":"a1","display_name":"Зал","created_at":1,"payload":{
+            "type":"individual","speakers":["p1","p2"],"listeners":["p3"]}}),
+    );
+    resources.audiochannels.insert(
+        "a2".into(),
+        json!({"id":"a2","display_name":"Сцена","created_at":2,"payload":{
+            "type":"individual","speakers":[],"listeners":[]}}),
+    );
+    drop(resources);
+    let response = list_global(
+        State(state.clone()),
+        Extension(auth.clone()),
+        OriginalUri("/api/v3/audiochannels".parse().unwrap()),
+        Query(HashMap::from([("search".to_string(), "зал".to_string())])),
+    )
+    .await;
+    let listed = body(response).await;
+    assert_eq!(listed["count"], 1, "{listed}");
+    assert_eq!(listed["audiochannels"][0]["id"], "a1");
+
+    let response = list_global(
+        State(state.clone()),
+        Extension(auth),
+        OriginalUri("/api/v3/audiochannels".parse().unwrap()),
+        Query(HashMap::from([
+            ("page".to_string(), "2".to_string()),
+            ("page_size".to_string(), "1".to_string()),
+            ("sort_field".to_string(), "created_at".to_string()),
+            ("sort_order".to_string(), "1".to_string()),
+        ])),
+    )
+    .await;
+    let paged = body(response).await;
+    assert_eq!(paged["count"], 2);
+    assert_eq!(paged["audiochannels"][0]["id"], "a1", "created_at desc, вторая страница");
+
+    let mut resources = state.api_v3.resources.lock().await;
+    let channel = resources.audiochannels.get_mut("a1").unwrap();
+    channel["payload"]["speakers"] = json!([]);
+    channel["payload"]["listeners"] = json!(["p3", "p4"]);
+    update_resource(channel, &json!({})).unwrap();
+    assert_eq!(resources.audiochannels["a1"]["speakers"], 0);
+    assert_eq!(resources.audiochannels["a1"]["listeners"], 2);
 }
