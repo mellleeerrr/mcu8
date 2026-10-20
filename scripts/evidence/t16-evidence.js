@@ -250,6 +250,9 @@ function buildFacts() {
 
     // --- kick из UI с подтверждением ---
     push('kick-' + sc.protocol);
+    // редактор раскладки перекрывает вкладки сессии — возвращаемся на карточку сессии
+    await page.goto(BASE + '/pnm/monitoring/sessions/' + rec.session_id, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(5000);
     await page.locator('[data-qa="session-main-tabs-control-panel"]').click();
     await page.waitForTimeout(2500);
     await page.locator('.abonent-item-connected button').nth(7).click();
