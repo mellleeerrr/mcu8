@@ -1,11 +1,11 @@
 {
- "generated_at": "2026-10-20T20:36:35.363Z",
+ "generated_at": "2026-10-20T21:27:38.045Z",
  "ok": true,
  "build": {
-  "git_head": "1defb6f5370df3917192db5269bef9fc8456b049",
+  "git_head": "bdef85cef510a4ea99ef57608689ec30eb5ab975",
   "git_dirty": false,
-  "binary_sha256": "12c647a7be35c650ab72890899071e0b518737b0dd8b4553c40e688b1693967a",
-  "server_pid": 626371
+  "binary_sha256": "1c4f90d7bb8397a1d56155b8568b4ab837c88294b21af8fdc9ba28e347e8d8dc",
+  "server_pid": 665729
  },
  "acceptance": {
   "users_list": true,
@@ -13,9 +13,14 @@
   "card_tabs": true,
   "credentials": true,
   "user_address": true,
+  "user_address_edit": true,
   "group_created": true,
+  "group_search": true,
   "group_member": true,
+  "role_create_assign": true,
+  "self_password": true,
   "reload": true,
+  "user_delete_ui": true,
   "cleanup": true,
   "unique_steps": true,
   "screenshots": true
@@ -46,6 +51,10 @@
    "errors": []
   },
   {
+   "step": "user-address-edit",
+   "errors": []
+  },
+  {
    "step": "group-create",
    "errors": []
   },
@@ -54,7 +63,23 @@
    "errors": []
   },
   {
+   "step": "group-search",
+   "errors": []
+  },
+  {
+   "step": "role-create-assign",
+   "errors": []
+  },
+  {
+   "step": "self-password",
+   "errors": []
+  },
+  {
    "step": "reload",
+   "errors": []
+  },
+  {
+   "step": "user-delete-ui",
    "errors": []
   },
   {
@@ -67,43 +92,41 @@
   "vendor_console_errors": 1,
   "other_console_errors": 0,
   "http_errors": 0,
-  "expected_credentials_404": 4,
-  "steps": 10,
-  "screenshots": 8
+  "expected_credentials_404": 2,
+  "steps": 15,
+  "screenshots": 9
  },
  "user": {
-  "name": "T21 Пользователь 525070",
-  "login": "t21_525070",
-  "id": "998e5067-2e3a-4573-9390-2d4c360f3f7c",
+  "name": "T21 Пользователь 578435",
+  "login": "t21_578435",
+  "id": "b072fc70-82fb-425b-80d3-64de5386a2fc",
   "deleted_in_cleanup": true
  },
  "group": {
-  "name": "T21 Группа 525070",
-  "id": "230ea92f-9ecb-47e3-9e94-d1c0144c7067",
+  "name": "T21 Группа 578435",
+  "id": "d0bd614d-41cb-4fff-bc33-9432d58a4325",
   "deleted_in_cleanup": true
  },
  "ws_users_search": [
   {
    "request": {
     "method": "ui:users:search",
+    "id": "f48bbf63-a774-45f6-9323-d8c22d888e15",
     "payload": {
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
      "sort_order": 0
-    },
-    "id": "72dea460-20e1-4bd0-b891-6f0a7c1835e0",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "c69524ed-ff0f-40bb-8b67-48e4691ceb64",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
-    },
-    "id": "6a7da1ef-5612-4eaa-8104-900c4e2a2882",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
@@ -131,14 +154,13 @@
   {
    "request": {
     "method": "ui:users:search",
+    "id": "dd32bfb9-c036-4260-986c-1ec4e2af63fb",
     "payload": {
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
      "sort_order": 0
-    },
-    "id": "0207de5e-e9ee-499c-a5d2-778b1c485c10",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
@@ -146,25 +168,24 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
+     "b072fc70-82fb-425b-80d3-64de5386a2fc"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 525070"
+     "T21 Пользователь 578435"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "6138125d-d9e5-4674-bac2-fb0d4fb29e34",
     "payload": {
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
      "sort_order": 0
-    },
-    "id": "4816d526-c081-4721-b1f8-70765364e330",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
@@ -172,35 +193,33 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
+     "b072fc70-82fb-425b-80d3-64de5386a2fc"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 525070"
+     "T21 Пользователь 578435"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "24a65141-313f-4163-8ad6-b1aa10e2be08",
     "payload": {
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
      "sort_order": 0
-    },
-    "id": "261d303d-c50e-405a-a0dc-9dba06cf86f8",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "b8d45a41-065a-4599-81be-e7b0293dcebe",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
-    },
-    "id": "68e1f347-d944-4ff7-9a08-78c55d8d127f",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
@@ -208,11 +227,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
+     "b072fc70-82fb-425b-80d3-64de5386a2fc"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 525070"
+     "T21 Пользователь 578435"
     ]
    }
   },
@@ -221,35 +240,33 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
+     "b072fc70-82fb-425b-80d3-64de5386a2fc"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 525070"
+     "T21 Пользователь 578435"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "2463f168-ae02-4f0d-9c91-10f15a843730",
     "payload": {
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
      "sort_order": 0
-    },
-    "id": "d533e6a4-a4bd-4e1b-b16b-db419851f523",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "1e7072b7-0e94-4549-83bf-4e76b0d05e3d",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
-    },
-    "id": "3c1e013c-0ced-4993-a659-b7890631949c",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
@@ -257,11 +274,11 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
+     "b072fc70-82fb-425b-80d3-64de5386a2fc"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 525070"
+     "T21 Пользователь 578435"
     ]
    }
   },
@@ -270,22 +287,21 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
+     "b072fc70-82fb-425b-80d3-64de5386a2fc"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 525070"
+     "T21 Пользователь 578435"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "ac293458-20de-4ca4-b455-53f1b06133e2",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
-    },
-    "id": "7cc52b51-149c-4760-b65e-2683fd8a1b73",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
@@ -293,36 +309,34 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
+     "b072fc70-82fb-425b-80d3-64de5386a2fc"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 525070"
+     "T21 Пользователь 578435"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "783a1819-3b3e-4ff9-9fc9-f35b72c02dd6",
     "payload": {
-     "group_id": "230ea92f-9ecb-47e3-9e94-d1c0144c7067",
+     "group_id": "d0bd614d-41cb-4fff-bc33-9432d58a4325",
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
      "sort_order": 0
-    },
-    "id": "664c1c9c-9663-439b-a140-41594614d509",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "52ea7586-095d-4491-b073-a36661af186c",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
-    },
-    "id": "a7df7e99-ba18-4706-b2b3-ff5ad157d546",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
@@ -337,28 +351,27 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
+     "b072fc70-82fb-425b-80d3-64de5386a2fc"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 525070"
+     "T21 Пользователь 578435"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "df9d4d47-50ef-4d08-9a0e-e750aab0beb9",
     "payload": {
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
      "sort_order": 0,
      "exclude_groups": [
-      "230ea92f-9ecb-47e3-9e94-d1c0144c7067"
+      "d0bd614d-41cb-4fff-bc33-9432d58a4325"
      ]
-    },
-    "id": "c6d63b43-5b9f-4b0c-9ae5-20c6c02cfe2c",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
@@ -366,36 +379,34 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
+     "b072fc70-82fb-425b-80d3-64de5386a2fc"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 525070"
+     "T21 Пользователь 578435"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "b56a2501-48d2-4648-be7f-30b29a910ff3",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
-    },
-    "id": "8c994949-187b-40ab-8220-f5a3f5e52440",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "b033baca-5ed7-4fa4-a4af-e8bb93002415",
     "payload": {
-     "group_id": "230ea92f-9ecb-47e3-9e94-d1c0144c7067",
+     "group_id": "d0bd614d-41cb-4fff-bc33-9432d58a4325",
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
      "sort_order": 0
-    },
-    "id": "f7333769-d471-4fcc-a741-c3aabc85775f",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
@@ -413,34 +424,32 @@
    "response": {
     "count": 1,
     "ids": [
-     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
+     "b072fc70-82fb-425b-80d3-64de5386a2fc"
     ],
     "names": [
-     "T21 Пользователь 525070"
+     "T21 Пользователь 578435"
     ]
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "7df695c3-334e-4e5c-9112-71b63b8f5951",
     "payload": {
      "page": 1,
      "page_size": 100,
      "sort_field": "display_name",
      "sort_order": 0
-    },
-    "id": "5b8c7c4f-eb86-469a-be12-c0b7eccdea43",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
    "request": {
     "method": "ui:users:search",
+    "id": "9b431004-5043-4945-a6d4-2b9633634b7d",
     "payload": {
      "group_id": "00000000-0000-0000-0000-000000000000"
-    },
-    "id": "11a964c6-3e55-4574-8893-b75dcf2a940b",
-    "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJqdGkiOiIwMU01REdERFZISFBCU1RRNFZTV0tFOVNEUiIsImV4cCI6MTc5MjYxNDkyOSwiaWF0IjoxNzkyNTI4NTI5LCJpc3MiOiJ2a3MtbWN1IiwiZ2VuZXJhdGlvbiI6MX0.KibkgQ23WfHconVSRvurg68LKhXM0602PvO_Q5mUVzw"
+    }
    }
   },
   {
@@ -448,12 +457,35 @@
     "count": 2,
     "ids": [
      "00000000-0000-0000-0000-000000000001",
-     "998e5067-2e3a-4573-9390-2d4c360f3f7c"
+     "b072fc70-82fb-425b-80d3-64de5386a2fc"
     ],
     "names": [
      "Administrator",
-     "T21 Пользователь 525070"
+     "T21 Пользователь 578435"
     ]
+   }
+  },
+  {
+   "response": {
+    "count": 1,
+    "ids": [
+     "00000000-0000-0000-0000-000000000001"
+    ],
+    "names": [
+     "Administrator"
+    ]
+   }
+  },
+  {
+   "request": {
+    "method": "ui:users:search",
+    "id": "39588ffa-e2d0-4185-91c5-1602f5731b8a",
+    "payload": {
+     "page": 1,
+     "page_size": 100,
+     "sort_field": "display_name",
+     "sort_order": 0
+    }
    }
   },
   {
@@ -470,6 +502,13 @@
  ],
  "http_error_samples": [],
  "console_error_samples": [],
+ "vendor_error_samples": [
+  {
+   "step": "group-create",
+   "text": "TypeError: this.validationHandler(...).then(...).then.catch is not a function\n    at Proxy.confirmHandler (http://127.0.0.1:8080/mcu/chunks/index2.bundle-2.2.1.66.js:1:123194)\n    at Wl (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42202)\n    at ui (http://127.0.0.1:8080/mcu/chunks/in",
+   "source": "http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js"
+  }
+ ],
  "screenshots": [
   "01-users-list.png",
   "02-user-created.png",
@@ -478,15 +517,21 @@
   "05-user-address.png",
   "06-group-created.png",
   "07-group-member.png",
-  "08-users-reload.png"
+  "08-users-reload.png",
+  "09-user-deleted.png"
  ],
  "notes": [
   "справочник работает через vendor-UI 2.2.1.66: WS ui:users:search отдаёт id (без него карточка не открывалась), карточка с вкладками info/profile/addresses/credentials, создание пользователя/группы/учётной записи/личного адреса и членство в группе",
   "учётная запись проверена реальным POST /api/v3/login с новым логином/паролем",
-  "личная адресная книга проверена GET /api/v3/users/{id}/call_strings; удаление — read-back 404/0",
-  "созданные сущности уникальны по timestamp и удалены в cleanup",
-  "ожидаемый 404 GET /users/{id}/credentials — vendor-UI проверяет наличие учётной записи (пустое состояние), не ошибка контракта",
-  "известные vendor-дефекты атрибутированы отдельно: CSP/runtime-компиляция шаблона (лечится unsafe-eval в CSP для неизменяемых бандлов) и TypeError validationHandler при создании группы; наш API при этом отвечает 201 и группа создаётся"
+  "личная адресная книга: создание и редактирование проверены vendor-эндпоинтами /ui/users/{id}/call_strings; глобальная книга не затрагивается",
+  "поиск групп проверен vendor-параметром display_name (не только search)",
+  "роль создаётся/назначается/удаляется через vendor-API /roles и /users/{id}/roles/{rid}",
+  "смена своего пароля проверена vendor-телом {login:null,...}: старый пароль отклоняется, новый работает",
+  "удаление пользователя выполнено кнопкой UI; после delete login отклоняется, профиль/членства/адреса/credentials вычищены",
+  "созданные сущности уникальны по timestamp; пользователь удалён UI, группа — API; роль удалена в своём шаге",
+  "ожидаемый 404 GET /users/{id}/credentials — vendor-UI проверяет наличие учётной записи (пустое состояние), не ошибка контракта; считается один раз (по response)",
+  "единственная vendor-console-ошибка — известный TypeError validationHandler при создании группы (allowlist по точному тексту); CSP-нарушений в финальном прогоне нет",
+  "unsafe-eval в CSP вынужден: без него index2.bundle исполняет строку как JS при открытии карточки пользователя/удалении — Chromium пишет «Evaluating a string as JavaScript violates … CSP» (сообщение и источник зафиксированы в отчёте; статический grep этот runtime-путь не видит)"
  ],
  "base_url": "http://127.0.0.1:8080"
 }
