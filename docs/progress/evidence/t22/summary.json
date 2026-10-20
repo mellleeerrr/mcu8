@@ -1,31 +1,34 @@
 {
  "task": "T2.2",
  "ok": true,
- "started_at": "2026-10-20T23:20:42.963Z",
+ "started_at": "2026-10-20T23:50:42.523Z",
  "build": {
-  "git_head": "04cad6a085c1a8514a07f4c9a1b81ad497bd7b94",
-  "git_head_ct": 1792538322,
+  "git_head": "dce1abd15b96eba1888d00ef18f4e7468b954899",
+  "git_head_ct": 1792540130,
   "git_dirty": false,
-  "binary_sha256": "d175c7e6a43a8e806a8c935517fb9e265047296289099e45f08916430f1d55c7",
-  "binary_mtime": 1792538382,
-  "binary_path": "/proc/727158/exe",
-  "server_pid": 727158
+  "binary_sha256": "ca6f9a52215304ae174cd972fea3e1455cab3e789757b2b611734918ffefe32d",
+  "binary_mtime": 1792540198,
+  "binary_path": "/proc/746439/exe",
+  "server_pid": 746439
  },
  "acceptance": {
   "conference_dtmf": true,
   "conference_route": true,
   "history_list_schema": true,
   "history_dtmf_route": true,
+  "history_date_filter": true,
   "history_detail_calls": true,
   "ui_session_history": true,
   "ui_call_history": true,
   "export_zip": true,
-  "export_csv_header": true,
+  "export_zip_integrity": true,
+  "export_csv_rows": true,
   "history_pagination": true,
   "history_list_ui": true,
   "history_detail_ui": true,
   "history_export_ui": true,
   "history_clean": true,
+  "export_invalidated_after_clean": true,
   "history_clean_ui": true,
   "clean_build": true,
   "binary_built_after_head": true
@@ -39,10 +42,11 @@
  },
  "error": null,
  "export": {
-  "filename": "Conference_history_2026-10-20.zip",
-  "ui_filename": "Conference_history_T22History_442963.zip"
+  "filename": "Conference_history_2026-10-20_07b0806a8bd3451f950db1a57b216d94.zip",
+  "csv_bytes": 290,
+  "ui_filename": "Conference_history_T22History_242523_e4e1fdc93fd9424ba18c15b49c1a81f3.zip"
  },
- "finished_at": "2026-10-20T23:21:17.379Z",
+ "finished_at": "2026-10-20T23:51:16.729Z",
  "steps": [
   "conference-create",
   "session-start",
