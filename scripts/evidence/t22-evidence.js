@@ -318,6 +318,12 @@ const summary = {
       await shot('03-history-empty.png');
     });
 
+    // Провенанс: прогон на чистом дереве и бинарник собран после коммита.
+    summary.acceptance.clean_build =
+      build.git_dirty === false && build.git_head.length === 40 && build.binary_sha256 !== null;
+    summary.acceptance.binary_built_after_head =
+      build.binary_mtime !== null && build.git_head_ct > 0 && build.binary_mtime >= build.git_head_ct;
+
     const gates = Object.values(summary.acceptance);
     summary.ok = gates.length > 0 && gates.every(Boolean) && consoleErrors.length === 0 && httpErrors.length === 0;
     if (!summary.ok) {
