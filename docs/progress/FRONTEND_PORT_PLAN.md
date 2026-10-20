@@ -612,3 +612,12 @@ volume и kick. Всегда удаляет созданные сущности.
   H.323↔SIP нужна пауза на освобождение (в прогоне 15 с), иначе 486 Busy Here;
 - live-часть смоука включается только через `SMOKE_URI` (CI — без неё);
 - UI-отключение участника требует подтверждения в диалоге (учтено в evidence).
+
+## 10. Прогресс порта: T1.7 (2026-10-20)
+
+Boot-reconcile остановленных сессий закреплён тестом
+`sessions::boot_reconcile_tests::boot_reconcile_marks_persisted_sessions_stopped_until_started`:
+после `sync_from_storage` все persisted-комнаты попадают в `stopped_sessions`
+(сессии в выдаче `STOPPED`, живого `session` нет), `POST /sessions` возвращает
+выбранную комнату в `ACTIVE`, а следующий старт с тем же storage снова гасит её —
+активные звонки не переживают рестарт. Тест входит в 147 unit-тестов `vks-admin`.

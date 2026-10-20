@@ -1837,3 +1837,73 @@ mod auth_scope_tests {
         assert_eq!(filter_sessions_scope(payload.clone(), &auth), payload);
     }
 }
+
+#[cfg(test)]
+mod boot_reconcile_tests {
+    use super::*;
+    use std::sync::Arc;
+    use vks_core::ports::Storage;
+    use vks_core::room::RoomMode;
+
+    /// T1.7: при старте все persisted-комнаты считаются остановленными
+    /// (живые звонки не переживают рестарт), а `POST /sessions` снова делает
+    /// выбранную комнату активной; следующий «рестарт» опять гасит обе.
+    #[tokio::test]
+    async fn boot_reconcile_marks_persisted_sessions_stopped_until_started() {
+        let storage: Arc<dyn Storage> = Arc::new(vks_storage::MemoryStorage::new());
+        let mut room_a = vks_core::Room::new("boot-a", RoomMode::Sfu);
+        let id_a = room_a.id;
+        room_a.created_ms = 1_700_000_000_000;
+        storage.upsert_room(&room_a).await.unwrap();
+        let mut room_b = vks_core::Room::new("boot-b", RoomMode::Sfu);
+        let id_b = room_b.id;
+        room_b.created_ms = 1_700_000_000_001;
+        storage.upsert_room(&room_b).await.unwrap();
+
+        let state = Arc::new(AppState::with_storage(storage.clone()));
+        state.sync_from_storage().await.unwrap();
+
+        {
+            let stopped = state.api_v3.stopped_sessions.lock().unwrap();
+            assert!(stopped.contains(&id_a) && stopped.contains(&id_b), "обе комнаты после boot — STOPPED");
+        }
+        let payload = sessions_payload(&state, &SessionsQuery::default());
+        assert_eq!(payload["count"], 2);
+        for session in payload["sessions"].as_array().unwrap() {
+            assert_eq!(session["state"], "STOPPED", "persisted-сессии после рестарта остановлены: {session}");
+            assert_eq!(session["has_stopped"], true);
+            assert!(session["session"].is_null(), "у остановленной сессии нет живого session");
+        }
+
+        let auth = AuthContext {
+            subject: "operator".into(),
+            role: Role::Operator,
+            auth_type: crate::auth_middleware::AuthType::Jwt,
+            scopes: vec!["*".into()],
+            room_scope: None,
+            generation: 0,
+            client_ip: "127.0.0.1".into(),
+        };
+        let response = start_session(
+            State(state.clone()),
+            Extension(auth),
+            None,
+            Json(StartSessionRequest { conference_id: Some(id_a.to_string()) }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let after = sessions_payload(&state, &SessionsQuery::default());
+        for session in after["sessions"].as_array().unwrap() {
+            let expected = if session["id"].as_str() == Some(&id_a.to_string()) { "ACTIVE" } else { "STOPPED" };
+            assert_eq!(session["state"], expected, "{session}");
+        }
+
+        // Имитация второго рестарта: тот же storage, новое состояние.
+        let restarted = Arc::new(AppState::with_storage(storage));
+        restarted.sync_from_storage().await.unwrap();
+        let payload = sessions_payload(&restarted, &SessionsQuery::default());
+        for session in payload["sessions"].as_array().unwrap() {
+            assert_eq!(session["state"], "STOPPED", "после рестарта активная сессия снова STOPPED: {session}");
+        }
+    }
+}

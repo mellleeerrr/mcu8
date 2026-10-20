@@ -413,7 +413,7 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 | T1.4 | Раскладки: `.../video_layouts/{id}/abonents`, `calculate`, `settings/video`, attach в любой слот | 🟢 | abonents/attach/detach: получатели по `type`, занятие свободных окон (422/409/404), detach без reindex, purge при удалении комнаты, calculate, templates, settings/video GET+PATCH (RBAC+аудит+durable), mode→запись с откатом; UI-сценарий «Настроить раскладку → Ручная → Заполнить → Создать» зелёный; live RTP H.323/H264 — `evidence/acceptance/` |
 | T1.5 | «Добавить по адресу»: autocomplete, адресная книга, `/ui/sessions/{id}/audiochannels` | 🟢 | vendor не имеет `/pnm/addresses` и `/ui/addresses` — вместо них глобальная книга: `GET/POST/PATCH/DELETE /api/v3/call_strings[/{id}]` (+`/ui`), фильтры/пагинация/сортировка, WS `ui:call_strings:search`, автодополнение по `uri/protocols`; аудиоканалы: list с `page/page_size/search/sort`, счётчики speakers/listeners, `/ui`-алиасы; evidence `docs/progress/evidence/t15/` |
 | T1.6 | Приёмка SIP+H.323 из UI + `scripts/smoke_v3.sh` + evidence | 🟢 | оба протокола: connected, рост RTP, контролы, ручная раскладка/слот, reload, kick; smoke 18/24/24 |
-| T1.7 | Тест boot-reconcile `stopped_sessions` (логика уже есть) | ⚪ | — |
+| T1.7 | Тест boot-reconcile `stopped_sessions` (логика уже есть) | 🟢 | тест: persisted-сессии STOPPED после старта, start → ACTIVE, рестарт → снова STOPPED |
 | T2.1 | Справочник: groups, users CRUD, credentials, addresses | ⚪ | — |
 | T2.2 | История: call_history (+ui, export, clean), session_history | ⚪ | — |
 | T2.3 | Администрирование: settings/calls/{sip,h323}, video, rtp, http, styles, smtp, security, time/tz/ntp | ⚪ | — |
