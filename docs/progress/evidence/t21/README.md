@@ -22,13 +22,15 @@
 | `group-member` | «Добавить» участника: пользователь в `user.groups` | ✅ |
 | `role-create-assign` | `POST /roles`, `POST /users/{u}/roles/{r}`, роль видна в карточке, `DELETE /roles/{r}` | ✅ |
 | `self-password` | свой пароль vendor-телом `{login:null,...}`: старый пароль → 401, новый → 200 | ✅ |
-| `reload` | после перезагрузки SPA пользователь, группа и адрес на месте | ✅ |
+| `reload` | после перезагрузки SPA созданный пользователь виден в списке; группа и личный адрес подтверждены API на шагах `group-create`/`user-address` (перезагрузка проверяет только отрисовку карточки) | ✅ |
 | `user-delete-ui` | кнопка «Удалить» в UI: пользователь исчезает, `GET /users/{id}` → 404 | ✅ |
 | `cleanup` | группа удалена и отсутствует в поиске; created-сущности не остаются | ✅ |
 
-`summary.json → ok=true` — строгий гейт: все 16 acceptance-флагов,
-0 HTTP ≥ 400 (кроме двух ожидаемых credentials-404, см. ниже),
-0 неатрибутированных console errors; при провале exit 1.
+`summary.json → ok=true` — строгий гейт: все acceptance-флаги,
+0 HTTP ≥ 400 (кроме ровно двух ожидаемых credentials-404, см. ниже),
+0 неатрибутированных console errors, `expected_credentials_404 === 2` и
+`clean_build` (`git_dirty=false`, известный `git_head`, `binary_sha256`);
+при провале exit 1 и пишется `ok=false`-summary (старый артефакт не остаётся).
 
 ## Честная атрибуция
 
@@ -53,13 +55,16 @@
 
 ## Что покрыто кодом/тестами вне UI-прогона
 
-`crates/vks-admin/src/api_v3/directory_tests.rs` (18 тестов) дополнительно
-проверяет: каскадное удаление (credentials/профиль/членства/адреса, login
+18 тестов справочника (15 HTTP-интеграционных в `directory_tests.rs` + 3
+inline `#[cfg(test)]` в `directory.rs`) дополнительно проверяют: каскадное удаление (credentials/профиль/членства/адреса, login
 удалённого → 401), флаги `defaults.deletable`, `room_scope` не читает
 глобальный справочник, WS у Moderator, CRUD ролей, сохранение неявной роли
 Administrator при добавлении Operator, переименование логина, Unicode-дубли и
 лимиты длин, malformed-JSON-конверт, гидратацию справочника из
-configuration-document при рестарте.
+configuration-document при рестарте, коллизию display_name с логином
+администратора (резолв субъекта остаётся однозначным), legacy-расклад
+LocalDb `u-admin` ↔ core-id для PATCH/DELETE credentials и WS/HTTP-паритет
+`defaults.deletable`.
 
 ## Воспроизведение
 

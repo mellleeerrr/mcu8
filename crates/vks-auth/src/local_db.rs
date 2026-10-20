@@ -68,6 +68,12 @@ impl LocalDb {
         if map.contains_key(id) {
             return Err(LocalDbError::AlreadyExists(id.to_string()));
         }
+        // Логины уникальны без учёта регистра Unicode (как и при переименовании):
+        // иначе `authenticate` выбирал бы случайный из дублей HashMap.
+        let username_key = username.trim().to_lowercase();
+        if map.values().any(|user| user.username.to_lowercase() == username_key) {
+            return Err(LocalDbError::AlreadyExists(username.to_string()));
+        }
         let clone = user.clone();
         map.insert(id.to_string(), user);
         drop(map);
@@ -106,16 +112,15 @@ impl LocalDb {
         }
     }
 
-    /// Fetch a user by username.
     /// Переименовать логин существующего пользователя (admin UI «Учётная
-    /// запись»). Коллизия логинов → `AlreadyExists`.
+    /// запись»). Коллизия логинов без учёта регистра Unicode → `AlreadyExists`.
     pub fn rename_user(&self, id: &str, new_username: &str) -> Result<User, LocalDbError> {
         let new_username = new_username.trim();
         if new_username.is_empty() {
             return Err(LocalDbError::NotFound(new_username.to_string()));
         }
         let mut map = self.users.lock().unwrap();
-        if map.values().any(|u| u.id != id && u.username.eq_ignore_ascii_case(new_username)) {
+        if map.values().any(|u| u.id != id && u.username.to_lowercase() == new_username.to_lowercase()) {
             return Err(LocalDbError::AlreadyExists(new_username.to_string()));
         }
         let user = map.get_mut(id).ok_or_else(|| LocalDbError::NotFound(id.to_string()))?;
@@ -123,6 +128,7 @@ impl LocalDb {
         Ok(user.clone())
     }
 
+    /// Fetch a user by username (exact match; uniqueness is case-insensitive).
     pub fn user_by_name(&self, username: &str) -> Result<User, LocalDbError> {
         let map = self.users.lock().unwrap();
         map.values()

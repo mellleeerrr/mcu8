@@ -54,7 +54,7 @@ async fn user_body(app: &axum::Router, token: &str, id: &str) -> Value {
 
 #[tokio::test]
 async fn users_crud_groups_roles_and_credentials() {
-    let (state, issuer) = test_state();
+    let (state, _issuer) = test_state();
     let app = app(state.clone());
     let token = login_token(&app, "admin", "s3cret").await;
 
@@ -219,7 +219,6 @@ async fn users_crud_groups_roles_and_credentials() {
     let response = send(&app, request("GET", "/api/v3/groups", Some(&token), json!({}))).await;
     let body = json_body(response).await;
     assert!(!body["groups"].as_array().unwrap().iter().any(|g| g["id"] == group_id));
-    let _ = issuer;
 }
 
 #[tokio::test]
@@ -422,7 +421,7 @@ async fn deletable_flags_expose_ui_delete_but_not_self_or_bootstrap() {
     let (state, _) = test_state();
     let app = app(state.clone());
     let token = login_token(&app, "admin", "s3cret").await;
-    let id = created_user(&app, &token, "Удаляемы�� через UI").await;
+    let id = created_user(&app, &token, "Удаляемый через UI").await;
     let body = user_body(&app, &token, &id).await;
     assert_eq!(body["user"]["defaults"]["deletable"], true, "обычного пользователя UI должен давать удалить");
     let admin_id = Users::list(&state).into_iter().find(|u| u.role == Role::Operator).unwrap().id.to_string();
@@ -752,4 +751,75 @@ async fn credentials_login_can_be_renamed_by_admin_and_self() {
     let renamed =
         send(&app, request("POST", "/api/v3/login", None, json!({"login": "login-c", "password": "secret2"}))).await;
     assert_eq!(renamed.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn display_name_collision_cannot_shadow_admin_identity() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    // Пользователь с display_name, совпадающим с логином администратора.
+    let id = created_user(&app, &token, "admin").await;
+    // Внутренний username уникален, поэтому резолв субъекта остаётся однозначным.
+    assert_eq!(Users::resolve_role(&state, "u-admin"), Some(Role::Operator), "админ не должен потерять роль");
+    let body = user_body(&app, &token, &id).await;
+    assert_eq!(body["user"]["display_name"], "admin");
+    let response = send(&app, request("GET", "/api/v3/users", Some(&token), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::OK, "список доступен после коллизии имён");
+    // Чужой display_name не даёт прав: новый пользователь — Participant.
+    assert_eq!(Users::resolve_role(&state, &id), Some(Role::Participant));
+}
+
+#[tokio::test]
+async fn legacy_localdb_id_credentials_can_be_patched_and_deleted() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    // test_state: LocalDb-запись `u-admin` с логином `admin`, а Users-запись
+    // создана с другим id — ровно тот legacy-расклад, который чинится резолвом по логину.
+    let admin_id = json_body(send(&app, request("GET", "/api/v3/users?search=admin", Some(&token), json!({}))).await)
+        .await["users"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let response = send(
+        &app,
+        request(
+            "PATCH",
+            &format!("/api/v3/users/{admin_id}/credentials"),
+            Some(&token),
+            json!({"password": "s3cret2"}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "{:?}", json_body(response).await);
+    let login =
+        send(&app, request("POST", "/api/v3/login", None, json!({"login": "admin", "password": "s3cret2"}))).await;
+    assert_eq!(login.status(), StatusCode::OK);
+    // Смена пароля инвалидирует старые токены (generation) — берём свежий.
+    let fresh_token = json_body(login).await["token"].as_str().unwrap().to_string();
+    let response =
+        send(&app, request("DELETE", &format!("/api/v3/users/{admin_id}/credentials"), Some(&fresh_token), json!({})))
+            .await;
+    assert_eq!(response.status(), StatusCode::OK, "legacy credentials delete");
+    let login =
+        send(&app, request("POST", "/api/v3/login", None, json!({"login": "admin", "password": "s3cret2"}))).await;
+    assert_eq!(login.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn ws_and_http_deletable_flags_match_for_own_card() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let admin_id = json_body(send(&app, request("GET", "/api/v3/users?search=admin", Some(&token), json!({}))).await)
+        .await["users"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let http = user_body(&app, &token, &admin_id).await;
+    assert_eq!(http["user"]["defaults"]["deletable"], false, "себя удалять нельзя");
+    let ws = ws_users_search(&state, "u-admin", None, &json!({})).await.expect("ws search");
+    let ws_self = ws["users"].as_array().unwrap().iter().find(|user| user["id"] == admin_id).expect("own card in ws");
+    assert_eq!(ws_self["defaults"]["deletable"], false, "WS-вьюер должен совпадать с HTTP");
 }

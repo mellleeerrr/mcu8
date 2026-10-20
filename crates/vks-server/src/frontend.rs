@@ -234,10 +234,13 @@ pub async fn with_security_headers(csp: String, request: Request, next: Next) ->
 /// `'unsafe-eval'` — вынужденная минимальная уступка неизменяемым vendor-бандлам
 /// 2.2.1.66: при открытии карточки пользователя/удалении `index2.bundle` реально
 /// исполняет строку как JavaScript, и без `unsafe-eval` Chromium пишет
-/// «Evaluating a string as JavaScript violates … CSP» (точный текст и источник
-/// зафиксированы в evidence T2.1, `console_error_samples` до фикса). Статический
-/// `grep` этого пути не видит — он срабатывает в runtime. Vendor-сервер `.92`
-/// CSP не отдаёт вовсе. `'unsafe-inline'` в script-src не добавляется.
+/// «Evaluating a string as JavaScript violates … CSP» (точный текст, источник
+/// `/mcu/chunks/index2.bundle-2.2.1.66.js` и разбор — в
+/// `docs/progress/evidence/t21/README.md`, раздел «CSP `'unsafe-eval'`»; в
+/// финальном прогоне CSP-ошибок нет, поэтому в `summary.json` сэмпла нет).
+/// Статический `grep` этого пути не видит — он срабатывает в runtime.
+/// Vendor-сервер `.92` CSP не отдаёт вовсе. `'unsafe-inline'` в script-src не
+/// добавляется.
 /// `style-src` — `'self' 'unsafe-inline'`
 /// (инлайн-`<style id="prostor-pnm-overrides">` и style-атрибуты Vue).
 pub fn build_csp(index_html: &str) -> String {

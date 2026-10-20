@@ -374,6 +374,11 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
       cleanup: stepOk('cleanup'),
       unique_steps: new Set(steps.map((s) => s.step)).size === steps.length,
       screenshots: screenshots.length === 9,
+      // Ровно два реальных vendor-запроса credentials завершаются 404 (пустое
+      // состояние). Регрессия «404 для всех» больше не проходит гейт.
+      expected_credentials_404: expectedCredentials404 === 2,
+      // Артефакт коммитится только с чистого дерева; иначе provenance недостоверен.
+      clean_build: build.git_dirty === false && build.git_head.length === 40 && build.binary_sha256 !== null,
     };
     const ok = httpErrors.length === 0 && otherErrors.length === 0 && Object.values(acceptance).every(Boolean);
     const summary = {
@@ -418,6 +423,26 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
     if (!ok) process.exitCode = 1;
   } catch (e) {
     console.error(e);
+    // Провальный прогон не должен оставлять предыдущий ok:true summary.json.
+    const failure = {
+      ok: false,
+      error: String(e && e.stack ? e.stack : e),
+      totals: {
+        console_errors: consoleErrors.length,
+        vendor_console_errors: vendorConsoleErrors,
+        other_console_errors: consoleErrors.filter((entry) => !entry.vendor).length,
+        http_errors: httpErrors.length,
+        expected_credentials_404: expectedCredentials404,
+        steps: steps.length,
+        screenshots: screenshots.length,
+      },
+      build,
+      steps,
+      console_error_samples: consoleErrors.filter((entry) => !entry.vendor).slice(0, 10),
+      vendor_error_samples: vendorSamples.slice(0, 10),
+      http_error_samples: httpErrors.slice(0, 10),
+    };
+    fs.writeFileSync(path.join(OUT, 'summary.json'), JSON.stringify(failure, null, 1) + '\n');
     process.exitCode = 1;
   } finally {
     try {

@@ -354,14 +354,16 @@ pub(crate) fn sort_and_page(
         });
     }
     items.sort_by(|left, right| {
-        let order = if sort_field == "created_at" {
-            left["created_at"].as_u64().unwrap_or(0).cmp(&right["created_at"].as_u64().unwrap_or(0))
-        } else {
-            left["display_name"]
+        // Любое числовое поле (`created_at`, `size`, ...) сравнивается как число,
+        // остальные — как регистронезависимая строка. Один компаратор на все
+        // списки PNM вместо копий в каждом хендлере.
+        let order = match (left[sort_field].as_u64(), right[sort_field].as_u64()) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            _ => left[sort_field]
                 .as_str()
                 .unwrap_or_default()
                 .to_lowercase()
-                .cmp(&right["display_name"].as_str().unwrap_or_default().to_lowercase())
+                .cmp(&right[sort_field].as_str().unwrap_or_default().to_lowercase()),
         };
         if sort_order == 1 {
             order.reverse()

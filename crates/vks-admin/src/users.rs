@@ -261,21 +261,46 @@ impl Users {
         users.len()
     }
 
-    /// Роль субъекта токена для RBAC (v1-middleware и профиль `/api/v3`).
+    /// Резолвит субъект токена в запись без неоднозначности.
     ///
-    /// `subject` — `sub` из JWT: id или username записи admin-хранилища;
-    /// id локального провайдера (`u-admin`, `/api/v3/login`) резолвится в
-    /// username через [`vks_auth::local_db::LocalDb`]. `None` — записи нет
-    /// или она удалена (fail-closed: доступ запрещён).
-    pub fn resolve_role(state: &AppState, subject: &str) -> Option<Role> {
-        let username = state
-            .local_db
-            .as_ref()
-            .and_then(|db| db.user(subject).ok())
-            .map(|u| u.username)
-            .unwrap_or_else(|| subject.to_string());
+    /// Порядок: (1) точное совпадение `Users.id`; (2) логин LocalDb-провайдера
+    /// (`u-admin` → `admin`) — ровно одно совпадение по `username`;
+    /// (3) сам `subject` как `username` — только если совпадение единственное.
+    /// Дубли логинов запрещены на уровне [`crate::users::Users`]/LocalDb, а
+    /// исторические дубли трактуются как `None` (fail-closed), а не «первый из
+    /// HashMap»: иначе чужой профиль мог бы получить роль администратора.
+    pub fn resolve(state: &AppState, subject: &str) -> Option<UserRecord> {
+        let local_username = state.local_db.as_ref().and_then(|db| db.user(subject).ok()).map(|user| user.username);
         let users = state.users.lock().expect("users store poisoned");
-        users.values().find(|u| !u.deleted && (u.username == username || u.id.to_string() == subject)).map(|u| u.role)
+        let active = || users.values().filter(|user| !user.deleted);
+        if let Some(record) = active().find(|user| user.id.to_string() == subject) {
+            return Some(record.clone());
+        }
+        for candidate in local_username.as_deref().into_iter().chain(std::iter::once(subject)) {
+            let mut matches = active().filter(|user| user.username == candidate);
+            if let (Some(record), None) = (matches.next(), matches.next()) {
+                return Some(record.clone());
+            }
+        }
+        None
+    }
+
+    /// Роль субъекта токена для RBAC (v1-middleware и профиль `/api/v3`).
+    /// `None` — записи нет/удалена или логин неоднозначен (fail-closed).
+    pub fn resolve_role(state: &AppState, subject: &str) -> Option<Role> {
+        Self::resolve(state, subject).map(|user| user.role)
+    }
+
+    /// Проверяет, занят ли `username` другой активной записью (без учёта
+    /// регистра Unicode — как логины LocalDb).
+    pub fn username_taken(state: &AppState, username: &str, except: Option<UserId>) -> bool {
+        let needle = username.trim().to_lowercase();
+        state
+            .users
+            .lock()
+            .expect("users store poisoned")
+            .values()
+            .any(|user| !user.deleted && Some(user.id) != except && user.username.to_lowercase() == needle)
     }
 }
 
