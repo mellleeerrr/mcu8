@@ -1,6 +1,6 @@
 # T1.5 — «Добавить по адресу»: автодополнение, адресная книга, аудиоканалы
 
-Дата: 2026-10-20. Стенд: release-сборка `vks-server` (pid 539438, sha256 `0cc776ba…`;
+Дата: 2026-10-20. Стенд: release-сборка `vks-server` (pid 547164, sha256 `971323a3…`;
 head/сборка — в `summary.json → build`), UI `/pnm/`, endpoint `192.168.1.132` (H.323 1720).
 
 ## Что доказано
@@ -16,7 +16,7 @@ head/сборка — в `summary.json → build`), UI `/pnm/`, endpoint `192.16
    (`11-address-selected.png`).
 3. **Реальный вызов по выбранному адресу.** После выбора кодеков (payload адреса создан
    без кодеков; форма требует хотя бы один) «Добавить» → `POST /ui/sessions/{id}/call_strings`
-   → абонент CONNECTED: PCMU rx/tx ~176/349 пакетов, H.264 640x360 rx/tx ~59/371
+   → абонент CONNECTED: PCMU rx/tx ~203/385 пакетов, H.264 640x360 rx/tx ~64/404
    (`12-address-call-connected.png`, `summary.json → connected`).
 4. **Аудиоканалы сессии.** Вкладка «Аудиоканалы»: список `{count,audiochannels}`, «Добавить»
    → `POST /api/v3/audiochannels` (201) → `POST /api/v3/sessions/{id}/audiochannels/{id}` (204),

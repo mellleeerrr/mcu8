@@ -1,7 +1,7 @@
 {
-  "session_id": "ac17184d-22e9-412b-b5f1-a688a6342a43",
+  "session_id": "c392b916-9867-4bd8-bd4d-a519032ac931",
   "audiochannel": {
-    "id": "d50789a4-2c96-43ea-89db-55c702301413",
+    "id": "001e57cd-7c7b-4288-95f8-4d1e3a7a175f",
     "display_name": "Канал T1.5",
     "speakers": 0,
     "listeners": 0,
@@ -12,35 +12,35 @@
   "connected": {
     "display_name": "Зал 132 (h323)",
     "url": "h323:192.168.1.132",
-    "layout": "9ba8a2cb-4e37-4f9a-91e9-53dfe1a2ddc4",
+    "layout": "30e5b6a4-e795-48b9-bf23-597533830a54",
     "media": {
       "audio": {
         "rx": {
           "active": true,
           "codec": "PCMU",
-          "packets": 176,
-          "bitrate": 31840
+          "packets": 203,
+          "bitrate": 34442
         },
         "tx": {
           "active": true,
           "codec": "PCMU",
-          "packets": 349,
-          "bitrate": 63137
+          "packets": 385,
+          "bitrate": 65321
         }
       },
       "video": {
         "rx": {
           "active": true,
           "codec": "H264",
-          "packets": 59,
-          "bitrate": 29538,
+          "packets": 64,
+          "bitrate": 30292,
           "resolution": "640x360"
         },
         "tx": {
           "active": true,
           "codec": "H264",
-          "packets": 371,
-          "bitrate": 232853,
+          "packets": 404,
+          "bitrate": 240295,
           "resolution": "640x360"
         }
       }
@@ -81,7 +81,7 @@
       "errors": [],
       "fails": [],
       "channel": {
-        "id": "d50789a4-2c96-43ea-89db-55c702301413",
+        "id": "001e57cd-7c7b-4288-95f8-4d1e3a7a175f",
         "display_name": "Канал T1.5"
       }
     },
@@ -104,7 +104,7 @@
       "connected": {
         "display_name": "Зал 132 (h323)",
         "url": "h323:192.168.1.132",
-        "layout": "9ba8a2cb-4e37-4f9a-91e9-53dfe1a2ddc4",
+        "layout": "30e5b6a4-e795-48b9-bf23-597533830a54",
         "media": {
           "audio": {
             "auto_gain_control": false,
@@ -134,8 +134,8 @@
             },
             "tx": {
               "active": true,
-              "bitrate": 69590,
-              "bytes": 7568,
+              "bitrate": 66190,
+              "bytes": 8944,
               "codec": "PCMU",
               "enabled": true,
               "fps": 0,
@@ -145,7 +145,7 @@
               "loss": 0,
               "lossrate": 0,
               "lost_packets": 0,
-              "packets": 44,
+              "packets": 52,
               "present": true,
               "requested_bitrate": 0,
               "resolution": "0x0",
@@ -156,38 +156,38 @@
           "video": {
             "rx": {
               "active": true,
-              "bitrate": 0,
-              "bytes": 0,
+              "bitrate": 28173,
+              "bytes": 3807,
               "codec": "H264",
               "enabled": true,
               "fps": 0,
-              "frame_rate": 0,
-              "height": 0,
-              "jitter": 0,
-              "loss": 0,
-              "lossrate": 0,
-              "lost_packets": 0,
-              "packets": 0,
-              "present": true,
-              "requested_bitrate": 0,
-              "resolution": "0x0",
-              "volume": 0,
-              "width": 0
-            },
-            "tx": {
-              "active": true,
-              "bitrate": 16487,
-              "bytes": 1793,
-              "codec": "H264",
-              "enabled": true,
-              "fps": 0,
-              "frame_rate": 12.629600235872251,
+              "frame_rate": 2.774804723533802,
               "height": 360,
               "jitter": 0,
               "loss": 0,
               "lossrate": 0,
               "lost_packets": 0,
-              "packets": 25,
+              "packets": 7,
+              "present": true,
+              "requested_bitrate": 0,
+              "resolution": "640x360",
+              "volume": 0,
+              "width": 640
+            },
+            "tx": {
+              "active": true,
+              "bitrate": 151785,
+              "bytes": 20510,
+              "codec": "H264",
+              "enabled": true,
+              "fps": 0,
+              "frame_rate": 12.949088709824409,
+              "height": 360,
+              "jitter": 0,
+              "loss": 0,
+              "lossrate": 0,
+              "lost_packets": 0,
+              "packets": 44,
               "present": true,
               "requested_bitrate": 0,
               "resolution": "640x360",
@@ -200,16 +200,17 @@
     }
   ],
   "build": {
-    "git_head": "b9b01401f880bf25d5885e06963f98e4f128c2c9",
-    "binary_sha256": "0cc776bac37a38863f5085a6d950d9c203495157802e73abf9275711bd849b7f",
-    "binary_built_at": "2026-10-20 20:52:38.336872947 +0300",
-    "server_pid": 539438,
-    "git_dirty_files": 10
+    "git_head": "36de0d52e44c1e202d5b0d4659fb73d0b8631fb9",
+    "source_note": "собрано из рабочего дерева HEAD+правки T1.5 до коммита; дерево закоммичено в 36de0d5 и последующий fix",
+    "binary_sha256": "971323a3d2536e1e0b43eaff39e1b4abbae1aa40cff89c59543d1360570e47f6",
+    "binary_built_at": "2026-10-20 21:05:05.724081240 +0300",
+    "server_pid": 547164
   },
   "known_limits": [
     "contact_id-привязки и /ui/users/{id}/call_strings — T2.1; is_binded игнорируется",
     "busy всегда false; дубли адресов не проверяются",
-    "room-scoped контакты правятся Operator-ом своей комнаты; глобальная книга — unscoped Operator"
+    "room-scoped контакты правятся Operator-ом своей комнаты; глобальная книга — unscoped Operator",
+    "аудит address CRUD и уникальность id контактов — бэклог P3"
   ],
   "access_policy": {
     "read": "Moderator+ (HTTP 403 для Viewer, WS error 403)",

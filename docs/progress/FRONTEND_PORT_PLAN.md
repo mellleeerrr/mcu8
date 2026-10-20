@@ -546,7 +546,8 @@ API-мутации, пошаговая атрибуция) и скриншоты
   канонизация `uri`, слияние `payload` по протоколам). Список поддерживает
   `page/page_size/sort_field/sort_order/search/protocols/uri/includeAddresses/excludeAddresses`;
   `page/sort` — общий `ListParams`, `PATCH`/`DELETE` резолвят и глобальные адреса,
-  и контакты комнаты (vendor `editAddress(addressId)`);
+  и контакты комнаты (vendor `editAddress(addressId)`), PATCH контакта сохраняет
+  top-level настройки (`auto_call/volume_*/флаги`), повторяющийся id → 409;
   WS `ui:call_strings:search` (`process_frame` стал async) использует тот же
   источник, фильтры, дефолты (`page_size=100`) и `AuthContext` (`room_scope` +
   `Users::resolve_role`), поэтому таблица адресов и автодополнение не расходятся.
@@ -571,10 +572,10 @@ API-мутации, пошаговая атрибуция) и скриншоты
 
 ### 8.3. Приёмка и ограничения
 
-- Прогон `docs/progress/evidence/t15/`: release pid 539438, sha256 `0cc776ba…`
-  (git head/сборка — в `summary.json → build`), сессия `ac17184d-…`, канал
-  `d50789a4-…`, автодополнение «Зал 132 (h323)», H.323 `192.168.1.132` connected
-  (PCMU rx/tx ~176/349 пакетов, H.264 640x360 rx/tx ~59/371), 0 ошибок на шагах
+- Прогон `docs/progress/evidence/t15/`: release pid 547164, sha256 `971323a3…`
+  (git head/сборка — в `summary.json → build`), сессия `c392b916-…`, канал
+  `001e57cd-…`, автодополнение «Зал 132 (h323)», H.323 `192.168.1.132` connected
+  (PCMU rx/tx ~203/385 пакетов, H.264 640x360 rx/tx ~64/404), 0 ошибок на шагах
   аудио/адреса; 6 transient vendor TypeError на шаге открытия формы создания
   конференции (известная категория, 0 HTTP≥400).
 - Отложено в T2.1: `contact_id` и `/api/v3/ui/users/{id}/call_strings` (адресная книга

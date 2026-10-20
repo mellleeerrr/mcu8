@@ -378,7 +378,9 @@ async fn address_patch_and_delete_resolve_room_contacts() {
         "id": "cs-contact", "contact_id": "cs-contact", "contact_type": "call_strings",
         "uri": "sip:192.168.1.132", "connection_url": "sip:192.168.1.132",
         "display_name": "Зал 132", "created_at": 5,
-        "payload": {"call_string": {"sip": {"bitrate": 1}}},
+        "payload": {"auto_call": false, "volume_rx": -60, "audio_tx_enabled": false,
+                    "crown": false, "slot_render_type": 3,
+                    "call_string": {"sip": {"bitrate": 1}}},
         "call_string": {"id": "cs-contact", "uri": "sip:192.168.1.132", "display_name": "Зал 132"}
     });
     state.api_v3.resources.lock().await.contacts.insert(room.to_string(), vec![contact]);
@@ -394,6 +396,17 @@ async fn address_patch_and_delete_resolve_room_contacts() {
     let patched = response_json(patched).await;
     assert_eq!(patched["call_string"]["payload"]["sip"]["bitrate"], 9);
     assert_eq!(patched["call_string"]["display_name"], "Зал 132");
+    // vendor `editAddress` меняет одно поле: top-level настройки контакта не теряются
+    {
+        let resources = state.api_v3.resources.lock().await;
+        let stored = &resources.contacts[&room.to_string()][0]["payload"];
+        assert_eq!(stored["auto_call"], false, "{stored}");
+        assert_eq!(stored["volume_rx"], -60, "{stored}");
+        assert_eq!(stored["audio_tx_enabled"], false, "{stored}");
+        assert_eq!(stored["crown"], "EQUAL", "{stored}");
+        assert_eq!(stored["slot_render_type"], "DEFAULT", "{stored}");
+        assert_eq!(stored["call_string"]["sip"]["bitrate"], 9, "{stored}");
+    }
 
     let mut viewer = operator_auth(Role::Viewer);
     viewer.room_scope = Some(room.to_string());
@@ -450,4 +463,71 @@ async fn address_patch_tolerates_broken_stored_protocol_payload() {
     .await;
     assert_eq!(patched.status(), StatusCode::OK);
     assert_eq!(response_json(patched).await["call_string"]["payload"]["sip"]["bitrate"], 64);
+}
+
+/// T1.5: нестроковые поля отклоняются 400 (как create, так и PATCH), а
+/// повторяющийся id контакта в разных комнатах не резолвится молчаливым выбором.
+#[tokio::test]
+async fn address_patch_rejects_bad_types_and_ambiguous_ids() {
+    let state = Arc::new(AppState::new());
+    let auth = operator_auth(Role::Operator);
+    let created =
+        create_call_string(State(state.clone()), Extension(auth.clone()), Json(json!({"uri": "sip:10.9.9.9"}))).await;
+    let id = response_json(created).await["call_string"]["id"].as_str().unwrap().to_string();
+    let bad =
+        update_call_string(State(state.clone()), Extension(auth.clone()), Path(id.clone()), Json(json!({"uri": 123})))
+            .await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(bad).await;
+    assert!(
+        body["error"]["details"][0]["reason"].as_str().unwrap_or_default().contains("field must be a string"),
+        "{body}"
+    );
+
+    let contact = |uri: &str| {
+        json!({"id": "cs-dup", "uri": uri, "display_name": uri, "created_at": 1,
+               "payload": {"call_string": {}}})
+    };
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.contacts.insert("room-a".into(), vec![contact("sip:10.1.1.1")]);
+        resources.contacts.insert("room-b".into(), vec![contact("sip:10.1.1.2")]);
+    }
+    let ambiguous = update_call_string(
+        State(state.clone()),
+        Extension(auth.clone()),
+        Path("cs-dup".into()),
+        Json(json!({"display_name": "x"})),
+    )
+    .await;
+    assert_eq!(ambiguous.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        delete_call_string(State(state.clone()), Extension(auth), Path("cs-dup".into())).await.status(),
+        StatusCode::CONFLICT
+    );
+}
+
+/// T1.5: room-scoped Operator не может вытащить глобальный адрес по id через
+/// приглашение — глобальная книга требует unscoped-чтения (Moderator+).
+#[tokio::test]
+async fn invite_global_address_requires_global_read_scope() {
+    let state = Arc::new(AppState::new());
+    let room = crate::rooms::Rooms::create_async(&state, "T1.5 invite scope").await.unwrap();
+    let auth = operator_auth(Role::Operator);
+    let created =
+        create_call_string(State(state.clone()), Extension(auth.clone()), Json(json!({"uri": "sip:10.7.7.7"}))).await;
+    let id = response_json(created).await["call_string"]["id"].as_str().unwrap().to_string();
+    let mut scoped = operator_auth(Role::Operator);
+    scoped.room_scope = Some(room.id.to_string());
+    let response = invite_conference_call_strings(
+        State(state.clone()),
+        Extension(scoped),
+        None,
+        Path(room.id.to_string()),
+        Json(InviteCallStringsRequest {
+            call_strings: vec![CallStringItem { id: Some(id), uri: None, display_name: None, payload: None }],
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }

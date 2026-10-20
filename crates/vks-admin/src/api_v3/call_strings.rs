@@ -520,6 +520,11 @@ pub async fn invite_conference_call_strings(
             let Some(address_id) = item.id.as_deref() else {
                 return validation_error("invalid.uri", "uri");
             };
+            if check_permission(&auth, None).is_err()
+                && state.api_v3.resources.lock().await.addresses.contains_key(address_id)
+            {
+                return error_json(403, "Forbidden: global address book requires broader scope");
+            }
             let Some(saved) = address_book_records(&state, &auth)
                 .await
                 .into_iter()
@@ -953,6 +958,13 @@ fn can_write_address_book(auth: &AuthContext) -> bool {
 }
 
 fn address_fields(body: &Value) -> Result<(String, String, Option<Value>), (&'static str, &'static str)> {
+    for (field, position) in [("uri", "uri"), ("display_name", "display_name")] {
+        if let Some(value) = body.get(field) {
+            if !value.is_null() && !value.is_string() {
+                return Err(("field must be a string", position));
+            }
+        }
+    }
     let raw = body["uri"].as_str().unwrap_or_default().trim();
     if raw.is_empty() {
         return Err(("uri is required", "uri"));
@@ -964,13 +976,6 @@ fn address_fields(body: &Value) -> Result<(String, String, Option<Value>), (&'st
     }
     if address.is_empty() {
         return Err(("uri address is required", "uri"));
-    }
-    for field in ["uri", "display_name"] {
-        if let Some(value) = body.get(field) {
-            if !value.is_null() && !value.is_string() {
-                return Err(("field must be a string", if field == "uri" { "uri" } else { "display_name" }));
-            }
-        }
     }
     let payload = match body.get("payload") {
         None | Some(Value::Null) => None,
@@ -1027,16 +1032,25 @@ enum AddressTarget {
     Contact { room_id: String, index: usize },
 }
 
-fn address_target(resources: &ResourceState, id: &str) -> Option<AddressTarget> {
-    if resources.addresses.contains_key(id) {
-        return Some(AddressTarget::Global);
-    }
+enum AddressLookup {
+    Found(AddressTarget),
+    Missing,
+    /// Один id встречается в нескольких комнатах: контакты переносятся с сохранением
+    /// vendor `id`, и неоднозначность нельзя решать молчаливым выбором.
+    Ambiguous,
+}
+
+fn address_target(resources: &ResourceState, id: &str) -> AddressLookup {
+    let mut found: Option<AddressTarget> = resources.addresses.contains_key(id).then_some(AddressTarget::Global);
     for (room_id, contacts) in &resources.contacts {
         if let Some(index) = contacts.iter().position(|contact| contact["id"].as_str() == Some(id)) {
-            return Some(AddressTarget::Contact { room_id: room_id.clone(), index });
+            if found.is_some() {
+                return AddressLookup::Ambiguous;
+            }
+            found = Some(AddressTarget::Contact { room_id: room_id.clone(), index });
         }
     }
-    None
+    found.map_or(AddressLookup::Missing, AddressLookup::Found)
 }
 
 fn contact_write_allowed(auth: &AuthContext, room_id: &str) -> Option<Response> {
@@ -1055,8 +1069,10 @@ pub async fn update_call_string(
     Json(body): Json<Value>,
 ) -> Response {
     let mut resources = state.api_v3.resources.lock().await;
-    let Some(target) = address_target(&resources, &id) else {
-        return error_json(404, "Call string not found");
+    let target = match address_target(&resources, &id) {
+        AddressLookup::Found(target) => target,
+        AddressLookup::Missing => return error_json(404, "Call string not found"),
+        AddressLookup::Ambiguous => return error_json(409, "Call string id is ambiguous"),
     };
     match target {
         AddressTarget::Global => {
@@ -1117,13 +1133,22 @@ pub async fn update_call_string(
                 Ok(values) => values,
                 Err((reason, position)) => return validation_error(reason, position),
             };
-            let payload = default_contact_payload(Some(&json!({
-                "call_string": address_payload(Some(&flat_payload), patch.as_ref())
-            })));
+            // Сохраняем top-level настройки контакта (auto_call, volume_*, флаги
+            // медиа, crown, slot_render_type, stop_details и пр.), меняя только
+            // вложенный `call_string` — vendor `editAddress` присылает патч одного поля.
+            let merged_call_string = address_payload(Some(&flat_payload), patch.as_ref());
+            let mut base = match current["payload"].as_object() {
+                Some(object) => Value::Object(object.clone()),
+                None => json!({}),
+            };
+            base["call_string"] = merged_call_string;
+            let payload = default_contact_payload(Some(&base));
             let previous = resources.clone();
             if let Some(contact) = resources.contacts.get_mut(&room_id).and_then(|contacts| contacts.get_mut(index)) {
                 contact["uri"] = json!(uri);
-                contact["connection_url"] = json!(uri);
+                if body.get("uri").is_some_and(|value| !value.is_null()) {
+                    contact["connection_url"] = json!(uri);
+                }
                 contact["display_name"] = json!(display_name);
                 contact["payload"] = payload.clone();
                 if contact["call_string"].is_object() {
@@ -1153,8 +1178,10 @@ pub async fn delete_call_string(
     Path(id): Path<String>,
 ) -> Response {
     let mut resources = state.api_v3.resources.lock().await;
-    let Some(target) = address_target(&resources, &id) else {
-        return error_json(404, "Call string not found");
+    let target = match address_target(&resources, &id) {
+        AddressLookup::Found(target) => target,
+        AddressLookup::Missing => return error_json(404, "Call string not found"),
+        AddressLookup::Ambiguous => return error_json(409, "Call string id is ambiguous"),
     };
     match target {
         AddressTarget::Global => {
