@@ -396,3 +396,33 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 | A4 SIP/H.323 media | 1 | acceptance reviewer | 6.0 | Счётчики росли, но не было доказательства двустороннего decoded/encoded; добавлены live-замеры PT/разрешения. |
 | A6 task list | 1 | task-list reviewer | 7.5 | Список раздут/устарел; сокращён, статусы A0–A6 приведены к фактам. |
 | A6 hygiene | 1 | elegance reviewer | 6.0 | CRLF в shell/lib раздувал diff; нормализованы, `.accept*`/`__pycache__` в ignore. |
+
+## План 2026-10-20 (утверждён): рабочий фронтенд, SIP/H.323, раскладки, чистка
+
+Правило цикла — как выше: «подводные камни» → реализация → параллельное ревью
+(закрытие при ≥9.5 хотя бы у одного) → агент элегантности/приёмки (≥9) → commit.
+Границы: UI не переписываем; bundle не патчим; запись/трансляция/терминалы/кластер —
+честный read-only или явный отказ; эталон `.92` — только GET.
+
+| ID | Задача | Статус | Коммит/артефакт |
+|---|---|---|---|
+| T0.1 | Единый рантайм: один release-процесс на :8080, runbook build→restart | 🟢 | `38f9a54`, `scripts/run-local.sh` |
+| T1.1 | Калибровка: `{"calibration":null}`, скрыть пункт меню, deep-link → статистика | ⚪ | — |
+| T1.2 | DTO конференции: `addresses`, `primary_*`, контакты; golden-фикстуры `.92` | ⚪ | — |
+| T1.3 | DTO абонента/сессии: `engineAbonent.statuses`, `connection.protocol`, `contact`, `layoutId` | ⚪ | — |
+| T1.4 | Раскладки: `.../video_layouts/{id}/abonents`, `calculate`, `settings/video`, attach в любой слот | ⚪ | — |
+| T1.5 | «Добавить по адресу»: `/addresses`, autocomplete, `/ui/addresses`, `/ui/sessions/{id}/audiochannels` | ⚪ | — |
+| T1.6 | Приёмка SIP+H.323 из UI + `scripts/smoke_v3.sh` + evidence | ⚪ | — |
+| T1.7 | Тест boot-reconcile `stopped_sessions` (логика уже есть) | ⚪ | — |
+| T2.1 | Справочник: groups, users CRUD, credentials, addresses | ⚪ | — |
+| T2.2 | История: call_history (+ui, export, clean), session_history | ⚪ | — |
+| T2.3 | Администрирование: settings/calls/{sip,h323}, video, rtp, http, styles, smtp, security, time/tz/ntp | ⚪ | — |
+| T2.4 | Наблюдаемость/сервис: stats (/proc), network, log_events, roles, license, videorecords, terminals read-only; destructive → явный отказ | ⚪ | — |
+| T3.1 | Мёртвый код/зависимости (/records→/videorecords, неиспользуемые модули/крейты) | ⚪ | — |
+| T3.2 | Доки/конфиг/git: один трекер, README, dev/prod, CI master, .gitignore, .cargo | ⚪ | — |
+| T3.3 | Артефакты + финальный обход страниц + таблица паритета | ⚪ | — |
+
+Приёмка (AC1–AC9) — в утверждённом плане; ключевые: один процесс; SIP и H.323
+до живого участника с ростом медиа-счётчиков; участник ставится в любой слот и
+переживает reload; 0 console errors и 0 необъявленных 501 на сценарии; калибровки
+нет в меню; `smoke_v3.sh` зелёный; CI на master.
