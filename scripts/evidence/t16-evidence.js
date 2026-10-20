@@ -45,6 +45,8 @@ function buildFacts() {
 }
 
 (async () => {
+  // Провенанс фиксируем до записи выходных файлов, иначе evidence сам делает дерево dirty.
+  const build = buildFacts();
   if (!fs.existsSync(CHROME)) throw new Error(`Chromium не найден: ${CHROME}`);
   const browser = await chromium.launch({ executablePath: CHROME });
   const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
@@ -292,7 +294,7 @@ function buildFacts() {
   const httpErrors = steps.reduce((n, s) => n + s.fails.length, 0);
   const summary = {
     generated_at: new Date().toISOString(), base: BASE,
-    build: buildFacts(),
+    build,
     totals: {
       console_errors: createErrors + otherErrors,
       vendor_create_form_typeerrors: createErrors,
