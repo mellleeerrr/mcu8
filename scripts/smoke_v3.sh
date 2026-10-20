@@ -147,7 +147,6 @@ req DELETE "/api/v3/call_strings/$ADDRESS_ID"
 [ "$(http_status GET "/api/v3/call_strings/$DELETED_ADDRESS")" = "404" ] \
     && ok "address deleted (GET 404)" || fail "address still readable after delete"
 ADDRESS_ID=""
-ADDRESS_ID=""
 ok "address deleted"
 
 # --- аудиоканал ----------------------------------------------------------
@@ -217,16 +216,23 @@ if [ -n "$SMOKE_URI" ]; then
         && ok "RTP audio counters grow (rx $rx1->$rx2, tx $tx1->$tx2)" \
         || fail "RTP audio counters do not grow (rx $rx1->$rx2, tx $tx1->$tx2)"
 
-    req POST "/api/v3/abonents/$pid/audio" '{"enable":false}'
+    # Направления как у vendor UI: rx = от терминала (микрофон/камера),
+    # tx = к терминалу (колонка/видео конференции).
+    req POST "/api/v3/abonents/$pid/audio" '{"enable":false,"outgoing":true}'
     req GET "/api/v3/sessions/$SESSION_ID/abonents"
     jq -e --arg p "$pid" '.connected[] | select(.id == $p) | .details.audio.tx.enabled == false' <<<"$HTTP_BODY" >/dev/null \
-        && ok "microphone muted (audio.tx.enabled=false)" || fail "microphone mute did not apply: $HTTP_BODY"
-    req POST "/api/v3/abonents/$pid/audio" '{"enable":true}'
-    req POST "/api/v3/abonents/$pid/video" '{"enable":false}'
+        && ok "speaker muted (audio.tx.enabled=false)" || fail "speaker mute did not apply: $HTTP_BODY"
+    req POST "/api/v3/abonents/$pid/audio" '{"enable":true,"outgoing":true}'
+    req POST "/api/v3/abonents/$pid/audio" '{"enable":false,"outgoing":false}'
     req GET "/api/v3/sessions/$SESSION_ID/abonents"
-    jq -e --arg p "$pid" '.connected[] | select(.id == $p) | .details.video.tx.enabled == false' <<<"$HTTP_BODY" >/dev/null \
-        && ok "camera off (video.tx.enabled=false)" || fail "camera toggle did not apply: $HTTP_BODY"
-    req POST "/api/v3/abonents/$pid/video" '{"enable":true}'
+    jq -e --arg p "$pid" '.connected[] | select(.id == $p) | .details.audio.rx.enabled == false' <<<"$HTTP_BODY" >/dev/null \
+        && ok "microphone muted (audio.rx.enabled=false)" || fail "microphone mute did not apply: $HTTP_BODY"
+    req POST "/api/v3/abonents/$pid/audio" '{"enable":true,"outgoing":false}'
+    req POST "/api/v3/abonents/$pid/video" '{"enable":false,"outgoing":false}'
+    req GET "/api/v3/sessions/$SESSION_ID/abonents"
+    jq -e --arg p "$pid" '.connected[] | select(.id == $p) | .details.video.rx.enabled == false' <<<"$HTTP_BODY" >/dev/null \
+        && ok "camera off (video.rx.enabled=false)" || fail "camera toggle did not apply: $HTTP_BODY"
+    req POST "/api/v3/abonents/$pid/video" '{"enable":true,"outgoing":false}'
     req POST "/api/v3/abonents/$pid/volume" '{"volume":-60,"outgoing":false}'
     req GET "/api/v3/sessions/$SESSION_ID/abonents"
     jq -e --arg p "$pid" '.connected[] | select(.id == $p) | .details.audio.rx.volume == -60' <<<"$HTTP_BODY" >/dev/null \

@@ -135,7 +135,22 @@ function buildFacts() {
     token = (await r.json()).token;
   }
 
-  await stopAll();
+  // Чистим прошлые выходы, чтобы упавший прогон не оставил «свежий» summary/PNG.
+  for (const f of ['summary.json', 'http-trace.json', 'server-correlate.txt']) {
+    const target = path.join(OUT, f);
+    if (fs.existsSync(target)) fs.rmSync(target);
+  }
+  for (const f of fs.readdirSync(OUT).filter((f) => /^\d{2}-(?:h323|sip)-.*\.png$/.test(f))) {
+    fs.rmSync(path.join(OUT, f));
+  }
+  // Стенд выделенный: завершаем оставшиеся ACTIVE-сессии прошлых прогонов,
+  // иначе терминал получит 486 Busy Here. Чужие сессии созданного набора не трогаем.
+  const stale = (await api('/api/v3/sessions?page_size=200')).json?.sessions || [];
+  const staleActive = stale.filter((s) => s.state === 'ACTIVE').map((s) => s.id);
+  for (const id of staleActive) {
+    await api('/api/v3/sessions/' + id, { method: 'DELETE' });
+    await api('/api/v3/conferences/' + id, { method: 'DELETE' });
+  }
   for (const proto of PROTOCOLS) await ensureSaved(proto.uri, proto.suggestion);
 
   const screenshots = [];
@@ -226,17 +241,30 @@ function buildFacts() {
     // --- контролы из UI ---
     push('controls-' + sc.protocol);
     let row = page.locator('.abonent-item-connected button');
-    await row.nth(1).click(); // камера (video.rx)
+    // Порядок кнопок vendor-строки: 1 = камера (video.rx), 2 = микрофон
+    // (audio.rx), 3 = колонка (audio.tx); направления — как в settingsList
+    // (value: ["<field>", {direction: "rx"|"tx"}]).
+    await row.nth(1).click(); // камера
+    await page.waitForTimeout(1200);
+    await row.nth(2).click(); // микрофон
+    await page.waitForTimeout(1200);
+    await row.nth(3).click(); // колонка
     await page.waitForTimeout(1500);
-    const cam = (await api('/api/v3/sessions/' + rec.session_id + '/abonents')).json?.connected?.[0]?.details?.video;
-    await row.nth(3).click(); // микрофон (audio.tx)
-    await page.waitForTimeout(1500);
-    const mic = (await api('/api/v3/sessions/' + rec.session_id + '/abonents')).json?.connected?.[0]?.details?.audio;
-    rec.controls = { camera_rx_enabled: cam?.rx?.enabled, mic_tx_enabled: mic?.tx?.enabled };
+    const ctl = (await api('/api/v3/sessions/' + rec.session_id + '/abonents')).json?.connected?.[0]?.details;
+    rec.controls = {
+      camera_rx_enabled: ctl?.video?.rx?.enabled,
+      mic_rx_enabled: ctl?.audio?.rx?.enabled,
+      speaker_tx_enabled: ctl?.audio?.tx?.enabled,
+    };
     screenshots.push(await shot(file(3, 'controls')));
-    await row.nth(1).click(); await row.nth(3).click(); await page.waitForTimeout(1200);
-    const restored = (await api('/api/v3/sessions/' + rec.session_id + '/abonents')).json?.connected?.[0];
-    rec.controls_restored = { camera_rx_enabled: restored?.details?.video?.rx?.enabled, mic_tx_enabled: restored?.details?.audio?.tx?.enabled };
+    await row.nth(1).click(); await row.nth(2).click(); await row.nth(3).click();
+    await page.waitForTimeout(1500);
+    const restored = (await api('/api/v3/sessions/' + rec.session_id + '/abonents')).json?.connected?.[0]?.details;
+    rec.controls_restored = {
+      camera_rx_enabled: restored?.video?.rx?.enabled,
+      mic_rx_enabled: restored?.audio?.rx?.enabled,
+      speaker_tx_enabled: restored?.audio?.tx?.enabled,
+    };
 
     // --- ручная раскладка ---
     push('layout-' + sc.protocol);
@@ -331,12 +359,13 @@ function buildFacts() {
       unique_steps: new Set(steps.map((s) => s.step)).size,
     },
     unconnected_protocols: notConnected,
+    stale_stopped_sessions: staleActive,
     notes: [
       `transient vendor TypeError на открытие формы создания конференции (2.2.1.66), поля: ${vendorFields.join(', ')}; HTTP>=400 при этом 0 — атрибутировано, не скрыто`,
       'SIP и H.323: вызов из UI через автодополнение сохранённого адреса, рост медиа-счётчиков, mute камеры/микрофона из UI, ручная раскладка 4 слота, позиция 1 переживает reload, kick из UI',
       'summary.json и http-trace.json генерируются этим скриптом; первичные доказательства — PNG + smoke-логи + серверный лог',
       'провенанс: build.git_head — коммит, на котором запущен генератор; коммит с evidence является его docs-only потомком (кода не меняет), бинарник подтверждён sha256 и pid',
-      'stopAll() завершает только сессии, созданные этим прогоном; чужие ACTIVE-сессии не затрагиваются',
+      'в начале прогона завершаются оставшиеся ACTIVE-сессии стенда (stale_stopped_sessions); внутри сценариев — только созданные этим прогоном',
     ],
     screenshots: screenshots.map((f) => ({ file: f })),
     scenarios,
