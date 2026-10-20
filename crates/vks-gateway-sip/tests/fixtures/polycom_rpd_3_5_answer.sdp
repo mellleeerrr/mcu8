@@ -1,0 +1,66 @@
+v=0
+o=- 1792479673 1792479673 IN IP4 192.168.1.132
+s=MRD=MRE MRC-V=1.0.1
+c=IN IP4 192.168.1.132
+b=AS:384
+t=0 0
+a=sendrecv
+a=vnd.polycom.MBA.p2p:v=1.0.1
+m=audio 3230 RTP/AVP 118 115 114 113 102 101 103 99 98 97 9 18 15 0 8 119
+a=sendrecv
+a=rtpmap:118 SIRENLPR/48000/1
+a=fmtp:118 bitrate=64000
+a=rtpmap:115 G7221/32000
+a=fmtp:115 bitrate=48000
+a=rtpmap:114 G7221/32000
+a=fmtp:114 bitrate=32000
+a=rtpmap:113 G7221/32000
+a=fmtp:113 bitrate=24000
+a=rtpmap:102 G7221/16000
+a=fmtp:102 bitrate=32000
+a=rtpmap:101 G7221/16000
+a=fmtp:101 bitrate=24000
+a=rtpmap:103 G7221/16000
+a=fmtp:103 bitrate=16000
+a=rtpmap:99 SIREN14/16000
+a=fmtp:99 bitrate=48000
+a=rtpmap:98 SIREN14/16000
+a=fmtp:98 bitrate=32000
+a=rtpmap:97 SIREN14/16000
+a=fmtp:97 bitrate=24000
+a=rtpmap:9 G722/8000
+a=fmtp:9 bitrate=64000
+a=rtpmap:18 G729/8000
+a=fmtp:18 annexb=no
+a=rtpmap:15 G728/8000
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:119 telephone-event/8000
+a=fmtp:119 0-15
+m=video 3232 RTP/AVP 111 109 110 96 34 31 106 105 116
+a=sendrecv
+a=rtcp-fb:* nack pli
+a=rtcp-fb:* ccm fir
+a=rtcp-fb:* ccm tmmbr
+a=vnd.polycom.forceVideoMode:9
+a=rtpmap:111 H264/90000
+a=fmtp:111 profile-level-id=64001e; packetization-mode=1; max-mbps=49000; max-br=20010; sar=13
+a=vnd.polycom.avcplus.p2p:111 max-temp-layer-p2p=3
+a=rtpmap:109 H264/90000
+a=fmtp:109 profile-level-id=42801e; max-mbps=49000; max-br=20010; sar=13
+a=vnd.polycom.avcplus.p2p:109 max-temp-layer-p2p=3
+a=rtpmap:110 H264/90000
+a=fmtp:110 profile-level-id=42801e; packetization-mode=1; max-mbps=49000; max-br=20010; sar=13
+a=vnd.polycom.avcplus.p2p:110 max-temp-layer-p2p=3
+a=rtpmap:96 H263-1998/90000
+a=fmtp:96 CIF=1;QCIF=1;SQCIF=1;CUSTOM=352,240,1;T
+a=rtpmap:34 H263/90000
+a=fmtp:34 CIF=1;QCIF=1;SQCIF=1
+a=rtpmap:31 H261/90000
+a=fmtp:31 CIF=1;QCIF=1
+a=rtpmap:106 H264-SVC/90000
+a=fmtp:106 profile-level-id=56001e; packetization-mode=1; max-mbps=49000; max-br=20010; sar=13
+a=rtpmap:105 H264-SVC/90000
+a=fmtp:105 profile-level-id=53e01e; packetization-mode=1; max-mbps=49000; max-br=20010; sar=13
+a=rtpmap:116 vnd.polycom.lpr/9000
+a=fmtp:116 V=2;minPP=0;PP=150;RS=52;RP=10;PS=1400

@@ -22,6 +22,14 @@ fn to_storage_err(err: impl std::fmt::Display) -> StorageError {
 
 #[async_trait]
 impl Storage for MemoryStorage {
+    async fn put_configuration_document(&self, key: &str, document: &str) -> Result<(), StorageError> {
+        self.configuration_documents().write().map_err(to_storage_err)?.insert(key.to_string(), document.to_string());
+        Ok(())
+    }
+
+    async fn get_configuration_document(&self, key: &str) -> Result<Option<String>, StorageError> {
+        Ok(self.configuration_documents().read().map_err(to_storage_err)?.get(key).cloned())
+    }
     async fn upsert_room(&self, room: &Room) -> Result<(), StorageError> {
         let id = *room.id.as_uuid();
         let mode = room.mode;
@@ -210,6 +218,7 @@ impl Storage for MemoryStorage {
     }
 
     async fn reset(&self) -> Result<(), StorageError> {
+        self.configuration_documents().write().map_err(to_storage_err)?.clear();
         self.rooms_map().write().unwrap().clear();
         self.room_mode_overrides_map().write().unwrap().clear();
         self.participants_map().write().unwrap().clear();
@@ -226,6 +235,19 @@ impl Storage for MemoryStorage {
 
 #[async_trait]
 impl Storage for SqliteStorage {
+    async fn put_configuration_document(&self, key: &str, document: &str) -> Result<(), StorageError> {
+        sqlx::query("INSERT INTO configuration_documents(document_key,document_json) VALUES($1,$2) ON CONFLICT(document_key) DO UPDATE SET document_json=excluded.document_json")
+            .bind(key).bind(document).execute(self.pool()).await.map_err(to_storage_err)?;
+        Ok(())
+    }
+
+    async fn get_configuration_document(&self, key: &str) -> Result<Option<String>, StorageError> {
+        sqlx::query_scalar::<_, String>("SELECT document_json FROM configuration_documents WHERE document_key=$1")
+            .bind(key)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(to_storage_err)
+    }
     async fn ping(&self) -> Result<(), StorageError> {
         sqlx::query("SELECT 1").execute(self.pool()).await.map_err(to_storage_err)?;
         Ok(())
@@ -663,6 +685,19 @@ impl Storage for SqliteStorage {
 
 #[async_trait]
 impl Storage for PostgresStorage {
+    async fn put_configuration_document(&self, key: &str, document: &str) -> Result<(), StorageError> {
+        sqlx::query("INSERT INTO configuration_documents(document_key,document_json) VALUES($1,$2) ON CONFLICT(document_key) DO UPDATE SET document_json=excluded.document_json")
+            .bind(key).bind(document).execute(self.pool()).await.map_err(to_storage_err)?;
+        Ok(())
+    }
+
+    async fn get_configuration_document(&self, key: &str) -> Result<Option<String>, StorageError> {
+        sqlx::query_scalar::<_, String>("SELECT document_json FROM configuration_documents WHERE document_key=$1")
+            .bind(key)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(to_storage_err)
+    }
     async fn ping(&self) -> Result<(), StorageError> {
         sqlx::query("SELECT 1").execute(self.pool()).await.map_err(to_storage_err)?;
         Ok(())

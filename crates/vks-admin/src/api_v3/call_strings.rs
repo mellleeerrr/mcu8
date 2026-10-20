@@ -33,6 +33,105 @@ pub struct CallStringRecord {
     pub uri: String,
     pub display_name: String,
     pub created_at: u64,
+    #[serde(default)]
+    pub payload: Value,
+}
+
+/// Native PNM payload: gains are signed tenths of a dB and directions are
+/// viewed from the MCU (RX terminal -> MCU; TX MCU -> terminal).
+pub fn default_contact_payload(payload: Option<&Value>) -> Value {
+    let protocol = json!({"bitrate":null,"audioCodecs":[],"videoCodecs":[],"resolution":null,
+        "isSelfViewEnabled":true,"cascadeMode":"none"});
+    let mut defaults = json!({
+        "slot_render_type":"DEFAULT","auto_call":true,
+        "audio_rx_enabled":true,"audio_tx_enabled":true,
+        "video_rx_enabled":true,"video_tx_enabled":true,
+        "volume_rx":0,"volume_tx":0,"noise_suppression":"DEFAULT","auto_gain_control":"DEFAULT",
+        "crown":"EQUAL","hide_display_name":false,
+        "call_string":{"sip":protocol.clone(),"h323":protocol,
+            "rtsp":{"primary":true},"vnc":{"primary":true},
+            "file":{"primary":true,"zoom":"fit"},"media":{"primary":true,"loop":true}},
+        "stop_details":{}
+    });
+    if let Some(values) = payload.and_then(Value::as_object) {
+        for (key, value) in values {
+            if key == "call_string" {
+                if let Some(protocols) = value.as_object() {
+                    for (protocol, options) in protocols {
+                        if let Some(options) = options.as_object() {
+                            if !defaults["call_string"][protocol].is_object() {
+                                defaults["call_string"][protocol] = json!({});
+                            }
+                            for (option, value) in options {
+                                defaults["call_string"][protocol][option] = value.clone();
+                            }
+                        }
+                    }
+                }
+            } else {
+                defaults[key] = value.clone();
+            }
+        }
+    }
+    for field in ["audio_rx_enabled", "audio_tx_enabled", "video_rx_enabled", "video_tx_enabled", "auto_call"] {
+        if !defaults[field].is_boolean() {
+            defaults[field] = json!(true);
+        }
+    }
+    if !defaults["hide_display_name"].is_boolean() {
+        defaults["hide_display_name"] = json!(false);
+    }
+    for field in ["volume_rx", "volume_tx"] {
+        defaults[field] = json!(defaults[field].as_i64().unwrap_or(0).clamp(-400, 200));
+    }
+    let crown = match defaults["crown"].as_str() {
+        Some("EQUAL" | "SELECTED" | "EXCLUSIVE") => defaults["crown"].clone(),
+        _ => json!(if defaults["crown"].as_bool().unwrap_or(false) { "SELECTED" } else { "EQUAL" }),
+    };
+    defaults["crown"] = crown;
+    let render = defaults["slot_render_type"].as_str().unwrap_or("DEFAULT").to_ascii_uppercase();
+    defaults["slot_render_type"] = json!(if matches!(render.as_str(), "DEFAULT" | "AUTO" | "FILL" | "FULL") {
+        render.as_str()
+    } else {
+        "DEFAULT"
+    });
+    for protocol in ["sip", "h323"] {
+        for (snake, camel) in [
+            ("audio_codecs", "audioCodecs"),
+            ("video_codecs", "videoCodecs"),
+            ("self_view", "isSelfViewEnabled"),
+            ("cascade", "cascadeMode"),
+        ] {
+            if let Some(value) = payload
+                .and_then(|payload| payload.get("call_string"))
+                .and_then(|options| options.get(protocol))
+                .and_then(|options| options.get(snake))
+            {
+                defaults["call_string"][protocol][camel] = value.clone();
+            }
+        }
+    }
+    defaults
+}
+
+fn merged_contact_payload(previous: Option<&Value>, patch: Option<&Value>) -> Value {
+    fn merge(target: &mut Value, patch: &Value) {
+        if let (Some(target), Some(patch)) = (target.as_object_mut(), patch.as_object()) {
+            for (key, value) in patch {
+                if let Some(existing) = target.get_mut(key).filter(|existing| existing.is_object() && value.is_object())
+                {
+                    merge(existing, value);
+                } else {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+    let mut payload = default_contact_payload(previous);
+    if let Some(patch) = patch {
+        merge(&mut payload, patch);
+    }
+    default_contact_payload(Some(&payload))
 }
 
 /// Гибкий элемент строки вызова с поддержкой алиасов Serde для совместимости с различными версиями DTO фронтенда.
@@ -89,37 +188,229 @@ pub fn conflict_error(description: &str) -> Response {
 /// Канонизирует адрес абонента, гарантируя наличие схемы протокола (`sip:` по умолчанию).
 pub fn canonical_uri(raw: &str) -> String {
     let trimmed = raw.trim();
-    if trimmed.starts_with("sip:")
-        || trimmed.starts_with("h323:")
-        || trimmed.starts_with("webrtc:")
-        || trimmed.starts_with("recorder:")
-    {
-        trimmed.to_string()
-    } else {
-        format!("sip:{}", trimmed)
+    if let Some((scheme, address)) = trimmed.split_once(':') {
+        let mut characters = scheme.chars();
+        if characters.next().is_some_and(|character| character.is_ascii_alphabetic())
+            && characters.all(|character| character.is_ascii_alphanumeric() || "+.-".contains(character))
+        {
+            let scheme = scheme.to_ascii_lowercase();
+            return format!("{}:{address}", if scheme == "auto" { "sip" } else { scheme.as_str() });
+        }
     }
+    format!("sip:{trimmed}")
 }
 
-/// RAII Guard для In-Flight исходящих вызовов.
-/// Гарантирует удаление записи из `in_flight_calls` при завершении вызова, ошибке или панике.
-pub struct InFlightCallGuard {
+/// One call intent can have several attempts; stale completions cannot replace a retry.
+#[derive(Debug, Clone)]
+pub struct CallAttempt {
+    pub record: CallStringRecord,
+    pub generation: Uuid,
+    pub participant_id: Option<String>,
+    pub failure_reason: Option<String>,
+    pub completed_at: Option<u64>,
+    pub abort_handle: Option<tokio::task::AbortHandle>,
+}
+
+struct InFlightCallGuard {
     state: SharedState,
     room_id: RoomId,
     address: String,
-}
-
-impl InFlightCallGuard {
-    pub fn new(state: SharedState, room_id: RoomId, address: String) -> Self {
-        Self { state, room_id, address }
-    }
+    generation: Uuid,
 }
 
 impl Drop for InFlightCallGuard {
     fn drop(&mut self) {
-        if let Ok(mut g) = self.state.api_v3.in_flight_calls.lock() {
-            g.remove(&(self.room_id, self.address.clone()));
+        let key = (self.room_id, self.address.clone());
+        let mut attempts = self.state.api_v3.call_attempts.lock().expect("call_attempts poisoned");
+        if let Some(attempt) = attempts.get_mut(&key) {
+            if attempt.generation != self.generation {
+                return;
+            }
+            if attempt.participant_id.is_none() && attempt.failure_reason.is_none() {
+                attempt.failure_reason = Some("Call cancelled before connection".into());
+            }
+            if attempt.failure_reason.is_some() && attempt.completed_at.is_none() {
+                attempt.completed_at = Some(now_unix_sec());
+            }
+            attempt.abort_handle = None;
+            self.state.api_v3.in_flight_calls.lock().expect("in_flight_calls poisoned").remove(&key);
         }
     }
+}
+
+/// Stop only pending futures in this room; completed calls are hung up by the
+/// session lifecycle. Abort handles are invoked after releasing all state locks.
+pub(super) fn cancel_pending_calls(state: &SharedState, room_id: &RoomId) {
+    let mut handles = Vec::new();
+    {
+        let mut attempts = state.api_v3.call_attempts.lock().expect("call_attempts poisoned");
+        let mut in_flight = state.api_v3.in_flight_calls.lock().expect("in_flight_calls poisoned");
+        let keys: Vec<_> = in_flight.keys().filter(|(rid, _)| rid == room_id).cloned().collect();
+        for key in keys {
+            if let Some(attempt) = attempts.get_mut(&key) {
+                attempt.failure_reason = Some("Session ended before connection".into());
+                attempt.completed_at.get_or_insert_with(now_unix_sec);
+                if let Some(handle) = attempt.abort_handle.take() {
+                    handles.push(handle);
+                }
+            }
+            in_flight.remove(&key);
+        }
+    }
+    for handle in handles {
+        handle.abort();
+    }
+}
+
+fn gain_percent(value: &Value) -> u32 {
+    (100.0 * 10.0_f64.powf(value.as_i64().unwrap_or(0).clamp(-400, 200) as f64 / 200.0)).round() as u32
+}
+
+fn apply_call_controls(state: &SharedState, dialer: &dyn crate::state::OutboundDialer, pid: &str, payload: &Value) {
+    let payload = default_contact_payload(Some(payload));
+    let rx_muted = !payload["audio_rx_enabled"].as_bool().unwrap_or(true);
+    let tx_muted = !payload["audio_tx_enabled"].as_bool().unwrap_or(true);
+    let video_rx_muted = !payload["video_rx_enabled"].as_bool().unwrap_or(true);
+    let video_tx_muted = !payload["video_tx_enabled"].as_bool().unwrap_or(true);
+    state.api_v3.abonent_settings.lock().expect("abonent_settings poisoned").insert(
+        pid.to_string(),
+        super::AbonentMediaState {
+            audio_rx_muted: rx_muted,
+            audio_tx_muted: tx_muted,
+            video_rx_muted,
+            video_tx_muted,
+            volume_rx: payload["volume_rx"].as_i64().unwrap_or(0) as i32,
+            volume_tx: payload["volume_tx"].as_i64().unwrap_or(0) as i32,
+        },
+    );
+    // Bridge names use the terminal perspective, so NativeAPI directions swap.
+    if !dialer.set_media_control(
+        pid,
+        Some(rx_muted),
+        Some(tx_muted),
+        Some(video_rx_muted),
+        Some(video_tx_muted),
+        Some(gain_percent(&payload["volume_rx"])),
+        Some(gain_percent(&payload["volume_tx"])),
+    ) {
+        tracing::warn!(participant_id = pid, "Outbound gateway did not apply initial media controls");
+    }
+}
+
+/// Admit a real dial atomically; an unavailable gateway must never create a fake participant.
+pub(super) fn queue_call(
+    state: &SharedState,
+    room_id: RoomId,
+    mut record: CallStringRecord,
+) -> Result<(), Box<Response>> {
+    let Some(dialer) = state.outbound_dialer() else {
+        return Err(Box::new(error_json(503, "Outbound gateway is not configured")));
+    };
+    let stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned");
+    if stopped.contains(&room_id) {
+        return Err(Box::new(conflict_error("Session is not running")));
+    }
+    let mut attempts = state.api_v3.call_attempts.lock().expect("call_attempts poisoned");
+    let mut in_flight = state.api_v3.in_flight_calls.lock().expect("in_flight_calls poisoned");
+    let key = (room_id, record.uri.clone());
+    let participants = state.room_hub.list_participants(&room_id);
+    let connected = attempts
+        .get(&key)
+        .and_then(|a| a.participant_id.as_deref())
+        .is_some_and(|id| participants.iter().any(|p| p.participant_id == id));
+    if in_flight.contains_key(&key) || connected {
+        return Err(Box::new(conflict_error("The specified call string is used in session")));
+    }
+    let current = participants.len() + in_flight.keys().filter(|(rid, _)| *rid == room_id).count();
+    if current >= SettingsService::get(state).limits.max_participants_per_room as usize {
+        return Err(Box::new(conflict_error("Too many connections")));
+    }
+    record.payload = default_contact_payload(Some(&record.payload));
+    let generation = Uuid::new_v4();
+    attempts.insert(
+        key.clone(),
+        CallAttempt {
+            record: record.clone(),
+            generation,
+            participant_id: None,
+            failure_reason: None,
+            completed_at: None,
+            abort_handle: None,
+        },
+    );
+    in_flight.insert(key, record.clone());
+    drop(in_flight);
+    drop(attempts);
+    drop(stopped);
+    if let Some(list) = state.api_v3.scheduled_calls.lock().expect("scheduled_calls poisoned").get_mut(&room_id) {
+        list.retain(|r| r.uri != record.uri && r.id != record.id);
+    }
+    let dial_state = state.clone();
+    let attempt_key = (room_id, record.uri.clone());
+    let task = tokio::spawn(async move {
+        let _guard = InFlightCallGuard { state: dial_state.clone(), room_id, address: record.uri.clone(), generation };
+        let result = dialer.dial(room_id, &record.uri, Some(&record.display_name)).await;
+        let stopped = dial_state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room_id);
+        let mut obsolete = stopped;
+        {
+            let mut attempts = dial_state.api_v3.call_attempts.lock().expect("call_attempts poisoned");
+            if let Some(attempt) =
+                attempts.get_mut(&(room_id, record.uri.clone())).filter(|a| a.generation == generation)
+            {
+                if attempt.failure_reason.is_some() {
+                    obsolete = true;
+                }
+                if !obsolete {
+                    match &result {
+                        Ok(pid) => attempt.participant_id = Some(pid.clone()),
+                        Err(error) => {
+                            attempt.failure_reason = Some(error.clone());
+                            attempt.completed_at = Some(now_unix_sec());
+                        }
+                    }
+                } else {
+                    attempt.failure_reason.get_or_insert_with(|| "Session ended before connection".into());
+                    attempt.completed_at.get_or_insert_with(now_unix_sec);
+                }
+            } else {
+                obsolete = true;
+            }
+        }
+        match result {
+            Ok(pid) if obsolete => {
+                dialer.hangup(&pid);
+                dial_state.room_hub.unregister_participant(&room_id, &pid);
+            }
+            Ok(pid) => {
+                apply_call_controls(&dial_state, dialer.as_ref(), &pid, &record.payload);
+                tracing::info!(room=%room_id,pid=%pid,uri=%record.uri,"outbound dial connected");
+            }
+            Err(error) => tracing::warn!(room=%room_id,uri=%record.uri,%error,"outbound dial failed"),
+        }
+        dial_state.notify_admin(
+            &format!("session:{room_id}:abonents"),
+            json!({"action":"call_completed","contact_id":record.id}),
+        );
+    });
+    // A stop can happen between admission and spawning. Register under the same
+    // lifecycle lock order and abort immediately if cancellation already won.
+    let abort_handle = task.abort_handle();
+    let stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned");
+    let should_abort = {
+        let mut attempts = state.api_v3.call_attempts.lock().expect("call_attempts poisoned");
+        match attempts.get_mut(&attempt_key).filter(|attempt| attempt.generation == generation) {
+            Some(attempt) if !stopped.contains(&room_id) && attempt.failure_reason.is_none() => {
+                attempt.abort_handle = Some(abort_handle.clone());
+                false
+            }
+            _ => true,
+        }
+    };
+    drop(stopped);
+    if should_abort {
+        abort_handle.abort();
+    }
+    Ok(())
 }
 
 fn now_unix_sec() -> u64 {
@@ -158,19 +449,42 @@ pub async fn create_conference_call_string(
     let cs_id = body.id.unwrap_or_else(|| format!("cs-{}", Uuid::new_v4()));
     let now = now_unix_sec();
 
+    let display_name = body.display_name.clone().unwrap_or_else(|| raw_uri.to_string());
+    let payload = default_contact_payload(body.payload.as_ref());
+    let record = json!({"id":cs_id,"contact_id":cs_id,"call_string_id":cs_id,
+        "contact_type":"call_strings","display_name":display_name,"created_at":now,
+        "uri":uri,"connection_url":uri,"payload":payload,
+        "call_string":{"id":cs_id,"uri":uri,"display_name":display_name}});
+    let mut resources = state.api_v3.resources.lock().await;
+    let previous = resources.clone();
+    let contacts = resources.contacts.entry(room.id.to_string()).or_default();
+    if contacts.iter().any(|contact| contact["uri"].as_str() == Some(uri.as_str())) {
+        return conflict_error("The specified call string is used in conference");
+    }
+    contacts.push(record);
+    if let Err(error) = super::resources::persist(&state, &resources).await {
+        *resources = previous;
+        return error_json(500, &format!("Storage error: {error}"));
+    }
+    drop(resources);
+
     let ip = client_ip.as_ref().map(|c| c.0 .0.as_str()).unwrap_or("127.0.0.1");
     state.record_audit_entry(&auth.subject, "conference.call_string.add", Some(room.id.to_string()), ip);
 
-    Json(json!({
-        "call_string": {
-            "id": cs_id,
-            "addressId": cs_id,
-            "created_at": now,
-            "uri": uri,
-            "display_name": body.display_name.unwrap_or_else(|| raw_uri.to_string())
-        }
-    }))
-    .into_response()
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "call_string": {
+                "id": cs_id,
+                "addressId": cs_id,
+                "created_at": now,
+                "uri": uri,
+                "display_name": display_name,
+                "payload":payload
+            }
+        })),
+    )
+        .into_response()
 }
 
 /// `POST /api/v3/conferences/{id}/invite/call_string/list` — пакетное добавление строк вызова в конференцию.
@@ -193,11 +507,41 @@ pub async fn invite_conference_call_strings(
         return error_json(404, "Conference not found");
     };
 
+    let count = body.call_strings.len();
+    for mut item in body.call_strings {
+        if item.uri.as_deref().is_none_or(|uri| uri.trim().is_empty()) {
+            let Some(address_id) = item.id.as_deref() else {
+                return validation_error("invalid.uri", "uri");
+            };
+            let Some(saved) = address_book_records(&state, &auth)
+                .await
+                .into_iter()
+                .find(|record| record["id"].as_str() == Some(address_id))
+            else {
+                return error_json(404, "Call string not found");
+            };
+            item.uri = saved["uri"].as_str().map(str::to_string);
+            if item.display_name.is_none() {
+                item.display_name = saved["display_name"].as_str().map(str::to_string);
+            }
+        }
+        let response = create_conference_call_string(
+            State(state.clone()),
+            Extension(auth.clone()),
+            client_ip.clone(),
+            Path(id.clone()),
+            Json(item),
+        )
+        .await;
+        if !response.status().is_success() {
+            return response;
+        }
+    }
     let ip = client_ip.as_ref().map(|c| c.0 .0.as_str()).unwrap_or("127.0.0.1");
     state.record_audit_entry(
         &auth.subject,
         "conference.call_string.invite_list",
-        Some(format!("{}:{} items", room.id, body.call_strings.len())),
+        Some(format!("{}:{count} items", room.id)),
         ip,
     );
 
@@ -233,99 +577,34 @@ pub async fn create_session_call_string(
     let cs_id = body.id.unwrap_or_else(|| format!("cs-{}", Uuid::new_v4()));
     let now = now_unix_sec();
 
-    // 1. Проверка лимитов участников комнаты
-    let max_participants = SettingsService::get(&state).limits.max_participants_per_room as usize;
-    let current_participants = state.room_hub.list_participants(&room.id).len();
-    let current_in_flight = if let Ok(guard) = state.api_v3.in_flight_calls.lock() {
-        guard.keys().filter(|(rid, _)| *rid == room.id).count()
-    } else {
-        0
+    let payload = default_contact_payload(body.payload.as_ref());
+    let record = CallStringRecord {
+        id: cs_id.clone(),
+        uri: uri.clone(),
+        display_name: display_name.clone(),
+        created_at: now,
+        payload: payload.clone(),
     };
-
-    if current_participants + current_in_flight >= max_participants {
-        return conflict_error("Too many connections");
+    if let Err(response) = queue_call(&state, room.id, record) {
+        return *response;
     }
-
-    // 2. Проверка дублирования абонента / In-Flight Guard
-    {
-        let mut in_flight = state.api_v3.in_flight_calls.lock().expect("in_flight_calls poisoned");
-        if in_flight.contains_key(&(room.id, uri.clone())) {
-            return conflict_error("The specified call string is used in session");
-        }
-
-        // Проверяем также уже подключенных участников комнаты
-        let participants = state.room_hub.list_participants(&room.id);
-        if participants.iter().any(|p| {
-            p.display_name == display_name || p.participant_id.contains(&raw_uri.replace([':', '@', '.'], "-"))
-        }) {
-            return conflict_error("The specified call string is used in session");
-        }
-
-        let record = CallStringRecord {
-            id: cs_id.clone(),
-            uri: uri.clone(),
-            display_name: display_name.clone(),
-            created_at: now,
-        };
-        in_flight.insert((room.id, uri.clone()), record);
-    }
-
-    // Удаляем из standby если контакт уже был запланирован
-    if let Ok(mut scheduled) = state.api_v3.scheduled_calls.lock() {
-        if let Some(list) = scheduled.get_mut(&room.id) {
-            list.retain(|r| r.uri != uri && r.id != cs_id);
-        }
-    }
-
     let ip = client_ip.as_ref().map(|c| c.0 .0.as_str()).unwrap_or("127.0.0.1");
     state.record_audit_entry(&auth.subject, "session.outbound_invite", Some(format!("{}:{}", room.id, uri)), ip);
 
-    // 3. Инициируем вызов через OutboundDialer (асинхронно в фоне с RAII guard)
-    let dialer_opt = state.outbound_dialer();
-    let dial_state = state.clone();
-    let dial_room_id = room.id;
-    let dial_uri = uri.clone();
-    let dial_name = display_name.clone();
-
-    tokio::spawn(async move {
-        let _guard = InFlightCallGuard::new(dial_state.clone(), dial_room_id, dial_uri.clone());
-        if let Some(dialer) = dialer_opt {
-            match dialer.dial(dial_room_id, &dial_uri, Some(&dial_name)).await {
-                Ok(pid) => {
-                    tracing::info!(room = %dial_room_id, pid = %pid, uri = %dial_uri, "outbound dial connected");
-                }
-                Err(e) => {
-                    tracing::warn!(room = %dial_room_id, uri = %dial_uri, error = %e, "outbound dial failed");
-                }
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "call_string": {
+                "id": cs_id,
+                "addressId": cs_id,
+                "created_at": now,
+                "uri": uri,
+                "display_name": display_name,
+                "payload":payload
             }
-        } else {
-            // Без dialer (standalone/тестовый режим): создаем тестового участника в RoomHub
-            let proto_tag = if dial_uri.starts_with("h323:") { "@h323-gateway" } else { "@sip-gateway" };
-            let pid = format!("{}p-out-{}", proto_tag, Uuid::new_v4());
-            let snapshot = crate::hub::ParticipantSnapshot {
-                participant_id: pid.clone(),
-                display_name: dial_name,
-                is_recorder: false,
-                is_speaking: false,
-                track_ids: vec!["audio".into(), "video".into()],
-                is_audio_muted: false,
-                is_video_muted: false,
-                connected_at: now_unix_sec(),
-            };
-            let _ = dial_state.room_hub.register_participant(&dial_room_id, snapshot);
-        }
-    });
-
-    Json(json!({
-        "call_string": {
-            "id": cs_id,
-            "addressId": cs_id,
-            "created_at": now,
-            "uri": uri,
-            "display_name": display_name
-        }
-    }))
-    .into_response()
+        })),
+    )
+        .into_response()
 }
 
 /// `POST /api/v3/ui/sessions/{id}/call_strings/without_call` — добавление абонента в StandBy (запланированные) без вызова.
@@ -357,11 +636,22 @@ pub async fn create_session_call_string_standby(
     let cs_id = body.id.unwrap_or_else(|| format!("cs-{}", Uuid::new_v4()));
     let now = now_unix_sec();
 
-    let record =
-        CallStringRecord { id: cs_id.clone(), uri: uri.clone(), display_name: display_name.clone(), created_at: now };
+    let mut payload = default_contact_payload(body.payload.as_ref());
+    payload["auto_call"] = json!(false);
+    let record = CallStringRecord {
+        id: cs_id.clone(),
+        uri: uri.clone(),
+        display_name: display_name.clone(),
+        created_at: now,
+        payload: payload.clone(),
+    };
 
     {
         let mut scheduled = state.api_v3.scheduled_calls.lock().expect("scheduled_calls poisoned");
+        if scheduled.get(&room.id).is_some_and(|list| list.iter().any(|record| record.uri == uri || record.id == cs_id))
+        {
+            return conflict_error("The specified call string is used in session");
+        }
         scheduled.entry(room.id).or_default().push(record);
     }
 
@@ -373,16 +663,20 @@ pub async fn create_session_call_string_standby(
         ip,
     );
 
-    Json(json!({
-        "call_string": {
-            "id": cs_id,
-            "addressId": cs_id,
-            "created_at": now,
-            "uri": uri,
-            "display_name": display_name
-        }
-    }))
-    .into_response()
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "call_string": {
+                "id": cs_id,
+                "addressId": cs_id,
+                "created_at": now,
+                "uri": uri,
+                "display_name": display_name,
+                "payload":payload
+            }
+        })),
+    )
+        .into_response()
 }
 
 /// `POST /api/v3/sessions/{id}/invite/call_strings/list` — вызов/повторный дозвон списка строк вызова (Recall/Invite).
@@ -413,92 +707,122 @@ pub async fn invite_session_call_strings_list(
         ip,
     );
 
-    let max_participants = SettingsService::get(&state).limits.max_participants_per_room as usize;
-    let dialer_opt = state.outbound_dialer();
-
     for item in body.call_strings {
-        let raw_uri = item.uri.as_deref().unwrap_or("").trim();
-        if raw_uri.is_empty() {
-            continue;
+        // Native recall can send an id without repeating the URI.
+        let previous = lookup_session_record(&state, &room.id, item.id.as_deref());
+        let raw = item.uri.clone().or_else(|| previous.as_ref().map(|r| r.uri.clone())).unwrap_or_default();
+        if raw.trim().is_empty() {
+            return validation_error("invalid.uri", "uri");
         }
-        let uri = canonical_uri(raw_uri);
-        let display_name = item.display_name.unwrap_or_else(|| raw_uri.to_string());
-
-        // Проверяем лимит комнаты с учетом активных и in-flight участников
-        let current_participants = state.room_hub.list_participants(&room.id).len();
-        let in_flight_count = if let Ok(guard) = state.api_v3.in_flight_calls.lock() {
-            guard.keys().filter(|(rid, _)| *rid == room.id).count()
-        } else {
-            0
-        };
-        if current_participants + in_flight_count >= max_participants {
-            tracing::warn!(room = %room.id, uri = %uri, "invite skipped: room capacity reached");
-            break;
-        }
-
-        // Проверяем на дубликат: уже подключен или уже в процессе вызова
-        let is_connected = state.room_hub.list_participants(&room.id).iter().any(|p| {
-            p.display_name == display_name || p.participant_id.contains(&raw_uri.replace([':', '@', '.'], "-"))
-        });
-        if is_connected {
-            continue;
-        }
-
-        let mut in_flight = state.api_v3.in_flight_calls.lock().expect("in_flight_calls poisoned");
-        if in_flight.contains_key(&(room.id, uri.clone())) {
-            continue;
-        }
-
-        // Удаляем из standby если был там
-        if let Ok(mut scheduled) = state.api_v3.scheduled_calls.lock() {
-            if let Some(list) = scheduled.get_mut(&room.id) {
-                list.retain(|r| r.uri != uri && r.id != item.id.as_deref().unwrap_or(""));
-            }
-        }
-
-        let cs_id = item.id.unwrap_or_else(|| format!("cs-{}", Uuid::new_v4()));
         let record = CallStringRecord {
-            id: cs_id,
-            uri: uri.clone(),
-            display_name: display_name.clone(),
+            id: item.id.unwrap_or_else(|| format!("cs-{}", Uuid::new_v4())),
+            uri: canonical_uri(&raw),
+            display_name: item
+                .display_name
+                .or_else(|| previous.as_ref().map(|r| r.display_name.clone()))
+                .unwrap_or(raw),
             created_at: now_unix_sec(),
+            payload: merged_contact_payload(previous.as_ref().map(|record| &record.payload), item.payload.as_ref()),
         };
-        in_flight.insert((room.id, uri.clone()), record);
-        drop(in_flight);
-
-        let dial_state = state.clone();
-        let dial_room_id = room.id;
-        let dial_uri = uri.clone();
-        let dial_name = display_name.clone();
-        let dialer = dialer_opt.clone();
-
-        tokio::spawn(async move {
-            let _guard = InFlightCallGuard::new(dial_state.clone(), dial_room_id, dial_uri.clone());
-            if let Some(d) = dialer {
-                let _ = d.dial(dial_room_id, &dial_uri, Some(&dial_name)).await;
-            } else {
-                let proto_tag = if dial_uri.starts_with("h323:") { "@h323-gateway" } else { "@sip-gateway" };
-                let pid = format!("{}p-out-{}", proto_tag, Uuid::new_v4());
-                let snapshot = crate::hub::ParticipantSnapshot {
-                    participant_id: pid.clone(),
-                    display_name: dial_name,
-                    is_recorder: false,
-                    is_speaking: false,
-                    track_ids: vec!["audio".into(), "video".into()],
-                    is_audio_muted: false,
-                    is_video_muted: false,
-                    connected_at: now_unix_sec(),
-                };
-                let _ = dial_state.room_hub.register_participant(&dial_room_id, snapshot);
-            }
-        });
+        if let Err(response) = queue_call(&state, room.id, record) {
+            return *response;
+        }
     }
 
     Json(json!({ "status": "ok" })).into_response()
 }
 
-/// `GET /api/v3/call_strings` и `GET /api/v3/ui/call_strings` — список сохраненных строк вызова в адресной книге.
-pub async fn list_call_strings() -> Response {
-    track("call_strings");
-    Json(json!({ "call_strings": [], "count": 0 })).into_response()
+fn lookup_session_record(state: &SharedState, room_id: &RoomId, id: Option<&str>) -> Option<CallStringRecord> {
+    let id = id?;
+    let previous = state
+        .api_v3
+        .call_attempts
+        .lock()
+        .expect("call_attempts poisoned")
+        .iter()
+        .find(|((rid, _), attempt)| rid == room_id && attempt.record.id == id)
+        .map(|(_, attempt)| attempt.record.clone());
+    previous.or_else(|| {
+        state
+            .api_v3
+            .scheduled_calls
+            .lock()
+            .expect("scheduled_calls poisoned")
+            .get(room_id)
+            .and_then(|records| records.iter().find(|record| record.id == id))
+            .cloned()
+    })
 }
+
+fn address_book_record(record: &CallStringRecord) -> Value {
+    let payload = default_contact_payload(Some(&record.payload));
+    json!({"id":record.id,"uri":record.uri,"display_name":record.display_name,"created_at":record.created_at,
+        "busy":false,"payload":payload["call_string"],"contact":{"id":record.id,"type":"call_strings",
+            "contact_type":"call_strings","display_name":record.display_name}})
+}
+
+async fn address_book_records(state: &SharedState, auth: &AuthContext) -> Vec<Value> {
+    let mut records = std::collections::BTreeMap::new();
+    {
+        let resources = state.api_v3.resources.lock().await;
+        for (room_id, contacts) in &resources.contacts {
+            if check_permission(auth, Some(room_id)).is_err() {
+                continue;
+            }
+            for contact in contacts {
+                let Some(id) = contact["id"].as_str() else {
+                    continue;
+                };
+                let record = CallStringRecord {
+                    id: id.to_string(),
+                    uri: contact["uri"].as_str().unwrap_or_default().to_string(),
+                    display_name: contact["display_name"].as_str().unwrap_or_default().to_string(),
+                    created_at: contact["created_at"].as_u64().unwrap_or(0),
+                    payload: default_contact_payload(contact.get("payload")),
+                };
+                records.insert(id.to_string(), address_book_record(&record));
+            }
+        }
+    }
+    {
+        let attempts = state.api_v3.call_attempts.lock().expect("call_attempts poisoned");
+        for ((room_id, _), attempt) in attempts.iter() {
+            if check_permission(auth, Some(&room_id.to_string())).is_ok() {
+                records.insert(attempt.record.id.clone(), address_book_record(&attempt.record));
+            }
+        }
+    }
+    {
+        let scheduled = state.api_v3.scheduled_calls.lock().expect("scheduled_calls poisoned");
+        for (room_id, items) in scheduled.iter() {
+            if check_permission(auth, Some(&room_id.to_string())).is_ok() {
+                for record in items {
+                    records.insert(record.id.clone(), address_book_record(record));
+                }
+            }
+        }
+    }
+    records.into_values().collect()
+}
+
+/// `GET /api/v3/call_strings` и `GET /api/v3/ui/call_strings` — список сохраненных строк вызова в адресной книге.
+pub async fn list_call_strings(State(state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
+    track("call_strings");
+    let records = address_book_records(&state, &auth).await;
+    Json(json!({"count":records.len(),"call_strings":records})).into_response()
+}
+
+pub async fn get_call_string(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Response {
+    match address_book_records(&state, &auth).await.into_iter().find(|record| record["id"].as_str() == Some(&id)) {
+        Some(record) => Json(json!({"call_string":record})).into_response(),
+        None => error_json(404, "Call string not found"),
+    }
+}
+
+#[cfg(test)]
+#[path = "call_lifecycle_tests.rs"]
+mod call_lifecycle_tests;

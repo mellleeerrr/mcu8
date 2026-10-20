@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! `vks-admin` — admin REST API (axum + utoipa).
 //!
 //! Фаза 5: `server.rs` (axum app), `rooms.rs` (CRUD + live status +

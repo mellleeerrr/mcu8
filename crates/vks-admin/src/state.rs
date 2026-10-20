@@ -136,6 +136,11 @@ pub trait OutboundDialer: Send + Sync {
     /// Возвращает идентификатор участника (participant_id).
     async fn dial(&self, room_id: RoomId, uri: &str, display_name: Option<&str>) -> Result<String, String>;
 
+    /// Measured media counters for an active gateway connection.
+    fn media_stats(&self, _participant_id: &str) -> Option<serde_json::Value> {
+        None
+    }
+
     /// Завершает исходящий/шлюзовой вызов абонента (BYE / Release).
     fn hangup(&self, _participant_id: &str) -> bool {
         false
@@ -538,6 +543,26 @@ impl AppState {
                     self.mode.lock().map_err(|e| e.to_string())?.global_mode = loaded.default_mode;
                 }
             }
+
+            // M0.4: Hydrate custom layouts from storage
+            if let Some(document) = storage
+                .get_configuration_document(crate::api_v3::resources::CONFIGURATION_KEY)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                let value: serde_json::Value = serde_json::from_str(&document).map_err(|e| e.to_string())?;
+                if let Some(resources) = value.get("resources") {
+                    *self.api_v3.resources.lock().await =
+                        serde_json::from_value(resources.clone()).map_err(|e| e.to_string())?;
+                }
+                if let Some(settings) = value.get("conference_settings") {
+                    *self.api_v3.conference_settings.lock().map_err(|e| e.to_string())? =
+                        serde_json::from_value(settings.clone()).map_err(|e| e.to_string())?;
+                }
+            }
+            // Stored definitions survive a restart; live calls and sessions do not.
+            let room_ids: Vec<_> = self.rooms.lock().map_err(|e| e.to_string())?.keys().copied().collect();
+            self.api_v3.stopped_sessions.lock().map_err(|e| e.to_string())?.extend(room_ids);
 
             // M0.4: Hydrate custom layouts from storage
             let layouts = storage.list_layouts().await.unwrap_or_default();

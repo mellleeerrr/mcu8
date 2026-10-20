@@ -26,6 +26,322 @@ use vks_core::RoomId;
 use super::router;
 use crate::state::{AppState, SharedState};
 
+struct RejectingDialer;
+
+#[tokio::test]
+async fn pnm_lifecycle_pushes_include_native_conference_and_session_envelopes() {
+    let (state, _) = test_state();
+    let mut events = state.admin_events.subscribe();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let created = send(
+        &server,
+        request("POST", "/api/v3/conferences", Some(&token), json!({"display_name":"WS envelope regression"})),
+    )
+    .await;
+    let created = json_body(created).await;
+    let id = created["conference"]["id"].as_str().unwrap();
+    let started = send(&server, request("POST", "/api/v3/sessions", Some(&token), json!({"conference_id":id}))).await;
+    assert!(started.status().is_success());
+    let mut pushed = None;
+    while let Ok(event) = events.try_recv() {
+        if event.topic == "sessions:started" {
+            pushed = Some(event.payload);
+        }
+    }
+    let pushed = pushed.expect("Native start event");
+    assert_eq!(pushed["conference"]["id"], id, "onStartConference destructures conference.id");
+    assert_eq!(pushed["session"]["id"], id, "onStartConference destructures session.id");
+    let stopped = send(&server, request("DELETE", &format!("/api/v3/sessions/{id}"), Some(&token), json!({}))).await;
+    assert!(stopped.status().is_success());
+    let mut pushed = None;
+    while let Ok(event) = events.try_recv() {
+        if event.topic == "sessions:stopped" {
+            pushed = Some(event.payload);
+        }
+    }
+    assert_eq!(pushed.unwrap()["session"]["id"], id, "Native stop callback destructures session.id");
+}
+#[async_trait::async_trait]
+impl crate::state::OutboundDialer for RejectingDialer {
+    async fn dial(&self, _: RoomId, _: &str, _: Option<&str>) -> Result<String, String> {
+        Err("SIP 486 Busy Here".into())
+    }
+}
+
+#[tokio::test]
+async fn pnm_native_gain_and_direction_reach_media_bridge() {
+    let (state, _) = test_state();
+    let dialer = Arc::new(MockStep4Dialer::default());
+    state.set_dialer(dialer.clone());
+    let room = crate::rooms::Rooms::create_async(&state, "Controls regression").await.unwrap();
+    let pid = "controls@sip-gateway";
+    state.room_hub.register_participant(
+        &room.id,
+        crate::hub::ParticipantSnapshot {
+            participant_id: pid.into(),
+            display_name: "Terminal".into(),
+            is_recorder: false,
+            is_speaking: false,
+            track_ids: vec!["audio".into()],
+            is_audio_muted: false,
+            is_video_muted: false,
+            connected_at: 1,
+        },
+    );
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response = send(
+        &server,
+        request("POST", &format!("/api/v3/abonents/{pid}/volume"), Some(&token), json!({"volume":-60,"outgoing":true})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "The native slider sends signed tenths of a dB");
+    let record = dialer.last_media_control.lock().unwrap().clone().unwrap();
+    assert_eq!(record.3, None);
+    assert_eq!(record.4, Some(50), "-6 dB MCU→terminal must set internal RX to 50%");
+    let response = send(
+        &server,
+        request(
+            "POST",
+            &format!("/api/v3/abonents/{pid}/audio"),
+            Some(&token),
+            json!({"enable":false,"outgoing":false}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let record = dialer.last_media_control.lock().unwrap().clone().unwrap();
+    assert_eq!(record.1, Some(true));
+    assert_eq!(record.2, None, "Microphone mute must affect terminal→MCU only");
+    let response =
+        send(&server, request("GET", &format!("/api/v3/sessions/{}/abonents", room.id), Some(&token), json!({}))).await;
+    let roster = json_body(response).await;
+    assert_eq!(roster["connected"][0]["payload"]["volume_tx"], -60);
+    assert_eq!(roster["connected"][0]["payload"]["audio_rx_enabled"], false);
+    assert_eq!(roster["connected"][0]["payload"]["audio_tx_enabled"], true);
+}
+
+#[tokio::test]
+async fn pnm_engine_uses_dialed_address_and_native_contact_payload() {
+    let (state, _) = test_state();
+    let room = crate::rooms::Rooms::create_async(&state, "Engine contact regression").await.unwrap();
+    let pid = "engine-address@sip-gateway";
+    state.room_hub.register_participant(
+        &room.id,
+        crate::hub::ParticipantSnapshot {
+            participant_id: pid.into(),
+            display_name: "Physical terminal label".into(),
+            is_recorder: false,
+            is_speaking: false,
+            track_ids: vec!["audio".into()],
+            is_audio_muted: false,
+            is_video_muted: false,
+            connected_at: 1,
+        },
+    );
+    state.api_v3.call_attempts.lock().unwrap().insert(
+        (room.id, "sip:192.168.1.132".into()),
+        super::call_strings::CallAttempt {
+            record: super::call_strings::CallStringRecord {
+                id: "saved-physical-contact".into(),
+                uri: "sip:192.168.1.132".into(),
+                display_name: "Physical terminal label".into(),
+                created_at: 1,
+                payload: super::call_strings::default_contact_payload(Some(&json!({"auto_call":true,"volume_rx":-60}))),
+            },
+            generation: uuid::Uuid::new_v4(),
+            participant_id: Some(pid.into()),
+            failure_reason: None,
+            completed_at: None,
+            abort_handle: None,
+        },
+    );
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let engine =
+        json_body(send(&server, request("GET", "/api/v3/engine/abonents", Some(&token), json!({}))).await).await;
+    let roster = json_body(
+        send(&server, request("GET", &format!("/api/v3/sessions/{}/abonents", room.id), Some(&token), json!({}))).await,
+    )
+    .await;
+    let abonent = &engine["abonents"][0];
+    assert_eq!(abonent["uri"], "sip:192.168.1.132", "Native info must show the dialed address, not a display name");
+    for field in ["uri", "connection_url", "contact_id", "call_string_id", "payload"] {
+        assert_eq!(abonent[field], roster["connected"][0][field], "Engine and room DTO disagree on {field}");
+    }
+    assert_eq!(abonent["contact_id"], "saved-physical-contact");
+    assert_eq!(abonent["details"]["audio"]["rx"]["volume"], -60);
+}
+
+#[tokio::test]
+async fn pnm_failed_call_keeps_contact_and_reason() {
+    let (state, _) = test_state();
+    state.set_dialer(Arc::new(RejectingDialer));
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response = send(
+        &server,
+        request("POST", "/api/v3/conferences", Some(&token), json!({"display_name":"Failure regression"})),
+    )
+    .await;
+    let room = json_body(response).await;
+    let id = room["conference"]["id"].as_str().unwrap();
+    let response = send(&server, request("POST", "/api/v3/sessions", Some(&token), json!({"conference_id":id}))).await;
+    assert!(response.status().is_success());
+    let response = send(
+        &server,
+        request(
+            "POST",
+            &format!("/api/v3/ui/sessions/{id}/call_strings"),
+            Some(&token),
+            json!({"uri":"sip:192.168.1.132","display_name":"Real terminal"}),
+        ),
+    )
+    .await;
+    assert!(response.status().is_success());
+    let contact = json_body(response).await["call_string"]["id"].clone();
+    tokio::task::yield_now().await;
+    let response =
+        send(&server, request("GET", &format!("/api/v3/sessions/{id}/abonents"), Some(&token), json!({}))).await;
+    let roster = json_body(response).await;
+    assert_eq!(roster["connected"].as_array().unwrap().len(), 0);
+    assert_eq!(roster["disconnected"][0]["contact_id"], contact, "Failed dial must not erase the participant row");
+    assert_eq!(roster["disconnected"][0]["failure_reason"], "SIP 486 Busy Here");
+}
+
+#[tokio::test]
+async fn pnm_template_contact_and_settings_survive_reload() {
+    let storage = Arc::new(vks_storage::memory::MemoryStorage::new());
+    let (mut state, _) = test_state();
+    Arc::get_mut(&mut state).unwrap().storage = Some(storage.clone());
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response = send(
+        &server,
+        request(
+            "POST",
+            "/api/v3/conferences",
+            Some(&token),
+            json!({
+                "display_name":"Persistent template", "description":"Keep this description", "pin":"4321",
+                "payload":{"mode":"CUSTOM","ui_autocall_on_session_start":"ON"}
+            }),
+        ),
+    )
+    .await;
+    let room = json_body(response).await;
+    let id = room["conference"]["id"].as_str().unwrap();
+    let response = send(
+        &server,
+        request(
+            "POST",
+            &format!("/api/v3/ui/conferences/{id}/call_strings"),
+            Some(&token),
+            json!({
+                "uri":"sip:192.168.1.132:5060", "display_name":"Physical terminal", "payload":{"auto_call":true}
+            }),
+        ),
+    )
+    .await;
+    assert!(response.status().is_success());
+    let expected = json_body(response).await["call_string"]["id"].clone();
+    let response =
+        send(&server, request("GET", &format!("/api/v3/conferences/{id}/contacts"), Some(&token), json!({}))).await;
+    let contacts = json_body(response).await;
+    assert_eq!(contacts["contacts"][0]["contact_id"], expected, "A successful Add address must retain the contact");
+    let (mut restored, _) = test_state();
+    Arc::get_mut(&mut restored).unwrap().storage = Some(storage);
+    restored.sync_from_storage().await.unwrap();
+    let server = app(restored);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response =
+        send(&server, request("GET", &format!("/api/v3/conferences/{id}/contacts"), Some(&token), json!({}))).await;
+    assert_eq!(json_body(response).await["contacts"][0]["contact_id"], expected);
+    let response = send(&server, request("GET", &format!("/api/v3/conferences/{id}"), Some(&token), json!({}))).await;
+    let conference = json_body(response).await;
+    assert_eq!(conference["conference"]["pin"], "4321");
+    assert_eq!(conference["conference"]["description"], "Keep this description");
+}
+
+#[tokio::test]
+async fn pnm_card_resources_roundtrip_regression() {
+    let (state, _) = test_state();
+    let app = app(state);
+    let token = login_token(&app, "admin", "s3cret").await;
+    let response = send(
+        &app,
+        request(
+            "POST",
+            "/api/v3/conferences",
+            Some(&token),
+            json!({
+                "display_name": "Card regression", "route": "card-regression", "dtmf": "98261020"
+            }),
+        ),
+    )
+    .await;
+    assert!(response.status().is_success());
+    let body = json_body(response).await;
+    let id = body["conference"]["id"].as_str().unwrap();
+    for (path, field) in [
+        (format!("/api/v3/ui/conferences/{id}/video_layouts"), "video_layouts"),
+        (format!("/api/v3/conferences/{id}/audiochannels"), "audiochannels"),
+        (format!("/api/v3/schedules?object_id={id}&object_type=conferences"), "schedules"),
+        ("/api/v3/video_layout_grids".to_string(), "grids"),
+    ] {
+        let response = send(&app, request("GET", &path, Some(&token), json!({}))).await;
+        assert_eq!(response.status(), StatusCode::OK, "The original conference card requires {path}");
+        assert!(json_body(response).await[field].is_array(), "{path} must return its collection");
+    }
+    let response = send(
+        &app,
+        request(
+            "POST",
+            "/api/v3/ui/video_layouts",
+            Some(&token),
+            json!({
+                "display_name": null, "payload": {"mode":"auto", "preset":"preset_default_13", "type":"default"}
+            }),
+        ),
+    )
+    .await;
+    assert!(response.status().is_success(), "Create-conference must be able to create its default layout");
+    let layout = json_body(response).await["video_layout"].clone();
+    let lid = layout["id"].as_str().unwrap();
+    let response =
+        send(&app, request("POST", &format!("/api/v3/conferences/{id}/video_layouts/{lid}"), Some(&token), json!({})))
+            .await;
+    assert!(response.status().is_success());
+    let response =
+        send(&app, request("GET", &format!("/api/v3/ui/conferences/{id}/video_layouts"), Some(&token), json!({})))
+            .await;
+    let layouts = json_body(response).await;
+    assert_eq!(layouts["video_layouts"][0]["id"], lid);
+    let response = send(
+        &app,
+        request(
+            "POST",
+            "/api/v3/audiochannels",
+            Some(&token),
+            json!({
+                "display_name":"For all participants", "payload":{"type":"default","vad":true,"attachmode":"BLACKLIST"}
+            }),
+        ),
+    )
+    .await;
+    assert!(response.status().is_success());
+    let audio = json_body(response).await["audiochannel"].clone();
+    let aid = audio["id"].as_str().unwrap();
+    let response =
+        send(&app, request("POST", &format!("/api/v3/conferences/{id}/audiochannels/{aid}"), Some(&token), json!({})))
+            .await;
+    assert!(response.status().is_success());
+    let response =
+        send(&app, request("GET", &format!("/api/v3/conferences/{id}/audiochannels"), Some(&token), json!({}))).await;
+    assert_eq!(json_body(response).await["audiochannels"][0]["id"], aid);
+}
+
 /// Состояние с issuer + LocalDb(`admin`/`s3cret`), как бутстрап `main.rs`.
 fn test_state() -> (SharedState, Arc<JwtIssuer>) {
     let issuer = Arc::new(JwtIssuer::new(JwtConfig {
@@ -263,6 +579,13 @@ async fn sessions_sort_by_time_and_state_filters() {
     for name in ["Bravo", "Alpha"] {
         let response =
             send(&app, request("POST", "/api/v3/conferences", Some(&token), json!({ "display_name": name }))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let created = json_body(response).await;
+        let response = send(
+            &app,
+            request("POST", "/api/v3/sessions", Some(&token), json!({"conference_id":created["conference"]["id"]})),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -1040,9 +1363,18 @@ async fn test_m0_custom_layouts_api_keys_and_gateway_cluster_status() {
     state.clear_fault("lease");
 }
 
+struct PendingTestDialer;
+#[async_trait::async_trait]
+impl crate::state::OutboundDialer for PendingTestDialer {
+    async fn dial(&self, _: RoomId, _: &str, _: Option<&str>) -> Result<String, String> {
+        std::future::pending().await
+    }
+}
+
 #[tokio::test]
 async fn step2_call_strings_and_invite_vertical() {
     let (state, _) = test_state();
+    state.set_dialer(Arc::new(PendingTestDialer));
     let app_router = app(state.clone());
     let token = login_token(&app_router, "admin", "s3cret").await;
 
@@ -1072,7 +1404,7 @@ async fn step2_call_strings_and_invite_vertical() {
         ),
     )
     .await;
-    assert_eq!(cs_conf_resp.status(), StatusCode::OK);
+    assert_eq!(cs_conf_resp.status(), StatusCode::CREATED);
     let cs_conf_body = json_body(cs_conf_resp).await;
     assert_eq!(cs_conf_body["call_string"]["uri"], "sip:192.168.1.132");
     assert_eq!(cs_conf_body["call_string"]["display_name"], "Terminal 132");
@@ -1103,7 +1435,7 @@ async fn step2_call_strings_and_invite_vertical() {
     .await;
     assert_eq!(stray_resp.status(), StatusCode::OK, "Stray brace route must not return 404/501");
     let stray_body = json_body(stray_resp).await;
-    assert_eq!(stray_body["count"], 0);
+    assert_eq!(stray_body["count"], 1, "Added template contact must remain visible");
 
     // 6. Test standby abonent: POST /api/v3/ui/sessions/{id}/call_strings/without_call
     let standby_resp = send(
@@ -1116,7 +1448,7 @@ async fn step2_call_strings_and_invite_vertical() {
         ),
     )
     .await;
-    assert_eq!(standby_resp.status(), StatusCode::OK);
+    assert_eq!(standby_resp.status(), StatusCode::CREATED);
 
     // Verify standby appears in session abonents
     let abonents_resp =
@@ -1141,7 +1473,7 @@ async fn step2_call_strings_and_invite_vertical() {
         ),
     )
     .await;
-    assert_eq!(dial_resp.status(), StatusCode::OK);
+    assert_eq!(dial_resp.status(), StatusCode::CREATED);
     let dial_body = json_body(dial_resp).await;
     assert_eq!(dial_body["call_string"]["uri"], "sip:192.168.1.132");
 
@@ -1343,7 +1675,7 @@ async fn step4_abonent_media_controls_dtmf_fecc_and_standby() {
     assert_eq!(mute_tx_resp.status(), StatusCode::OK);
     let last_ctrl = mock_dialer.last_media_control.lock().unwrap().take().expect("media control called");
     assert_eq!(last_ctrl.0, pid);
-    assert_eq!(last_ctrl.1, Some(true), "audio_tx_muted should be true");
+    assert_eq!(last_ctrl.2, Some(true), "Native TX controls MCU→terminal (internal RX)");
 
     // 5. Проверяем POST /api/v3/abonents/{id}/microphone (mute RX speaker)
     let mute_rx_resp = send(
@@ -1358,7 +1690,7 @@ async fn step4_abonent_media_controls_dtmf_fecc_and_standby() {
     .await;
     assert_eq!(mute_rx_resp.status(), StatusCode::OK);
     let last_ctrl = mock_dialer.last_media_control.lock().unwrap().take().expect("media control called");
-    assert_eq!(last_ctrl.2, Some(true), "audio_rx_muted should be true");
+    assert_eq!(last_ctrl.1, Some(true), "Native RX controls terminal→MCU (internal TX)");
 
     // 6. Проверяем POST /api/v3/abonents/{id}/volume (volume RX)
     let vol_resp = send(
@@ -1373,7 +1705,7 @@ async fn step4_abonent_media_controls_dtmf_fecc_and_standby() {
     .await;
     assert_eq!(vol_resp.status(), StatusCode::OK);
     let last_ctrl = mock_dialer.last_media_control.lock().unwrap().take().expect("media control called");
-    assert_eq!(last_ctrl.4, Some(80), "volume_rx should be 80");
+    assert_eq!(last_ctrl.3, Some(251), "Native +8dB RX must reach internal TX as linear 251%");
 
     // Проверяем, что GET /api/v3/abonents и GET /api/v3/engine/abonents возвращают сохраненную громкость 80
     let list_resp = send(&app_router, request("GET", "/api/v3/abonents", Some(&token), json!({}))).await;
@@ -1444,7 +1776,7 @@ async fn step4_abonent_media_controls_dtmf_fecc_and_standby() {
         ),
     )
     .await;
-    assert_eq!(standby_add.status(), StatusCode::OK);
+    assert_eq!(standby_add.status(), StatusCode::CREATED);
     let sb_body = json_body(standby_add).await;
     let contact_id = sb_body["call_string"]["id"].as_str().unwrap().to_string();
 
@@ -1576,7 +1908,7 @@ async fn step6_conference_8_tabs_settings_persistence() {
     assert_eq!(conf["pin"], "4321");
     assert_eq!(conf["has_pin"], true);
     assert_eq!(conf["description"], "Initial Conference Description");
-    assert_eq!(conf["owner_id"], "user-admin");
+    assert_eq!(conf["owner_id"], "u-admin", "Ownership comes from authenticated identity, not a client-supplied id");
     assert_eq!(conf["auto_call"], true);
     assert_eq!(conf["payload"]["skin"], "modern");
     assert_eq!(conf["payload"]["codec"], "OPUS");

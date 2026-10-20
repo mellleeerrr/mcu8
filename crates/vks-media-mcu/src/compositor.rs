@@ -35,6 +35,11 @@ impl Compositor {
     ///   (deterministic order).
     pub fn compose(&self, frames: &BTreeMap<u32, Frame>, rects: &BTreeMap<u32, PixelRect>) -> CompositeFrame {
         let mut canvas = CompositeFrame::black(CANVAS_WIDTH, CANVAS_HEIGHT);
+        let pixels = CANVAS_WIDTH as usize * CANVAS_HEIGHT as usize;
+        if frames.values().any(|frame| frame.is_yuv420p()) {
+            canvas.data.fill(16);
+            canvas.data.resize(pixels * 3 / 2, 128);
+        }
         for (key, rect) in rects {
             let Some(frame) = frames.get(key) else {
                 continue; // slot has no frame yet → black
@@ -98,12 +103,57 @@ impl Compositor {
                 }
             }
         }
+        if canvas.data.len() == cw * ch * 3 / 2 {
+            let source_pixels = fw * fh;
+            let chroma_width = fw / 2;
+            let chroma_height = fh / 2;
+            for plane in 0..2 {
+                let source_offset = source_pixels + plane * (source_pixels / 4);
+                let destination_offset = cw * ch + plane * (cw * ch / 4);
+                for dy in 0..dh / 2 {
+                    let row = oy / 2 + dy;
+                    if row >= ch / 2 {
+                        break;
+                    }
+                    for dx in 0..dw / 2 {
+                        let column = ox / 2 + dx;
+                        if column >= cw / 2 {
+                            break;
+                        }
+                        let value = if frame.is_yuv420p() {
+                            let source_x = ((dx as f64 / s) as usize).min(chroma_width - 1);
+                            let source_y = ((dy as f64 / s) as usize).min(chroma_height - 1);
+                            frame.data[source_offset + source_y * chroma_width + source_x]
+                        } else {
+                            128
+                        };
+                        canvas.data[destination_offset + row * (cw / 2) + column] = value;
+                    }
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn i420_color_survives_full_canvas_composition() {
+        let pixels = 320 * 180;
+        let mut red = vec![76; pixels];
+        red.extend(vec![85; pixels / 4]);
+        red.extend(vec![255; pixels / 4]);
+        let frames = BTreeMap::from([(0, Frame::new(320, 180, red))]);
+        let rects = BTreeMap::from([(0, PixelRect::new(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT))]);
+        let result = Compositor.compose(&frames, &rects);
+        let output_pixels = CANVAS_WIDTH as usize * CANVAS_HEIGHT as usize;
+        assert_eq!(result.data.len(), output_pixels * 3 / 2, "I420 chroma planes were discarded");
+        assert!(result.data[..output_pixels].iter().all(|v| *v == 76));
+        assert!(result.data[output_pixels..output_pixels * 5 / 4].iter().all(|v| *v == 85));
+        assert!(result.data[output_pixels * 5 / 4..].iter().all(|v| *v == 255));
+    }
 
     fn slot_rects(n: u32) -> (BTreeMap<u32, Frame>, BTreeMap<u32, PixelRect>) {
         // n distinct frames + n distinct 960×540 tiles in a 2×2 grid.

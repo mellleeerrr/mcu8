@@ -30,6 +30,15 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// Whether the buffer is a complete planar YUV 4:2:0 frame (Y, U, V).
+    /// Legacy one-byte-per-pixel frames remain supported as grayscale.
+    pub fn is_yuv420p(&self) -> bool {
+        self.width > 0
+            && self.height > 0
+            && self.width.is_multiple_of(2)
+            && self.height.is_multiple_of(2)
+            && self.data.len() as u64 == self.pixel_count() * 3 / 2
+    }
     /// Creates a frame with the given size and payload.
     pub fn new(width: u32, height: u32, data: Vec<u8>) -> Self {
         Self { width, height, data }

@@ -1,0 +1,396 @@
+# MASTER_TASK_LIST — приоритетный план доведения VKS MCU до приёмки
+
+> Рабочий трекер. Обновляется в коммите каждой задачи (статус + ссылка на коммит + ревью-оценка).
+> Источники: `docs/progress/REWORK_PLAN.md`, `docs/architecture/*`, аудит 2026-10-16,
+> живая проверка 2026-10-19/20, документ TrueConf MCU 2.2.1.66 (страница мониторинга сессии).
+>
+> Главный приёмочный сценарий (P0): **frontend → создание комнаты → настройка → запуск →
+> вызов 192.168.1.132 → двусторонние аудио/видео → управление → завершение**.
+> SIP и H.323 проверяются отдельными ветками, но обе должны доходить до живого участника.
+>
+> Правило цикла: перед задачей — агент «подводные камни»; после реализации — параллельное
+> code-review (оценка /10, обязательные правки); цикл не закрывается, пока хотя бы один
+> независимый ревьюер не поставит **≥9.5/10**. Затем — агент «условия задачи/элегантность»
+> (≥9/10), правки, commit, отметка задачи.
+
+## Легенда
+
+⚪ не начата · 🟡 в работе · 🟢 завершена · 🔴 заблокирована · ⏸️ отложена
+
+## Факты, уже подтверждённые живой проверкой (2026-10-20)
+
+| Проверка | Результат | Следствие |
+|---|---|---|
+| SIP-вызов `sip:192.168.1.132` на текущей debug-сборке | `201` → `connecting` → `connected`, participant `sip-…@sip-gateway`, PCMU + H264, RX/TX растут ≥10 c | SIP-ветка рабочая; «исчезновение за 1 c» — не SIP-транспорт, а lifecycle/UI/старый бинарник |
+| H.323 Setup с **нулевым/почти нулевым** GUID | Polycom отвечает Q.931 Release Complete `invalidCID` | `conferenceID`/`callIdentifier` нельзя брать из детерминированного нулевого UUID |
+| H.323 Setup с **v4 UUID** | `ringing` → H.245 TCP → TCS/MSD → openLogicalChannel; каналы audio PT 0, video PT 109/96 | Сигнализация H.323 доходит до медиа-негоциации; причина прежнего отказа — GUID/состояние endpoint |
+| H.323 sidecar | venv `~/.local/share/vks-mcu/h323-venv` рабочий; Pycrate 0.8.1 + `h323_asn` | Не пересоздавать venv; не ломать `PYTHONPATH` |
+| H.323 после `resolve_helper()` | `connected`, audio RX/TX, video RX PT 109 / TX PT 96, decoded/encoded >0, жив >12 c | helper-путь был единственной причиной `stdout closed`; H.323-ветка рабочая |
+| `DELETE /api/v3/sessions/{id}` после SIP/H.323 | 204; `connected/connecting/disconnected/scheduled/count` = 0 | ghost-ростер закрыт прунингом `call_attempts`/`settings`; «комната не пустеет» больше не воспроизводится |
+| `GET /api/v3/sessions/{id}/abonents` | `connected[]` живёт, `RoomHub` отдаёт participant | Ростер не обязан «испаряться»; искать гонку cleanup/старый процесс |
+
+## P0 — приёмка (блокирует всё остальное)
+
+### A0. Triage «участник исчез за 1 c»: один бинарник, один лог, один источник истины
+
+**Статус:** 🟢 (2026-10-20)
+**Цель:** исключить ложные симптомы: старый процесс, два сервера, чужой конфиг, UI-кэш.
+
+**Что проверено:**
+- `target/debug/vks-server` новее исходников; старый процесс на 18081 остановлен перед пересборкой;
+- SIP и H.323 вызовы на пересобранном бинарнике дают `connected` и живут >12 c;
+- после `DELETE /sessions/{id}` `connected/connecting/disconnected/scheduled/count` = 0;
+- UI-кэш: `MANIFEST.sha256`; для приёмки — hard reload/новый профиль.
+
+**Диагноз:** «исчезновение» воспроизводилось двумя путями: (а) видео-воркер падал уже после
+регистрации в RoomHub, и `hangup` снимал участника через десятки мс; (б) `stop_session` не чистил
+`call_attempts`, поэтому после завершения в ростере оставался `disconnected` с `count=1`.
+Оба пути закрыты в A5/B3. Третий путь — смена identity `cs-…` → `sip-…@sip-gateway`, из-за чего
+фронт пересоздаёт строку; это не потеря вызова, но требует стабильного ключа (B3).
+
+### A1a. SIP acceptance-harness: комната → запуск → вызов → ростер → завершение
+
+**Статус:** 🟢 (ручной API-прогон 2026-10-20; автоматизация — C2)
+**Цель:** один сценарий на чистой БД: логин, создание комнаты, запуск сессии, вызов
+`sip:192.168.1.132`, ожидание `connected`, проверка media-счётчиков, mute/volume/DTMF,
+`DELETE /sessions/{id}`, проверка пустого ростера и отсутствия портов.
+
+**Факты прогона:** `POST /conferences` → `POST /sessions` → `POST /ui/sessions/{id}/call_strings`
+→ 201/`connecting` → `connected` за ~2 c; PCMU + H264; через 12 c connected=1, RX/TX растут;
+mute mic (`microphone`, outgoing=false) даёт `audio.rx.enabled=false`; `DTMF 123#` → 200;
+`DELETE` → 204, roster `count=0`.
+
+**Подводные камни:**
+- не использовать `/tmp` для лога/БД; только workspace `.accept/`;
+- `POST /sessions` без `conference_id` создаёт Quick Session и может автоматически звонить по
+  шаблону — для приёмки всегда передавать `conference_id`;
+- `POST /sessions/{id}/invite/call_strings` — не то же самое, что `/ui/sessions/{id}/call_strings`;
+- ответ 201 не равен `connected`: poll `abonents` до `connected[]`;
+- завершение: `DELETE /api/v3/sessions/{id}` (204), затем `abonents` и `engine` должны быть пусты;
+- старый процесс/порт 18081/40010 убивает воспроизводимость — проверять `ss -ltnup`.
+
+**Приёмка:** `scripts/accept_sip.sh` (TODO, C2) или ручной прогон с отчётом; повторный запуск
+не оставляет сессий/портов.
+
+### A1b. H.323 acceptance-harness: helper path, валидный GUID, connected, медиа
+
+**Статус:** 🟢 (2026-10-20)
+**Цель:** тот же сценарий для `h323:192.168.1.132`, с проверкой sidecar и H.245.
+
+**Факты прогона:** после `resolve_helper()` sidecar запускается из runtime-дерева; `connected`
+за ~4 c; audio PT 0 RX/TX; video RX PT 109 / TX PT 96; за 20 c decoded 150, encoded 169;
+`video_rx.resolution=640x360`; `DELETE` → 204, roster `count=0`.
+
+**Подводные камни:**
+- `env!("CARGO_MANIFEST_DIR")` нельзя использовать как runtime-путь; `resolve_helper()` возвращает
+  `Result` и ищет: `VKS_H323_HELPER` (обязан быть файлом) → рядом с exe → `../share/vks-mcu` →
+  cwd/source-tree **только в debug** → manifest fallback; при отсутствии — ошибка со списком путей;
+- sidecar не должен принимать nil UUID (`invalidCID` у Polycom); генерировать v4 внутри Rust;
+- видео-reject (чужой sessionID/reverse/не baseline) не должен вешать `connected`: ставить
+  `video_unavailable` и подключать аудио; если peer анонсировал H.264, но 2.5 c не открыл
+  входящий video OLC (камера выключена), подключить audio-only, а не ждать дедлайн;
+- неизвестный/неполный H.245 ACK не должен рвать живой вызов;
+- `.132` может быть занят SIP/H.323 — сначала завершить предыдущий вызов;
+- не запускать два sidecar на один вызов; stdout — только JSON lines.
+
+**Приёмка:** H.323 `connected`, оба направления RTP, `was_connected=true`, повторный вызов успешен.
+
+### A2. H.323-вызов `.132`: `invalidCID`, `connected`, медиа
+
+**Статус:** 🟢 (2026-10-20)
+**Цель:** исходящий H.323-вызов из комнаты доходит до `connected`, sidecar отдаёт валидные
+audio/video endpoints, Rust-бридж отправляет/принимает RTP; вызов завершается Release Complete.
+
+**Подводные камни:**
+- `conferenceID` и `callIdentifier` — 16-байтовые GUID; **никогда** не использовать нулевой/
+  детерминированный UUID (`00000000-…`): Polycom отвечает `invalidCID`;
+- в `send_setup` оба поля сейчас равны `uuid.UUID(call_id).bytes`; проверить, что `call_id`
+  всегда v4 и не приходит извне как произвольная строка; добавить guard `uuid.UUID(...).version == 4`
+  или генерировать внутри sidecar;
+- `activeMC`/`conferenceGoal`/`sourceInfo` для direct point-to-point: не выдавать себя за MCU,
+  если endpoint ждёт terminal; проверить допустимые значения Pycrate (`conferenceGoal` — не `"call"`,
+  а `("call",0)`/`("create",0)` по ASN.1; `sourceInfo` — choice, а не dict);
+- `conferenceID` может быть опционален; но если Polycom требует, не удалять без проверки;
+- после Setup Polycom может прислать `Alerting` и открыть H.245 только после «ответа»; таймаут
+  sidecar 25 c может быть меньше ручного ответа;
+- H.245: TCS ACK, MSD ACK, openLogicalChannel ACK; `connected` эмитится только при
+  `incoming_audio && remote_audio` (и video, если запрошено); не считать `ringing` успехом;
+- `remote_audio` приходит в `openLogicalChannelAck`; если Polycom не присылает ACK, проверить
+  `sessionID`, `mediaControlChannel`, `dynamicRTPPayloadType`, `mediaPacketization`;
+- video PT: входящий 109, исходящий 96; не перепутать; H.264 baseline 640×360@15;
+- sidecar stdout — JSON lines; любая библиотека не должна печатать в stdout (Pycrate уже
+  перенаправлен в stderr);
+- завершение: `endSessionCommand` + Q.931 Release Complete; не оставлять TCP 1720/H.245 сокеты;
+- `.132` может быть занят SIP-вызовом или старым H.323-соединением; перед тестом завершить
+  предыдущую сессию и подождать 2–3 c.
+
+**Приёмка:** H.323-вызов `.132` даёт `connected`; в отчёте `remote_audio_port`, `remote_video_port`,
+PT; RTP-пакеты идут в обе стороны; `was_connected=true` при завершении; повторный вызов успешен.
+
+### A3. Frontend E2E через PNM UI: создание комнаты, настройка, запуск, вызов, управление, завершение
+
+**Статус:** 🟡 (API-контракт проверен 2026-10-20; визуальный Playwright недоступен в сандбоксе)
+**Цель:** оператор в браузере на `http://<host>:8080/pnm/` проходит сценарий без API-хаков;
+участник появляется и **не исчезает**, счётчики и таблица обновляются.
+
+**Факты прогона:** `POST /conferences` (payload mode=MCU) → `POST /sessions` → все ключевые
+`/api/v3/ui/sessions/{id}/*` (`session`, `abonents`, `contacts`, `video_layouts`) и
+`/api/v3/engine/abonents` отвечают 200; `sip:192.168.1.132` появляется в `connected[]` и живёт
+>12 c; после `DELETE` ростор пуст. PNM UI — **административная** консоль: в её бандле нет
+`getUserMedia`/исходящего WebRTC, поэтому «браузер как участник» не является приёмочным требованием.
+
+**Подводные камни:**
+- UI 2.2.1.66 ходит в `/api/v3/ui/*`, а не в v1; проверить все ответы и формы DTO;
+- список сессий обновляется поллингом 10 c, участники — 5 c; WS-события `sessions:joined/left`
+  фронт **не слушает**; «исчезновение» может быть гонкой между poll и cleanup;
+- `RoomHub` — in-memory; после рестарта сервера комната пустая, а UI показывает старую сессию;
+- `create-conference-button` создаёт **описание**, а не живую комнату; запуск — отдельный
+  `POST /api/v3/sessions {conference_id}`; в UI это разные страницы;
+- `display_name`/`route`/`dtmf` генерируются фронтом; route должен быть уникален;
+- кнопка «Добавить по адресу» → `POST /ui/sessions/{id}/call_strings`; payload `auto_call`,
+  `crown`, `volume_*`; ошибки 409/3 (адрес уже в сессии);
+- `connection_id` — число из движка, `abonent_id` — UUID; кнопки управления используют первый;
+- после `DELETE /sessions/{id}` UI должен уйти на карточку конференции; проверить отсутствие
+  «фантомной» строки;
+- кэш браузера: `MANIFEST.sha256`/cache-bust; hard reload или новый профиль;
+- не тестировать на старой сборке: `cargo build -p vks-server` и запуск именно её.
+
+**Приёмка:** видеозапись/скриншоты или Playwright-тест: комната создана, запущена, `.132` в
+`connected[]`, счётчик «👥 1» и таблица не пустеют ≥30 c, кнопки mute/камера/отключить работают,
+сессия завершается, строка исчезает.
+
+### A4. Двусторонние аудио/видео: доказательство, а не «счётчики растут»
+
+**Статус:** 🟢 (media-level proof 2026-10-20; визуальная проверка на `.132` — за оператором)
+**Цель:** подтвердить, что `.132` слышит комнату и видит видео, а комната слышит/видит `.132`;
+для SIP и H.323 отдельно.
+
+**Факты прогона:**
+- SIP: PCMU/H264; за 12 c `audio_rx=422`, `audio_tx=175`, `video_rx=99`, `video_tx=196`,
+  `decoded_video_frames=54`, `encoded_video_frames=59`;
+- H.323: PCMU, RX PT 109 / TX PT 96; за 20 c `decoded_video_frames=150`, `encoded=169`,
+  `video_rx.resolution=640x360`; вызов жив >12 c;
+- `active:false` при растущих packets — это VAD, а не отсутствие потока.
+
+**Подводные камни:**
+- `active:false`/`present:true` в `engine/abonents` может означать «поток есть, но VAD не активен»;
+  проверять `packets`, `bitrate`, `power_sB`, `quality.downlink`, а не только флаг;
+- SIP SDP: `sendrecv`, корректные `m=audio/video`, PT; `build_plain_sdp` должен включать H264 96
+  и telephone-event 101; проверить, что `.132` принял video;
+- G.711 8k ↔ 48k: ресемплинг не должен давать тишину/артефакты; проверить PCM-уровень;
+- MCU mix-minus: участник не должен слышать себя; AGC 1/√N; tanh soft clip;
+- H.264: FFmpeg baseline, keyframe при старте, `resize_i420`; при отсутствии IDR — чёрный экран;
+- RTP-порты 41000–41200: lease, RTCP, symetric NAT; не переиспользовать порт до освобождения;
+- firewall/iptables на `.93`; `.132` должен иметь маршрут к RTP-портам;
+- для H.323 проверить оба направления PT (109 in / 96 out) и H.245 master/slave.
+
+**Приёмка:** capture/pcap или media-отчёт: аудио RX/TX > 0 в обе стороны, видео RX/TX > 0,
+`power_sB` меняется при речи, на `.132` видно видео комнаты; для SIP и H.323 — отдельные записи.
+
+### A5. Управление участником и чистое завершение
+
+**Статус:** 🟢 (2026-10-20; H.323 DTMF остаётся ограничением — 501)
+**Цель:** mute микрофона/камеры, «не слышит/не видит комнату», kick, DTMF, громкость, завершение
+сессии работают и не оставляют зомби.
+
+**Факты прогона:** mute mic (`microphone`, outgoing=false) → `audio.rx.enabled=false`; mute
+conference audio (outgoing=true) → `audio.tx.enabled=false`; restore → true; SIP `DTMF 123#` → 200;
+`DELETE /sessions/{id}` → 204, roster `count=0`, participant/attempts/ports очищены.
+H.323 DTMF сейчас не реализован (H.245 userInputIndication) — API должен отдавать явный 501,
+а не 500.
+
+**Подводные камни:**
+- направления: `audio {outgoing:false}` — то, что участник **шлёт** (микрофон);
+  `{outgoing:true}` — то, что он **получает** (динамик); для video аналогично;
+- `DELETE /api/v3/abonents/{connection_id}` vs `DELETE /sessions/{id}/abonents/{abonent_id}`;
+- после kick должен уйти `ParticipantLeft reason=2`, WS close 4003, RTP-порт освобождён;
+- `DELETE /sessions/{id}` должен снять все соединения и остановить запись/трансляцию;
+- `stopped_sessions`/`in_flight_calls`/`PendingOutboundGuard` не должны удерживать запись;
+- BYE/CANCEL: если вызов ещё `connecting`, нужен CANCEL, а не BYE;
+- H.323: Release Complete и `endSessionCommand`, затем закрыть H.245/TCP;
+- повторный `DELETE` должен быть идемпотентным (204/404 по контракту).
+
+**Приёмка:** после каждого действия состояние в API/движке совпадает; после завершения нет
+активных `connection_id`, портов, задач; повторный вызов того же адреса работает.
+
+### A6. Гигиена тестовых артефактов и конфигов
+
+**Статус:** 🟢 (2026-10-20; критичный код добавлен в индекс, `.accept/`/`.accept_*`/`.h323_*`/
+`__pycache__/` в `.gitignore`, `git status` содержит только осмысленные изменения)
+**Цель:** убрать мусор, который мешает запуску и ревью: `.accept_*`, `.h323_*`, `__pycache__`,
+логи, временные БД, архивы; зафиксировать `.gitignore`.
+
+**Важно:** до `git clean` добавить в индекс критичный untracked-код: `crates/vks-server/src/gateway_audio.rs`,
+`gateway_video.rs`, `crates/vks-gateway-h323/python/` (кроме `__pycache__`), `crates/vks-gateway-sip/tests/`,
+`crates/vks-admin/src/api_v3/resources.rs`, `call_lifecycle_tests.rs`, `resource_tests.rs`,
+`migrations/0005_configuration_documents.sql`. Иначе `git clean -fd` уничтожит реализацию.
+
+**Подводные камни:**
+- `crates/vks-gateway-h323/python/__pycache__` — удалить, но не удалять `h323_asn.py`,
+  `schemas/*.asn`, `requirements.lock`, `PROVENANCE.md`;
+- `vks_data.db`, `vks-server.log`, `vks_server.log` — не коммитить; добавить в `.gitignore`;
+- `client/pnm-frontend/archive/*.zip` (26 MB) — не тащить в git; проверить, что уже ignored;
+- `.accept_token` содержит JWT — удалить, не логировать;
+- `.h323_*.py` — временные копии, удалить;
+- не удалять пользовательскую БД/данные без подтверждения; тестовые — только workspace.
+
+**Приёмка:** `git status` содержит только осмысленные изменения; `git check-ignore` подтверждает
+игнор; сборка/тесты не зависят от мусора.
+
+## P1 — архитектура и медиа-контур
+
+### B1. Движки SFU/MCU в `AppState`, per-room режим, тики
+
+**Статус:** ⚪ (было T2.1–T2.3)
+**Цель:** UI v3 переключает режим комнаты, `MediaEngine` реально используется, метрики и тики
+идут из composition root, а не из тестов.
+
+**Подводные камни:**
+- сейчас `ModeSwitcher` используется только в `network_integration.rs`; в рантайме его нет;
+- `HandlerConfig.room_mode` фиксируется на старте из глобального `effective_mode`; per-room
+  override не доходит до signaling;
+- две реализации (`SfuEngine`, `McuEngine`) могут дублировать комнаты/тики; один источник истины;
+- `spawn` тиков: не блокировать async runtime, backpressure, отмена при удалении комнаты;
+- метрики pull не должны брать lock на горячем пути;
+- при переключении режима отправить `RoomModeChanged` всем, включая late joiner;
+- не сломать SFU-путь, который уже работает в браузере.
+
+**Приёмка:** `POST /api/v3/ui/video_layouts/mode` меняет режим; `GET /api/v3/engine/...` отдаёт
+метрики; тест на late joiner; нет утечки тиков после закрытия комнаты.
+
+### B2. Доставка MCU-композита WebRTC-клиентам
+
+**Статус:** ⚪
+**Цель:** в MCU-режиме браузер получает единый композит, а не отдельные потоки; SFU-режим
+продолжает работать.
+
+**Подводные камни:**
+- сейчас MCU-композит потребляет только gateway video; WebRTC-клиенты не получают composite;
+- браузер не принимает I420; нужен H.264/VP8 энкодер (FFmpeg или Rust), keyframe, тайминг 30 fps;
+- CPU: 1920×1080@30 на комнату; ограничить, если нет аппаратного кодека;
+- SSRC/PT/RTCP должны совпадать с SDP; не отдавать один и тот же SSRC разным клиентам;
+- backpressure: медленный клиент не должен тормозить композитор;
+- прозрачность: API/клиент не должны знать режим; `MediaEngine` — единственная точка.
+
+**Приёмка:** браузер в MCU-комнате видит сетку; SFU-комната не деградировала; CPU/латентность
+в бюджете; тест на переключение.
+
+### B3. Единый lifecycle сессии/ростера (in-memory + storage)
+
+**Статус:** ⚪ (было T2.6)
+**Цель:** participant не исчезает через 1 c; `RoomHub`, `Rooms`, `in_flight_calls`, `stopped_sessions`
+согласованы; рестарт не оставляет фантомов.
+
+**Подводные камни:**
+- `RoomHub::unregister_participant` удаляет комнату при `remaining==0 && no receivers`; гонка с
+  повторной регистрацией;
+- `cleanup_active_membership` может сработать дважды (WS close + timeout);
+- `PendingOutboundGuard`/`InFlightCallGuard` должны освобождаться на всех путях (drop, cancel, error);
+- `connection_id` vs `participant_id` vs `call_id`: не перепутать ключи;
+- storage-sync асинхронный; не держать lock через `.await`;
+- при рестарте `RoomHub` пуст, а `sessions` в БД активны — нужен reconcile или остановка.
+
+**Приёмка:** тест «join → 1 c → leave» не удаляет комнату с другими; параллельные join/leave;
+рестарт; 100 циклов без утечек.
+
+### B4. WS-события и UI-обновления
+
+**Статус:** ⚪
+**Цель:** UI получает `sessions:joined/left/updated`, `abonents:*` без 5-секундного поллинга;
+события совпадают по имени/форме с фронтом.
+
+**Подводные камни:**
+- фронт 2.2.1.66 не подписан на `sessions:joined/left`; нужно либо добавить подписку, либо
+  оставить polling и не ломать его;
+- WS auth — `access_token` в кадре, не заголовок; PING/PONG;
+- `admin_events` broadcast может терять события при lag; ring buffer;
+- не отправлять события до регистрации participant;
+- payload должен быть JSON-совместим с DTO; не слать Rust enum как строку без serde.
+
+**Приёмка:** два браузера видят join/leave <1 c; нет дублей; reconnect.
+
+### B5. Конфиг: один источник истины, per-room mode, секреты
+
+**Статус:** ⚪ (было T3.3)
+**Цель:** `listen_addr`, `media_listen_addr`, `candidate_addr`, `frontend_dir`, `room_mode` не
+дублируются; TOML читается полностью; `VKS_CONFIG_PATH` работает.
+
+**Подводные камни:**
+- сейчас 4 источника `listen_addr`; env/TOML/CLI/default расходятся;
+- `candidate_addr` должен быть реальным IP `.93`, иначе ICE/SDP врёт;
+- `frontend_dir` относительный — зависит от cwd; использовать абсолютный или `CARGO_MANIFEST_DIR`;
+- `jwt_secret` dev-значение; не логировать; для прода — RS256 (T3.1);
+- `database_url` SQLite `?mode=rwc`; для in-memory `cache=shared`;
+- `server_name`/`default_room_mode` должны попадать в `AppState` и `HandlerConfig`;
+- не хранить секреты в `configs/default.toml` для прода.
+
+**Приёмка:** `Config::validate`, тест «TOML → AppState», запуск из другого cwd; нет дублей.
+
+### B6. Надёжность gateway-медиа: порты, RTCP, DTMF, H.264
+
+**Статус:** ⚪ (было T2.5)
+**Цель:** RTP-бридж не течёт, порты освобождаются, RTCP/DTMF работают, видео не чёрное.
+
+**Подводные камни:**
+- `RtpPortLease` удерживает порт до drop; при ошибке dial — освободить;
+- RTCP SR/RR и PLI; без PLI — чёрный экран;
+- DTMF RFC 4733: PT 101, sequence/timestamp; не путать с in-band;
+- ресемплинг 48↔8: целочисленные ошибки, дрейф;
+- H.264 FFmpeg: профиль baseline, GOP, bitrate; `-fflags nobuffer`; не блокировать async;
+- mix-minus: не отправлять участнику его же аудио;
+- при `connected` запускать media loop только после ACK; при disconnect остановить.
+
+**Приёмка:** 100 циклов dial/hangup без утечки портов; pcap с RTP/RTCP; DTMF слышен; видео
+на `.132` не чёрное.
+
+## P2 — качество, безопасность, инфраструктура
+
+### C1. Auth/RBAC: RS256, `iss`, permissions sync
+
+**Статус:** ⚪ (T3.1–T3.2)
+**Подводные камни:** HS256 dev-секрет; `iss` опционален; `getIsProfileHasPermissions` TODO;
+не сломать v1 RBAC; refresh-токена нет.
+**Приёмка:** тесты JWT (alg none/HS256/RS256, iss), 403 на UI, профиль `permissions`.
+
+### C2. Тесты/CI: unit, integration, flaky, clippy
+
+**Статус:** ⚪ (T4.1–T4.2)
+**Подводные камни:** 527 тестов в PROGRESS не соответствуют текущему дереву; сетевые тесты
+требуют `.132`; sidecar-тесты зависят от venv; `cargo test --workspace` может быть долгим.
+**Приёмка:** CI зелёный; отдельные job для network/acceptance (skip без env).
+
+### C3. Документация и трекер
+
+**Статус:** ⚪ (T4.3–T4.4)
+**Подводные камни:** PROGRESS заявляет завершённость фаз, которой нет; REWORK_PLAN устарел;
+не коммитить ложные «527 tests».
+**Приёмка:** README/ARCHITECTURE/PROGRESS соответствуют коду; acceptance checklist.
+
+### C4. Заглушки кластера/рекордера/TURN/NATS
+
+**Статус:** ⏸️ (T3.4)
+**Подводные камни:** in-memory NATS simulation; recorder metadata only; TURN не реальный.
+**Приёмка:** либо реальный адаптер, либо явная пометка «not for production» и fail-fast.
+
+## Порядок исполнения
+
+1. A0 (triage) — исключить старый бинарник/процесс; уже сделано.
+2. A1a (SIP) → A4 (SIP media) → A3 (UI API) → A5 (controls/stop) — основной P0-путь.
+3. A6 (git add критичного кода → чистка) — до коммита.
+4. A1b/A2 (H.323) — отдельная ветка; SIP уже зелёный.
+5. B3 (единый lifecycle/identity) → B1 (per-room mode) → B6 (порты/RTCP/DTMF).
+6. B2 (композит в WebRTC) — **не блокирует** приёмку PNM: UI админский, не медиа-клиент.
+7. B4 → B5 → C1 (authz-scope/RS256) → C2 → C3 → C4.
+
+## Ревью-журнал
+
+| Задача | Раунд | Ревьюер | Оценка | Вердикт/правки |
+|---|---|---|---|---|
+| A1a SIP happy path | 1 | lifecycle reviewer | 7.5 | Найден 5-секундный watchdog, убивавший медленный первый RTP/удержание; видео-сбой рвал аудио; утечка `abonent_settings`; hot-spin на recv error. |
+| A1a/A5 lifecycle | 2 | lifecycle reviewer | **9.5** | Watchdog 15 c + `connected_at` перед announce; видео-сбой → audio-only, без phantom leave; очистка settings; bounded recv errors; добавлены 2 теста предиката. Ship. |
+| A1b/A2 H.323 | 1 | H.323 reviewer | 7.0 | `resolve_helper()` без тестов и без диагностики; cwd-hijack; нет video-grace; reject чужого канала; PT до валидации. |
+| A1b/A2 H.323 | 2 | H.323 reviewer | **9.5** | Pure resolver + 3 теста, fail-closed override, `info!` пути, cwd только debug; 2.5 c video-grace, reject только своего канала, PT до assign; 19 Python tests, live RTP. Ship. |
+| A3 UI API | 1 | acceptance reviewer | 5.0 | PNM UI — админская control plane, не WebRTC-медиа-клиент; визуальный E2E в sandbox недоступен, API/asset-проверка. |
+| A4 SIP/H.323 media | 1 | acceptance reviewer | 6.0 | Счётчики росли, но не было доказательства двустороннего decoded/encoded; добавлены live-замеры PT/разрешения. |
+| A6 task list | 1 | task-list reviewer | 7.5 | Список раздут/устарел; сокращён, статусы A0–A6 приведены к фактам. |
+| A6 hygiene | 1 | elegance reviewer | 6.0 | CRLF в shell/lib раздувал diff; нормализованы, `.accept*`/`__pycache__` в ignore. |

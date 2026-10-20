@@ -1,82 +1,87 @@
 # vks-gateway-h323
 
-H.323 → WebRTC gateway (phase 6, ADR-0007 «H.323: FFI wrapper on top of
-H323Plus»).
+Outbound H.323 calls use a separate Python ASN.1/PER process. H.225 CONNECT,
+H.245 capability exchange, master/slave determination and both audio logical
+channels must succeed before `H323UacClient::dial*()` returns a participant.
+Timeouts, ALERTING and TCP closure are errors. No RTP port is guessed.
 
-Accepts H.323 calls (H.225/H.245 signaling, via H323Plus/OPAL) and "lands"
-them in WebRTC-rooms: each H.323 call becomes a **participant** of the
-room with a display name `<from>@h323-gateway` (ARCHITECTURE.md §2 —
-transparent to WebRTC clients).
+## Runtime setup
 
-## What is included in this wave (self-contained core)
+Python 3 with the separate hash-pinned Pycrate 0.8.1 package is required.
+On installations with pip/ensurepip:
 
-- **`src/codec.rs`** — `H323CodecMap`: deterministic H.323↔WebRTC codec
-  negotiation.
-- **`src/ffi.rs`** — `H323PlusBridge`: mock FFI boundary with `Watchdog`
-  and a panic hook.
-- **`src/call.rs`** — `H323Call` (H.225 FSM) + `H323Gateway` (in-memory,
-  mock room registry).
-- `src/lib.rs` — re-exports.
-
-## Codec map (H.323 → WebRTC)
-
-| H.323 offer | WebRTC codec | transcoding |
-|---|---|---|
-| G.711 (PCMU/PCMA) | Opus | **yes** |
-| G.729 | Opus | **yes** |
-| OPUS | Opus | no |
-| H.263 | VP8 | **yes** |
-| H.264 | VP9 | **yes** |
-| VP8 / VP9 | VP8 / VP9 | no |
-
-`H323CodecMap::negotiate(&[H323Codec]) -> (WebRtcCodec, needs_transcode)` —
-the first audio codec has priority; if absent, the first video codec.
-`negotiate_streams` returns a pair `(audio, video)` for a full bridge.
-Video: H.263 → VP8, H.264 → VP9.
-
-## FFI boundary (ADR-0007, BACKEND_RULES §6.2)
-
-The FFI boundary is **one point** — `H323PlusBridge::call`.
-
-- **Panic hook** — a panic in FFI does not kill the process: it is
-  intercepted (`catch_unwind`) and converted to `Err`, the module is
-  marked `Crashed`.
-- **Watchdog** — if an FFI call exceeds the limit (in production 5 s =  5
-  ticks; parameterizable), the module is marked `Crashed`,
-  `restart()` resets it. Deterministic: instead of real time / threads,
-  a tick counter is used.
-
-```
-H323PlusBridge::call(op, ticks)
-  └─ watchdog.check(ticks > limit)?
-       └─ yes → ModuleState::Crashed (restart required)
-       └─ no  → ModuleState::Ok
+```sh
+python3 -m venv "$HOME/.local/share/vks-mcu/h323-venv"
+"$HOME/.local/share/vks-mcu/h323-venv/bin/python3" -m pip install \
+  --require-hashes --only-binary=:all: -r crates/vks-gateway-h323/python/requirements.lock
 ```
 
-## Call (H.225 / Q.931 FSM)
+The minimal VM Python has no ensurepip. The equivalent stdlib-only installer
+creates `venv --without-pip`, verifies the same official wheel SHA256, and installs
+only its library modules/license metadata into that venv:
 
+```sh
+python3 crates/vks-gateway-h323/python/install_runtime.py
 ```
-Idle ──Setup──► Alerting ──Proceeding──► Connect ──Release──► Terminated
+
+`VKS_H323_PYTHON` overrides the Python executable. By default the UAC checks
+`$HOME/.local/share/vks-mcu/h323-venv/bin/python3`, then uses `python3`.
+`VKS_H323_HELPER` overrides the helper path. Source-tree builds use
+`<crate>/python/h323_sidecar.py`; a binary deployment must include that helper and
+`h323_asn.py` and point the environment variable to the installed helper.
+See [codec provenance](python/PROVENANCE.md) for separate dependency licensing,
+input schemas, regeneration and protocol references.
+
+## Media contract
+
+```rust,ignore
+client.dial_with_media(target, local_audio_rtp_port, Some(local_video_rtp_port), timeout).await
 ```
 
-- `H323Gateway::on_setup(call_id, from, offer)` → creates a call in
-  `Alerting` state, negotiates codecs.
-- `H323Gateway::proceeding` / `connect` — H.245 capability exchange,
-  Connect.
-- `H323Gateway::release` — Release; removes the participant from the room.
-- `H323Gateway::land_in_room(room_id, call_id)` — "landing" in the room:
-  the call becomes a participant (mock registry: room_id → names).
+The caller owns/reserves each advertised RTP/RTCP port pair. The helper does not
+bind or transform media. It reports negotiated remote endpoints and separate
+outgoing/incoming payload types to the Rust media bridge.
 
-## What is mocked, and what is for the future
+Supported outbound negotiation:
 
-- **Mock:** the FFI boundary (H323Plus), the H.225 transport, the room
-  registry. No I/O, deterministic (tick counter).
-- **Future (heavy feature `h323plus`):** the real FFI wrapper on top of
-  H323Plus/OPAL (C++), the only `unsafe` blocks (`// SAFETY:`), real
-  transcoding H.263/H.264→VP8/VP9, G.711/G.729→Opus.
+- Direct IPv4 H.225 TCP, separate H.245 TCP control; no gatekeeper/RAS requirement.
+- G.711 mu-law audio, RTP PT 0, 20 ms offer. Unsupported codecs are rejected.
+- Optional H.264 baseline capability, level 3.1, H.241 non-interleaved RTP
+  packetization, negotiated dynamic PTs in each direction. Video is reported only
+  when both logical channels negotiate. It also requires the server's H.264 media
+  bridge, encoder and decoder; successful signaling alone proves no decoded video.
+- H.245 round-trip requests and remote end-session/channel closure remain active
+  throughout the call. H.225 RELEASE COMPLETE is observed independently.
 
-## Dependencies
+The initial implementation rejects non-IPv4, H.245 tunneling-only peers,
+unsupported/reverse logical channel forms, and media/control addresses different
+from the dialed endpoint. It does not advertise encryption, G.729, FECC, H.239
+presentation, gatekeeper registration or transcoding that is not running.
 
-Default: `vks-core`, `vks-common`, `thiserror`, `tracing`, `serde`,
-`uuid`. `h323plus` — optional feature (FFI). No `unsafe` in the default
-build.
+## Lifecycle integration
+
+Keep `ActiveH323Session` for the lifetime of the call. Subscribe immediately with
+`subscribe_disconnect()` and remove the participant/media bridge when the watch
+value becomes `Some(reason)`. `is_closed()` is atomic. Explicit `hangup()` is
+idempotent and waits for the child process to close. Dropping the last session
+owner or cancelling a pending dial requests end-session/RELEASE through stdin;
+a bounded supervisor kills/reaps an unresponsive helper. Stdout is bounded JSON
+IPC; stderr is independently drained with bounded retained diagnostics.
+
+## Verification
+
+```sh
+cargo test -p vks-gateway-h323
+"$HOME/.local/share/vks-mcu/h323-venv/bin/python3" -m unittest discover \
+  -s crates/vks-gateway-h323/python -p test_h323_sidecar.py -v
+```
+
+Python tests include independent Polycom CONNECT/OLC/ACK wire captures,
+fragmentation, malformed/private-format rejection and negotiation state gates.
+Rust tests cover IPC size limits, ringing/EOF failures, remote disconnect,
+graceful hangup and cancellation cleanup. These tests place no real calls.
+
+`call`, `codec` and `ffi` still contain the earlier deterministic core/FFI mocks;
+they are not a running H323Plus/OPAL implementation. The `h323plus` feature alone
+does not provide a native telephony stack. Production outbound UAC uses the
+explicit sidecar path above.

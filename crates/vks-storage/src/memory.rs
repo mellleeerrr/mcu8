@@ -28,9 +28,13 @@ pub struct MemoryStorage {
     core_audit: RwLock<Vec<vks_core::ports::storage::AuditEntry>>,
     core_records: RwLock<HashMap<String, vks_core::ports::storage::RecordEntry>>,
     server_settings: RwLock<Option<String>>,
+    configuration_documents: RwLock<HashMap<String, String>>,
 }
 
 impl MemoryStorage {
+    pub(crate) fn configuration_documents(&self) -> &RwLock<HashMap<String, String>> {
+        &self.configuration_documents
+    }
     pub(crate) fn records_map(&self) -> &RwLock<HashMap<String, vks_core::ports::storage::RecordEntry>> {
         &self.core_records
     }

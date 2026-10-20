@@ -1,0 +1,17 @@
+v=0
+o=VKS-MCU 1 1 IN IP4 192.168.1.93
+s=VKS Conference
+c=IN IP4 192.168.1.93
+t=0 0
+m=audio 41000 RTP/AVP 0 8 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=sendrecv
+a=rtcp:41001
+m=video 41002 RTP/AVP 96
+a=rtpmap:96 H264/90000
+a=fmtp:96 packetization-mode=1;profile-level-id=42e01f
+a=sendrecv
+a=rtcp:41003

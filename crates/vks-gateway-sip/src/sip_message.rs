@@ -64,7 +64,11 @@ impl<'a> SipResponse<'a> {
                     resp.cseq_method = cparts.next();
                 }
                 "contact" | "m" => {
-                    let c = val.trim_start_matches('<').split('>').next().unwrap_or(val).trim();
+                    let c = if let Some((_, rest)) = val.split_once('<') {
+                        rest.split('>').next().unwrap_or(rest).trim()
+                    } else {
+                        val.split(',').next().unwrap_or(val).trim()
+                    };
                     resp.contact = Some(c);
                 }
                 "to" | "t" => {

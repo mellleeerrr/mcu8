@@ -263,6 +263,16 @@ pub trait Storage: Send + Sync + 'static {
 
     // --- Server Settings (M1.5) ---
 
+    /// Atomically replace a versioned application configuration document.
+    async fn put_configuration_document(&self, _key: &str, _document: &str) -> Result<(), StorageError> {
+        Err(StorageError::Other("Configuration document persistence is unavailable".into()))
+    }
+
+    /// Read a configuration document. Runtime calls must never be restored from it.
+    async fn get_configuration_document(&self, _key: &str) -> Result<Option<String>, StorageError> {
+        Ok(None)
+    }
+
     /// Сохраняет или обновляет настройки сервера (JSON).
     async fn upsert_settings(&self, _settings_json: &str) -> Result<(), StorageError> {
         Ok(())

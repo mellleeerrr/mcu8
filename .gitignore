@@ -24,3 +24,9 @@ vks_server.log
 *.db-wal
 *.db-shm
 *.sqlite
+
+# Local acceptance artifacts (tokens, SQLite, sidecar probes, logs)
+.accept/
+.accept_*
+.h323_*
+__pycache__/

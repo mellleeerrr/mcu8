@@ -229,7 +229,8 @@ pub async fn engine_calibration() -> Response {
     Json(json!({
         "calibration": {
             "state": "IDLE",
-            "progress": 0
+            "progress": null,
+            "calibrated_at": null
         }
     }))
     .into_response()
@@ -297,7 +298,11 @@ pub async fn settings_calls(State(state): State<SharedState>) -> Response {
         "aspeaker": true,
         "mcu_domain": "",
         "mcu_display_name": s.name,
-        "protocol_preferences": ["webrtc", "sip", "h323"],
+        "protocol_preferences": "SIP",
+        "supported_protocols": ["webrtc", "sip", "h323"],
+        "enabled_protocol":"ALL",
+        "ui_autocall_on_session_start":"ON",
+        "ui_autocall_scope":"all",
         "stop_rules": {}
     });
     Json(json!({
@@ -358,7 +363,11 @@ pub async fn update_settings_calls(
         "aspeaker": true,
         "mcu_domain": "",
         "mcu_display_name": updated.name,
-        "protocol_preferences": ["webrtc", "sip", "h323"],
+        "protocol_preferences": "SIP",
+        "supported_protocols": ["webrtc", "sip", "h323"],
+        "enabled_protocol":"ALL",
+        "ui_autocall_on_session_start":"ON",
+        "ui_autocall_scope":"all",
         "stop_rules": {}
     });
     Json(json!({

@@ -140,14 +140,44 @@ fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_sto
     let stored_settings =
         state.api_v3.conference_settings.lock().ok().and_then(|m| m.get(&r.id).cloned()).unwrap_or_else(|| json!({}));
 
-    let mut payload_map = stored_settings.as_object().cloned().unwrap_or_default();
+    let mut payload_map = json!({
+        "connections_limit":connections_limit, "mode":"CUSTOM", "bitrate":2048,
+        "resolution":{"width":1280,"height":720,"fps_limit":30},
+        "audio_codecs":[{"name":"G711","bitrate":null}],"video_codecs":[],
+        "locked":false,"aspeaker":"SELECTIVE","show_audio_bars":true,
+        "mute_audio_on_join":false,"mute_video_on_join":false,
+        "noise_suppression":"DEFAULT","auto_gain_control":"DEFAULT",
+        "slot_render_type":"AUTO","layout_strict":false,"slot_avatars":true,
+        "auto_create_layout":true,"ui_autocall_on_session_start":"DEFAULT",
+        "stop_rules":{"empty":null,"quit_all":null,"one_abonent":null},
+        "recording":{"individual":false,"quality":"BEST","show_presentation":"replace"},
+        "broadcast":{"individual":false,"profile":"quality","uri":null},
+        "styles":{"individual":false,"background_type":"SILVER",
+            "font":{"family":"DEFAULT","height":10,"height_auto":true,"text_float":false,
+                "rectangle_width":100,"rectangle_y":100,"rectangle_align":"LEFT","rectangle_auto":true,
+                "text_align":"CENTER","show_names":"PERMANENT",
+                "background":{"red":0,"green":0,"blue":0,"alpha":128},
+                "text_foreground":{"red":255,"green":255,"blue":255,"alpha":255},
+                "text_background":{"red":0,"green":0,"blue":0,"alpha":255}},
+            "border":{"enabled":"ON","mode":"SIMPLE","args":{"thickness":10},"floating":"ON","selected":"ON","spacing":10}}
+    }).as_object().cloned().unwrap();
+    if let Some(stored) = stored_settings.as_object() {
+        for (key, value) in stored {
+            payload_map.insert(key.clone(), value.clone());
+        }
+    }
     if !payload_map.contains_key("connections_limit") {
         payload_map.insert("connections_limit".to_string(), json!(connections_limit));
     }
 
     let pin_val = stored_settings.get("pin").and_then(|v| v.as_str()).unwrap_or("");
     let description_val = stored_settings.get("description").and_then(|v| v.as_str()).unwrap_or("");
-    let owner_id_val = stored_settings.get("owner_id").and_then(|v| v.as_str()).unwrap_or("");
+    let owner_id_val = stored_settings
+        .get("creator_id")
+        .or_else(|| stored_settings.get("owner_id"))
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty())
+        .unwrap_or("00000000-0000-0000-0000-000000000000");
     let layout_val = stored_settings.get("layout").and_then(|v| v.as_str()).unwrap_or("grid");
     let auto_call_val = stored_settings.get("auto_call").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -164,6 +194,16 @@ fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_sto
         "videorecord": is_recording,
         "broadcast": false,
         "owner_id": owner_id_val,
+        "creator_id":owner_id_val,
+        "conference_id":r.id.to_string(),
+        "created_at":r.created_ms/1000,
+        "duration":stored_settings.get("duration").cloned().unwrap_or(Value::Null),
+        "stopped_at":if is_stopped {stored_settings.get("stopped_at").cloned().unwrap_or(Value::Null)} else {Value::Null},
+        "session":if is_stopped {Value::Null} else {json!({"id":r.id.to_string(),"display_name":r.name,"started_at":r.created_ms/1000})},
+        "primary_route":{"id":format!("route-{}",r.id),"name":stored_settings.get("route").and_then(Value::as_str).unwrap_or(&r.name)},
+        "primary_dtmf":stored_settings.get("dtmf").filter(|v|!v.is_null()).map(|value|json!({"id":format!("dtmf-{}",r.id),"name":value})),
+        "primary_alias":stored_settings.get("alias").filter(|v|!v.is_null()).map(|value|json!({"id":format!("alias-{}",r.id),"name":value})),
+        "cascade":"none",
         "pin": pin_val,
         "has_pin": !pin_val.is_empty(),
         "description": description_val,
@@ -238,6 +278,21 @@ fn sessions_payload(state: &AppState, query: &SessionsQuery) -> Value {
     })
 }
 
+/// Room-scoped bearer tokens must not enumerate other rooms.
+fn filter_sessions_scope(mut payload: Value, auth: &AuthContext) -> Value {
+    let Some(scope) = auth.room_scope.as_deref() else {
+        return payload;
+    };
+    for field in ["sessions", "conferences"] {
+        if let Some(items) = payload.get_mut(field).and_then(Value::as_array_mut) {
+            items
+                .retain(|item| item.get("id").and_then(Value::as_str).is_some_and(|id| id.eq_ignore_ascii_case(scope)));
+            payload["count"] = json!(items.len());
+        }
+    }
+    payload
+}
+
 fn conferences_payload(state: &AppState, query: &SessionsQuery) -> Value {
     let (items, count) = select_rooms(state, query);
     let limit = connections_limit(state);
@@ -249,16 +304,27 @@ fn conferences_payload(state: &AppState, query: &SessionsQuery) -> Value {
 }
 
 /// `GET /api/v3/ui/sessions` (Ф3: наши комнаты; дашборд дёргает сразу после логина).
-pub async fn ui_sessions(State(state): State<SharedState>, Query(query): Query<SessionsQuery>) -> Response {
+pub async fn ui_sessions(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Query(query): Query<SessionsQuery>,
+) -> Response {
     track("ui/sessions");
-    Json(sessions_payload(&state, &query)).into_response()
+    Json(filter_sessions_scope(sessions_payload(&state, &query), &auth)).into_response()
 }
 
 /// `GET /api/v3/ui/sessions/{id}` или `GET /api/v3/sessions/{id}` → `{session:{…}}` (404 JSON если нет).
-pub async fn session(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
+pub async fn session(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Response {
     track("sessions/{id}");
     match find_room(&state, &id) {
         Some(room) => {
+            if let Err(resp) = check_permission(&auth, Some(&room.id.to_string())) {
+                return resp;
+            }
             let is_stopped =
                 state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
             Json(json!({ "session": session_json(&state, &room, connections_limit(&state), is_stopped) }))
@@ -269,9 +335,13 @@ pub async fn session(State(state): State<SharedState>, Path(id): Path<String>) -
 }
 
 /// `GET /api/v3/sessions` — тот же список (не-ui форма).
-pub async fn sessions(State(state): State<SharedState>, Query(query): Query<SessionsQuery>) -> Response {
+pub async fn sessions(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Query(query): Query<SessionsQuery>,
+) -> Response {
     track("sessions");
-    Json(sessions_payload(&state, &query)).into_response()
+    Json(filter_sessions_scope(sessions_payload(&state, &query), &auth)).into_response()
 }
 
 /// `POST /api/v3/sessions` — старт сессии конференции (или создание быстрой сессии).
@@ -299,7 +369,62 @@ pub async fn start_session(
             Err(e) => return error_json(500, &format!("Storage error: {e}")),
         }
     };
-    state.notify_admin("sessions:started", json!({ "id": room.id.to_string() }));
+    // A live room inherits its definition resources; template contacts remain stable.
+    let contacts = {
+        let mut resources = state.api_v3.resources.lock().await;
+        for kind in ["video_layouts", "audiochannels"] {
+            let source = format!("conferences:{}:{kind}", room.id);
+            let target = format!("sessions:{}:{kind}", room.id);
+            if let Some(links) = resources.links.get(&source).cloned() {
+                resources.links.insert(target, links);
+            }
+        }
+        resources.contacts.get(&room.id.to_string()).cloned().unwrap_or_default()
+    };
+    let autocall = state
+        .api_v3
+        .conference_settings
+        .lock()
+        .expect("conference_settings poisoned")
+        .get(&room.id)
+        .and_then(|v| v.get("ui_autocall_on_session_start"))
+        .and_then(Value::as_str)
+        .is_none_or(|v| v != "OFF");
+    for contact in contacts {
+        let record = super::call_strings::CallStringRecord {
+            id: contact["id"].as_str().unwrap_or_default().to_string(),
+            uri: contact["uri"].as_str().unwrap_or_default().to_string(),
+            display_name: contact["display_name"].as_str().unwrap_or_default().to_string(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            payload: super::call_strings::default_contact_payload(contact.get("payload")),
+        };
+        if autocall && contact["payload"]["auto_call"].as_bool().unwrap_or(true) {
+            if let Err(response) = super::call_strings::queue_call(&state, room.id, record.clone()) {
+                tracing::warn!(room=%room.id,uri=%record.uri,status=%response.status(),"Autocall could not be admitted");
+                state
+                    .api_v3
+                    .scheduled_calls
+                    .lock()
+                    .expect("scheduled_calls poisoned")
+                    .entry(room.id)
+                    .or_default()
+                    .push(record);
+            }
+        } else {
+            state
+                .api_v3
+                .scheduled_calls
+                .lock()
+                .expect("scheduled_calls poisoned")
+                .entry(room.id)
+                .or_default()
+                .push(record);
+        }
+    }
+    state.notify_admin("sessions:started", json!({"id":room.id.to_string(),"conference":{"id":room.id.to_string()},"session":session_json(&state,&room,connections_limit(&state),false)}));
     state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
     audit_room(
         &state,
@@ -332,7 +457,7 @@ pub async fn quick_session(
         Ok(r) => r,
         Err(e) => return error_json(500, &format!("Storage error: {e}")),
     };
-    state.notify_admin("sessions:started", json!({ "id": room.id.to_string() }));
+    state.notify_admin("sessions:started", json!({"id":room.id.to_string(),"conference":{"id":room.id.to_string()},"session":session_json(&state,&room,connections_limit(&state),false)}));
     state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
     state.notify_admin("conferences:created", json!({ "id": room.id.to_string() }));
     state.notify_admin("conferences", json!({ "action": "created", "id": room.id.to_string() }));
@@ -359,9 +484,49 @@ pub async fn stop_session(
     }
     match find_room(&state, &id) {
         Some(room) => {
-            let _ = Rooms::update_async(&state, &room.id, None, None, Some(0), Some(0)).await;
             state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").insert(room.id);
-            state.notify_admin("sessions:stopped", json!({ "id": room.id.to_string() }));
+            super::call_strings::cancel_pending_calls(&state, &room.id);
+            let stopped_participants: Vec<String> = state
+                .room_hub
+                .list_participants(&room.id)
+                .into_iter()
+                .map(|participant| participant.participant_id)
+                .collect();
+            for participant in &stopped_participants {
+                Rooms::kick_participant(&state, &room.id, participant);
+            }
+            state.api_v3.scheduled_calls.lock().expect("scheduled_calls poisoned").remove(&room.id);
+            state
+                .api_v3
+                .in_flight_calls
+                .lock()
+                .expect("in_flight_calls poisoned")
+                .retain(|(room_id, _), _| *room_id != room.id);
+            state
+                .api_v3
+                .call_attempts
+                .lock()
+                .expect("call_attempts poisoned")
+                .retain(|(room_id, _), _| *room_id != room.id);
+            if let Ok(mut settings) = state.api_v3.abonent_settings.lock() {
+                for participant in &stopped_participants {
+                    settings.remove(participant);
+                }
+            }
+            if let Ok(mut processing) = state.api_v3.abonent_processing.lock() {
+                for participant in &stopped_participants {
+                    processing.remove(participant);
+                }
+            }
+            let _ = Rooms::update_async(&state, &room.id, None, None, Some(0), Some(0)).await;
+            state.notify_admin(
+                &format!("session:{}:abonents", room.id),
+                json!({"action":"stopped","room_id":room.id.to_string(),"count":0}),
+            );
+            state.notify_admin(
+                "sessions:stopped",
+                json!({"id":room.id.to_string(),"session":{"id":room.id.to_string()}}),
+            );
             state.notify_admin("sessions", json!({ "action": "stopped", "id": room.id.to_string() }));
             audit_room(
                 &state,
@@ -377,15 +542,23 @@ pub async fn stop_session(
 }
 
 /// `GET /api/v3/conferences` — список конференций.
-pub async fn conferences(State(state): State<SharedState>, Query(query): Query<SessionsQuery>) -> Response {
+pub async fn conferences(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Query(query): Query<SessionsQuery>,
+) -> Response {
     track("conferences");
-    Json(conferences_payload(&state, &query)).into_response()
+    Json(filter_sessions_scope(conferences_payload(&state, &query), &auth)).into_response()
 }
 
 /// `GET /api/v3/ui/conferences` — тот же список для мапперов `dy/zZ`.
-pub async fn ui_conferences(State(state): State<SharedState>, Query(query): Query<SessionsQuery>) -> Response {
+pub async fn ui_conferences(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Query(query): Query<SessionsQuery>,
+) -> Response {
     track("ui/conferences");
-    Json(conferences_payload(&state, &query)).into_response()
+    Json(filter_sessions_scope(conferences_payload(&state, &query), &auth)).into_response()
 }
 
 /// `POST /api/v3/conferences` — создание комнаты тем же внутренним путём,
@@ -410,8 +583,9 @@ pub async fn create_conference(
         Ok(r) => r,
         Err(e) => return error_json(500, &format!("Storage error: {e}")),
     };
+    let resources_guard = state.api_v3.resources.lock().await;
     {
-        let mut initial_settings = json!({});
+        let mut initial_settings = json!({"creator_id":auth.subject,"owner_id":auth.subject});
         if let Some(cur_obj) = initial_settings.as_object_mut() {
             if let Some(ref pin) = body.pin {
                 cur_obj.insert("pin".to_string(), json!(pin));
@@ -431,6 +605,14 @@ pub async fn create_conference(
             settings_map.insert(record.id, initial_settings);
         }
     }
+    if let Err(error) = super::resources::persist(&state, &resources_guard).await {
+        state.api_v3.conference_settings.lock().unwrap().remove(&record.id);
+        drop(resources_guard);
+        let _ = Rooms::delete_async(&state, &record.id).await;
+        return error_json(500, &format!("Storage error: {error}"));
+    }
+    drop(resources_guard);
+    state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").insert(record.id);
     state.notify_admin("conferences:created", json!({ "id": record.id.to_string(), "display_name": record.name }));
     state.notify_admin("conferences", json!({ "action": "created", "id": record.id.to_string() }));
     audit_room(
@@ -440,7 +622,7 @@ pub async fn create_conference(
         &record.id.to_string(),
         client_ip.as_ref().map(|c| c.0 .0.as_str()),
     );
-    Json(json!({ "conference": session_json(&state, &record, connections_limit(&state), false) })).into_response()
+    Json(json!({ "conference": session_json(&state, &record, connections_limit(&state), true) })).into_response()
 }
 
 /// `GET /api/v3/conferences/{id}` → `{conference:{…}}` (404 JSON если нет).
@@ -478,6 +660,8 @@ pub async fn update_conference(
         }
     }
 
+    let resources_guard = state.api_v3.resources.lock().await;
+    let previous_settings = state.api_v3.conference_settings.lock().unwrap().get(&room.id).cloned();
     {
         if let Ok(mut settings_map) = state.api_v3.conference_settings.lock() {
             let current = settings_map.entry(room.id).or_insert_with(|| json!({}));
@@ -501,6 +685,16 @@ pub async fn update_conference(
             }
         }
     }
+    if let Err(error) = super::resources::persist(&state, &resources_guard).await {
+        let mut settings = state.api_v3.conference_settings.lock().unwrap();
+        if let Some(previous) = previous_settings {
+            settings.insert(room.id, previous);
+        } else {
+            settings.remove(&room.id);
+        }
+        return error_json(500, &format!("Storage error: {error}"));
+    }
+    drop(resources_guard);
 
     audit_room(
         &state,
@@ -551,9 +745,20 @@ pub async fn delete_conference(
 }
 
 /// `GET /api/v3/conferences/{id}/contacts` → `{contacts:[], count:0}`.
-pub async fn conference_contacts(Path(_id): Path<String>) -> Response {
+pub async fn conference_contacts(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Response {
     track("conferences/{id}/contacts");
-    Json(json!({ "contacts": [], "count": 0 })).into_response()
+    let Some(room) = find_room(&state, &id) else {
+        return error_json(404, "Conference not found");
+    };
+    if let Err(response) = check_permission(&auth, Some(&room.id.to_string())) {
+        return response;
+    }
+    let contacts = state.api_v3.resources.lock().await.contacts.get(&room.id.to_string()).cloned().unwrap_or_default();
+    Json(json!({ "contacts": contacts, "count": contacts.len() })).into_response()
 }
 
 /// Сериализует снапшот участника в DTO абонента, полностью совместимый с мапперами фронтенда (`dY`/`Lh`).
@@ -578,15 +783,15 @@ pub fn participant_to_abonent_json_with_settings(
         ("webrtc", format!("webrtc://{}", p.participant_id), format!("webrtc:{}", p.participant_id))
     };
 
-    let audio_rx_enabled = media_opt.map(|m| !m.audio_rx_muted).unwrap_or(true);
-    let audio_tx_enabled = media_opt.map(|m| !m.audio_tx_muted).unwrap_or(!p.is_audio_muted);
-    let video_rx_enabled = media_opt.map(|m| !m.video_rx_muted).unwrap_or(true);
-    let video_tx_enabled = media_opt.map(|m| !m.video_tx_muted).unwrap_or(!p.is_video_muted);
-    let volume_rx = media_opt.map(|m| m.volume_rx).unwrap_or(100);
-    let volume_tx = media_opt.map(|m| m.volume_tx).unwrap_or(100);
+    let audio_rx_enabled = media_opt.map(|m| !m.audio_rx_muted).unwrap_or(!p.is_audio_muted);
+    let audio_tx_enabled = media_opt.map(|m| !m.audio_tx_muted).unwrap_or(true);
+    let video_rx_enabled = media_opt.map(|m| !m.video_rx_muted).unwrap_or(!p.is_video_muted);
+    let video_tx_enabled = media_opt.map(|m| !m.video_tx_muted).unwrap_or(true);
+    let volume_rx = media_opt.map(|m| m.volume_rx).unwrap_or(0);
+    let volume_tx = media_opt.map(|m| m.volume_tx).unwrap_or(0);
 
     let settings = json!({
-        "slot_render_type": "auto",
+        "slot_render_type": "DEFAULT",
         "auto_call": false,
         "audio_rx_enabled": audio_rx_enabled,
         "audio_tx_enabled": audio_tx_enabled,
@@ -594,22 +799,22 @@ pub fn participant_to_abonent_json_with_settings(
         "volume_tx": volume_tx,
         "video_rx_enabled": video_rx_enabled,
         "video_tx_enabled": video_tx_enabled,
-        "crown": false,
+        "crown": "EQUAL",
         "hide_display_name": false
     });
 
     let details = json!({
         "audio": {
-            "rx": { "bitrate": 64000, "codec": "OPUS", "loss": 0.0, "jitter": 0 },
-            "tx": { "bitrate": 64000, "codec": "OPUS", "loss": 0.0, "jitter": 0 }
+            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present":false, "active":false, "packets":0, "bytes":0, "lost_packets":0, "lossrate":0, "requested_bitrate":0 },
+            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present":false, "active":false, "packets":0, "bytes":0, "lost_packets":0, "lossrate":0, "requested_bitrate":0 }
         },
         "video": {
-            "rx": { "bitrate": 1500000, "codec": "H264", "loss": 0.0, "jitter": 0, "resolution": "1280x720", "fps": 30 },
-            "tx": { "bitrate": 1500000, "codec": "H264", "loss": 0.0, "jitter": 0, "resolution": "1280x720", "fps": 30 }
+            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present":false, "active":false, "packets":0, "bytes":0, "lost_packets":0, "lossrate":0, "requested_bitrate":0, "resolution": "0x0", "fps": 0, "width":0,"height":0,"frame_rate":0 },
+            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present":false, "active":false, "packets":0, "bytes":0, "lost_packets":0, "lossrate":0, "requested_bitrate":0, "resolution": "0x0", "fps": 0, "width":0,"height":0,"frame_rate":0 }
         },
         "content": {
-            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0 },
-            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0 }
+            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present":false, "active":false, "packets":0, "bytes":0, "lost_packets":0, "lossrate":0, "requested_bitrate":0 },
+            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present":false, "active":false, "packets":0, "bytes":0, "lost_packets":0, "lossrate":0, "requested_bitrate":0 }
         }
     });
 
@@ -626,11 +831,11 @@ pub fn participant_to_abonent_json_with_settings(
         "type_id": "OUTGOING",
         "protocol": proto,
         "contact_type": "call_strings",
-        "crown": false,
+        "crown": "EQUAL",
         "connected_at": p.connected_at,
         "details": details,
         "payload": {
-            "slot_render_type": "auto",
+            "slot_render_type": "DEFAULT",
             "auto_call": false,
             "audio_rx_enabled": audio_rx_enabled,
             "audio_tx_enabled": audio_tx_enabled,
@@ -638,11 +843,26 @@ pub fn participant_to_abonent_json_with_settings(
             "volume_tx": volume_tx,
             "video_rx_enabled": video_rx_enabled,
             "video_tx_enabled": video_tx_enabled,
-            "crown": false,
+            "crown": "EQUAL",
             "hide_display_name": false,
             "settings": settings
         }
     })
+}
+
+fn native_stop_reason(reason: &str) -> &'static str {
+    let reason = reason.to_ascii_lowercase();
+    if reason.contains("busy") || reason.contains("486") {
+        "Busy Here"
+    } else if reason.contains("timeout") || reason.contains("timed out") {
+        "Request Timeout"
+    } else if reason.contains("codec") || reason.contains("media") || reason.contains("sdp") {
+        "Unsupported Media Type"
+    } else if reason.contains("cancel") || reason.contains("session ended") {
+        "Ended By Local"
+    } else {
+        "Ended By Remote"
+    }
 }
 
 /// Сериализует снимок участника в формат абонента PNM UI.
@@ -655,15 +875,15 @@ pub fn call_record_to_abonent_json(r: &super::call_strings::CallStringRecord, st
     let uri = if r.uri.contains(':') { r.uri.clone() } else { format!("sip:{}", r.uri) };
     let proto = uri.split(':').next().unwrap_or("sip");
     let settings = json!({
-        "slot_render_type": "auto",
+        "slot_render_type": "DEFAULT",
         "auto_call": false,
         "audio_rx_enabled": true,
         "audio_tx_enabled": true,
-        "volume_rx": 100,
-        "volume_tx": 100,
+        "volume_rx": 0,
+        "volume_tx": 0,
         "video_rx_enabled": true,
         "video_tx_enabled": true,
-        "crown": false,
+        "crown": "EQUAL",
         "hide_display_name": false
     });
     let details = json!({
@@ -681,7 +901,7 @@ pub fn call_record_to_abonent_json(r: &super::call_strings::CallStringRecord, st
         }
     });
 
-    json!({
+    let mut value = json!({
         "id": r.id,
         "abonent_id": r.id,
         "connection_id": r.id,
@@ -695,40 +915,166 @@ pub fn call_record_to_abonent_json(r: &super::call_strings::CallStringRecord, st
         "protocol": proto,
         "contact_type": "call_strings",
         "state": state_str,
-        "crown": false,
+        "crown": "EQUAL",
         "connected_at": r.created_at,
         "details": details,
         "payload": {
-            "slot_render_type": "auto",
+            "slot_render_type": "DEFAULT",
             "auto_call": false,
             "audio_rx_enabled": true,
             "audio_tx_enabled": true,
-            "volume_rx": 100,
-            "volume_tx": 100,
+            "volume_rx": 0,
+            "volume_tx": 0,
             "video_rx_enabled": true,
             "video_tx_enabled": true,
-            "crown": false,
+            "crown": "EQUAL",
             "hide_display_name": false,
             "settings": settings
         }
-    })
+    });
+    let payload = super::call_strings::default_contact_payload(Some(&r.payload));
+    value["payload"] = payload.clone();
+    value["payload"]["settings"] = payload;
+    value["crown"] = value["payload"]["crown"].clone();
+    fill_native_stream_settings(&mut value);
+    value
+}
+
+/// The stock monitor reads stream settings from the engine DTO as well as payload.
+fn fill_native_stream_settings(value: &mut Value) {
+    for media in ["audio", "video", "content"] {
+        for direction in ["rx", "tx"] {
+            let field = format!("{media}_{direction}_enabled");
+            let enabled = value["payload"][&field].as_bool().unwrap_or(false);
+            value["details"][media][direction]["enabled"] = json!(enabled);
+            if media == "audio" {
+                value["details"][media][direction]["volume"] = value["payload"][format!("volume_{direction}")].clone();
+            }
+        }
+    }
+}
+
+/// Forward measured counters; negotiated codecs are not invented bitrate/fps values.
+fn attach_gateway_statistics(state: &SharedState, pid: &str, value: &mut Value) {
+    fill_native_stream_settings(value);
+    let processing = state
+        .api_v3
+        .abonent_processing
+        .lock()
+        .expect("abonent_processing poisoned")
+        .get(pid)
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let agc = processing["auto_gain_control"].as_str().unwrap_or("DEFAULT");
+    let noise = processing["noise_suppression"].as_str().unwrap_or("DEFAULT");
+    value["details"]["audio"]["auto_gain_control_switch"] = json!(agc);
+    value["details"]["audio"]["noise_suppressor_switch"] = json!(noise);
+    value["details"]["audio"]["auto_gain_control"] = json!(false);
+    value["details"]["audio"]["noise_suppressor"] = json!(false);
+    value["payload"]["auto_gain_control"] = json!(agc);
+    value["payload"]["noise_suppression"] = json!(noise);
+    let Some(stats) = state.outbound_dialer().and_then(|dialer| dialer.media_stats(pid)) else {
+        return;
+    };
+    for media in ["audio", "video"] {
+        for direction in ["rx", "tx"] {
+            if let Some(codec) = stats.get(format!("{media}_codec")) {
+                value["details"][media][direction]["codec"] = codec.clone();
+            }
+            if let Some(bitrate) = stats.get(format!("{media}_{direction}_bitrate_bps")) {
+                value["details"][media][direction]["bitrate"] = bitrate.clone();
+            }
+            for metric in ["packets", "bytes"] {
+                if let Some(counter) = stats.get(format!("{media}_{direction}_{metric}")) {
+                    value["details"][media][direction][metric] = counter.clone();
+                }
+            }
+        }
+    }
+    if let Some(running) = stats.get("audio_codec_running").and_then(Value::as_bool) {
+        for direction in ["rx", "tx"] {
+            value["details"]["audio"][direction]["present"] = json!(running);
+        }
+    }
+    if let Some(running) = stats.get("video_codec_running").and_then(Value::as_bool) {
+        for direction in ["rx", "tx"] {
+            value["details"]["video"][direction]["present"] = json!(running);
+        }
+    }
+    for (direction, field) in [("rx", "decoded_video_fps"), ("tx", "encoded_video_fps")] {
+        if let Some(fps) = stats.get(field) {
+            value["details"]["video"][direction]["frame_rate"] = fps.clone();
+        }
+    }
+    if stats["video_tx_packets"].as_u64().unwrap_or(0) > 0 {
+        // The gateway encoder always emits 640x360 baseline H.264.
+        value["details"]["video"]["tx"]["width"] = json!(640);
+        value["details"]["video"]["tx"]["height"] = json!(360);
+        value["details"]["video"]["tx"]["resolution"] = json!("640x360");
+    }
+    if stats["decoded_video_frames"].as_u64().unwrap_or(0) > 0 {
+        // The gateway decoder normalises every incoming stream to the same
+        // composite tile, so this is the real decoded geometry.
+        value["details"]["video"]["rx"]["width"] = json!(640);
+        value["details"]["video"]["rx"]["height"] = json!(360);
+        value["details"]["video"]["rx"]["resolution"] = json!("640x360");
+    }
+    value["media"] = stats;
+}
+
+/// Both the native info modal and the room roster must retain the dial intent.
+/// A participant's editable display label is not a callable SIP/H.323 address.
+fn attach_call_contact(value: &mut Value, record: &super::call_strings::CallStringRecord, has_media_settings: bool) {
+    value["contact_id"] = json!(record.id);
+    value["call_string_id"] = json!(record.id);
+    value["uri"] = json!(record.uri);
+    value["connection_url"] = json!(record.uri);
+    value["protocol"] = json!(record.uri.split(':').next().unwrap_or("sip"));
+    let mut payload = super::call_strings::default_contact_payload(Some(&record.payload));
+    if has_media_settings {
+        for field in
+            ["audio_rx_enabled", "audio_tx_enabled", "video_rx_enabled", "video_tx_enabled", "volume_rx", "volume_tx"]
+        {
+            payload[field] = value["payload"][field].clone();
+        }
+    }
+    value["payload"] = payload.clone();
+    value["payload"]["settings"] = payload;
+    value["crown"] = value["payload"]["crown"].clone();
 }
 
 /// `GET /api/v3/sessions/{id}/abonents` (и `/ui/sessions/{id}/abonents`) → динамический ростер абонентов.
-pub async fn session_abonents(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
+pub async fn session_abonents(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Response {
     track("sessions/{id}/abonents");
     let clean_id = sanitize_id(&id);
     let Some(room) = find_room(&state, clean_id) else {
         return error_json(404, "Session not found");
     };
+    if let Err(resp) = check_permission(&auth, Some(&room.id.to_string())) {
+        return resp;
+    }
 
     let participants = state.room_hub.list_participants(&room.id);
     let settings_map = state.api_v3.abonent_settings.lock().ok();
+    let mut attempts = state.api_v3.call_attempts.lock().expect("call_attempts poisoned");
     let connected: Vec<Value> = participants
         .iter()
         .map(|p| {
             let media = settings_map.as_ref().and_then(|m| m.get(&p.participant_id));
-            participant_to_abonent_json_with_settings(p, media)
+            let mut value = participant_to_abonent_json_with_settings(p, media);
+            if let Some(attempt) = attempts
+                .iter()
+                .find(|((rid, _), a)| *rid == room.id && a.participant_id.as_deref() == Some(p.participant_id.as_str()))
+                .map(|(_, a)| a)
+            {
+                attach_call_contact(&mut value, &attempt.record, media.is_some());
+            }
+            attach_gateway_statistics(&state, &p.participant_id, &mut value);
+            value
         })
         .collect();
 
@@ -750,12 +1096,34 @@ pub async fn session_abonents(State(state): State<SharedState>, Path(id): Path<S
         .collect();
     drop(scheduled_map);
 
-    let disconnected: Vec<Value> = Vec::new();
+    let mut disconnected = Vec::new();
+    let in_flight = state.api_v3.in_flight_calls.lock().expect("in_flight_calls poisoned");
+    for ((rid, uri), attempt) in attempts.iter_mut() {
+        if *rid != room.id
+            || in_flight.contains_key(&(*rid, uri.clone()))
+            || attempt.participant_id.as_ref().is_some_and(|pid| participants.iter().any(|p| &p.participant_id == pid))
+        {
+            continue;
+        }
+        let end = *attempt.completed_at.get_or_insert_with(|| {
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+        });
+        let reason = attempt.failure_reason.as_deref().unwrap_or("Call ended");
+        let mut value = call_record_to_abonent_json(&attempt.record, "disconnected");
+        value["failure_reason"] = json!(reason);
+        value["stop_reason"] = json!(native_stop_reason(reason));
+        value["disconnected_at"] = json!(end);
+        value["stopped_at"] = json!(end);
+        disconnected.push(value);
+    }
+    drop(in_flight);
+    drop(attempts);
 
     let mut all_abonents = Vec::new();
     all_abonents.extend(connected.clone());
     all_abonents.extend(connecting.clone());
     all_abonents.extend(scheduled.clone());
+    all_abonents.extend(disconnected.clone());
     let count = all_abonents.len();
 
     Json(json!({
@@ -777,7 +1145,16 @@ pub struct SwitchAbonentSettingsRequest {
     #[serde(default)]
     pub outgoing: Option<bool>,
     #[serde(default)]
-    pub volume: Option<u32>,
+    pub volume: Option<i32>,
+    #[serde(default)]
+    pub noise_suppression: Option<String>,
+    #[serde(default)]
+    pub auto_gain_control: Option<String>,
+}
+
+/// PNM's slider uses signed tenths of a dB; the bridge accepts linear percent.
+fn db_tenths_to_percent(value: i32) -> u32 {
+    (100.0 * 10.0_f64.powf(f64::from(value) / 200.0)).round().clamp(0.0, 1000.0) as u32
 }
 
 /// `POST /api/v3/abonents/{connection_id}/{settings_type}` — переключение mute микрофона/камеры и громкости.
@@ -799,6 +1176,29 @@ pub async fn switch_abonent_settings(
         return resp;
     }
 
+    if matches!(setting_type.as_str(), "noise_suppression" | "auto_gain_control") {
+        let requested = if setting_type == "noise_suppression" {
+            body.noise_suppression.as_deref()
+        } else {
+            body.auto_gain_control.as_deref()
+        }
+        .unwrap_or("DEFAULT");
+        if !matches!(requested, "DEFAULT" | "OFF" | "ON") {
+            return super::call_strings::validation_error("invalid.audio_processing", &setting_type);
+        }
+        // Resetting inheritance or explicitly disabling DSP is supported. The
+        // mixer currently has no active denoiser/automatic input-level filter.
+        if requested == "ON" {
+            return error_json(501, "This audio processing filter is not implemented in the active media runtime");
+        }
+        let mut processing = state.api_v3.abonent_processing.lock().expect("abonent_processing poisoned");
+        let saved = processing.entry(connection_id.clone()).or_insert_with(|| json!({}));
+        saved[&setting_type] = json!(requested);
+        return Json(json!({"status":"ok","mode":requested,"effective":false})).into_response();
+    }
+    if body.volume.is_some_and(|volume| !(-400..=200).contains(&volume)) {
+        return super::call_strings::validation_error("invalid.volume", "volume");
+    }
     let is_outgoing = body.outgoing.unwrap_or(true);
     let mut audio_tx_muted = None;
     let mut audio_rx_muted = None;
@@ -833,7 +1233,7 @@ pub async fn switch_abonent_settings(
                 }
             }
         }
-        _ => {}
+        _ => return error_json(400, "Unsupported media setting"),
     }
 
     // Сохраняем актуальные настройки абонента для ростера
@@ -860,21 +1260,46 @@ pub async fn switch_abonent_settings(
     }
 
     let handled_by_dialer = if let Some(dialer) = state.outbound_dialer() {
+        // API `outgoing` is relative to the conference: outgoing=true means
+        // MCU→terminal, which is the bridge's RX direction. Keep this explicit
+        // translation; the two vocabularies are inverted.
         dialer.set_media_control(
             &connection_id,
-            audio_tx_muted,
             audio_rx_muted,
-            video_tx_muted,
+            audio_tx_muted,
             video_rx_muted,
-            vol_tx,
-            vol_rx,
+            video_tx_muted,
+            vol_rx.map(db_tenths_to_percent),
+            vol_tx.map(db_tenths_to_percent),
         )
     } else {
         false
     };
 
     if !handled_by_dialer {
-        state.room_hub.update_participant_media(&room_id, &connection_id, audio_tx_muted, video_tx_muted, None);
+        state.room_hub.update_participant_media(&room_id, &connection_id, audio_rx_muted, video_rx_muted, None);
+    }
+
+    if let Ok(mut attempts) = state.api_v3.call_attempts.lock() {
+        for attempt in
+            attempts.values_mut().filter(|attempt| attempt.participant_id.as_deref() == Some(connection_id.as_str()))
+        {
+            let direction = if is_outgoing { "tx" } else { "rx" };
+            match setting_type.as_str() {
+                "audio" | "microphone" => {
+                    attempt.record.payload[format!("audio_{direction}_enabled")] = json!(body.enable.unwrap_or(true))
+                }
+                "video" | "camera" => {
+                    attempt.record.payload[format!("video_{direction}_enabled")] = json!(body.enable.unwrap_or(true))
+                }
+                "volume" => {
+                    if let Some(volume) = body.volume {
+                        attempt.record.payload[format!("volume_{direction}")] = json!(volume);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     audit_room(
@@ -992,15 +1417,31 @@ pub async fn edit_abonent(
     Json(json!({ "status": "ok" })).into_response()
 }
 
-fn collect_all_abonents_json(state: &SharedState) -> (Vec<serde_json::Value>, usize) {
-    let room_ids: Vec<RoomId> =
+fn collect_all_abonents_json(state: &SharedState, scope: Option<&str>) -> (Vec<serde_json::Value>, usize) {
+    let mut room_ids: Vec<RoomId> =
         if let Ok(rooms) = state.rooms.lock() { rooms.keys().copied().collect() } else { Vec::new() };
+    if let Some(scope) = scope {
+        room_ids.retain(|rid| rid.to_string().eq_ignore_ascii_case(scope));
+    }
     let settings_map = state.api_v3.abonent_settings.lock().ok();
+    let attempts = state.api_v3.call_attempts.lock().expect("call_attempts poisoned");
     let mut all_abonents = Vec::new();
     for rid in room_ids {
         for p in state.room_hub.list_participants(&rid) {
             let media = settings_map.as_ref().and_then(|m| m.get(&p.participant_id));
-            all_abonents.push(participant_to_abonent_json_with_settings(&p, media));
+            let mut value = participant_to_abonent_json_with_settings(&p, media);
+            if let Some(attempt) = attempts
+                .iter()
+                .find(|((room, _), attempt)| {
+                    *room == rid && attempt.participant_id.as_deref() == Some(p.participant_id.as_str())
+                })
+                .map(|(_, attempt)| attempt)
+            {
+                attach_call_contact(&mut value, &attempt.record, media.is_some());
+            }
+            attach_gateway_statistics(state, &p.participant_id, &mut value);
+            value["room_id"] = json!(rid.to_string());
+            all_abonents.push(value);
         }
     }
     let count = all_abonents.len();
@@ -1008,9 +1449,9 @@ fn collect_all_abonents_json(state: &SharedState) -> (Vec<serde_json::Value>, us
 }
 
 /// `GET /api/v3/engine/abonents` → `{abonents:[...], count:N}`.
-pub async fn engine_abonents(State(state): State<SharedState>) -> Response {
+pub async fn engine_abonents(State(state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
     track("engine/abonents");
-    let (abonents, count) = collect_all_abonents_json(&state);
+    let (abonents, count) = collect_all_abonents_json(&state, auth.room_scope.as_deref());
     Json(json!({
         "abonents": abonents,
         "count": count
@@ -1019,9 +1460,9 @@ pub async fn engine_abonents(State(state): State<SharedState>) -> Response {
 }
 
 /// `GET /api/v3/abonents` → список всех активных абонентов (для PNM UI).
-pub async fn list_abonents(State(state): State<SharedState>) -> Response {
+pub async fn list_abonents(State(state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
     track("abonents");
-    let (abonents, count) = collect_all_abonents_json(&state);
+    let (abonents, count) = collect_all_abonents_json(&state, auth.room_scope.as_deref());
     Json(json!({
         "abonents": abonents,
         "count": count,
@@ -1218,7 +1659,10 @@ pub async fn send_abonent_dtmf(
 
     if let Some(dialer) = state.outbound_dialer() {
         if let Err(e) = dialer.send_dtmf(&id, &seq) {
-            return error_json(500, &format!("Failed to send DTMF: {e}"));
+            // H.323 does not negotiate RFC 4733 telephone-event; report an
+            // explicit capability gap instead of an opaque 500.
+            let code = if e.contains("did not negotiate RTP telephone-event") { 501 } else { 500 };
+            return error_json(code, &format!("Failed to send DTMF: {e}"));
         }
     }
 
@@ -1279,4 +1723,44 @@ pub async fn send_abonent_fecc(
     );
 
     Json(json!({ "status": "ok" })).into_response()
+}
+
+#[cfg(test)]
+mod auth_scope_tests {
+    use super::*;
+
+    fn scoped() -> AuthContext {
+        AuthContext {
+            subject: "operator".into(),
+            role: Role::Operator,
+            auth_type: crate::auth_middleware::AuthType::Jwt,
+            scopes: vec!["*".into()],
+            room_scope: Some("11111111-1111-1111-1111-111111111111".into()),
+            generation: 0,
+            client_ip: "127.0.0.1".into(),
+        }
+    }
+
+    #[test]
+    fn scoped_payload_hides_foreign_rooms_and_recounts() {
+        let payload = json!({
+            "sessions": [
+                {"id": "11111111-1111-1111-1111-111111111111"},
+                {"id": "22222222-2222-2222-2222-222222222222"}
+            ],
+            "count": 2
+        });
+        let filtered = filter_sessions_scope(payload, &scoped());
+        assert_eq!(filtered["count"], 1);
+        assert_eq!(filtered["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(filtered["sessions"][0]["id"], "11111111-1111-1111-1111-111111111111");
+    }
+
+    #[test]
+    fn unscoped_payload_is_untouched() {
+        let mut auth = scoped();
+        auth.room_scope = None;
+        let payload = json!({"sessions": [{"id": "a"}, {"id": "b"}], "count": 2});
+        assert_eq!(filter_sessions_scope(payload.clone(), &auth), payload);
+    }
 }

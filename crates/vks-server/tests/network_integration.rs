@@ -1845,7 +1845,10 @@ async fn test_step4_gateway_media_controls_dtmf_rtp() {
     assert!(got_dtmf, "Terminal must receive RFC 4733 telephone-event (PT 101) for DTMF digit 5");
 
     let fecc_res = gateway_manager.send_fecc(&pid, "pan_left");
-    assert!(fecc_res.is_ok(), "send_fecc must succeed");
+    assert!(
+        fecc_res.unwrap_err().contains("not negotiated"),
+        "A gateway without an H.224/FECC channel must report unsupported instead of acknowledging a fictitious camera move"
+    );
 
     let hung_up = gateway_manager.hangup(&pid);
     assert!(hung_up, "hangup must return true");
@@ -1853,99 +1856,110 @@ async fn test_step4_gateway_media_controls_dtmf_rtp() {
 }
 
 #[tokio::test]
-async fn test_step5_gateway_dial_outbound_h323_media_bridge() {
+async fn test_step5_h323_rejects_invented_faststart_eof_and_timeout() {
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::{TcpListener, UdpSocket};
+    use tokio::net::TcpListener;
     use vks_admin::rooms::Rooms;
     use vks_admin::state::OutboundDialer;
-    use vks_gateway_h323::q931::{encode_tpkt, parse_q931_message, MSG_RELEASE_COMPLETE, MSG_SETUP};
+    use vks_gateway_h323::q931::{encode_tpkt, parse_q931_message, MSG_SETUP};
+    use vks_gateway_h323::H323UacClient;
     use vks_media_mcu::McuEngine;
     use vks_server::GatewayManager;
 
-    let term_tcp_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock h323 tcp");
-    let term_tcp_addr = term_tcp_listener.local_addr().unwrap();
-
-    let term_rtp_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("bind mock rtp"));
-    let term_rtp_addr = term_rtp_sock.local_addr().unwrap();
-
-    let term_task = tokio::spawn(async move {
-        let (mut socket, _peer) = term_tcp_listener.accept().await.expect("accept h323 tcp");
-        let mut buf = [0u8; 4096];
-        let n = socket.read(&mut buf).await.expect("read q931 setup");
-        assert!(n >= 4, "setup packet received");
-
-        let setup_msg = parse_q931_message(&buf[..n]).expect("parse q931 setup");
-        assert_eq!(setup_msg.message_type, MSG_SETUP, "must be Q.931 SETUP");
-
-        // Send CONNECT with FastStart
-        let mut conn_q931 = Vec::new();
-        conn_q931.push(0x08); // Q.931
-        conn_q931.push(0x02);
-        conn_q931.extend_from_slice(&setup_msg.call_reference.to_be_bytes());
-        conn_q931.push(0x07); // CONNECT
-
-        // User-User IE (0x7e) with FastStart tag 0xa0
-        let mut uu_body = Vec::new();
-        uu_body.push(0x05); // H.225
-        uu_body.push(0xa0); // FastStart tag
-        let mut fs_body = Vec::new();
-        fs_body.push(0x01); // logicalChannelNumber 1
-        fs_body.push(0x00); // G.711 PCMU
-        fs_body.extend_from_slice(&[127, 0, 0, 1]);
-        fs_body.extend_from_slice(&term_rtp_addr.port().to_be_bytes());
-
-        uu_body.push(fs_body.len() as u8);
-        uu_body.extend_from_slice(&fs_body);
-
-        conn_q931.push(0x7e);
-        conn_q931.push(uu_body.len() as u8);
-        conn_q931.extend_from_slice(&uu_body);
-
-        let conn_pkt = encode_tpkt(&conn_q931);
-        socket.write_all(&conn_pkt).await.expect("write connect");
-
-        // Wait for RELEASE COMPLETE
-        let mut rel_buf = [0u8; 512];
-        let rel_len = socket.read(&mut rel_buf).await.expect("read release");
-        if rel_len >= 4 {
-            let rel_msg = parse_q931_message(&rel_buf[..rel_len]).expect("parse release complete");
-            assert_eq!(rel_msg.message_type, MSG_RELEASE_COMPLETE);
-        }
+    // This is a real sidecar boundary test, not a replacement fake dialer.
+    // Fail with an actionable dependency message instead of silently passing
+    // when a build host has not installed its separately pinned ASN.1 runtime.
+    let python = std::env::var_os("VKS_H323_PYTHON").map(PathBuf::from).unwrap_or_else(|| {
+        let installed = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(".local/share/vks-mcu/h323-venv/bin/python3"));
+        installed
+            .filter(|path| path.is_file())
+            .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "python" } else { "python3" }))
     });
+    let dependency = std::process::Command::new(&python)
+        .args(["-c", "import importlib.metadata,pycrate_asn1rt;assert importlib.metadata.version('pycrate')=='0.8.1'"])
+        .output()
+        .expect("H323 regression requires Python; set VKS_H323_PYTHON and install python/requirements.lock");
+    assert!(dependency.status.success(), "H323 regression requires installed Pycrate0.8.1; run crates/vks-gateway-h323/python/install_runtime.py or use requirements.lock. stderr: {}", String::from_utf8_lossy(&dependency.stderr));
 
-    let admin_state = Arc::new(AppState::new());
-    let room = Rooms::create(&admin_state, "Room for H.323 Test");
-    let mcu_engine = Arc::new(McuEngine::new());
-    let gateway_manager = Arc::new(GatewayManager::new().with_mcu(mcu_engine.clone()).with_candidate_ip("127.0.0.1"));
-    gateway_manager.bind_state(Arc::downgrade(&admin_state));
-    admin_state.set_dialer(gateway_manager.clone());
+    async fn receive_setup(socket: &mut tokio::net::TcpStream) -> u16 {
+        let mut header = [0u8; 4];
+        socket.read_exact(&mut header).await.expect("complete TPKT header");
+        let length = u16::from_be_bytes([header[2], header[3]]) as usize;
+        assert!((9..=65535).contains(&length), "bounded TPKT SETUP");
+        let mut packet = header.to_vec();
+        packet.resize(length, 0);
+        socket.read_exact(&mut packet[4..]).await.expect("complete TPKT SETUP");
+        let setup = parse_q931_message(&packet).expect("strict Q931 framing");
+        assert_eq!(setup.message_type, MSG_SETUP);
+        assert!(setup.h225_user_information.is_some(), "real ASN.1 SETUP was sent");
+        setup.call_reference
+    }
 
-    let target_uri = format!("h323://127.0.0.1:{}", term_tcp_addr.port());
-    let pid = gateway_manager.dial(room.id, &target_uri, Some("H.323 Terminal 132")).await.expect("h323 dial");
-
-    assert!(pid.starts_with("h323-"), "Participant ID must have h323- prefix");
-    assert_eq!(admin_state.room_hub.list_participants(&room.id).len(), 1, "Must be registered in RoomHub");
-
-    // Wait for RTP audio packet on mock terminal
-    let mut rtp_packet_buf = [0u8; 1500];
-    let (rtp_len, _) = tokio::time::timeout(Duration::from_secs(3), term_rtp_sock.recv_from(&mut rtp_packet_buf))
+    for invented_faststart in [true, false] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback terminal");
+        let address = listener.local_addr().unwrap();
+        let terminal = tokio::spawn(async move {
+            let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .expect("sidecar reached terminal")
+                .expect("accept");
+            let call_ref = receive_setup(&mut socket).await;
+            if invented_faststart {
+                // Well-framed Q931, but the old implementation invented this
+                // 0xa0 structure instead of encoding H225/H245 aligned PER.
+                let opaque = [5, 0xa0, 8, 1, 0, 127, 0, 0, 1, 0x30, 0x39];
+                let mut packet = vec![8, 2];
+                packet.extend_from_slice(&(call_ref | 0x8000).to_be_bytes());
+                packet.extend_from_slice(&[7, 0x7e]);
+                packet.extend_from_slice(&(opaque.len() as u16).to_be_bytes());
+                packet.extend_from_slice(&opaque);
+                socket.write_all(&encode_tpkt(&packet)).await.expect("write invalid PER CONNECT");
+            } else {
+                let mut alerting = vec![8, 2];
+                alerting.extend_from_slice(&(call_ref | 0x8000).to_be_bytes());
+                alerting.push(1);
+                socket.write_all(&encode_tpkt(&alerting)).await.expect("write ALERTING");
+            }
+            socket.shutdown().await.expect("terminal EOF");
+        });
+        let state = Arc::new(AppState::new());
+        let room = Rooms::create(&state, "H323 negative interoperability regression");
+        let gateway =
+            Arc::new(GatewayManager::new().with_mcu(Arc::new(McuEngine::new())).with_candidate_ip("127.0.0.1"));
+        gateway.bind_state(Arc::downgrade(&state));
+        state.set_dialer(gateway.clone());
+        let result = tokio::time::timeout(
+            Duration::from_secs(6),
+            gateway.dial(room.id, &format!("h323:{address}"), Some("Invalid H323 peer")),
+        )
         .await
-        .expect("RTP recv within 3s")
-        .expect("RTP recv ok");
-    assert!(rtp_len >= 12, "RTP packet size >= 12");
-    assert_eq!(rtp_packet_buf[1] & 0x7F, 0, "Payload type 0 (PCMU)");
+        .expect("failure must be bounded");
+        assert!(result.is_err(), "private 0xa0/ALERTING+EOF must never create a connected call");
+        assert!(state.room_hub.list_participants(&room.id).is_empty(), "failed H323 dial must not leave a participant");
+        terminal.await.expect("negative terminal completed");
+    }
 
-    // Hangup
-    let hung_up = gateway_manager.hangup(&pid);
-    assert!(hung_up, "hangup must return true");
-
-    assert_eq!(
-        admin_state.room_hub.list_participants(&room.id).len(),
-        0,
-        "Participant must be unmapped from RoomHub (0 ghost participants)"
-    );
-
-    let _ = tokio::time::timeout(Duration::from_secs(3), term_task).await.expect("term_task finished");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("timeout terminal");
+    let address = listener.local_addr().unwrap();
+    let terminal = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept timeout peer");
+        receive_setup(&mut socket).await;
+        // Keep TCP open without CONNECT. Real H225 setup/media timeout must
+        // fail; an absent media endpoint must never become guessed UDP5004.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(4),
+        H323UacClient::new("127.0.0.1").dial(&format!("h323:{address}"), 45120, Duration::from_millis(600)),
+    )
+    .await
+    .expect("negotiation timeout must be bounded");
+    assert!(result.is_err(), "TCP connection without CONNECT cannot be a successful call");
+    terminal.abort();
+    let _ = terminal.await;
 }

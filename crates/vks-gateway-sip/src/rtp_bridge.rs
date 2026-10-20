@@ -174,11 +174,39 @@ pub fn parse_rtp_header(packet: &[u8]) -> Option<(u8, u16, u32, u32, usize)> {
     let ts = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
     let ssrc = u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]]);
 
-    let header_len = 12 + cc * 4;
+    let mut header_len = 12 + cc * 4;
     if packet.len() < header_len {
         return None;
     }
+    if packet[0] & 0x10 != 0 {
+        if packet.len() < header_len + 4 {
+            return None;
+        }
+        let words = u16::from_be_bytes([packet[header_len + 2], packet[header_len + 3]]) as usize;
+        header_len = header_len.checked_add(4 + words * 4)?;
+        if packet.len() < header_len {
+            return None;
+        }
+    }
+    if packet[0] & 0x20 != 0 {
+        let padding = *packet.last()? as usize;
+        if padding == 0 || padding > packet.len() - header_len {
+            return None;
+        }
+    }
     Some((pt, seq, ts, ssrc, header_len))
+}
+
+#[cfg(test)]
+mod header_regressions {
+    use super::*;
+    #[test]
+    fn rtp_extension_is_not_audio_payload() {
+        let mut packet = vec![0x90, 0, 0, 1, 0, 0, 0, 160, 0, 0, 0, 1, 0xbe, 0xde, 0, 1, 0x10, 0x7f, 0, 0, 0xff];
+        assert_eq!(parse_rtp_header(&packet).unwrap().4, 20);
+        packet.truncate(19);
+        assert!(parse_rtp_header(&packet).is_none());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +237,7 @@ a=rtcp:{}\r\n",
         sdp.push_str(&format!(
             "m=video {vport} RTP/AVP 96\r\n\
 a=rtpmap:96 H264/90000\r\n\
-a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n\
+a=fmtp:96 packetization-mode=1;profile-level-id=42801e\r\n\
 a=sendrecv\r\n\
 a=rtcp:{}\r\n",
             vport + 1
@@ -306,5 +334,280 @@ m=video 5006 RTP/AVP 96\r\n";
         assert_eq!(ip, Some("192.168.1.132".to_string()));
         assert_eq!(a_port, Some(5004));
         assert_eq!(v_port, Some(5006));
+    }
+}
+
+/// Accepted plain-RTP answer, restricted to codecs this bridge actually implements.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegotiatedMedia {
+    pub ip: String,
+    pub audio_port: u16,
+    pub audio_payload_type: u8,
+    pub video_port: Option<u16>,
+    pub video_payload_type: Option<u8>,
+    pub dtmf_payload_type: Option<u8>,
+    pub local_video_payload_type: Option<u8>,
+    pub video_ip: Option<String>,
+}
+
+#[derive(Default)]
+struct SdpMedia {
+    kind: String,
+    transport: String,
+    port: u16,
+    ip: Option<String>,
+    duplex: bool,
+    payloads: Vec<u8>,
+    maps: std::collections::HashMap<u8, String>,
+    fmtp: std::collections::HashMap<u8, std::collections::HashMap<String, String>>,
+}
+
+struct SdpDescription {
+    ip: Option<String>,
+    media: Vec<SdpMedia>,
+}
+
+fn parse_sdp(sdp: &str) -> Option<SdpDescription> {
+    let mut description = SdpDescription { ip: None, media: Vec::new() };
+    let mut session_duplex = true;
+    for line in sdp.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("m=") {
+            let mut parts = value.split_whitespace();
+            let kind = parts.next()?.to_string();
+            let port = parts.next()?.split('/').next()?.parse::<u16>().ok()?;
+            let transport = parts.next()?.to_string();
+            let mut payloads = Vec::new();
+            for value in parts {
+                let payload = value.parse::<u8>().ok()?;
+                if payload > 127 {
+                    return None;
+                }
+                payloads.push(payload);
+            }
+            description.media.push(SdpMedia {
+                kind,
+                transport,
+                port,
+                duplex: session_duplex,
+                payloads,
+                ..SdpMedia::default()
+            });
+        } else if let Some(value) = line.strip_prefix("c=IN IP4 ") {
+            let ip = value.split('/').next()?.trim();
+            let address = ip.parse::<std::net::Ipv4Addr>().ok()?;
+            if address.is_unspecified() || address.is_multicast() {
+                return None;
+            }
+            if let Some(media) = description.media.last_mut() {
+                media.ip = Some(ip.into());
+            } else {
+                description.ip = Some(ip.into());
+            }
+        } else if let Some(value) = line.strip_prefix("a=rtpmap:") {
+            let (payload, codec) = value.split_once(char::is_whitespace)?;
+            let payload = payload.parse::<u8>().ok()?;
+            let codec = codec.trim().to_ascii_uppercase();
+            let media = description.media.last_mut()?;
+            if media.maps.insert(payload, codec.clone()).is_some_and(|previous| previous != codec) {
+                return None;
+            }
+        } else if let Some(value) = line.strip_prefix("a=fmtp:") {
+            let (payload, parameters) = value.split_once(char::is_whitespace)?;
+            let payload = payload.parse::<u8>().ok()?;
+            let media = description.media.last_mut()?;
+            let entry = media.fmtp.entry(payload).or_default();
+            for parameter in parameters.split(';').map(str::trim) {
+                if let Some((key, value)) = parameter.split_once('=') {
+                    let key = key.trim().to_ascii_lowercase();
+                    let value = value.trim().to_string();
+                    if entry.insert(key, value.clone()).is_some_and(|previous| previous != value) {
+                        return None;
+                    }
+                }
+            }
+        } else if ["a=sendrecv", "a=sendonly", "a=recvonly", "a=inactive"].contains(&line) {
+            let duplex = line == "a=sendrecv";
+            if let Some(media) = description.media.last_mut() {
+                media.duplex = duplex;
+            } else {
+                session_duplex = duplex;
+            }
+        }
+    }
+    Some(description)
+}
+
+fn usable_media<'a>(description: &'a SdpDescription, kind: &str) -> Option<&'a SdpMedia> {
+    description
+        .media
+        .iter()
+        .find(|media| media.kind == kind && media.port > 0 && media.transport == "RTP/AVP" && media.duplex)
+}
+
+fn audio_codec(media: &SdpMedia, payload: u8) -> Option<&'static str> {
+    let expected = match payload {
+        0 => "PCMU/8000",
+        8 => "PCMA/8000",
+        _ => return None,
+    };
+    media
+        .maps
+        .get(&payload)
+        .is_none_or(|codec| codec == expected || codec == &format!("{expected}/1"))
+        .then_some(expected)
+}
+
+fn telephone_event(media: &SdpMedia) -> Option<u8> {
+    media.payloads.iter().copied().find(|payload| {
+        (96..=127).contains(payload) && media.maps.get(payload).is_some_and(|codec| codec == "TELEPHONE-EVENT/8000")
+    })
+}
+
+/// Our real sender implements Baseline-family H264, non-interleaved mode1,
+/// 640x360/15fps at level3.0. High, mode0 and mode2 are distinct configurations.
+fn h264_level(media: &SdpMedia, payload: u8) -> Option<u8> {
+    if !(96..=127).contains(&payload) || media.maps.get(&payload)?.as_str() != "H264/90000" {
+        return None;
+    }
+    let parameters = media.fmtp.get(&payload)?;
+    if parameters.get("packetization-mode").and_then(|value| value.parse::<u8>().ok()).unwrap_or(0) != 1 {
+        return None;
+    }
+    let profile = parameters.get("profile-level-id")?;
+    if profile.len() != 6 || !profile.is_ascii() {
+        return None;
+    }
+    let bits = u32::from_str_radix(profile, 16).ok()?;
+    let profile_idc = ((bits >> 16) & 255) as u8;
+    let constraints = ((bits >> 8) & 255) as u8;
+    let level = (bits & 255) as u8;
+    if profile_idc != 66 || constraints & 3 != 0 || ![30, 31, 32, 40, 41, 42, 50, 51, 52].contains(&level) {
+        return None;
+    }
+    for (key, needed) in [("max-fs", 920u32), ("max-mbps", 13800), ("max-br", 256)] {
+        if let Some(value) = parameters.get(key) {
+            if value.parse::<u32>().ok()? < needed {
+                return None;
+            }
+        }
+    }
+    Some(level)
+}
+
+/// Intersect local offer with the peer's answer. Dynamic RTP mappings are
+/// directional: send the answer PT and receive the corresponding offer PT.
+/// Unsupported video is left disabled while valid G711 audio remains usable.
+pub fn negotiate_media(offer: &str, answer: &str) -> Option<NegotiatedMedia> {
+    let local = parse_sdp(offer)?;
+    let remote = parse_sdp(answer)?;
+    let local_audio = usable_media(&local, "audio")?;
+    let remote_audio = usable_media(&remote, "audio")?;
+    let audio_payload_type = remote_audio.payloads.iter().copied().find(|payload| {
+        audio_codec(remote_audio, *payload).is_some_and(|codec| {
+            local_audio.payloads.contains(payload) && audio_codec(local_audio, *payload) == Some(codec)
+        })
+    })?;
+    let ip = remote_audio.ip.clone().or(remote.ip.clone())?;
+    let dtmf_payload_type = telephone_event(local_audio).and_then(|_| telephone_event(remote_audio));
+    let mut video = None;
+    if let (Some(local_video), Some(remote_video)) = (usable_media(&local, "video"), usable_media(&remote, "video")) {
+        for transmit_payload in &remote_video.payloads {
+            let Some(remote_level) = h264_level(remote_video, *transmit_payload) else {
+                continue;
+            };
+            let receive_payload = local_video.payloads.iter().copied().find(|payload| {
+                h264_level(local_video, *payload).is_some_and(|local_level| local_level.min(remote_level) >= 30)
+            });
+            if let Some(receive_payload) = receive_payload {
+                if let Some(video_ip) = remote_video.ip.clone().or(remote.ip.clone()) {
+                    video = Some((video_ip, remote_video.port, *transmit_payload, receive_payload));
+                    break;
+                }
+            }
+        }
+    }
+    Some(NegotiatedMedia {
+        ip,
+        audio_port: remote_audio.port,
+        audio_payload_type,
+        dtmf_payload_type,
+        video_ip: video.as_ref().map(|value| value.0.clone()),
+        video_port: video.as_ref().map(|value| value.1),
+        video_payload_type: video.as_ref().map(|value| value.2),
+        local_video_payload_type: video.as_ref().map(|value| value.3),
+    })
+}
+
+/// Answer inspection using this bridge's default capabilities. Production UAC
+/// uses `negotiate_media` with the exact local offer instead of this convenience.
+pub fn parse_negotiated_media(answer: &str) -> Option<NegotiatedMedia> {
+    negotiate_media(&build_plain_sdp("127.0.0.1", 2, Some(4)), answer)
+}
+
+#[cfg(test)]
+mod negotiation_regressions {
+    use super::*;
+    const POLYCOM_OFFER: &str = include_str!("../tests/fixtures/polycom_rpd_3_5_offer.sdp");
+    const POLYCOM_ANSWER: &str = include_str!("../tests/fixtures/polycom_rpd_3_5_answer.sdp");
+
+    #[test]
+    fn captured_polycom_answer_selects_baseline_mode1_tx110_and_offered_rx96() {
+        let media = negotiate_media(POLYCOM_OFFER, POLYCOM_ANSWER).unwrap();
+        assert_eq!(media.audio_payload_type, 0);
+        assert_eq!(media.video_port, Some(3232), "compatible H264 was silently discarded");
+        assert_eq!(media.video_payload_type, Some(110), "High111 and mode0 PT109 must not be selected");
+        assert_eq!(media.local_video_payload_type, Some(96));
+        assert_eq!(media.video_ip.as_deref(), Some("192.168.1.132"));
+        assert_eq!(media.dtmf_payload_type, Some(119), "answer PT101 is G7221, not telephone-event");
+    }
+
+    #[test]
+    fn h264_high_interleaved_and_default_mode0_are_not_offered_as_usable_video() {
+        for parameters in [
+            "profile-level-id=64001e;packetization-mode=1",
+            "profile-level-id=42801e;packetization-mode=0",
+            "profile-level-id=42801e",
+            "profile-level-id=42801e;packetization-mode=2",
+            "profile-level-id=428015;packetization-mode=1",
+        ] {
+            let answer=format!("v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 3230 RTP/AVP 0\r\nm=video 3232 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 {parameters}\r\n");
+            assert!(
+                negotiate_media(POLYCOM_OFFER, &answer).unwrap().video_port.is_none(),
+                "unsupported H264 configuration accepted: {parameters}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsolicited_video_and_invalid_audio_payload_maps_are_rejected() {
+        let audio_only = POLYCOM_OFFER.split("m=video").next().unwrap();
+        assert!(negotiate_media(audio_only, POLYCOM_ANSWER).unwrap().video_port.is_none());
+        let wrong_audio = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 3230 RTP/AVP 0\r\na=rtpmap:0 G729/8000\r\n";
+        assert!(negotiate_media(POLYCOM_OFFER, wrong_audio).is_none());
+        let incompatible_offer = POLYCOM_OFFER.replace("profile-level-id=42e01f", "profile-level-id=64001f");
+        assert!(negotiate_media(&incompatible_offer, POLYCOM_ANSWER).unwrap().video_port.is_none());
+        let mode0_offer = POLYCOM_OFFER.replace("packetization-mode=1", "packetization-mode=0");
+        assert!(negotiate_media(&mode0_offer, POLYCOM_ANSWER).unwrap().video_port.is_none());
+    }
+
+    #[test]
+    fn offered_h264_rx_payload_is_independent_from_answer_tx_payload() {
+        let offer = POLYCOM_OFFER.replace("96", "112");
+        let media = negotiate_media(&offer, POLYCOM_ANSWER).unwrap();
+        assert_eq!(media.video_payload_type, Some(110));
+        assert_eq!(media.local_video_payload_type, Some(112));
+    }
+    #[test]
+    fn pcma_and_h264_are_negotiated_without_inventing_dtmf() {
+        let m=parse_negotiated_media("v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 3230 RTP/AVP 8\r\nm=video 3232 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 profile-level-id=42801e;packetization-mode=1\r\n").unwrap();
+        assert_eq!(m.audio_payload_type, 8);
+        assert_eq!(m.video_payload_type, Some(96));
+        assert_eq!(m.dtmf_payload_type, None);
+    }
+    #[test]
+    fn disabled_or_unsupported_audio_is_rejected() {
+        for section in ["m=audio 0 RTP/AVP 0", "m=audio 3230 RTP/AVP 18"] {
+            assert!(parse_negotiated_media(&format!("v=0\r\nc=IN IP4 192.168.1.132\r\n{section}\r\n")).is_none());
+        }
     }
 }

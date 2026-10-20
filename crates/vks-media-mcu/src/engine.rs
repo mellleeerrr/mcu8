@@ -477,8 +477,61 @@ impl McuEngine {
         let state = g.entry(room).or_insert_with(|| RoomState::new(RoomMode::Mcu, RoomCaps::default()));
         state.subscribers.insert(pid);
         if !tracks.is_empty() {
+            let has_video = tracks.iter().any(|track| {
+                matches!(track.kind, vks_core::track::TrackKind::Video | vks_core::track::TrackKind::Screen)
+            });
             state.publisher_tracks.insert(pid, tracks);
+            if has_video {
+                let descriptor = state.layout.get_or_insert_with(|| LayoutDescriptor {
+                    layout_id: "grid".into(),
+                    version: 0,
+                    assignments: BTreeMap::new(),
+                });
+                if !descriptor.assignments.contains_key(&pid) {
+                    let slot = (0..u32::MAX)
+                        .find(|slot| !descriptor.assignments.values().any(|existing| existing == slot))
+                        .unwrap_or(0);
+                    descriptor.assignments.insert(pid, slot);
+                    descriptor.version += 1;
+                    let layout = RoomState::layout_from_descriptor(descriptor);
+                    state.bridge.apply(&layout);
+                    state.current_layout = layout;
+                    state.layout_applied_at_ms = None;
+                    state.elapsed_ms = 0;
+                }
+            }
         }
+    }
+
+    /// Writes a decoded frame only into the slot belonging to this publisher.
+    pub fn set_participant_frame(&self, room: RoomId, pid: ParticipantId, frame: Frame) -> bool {
+        let rooms = self.rooms.lock().unwrap();
+        let Some(state) = rooms.get(&room) else {
+            return false;
+        };
+        let Some(slot) = state.layout.as_ref().and_then(|layout| layout.assignments.get(&pid)) else {
+            return false;
+        };
+        self.frames.lock().unwrap().entry(room).or_default().insert(*slot, frame);
+        true
+    }
+
+    /// Removes the participant's decoded pixels immediately when reception is muted.
+    pub fn clear_participant_frame(&self, room: RoomId, pid: ParticipantId) {
+        let mut rooms = self.rooms.lock().unwrap();
+        let Some(state) = rooms.get_mut(&room) else {
+            return;
+        };
+        if let Some(slot) = state.layout.as_ref().and_then(|layout| layout.assignments.get(&pid)) {
+            self.frames.lock().unwrap().entry(room).or_default().remove(slot);
+            let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
+            state.process_video(&frames);
+        }
+    }
+
+    /// Current composed pixels, shared by subscribers when a render is throttled.
+    pub fn composite_frame(&self, room: RoomId) -> Option<Frame> {
+        self.rooms.lock().unwrap().get(&room).map(|state| state.composite.clone())
     }
 
     /// Synchronously removes a bridged participant from the MCU room, purging layout and audio.

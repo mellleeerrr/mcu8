@@ -14,6 +14,7 @@
 pub mod auth;
 pub mod boot;
 pub mod call_strings;
+pub mod resources;
 pub mod sessions;
 pub mod shell;
 pub mod ws;
@@ -47,37 +48,30 @@ pub struct ApiV3State {
     /// Активные исходящие вызовы в процессе дозвона (In-Flight Guard).
     pub in_flight_calls:
         std::sync::Mutex<std::collections::HashMap<(vks_core::RoomId, String), call_strings::CallStringRecord>>,
+    /// Outcomes remain visible after a failed dial or a remote disconnect.
+    pub call_attempts:
+        std::sync::Mutex<std::collections::HashMap<(vks_core::RoomId, String), call_strings::CallAttempt>>,
     /// Запланированные контакты (StandBy / without_call).
     pub scheduled_calls:
         std::sync::Mutex<std::collections::HashMap<vks_core::RoomId, Vec<call_strings::CallStringRecord>>>,
     /// Персистентные настройки медиа абонентов (volume, mute rx/tx).
     pub abonent_settings: std::sync::Mutex<std::collections::HashMap<String, AbonentMediaState>>,
+    /// Requested inherit/disabled DSP modes (active filters are reported separately).
+    pub abonent_processing: std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>,
     /// Настройки всех 8 вкладок конференции (M1.5 / F1 / F2 / F6).
     pub conference_settings: std::sync::Mutex<std::collections::HashMap<vks_core::RoomId, serde_json::Value>>,
+    pub resources: tokio::sync::Mutex<resources::ResourceState>,
 }
 
 /// Состояние медиа-настроек абонента (громкость, mute).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AbonentMediaState {
     pub audio_rx_muted: bool,
     pub audio_tx_muted: bool,
     pub video_rx_muted: bool,
     pub video_tx_muted: bool,
-    pub volume_rx: u32,
-    pub volume_tx: u32,
-}
-
-impl Default for AbonentMediaState {
-    fn default() -> Self {
-        Self {
-            audio_rx_muted: false,
-            audio_tx_muted: false,
-            video_rx_muted: false,
-            video_tx_muted: false,
-            volume_rx: 100,
-            volume_tx: 100,
-        }
-    }
+    pub volume_rx: i32,
+    pub volume_tx: i32,
 }
 
 /// Нормализует опечатку вендорного фронтенда PNM (`}/contacts` -> `/contacts`) до роутинга.
@@ -119,6 +113,61 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/system/time", get(shell::system_time))
         .route("/api/v3/settings/calls", get(shell::settings_calls).patch(shell::update_settings_calls))
         .route("/api/v3/settings/security", get(shell::settings_security))
+        .route("/api/v3/settings/smtp", get(resources::smtp))
+        .route("/api/v3/users/{id}", get(resources::user))
+        .route("/api/v3/schedules", get(resources::schedules).post(resources::create_schedule))
+        .route(
+            "/api/v3/schedules/{id}",
+            get(resources::get_schedule).patch(resources::edit_schedule).delete(resources::remove_schedule),
+        )
+        .route("/api/v3/video_layout_grids", get(resources::grids))
+        .route("/api/v3/video_layout_grids/{id}", get(resources::get_grid))
+        .route("/api/v3/conferences/{id}/video_layouts/{resource_id}/contacts", get(resources::layout_contacts))
+        .route(
+            "/api/v3/conferences/{id}/video_layouts/{resource_id}/contacts/{contact_id}",
+            post(resources::attach_layout_contact).delete(resources::detach_layout_contact),
+        )
+        .route("/api/v3/audiochannels", get(resources::list_global).post(resources::create))
+        .route(
+            "/api/v3/audiochannels/{id}",
+            get(resources::get_global).patch(resources::edit_global).delete(resources::remove_global),
+        )
+        .route(
+            "/api/v3/video_layouts/{id}",
+            get(resources::get_global).patch(resources::edit_global).delete(resources::remove_global),
+        )
+        .route("/api/v3/ui/conferences/{id}/video_layouts", get(resources::list_linked))
+        .route(
+            "/api/v3/ui/conferences/{id}/video_layouts/{resource_id}",
+            get(resources::get_linked).patch(resources::edit_linked),
+        )
+        .route("/api/v3/ui/sessions/{id}/video_layouts", get(resources::list_linked))
+        .route(
+            "/api/v3/ui/sessions/{id}/video_layouts/{resource_id}",
+            get(resources::get_linked).patch(resources::edit_linked),
+        )
+        .route("/api/v3/conferences/{id}/video_layouts", get(resources::list_linked))
+        .route("/api/v3/sessions/{id}/video_layouts", get(resources::list_linked))
+        .route(
+            "/api/v3/conferences/{id}/video_layouts/{resource_id}",
+            get(resources::get_linked).patch(resources::edit_linked).post(resources::attach).delete(resources::detach),
+        )
+        .route(
+            "/api/v3/sessions/{id}/video_layouts/{resource_id}",
+            get(resources::get_linked).patch(resources::edit_linked).post(resources::attach).delete(resources::detach),
+        )
+        .route("/api/v3/conferences/{id}/audiochannels", get(resources::list_linked))
+        .route("/api/v3/sessions/{id}/audiochannels", get(resources::list_linked))
+        .route(
+            "/api/v3/conferences/{id}/audiochannels/{resource_id}",
+            get(resources::get_linked).patch(resources::edit_linked).post(resources::attach).delete(resources::detach),
+        )
+        .route(
+            "/api/v3/sessions/{id}/audiochannels/{resource_id}",
+            get(resources::get_linked).patch(resources::edit_linked).post(resources::attach).delete(resources::detach),
+        )
+        .route("/api/v3/conferences/{id}/video_layouts/templates", get(resources::templates))
+        .route("/api/v3/sessions/{id}/video_layouts/templates", get(resources::templates))
         .route("/api/v3/settings/audio_codecs", get(shell::settings_audio_codecs))
         .route("/api/v3/settings/video_codecs", get(shell::settings_video_codecs))
         .route("/api/v3/waitingroom", get(shell::waitingroom))
@@ -153,6 +202,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/sessions/{id}/invite/call_strings/list", post(call_strings::invite_session_call_strings_list))
         .route("/api/v3/call_strings", get(call_strings::list_call_strings))
         .route("/api/v3/ui/call_strings", get(call_strings::list_call_strings))
+        .route("/api/v3/call_strings/{id}", get(call_strings::get_call_string))
+        .route("/api/v3/ui/call_strings/{id}", get(call_strings::get_call_string))
         .route(
             "/api/v3/sessions/{id}/contacts",
             get(sessions::conference_contacts).delete(sessions::remove_session_contacts_batch),
@@ -165,7 +216,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/ui/sessions/{id}/contacts/list", delete(sessions::remove_session_contacts_batch))
         .route("/api/v3/sessions/{id}/contacts/{contact_id}", delete(sessions::remove_session_contact))
         .route("/api/v3/ui/sessions/{id}/contacts/{contact_id}", delete(sessions::remove_session_contact))
-        .route("/api/v3/ui/video_layouts", get(shell::video_layouts))
+        .route("/api/v3/ui/video_layouts", get(resources::list_global).post(resources::create))
         .route("/api/v3/video_layouts", get(shell::video_layouts))
         .route("/api/v3/ui/video_layouts/mode", post(shell::switch_video_layout_mode))
         .route("/api/v3/ui/sessions/quick", post(sessions::quick_session))

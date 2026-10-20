@@ -1,31 +1,30 @@
-//! Async Outbound SIP UAC Client (RFC 3261) for dialing hardware terminals.
-
+//! Real outbound SIP dialogs with negotiated RTP codecs and remote teardown.
+use crate::rtp_bridge::negotiate_media;
+use crate::sip_message::{build_ack, build_bye, build_cancel, build_invite, SipResponse};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::rtp_bridge::parse_remote_media_ports;
-use crate::sip_message::{build_ack, build_bye, build_invite, SipResponse};
-
-/// Ошибки исходящего дозвона.
 #[derive(Debug, thiserror::Error)]
 pub enum SipDialError {
-    #[error("Invalid target URI: {0}")]
+    #[error("Invalid or unsupported target URI: {0}")]
     InvalidUri(String),
     #[error("Socket IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Call rejected by remote terminal: {0} {1}")]
     Rejected(u16, String),
-    #[error("Dial timeout (no response from {0} within {1:?})")]
+    #[error("Dial timeout (no answer from {0} within {1:?})")]
     Timeout(String, Duration),
-    #[error("Invalid or missing SDP answer from remote terminal")]
+    #[error("Invalid or unsupported SDP answer from remote terminal")]
     InvalidSdpAnswer,
 }
 
-/// Активный исходящий SIP диалог.
 #[derive(Debug, Clone)]
 pub struct ActiveSipSession {
     pub call_id: String,
@@ -38,12 +37,22 @@ pub struct ActiveSipSession {
     pub remote_media_ip: String,
     pub remote_audio_port: Option<u16>,
     pub remote_video_port: Option<u16>,
+    pub remote_audio_payload_type: u8,
+    pub remote_video_payload_type: Option<u8>,
+    pub local_video_payload_type: Option<u8>,
+    pub remote_video_ip: Option<String>,
+    pub remote_dtmf_payload_type: Option<u8>,
     pub socket: Arc<UdpSocket>,
+    ended: Arc<AtomicBool>,
 }
-
 impl ActiveSipSession {
-    /// Отправляет запрос BYE удаленному терминалу для завершения сессии.
+    pub fn is_ended(&self) -> bool {
+        self.ended.load(Ordering::Acquire)
+    }
     pub async fn hangup(&self) -> Result<(), std::io::Error> {
+        if self.ended.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
         let bye = build_bye(
             &self.contact_uri,
             &self.local_ip,
@@ -53,21 +62,99 @@ impl ActiveSipSession {
             &self.to_tag,
             2,
         );
-        let _ = self.socket.send_to(bye.as_bytes(), self.target_addr).await?;
-        info!(call_id = %self.call_id, target = %self.target_addr, "SIP BYE sent successfully");
+        self.socket.send_to(bye.as_bytes(), self.target_addr).await?;
+        info!(call_id=%self.call_id,"SIP BYE sent");
         Ok(())
     }
 }
 
-/// Клиент исходящего дозвона SIP UAC.
 #[derive(Debug, Clone)]
 pub struct SipUacClient {
     local_candidate_ip: String,
 }
-
 impl Default for SipUacClient {
     fn default() -> Self {
         Self::new("127.0.0.1")
+    }
+}
+
+#[derive(Clone)]
+struct InviteContext {
+    socket: Arc<UdpSocket>,
+    target: SocketAddr,
+    uri: String,
+    ip: String,
+    port: u16,
+    call_id: String,
+    from_tag: String,
+    branch: String,
+}
+/// Dropping a pending dial (including a stopped session) cancels the remote ring.
+struct PendingInvite {
+    context: InviteContext,
+    armed: bool,
+}
+impl Drop for PendingInvite {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let context = self.context.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let cancel = build_cancel(
+                    &context.uri,
+                    &context.ip,
+                    context.port,
+                    &context.call_id,
+                    &context.from_tag,
+                    &context.branch,
+                );
+                let _ = context.socket.send_to(cancel.as_bytes(), context.target).await;
+                let mut buf = [0; 16384];
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                while let Ok(Ok((len, source))) =
+                    tokio::time::timeout_at(deadline, context.socket.recv_from(&mut buf)).await
+                {
+                    if source != context.target {
+                        continue;
+                    }
+                    let text = String::from_utf8_lossy(&buf[..len]);
+                    let Some(response) = SipResponse::parse(&text) else {
+                        continue;
+                    };
+                    if response.call_id != Some(&context.call_id) || response.cseq_method != Some("INVITE") {
+                        continue;
+                    }
+                    if response.status_code >= 200 {
+                        let ack = build_ack(
+                            &context.uri,
+                            &context.ip,
+                            context.port,
+                            &context.call_id,
+                            &context.from_tag,
+                            response.to_tag,
+                            &context.branch,
+                            response.status_code < 300,
+                        );
+                        let _ = context.socket.send_to(ack.as_bytes(), context.target).await;
+                        if response.status_code < 300 {
+                            let bye = build_bye(
+                                response.contact.unwrap_or(&context.uri),
+                                &context.ip,
+                                context.port,
+                                &context.call_id,
+                                &context.from_tag,
+                                response.to_tag.unwrap_or(""),
+                                2,
+                            );
+                            let _ = context.socket.send_to(bye.as_bytes(), context.target).await;
+                        }
+                        break;
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -75,171 +162,331 @@ impl SipUacClient {
     pub fn new(local_candidate_ip: impl Into<String>) -> Self {
         Self { local_candidate_ip: local_candidate_ip.into() }
     }
-
-    /// Парсит целевой адрес (e.g. "sip:192.168.1.132:5060" -> "192.168.1.132:5060" или "sip:box@192.168.1.132").
     fn parse_target_addr(raw: &str) -> Result<(String, SocketAddr), SipDialError> {
-        let clean = raw.trim().trim_start_matches("sip:").trim_start_matches("sips:");
-        let clean = clean.split(';').next().unwrap_or(clean).trim();
-        let host_part = clean.split('@').next_back().unwrap_or(clean);
-        let target_str = if host_part.contains(':') { host_part.to_string() } else { format!("{host_part}:5060") };
-
-        let addr = target_str.parse::<SocketAddr>().map_err(|_| SipDialError::InvalidUri(raw.to_string()))?;
-        Ok((clean.to_string(), addr))
+        let raw = raw.trim();
+        if raw.starts_with("sips:")
+            || raw.chars().any(|c| c == '\r' || c == '\n')
+            || raw.contains("transport=tcp")
+            || raw.contains("transport=tls")
+        {
+            return Err(SipDialError::InvalidUri(raw.into()));
+        }
+        let clean = raw.strip_prefix("sip:").unwrap_or(raw).split(';').next().unwrap_or(raw);
+        let host = clean.split(';').next().unwrap_or(clean).rsplit('@').next().unwrap_or(clean);
+        let endpoint = if host.contains(':') { host.to_string() } else { format!("{host}:5060") };
+        Ok((clean.to_string(), endpoint.parse().map_err(|_| SipDialError::InvalidUri(raw.into()))?))
     }
-
-    /// Инициирует исходящий вызов (RFC 3261 INVITE) на указанный адрес терминала.
     pub async fn dial(
         &self,
         target_uri: &str,
         sdp_offer: &str,
         timeout_dur: Duration,
     ) -> Result<ActiveSipSession, SipDialError> {
-        let (target_clean, target_addr) = Self::parse_target_addr(target_uri)?;
-
-        // Биндим сокет UAC на эфемерный порт
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        let local_sip_port = socket.local_addr()?.port();
-        let local_ip = self.local_candidate_ip.clone();
-
-        let call_id = format!("call-out-{}", Uuid::new_v4());
-        let from_tag = format!("tag-{}", &Uuid::new_v4().simple().to_string()[..8]);
-        let branch = format!("br-{}", &Uuid::new_v4().simple().to_string()[..12]);
-
-        let invite_msg =
-            build_invite(&target_clean, &local_ip, local_sip_port, &call_id, &from_tag, &branch, sdp_offer);
-
-        debug!(target = %target_addr, call_id = %call_id, "Sending SIP INVITE to terminal");
-        socket.send_to(invite_msg.as_bytes(), target_addr).await?;
-
-        // Цикл обработки ответов с таймером
-        let arc_socket = Arc::new(socket);
-        let dial_fut = Self::wait_for_answer(
-            arc_socket.clone(),
-            target_addr,
-            &target_clean,
-            &local_ip,
-            local_sip_port,
-            &call_id,
-            &from_tag,
-            &branch,
+        let (uri, target) = Self::parse_target_addr(target_uri)?;
+        let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+        let context = InviteContext {
+            port: socket.local_addr()?.port(),
+            socket,
+            target,
+            uri,
+            ip: self.local_candidate_ip.clone(),
+            call_id: format!("call-out-{}", Uuid::new_v4()),
+            from_tag: format!("tag-{}", Uuid::new_v4().simple()),
+            branch: format!("br-{}", Uuid::new_v4().simple()),
+        };
+        let invite = build_invite(
+            &context.uri,
+            &context.ip,
+            context.port,
+            &context.call_id,
+            &context.from_tag,
+            &context.branch,
+            sdp_offer,
         );
-
-        match tokio::time::timeout(timeout_dur, dial_fut).await {
-            Ok(res) => res,
+        context.socket.send_to(invite.as_bytes(), context.target).await?;
+        let mut pending = PendingInvite { context: context.clone(), armed: true };
+        let result = tokio::time::timeout(timeout_dur, Self::wait_for_answer(&context, &invite, sdp_offer)).await;
+        match result {
+            Ok(result) => {
+                pending.armed = false;
+                result
+            }
             Err(_) => {
-                warn!(target = %target_addr, "SIP dial timed out after {:?}", timeout_dur);
-                Err(SipDialError::Timeout(target_uri.to_string(), timeout_dur))
+                warn!(target=%target,"SIP answer timeout; cancelling invite");
+                Err(SipDialError::Timeout(target_uri.into(), timeout_dur))
             }
         }
     }
-
-    #[allow(clippy::too_many_arguments)]
     async fn wait_for_answer(
-        socket: Arc<UdpSocket>,
-        target_addr: SocketAddr,
-        target_clean: &str,
-        local_ip: &str,
-        local_sip_port: u16,
-        call_id: &str,
-        from_tag: &str,
-        branch: &str,
+        c: &InviteContext,
+        invite: &str,
+        sdp_offer: &str,
     ) -> Result<ActiveSipSession, SipDialError> {
-        let mut buf = [0u8; 4096];
-
+        let mut buf = [0; 16384];
+        let mut provisional = false;
+        let mut retry = tokio::time::interval(Duration::from_millis(500));
+        retry.tick().await;
         loop {
-            let (len, src) = match socket.recv_from(&mut buf).await {
-                Ok(res) => res,
-                Err(e) => {
-                    // Windows WSAECONNRESET (10054) при ICMP port unreachable
-                    debug!(error = %e, "UDP recv_from transient error; waiting for valid response");
-                    continue;
-                }
+            let (len, source) = tokio::select! {
+                _=retry.tick(),if !provisional=>{c.socket.send_to(invite.as_bytes(),c.target).await?;continue;},
+                received=c.socket.recv_from(&mut buf)=>received?,
             };
-
-            let text = String::from_utf8_lossy(&buf[..len]);
-            let Some(resp) = SipResponse::parse(&text) else {
-                continue;
-            };
-
-            if resp.call_id != Some(call_id) {
+            if source != c.target {
                 continue;
             }
-
-            debug!(status = resp.status_code, reason = resp.reason, from = %src, "Received SIP response");
-
-            match resp.status_code {
+            let text = String::from_utf8_lossy(&buf[..len]);
+            let Some(response) = SipResponse::parse(&text) else {
+                continue;
+            };
+            if response.call_id != Some(&c.call_id) || response.cseq_num != 1 || response.cseq_method != Some("INVITE")
+            {
+                continue;
+            }
+            debug!(status=response.status_code,target=%source,"SIP INVITE response");
+            match response.status_code {
                 100..=199 => {
-                    // 100 Trying, 180 Ringing, 183 Session Progress — продолжаем ожидать 200 OK
-                    continue;
+                    provisional = true;
                 }
-                200 => {
-                    // 200 OK — отправляем End-to-End Dialog ACK
-                    let to_tag = resp.to_tag.unwrap_or("default-tag");
-                    let contact = resp.contact.unwrap_or(target_clean);
-
-                    let ack = build_ack(
-                        target_clean,
-                        local_ip,
-                        local_sip_port,
-                        call_id,
-                        from_tag,
-                        Some(to_tag),
-                        branch,
-                        true,
-                    );
-                    let _ = socket.send_to(ack.as_bytes(), target_addr).await;
-
-                    // Разбираем remote media порты из SDP
-                    let (remote_ip, remote_audio, remote_video) = parse_remote_media_ports(resp.body);
-                    let remote_media_ip = remote_ip.unwrap_or_else(|| target_addr.ip().to_string());
-
-                    info!(
-                        call_id = %call_id,
-                        target = %target_addr,
-                        media_ip = %remote_media_ip,
-                        audio_port = ?remote_audio,
-                        video_port = ?remote_video,
-                        "SIP 200 OK received and ACKed; call confirmed"
-                    );
-
-                    return Ok(ActiveSipSession {
-                        call_id: call_id.to_string(),
-                        local_ip: local_ip.to_string(),
-                        local_sip_port,
-                        target_addr,
-                        contact_uri: contact.to_string(),
-                        from_tag: from_tag.to_string(),
-                        to_tag: to_tag.to_string(),
-                        remote_media_ip,
-                        remote_audio_port: remote_audio,
-                        remote_video_port: remote_video,
-                        socket,
-                    });
+                200..=299 => {
+                    let to_tag = response.to_tag.ok_or(SipDialError::InvalidSdpAnswer)?;
+                    let contact = response.contact.unwrap_or(&c.uri);
+                    // 2xx ACK targets Contact. Preserve original To identity in the dialog.
+                    let contact_clean = contact.strip_prefix("sip:").unwrap_or(contact);
+                    let mut ack =
+                        build_ack(contact_clean, &c.ip, c.port, &c.call_id, &c.from_tag, Some(to_tag), &c.branch, true);
+                    ack = ack.replace(&format!("To: <sip:{contact_clean}>"), &format!("To: <sip:{}>", c.uri));
+                    c.socket.send_to(ack.as_bytes(), c.target).await?;
+                    let Some(media) = negotiate_media(sdp_offer, response.body) else {
+                        let bye = build_bye(contact, &c.ip, c.port, &c.call_id, &c.from_tag, to_tag, 2);
+                        c.socket.send_to(bye.as_bytes(), c.target).await?;
+                        return Err(SipDialError::InvalidSdpAnswer);
+                    };
+                    let session = ActiveSipSession {
+                        call_id: c.call_id.clone(),
+                        local_ip: c.ip.clone(),
+                        local_sip_port: c.port,
+                        target_addr: c.target,
+                        contact_uri: contact.into(),
+                        from_tag: c.from_tag.clone(),
+                        to_tag: to_tag.into(),
+                        remote_media_ip: media.ip,
+                        remote_audio_port: Some(media.audio_port),
+                        remote_video_port: media.video_port,
+                        remote_audio_payload_type: media.audio_payload_type,
+                        remote_video_payload_type: media.video_payload_type,
+                        local_video_payload_type: media.local_video_payload_type,
+                        remote_video_ip: media.video_ip,
+                        remote_dtmf_payload_type: media.dtmf_payload_type,
+                        socket: c.socket.clone(),
+                        ended: Arc::new(AtomicBool::new(false)),
+                    };
+                    Self::monitor_dialog(session.clone(), ack);
+                    info!(call_id=%session.call_id,audio_port=?session.remote_audio_port,video_port=?session.remote_video_port,"SIP dialog confirmed with usable media");
+                    return Ok(session);
                 }
                 300..=699 => {
-                    // Ошибка вызова (486 Busy, 404 Not Found, 603 Decline) — отправляем Hop-by-Hop ACK
-                    let ack = build_ack(
-                        target_clean,
-                        local_ip,
-                        local_sip_port,
-                        call_id,
-                        from_tag,
-                        resp.to_tag,
-                        branch,
-                        false,
-                    );
-                    let _ = socket.send_to(ack.as_bytes(), target_addr).await;
-                    return Err(SipDialError::Rejected(resp.status_code, resp.reason.to_string()));
+                    let ack =
+                        build_ack(&c.uri, &c.ip, c.port, &c.call_id, &c.from_tag, response.to_tag, &c.branch, false);
+                    c.socket.send_to(ack.as_bytes(), c.target).await?;
+                    return Err(SipDialError::Rejected(response.status_code, response.reason.into()));
                 }
                 _ => {}
             }
         }
+    }
+    fn monitor_dialog(session: ActiveSipSession, ack: String) {
+        tokio::spawn(async move {
+            let mut buf = [0; 16384];
+            while !session.is_ended() {
+                let received =
+                    tokio::time::timeout(Duration::from_millis(250), session.socket.recv_from(&mut buf)).await;
+                let Ok(Ok((len, source))) = received else {
+                    continue;
+                };
+                if source != session.target_addr {
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&buf[..len]);
+                if let Some(response) = SipResponse::parse(&text) {
+                    if response.call_id == Some(&session.call_id)
+                        && response.status_code < 300
+                        && response.cseq_method == Some("INVITE")
+                    {
+                        let _ = session.socket.send_to(ack.as_bytes(), source).await;
+                    }
+                    continue;
+                }
+                let header = |name: &str| {
+                    text.lines()
+                        .skip(1)
+                        .filter_map(|line| line.split_once(':'))
+                        .find(|(n, _)| n.trim().eq_ignore_ascii_case(name))
+                        .map(|(_, v)| v.trim())
+                };
+                if header("Call-ID") != Some(&session.call_id) {
+                    continue;
+                }
+                if !header("From").is_some_and(|v| v.contains(&format!("tag={}", session.to_tag)))
+                    || !header("To").is_some_and(|v| v.contains(&format!("tag={}", session.from_tag)))
+                {
+                    continue;
+                }
+                let method = text.split_whitespace().next().unwrap_or("");
+                let (code, reason) = match method {
+                    "BYE" | "OPTIONS" => (200, "OK"),
+                    "INVITE" => (488, "Not Acceptable Here"),
+                    _ => (501, "Not Implemented"),
+                };
+                let mut reply = format!("SIP/2.0 {code} {reason}\r\n");
+                for name in ["Via", "From", "To", "Call-ID", "CSeq"] {
+                    for (_, value) in text
+                        .lines()
+                        .skip(1)
+                        .filter_map(|l| l.split_once(':'))
+                        .filter(|(n, _)| n.trim().eq_ignore_ascii_case(name))
+                    {
+                        reply.push_str(&format!("{name}: {}\r\n", value.trim()));
+                    }
+                }
+                reply.push_str("Content-Length: 0\r\n\r\n");
+                let _ = session.socket.send_to(reply.as_bytes(), source).await;
+                if method == "BYE" {
+                    session.ended.store(true, Ordering::Release);
+                    info!(call_id=%session.call_id,"Remote SIP BYE received and acknowledged");
+                }
+            }
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn captured_polycom_sdp_reaches_directional_active_session_fields() {
+        let terminal = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = terminal.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let mut buffer = [0; 16384];
+            let (count, source) = terminal.recv_from(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..count]);
+            let id = request.lines().find_map(|line| line.strip_prefix("Call-ID: ")).unwrap();
+            let sdp = include_str!("../tests/fixtures/polycom_rpd_3_5_answer.sdp");
+            let response=format!("SIP/2.0 200 OK\r\nTo: <sip:terminal>;tag=polycom-fixture\r\nCall-ID: {id}\r\nCSeq: 1 INVITE\r\nContact: <sip:terminal@{address}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{sdp}",sdp.len());
+            terminal.send_to(response.as_bytes(), source).await.unwrap();
+            let (count, _) = terminal.recv_from(&mut buffer).await.unwrap();
+            assert!(buffer[..count].starts_with(b"ACK "));
+            let (count, _) =
+                tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut buffer)).await.unwrap().unwrap();
+            assert!(buffer[..count].starts_with(b"BYE "));
+        });
+        let offer = include_str!("../tests/fixtures/polycom_rpd_3_5_offer.sdp");
+        let session = SipUacClient::new("127.0.0.1")
+            .dial(&format!("sip:{address}"), offer, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(session.remote_audio_payload_type, 0);
+        assert_eq!(session.remote_video_payload_type, Some(110));
+        assert_eq!(session.local_video_payload_type, Some(96));
+        assert_eq!(session.remote_video_ip.as_deref(), Some("192.168.1.132"));
+        assert_eq!(session.remote_dtmf_payload_type, Some(119));
+        session.hangup().await.unwrap();
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_bye_is_acknowledged_and_marks_dialog_ended() {
+        let terminal = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = terminal.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let mut buf = [0; 4096];
+            let (size, source) = terminal.recv_from(&mut buf).await.unwrap();
+            let invite = String::from_utf8_lossy(&buf[..size]);
+            let id = invite.lines().find_map(|l| l.strip_prefix("Call-ID: ")).unwrap().to_string();
+            let local_from = invite.lines().find_map(|l| l.strip_prefix("From: ")).unwrap().to_string();
+            let sdp = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 45000 RTP/AVP 0\r\n";
+            let answer=format!("SIP/2.0 200 OK\r\nFrom: {local_from}\r\nTo: <sip:terminal>;tag=remote-bye\r\nCall-ID: {id}\r\nCSeq: 1 INVITE\r\nContact: <sip:terminal@{addr}>\r\nContent-Length: {}\r\n\r\n{sdp}",sdp.len());
+            terminal.send_to(answer.as_bytes(), source).await.unwrap();
+            let (size, _) = terminal.recv_from(&mut buf).await.unwrap();
+            assert!(buf[..size].starts_with(b"ACK "));
+            let bye=format!("BYE sip:vks@{source} SIP/2.0\r\nVia: SIP/2.0/UDP {addr};branch=z9hG4bKbye\r\nFrom: <sip:terminal>;tag=remote-bye\r\nTo: {local_from}\r\nCall-ID: {id}\r\nCSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n");
+            terminal.send_to(bye.as_bytes(), source).await.unwrap();
+            let (size, _) =
+                tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut buf)).await.unwrap().unwrap();
+            assert!(buf[..size].starts_with(b"SIP/2.0 200 OK"));
+        });
+        let session = SipUacClient::new("127.0.0.1")
+            .dial(
+                &format!("sip:{addr}"),
+                "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 41000 RTP/AVP 0\r\n",
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        peer.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !session.is_ended() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        session.hangup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn aborting_pending_dial_sends_cancel_instead_of_leaving_terminal_ringing() {
+        let terminal = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = terminal.local_addr().unwrap();
+        let job = tokio::spawn(async move {
+            SipUacClient::new("127.0.0.1")
+                .dial(
+                    &format!("sip:{addr}"),
+                    "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 41000 RTP/AVP 0\r\n",
+                    Duration::from_secs(60),
+                )
+                .await
+        });
+        let mut buf = [0; 4096];
+        let (size, source) = terminal.recv_from(&mut buf).await.unwrap();
+        assert!(buf[..size].starts_with(b"INVITE "));
+        job.abort();
+        let _ = job.await;
+        let (size, _) =
+            tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut buf)).await.unwrap().unwrap();
+        assert!(buf[..size].starts_with(b"CANCEL "));
+        assert_eq!(source.ip(), "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn unusable_sdp_must_not_create_connected_call() {
+        let terminal = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = terminal.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let mut buf = [0; 4096];
+            let (size, source) = terminal.recv_from(&mut buf).await.unwrap();
+            let invite = String::from_utf8_lossy(&buf[..size]);
+            let id = invite.lines().find_map(|l| l.strip_prefix("Call-ID: ")).unwrap();
+            let sdp = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 45000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\n";
+            let response=format!("SIP/2.0 200 OK\r\nTo: <sip:terminal>;tag=remote\r\nCall-ID: {id}\r\nCSeq: 1 INVITE\r\nContact: <sip:terminal@{addr}>\r\nContent-Length: {}\r\n\r\n{sdp}",sdp.len());
+            terminal.send_to(response.as_bytes(), source).await.unwrap();
+            let (size, _) = terminal.recv_from(&mut buf).await.unwrap();
+            assert!(buf[..size].starts_with(b"ACK "));
+        });
+        let result = SipUacClient::new("127.0.0.1")
+            .dial(
+                &format!("sip:{addr}"),
+                "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 41000 RTP/AVP 0 8\r\n",
+                Duration::from_secs(2),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(SipDialError::InvalidSdpAnswer)),
+            "An unsupported codec must not be shown as connected"
+        );
+        peer.await.unwrap();
+    }
 
     #[tokio::test]
     async fn test_uac_dial_and_hangup_mock_terminal() {
