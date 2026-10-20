@@ -1226,7 +1226,7 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
     let alice_abonent = connected.iter().find(|a| a["display_name"] == "Alice").unwrap();
     let alice_pid = alice_abonent["abonent_id"].as_str().unwrap().to_string();
 
-    assert_eq!(bob_abonent["payload"]["settings"]["audio_tx_enabled"], true);
+    assert_eq!(bob_abonent["payload"]["audio_tx_enabled"], true);
 
     // 4. Operator Commands: Mute Bob audio, Rename Alice, Engine Command (M4.2, M4.4)
     let (code_mute, _) = reqwest_like_request(
@@ -1243,7 +1243,7 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
         reqwest_like_request(tcp_addr, "GET", "/api/v3/sessions/room-pkg-d/abonents", &token, None).await;
     let ab_muted_json: serde_json::Value = serde_json::from_str(&body_ab_muted).unwrap();
     let bob_muted = ab_muted_json["connected"].as_array().unwrap().iter().find(|a| a["display_name"] == "Bob").unwrap();
-    assert_eq!(bob_muted["payload"]["settings"]["audio_tx_enabled"], false);
+    assert_eq!(bob_muted["payload"]["audio_tx_enabled"], false);
 
     let (code_rename, _) = reqwest_like_request(
         tcp_addr,

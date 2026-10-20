@@ -354,6 +354,8 @@ fn test_state() -> (SharedState, Arc<JwtIssuer>) {
     let mut state = AppState::new();
     state.jwt_issuer = Some(issuer.clone());
     state.local_db = Some(db);
+    // Как main.rs после bind UDP-лупа: conference-адреса строятся из candidate IP.
+    state.server_addr.set("192.168.1.92".to_string()).expect("server_addr set once");
     // UI-поиск пользователей (`ui:users:search`) читает admin-хранилище (§4.4);
     // bootstrap `main.rs` наполняет его тем же администратором.
     crate::users::Users::create(&state, "admin", vks_core::Role::Operator);
@@ -1020,6 +1022,15 @@ async fn m4_abonents_lifecycle_and_commands() {
     let room_id_str = quick_body["session"]["id"].as_str().unwrap().to_string();
     assert_eq!(quick_body["session"]["display_name"], "M4 Quick Session");
     assert_eq!(quick_body["session"]["state"], "ACTIVE");
+    // T1.2: addresses нужны карточке конференции (`Proxy.informationList`).
+    assert_eq!(
+        quick_body["session"]["addresses"],
+        json!({
+            "sip": "sip:M4_Quick_Session@192.168.1.92",
+            "h323": "h323:M4_Quick_Session@192.168.1.92",
+            "webrtc": "sip:M4_Quick_Session@127.0.0.1",
+        })
+    );
 
     let room_id = vks_core::RoomId::from_uuid(uuid::Uuid::parse_str(&room_id_str).unwrap());
 
@@ -1044,8 +1055,47 @@ async fn m4_abonents_lifecycle_and_commands() {
     let abonents_body = json_body(abonents_resp).await;
     assert_eq!(abonents_body["count"], 1);
     assert_eq!(abonents_body["connected"][0]["display_name"], "Bob");
-    assert_eq!(abonents_body["connected"][0]["payload"]["settings"]["audio_tx_enabled"], true);
-    assert_eq!(abonents_body["connected"][0]["payload"]["settings"]["video_tx_enabled"], true);
+    assert_eq!(abonents_body["connected"][0]["payload"]["audio_tx_enabled"], true);
+    assert_eq!(abonents_body["connected"][0]["payload"]["video_tx_enabled"], true);
+    // T1.2: engine-маппер UI читает `details.user_agent` (`isWebrtcAbonent().includes`)
+    // и `details.*.enabled`; без них — TypeError в карточке участника.
+    assert_eq!(
+        abonents_body["connected"][0]["details"]["user_agent"], "Trueconf WebRTC Gateway",
+        "isWebrtcAbonent() checks this exact UA substring"
+    );
+    assert_eq!(abonents_body["connected"][0]["details"]["audio"]["tx"]["enabled"], true);
+    assert_eq!(abonents_body["connected"][0]["details"]["audio"]["rx"]["volume"], 0);
+
+    // engine/abonents фильтруется по session_id (иначе карточка видит чужих).
+    let engine_own = send(
+        &app,
+        request("GET", &format!("/api/v3/engine/abonents?session_id={room_id_str}"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(engine_own.status(), StatusCode::OK);
+    let engine_own_body = json_body(engine_own).await;
+    assert_eq!(engine_own_body["count"], 1);
+    // display_name — регистронезависимый поиск (передаёт store `engine-abonents`).
+    let engine_search =
+        send(&app, request("GET", "/api/v3/engine/abonents?display_name=bo", Some(&token), json!({}))).await;
+    assert_eq!(json_body(engine_search).await["count"], 1);
+    let engine_other = send(
+        &app,
+        request(
+            "GET",
+            "/api/v3/engine/abonents?session_id=00000000-0000-0000-0000-000000000000",
+            Some(&token),
+            json!({}),
+        ),
+    )
+    .await;
+    let engine_other_body = json_body(engine_other).await;
+    assert_eq!(engine_other_body["count"], 0, "session_id must filter abonents");
+    // `/ui/conferences/{id}` использует тот же session_json (карточка конференции).
+    let ui_conf =
+        send(&app, request("GET", &format!("/api/v3/ui/conferences/{room_id_str}"), Some(&token), json!({}))).await;
+    assert_eq!(ui_conf.status(), StatusCode::OK);
+    assert_eq!(json_body(ui_conf).await["conference"]["addresses"]["sip"], "sip:M4_Quick_Session@192.168.1.92");
 
     // 4. Mute Audio
     let mute_audio =
@@ -1056,7 +1106,7 @@ async fn m4_abonents_lifecycle_and_commands() {
     let check_mute_a =
         send(&app, request("GET", &format!("/api/v3/sessions/{room_id_str}/abonents"), Some(&token), json!({}))).await;
     let body_mute_a = json_body(check_mute_a).await;
-    assert_eq!(body_mute_a["connected"][0]["payload"]["settings"]["audio_tx_enabled"], false);
+    assert_eq!(body_mute_a["connected"][0]["payload"]["audio_tx_enabled"], false);
 
     // 5. Mute Video
     let mute_video =
@@ -1067,7 +1117,7 @@ async fn m4_abonents_lifecycle_and_commands() {
     let check_mute_v =
         send(&app, request("GET", &format!("/api/v3/sessions/{room_id_str}/abonents"), Some(&token), json!({}))).await;
     let body_mute_v = json_body(check_mute_v).await;
-    assert_eq!(body_mute_v["connected"][0]["payload"]["settings"]["video_tx_enabled"], false);
+    assert_eq!(body_mute_v["connected"][0]["payload"]["video_tx_enabled"], false);
 
     // 6. Rename participant
     let rename = send(
@@ -1470,7 +1520,7 @@ async fn step2_call_strings_and_invite_vertical() {
     assert_eq!(abonents_body["scheduled"][0]["display_name"], "Standby Box");
     assert_eq!(abonents_body["scheduled"][0]["uri"], "sip:192.168.1.150");
     assert_eq!(abonents_body["scheduled"][0]["payload"]["audio_tx_enabled"], true);
-    assert_eq!(abonents_body["scheduled"][0]["payload"]["settings"]["audio_tx_enabled"], true);
+    assert_eq!(abonents_body["scheduled"][0]["payload"]["audio_tx_enabled"], true);
 
     // 7. Test active outbound dial: POST /api/v3/ui/sessions/{id}/call_strings
     let dial_resp = send(

@@ -278,6 +278,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             (None, None, "127.0.0.1".to_string(), 0)
         }
     };
+    // Один источник истины с ICE: conference-адреса (`sip:/h323:`) — тот же
+    // нормализованный candidate IP (trim/fallback/bind-fail уже учтены выше).
+    let _ = admin_state.server_addr.set(candidate_addr.clone());
 
     // 8. Конфигурация обработчика сигналинга с реальными ICE/кодек атрибутами
     let ice_servers: Vec<vks_proto::signaling::IceServer> = config

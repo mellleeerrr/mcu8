@@ -169,9 +169,15 @@ fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_sto
     if !payload_map.contains_key("connections_limit") {
         payload_map.insert("connections_limit".to_string(), json!(connections_limit));
     }
+    // Ключи эталона 2.2.1.66, которые UI читает с дефолтами (T1.2).
+    payload_map.entry("selfview").or_insert_with(|| json!("SELECTIVE"));
+    payload_map.entry("cascade").or_insert_with(|| json!("none"));
 
-    let pin_val = stored_settings.get("pin").and_then(|v| v.as_str()).unwrap_or("");
-    let description_val = stored_settings.get("description").and_then(|v| v.as_str()).unwrap_or("");
+    // Эталон отдаёт null, а не ""; `has_pin` остаётся булевым для формы.
+    let text_or_null = |k: &str| {
+        stored_settings.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map_or(Value::Null, Value::from)
+    };
+    let (pin_val, description_val) = (text_or_null("pin"), text_or_null("description"));
     let owner_id_val = stored_settings
         .get("creator_id")
         .or_else(|| stored_settings.get("owner_id"))
@@ -200,17 +206,23 @@ fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_sto
         "duration":stored_settings.get("duration").cloned().unwrap_or(Value::Null),
         "stopped_at":if is_stopped {stored_settings.get("stopped_at").cloned().unwrap_or(Value::Null)} else {Value::Null},
         "session":if is_stopped {Value::Null} else {json!({"id":r.id.to_string(),"display_name":r.name,"started_at":r.created_ms/1000})},
+        "start_at": Value::Null,
+        "tags": Value::Null,
+        "addresses": conference_addresses(
+            state,
+            stored_settings.get("route").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(&r.name),
+        ),
         "primary_route":{"id":format!("route-{}",r.id),"name":stored_settings.get("route").and_then(Value::as_str).unwrap_or(&r.name)},
         "primary_dtmf":stored_settings.get("dtmf").filter(|v|!v.is_null()).map(|value|json!({"id":format!("dtmf-{}",r.id),"name":value})),
-        "primary_alias":stored_settings.get("alias").filter(|v|!v.is_null()).map(|value|json!({"id":format!("alias-{}",r.id),"name":value})),
+        "primary_alias":stored_settings.get("alias").and_then(Value::as_str).filter(|s|!s.is_empty()).map(|value|json!({"id":format!("alias-{}",r.id),"name":value})),
         "cascade":"none",
         "pin": pin_val,
-        "has_pin": !pin_val.is_empty(),
+        "has_pin": pin_val != Value::Null,
         "description": description_val,
         "layout": layout_val,
         "auto_call": auto_call_val,
         "abonents": { "sip": sip_count, "h323": h323_count, "rtsp": 0, "vnc": 0, "media": 0, "file": 0 },
-        "contacts": { "users": 0, "sip": sip_count, "h323": h323_count, "rtsp": 0, "vnc": 0, "media": 0, "file": 0 },
+        "contacts": { "users": 0, "sip": sip_count, "h323": h323_count, "alias": 0, "rtsp": 0, "vnc": 0, "media": 0, "file": 0 },
         "payload": payload_map
     });
 
@@ -230,6 +242,22 @@ fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_sto
 /// Лимит подключений комнаты (`payload.connections_limit`, из наших настроек).
 fn connections_limit(state: &AppState) -> u32 {
     SettingsService::get(state).limits.max_participants_per_room
+}
+
+/// Адреса конференции для входа внешних клиентов (эталон `.92`: `sip:/h323:` — LAN-IP
+/// сервера, `webrtc:` — локальный адрес; UI показывает их в карточке конференции).
+fn conference_addresses(state: &AppState, name: &str) -> Value {
+    let ip = state.server_addr.get().map(String::as_str).unwrap_or("127.0.0.1");
+    // IPv6 в SIP/H.323 URI — в квадратных скобках.
+    let host = if ip.contains(':') { format!("[{ip}]") } else { ip.to_string() };
+    // Имя может быть любым (пробелы/кириллица): в URI — только безопасный набор.
+    let name: String =
+        name.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' }).collect();
+    json!({
+        "sip": format!("sip:{name}@{host}"),
+        "h323": format!("h323:{name}@{host}"),
+        "webrtc": format!("sip:{name}@127.0.0.1"),
+    })
 }
 
 /// Очищает ID от лишних пробелов и фигурных скобок (вендорный баг фронтенда: `{id}}`).
@@ -761,6 +789,58 @@ pub async fn conference_contacts(
     Json(json!({ "contacts": contacts, "count": contacts.len() })).into_response()
 }
 
+/// `details.*` — источник для engine-мапперов UI (`dY`/`QQ`): `statuses.userAgent`
+/// (`isWebrtcAbonent()` ищет «Trueconf WebRTC Gateway»), `settings.*.isEnabled` и
+/// медиа-метрики. `present` = `enabled`, иначе карточка считает поток недоступным.
+fn abonent_details(
+    proto: &str,
+    audio_rx: bool,
+    audio_tx: bool,
+    video_rx: bool,
+    video_tx: bool,
+    volume_rx: i32,
+    volume_tx: i32,
+) -> Value {
+    let user_agent = match proto {
+        "sip" => "Trueconf SIP Gateway",
+        "h323" => "Trueconf H.323 Gateway",
+        "recorder" => "Trueconf Recorder",
+        _ => "Trueconf WebRTC Gateway",
+    };
+    let media = |enabled: bool, volume: i32| {
+        json!({
+            "enabled": enabled,
+            "volume": volume,
+            "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present": enabled, "active": enabled,
+            "packets": 0, "bytes": 0, "lost_packets": 0, "lossrate": 0, "requested_bitrate": 0,
+            "resolution": "0x0", "fps": 0, "width": 0, "height": 0, "frame_rate": 0
+        })
+    };
+    json!({
+        "user_agent": user_agent,
+        "bitrate": 0,
+        "video_supported": true,
+        "content_supported": true,
+        "fecc": proto == "h323",
+        "fec": false,
+        "srtp": false,
+        "self_view": false,
+        "cascade": "none",
+        "selection": false,
+        "audio": {
+            "auto_gain_control_switch": "DEFAULT",
+            "noise_suppressor_switch": "DEFAULT",
+            "auto_gain_control": false,
+            "noise_suppressor": false,
+            "power": 0,
+            "rx": media(audio_rx, volume_rx),
+            "tx": media(audio_tx, volume_tx)
+        },
+        "video": { "rx": media(video_rx, 0), "tx": media(video_tx, 0) },
+        "content": { "rx": media(false, 0), "tx": media(false, 0) }
+    })
+}
+
 /// Сериализует снапшот участника в DTO абонента, полностью совместимый с мапперами фронтенда (`dY`/`Lh`).
 pub fn participant_to_abonent_json_with_settings(
     p: &crate::hub::ParticipantSnapshot,
@@ -790,33 +870,15 @@ pub fn participant_to_abonent_json_with_settings(
     let volume_rx = media_opt.map(|m| m.volume_rx).unwrap_or(0);
     let volume_tx = media_opt.map(|m| m.volume_tx).unwrap_or(0);
 
-    let settings = json!({
-        "slot_render_type": "DEFAULT",
-        "auto_call": false,
-        "audio_rx_enabled": audio_rx_enabled,
-        "audio_tx_enabled": audio_tx_enabled,
-        "volume_rx": volume_rx,
-        "volume_tx": volume_tx,
-        "video_rx_enabled": video_rx_enabled,
-        "video_tx_enabled": video_tx_enabled,
-        "crown": "EQUAL",
-        "hide_display_name": false
-    });
-
-    let details = json!({
-        "audio": {
-            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present":false, "active":false, "packets":0, "bytes":0, "lost_packets":0, "lossrate":0, "requested_bitrate":0 },
-            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present":false, "active":false, "packets":0, "bytes":0, "lost_packets":0, "lossrate":0, "requested_bitrate":0 }
-        },
-        "video": {
-            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present":false, "active":false, "packets":0, "bytes":0, "lost_packets":0, "lossrate":0, "requested_bitrate":0, "resolution": "0x0", "fps": 0, "width":0,"height":0,"frame_rate":0 },
-            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present":false, "active":false, "packets":0, "bytes":0, "lost_packets":0, "lossrate":0, "requested_bitrate":0, "resolution": "0x0", "fps": 0, "width":0,"height":0,"frame_rate":0 }
-        },
-        "content": {
-            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present":false, "active":false, "packets":0, "bytes":0, "lost_packets":0, "lossrate":0, "requested_bitrate":0 },
-            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present":false, "active":false, "packets":0, "bytes":0, "lost_packets":0, "lossrate":0, "requested_bitrate":0 }
-        }
-    });
+    let details = abonent_details(
+        proto,
+        audio_rx_enabled,
+        audio_tx_enabled,
+        video_rx_enabled,
+        video_tx_enabled,
+        volume_rx,
+        volume_tx,
+    );
 
     json!({
         "id": p.participant_id,
@@ -844,8 +906,7 @@ pub fn participant_to_abonent_json_with_settings(
             "video_rx_enabled": video_rx_enabled,
             "video_tx_enabled": video_tx_enabled,
             "crown": "EQUAL",
-            "hide_display_name": false,
-            "settings": settings
+            "hide_display_name": false
         }
     })
 }
@@ -874,32 +935,7 @@ pub fn participant_to_abonent_json(p: &crate::hub::ParticipantSnapshot) -> Value
 pub fn call_record_to_abonent_json(r: &super::call_strings::CallStringRecord, state_str: &str) -> Value {
     let uri = if r.uri.contains(':') { r.uri.clone() } else { format!("sip:{}", r.uri) };
     let proto = uri.split(':').next().unwrap_or("sip");
-    let settings = json!({
-        "slot_render_type": "DEFAULT",
-        "auto_call": false,
-        "audio_rx_enabled": true,
-        "audio_tx_enabled": true,
-        "volume_rx": 0,
-        "volume_tx": 0,
-        "video_rx_enabled": true,
-        "video_tx_enabled": true,
-        "crown": "EQUAL",
-        "hide_display_name": false
-    });
-    let details = json!({
-        "audio": {
-            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0 },
-            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0 }
-        },
-        "video": {
-            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "resolution": "0x0", "fps": 0 },
-            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "resolution": "0x0", "fps": 0 }
-        },
-        "content": {
-            "rx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0 },
-            "tx": { "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0 }
-        }
-    });
+    let details = abonent_details(proto, true, true, true, true, 0, 0);
 
     let mut value = json!({
         "id": r.id,
@@ -917,24 +953,11 @@ pub fn call_record_to_abonent_json(r: &super::call_strings::CallStringRecord, st
         "state": state_str,
         "crown": "EQUAL",
         "connected_at": r.created_at,
-        "details": details,
-        "payload": {
-            "slot_render_type": "DEFAULT",
-            "auto_call": false,
-            "audio_rx_enabled": true,
-            "audio_tx_enabled": true,
-            "volume_rx": 0,
-            "volume_tx": 0,
-            "video_rx_enabled": true,
-            "video_tx_enabled": true,
-            "crown": "EQUAL",
-            "hide_display_name": false,
-            "settings": settings
-        }
+        "details": details
     });
+    // Payload — из записи call string (плоские `audio_*_enabled` — их читает маппер `Lh`).
     let payload = super::call_strings::default_contact_payload(Some(&r.payload));
-    value["payload"] = payload.clone();
-    value["payload"]["settings"] = payload;
+    value["payload"] = payload;
     value["crown"] = value["payload"]["crown"].clone();
     fill_native_stream_settings(&mut value);
     value
@@ -1038,8 +1061,7 @@ fn attach_call_contact(value: &mut Value, record: &super::call_strings::CallStri
             payload[field] = value["payload"][field].clone();
         }
     }
-    value["payload"] = payload.clone();
-    value["payload"]["settings"] = payload;
+    value["payload"] = payload;
     value["crown"] = value["payload"]["crown"].clone();
 }
 
@@ -1417,7 +1439,7 @@ pub async fn edit_abonent(
     Json(json!({ "status": "ok" })).into_response()
 }
 
-fn collect_all_abonents_json(state: &SharedState, scope: Option<&str>) -> (Vec<serde_json::Value>, usize) {
+fn collect_all_abonents_json(state: &SharedState, scope: Option<&str>) -> Vec<Value> {
     let mut room_ids: Vec<RoomId> =
         if let Ok(rooms) = state.rooms.lock() { rooms.keys().copied().collect() } else { Vec::new() };
     if let Some(scope) = scope {
@@ -1444,14 +1466,33 @@ fn collect_all_abonents_json(state: &SharedState, scope: Option<&str>) -> (Vec<s
             all_abonents.push(value);
         }
     }
-    let count = all_abonents.len();
-    (all_abonents, count)
+    all_abonents
 }
 
-/// `GET /api/v3/engine/abonents` → `{abonents:[...], count:N}`.
-pub async fn engine_abonents(State(state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
+/// Параметры `/engine/abonents` (UI передаёт `session_id` и `display_name`).
+#[derive(Deserialize)]
+pub struct EngineAbonentsQuery {
+    pub session_id: Option<String>,
+    pub display_name: Option<String>,
+}
+
+/// `GET /api/v3/engine/abonents?session_id=&display_name=` → `{abonents:[...], count:N}`.
+pub async fn engine_abonents(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Query(query): Query<EngineAbonentsQuery>,
+) -> Response {
     track("engine/abonents");
-    let (abonents, count) = collect_all_abonents_json(&state, auth.room_scope.as_deref());
+    let mut abonents = collect_all_abonents_json(&state, auth.room_scope.as_deref());
+    // Без фильтра карточка одной сессии видела участников другой (T1.2).
+    if let Some(session_id) = query.session_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        abonents.retain(|a| a["room_id"].as_str().is_some_and(|r| r.eq_ignore_ascii_case(session_id)));
+    }
+    if let Some(search) = query.display_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let needle = search.to_lowercase();
+        abonents.retain(|a| a["display_name"].as_str().is_some_and(|name| name.to_lowercase().contains(&needle)));
+    }
+    let count = abonents.len();
     Json(json!({
         "abonents": abonents,
         "count": count
@@ -1462,7 +1503,8 @@ pub async fn engine_abonents(State(state): State<SharedState>, Extension(auth): 
 /// `GET /api/v3/abonents` → список всех активных абонентов (для PNM UI).
 pub async fn list_abonents(State(state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
     track("abonents");
-    let (abonents, count) = collect_all_abonents_json(&state, auth.room_scope.as_deref());
+    let abonents = collect_all_abonents_json(&state, auth.room_scope.as_deref());
+    let count = abonents.len();
     Json(json!({
         "abonents": abonents,
         "count": count,

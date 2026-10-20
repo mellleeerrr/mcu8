@@ -30,6 +30,7 @@ impl OutboundDialer for PendingDialer {
 
 #[derive(Default)]
 struct CapturingDialer {
+    #[allow(clippy::type_complexity)] // (audio_tx, audio_rx, video_tx, video_rx, gain_tx, gain_rx)
     controls: Mutex<Vec<(bool, bool, bool, bool, u32, u32)>>,
     complete: tokio::sync::Notify,
 }

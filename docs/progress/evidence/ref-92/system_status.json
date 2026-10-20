@@ -1,0 +1,1 @@
+{"engine": {"connected": true, "description": "STARTED"}, "disk": {"videorecords": 4, "free": 62204288, "percent": 49, "full": "NORMAL"}, "sip": {"enable": true, "account": true, "registration": false, "local_address": "sip:192.168.1.92"}, "h323": {"enable": true, "account": true, "registration": false, "local_address": "h323:192.168.1.92"}, "time": 1792497355}

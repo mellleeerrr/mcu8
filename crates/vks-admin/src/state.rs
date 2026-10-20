@@ -220,6 +220,9 @@ pub struct AppState {
     pub media_healthy: std::sync::atomic::AtomicBool,
     /// Набор активных инъекций сбоев (M0.6 / M6.3).
     pub faults: Mutex<std::collections::HashSet<String>>,
+    /// Адрес MCU для conference-адресов (`addresses.sip/h323`). `OnceLock` — потому
+    /// что известен только после bind UDP-лупа (нормализованный ICE candidate).
+    pub server_addr: std::sync::OnceLock<String>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -238,6 +241,7 @@ impl std::fmt::Debug for AppState {
             .field("audit", &self.audit)
             .field("settings", &self.settings)
             .field("mode", &self.mode)
+            .field("server_addr", &self.server_addr)
             .field("event_queue", &self.event_queue)
             .field("media_healthy", &self.media_healthy.load(std::sync::atomic::Ordering::Relaxed))
             .finish()
@@ -276,6 +280,7 @@ impl AppState {
             revocation_tx,
             media_healthy: std::sync::atomic::AtomicBool::new(true),
             faults: Mutex::new(std::collections::HashSet::new()),
+            server_addr: std::sync::OnceLock::new(),
         }
     }
 
