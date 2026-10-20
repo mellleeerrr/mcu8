@@ -7,7 +7,7 @@
 - Содержимое: собранный TrueConf MCU Web UI v2.2.1-66 (Vue 3.5 + vue-router 4 (history, base `/pnm/`)
   + Pinia + axios + chart.js + video.js), сборка Vite (modern + `-legacy`). Сборка уже пропатчена
   стороной заказчика: брендинг «PROSTOR» в шапке, ссылка «Панель управления» (`href="/admin/"`)
-  и встроенный `<style id="prostor-pnm-nav-header-styles">`; футер «TrueConf MCU © 2026 АО «ТКС»».
+  и встроенный `<style id="prostor-pnm-overrides">`; футер «TrueConf MCU © 2026 АО «ТКС»».
   Полный ребрендинг рантайма (TrueConf MCU → PROSTOR) интегрирован 2026-10-17 — см. §«Ребренд PROSTOR».
 
 ## Восстановление архива

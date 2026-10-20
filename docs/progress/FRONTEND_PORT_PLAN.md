@@ -297,7 +297,8 @@ ui/conferences), `ws.rs` (спека §4.4), `tests.rs` (tower::oneshot + фик
 | `GET /api/v3/ui/system/status` | `{engine:{…},database:{…},network:{…},disk:{free,percent,full:"NORMAL"},sip:{…},h323:{…}}` ← маппер `DW`; навигация-гард деструктурирует `status` |
 | `GET /api/v3/license` | `{state:"VALID",type:"PERMANENT",count:100,…}` |
 | `GET /api/v3/features` | `{features:{}}` |
-| `GET /api/v3/engine/calibration` / `engine/diagnostics` | `{}` (маппер мягкий) |
+| `GET /api/v3/engine/calibration` | `{"calibration":null}` — как у эталона 2.2.1.66. Раздел удалён из UX (T1.1): CSS в оболочке `index.html` скрывает пункт админ-меню и плитку «Reserved resources» (в шапке и на «Статистике»), deep-link `/pnm/administration/calibration` → 308 на `/statistics`; `POST`/`DELETE` самого `/engine/calibration` не зарегистрированы (405), а `POST /engine/command` с `command`, содержащим `calibrat` (включая `recalibrate`) → 501 |
+| `GET /api/v3/engine/diagnostics` | `{diagnostics:{vsm:{limits:{performance},resources:{…}},scheduler:{workers}}}` — нужен разделу «Diagnostics» (гейт `"all"`) |
 | `GET /api/v3/system/time` | `{time,timezone,ntp,ntp_name,ntp_synchronized}` |
 | `GET /api/v3/settings/calls` | из наших `Settings` (codecs/limits) |
 | `GET /api/v3/settings/security` | `{payload:{password_min_*(числа), password_no_login_match:false, password_ttl:0, password_ttl_enabled:false, login_max_attempts_count:5, login_block_timeout:900, login_block_enabled:true, conf_*:0/false}}` ← маппер `Ane` читает **`data.payload`** (без него boot-цепочка падает на `settings.password`); lockout-значения — константы `auth` (не дублировать). `PATCH` — долг |

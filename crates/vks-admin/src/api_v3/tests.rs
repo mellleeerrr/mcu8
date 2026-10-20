@@ -911,7 +911,8 @@ async fn shell_monitoring_shapes_and_lifecycle_m4() {
     assert!(body["time"].is_object(), "time must be an object for NW (C4)");
     assert!(body["time"]["time"].is_number());
 
-    // 5. C11: license, diagnostics, calibration must have expected nested structures
+    // 5. C11: license/diagnostics — вложенные структуры; калибровка удалена из UX (T1.1)
+    // и отдаётся как у TrueConf-эталона: `{"calibration":null}`.
     let resp = send(&app, request("GET", "/api/v3/license", Some(&token), json!({}))).await;
     let body = json_body(resp).await;
     assert!(body["params"]["protocol"]["max_calls"].is_number(), "license params required (C11)");
@@ -921,8 +922,14 @@ async fn shell_monitoring_shapes_and_lifecycle_m4() {
     assert_eq!(body["diagnostics"]["vsm"]["limits"]["performance"], 100, "diagnostics required (C11)");
 
     let resp = send(&app, request("GET", "/api/v3/engine/calibration", Some(&token), json!({}))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
     let body = json_body(resp).await;
-    assert_eq!(body["calibration"]["state"], "IDLE", "calibration required (C11)");
+    assert!(body["calibration"].is_null(), "calibration must be null (T1.1)");
+    // Раздел удалён: start/stop не зарегистрированы (405), состояние не меняется.
+    for method in ["POST", "DELETE"] {
+        let resp = send(&app, request(method, "/api/v3/engine/calibration", Some(&token), json!({}))).await;
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "{method} calibration must be 405");
+    }
 
     // 6. M4.3 Lifecycle: Create -> Patch -> Start session -> Query -> Stop session -> Verify conference remains!
     let create_resp = send(
@@ -1094,10 +1101,13 @@ async fn m4_abonents_lifecycle_and_commands() {
     let mode_body = json_body(mode_switch).await;
     assert_eq!(mode_body["payload"]["mode"], "mcu");
 
-    // 8. Engine command
+    // 8. Engine command: калибровка удалена (T1.1) — честный 501, не фейковый 200.
     let eng_resp =
         send(&app, request("POST", "/api/v3/engine/command", Some(&token), json!({ "command": "calibration" }))).await;
-    assert_eq!(eng_resp.status(), StatusCode::OK);
+    assert_eq!(eng_resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let benign =
+        send(&app, request("POST", "/api/v3/engine/command", Some(&token), json!({ "command": "reload" }))).await;
+    assert_eq!(benign.status(), StatusCode::OK);
 
     // 9. Kick participant
     let kick_resp = send(&app, request("DELETE", &format!("/api/v3/abonents/{pid}"), Some(&token), json!({}))).await;

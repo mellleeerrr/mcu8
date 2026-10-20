@@ -75,6 +75,8 @@ impl Frontend {
     /// - `GET /` → `307 /pnm/`;
     /// - `GET /pnm` → `308 /pnm/` (+query; axum 0.8 не редиректит сам);
     /// - `GET /pnm/` и `/pnm/{*rest}` → файл, иначе `index.html` (SPA-fallback);
+    /// - `GET /pnm/administration/calibration[/]` → `308 /pnm/administration/statistics`
+    ///   (раздел калибровки удалён, T1.1);
     /// - `GET /mcu` и `/mcu/{*rest}` → файл, иначе **404** (без SPA-fallback);
     /// - `GET /admin`, `/admin/` → `307 /pnm/administration` (временная ссылка шапки UI).
     pub fn mount(&self) -> Router {
@@ -87,6 +89,8 @@ impl Frontend {
         Router::new()
             .route("/", get(redirect_root))
             .route("/pnm", get(redirect_pnm))
+            .route("/pnm/administration/calibration", get(redirect_removed_calibration))
+            .route("/pnm/administration/calibration/", get(redirect_removed_calibration))
             .nest_service("/pnm/", pnm_dir)
             .nest_service("/mcu", mcu_dir)
             .route("/admin", get(redirect_admin))
@@ -100,6 +104,11 @@ impl Frontend {
     pub fn router(&self) -> Router {
         self.mount().layer(axum::middleware::from_fn(with_cache_control))
     }
+}
+
+/// Deep-link удалённого раздела калибровки (T1.1) → «Статистика».
+async fn redirect_removed_calibration() -> Response {
+    (StatusCode::PERMANENT_REDIRECT, [(header::LOCATION, "/pnm/administration/statistics")]).into_response()
 }
 
 async fn redirect_root() -> Response {
@@ -221,7 +230,7 @@ pub async fn with_security_headers(csp: String, request: Request, next: Next) ->
 /// (в сборке их пять: WS-shim, probe modern-браузера, legacy-loader и два
 /// `nomodule`-скрипта; в modern-браузере исполняются три); `'unsafe-inline'`
 /// в `script-src` НЕ добавляется. `style-src` — `'self' 'unsafe-inline'`
-/// (инлайн-`<style id="prostor-pnm-nav-header-styles">` и style-атрибуты Vue).
+/// (инлайн-`<style id="prostor-pnm-overrides">` и style-атрибуты Vue).
 pub fn build_csp(index_html: &str) -> String {
     let mut csp = String::from("default-src 'self'; script-src 'self'");
     for script in extract_inline_scripts(index_html) {
@@ -331,6 +340,12 @@ mod tests {
         (status, headers, body)
     }
 
+    async fn head(app: &Router, uri: &str) -> (StatusCode, axum::http::HeaderMap) {
+        let request = HttpRequest::builder().method("HEAD").uri(uri).body(Body::empty()).unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        (response.status(), response.headers().clone())
+    }
+
     /// Как в `build_app`: роуты статики + слой Cache-Control/Vary. Security-заголовки —
     /// app-wide в `build_app`; для тестов заголовков на статике — `app_for_with_security`.
     fn app_for(fixture: &Fixture) -> Router {
@@ -405,6 +420,35 @@ mod tests {
         let (status, headers, _) = get(&app, "/admin/").await;
         assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(headers.get(header::LOCATION).unwrap().to_str().unwrap(), "/pnm/administration");
+    }
+
+    #[tokio::test]
+    async fn removed_calibration_redirects_to_statistics() {
+        let f = fixture("calibration-redirect");
+        let app = app_for(&f);
+        for uri in [
+            "/pnm/administration/calibration",
+            "/pnm/administration/calibration/",
+            "/pnm/administration/calibration?from=bookmark",
+        ] {
+            let (status, headers, _) = get(&app, uri).await;
+            assert_eq!(status, StatusCode::PERMANENT_REDIRECT, "{uri}");
+            assert_eq!(
+                headers.get(header::LOCATION).unwrap().to_str().unwrap(),
+                "/pnm/administration/statistics",
+                "{uri}"
+            );
+            // Редирект идёт через слой кэша: политика `/pnm/*` — no-cache.
+            assert_eq!(headers.get(header::CACHE_CONTROL).unwrap().to_str().unwrap(), CACHE_NO_CACHE, "{uri}");
+        }
+        // HEAD обслуживается тем же GET-роутом (axum срезает тело).
+        let (status, headers) = head(&app, "/pnm/administration/calibration").await;
+        assert_eq!(status, StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(headers.get(header::LOCATION).unwrap().to_str().unwrap(), "/pnm/administration/statistics");
+
+        // Соседние страницы админки отдаются как обычно (SPA-fallback).
+        let (status, _, _) = get(&app, "/pnm/administration/statistics").await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]

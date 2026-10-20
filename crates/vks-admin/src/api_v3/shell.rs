@@ -19,9 +19,8 @@ use super::{auth, track};
 use crate::settings::SettingsService;
 use crate::state::SharedState;
 
-// TODO(T3): ключи не-Operator ролей — провизорные (источник истины — гейт UI
-// `getIsProfileHasPermissions`); синхронизировать при появлении неоператорских
-// логинов. Operator отдаёт wildcard "all".
+// `Operator` сохраняет wildcard "all": им бандл гейтит «Diagnostics»/«Date and time».
+// `calibration:*` не выдаём ни одной роли (раздел удалён, T1.1).
 fn role_to_permissions(role: vks_core::Role) -> &'static [&'static str] {
     match role {
         vks_core::Role::Operator => &["all"],
@@ -34,8 +33,6 @@ fn role_to_permissions(role: vks_core::Role) -> &'static [&'static str] {
             "sessions:create",
             "sessions:update",
             "sessions:delete",
-            "calibration:start",
-            "calibration:stop",
         ],
         vks_core::Role::Participant => &["sessions:view", "conferences:view"],
         vks_core::Role::Viewer => &["sessions:view"],
@@ -223,17 +220,15 @@ pub async fn features() -> Response {
     Json(json!({ "features": {} })).into_response()
 }
 
-/// `GET /api/v3/engine/calibration` → `{calibration:{state:"IDLE",progress:0}}`.
+/// `GET /api/v3/engine/calibration` → `{"calibration":null}`.
+///
+/// Калибровка в нашей MCU не поддерживается (и убрана из UX, T1.1). Форма ответа —
+/// байт-в-байт как у TrueConf-эталона: UI-стор корректно превращает `null` в
+/// `calibration=null`, виджет калибровки не монтируется, статистика не уводит
+/// на страницу калибровки.
 pub async fn engine_calibration() -> Response {
     track("engine/calibration");
-    Json(json!({
-        "calibration": {
-            "state": "IDLE",
-            "progress": null,
-            "calibrated_at": null
-        }
-    }))
-    .into_response()
+    Json(json!({ "calibration": null })).into_response()
 }
 
 /// `GET /api/v3/engine/diagnostics` → `{diagnostics:{vsm:{limits:{performance:100},resources:{required:{encoders:0,decoders:0},available:{encoders:100,decoders:100}}},scheduler:{workers:4}}}`.
@@ -563,11 +558,19 @@ pub async fn switch_video_layout_mode(
 /// `POST /api/v3/engine/command` — команды движка.
 pub async fn engine_command(
     Extension(auth): Extension<crate::auth_middleware::AuthContext>,
-    Json(_body): Json<serde_json::Value>,
+    Json(body): Json<serde_json::Value>,
 ) -> Response {
     track("engine/command");
     if auth.role < vks_core::Role::Moderator {
         return super::error_json(403, "Forbidden: Moderator role required");
+    }
+    // Калибровки нет (T1.1): не подтверждаем успех команды, которой не существует.
+    let calibration = body
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|c| c.to_ascii_lowercase().contains("calibrat"));
+    if calibration {
+        return super::error_json(501, "Calibration is not supported");
     }
     Json(json!({ "status": "ok", "result": "ok" })).into_response()
 }
@@ -589,4 +592,27 @@ pub async fn ui_records(State(state): State<SharedState>) -> Response {
         "records": records,
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::role_to_permissions;
+    use vks_core::Role;
+
+    /// Контракт прав профиля (T1.1).
+    ///
+    /// Operator обязан сохранить wildcard "all": им бандл 2.2.1.66 гейтит
+    /// «Diagnostics» и «Date and time» — явный список прав их скрыл бы.
+    /// Ни одна роль не должна получать `calibration:*` литерально (UI прячет
+    /// остатки калибровки через `index.html`, deep-link — серверный редирект).
+    #[test]
+    fn role_permissions_contract() {
+        assert_eq!(role_to_permissions(Role::Operator), &["all"]);
+        for role in [Role::Operator, Role::Moderator, Role::Participant, Role::Viewer] {
+            assert!(
+                !role_to_permissions(role).iter().any(|p| p.starts_with("calibration:")),
+                "{role:?}: calibration:* retired"
+            );
+        }
+    }
 }

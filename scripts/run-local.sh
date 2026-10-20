@@ -40,9 +40,11 @@ terminate() {
     local pid="$1"
     [[ -n "$pid" ]] || return 0
     kill -0 "$pid" 2>/dev/null || return 0
-    # Чужие процессы не трогаем: только наш release-бинарь.
+    # Чужие процессы не трогаем: только наш release-бинарь. После пересборки
+    # старый процесс держит уже удалённый файл — readlink отдаёт «$BIN (deleted)».
     local exe
     exe="$(readlink "/proc/${pid}/exe" 2>/dev/null || true)"
+    exe="${exe% (deleted)}"
     if [[ "$exe" != "$BIN" ]]; then
         log "pid=$pid не наш бинарь ($exe) — не трогаю"
         return 0
@@ -76,7 +78,8 @@ start() {
     [[ -x "$BIN" ]] || { log "нет бинаря $BIN — сначала build"; exit 1; }
     [[ -f "$CONFIG" ]] || { log "нет конфига $CONFIG"; exit 1; }
     log "старт: $BIN --config $CONFIG"
-    ( cd "$ROOT" && nohup "$BIN" --config "$CONFIG" > "$LOG" 2>&1 & )
+    # Свой session, отвязанные stdio и exec: обёртка не держит пайп и не получает SIGHUP.
+    ( cd "$ROOT" && exec setsid "$BIN" --config "$CONFIG" </dev/null >>"$LOG" 2>&1 ) &
     for _ in $(seq 1 30); do
         if curl -fsS "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
             local pid

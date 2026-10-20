@@ -570,7 +570,9 @@ async fn test_composition_api_v3_login_chain() {
     let profile = axum::body::to_bytes(resp.into_body(), 1 << 20).await.expect("profile body");
     let profile: serde_json::Value = serde_json::from_slice(&profile).expect("profile json");
     assert_eq!(profile["user"]["role"], "operator", "login admin must resolve to Operator via Users store");
-    assert_eq!(profile["user"]["permissions"][0], "all");
+    // Operator сохраняет wildcard "all": им бандл гейтит «Diagnostics»/«Date and time»
+    // (T1.1; калибровку прячет index.html и серверный редирект, не права).
+    assert_eq!(profile["user"]["permissions"], serde_json::json!(["all"]));
 
     // 5. Security-заголовки — app-wide (включая /api/v3): CSP есть и на API-ответе.
     assert!(csp_on_profile, "security headers must be app-wide (build_app layer)");
@@ -1254,8 +1256,7 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
     assert_eq!(code_rename, 200);
 
     let (code_cmd, body_cmd) =
-        reqwest_like_request(tcp_addr, "POST", "/api/v3/engine/command", &token, Some(r#"{"command":"recalibrate"}"#))
-            .await;
+        reqwest_like_request(tcp_addr, "POST", "/api/v3/engine/command", &token, Some(r#"{"command":"reload"}"#)).await;
     assert_eq!(code_cmd, 200);
     let cmd_json: serde_json::Value = serde_json::from_str(&body_cmd).unwrap();
     assert_eq!(cmd_json["status"], "ok");

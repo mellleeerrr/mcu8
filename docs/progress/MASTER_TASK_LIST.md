@@ -407,7 +407,7 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 | ID | Задача | Статус | Коммит/артефакт |
 |---|---|---|---|
 | T0.1 | Единый рантайм: один release-процесс на :8080, runbook build→restart | 🟢 | `38f9a54`, `scripts/run-local.sh` |
-| T1.1 | Калибровка: `{"calibration":null}`, скрыть пункт меню, deep-link → статистика | ⚪ | — |
+| T1.1 | Калибровка: `{"calibration":null}`, скрыть пункт меню/плитку, deep-link 308 → статистика | 🟢 | см. `git log --grep T1.1` |
 | T1.2 | DTO конференции: `addresses`, `primary_*`, контакты; golden-фикстуры `.92` | ⚪ | — |
 | T1.3 | DTO абонента/сессии: `engineAbonent.statuses`, `connection.protocol`, `contact`, `layoutId` | ⚪ | — |
 | T1.4 | Раскладки: `.../video_layouts/{id}/abonents`, `calculate`, `settings/video`, attach в любой слот | ⚪ | — |
