@@ -142,6 +142,19 @@ impl LocalDb {
         *gen
     }
 
+    /// Remove a user's credential (login) from the in-memory store.
+    ///
+    /// Поколение не удаляется: монотонный счётчик должен остаться, чтобы
+    /// выданные ранее токены оставались невалидными после удаления логина.
+    pub fn remove_user(&self, id: &str) -> bool {
+        let removed = self.users.lock().unwrap().remove(id).is_some();
+        if removed {
+            self.password_changed_at.lock().unwrap().insert(id.to_string(), now_unix_secs());
+            self.bump_generation(id);
+        }
+        removed
+    }
+
     /// Replace `username`'s password (fresh salt + PBKDF2 hash) and bump the
     /// change mark and monotonic generation, invalidating previously issued tokens.
     pub fn set_password(&self, username: &str, new_password: &str) -> Result<User, LocalDbError> {
@@ -312,6 +325,18 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_user_revokes_login_and_bumps_generation() {
+        let db = LocalDb::new();
+        db.register("u-1", "ivan", "secret").expect("register");
+        let before = db.generation("u-1");
+        assert!(db.remove_user("u-1"));
+        assert!(db.user("u-1").is_err(), "логин удалён");
+        assert!(db.user_by_name("ivan").is_err(), "имя освобождено");
+        assert!(db.generation("u-1") > before, "поколение инкрементировано");
+        assert!(!db.remove_user("u-1"), "повторное удаление — false");
+    }
 
     #[test]
     fn register_and_authenticate_ok() {

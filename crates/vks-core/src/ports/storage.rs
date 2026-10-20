@@ -261,6 +261,11 @@ pub trait Storage: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    /// Удаляет учетные данные пользователя (при удалении логина в справочнике).
+    async fn delete_user_credentials(&self, _user_id: UserId) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     // --- Server Settings (M1.5) ---
 
     /// Atomically replace a versioned application configuration document.

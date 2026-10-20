@@ -226,13 +226,19 @@ pub async fn with_security_headers(csp: String, request: Request, next: Next) ->
 
 /// Строит `Content-Security-Policy` для страниц UI.
 ///
-/// `script-src` — `'self'` + sha256-хэши **inline**-скриптов `index.html`
-/// (в сборке их пять: WS-shim, probe modern-браузера, legacy-loader и два
-/// `nomodule`-скрипта; в modern-браузере исполняются три); `'unsafe-inline'`
-/// в `script-src` НЕ добавляется. `style-src` — `'self' 'unsafe-inline'`
+/// `script-src` — `'self' 'unsafe-eval'` + sha256-хэши **inline**-скриптов
+/// `index.html` (в сборке их пять: WS-shim, probe modern-браузера, legacy-loader
+/// и два `nomodule`-скрипта; в modern-браузере исполняются три);
+/// `'unsafe-inline'` в `script-src` НЕ добавляется.
+///
+/// `'unsafe-eval'` нужен vendor-бандлам PNM 2.2.1.66: карточка пользователя
+/// использует runtime-компиляцию шаблона (`new Function`), и без него браузер
+/// пишет CSP-error при каждом открытии карточки. Vendor-сервер (`.92`) CSP не
+/// отдаёт вовсе; здесь политика сохраняется, но с минимальной уступкой под
+/// неизменяемый vendor-код. `style-src` — `'self' 'unsafe-inline'`
 /// (инлайн-`<style id="prostor-pnm-overrides">` и style-атрибуты Vue).
 pub fn build_csp(index_html: &str) -> String {
-    let mut csp = String::from("default-src 'self'; script-src 'self'");
+    let mut csp = String::from("default-src 'self'; script-src 'self' 'unsafe-eval'");
     for script in extract_inline_scripts(index_html) {
         let digest = Sha256::digest(script.as_bytes());
         let encoded = base64::engine::general_purpose::STANDARD.encode(digest);
@@ -368,8 +374,9 @@ mod tests {
         assert!(csp.contains(&format!("'sha256-{FIXTURE_INLINE_HASH}'")), "csp: {csp}");
         // Внешний скрипт (src=) не хэшируется: ровно один хэш.
         assert_eq!(csp.matches("'sha256-").count(), 1, "csp: {csp}");
-        // script-src без unsafe-inline; style-src — с unsafe-inline.
-        assert!(csp.contains("script-src 'self' 'sha256-"), "csp: {csp}");
+        // script-src без unsafe-inline (unsafe-eval — только для vendor PNM);
+        // style-src — с unsafe-inline.
+        assert!(csp.contains("script-src 'self' 'unsafe-eval' 'sha256-"), "csp: {csp}");
         assert!(!csp.contains("script-src 'self' 'unsafe-inline'"), "csp: {csp}");
         assert!(csp.contains("style-src 'self' 'unsafe-inline'"), "csp: {csp}");
         assert!(csp.contains("object-src 'none'"), "csp: {csp}");
@@ -658,7 +665,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let csp = headers.get(header::CONTENT_SECURITY_POLICY).unwrap().to_str().unwrap();
         assert!(csp.contains(&format!("'sha256-{FIXTURE_INLINE_HASH}'")), "csp: {csp}");
-        assert!(csp.contains("script-src 'self' 'sha256-"), "csp: {csp}");
+        assert!(csp.contains("script-src 'self' 'unsafe-eval' 'sha256-"), "csp: {csp}");
         assert_eq!(headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap().to_str().unwrap(), "nosniff");
         assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap().to_str().unwrap(), "SAMEORIGIN");
         assert_eq!(headers.get(header::REFERRER_POLICY).unwrap().to_str().unwrap(), "same-origin");

@@ -344,7 +344,7 @@ async fn pnm_card_resources_roundtrip_regression() {
 }
 
 /// Состояние с issuer + LocalDb(`admin`/`s3cret`), как бутстрап `main.rs`.
-fn test_state() -> (SharedState, Arc<JwtIssuer>) {
+pub(crate) fn test_state() -> (SharedState, Arc<JwtIssuer>) {
     let issuer = Arc::new(JwtIssuer::new(JwtConfig {
         secret: "test_secret_api_v3_phase2".to_string(),
         ttl_secs: 86_400,
@@ -363,11 +363,11 @@ fn test_state() -> (SharedState, Arc<JwtIssuer>) {
     (Arc::new(state), issuer)
 }
 
-fn app(state: SharedState) -> Router {
+pub(crate) fn app(state: SharedState) -> Router {
     router(state)
 }
 
-fn request(method: &str, uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
+pub(crate) fn request(method: &str, uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
     let mut builder = Request::builder().method(method).uri(uri).header(header::CONTENT_TYPE, "application/json");
     if let Some(token) = token {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
@@ -375,7 +375,7 @@ fn request(method: &str, uri: &str, token: Option<&str>, body: Value) -> Request
     builder.body(Body::from(body.to_string())).expect("build request")
 }
 
-async fn send(app: &Router, req: Request<Body>) -> Response {
+pub(crate) async fn send(app: &Router, req: Request<Body>) -> Response {
     app.clone().oneshot(req).await.expect("oneshot")
 }
 
@@ -388,7 +388,7 @@ async fn login(app: &Router, user: &str, password: &str) -> Response {
     send(app, request("POST", "/api/v3/login", None, json!({ "login": user, "password": password }))).await
 }
 
-async fn login_token(app: &Router, user: &str, password: &str) -> String {
+pub(crate) async fn login_token(app: &Router, user: &str, password: &str) -> String {
     let response = login(app, user, password).await;
     assert_eq!(response.status(), StatusCode::OK, "login must succeed");
     let body = json_body(response).await;

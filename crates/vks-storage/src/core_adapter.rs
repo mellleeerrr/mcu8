@@ -188,6 +188,11 @@ impl Storage for MemoryStorage {
         Ok(self.credentials_map().read().unwrap().values().cloned().collect())
     }
 
+    async fn delete_user_credentials(&self, user_id: UserId) -> Result<(), StorageError> {
+        self.credentials_map().write().unwrap().remove(&user_id);
+        Ok(())
+    }
+
     async fn upsert_settings(&self, settings_json: &str) -> Result<(), StorageError> {
         *self.server_settings_slot().write().unwrap() = Some(settings_json.to_string());
         Ok(())
@@ -643,6 +648,16 @@ impl Storage for SqliteStorage {
         Ok(res)
     }
 
+    async fn delete_user_credentials(&self, user_id: UserId) -> Result<(), StorageError> {
+        let id_str = user_id.to_string();
+        sqlx::query("DELETE FROM user_credentials WHERE user_id = $1")
+            .bind(&id_str)
+            .execute(self.pool())
+            .await
+            .map_err(to_storage_err)?;
+        Ok(())
+    }
+
     async fn upsert_settings(&self, settings_json: &str) -> Result<(), StorageError> {
         sqlx::query(
             "INSERT INTO server_settings (id, data_json, updated_at)
@@ -1091,6 +1106,16 @@ impl Storage for PostgresStorage {
             }
         }
         Ok(res)
+    }
+
+    async fn delete_user_credentials(&self, user_id: UserId) -> Result<(), StorageError> {
+        let id_str = user_id.to_string();
+        sqlx::query("DELETE FROM user_credentials WHERE user_id = $1")
+            .bind(&id_str)
+            .execute(self.pool())
+            .await
+            .map_err(to_storage_err)?;
+        Ok(())
     }
 
     async fn upsert_settings(&self, settings_json: &str) -> Result<(), StorageError> {

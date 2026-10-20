@@ -30,6 +30,10 @@ pub struct ResourceState {
     /// переживают рестарт и участвуют в автодополнении «Добавить по адресу».
     #[serde(default, deserialize_with = "deserialize_addresses")]
     pub addresses: BTreeMap<String, AddressRecord>,
+    /// Справочник (T2.1): профили пользователей, группы, роли и личные
+    /// адресные книги. Хранится в том же configuration-document, что и ресурсы.
+    #[serde(default)]
+    pub directory: super::directory::DirectoryState,
 }
 
 /// Толерантная загрузка адресной книги: битые/старые записи не роняют весь

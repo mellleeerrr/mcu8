@@ -14,6 +14,7 @@
 pub mod auth;
 pub mod boot;
 pub mod call_strings;
+pub mod directory;
 pub mod resources;
 pub mod sessions;
 pub mod shell;
@@ -116,7 +117,40 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/settings/calls", get(shell::settings_calls).patch(shell::update_settings_calls))
         .route("/api/v3/settings/security", get(shell::settings_security))
         .route("/api/v3/settings/smtp", get(resources::smtp))
-        .route("/api/v3/users/{id}", get(resources::user))
+        .route("/api/v3/users", get(directory::list_users).post(directory::create_user))
+        .route(
+            "/api/v3/users/{id}",
+            get(directory::get_user).patch(directory::update_user).delete(directory::delete_user),
+        )
+        .route(
+            "/api/v3/users/{id}/credentials",
+            get(directory::get_user_credentials)
+                .post(directory::create_user_credentials)
+                .patch(directory::update_user_credentials)
+                .delete(directory::delete_user_credentials),
+        )
+        .route(
+            "/api/v3/profile/credentials",
+            get(directory::profile_credentials).patch(directory::update_profile_credentials),
+        )
+        .route("/api/v3/groups", get(directory::list_groups).post(directory::create_group))
+        .route(
+            "/api/v3/groups/{id}",
+            get(directory::get_group).patch(directory::update_group).delete(directory::delete_group),
+        )
+        .route(
+            "/api/v3/users/{id}/groups/{group_id}",
+            post(directory::add_user_to_group).delete(directory::remove_user_from_group),
+        )
+        .route("/api/v3/users/{id}/roles/{role_id}", post(directory::add_user_role).delete(directory::remove_user_role))
+        .route("/api/v3/roles", get(directory::list_roles))
+        .route("/api/v3/roles/{id}", get(directory::get_role))
+        .route("/api/v3/users/{id}/call_strings", get(directory::list_user_call_strings))
+        .route(
+            "/api/v3/users/{id}/call_strings/{address_id}",
+            post(directory::attach_user_call_string).delete(directory::detach_user_call_string),
+        )
+        .route("/api/v3/ui/users/{id}/call_strings", post(directory::create_user_call_string))
         .route("/api/v3/schedules", get(resources::schedules).post(resources::create_schedule))
         .route(
             "/api/v3/schedules/{id}",

@@ -766,6 +766,13 @@ fn lookup_session_record(state: &SharedState, room_id: &RoomId, id: Option<&str>
     })
 }
 
+/// Сериализация адреса в форме vendor (`id/uri/display_name/created_at/payload/contact`).
+pub(crate) fn address_value(id: &str, address: &AddressRecord) -> Value {
+    let mut record = stored_address_record(address);
+    record.id = id.to_string();
+    address_book_record(&record)
+}
+
 fn address_book_record(record: &CallStringRecord) -> Value {
     // Producers хранят уже нормализованный contact-payload; fallback — для записей,
     // пришедших из старых/внешних writers.
@@ -919,6 +926,9 @@ pub(crate) async fn ws_search(
     };
     if check_permission(&auth, None).is_err() {
         return Err((403, "Forbidden: insufficient permissions"));
+    }
+    if let Some(contact_id) = payload.get("contact_id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+        return super::directory::ws_user_call_strings(state, user_id, payload, contact_id).await;
     }
     let (count, records) = AddressFilter::from_value(payload).apply(address_book_records(state, &auth).await);
     Ok(json!({"call_strings": records, "count": count}))

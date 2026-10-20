@@ -356,7 +356,12 @@ async fn process_frame(
             }
             vec![ok_reply(&id, &json!({}))]
         }
-        "ui:users:search" => vec![ok_reply(&id, &users_search(state, &payload))],
+        "ui:users:search" => match super::directory::ws_users_search(state, &verified.user_id, &payload).await {
+            Ok(result) => vec![ok_reply(&id, &result)],
+            Err((code, description)) => {
+                vec![WsOutcome::json(json!({"id": id, "error": {"code": code, "description": description}}))]
+            }
+        },
         "ui:call_strings:search" => {
             match super::call_strings::ws_search(state, &verified.user_id, verified.room_id.as_deref(), &payload).await
             {
@@ -382,29 +387,6 @@ async fn process_frame(
 /// Обёртка ответа: `{"id": …, "payload": {…}}`.
 fn ok_reply(id: &Value, payload: &Value) -> WsOutcome {
     WsOutcome::json(json!({ "id": id, "payload": payload }))
-}
-
-/// `ui:users:search` → `{users:[…], count}` (маппер `QT`: `id`, `display_name`, …).
-///
-/// Источник — admin-хранилище пользователей; `search`/`query` фильтруют по имени
-/// (подстрока, case-insensitive). Незнакомые фильтры мягко игнорируются.
-fn users_search(state: &SharedState, payload: &Value) -> Value {
-    let needle =
-        payload.get("search").or_else(|| payload.get("query")).and_then(Value::as_str).unwrap_or("").to_lowercase();
-    let users = state.users.lock().expect("users store poisoned");
-    let matched: Vec<Value> = users
-        .values()
-        .filter(|u| needle.is_empty() || u.username.to_lowercase().contains(&needle))
-        .map(|u| {
-            json!({
-                "id": u.id,
-                "display_name": u.username,
-                "busy": false,
-                "deleted": u.deleted
-            })
-        })
-        .collect();
-    json!({ "users": matched, "count": matched.len() })
 }
 
 fn now_unix_ms() -> i64 {
