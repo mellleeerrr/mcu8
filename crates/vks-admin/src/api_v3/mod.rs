@@ -15,6 +15,7 @@ pub mod auth;
 pub mod boot;
 pub mod call_strings;
 pub mod directory;
+pub mod history;
 pub mod resources;
 pub mod sessions;
 pub mod shell;
@@ -64,6 +65,9 @@ pub struct ApiV3State {
     pub resources: tokio::sync::Mutex<resources::ResourceState>,
     /// `settings/video` (правится администратором; эталонные умолчания — ref-92).
     pub video_settings: std::sync::Mutex<serde_json::Value>,
+    /// Сгенерированные ZIP-архивы истории (export/clean) для
+    /// `/static/call_history/{filename}`; bounded снизу — чистятся при перезаписи.
+    pub history_exports: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
 }
 
 /// Состояние медиа-настроек абонента (громкость, mute).
@@ -317,6 +321,14 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/abonents/{id}/fecc", post(sessions::send_abonent_fecc))
         .route("/api/v3/sessions/{id}/abonents/{abonent_id}", delete(sessions::remove_session_abonent))
         .route("/api/v3/ui/sessions/{id}/abonents/{abonent_id}", delete(sessions::remove_session_abonent))
+        // T2.2: история конференций (vendor /call_history*).
+        .route("/api/v3/call_history", get(history::list))
+        .route("/api/v3/call_history/export", get(history::export))
+        .route("/api/v3/call_history/{id}/export", get(history::export_session))
+        .route("/api/v3/call_history/clean", post(history::clean))
+        .route("/api/v3/call_history/{id}", get(history::detail))
+        .route("/api/v3/ui/session_history/{id}", get(history::ui_session_history))
+        .route("/api/v3/ui/call_history/{id}", get(history::ui_call_history))
         .route("/api/v3/engine/command", post(shell::engine_command))
         .route("/api/v3/engine/abonents", get(sessions::engine_abonents))
         .layer(middleware::from_fn(normalize_stray_brace_middleware))
@@ -331,6 +343,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/references", get(boot::references))
         // WS: сокет открывается без токена, токен — в каждом сообщении (§4.4).
         .route("/api/v3/ws", get(ws::ws_handler))
+        // Vendor отдаёт готовые выгрузки истории как статику (без токена).
+        .route("/static/call_history/{filename}", get(history::static_export))
         .merge(protected)
         // Catch-all 501 на любой метод; `{*rest}` не матчит пустой rest (B3 ревью),
         // поэтому `/api/v3/` и `/api/v3` регистрируются явно (единый конверт).

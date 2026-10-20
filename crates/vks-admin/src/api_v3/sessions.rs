@@ -134,7 +134,7 @@ static CONFERENCE_PAYLOAD_DEFAULTS: std::sync::LazyLock<Value> = std::sync::Lazy
         .expect("conference_payload_defaults.json must be valid JSON")
 });
 
-fn conference_payload_defaults() -> serde_json::Map<String, Value> {
+pub(crate) fn conference_payload_defaults() -> serde_json::Map<String, Value> {
     CONFERENCE_PAYLOAD_DEFAULTS.as_object().cloned().unwrap_or_default()
 }
 
@@ -399,8 +399,14 @@ pub async fn start_session(
     let room = if let Some(ref cid) = body.conference_id {
         match find_room(&state, cid) {
             Some(r) => {
-                state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").remove(&r.id);
-                r
+                let was_stopped =
+                    state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").remove(&r.id);
+                if was_stopped {
+                    // Повторный запуск — новая сессия в истории (новый started_at).
+                    crate::rooms::Rooms::reset_created_ms(&state, &r.id).await.ok().flatten().unwrap_or(r)
+                } else {
+                    r
+                }
             }
             None => return error_json(404, "Conference not found"),
         }
@@ -410,6 +416,9 @@ pub async fn start_session(
             Err(e) => return error_json(500, &format!("Storage error: {e}")),
         }
     };
+    if let Ok(mut settings) = state.api_v3.conference_settings.lock() {
+        ensure_conference_identity(&mut settings, &room);
+    }
     // A live room inherits its definition resources; template contacts remain stable.
     if let Err(response) = prepare_session_resources(&state, &room.id.to_string(), &auth.subject).await {
         return response;
@@ -530,6 +539,8 @@ pub async fn stop_session(
                 .into_iter()
                 .map(|participant| participant.participant_id)
                 .collect();
+            // T2.2: снимок истории ДО очистки attempts/участников.
+            super::history::record_stopped(&state, &room, &auth.subject, "Manual").await;
             for participant in &stopped_participants {
                 Rooms::kick_participant(&state, &room.id, participant);
             }
@@ -601,6 +612,32 @@ pub async fn ui_conferences(
 
 /// `POST /api/v3/conferences` — создание комнаты тем же внутренним путём,
 /// что `POST /api/v1/rooms` (без дублирования логики).
+/// Свободный 9-значный DTMF-код конференции (vendor-контракт: `primary_dtmf`).
+fn free_dtmf(settings: &std::collections::HashMap<vks_core::RoomId, Value>) -> String {
+    let taken: std::collections::HashSet<&str> =
+        settings.values().filter_map(|value| value.get("dtmf").and_then(Value::as_str)).collect();
+    for _ in 0..32 {
+        let candidate = format!("{:09}", uuid::Uuid::new_v4().as_u128() % 1_000_000_000);
+        if !taken.contains(candidate.as_str()) {
+            return candidate;
+        }
+    }
+    format!("{:09}", uuid::Uuid::new_v4().as_u128() % 1_000_000_000)
+}
+
+/// Дозаполняет route/dtmf у сессии, созданной до T2.2 или через quick-start:
+/// иначе history/карточка показывают «ID: -», а vendor-UI ждёт реальные значения.
+fn ensure_conference_identity(settings: &mut std::collections::HashMap<vks_core::RoomId, Value>, room: &RoomRecord) {
+    let missing_dtmf = settings.get(&room.id).and_then(|value| value.get("dtmf")).is_none_or(|value| value.is_null());
+    let code = missing_dtmf.then(|| free_dtmf(settings));
+    let entry = settings.entry(room.id).or_insert_with(|| json!({}));
+    let Some(object) = entry.as_object_mut() else { return };
+    object.entry("route").or_insert_with(|| json!(room.name));
+    if let Some(code) = code {
+        object.insert("dtmf".to_string(), json!(code));
+    }
+}
+
 pub async fn create_conference(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
@@ -617,7 +654,7 @@ pub async fn create_conference(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Conference".to_string());
-    let record = match Rooms::create_async(&state, name).await {
+    let record = match Rooms::create_async(&state, name.clone()).await {
         Ok(r) => r,
         Err(e) => return error_json(500, &format!("Storage error: {e}")),
     };
@@ -625,7 +662,7 @@ pub async fn create_conference(
     // `/ui/video_layouts` + link) — серверный сид дал бы дубль «Общей».
     let resources_guard = state.api_v3.resources.lock().await;
     {
-        let mut initial_settings = json!({"creator_id":auth.subject,"owner_id":auth.subject});
+        let mut initial_settings = json!({"creator_id":auth.subject,"owner_id":auth.subject,"route":name});
         if let Some(cur_obj) = initial_settings.as_object_mut() {
             if let Some(ref pin) = body.pin {
                 cur_obj.insert("pin".to_string(), json!(pin));
@@ -642,6 +679,9 @@ pub async fn create_conference(
             }
         }
         if let Ok(mut settings_map) = state.api_v3.conference_settings.lock() {
+            if let Some(object) = initial_settings.as_object_mut() {
+                object.entry("dtmf").or_insert_with(|| json!(free_dtmf(&settings_map)));
+            }
             settings_map.insert(record.id, initial_settings);
         }
     }
@@ -762,25 +802,31 @@ pub async fn delete_conference(
         return resp;
     }
     match find_room(&state, &id) {
-        Some(room) => match Rooms::delete_async(&state, &room.id).await {
-            Ok(true) => {
-                state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").remove(&room.id);
-                state.api_v3.conference_settings.lock().ok().map(|mut m| m.remove(&room.id));
-                super::resources::purge_room_resources(&state, &room.id.to_string()).await;
-                state.notify_admin("conferences:deleted", json!({ "id": room.id.to_string() }));
-                state.notify_admin("conferences", json!({ "action": "deleted", "id": room.id.to_string() }));
-                audit_room(
-                    &state,
-                    &auth.subject,
-                    "conference.deleted",
-                    &room.id.to_string(),
-                    client_ip.as_ref().map(|c| c.0 .0.as_str()),
-                );
-                StatusCode::NO_CONTENT.into_response()
+        Some(room) => {
+            // `record_stopped` дедуплицирует уже остановленную сессию (room+started_at),
+            // поэтому вызов безопасен и для только что созданной (ещё не запущенной)
+            // конференции — она попадёт в историю как `Deleted`.
+            super::history::record_stopped(&state, &room, &auth.subject, "Deleted").await;
+            match Rooms::delete_async(&state, &room.id).await {
+                Ok(true) => {
+                    state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").remove(&room.id);
+                    state.api_v3.conference_settings.lock().ok().map(|mut m| m.remove(&room.id));
+                    super::resources::purge_room_resources(&state, &room.id.to_string()).await;
+                    state.notify_admin("conferences:deleted", json!({ "id": room.id.to_string() }));
+                    state.notify_admin("conferences", json!({ "action": "deleted", "id": room.id.to_string() }));
+                    audit_room(
+                        &state,
+                        &auth.subject,
+                        "conference.deleted",
+                        &room.id.to_string(),
+                        client_ip.as_ref().map(|c| c.0 .0.as_str()),
+                    );
+                    StatusCode::NO_CONTENT.into_response()
+                }
+                Ok(false) => error_json(404, "Conference not found"),
+                Err(e) => error_json(500, &format!("Storage error: {e}")),
             }
-            Ok(false) => error_json(404, "Conference not found"),
-            Err(e) => error_json(500, &format!("Storage error: {e}")),
-        },
+        }
         None => error_json(404, "Conference not found"),
     }
 }
@@ -924,7 +970,7 @@ pub fn participant_to_abonent_json_with_settings(
     })
 }
 
-fn native_stop_reason(reason: &str) -> &'static str {
+pub(crate) fn native_stop_reason(reason: &str) -> &'static str {
     let reason = reason.to_ascii_lowercase();
     if reason.contains("busy") || reason.contains("486") {
         "Busy Here"

@@ -191,6 +191,32 @@ impl Rooms {
         Ok(updated)
     }
 
+    /// Сбрасывает `created_ms` (время старта сессии) при повторном запуске
+    /// остановленной конференции: история получает новый `started_at`.
+    pub async fn reset_created_ms(
+        state: &AppState,
+        id: &RoomId,
+    ) -> Result<Option<RoomRecord>, vks_core::ports::storage::StorageError> {
+        let now = crate::state::now_unix_ms();
+        let updated = {
+            let mut rooms = state.rooms.lock().expect("rooms store poisoned");
+            match rooms.get_mut(id) {
+                Some(record) => {
+                    record.created_ms = now;
+                    Some(record.clone())
+                }
+                None => None,
+            }
+        };
+        if let (Some(storage), Some(record)) = (&state.storage, &updated) {
+            let mut cr = vks_core::Room::new(record.name.clone(), record.mode.unwrap_or(vks_core::RoomMode::Sfu));
+            cr.id = *id;
+            cr.created_ms = record.created_ms;
+            storage.upsert_room(&cr).await?;
+        }
+        Ok(updated)
+    }
+
     /// Удаляет комнату с подтвержденным синхронным удалением из Storage до ответа (M0-M1).
     pub async fn delete_async(state: &AppState, id: &RoomId) -> Result<bool, vks_core::ports::storage::StorageError> {
         let exists = {

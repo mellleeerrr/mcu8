@@ -34,6 +34,9 @@ pub struct ResourceState {
     /// адресные книги. Хранится в том же configuration-document, что и ресурсы.
     #[serde(default)]
     pub directory: super::directory::DirectoryState,
+    /// История конференций (T2.2): переживает рестарт в том же документе.
+    #[serde(default)]
+    pub history: super::history::HistoryState,
 }
 
 /// Толерантная загрузка адресной книги: битые/старые записи не роняют весь
