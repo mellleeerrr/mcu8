@@ -135,12 +135,13 @@ function buildFacts() {
     token = (await r.json()).token;
   }
 
+  try {
   // Чистим прошлые выходы, чтобы упавший прогон не оставил «свежий» summary/PNG.
   for (const f of ['summary.json', 'http-trace.json', 'server-correlate.txt']) {
     const target = path.join(OUT, f);
     if (fs.existsSync(target)) fs.rmSync(target);
   }
-  for (const f of fs.readdirSync(OUT).filter((f) => /^\d{2}-(?:h323|sip)-.*\.png$/.test(f))) {
+  for (const f of fs.readdirSync(OUT).filter((f) => /^\d{2}-(?:h323|h\.323|sip)-.*\.png$/i.test(f))) {
     fs.rmSync(path.join(OUT, f));
   }
   // Стенд выделенный: завершаем оставшиеся ACTIVE-сессии прошлых прогонов,
@@ -158,7 +159,7 @@ function buildFacts() {
     const sc = PROTOCOLS[pi];
     const rec = { protocol: sc.protocol, uri: sc.uri };
     await stopAll();
-    const base = pi * 6 + 1;
+    const base = pi * 8 + 1;
     const num = (n) => String(base + n).padStart(2, '0');
     const file = (n, suffix) => `${num(n)}-${sc.prefix}-${suffix}.png`;
 
@@ -342,14 +343,25 @@ function buildFacts() {
   const vendorErrors = consoleErrors.filter(isVendorCreate);
   const otherErrors = consoleErrors.filter((e) => !isVendorCreate(e));
   const createErrors = vendorErrors.length;
-  const httpErrors = steps.reduce((n, s) => n + s.fails.length, 0);
+  const httpErrors = trace.filter((entry) => entry.status >= 400 && entry.path !== '/api/v3/login').length;
   const notConnected = scenarios.filter((s) => !s.connected).map((s) => s.protocol);
   const vendorFields = [...new Set((vendorErrors.map((e) => e.text).join('\n').match(/reading '[a-zA-Z]+'/g) || []))];
-  const ok = otherErrors.length === 0 && httpErrors === 0 && notConnected.length === 0;
+  const acceptance = {
+    protocol_matches: scenarios.length === 2 && scenarios.every((s) => s.protocol_matches === true),
+    connected: scenarios.length === 2 && scenarios.every((s) => s.connected === true),
+    media_grows: scenarios.every((s) => s.media_grows === true),
+    controls_off: scenarios.every((s) => s.controls && s.controls.camera_rx_enabled === false && s.controls.mic_rx_enabled === false && s.controls.speaker_tx_enabled === false),
+    controls_restored: scenarios.every((s) => s.controls_restored && s.controls_restored.camera_rx_enabled === true && s.controls_restored.mic_rx_enabled === true && s.controls_restored.speaker_tx_enabled === true),
+    layout: scenarios.every((s) => s.layout && s.layout.mode === 'manual' && s.layout.size === 4 && (s.layout.abonents || []).some((a) => a.position === 1)),
+    reload_keeps_participant: scenarios.every((s) => s.layout_after_reload && s.layout_after_reload.participant_in_dom === true && (s.layout_after_reload.abonents || []).some((a) => a.position === 1)),
+    kicked: scenarios.every((s) => s.kicked && s.kicked.connected_empty === true && s.kicked.disconnected_contains === true),
+  };
+  const ok = otherErrors.length === 0 && httpErrors === 0 && Object.values(acceptance).every(Boolean);
   const summary = {
     generated_at: new Date().toISOString(), base: BASE,
     build,
     ok,
+    acceptance,
     totals: {
       console_errors: consoleErrors.length,
       vendor_create_form_typeerrors: createErrors,
@@ -359,13 +371,13 @@ function buildFacts() {
       unique_steps: new Set(steps.map((s) => s.step)).size,
     },
     unconnected_protocols: notConnected,
-    stale_stopped_sessions: staleActive,
+    stopped_active_sessions: staleActive,
     notes: [
       `transient vendor TypeError на открытие формы создания конференции (2.2.1.66), поля: ${vendorFields.join(', ')}; HTTP>=400 при этом 0 — атрибутировано, не скрыто`,
       'SIP и H.323: вызов из UI через автодополнение сохранённого адреса, рост медиа-счётчиков, mute камеры/микрофона из UI, ручная раскладка 4 слота, позиция 1 переживает reload, kick из UI',
       'summary.json и http-trace.json генерируются этим скриптом; первичные доказательства — PNG + smoke-логи + серверный лог',
       'провенанс: build.git_head — коммит, на котором запущен генератор; коммит с evidence является его docs-only потомком (кода не меняет), бинарник подтверждён sha256 и pid',
-      'в начале прогона завершаются оставшиеся ACTIVE-сессии стенда (stale_stopped_sessions); внутри сценариев — только созданные этим прогоном',
+      'в начале прогона завершаются оставшиеся ACTIVE-сессии стенда (stopped_active_sessions); внутри сценариев — только созданные этим прогоном',
     ],
     screenshots: screenshots.map((f) => ({ file: f })),
     scenarios,
@@ -397,9 +409,16 @@ function buildFacts() {
       layout: s.layout, layout_after_reload: s.layout_after_reload, kicked: s.kicked,
     })),
   }, null, 1));
-  await browser.close();
   if (!ok) {
-    console.error('evidence FAILED: unconnected=' + JSON.stringify(notConnected) + ', other_console_errors=' + otherErrors.length + ', http_errors=' + httpErrors);
-    process.exit(1);
+    console.error('evidence FAILED: unconnected=' + JSON.stringify(notConnected) + ', other_console_errors=' + otherErrors.length + ', http_errors=' + httpErrors + ', acceptance=' + JSON.stringify(acceptance));
+    process.exitCode = 1;
+  }
+  } catch (e) {
+    console.error(e);
+    process.exitCode = 1;
+  } finally {
+    // Гарантированная уборка: иначе исключение посреди сценария оставит ACTIVE-сессию.
+    try { await stopAll(); } catch (e) { console.error('cleanup: ' + e.message); }
+    await browser.close();
   }
 })().catch((e) => { console.error(e); process.exit(1); });

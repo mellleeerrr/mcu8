@@ -1,8 +1,8 @@
 # T1.6 — приёмка SIP+H.323 из UI, живые контролы, раскладка, `smoke_v3.sh`
 
-Дата: 2026-10-20. Стенд: release `vks-server` pid 547164, sha256 `971323a3…`
-(точные git head/pid/sha — в `summary.json → build`; Rust-код на момент прогонов
-не менялся с `b78d0d9`, последующие коммиты — тесты/доки/скрипты).
+Дата: 2026-10-20. Стенд: release `vks-server`; точные `git_head`, `git_dirty`,
+`binary_sha256` и `server_pid` — в `summary.json → build` (единственный источник
+истины; здесь значения не дублируются, чтобы не устаревать).
 UI `/pnm/`, endpoint `192.168.1.132` (SIP 5060, H.323 1720; одновременно
 активен только один протокол).
 
@@ -22,14 +22,15 @@ kick из UI (call_end + подтверждение «Отключить»).
 | Рост аудио-счётчиков rx/tx (точные числа — `summary.json`) | ✅ | ✅ |
 | Видео H.264 640x360 rx | ✅ | ✅ |
 | Камера выключается (`video.rx.enabled=false`) из UI | ✅ | ✅ |
-| Микрофон выключается (`audio.tx.enabled=false`) из UI | ✅ | ✅ |
+| Микрофон выключается (`audio.rx.enabled=false`, звук от участника) из UI | ✅ | ✅ |
+| Колонка выключается (`audio.tx.enabled=false`, звук к участнику) из UI | ✅ | ✅ |
 | Ручная раскладка: mode=manual, size=4, участник в position 1 | ✅ | ✅ |
 | После reload участник остаётся в position 1 и виден в редакторе | ✅ | ✅ |
 | Kick из UI: диалог подтверждения → `connected` пуст, участник в «Неподключившиеся» | ✅ | ✅ |
 | Console errors на шагах вызова/контролов/раскладки/reload/kick | 0 | 0 |
 | HTTP ≥400 за сценарий | 0 | 0 |
 
-Первичные доказательства: 16 PNG (`01`–`08` H.323, `07`–`14` SIP),
+Первичные доказательства: 16 PNG (`01`–`08` H.323, `09`–`16` SIP),
 `summary.json` (пошаговые ошибки, медиа, раскладки, build-провенанс),
 `http-trace.json` (все `/api/v3` запросы UI), `server-correlate.txt`
 (выдержка серверного лога по session id), 3 smoke-лога.
@@ -49,18 +50,18 @@ kick из UI (call_end + подтверждение «Отключить»).
   `03-h323-connected`, `04-h323-controls`, `05-h323-layout`,
   `06-h323-layout-reload` (слот 1 после reload), `07-h323-kick-confirm`,
   `08-h323-kicked`.
-- SIP: `07-sip-autocomplete`, `08-sip-address-selected` (Протокол SIP),
-  `09-sip-connected`, `10-sip-controls`, `11-sip-layout`,
-  `12-sip-layout-reload` (слот 1 после reload), `13-sip-kick-confirm`,
-  `14-sip-kicked`.
+- SIP: `09-sip-autocomplete`, `10-sip-address-selected` (Протокол SIP),
+  `11-sip-connected`, `12-sip-controls`, `13-sip-layout`,
+  `14-sip-layout-reload` (слот 1 после reload), `15-sip-kick-confirm`,
+  `16-sip-kicked`.
 
 ## Воспроизведение
 
 ```bash
 # 1) API/живой smoke (логи в этом каталоге обновляются вручную)
 ./scripts/smoke_v3.sh                                        # 24 проверки (API), 31 с живым вызовом
-SMOKE_URI=h323:192.168.1.132 ./scripts/smoke_v3.sh           # 27 проверок
-SMOKE_URI=sip:192.168.1.132  ./scripts/smoke_v3.sh           # 27 проверок
+SMOKE_URI=h323:192.168.1.132 ./scripts/smoke_v3.sh           # 31 проверка
+SMOKE_URI=sip:192.168.1.132  ./scripts/smoke_v3.sh           # 31 проверка
 
 # 2) UI-evidence (нужны node+playwright+Chromium и свободный endpoint)
 PLAYWRIGHT_MODULE=/path/to/node_modules/playwright \

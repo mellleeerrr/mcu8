@@ -147,7 +147,9 @@ req DELETE "/api/v3/call_strings/$ADDRESS_ID"
 [ "$(http_status GET "/api/v3/call_strings/$DELETED_ADDRESS")" = "404" ] \
     && ok "address deleted (GET 404)" || fail "address still readable after delete"
 ADDRESS_ID=""
-ok "address deleted"
+req GET "/api/v3/ui/call_strings?page=1&page_size=100"
+jq -e --arg id "$DELETED_ADDRESS" 'all(.call_strings[]; .id != $id)' <<<"$HTTP_BODY" >/dev/null \
+    && ok "address absent from list after delete" || fail "address still present in list after delete: $HTTP_BODY"
 
 # --- аудиоканал ----------------------------------------------------------
 req POST /api/v3/audiochannels '{"display_name":"smoke channel","payload":{}}'
