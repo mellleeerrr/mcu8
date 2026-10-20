@@ -128,6 +128,16 @@ fn select_rooms(state: &AppState, query: &SessionsQuery) -> (Vec<RoomRecord>, us
     (page_items, total)
 }
 
+/// Эталонный payload конференции (ref-92) — обязателен для валидатора старта в UI.
+static CONFERENCE_PAYLOAD_DEFAULTS: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    serde_json::from_str(include_str!("conference_payload_defaults.json"))
+        .expect("conference_payload_defaults.json must be valid JSON")
+});
+
+fn conference_payload_defaults() -> serde_json::Map<String, Value> {
+    CONFERENCE_PAYLOAD_DEFAULTS.as_object().cloned().unwrap_or_default()
+}
+
 /// JSON сессии/конференции (мапперы `Fv`/`dy`/`zZ` мягкие).
 fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_stopped: bool) -> Value {
     let (state_str, has_stopped) = if is_stopped { ("STOPPED", true) } else { ("ACTIVE", false) };
@@ -140,38 +150,21 @@ fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_sto
     let stored_settings =
         state.api_v3.conference_settings.lock().ok().and_then(|m| m.get(&r.id).cloned()).unwrap_or_else(|| json!({}));
 
-    let mut payload_map = json!({
-        "connections_limit":connections_limit, "mode":"CUSTOM", "bitrate":2048,
-        "resolution":{"width":1280,"height":720,"fps_limit":30},
-        "audio_codecs":[{"name":"G711","bitrate":null}],"video_codecs":[],
-        "locked":false,"aspeaker":"SELECTIVE","show_audio_bars":true,
-        "mute_audio_on_join":false,"mute_video_on_join":false,
-        "noise_suppression":"DEFAULT","auto_gain_control":"DEFAULT",
-        "slot_render_type":"AUTO","layout_strict":false,"slot_avatars":true,
-        "auto_create_layout":true,"ui_autocall_on_session_start":"DEFAULT",
-        "stop_rules":{"empty":null,"quit_all":null,"one_abonent":null},
-        "recording":{"individual":false,"quality":"BEST","show_presentation":"replace"},
-        "broadcast":{"individual":false,"profile":"quality","uri":null},
-        "styles":{"individual":false,"background_type":"SILVER",
-            "font":{"family":"DEFAULT","height":10,"height_auto":true,"text_float":false,
-                "rectangle_width":100,"rectangle_y":100,"rectangle_align":"LEFT","rectangle_auto":true,
-                "text_align":"CENTER","show_names":"PERMANENT",
-                "background":{"red":0,"green":0,"blue":0,"alpha":128},
-                "text_foreground":{"red":255,"green":255,"blue":255,"alpha":255},
-                "text_background":{"red":0,"green":0,"blue":0,"alpha":255}},
-            "border":{"enabled":"ON","mode":"SIMPLE","args":{"thickness":10},"floating":"ON","selected":"ON","spacing":10}}
-    }).as_object().cloned().unwrap();
+    // Полный payload эталона (ref-92): UI-валидатор открывает кнопки старта
+    // только когда есть `audio_codecs`/`video_codecs`, `broadcast`, `styles` и т.д.
+    let mut payload_map = conference_payload_defaults();
     if let Some(stored) = stored_settings.as_object() {
         for (key, value) in stored {
             payload_map.insert(key.clone(), value.clone());
         }
     }
-    if !payload_map.contains_key("connections_limit") {
+    // Лимит конференции приоритетнее системного умолчания (UI правит его в форме).
+    if stored_settings.get("connections_limit").is_none() {
         payload_map.insert("connections_limit".to_string(), json!(connections_limit));
     }
     // Ключи эталона 2.2.1.66, которые UI читает с дефолтами (T1.2).
-    payload_map.entry("selfview").or_insert_with(|| json!("SELECTIVE"));
-    payload_map.entry("cascade").or_insert_with(|| json!("none"));
+    payload_map.entry("selfview".to_string()).or_insert_with(|| json!("SELECTIVE"));
+    payload_map.entry("cascade".to_string()).or_insert_with(|| json!("none"));
 
     // Эталон отдаёт null, а не ""; `has_pin` остаётся булевым для формы.
     let text_or_null = |k: &str| {
@@ -221,7 +214,12 @@ fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_sto
         "description": description_val,
         "layout": layout_val,
         "auto_call": auto_call_val,
-        "abonents": { "sip": sip_count, "h323": h323_count, "rtsp": 0, "vnc": 0, "media": 0, "file": 0 },
+        // Карточка списка деструктурирует счётчики (`entity.abonents.rtsp`),
+        // а маппер `Mee` — `abonents.abonents.map`; отдаём обе формы сразу.
+        "abonents": {
+            "count": 0, "abonents": [], "records": [], "rtmp": [], "youtube": [],
+            "sip": sip_count, "h323": h323_count, "rtsp": 0, "vnc": 0, "media": 0, "file": 0
+        },
         "contacts": { "users": 0, "sip": sip_count, "h323": h323_count, "alias": 0, "rtsp": 0, "vnc": 0, "media": 0, "file": 0 },
         "payload": payload_map
     });
@@ -373,6 +371,21 @@ pub async fn sessions(
 }
 
 /// `POST /api/v3/sessions` — старт сессии конференции (или создание быстрой сессии).
+/// Сессия наследует ресурсы конференции и получает «Общую» раскладку (идемпотентно).
+/// При ошибке persist откатывает in-memory состояние и возвращает 500.
+async fn prepare_session_resources(state: &SharedState, room_id: &str, creator: &str) -> Result<(), Response> {
+    let mut resources = state.api_v3.resources.lock().await;
+    let previous = resources.clone();
+    let source = format!("conferences:{room_id}:audiochannels");
+    let target = format!("sessions:{room_id}:audiochannels");
+    if let Some(links) = resources.links.get(&source).cloned() {
+        // Уже существующие session-ссылки (раскладки прошлого запуска) сохраняются.
+        resources.links.entry(target).or_insert(links);
+    }
+    super::resources::inherit_and_ensure_default_layout(&mut resources, room_id, creator);
+    super::resources::commit(state, &mut resources, previous).await
+}
+
 pub async fn start_session(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
@@ -398,17 +411,10 @@ pub async fn start_session(
         }
     };
     // A live room inherits its definition resources; template contacts remain stable.
-    let contacts = {
-        let mut resources = state.api_v3.resources.lock().await;
-        for kind in ["video_layouts", "audiochannels"] {
-            let source = format!("conferences:{}:{kind}", room.id);
-            let target = format!("sessions:{}:{kind}", room.id);
-            if let Some(links) = resources.links.get(&source).cloned() {
-                resources.links.insert(target, links);
-            }
-        }
-        resources.contacts.get(&room.id.to_string()).cloned().unwrap_or_default()
-    };
+    if let Err(response) = prepare_session_resources(&state, &room.id.to_string(), &auth.subject).await {
+        return response;
+    }
+    let contacts = state.api_v3.resources.lock().await.contacts.get(&room.id.to_string()).cloned().unwrap_or_default();
     let autocall = state
         .api_v3
         .conference_settings
@@ -485,6 +491,10 @@ pub async fn quick_session(
         Ok(r) => r,
         Err(e) => return error_json(500, &format!("Storage error: {e}")),
     };
+    // Быстрая сессия тоже имеет «Общую» раскладку — иначе UI-сессия падает на `.some`.
+    if let Err(response) = prepare_session_resources(&state, &room.id.to_string(), &auth.subject).await {
+        return response;
+    }
     state.notify_admin("sessions:started", json!({"id":room.id.to_string(),"conference":{"id":room.id.to_string()},"session":session_json(&state,&room,connections_limit(&state),false)}));
     state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
     state.notify_admin("conferences:created", json!({ "id": room.id.to_string() }));
@@ -611,6 +621,8 @@ pub async fn create_conference(
         Ok(r) => r,
         Err(e) => return error_json(500, &format!("Storage error: {e}")),
     };
+    // Раскладку/аудиоканал конференции создаёт сам UI после POST (он шлёт
+    // `/ui/video_layouts` + link) — серверный сид дал бы дубль «Общей».
     let resources_guard = state.api_v3.resources.lock().await;
     {
         let mut initial_settings = json!({"creator_id":auth.subject,"owner_id":auth.subject});
@@ -754,6 +766,7 @@ pub async fn delete_conference(
             Ok(true) => {
                 state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").remove(&room.id);
                 state.api_v3.conference_settings.lock().ok().map(|mut m| m.remove(&room.id));
+                super::resources::purge_room_resources(&state, &room.id.to_string()).await;
                 state.notify_admin("conferences:deleted", json!({ "id": room.id.to_string() }));
                 state.notify_admin("conferences", json!({ "action": "deleted", "id": room.id.to_string() }));
                 audit_room(
@@ -1065,7 +1078,8 @@ fn attach_call_contact(value: &mut Value, record: &super::call_strings::CallStri
     value["crown"] = value["payload"]["crown"].clone();
 }
 
-/// `GET /api/v3/sessions/{id}/abonents` (и `/ui/sessions/{id}/abonents`) → динамический ростер абонентов.
+/// Раскладка участника: его individual-раскладка, иначе «Общая» комнаты.
+/// UI считает `hasIndividualLayout = !defaults.some(l => l.layoutId === entity.layoutId)`.
 pub async fn session_abonents(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
@@ -1081,6 +1095,16 @@ pub async fn session_abonents(
     }
 
     let participants = state.room_hub.list_participants(&room.id);
+    let layout_ids = {
+        let resources = state.api_v3.resources.lock().await;
+        participants
+            .iter()
+            .filter_map(|p| {
+                super::resources::participant_layout_id(&resources, &room.id, &p.participant_id)
+                    .map(|layout_id| (p.participant_id.clone(), layout_id))
+            })
+            .collect::<std::collections::HashMap<String, String>>()
+    };
     let settings_map = state.api_v3.abonent_settings.lock().ok();
     let mut attempts = state.api_v3.call_attempts.lock().expect("call_attempts poisoned");
     let connected: Vec<Value> = participants
@@ -1088,6 +1112,9 @@ pub async fn session_abonents(
         .map(|p| {
             let media = settings_map.as_ref().and_then(|m| m.get(&p.participant_id));
             let mut value = participant_to_abonent_json_with_settings(p, media);
+            if let Some(layout_id) = layout_ids.get(&p.participant_id) {
+                value["video_layout_id"] = json!(layout_id);
+            }
             if let Some(attempt) = attempts
                 .iter()
                 .find(|((rid, _), a)| *rid == room.id && a.participant_id.as_deref() == Some(p.participant_id.as_str()))
@@ -1439,12 +1466,13 @@ pub async fn edit_abonent(
     Json(json!({ "status": "ok" })).into_response()
 }
 
-fn collect_all_abonents_json(state: &SharedState, scope: Option<&str>) -> Vec<Value> {
+async fn collect_all_abonents_json(state: &SharedState, scope: Option<&str>) -> Vec<Value> {
     let mut room_ids: Vec<RoomId> =
         if let Ok(rooms) = state.rooms.lock() { rooms.keys().copied().collect() } else { Vec::new() };
     if let Some(scope) = scope {
         room_ids.retain(|rid| rid.to_string().eq_ignore_ascii_case(scope));
     }
+    let resources = state.api_v3.resources.lock().await;
     let settings_map = state.api_v3.abonent_settings.lock().ok();
     let attempts = state.api_v3.call_attempts.lock().expect("call_attempts poisoned");
     let mut all_abonents = Vec::new();
@@ -1452,6 +1480,9 @@ fn collect_all_abonents_json(state: &SharedState, scope: Option<&str>) -> Vec<Va
         for p in state.room_hub.list_participants(&rid) {
             let media = settings_map.as_ref().and_then(|m| m.get(&p.participant_id));
             let mut value = participant_to_abonent_json_with_settings(&p, media);
+            if let Some(layout_id) = super::resources::participant_layout_id(&resources, &rid, &p.participant_id) {
+                value["video_layout_id"] = json!(layout_id);
+            }
             if let Some(attempt) = attempts
                 .iter()
                 .find(|((room, _), attempt)| {
@@ -1483,7 +1514,7 @@ pub async fn engine_abonents(
     Query(query): Query<EngineAbonentsQuery>,
 ) -> Response {
     track("engine/abonents");
-    let mut abonents = collect_all_abonents_json(&state, auth.room_scope.as_deref());
+    let mut abonents = collect_all_abonents_json(&state, auth.room_scope.as_deref()).await;
     // Без фильтра карточка одной сессии видела участников другой (T1.2).
     if let Some(session_id) = query.session_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         abonents.retain(|a| a["room_id"].as_str().is_some_and(|r| r.eq_ignore_ascii_case(session_id)));
@@ -1503,7 +1534,7 @@ pub async fn engine_abonents(
 /// `GET /api/v3/abonents` → список всех активных абонентов (для PNM UI).
 pub async fn list_abonents(State(state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
     track("abonents");
-    let abonents = collect_all_abonents_json(&state, auth.room_scope.as_deref());
+    let abonents = collect_all_abonents_json(&state, auth.room_scope.as_deref()).await;
     let count = abonents.len();
     Json(json!({
         "abonents": abonents,

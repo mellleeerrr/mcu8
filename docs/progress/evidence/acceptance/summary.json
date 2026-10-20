@@ -1,0 +1,167 @@
+{
+  "session_id": "a37ecc9c-f15f-4a40-a2e4-7d42ce33254b",
+  "conference_name": "Conf_505679476",
+  "session_state": "ACTIVE",
+  "started_at": 1792512335,
+  "server_pid": 461301,
+  "abonent": {
+    "display_name": "192.168.1.132",
+    "connection_url": "h323:192.168.1.132",
+    "protocol": "h323",
+    "video_layout_id": "dc8d0f49-a5ad-4325-b9f5-da2cf0561955"
+  },
+  "media": {
+    "audio": {
+      "rx": {
+        "active": true,
+        "bitrate": 61772,
+        "codec": "PCMU",
+        "height": 0,
+        "packets": 2428,
+        "resolution": "0x0",
+        "width": 0
+      },
+      "tx": {
+        "active": true,
+        "bitrate": 59381,
+        "codec": "PCMU",
+        "height": 0,
+        "packets": 2334,
+        "resolution": "0x0",
+        "width": 0
+      }
+    },
+    "video": {
+      "rx": {
+        "active": true,
+        "bitrate": 31291,
+        "codec": "H264",
+        "height": 360,
+        "packets": 435,
+        "resolution": "640x360",
+        "width": 640
+      },
+      "tx": {
+        "active": true,
+        "bitrate": 254662,
+        "codec": "H264",
+        "height": 360,
+        "packets": 2751,
+        "resolution": "640x360",
+        "width": 640
+      }
+    }
+  },
+  "layouts": [
+    {
+      "id": "c438981c-07d4-49b2-ad62-9080bb15a3ef",
+      "type": "default",
+      "mode": "auto",
+      "preset": "preset_default_13",
+      "slots": 0,
+      "abonents_count": 1,
+      "abonents": [
+        "192.168.1.132"
+      ]
+    },
+    {
+      "id": "dc8d0f49-a5ad-4325-b9f5-da2cf0561955",
+      "type": "individual",
+      "mode": "manual",
+      "preset": "preset_equal_25",
+      "slots": 25,
+      "abonents_count": 1,
+      "abonents": [
+        "192.168.1.132"
+      ]
+    }
+  ],
+  "ui_steps": [
+    {
+      "step": "login",
+      "errors": [],
+      "fails": []
+    },
+    {
+      "step": "create-conference",
+      "errors": [
+        "CONSOLE TypeError: Cannot read properties of null (reading 'route')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422697)\n    at $A (ht",
+        "CONSOLE TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422436)\n    at ",
+        "CONSOLE TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.updateChainValue (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:42",
+        "CONSOLE TypeError: Cannot read properties of undefined (reading 'length')\n    at Proxy.Qv (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:424056)\n    at m",
+        "CONSOLE TypeError: Cannot read properties of null (reading 'mode')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:438450)\n    at $A (htt",
+        "CONSOLE TypeError: Cannot read properties of null (reading 'connectionsLimit')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:439639)\n  "
+      ],
+      "fails": []
+    },
+    {
+      "step": "start-conference",
+      "errors": [],
+      "fails": []
+    },
+    {
+      "step": "add-address-h323",
+      "errors": [],
+      "fails": []
+    },
+    {
+      "step": "layout-editor",
+      "errors": [],
+      "fails": []
+    },
+    {
+      "step": "session-layouts-tab",
+      "errors": [],
+      "fails": []
+    },
+    {
+      "step": "reload",
+      "errors": [],
+      "fails": []
+    }
+  ],
+  "ui_api_mutations": [
+    "create-conference :: POST /api/v3/conferences {\"display_name\":\"Conf_505679476\",\"route\":\"Conf_505679476\",\"dtmf\":\"200123958\",\"duration\":null,\"payload\":{\"audio_codecs\":[{\"name\":\"AAC\",\"bitrate\":null},{\"name\":\"G711\",\"bitrate\":null},{\"name\":\"G719\",\"bitrate\":null},{\"name\":\"G722\",\"bitrate\":null},{\"name\":\"G7221\",\"",
+    "create-conference :: POST /api/v3/ui/video_layouts {\"display_name\":null,\"payload\":{\"mode\":\"auto\",\"preset\":\"preset_default_13\",\"type\":\"default\"}}",
+    "create-conference :: POST /api/v3/conferences/a37ecc9c-f15f-4a40-a2e4-7d42ce33254b/video_layouts/c438981c-07d4-49b2-ad62-9080bb15a3ef ",
+    "create-conference :: POST /api/v3/audiochannels {\"display_name\":\"Для всех участников\",\"payload\":{\"type\":\"default\",\"vad\":true,\"autofill_speakers\":true,\"autofill_listeners\":true,\"speakers\":[],\"listeners\":[],\"attachmode\":\"BLACKLIST\",\"whitelist\":[],\"blacklist\":[]}}",
+    "create-conference :: POST /api/v3/conferences/a37ecc9c-f15f-4a40-a2e4-7d42ce33254b/audiochannels/dffefe78-ebd8-481d-8d65-f7a6fec137d1 ",
+    "start-conference :: PATCH /api/v3/conferences/a37ecc9c-f15f-4a40-a2e4-7d42ce33254b {\"display_name\":\"Conf_505679476\",\"route\":\"Conf_505679476\",\"dtmf\":\"200123958\",\"pin\":null,\"duration\":null,\"alias\":\"\",\"payload\":{\"connections_limit\":50,\"bitrate\":2048,\"resolution\":{\"width\":1280,\"height\":720,\"fps_limit\":30},\"audio_codecs\":[{\"bitrate\":null,\"name\":\"",
+    "start-conference :: POST /api/v3/sessions {\"conference_id\":\"a37ecc9c-f15f-4a40-a2e4-7d42ce33254b\"}",
+    "add-address-h323 :: POST /api/v3/ui/sessions/a37ecc9c-f15f-4a40-a2e4-7d42ce33254b/call_strings {\"uri\":\"h323:192.168.1.132\",\"display_name\":\"192.168.1.132\",\"payload\":{\"auto_call\":true,\"audio_rx_enabled\":true,\"audio_tx_enabled\":true,\"volume_rx\":0,\"volume_tx\":0,\"video_rx_enabled\":true,\"video_tx_enabled\":true,\"noise_suppression\":\"DEFAULT\",\"auto_gain_control\"",
+    "layout-editor :: POST /api/v3/ui/video_layouts/calculate {\"preset\":\"preset_equal_25\",\"width\":884,\"height\":497}",
+    "layout-editor :: POST /api/v3/ui/video_layouts {\"display_name\":\"Для “192.168.1.132”\",\"payload\":{\"mode\":\"manual\",\"preset\":\"preset_equal_25\",\"type\":\"individual\",\"slots\":[{\"position\":1,\"role\":\"PEER\",\"contact_id\":\"cs-5efdf849-c647-4d4c-94b4-200a7909f22e\",\"abonent_id\":\"h323-eede10bd-51b0-4199-bc06-0166cc37a7b1@",
+    "layout-editor :: POST /api/v3/sessions/a37ecc9c-f15f-4a40-a2e4-7d42ce33254b/video_layouts/dc8d0f49-a5ad-4325-b9f5-da2cf0561955 ",
+    "layout-editor :: POST /api/v3/sessions/a37ecc9c-f15f-4a40-a2e4-7d42ce33254b/video_layouts/dc8d0f49-a5ad-4325-b9f5-da2cf0561955/abone {\"connection_id\":\"h323-eede10bd-51b0-4199-bc06-0166cc37a7b1@h323-gateway\",\"contact_id\":\"cs-5efdf849-c647-4d4c-94b4-200a7909f22e\",\"contact_type\":\"call_strings\"}"
+  ],
+  "verification": {
+    "layouts_tab_renders_participant": true,
+    "individual_layout_attached_to_abonent": true,
+    "reload_preserves_participant": true,
+    "zero_console_errors_on_session_steps": true
+  },
+  "console_errors_attribution": {
+    "create-conference": "6 vendor form TypeErrors (Proxy getters reading null route/displayName/mode/connectionsLimit) during transient form state; 0 failed API requests",
+    "start-conference": "0",
+    "add-address-h323": "0",
+    "layout-editor": "0",
+    "session-layouts-tab": "0",
+    "reload": "0"
+  },
+  "screenshots": [
+    "01-session-started.png",
+    "02-add-address-modal.png",
+    "03-layout-editor.png",
+    "04-layout-filled.png",
+    "05-layout-created.png",
+    "06-session-layouts-tab.png",
+    "07-after-reload.png"
+  ],
+  "build": {
+    "git_head": "f1de6779aee4b3c27dc790ab51eea9c31969bb49",
+    "git_dirty_files": 11,
+    "binary": "/home/pro/Рабочий стол/mcu/target/release/vks-server",
+    "binary_sha256": "c0a184cda47e0fe9262bd9ce41f7b9a435d11ce53798cf14cfcb29313d634a8c",
+    "binary_built_at": "2026-10-20 19:05:08.692703315 +0300"
+  }
+}

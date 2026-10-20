@@ -557,12 +557,17 @@ impl AppState {
             {
                 let value: serde_json::Value = serde_json::from_str(&document).map_err(|e| e.to_string())?;
                 if let Some(resources) = value.get("resources") {
-                    *self.api_v3.resources.lock().await =
+                    let mut loaded: crate::api_v3::resources::ResourceState =
                         serde_json::from_value(resources.clone()).map_err(|e| e.to_string())?;
+                    crate::api_v3::resources::normalize_loaded(&mut loaded);
+                    *self.api_v3.resources.lock().await = loaded;
                 }
                 if let Some(settings) = value.get("conference_settings") {
                     *self.api_v3.conference_settings.lock().map_err(|e| e.to_string())? =
                         serde_json::from_value(settings.clone()).map_err(|e| e.to_string())?;
+                }
+                if let Some(video) = value.get("video_settings") {
+                    *self.api_v3.video_settings.lock().map_err(|e| e.to_string())? = video.clone();
                 }
             }
             // Stored definitions survive a restart; live calls and sessions do not.

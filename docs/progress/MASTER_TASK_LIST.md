@@ -409,8 +409,8 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 | T0.1 | Единый рантайм: один release-процесс на :8080, runbook build→restart | 🟢 | `38f9a54`, `scripts/run-local.sh` |
 | T1.1 | Калибровка: `{"calibration":null}`, скрыть пункт меню/плитку, deep-link 308 → статистика | 🟢 | см. `git log --grep T1.1` |
 | T1.2 | DTO конференции/абонента: `addresses`, null-паритет, `details.user_agent/enabled`, engine-фильтр | 🟢 | см. `git log --grep T1.2` |
-| T1.3 | DTO абонента/сессии: `engineAbonent.statuses`, `connection.protocol`, `contact`, `layoutId` | ⚪ | — |
-| T1.4 | Раскладки: `.../video_layouts/{id}/abonents`, `calculate`, `settings/video`, attach в любой слот | ⚪ | — |
+| T1.3 | DTO абонента/сессии: `engineAbonent.statuses`, `connection.protocol`, `contact`, `layoutId` | 🟢 | наследование+«Общая» раскладка при старте (без orphan), `video_layout_id` (individual→default), полный `payload` (ref-92), гибрид `abonents`, `abonents` раскладки в форме `my→Mee`; приёмка UI — `docs/progress/evidence/acceptance/summary.json` |
+| T1.4 | Раскладки: `.../video_layouts/{id}/abonents`, `calculate`, `settings/video`, attach в любой слот | 🟢 | abonents/attach/detach: получатели по `type`, занятие свободных окон (422/409/404), detach без reindex, purge при удалении комнаты, calculate, templates, settings/video GET+PATCH (RBAC+аудит+durable), mode→запись с откатом; UI-сценарий «Настроить раскладку → Ручная → Заполнить → Создать» зелёный; live RTP H.323/H264 — `evidence/acceptance/` |
 | T1.5 | «Добавить по адресу»: `/addresses`, autocomplete, `/ui/addresses`, `/ui/sessions/{id}/audiochannels` | ⚪ | — |
 | T1.6 | Приёмка SIP+H.323 из UI + `scripts/smoke_v3.sh` + evidence | ⚪ | — |
 | T1.7 | Тест boot-reconcile `stopped_sessions` (логика уже есть) | ⚪ | — |

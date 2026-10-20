@@ -1,6 +1,6 @@
 //! Persistable PNM conference resources. These are real definitions and links,
 //! not canned success responses: creation, attachment, edits and removal share one store.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -32,9 +32,24 @@ pub const CONFIGURATION_KEY: &str = "pnm-definitions-v1";
 
 /// Caller holds the async resources lock, serializing mutations and durable commits.
 pub async fn persist(state: &SharedState, resources: &ResourceState) -> Result<(), String> {
+    let video_settings = state.api_v3.video_settings.lock().map(|guard| guard.clone()).unwrap_or(Value::Null);
+    persist_with_video_settings(state, resources, video_settings).await
+}
+
+/// Как [`persist`], но снимок `settings/video` уже снят вызывающим (без повторного lock).
+pub async fn persist_with_video_settings(
+    state: &SharedState,
+    resources: &ResourceState,
+    video_settings: Value,
+) -> Result<(), String> {
     if let Some(storage) = &state.storage {
         let configurations = state.api_v3.conference_settings.lock().map_err(|e| e.to_string())?.clone();
-        let document = json!({"version":1,"resources":resources,"conference_settings":configurations});
+        let document = json!({
+            "version":1,
+            "resources":resources,
+            "conference_settings":configurations,
+            "video_settings":video_settings,
+        });
         storage
             .put_configuration_document(CONFIGURATION_KEY, &document.to_string())
             .await
@@ -43,12 +58,32 @@ pub async fn persist(state: &SharedState, resources: &ResourceState) -> Result<(
     Ok(())
 }
 
-async fn commit(state: &SharedState, resources: &mut ResourceState, previous: ResourceState) -> Result<(), Response> {
+pub(crate) async fn commit(
+    state: &SharedState,
+    resources: &mut ResourceState,
+    previous: ResourceState,
+) -> Result<(), Response> {
     if let Err(error) = persist(state, resources).await {
         *resources = previous;
         return Err(error_json(500, &format!("Storage error: {error}")));
     }
     Ok(())
+}
+
+/// Ресурс доступен только через привязанную к комнате ссылку (иначе — 404).
+fn attached(
+    resources: &ResourceState,
+    path: &str,
+    room_id: &vks_core::RoomId,
+    kind: &str,
+    resource_id: &str,
+) -> Option<Response> {
+    let key = scoped_key(path, &room_id.to_string(), kind);
+    if resources.links.get(&key).is_some_and(|ids| ids.iter().any(|id| id == resource_id)) {
+        None
+    } else {
+        Some(error_json(404, "Resource is not attached to this conference or session"))
+    }
 }
 
 fn now() -> u64 {
@@ -92,6 +127,13 @@ fn singular(kind: &str) -> &'static str {
     }
 }
 
+/// `preset_equal_25` → `Some(25)`, `preset_selected_b_4_(2)` → `Some(4)`.
+/// Как UI-маппер `Iee`: сначала отрезается суффикс `_(N)`, затем берётся хвост.
+pub(crate) fn preset_size(preset: &str) -> Option<u32> {
+    let base = preset.rsplit_once("_(").map_or(preset, |(base, _)| base);
+    base.rsplit('_').next().and_then(|tail| tail.parse().ok())
+}
+
 fn normalize_resource(kind: &str, body: &Value, creator: &str) -> Value {
     let mut payload = if kind == "video_layouts" {
         json!({"mode":"auto", "preset":"preset_default_13", "type":"default", "slots":[],
@@ -107,8 +149,11 @@ fn normalize_resource(kind: &str, body: &Value, creator: &str) -> Value {
         "display_name":body.get("display_name").cloned().unwrap_or(Value::Null), "payload":payload,
         "defaults":{"deletable":true,"editable":true}, "speakers":0,"listeners":0});
     if kind == "video_layouts" {
-        result["abonents"] = json!({"abonents":{"count":0,"abonents":[]},"records":[],"rtmp":[],"youtube":[]});
+        // `my` зовёт `Mee(record.abonents)`, а `Mee` читает `abonents.abonents.map`:
+        // объект обязателен (null → `entity.abonents.common` падает у individual-строк).
+        result["abonents"] = layout_record_abonents(Vec::new());
         result["contacts"] = json!({"count":0,"contacts":[]});
+        recalc_layout_size(&mut result);
     }
     result
 }
@@ -129,13 +174,445 @@ fn merge_json(target: &mut Value, patch: &Value) {
     }
 }
 
-fn update_resource(record: &mut Value, body: &Value) {
+fn gateway_protocol(participant_id: &str) -> &'static str {
+    if participant_id.contains("@sip-gateway") {
+        "sip"
+    } else if participant_id.contains("@h323-gateway") {
+        "h323"
+    } else if participant_id.contains("@rtsp-gateway") {
+        "rtsp"
+    } else {
+        "webrtc"
+    }
+}
+
+fn gateway_url(participant_id: &str, display_name: &str) -> String {
+    match gateway_protocol(participant_id) {
+        "sip" => format!("sip:{display_name}"),
+        "h323" => format!("h323:{display_name}"),
+        _ => format!("webrtc:{participant_id}"),
+    }
+}
+
+/// `abonents` записи раскладки в форме, которую ждёт `my → Mee`:
+/// `{abonents:{count,abonents:[...]}, records:[], rtmp:[]}`; плоский `{count, abonents}`
+/// роняет `.map` в Mee (`{abonents:{abonents:t}}`).
+fn layout_record_abonents(abonents: Vec<Value>) -> Value {
+    json!({
+        "abonents": {"count": abonents.len(), "abonents": abonents},
+        "records": [],
+        "rtmp": [],
+    })
+}
+
+fn participant_abonent_json(participant: &crate::hub::ParticipantSnapshot) -> Value {
+    json!({
+        "abonent_id": participant.participant_id,
+        "connection_id": participant.participant_id,
+        "connection_url": gateway_url(&participant.participant_id, &participant.display_name),
+        "contact_id": participant.participant_id,
+        "contact_type": gateway_protocol(&participant.participant_id),
+        "display_name": participant.display_name,
+    })
+}
+
+/// Кто реально стоит в раскладке: manual — занятые слоты, auto — все участники комнаты.
+fn resolved_layout_abonents(state: &SharedState, room_id: &vks_core::RoomId, layout: &Value) -> Vec<Value> {
+    let participants = state.room_hub.list_participants(room_id);
+    let individual = layout["payload"]["type"].as_str() == Some("individual");
+    if !individual && layout["payload"]["mode"].as_str() != Some("manual") {
+        return participants.iter().map(participant_abonent_json).collect();
+    }
+    let live: HashMap<&str, &crate::hub::ParticipantSnapshot> =
+        participants.iter().map(|p| (p.participant_id.as_str(), p)).collect();
+    let mut abonents = Vec::new();
+    for slot in layout["payload"]["slots"].as_array().into_iter().flatten() {
+        let Some(slot) = slot.as_object() else { continue };
+        let abonent_id = slot.get("abonent_id").and_then(Value::as_str).unwrap_or_default();
+        let stored_name = slot.get("display_name").and_then(Value::as_str).unwrap_or_default();
+        let participant = live.get(abonent_id).copied();
+        if participant.is_none() && stored_name.is_empty() {
+            // Пустая ячейка сетки (`cs-<uuid>` плейсхолдер) — не «стоящий в раскладке».
+            continue;
+        }
+        let mut entry = participant.map_or_else(
+            || {
+                json!({
+                    "abonent_id": slot.get("abonent_id").cloned().unwrap_or(Value::Null),
+                    "connection_id": slot.get("connection_id").cloned().unwrap_or(Value::Null),
+                    "connection_url": Value::Null,
+                    "display_name": stored_name,
+                })
+            },
+            participant_abonent_json,
+        );
+        entry["contact_id"] = slot.get("contact_id").cloned().unwrap_or(Value::Null);
+        entry["contact_type"] = slot.get("contact_type").cloned().unwrap_or(json!("call_strings"));
+        entry["position"] = slot.get("position").cloned().unwrap_or(Value::Null);
+        entry["role"] = slot.get("role").cloned().unwrap_or(json!("AUTO"));
+        abonents.push(entry);
+    }
+    abonents
+}
+
+pub(crate) fn with_layout_abonents(state: &SharedState, record: &mut Value, room_id: &vks_core::RoomId) {
+    let abonents = resolved_layout_abonents(state, room_id, record);
+    record["abonents"] = layout_record_abonents(abonents);
+}
+
+fn layout_contains_abonent(layout: &Value, abonent_id: &str) -> bool {
+    layout["payload"]["slots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|slot| slot["abonent_id"].as_str() == Some(abonent_id))
+}
+
+/// «Общая» раскладка комнаты (fallback — первая привязанная).
+fn default_layout_id(resources: &ResourceState, room_id: &vks_core::RoomId) -> Option<String> {
+    for scope in ["sessions", "conferences"] {
+        let Some(ids) = resources.links.get(&format!("{scope}:{room_id}:video_layouts")) else { continue };
+        let default = ids.iter().find(|id| {
+            resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
+        });
+        if let Some(id) = default.or_else(|| ids.first()) {
+            return Some(id.clone());
+        }
+    }
+    None
+}
+
+/// Individual-раскладка участника (иначе `hasIndividualLayout` в UI всегда false).
+pub(crate) fn participant_layout_id(
+    resources: &ResourceState,
+    room_id: &vks_core::RoomId,
+    abonent_id: &str,
+) -> Option<String> {
+    for scope in ["sessions", "conferences"] {
+        let Some(ids) = resources.links.get(&format!("{scope}:{room_id}:video_layouts")) else { continue };
+        for id in ids {
+            let Some(layout) = resources.layouts.get(id) else { continue };
+            if layout["payload"]["type"].as_str() == Some("individual") && layout_contains_abonent(layout, abonent_id) {
+                return Some(id.clone());
+            }
+        }
+    }
+    default_layout_id(resources, room_id)
+}
+
+/// `GET …/video_layouts/{resource_id}/abonents` — кто стоит в раскладке.
+pub async fn layout_abonents(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    OriginalUri(uri): OriginalUri,
+    Path((id, resource_id)): Path<(String, String)>,
+) -> Response {
+    let Some(room) = find_room(&state, &id) else {
+        return error_json(404, "Conference or session not found");
+    };
+    if let Err(response) = check_permission(&auth, Some(&room.id.to_string())) {
+        return response;
+    }
+    let layout = {
+        let resources = state.api_v3.resources.lock().await;
+        if let Some(response) = attached(&resources, uri.path(), &room.id, "video_layouts", &resource_id) {
+            return response;
+        }
+        match resources.layouts.get(&resource_id) {
+            Some(layout) => layout.clone(),
+            None => return error_json(404, "Resource not found"),
+        }
+    };
+    let abonents = resolved_layout_abonents(&state, &room.id, &layout);
+    Json(json!({ "abonents": abonents, "count": abonents.len() })).into_response()
+}
+
+/// `POST …/video_layouts/{resource_id}/abonents/{abonent_id}` — посадить абонента в слот.
+pub async fn attach_layout_abonent(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    OriginalUri(uri): OriginalUri,
+    Path((id, resource_id, abonent_id)): Path<(String, String, String)>,
+    Json(body): Json<Value>,
+) -> Response {
+    let Some(room) = find_room(&state, &id) else {
+        return error_json(404, "Conference or session not found");
+    };
+    if let Err(response) = check_permission(&auth, Some(&room.id.to_string())) {
+        return response;
+    }
+    let Some(participant) = state
+        .room_hub
+        .list_participants(&room.id)
+        .into_iter()
+        .find(|participant| participant.participant_id == abonent_id)
+    else {
+        return error_json(404, "Abonent is not connected to this session");
+    };
+    let mut resources = state.api_v3.resources.lock().await;
+    if let Some(response) = attached(&resources, uri.path(), &room.id, "video_layouts", &resource_id) {
+        return response;
+    }
+    let previous = resources.clone();
+    let Some(layout) = resources.layouts.get_mut(&resource_id) else {
+        return error_json(404, "Resource not found");
+    };
+    if !layout["payload"].is_object() {
+        return error_json(422, "Layout payload is malformed");
+    }
+    let limit = layout["payload"]["size"].as_u64().filter(|size| *size > 0).unwrap_or(64);
+    let Some(slots) = layout["payload"]["slots"].as_array_mut() else {
+        return error_json(409, "Layout has no video windows");
+    };
+    if slots.iter().any(|slot| !slot.is_object()) {
+        return error_json(422, "Layout slots are malformed");
+    }
+    let connection_id = body.get("connection_id").cloned().unwrap_or_else(|| json!(abonent_id));
+    let contact_id = body.get("contact_id").cloned().unwrap_or(Value::Null);
+    let contact_type = body.get("contact_type").cloned().unwrap_or_else(|| json!("call_strings"));
+    if let Some(slot) = slots.iter_mut().find(|slot| slot["abonent_id"].as_str() == Some(abonent_id.as_str())) {
+        slot["connection_id"] = connection_id;
+        slot["contact_id"] = contact_id;
+        slot["contact_type"] = contact_type;
+        slot["display_name"] = json!(participant.display_name);
+    } else {
+        let occupied =
+            slots.iter().filter(|slot| slot["abonent_id"].as_str().is_some_and(|id| !id.is_empty())).count() as u64;
+        // Сетка хранит и свободные окна (role=AUTO): занимаем первое из них, позицию не меняем.
+        let free = slots.iter().position(|slot| slot["abonent_id"].as_str().is_none_or(str::is_empty));
+        if let Some(index) = free {
+            let position = slots[index]["position"].clone();
+            slots[index] = json!({
+                "position": position,
+                "role": "PEER",
+                "abonent_id": abonent_id,
+                "connection_id": connection_id,
+                "contact_id": contact_id,
+                "contact_type": contact_type,
+                "call_string_id": contact_id.clone(),
+                "display_name": participant.display_name,
+            });
+        } else {
+            if occupied >= limit {
+                return error_json(409, "Layout is full");
+            }
+            let position = slots.iter().filter_map(|slot| slot["position"].as_u64()).max().unwrap_or(0) + 1;
+            slots.push(json!({
+                "position": position,
+                "role": "PEER",
+                "abonent_id": abonent_id,
+                "connection_id": connection_id,
+                "contact_id": contact_id,
+                "contact_type": contact_type,
+                "call_string_id": contact_id.clone(),
+                "display_name": participant.display_name,
+            }));
+        }
+    }
+    if let Err(response) = commit(&state, &mut resources, previous).await {
+        return response;
+    }
+    Json(json!({ "status": "ok" })).into_response()
+}
+
+/// `DELETE …/video_layouts/{resource_id}/abonents/{abonent_id}` — убрать из раскладки.
+pub async fn detach_layout_abonent(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    OriginalUri(uri): OriginalUri,
+    Path((id, resource_id, abonent_id)): Path<(String, String, String)>,
+) -> Response {
+    let Some(room) = find_room(&state, &id) else {
+        return error_json(404, "Conference or session not found");
+    };
+    if let Err(response) = check_permission(&auth, Some(&room.id.to_string())) {
+        return response;
+    }
+    let mut resources = state.api_v3.resources.lock().await;
+    if let Some(response) = attached(&resources, uri.path(), &room.id, "video_layouts", &resource_id) {
+        return response;
+    }
+    let previous = resources.clone();
+    let Some(layout) = resources.layouts.get_mut(&resource_id) else {
+        return error_json(404, "Resource not found");
+    };
+    if !layout["payload"].is_object() {
+        return error_json(422, "Layout payload is malformed");
+    }
+    let Some(slots) = layout["payload"]["slots"].as_array_mut() else {
+        return error_json(409, "Layout has no video windows");
+    };
+    // Окно не удаляем: размер/геометрия сетки стабильны, освободившееся окно — AUTO.
+    if let Some(slot) =
+        slots.iter_mut().find(|slot| slot.is_object() && slot["abonent_id"].as_str() == Some(abonent_id.as_str()))
+    {
+        let position = slot["position"].clone();
+        *slot = json!({"position": position, "role": "AUTO"});
+    }
+    if let Err(response) = commit(&state, &mut resources, previous).await {
+        return response;
+    }
+    (StatusCode::NO_CONTENT).into_response()
+}
+
+/// Миграция сохранённых записей: ранние версии держали в раскладке объект
+/// `abonents` (в т.ч. с лишним уровнем вложенности), битые `payload`/`slots`
+/// и висячие ссылки. Иначе `my → Mee` падает на `.map`, а мутации — на IndexMut.
+/// Непривязанные раскладки НЕ удаляются: UI создаёт их до attach, рестарт между
+/// этими шагами не должен терять данные.
+pub fn normalize_loaded(resources: &mut ResourceState) {
+    resources.layouts.retain(|_, layout| {
+        if !layout.is_object() {
+            return false;
+        }
+        if !layout["payload"].is_object() {
+            layout["payload"] = json!({
+                "mode":"auto","preset":"preset_default_13","type":"default","slots":[],
+                "size":13,"autoscroll":0
+            });
+        }
+        let slots = layout["payload"]["slots"].as_array().cloned().unwrap_or_default();
+        layout["payload"]["slots"] = json!(slots.into_iter().filter(Value::is_object).collect::<Vec<_>>());
+        layout["abonents"] = layout_record_abonents(Vec::new());
+        if !layout.get("contacts").is_some_and(Value::is_object) {
+            layout["contacts"] = json!({"count": 0, "contacts": []});
+        }
+        true
+    });
+    resources.links.retain(|_, ids| {
+        ids.retain(|id| resources.layouts.contains_key(id));
+        !ids.is_empty()
+    });
+}
+
+/// Удаление комнаты: убираются только её scoped-ссылки и ставшие недостижимыми
+/// ресурсы. Глобальные (ещё не привязанные) раскладки не трогаем — их бережёт
+/// `normalize_loaded`, UI создаёт их до attach.
+pub async fn purge_room_resources(state: &SharedState, room_id: &str) {
+    let mut resources = state.api_v3.resources.lock().await;
+    let previous = resources.clone();
+    let marker = format!(":{room_id}:");
+    let removed: Vec<String> =
+        resources.links.iter().filter(|(key, _)| key.contains(&marker)).flat_map(|(_, ids)| ids.clone()).collect();
+    resources.links.retain(|key, _| !key.contains(&marker));
+    resources.contacts.remove(room_id);
+    let referenced: std::collections::HashSet<String> = resources.links.values().flatten().cloned().collect();
+    for id in removed {
+        if !referenced.contains(&id) {
+            resources.layouts.remove(&id);
+            resources.audiochannels.remove(&id);
+        }
+    }
+    if commit(state, &mut resources, previous).await.is_err() {
+        tracing::warn!(%room_id, "failed to persist resource cleanup after room deletion");
+    }
+}
+
+/// Сессия наследует ресурсы конференции, затем получает «Общую» (default),
+/// если её нет в итоговом списке: без неё UI падает на `…default.some(...)`.
+/// Idempotent, вызывать под локом.
+pub fn inherit_and_ensure_default_layout(resources: &mut ResourceState, room_id: &str, creator: &str) {
+    let inherit_key = format!("conferences:{room_id}:video_layouts");
+    let key = format!("sessions:{room_id}:video_layouts");
+    let conference_ids = resources.links.get(&inherit_key).cloned().unwrap_or_default();
+    let session_ids = resources.links.entry(key.clone()).or_default();
+    for id in conference_ids {
+        // Рестарт конференции не должен терять индивидуальные раскладки прошлого запуска.
+        if !session_ids.contains(&id) && resources.layouts.contains_key(&id) {
+            session_ids.push(id);
+        }
+    }
+    let has_default = resources.links.get(&key).is_some_and(|ids| {
+        ids.iter().any(|id| {
+            resources.layouts.get(id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
+        })
+    });
+    if has_default {
+        return;
+    }
+    let record = normalize_resource("video_layouts", &json!({"payload":{"type":"default"}}), creator);
+    let id = record["id"].as_str().unwrap_or_default().to_string();
+    resources.layouts.insert(id.clone(), record);
+    resources.links.entry(key).or_default().push(id);
+}
+
+fn validate_layout_payload(payload: &Value) -> Result<(), String> {
+    if let Some(slots) = payload.get("slots") {
+        let Some(slots) = slots.as_array() else {
+            return Err("payload.slots must be an array".to_string());
+        };
+        if slots.iter().any(|slot| !slot.is_object()) {
+            return Err("payload.slots items must be objects".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn recalc_layout_size(record: &mut Value) {
+    let Some(payload) = record["payload"].as_object() else { return };
+    let size = payload
+        .get("slots")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .filter(|count| *count > 0)
+        .or_else(|| payload.get("preset").and_then(Value::as_str).and_then(preset_size).map(|n| n as usize));
+    if let Some(size) = size {
+        record["payload"]["size"] = json!(size);
+    }
+}
+
+/// UI присылает слоты без `display_name`/`connection_url`: переносим метаданные
+/// по `abonent_id`/`call_string_id`, иначе PATCH стирает имена получателей.
+fn merge_layout_slots(previous: &[Value], incoming: &[Value]) -> Vec<Value> {
+    incoming
+        .iter()
+        .map(|slot| {
+            if !slot.is_object() {
+                return slot.clone();
+            }
+            let key = slot
+                .get("abonent_id")
+                .and_then(Value::as_str)
+                .filter(|key| !key.is_empty())
+                .or_else(|| slot.get("call_string_id").and_then(Value::as_str).filter(|key| !key.is_empty()));
+            let mut entry = key
+                .and_then(|key| {
+                    previous.iter().find(|old| {
+                        old.get("abonent_id").and_then(Value::as_str) == Some(key)
+                            || old.get("call_string_id").and_then(Value::as_str) == Some(key)
+                    })
+                })
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            if let (Some(target), Some(patch)) = (entry.as_object_mut(), slot.as_object()) {
+                for (name, value) in patch {
+                    target.insert(name.clone(), value.clone());
+                }
+            }
+            entry
+        })
+        .collect()
+}
+
+fn update_resource(record: &mut Value, body: &Value) -> Result<(), String> {
     if let Some(name) = body.get("display_name") {
         record["display_name"] = name.clone();
     }
-    if let Some(payload) = body.get("payload").filter(|payload| payload.is_object()) {
+    if let Some(payload) = body.get("payload") {
+        if !payload.is_object() {
+            return Err("payload must be an object".to_string());
+        }
+        validate_layout_payload(payload)?;
+        let previous_slots = record["payload"]["slots"].as_array().cloned().unwrap_or_default();
         merge_json(&mut record["payload"], payload);
+        if let Some(incoming) = payload["slots"].as_array() {
+            record["payload"]["slots"] = json!(merge_layout_slots(&previous_slots, incoming));
+        }
     }
+    if record["id"].is_string() && record["payload"].is_object() {
+        recalc_layout_size(record);
+    }
+    Ok(())
 }
 
 pub async fn create(
@@ -148,6 +625,15 @@ pub async fn create(
         return response;
     }
     let kind = kind(uri.path());
+    if kind == "video_layouts" {
+        let payload = body.get("payload").cloned().unwrap_or(json!({}));
+        if !payload.is_object() {
+            return error_json(422, "payload must be an object");
+        }
+        if let Err(message) = validate_layout_payload(&payload) {
+            return error_json(422, &message);
+        }
+    }
     let record = normalize_resource(kind, &body, &auth.subject);
     let id = record["id"].as_str().unwrap().to_string();
     let mut resources = state.api_v3.resources.lock().await;
@@ -205,7 +691,9 @@ pub async fn edit_global(
     let Some(record) = collection_mut(&mut resources, kind).get_mut(&id) else {
         return error_json(404, "Resource not found");
     };
-    update_resource(record, &body);
+    if let Err(message) = update_resource(record, &body) {
+        return error_json(422, &message);
+    }
     let result = record.clone();
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
@@ -252,13 +740,18 @@ pub async fn list_linked(
     let kind = kind(uri.path());
     let resources = state.api_v3.resources.lock().await;
     let key = scoped_key(uri.path(), &room.id.to_string(), kind);
-    let items: Vec<Value> = resources
+    let mut items: Vec<Value> = resources
         .links
         .get(&key)
         .into_iter()
         .flatten()
         .filter_map(|id| collection(&resources, kind).get(id).cloned())
         .collect();
+    if kind == "video_layouts" {
+        for record in &mut items {
+            with_layout_abonents(&state, record, &room.id);
+        }
+    }
     Json(json!({kind:items,"count":items.len()})).into_response()
 }
 
@@ -277,12 +770,18 @@ pub async fn get_linked(
     }
     let kind = kind(uri.path());
     let resources = state.api_v3.resources.lock().await;
-    let key = scoped_key(uri.path(), &room.id.to_string(), kind);
-    if !resources.links.get(&key).is_some_and(|ids| ids.contains(&resource_id)) {
-        return error_json(404, "Resource is not attached to this conference or session");
+    if let Some(response) = attached(&resources, uri.path(), &room.id, kind, &resource_id) {
+        return response;
     }
     match collection(&resources, kind).get(&resource_id) {
-        Some(record) => Json(json!({singular(kind):record})).into_response(),
+        Some(record) => {
+            let mut record = record.clone();
+            drop(resources);
+            if kind == "video_layouts" {
+                with_layout_abonents(&state, &mut record, &room.id);
+            }
+            Json(json!({singular(kind):record})).into_response()
+        }
         None => error_json(404, "Resource not found"),
     }
 }
@@ -302,15 +801,16 @@ pub async fn edit_linked(
     }
     let kind = kind(uri.path());
     let mut resources = state.api_v3.resources.lock().await;
-    let key = scoped_key(uri.path(), &room.id.to_string(), kind);
-    if !resources.links.get(&key).is_some_and(|ids| ids.contains(&resource_id)) {
-        return error_json(404, "Resource is not attached to this conference or session");
+    if let Some(response) = attached(&resources, uri.path(), &room.id, kind, &resource_id) {
+        return response;
     }
     let previous = resources.clone();
     let Some(record) = collection_mut(&mut resources, kind).get_mut(&resource_id) else {
         return error_json(404, "Resource not found");
     };
-    update_resource(record, &body);
+    if let Err(message) = update_resource(record, &body) {
+        return error_json(422, &message);
+    }
     let result = record.clone();
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
@@ -742,8 +1242,37 @@ pub async fn user(
     }
 }
 
-pub async fn templates() -> Response {
-    Json(json!({"video_layout_templates":[],"count":0})).into_response()
+/// `GET …/video_layouts/templates?video_layout_id=…` — шаблоны превью.
+/// UI (`Hee`) читает `video_layout_templates[].payload.{mode,preset,slots}`.
+pub async fn templates(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    OriginalUri(uri): OriginalUri,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(room) = find_room(&state, &id) else {
+        return error_json(404, "Conference or session not found");
+    };
+    if let Err(response) = check_permission(&auth, Some(&room.id.to_string())) {
+        return response;
+    }
+    let resources = state.api_v3.resources.lock().await;
+    let key = scoped_key(uri.path(), &room.id.to_string(), "video_layouts");
+    let layout = params
+        .get("video_layout_id")
+        .and_then(|id| resources.links.get(&key).filter(|ids| ids.contains(id)).and(resources.layouts.get(id)));
+    let mut templates = Vec::new();
+    if let Some(layout) = layout.filter(|layout| layout["payload"]["mode"].as_str() == Some("manual")) {
+        templates.push(json!({
+            "payload": {
+                "mode": layout["payload"]["mode"],
+                "preset": layout["payload"]["preset"],
+                "slots": layout["payload"]["slots"],
+            }
+        }));
+    }
+    Json(json!({"count":templates.len(),"video_layout_templates":templates})).into_response()
 }
 
 #[cfg(test)]

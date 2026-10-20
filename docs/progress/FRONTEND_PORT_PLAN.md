@@ -453,3 +453,78 @@ ui/conferences), `ws.rs` (спека §4.4), `tests.rs` (tower::oneshot + фик
 - **WS-методы (10 найдено в бандле):** ui:users:search, ui:call_strings:search, ui:files:search,
   terminals:configurations:install, terminals:firmwares:install + subscribe/unsubscribe + события
   system:status:disk и системные (движок/БД/сеть/диск/SIP/H323) — таблица по мере реализации.
+
+---
+
+## 7. Прогресс порта: T1.3–T1.4 (2026-10-20)
+
+### 7.1. T1.3 — DTO сессии/абонента и раскладка по умолчанию
+
+- `GET /api/v3/{ui/}sessions/{id}/video_layouts` отдаёт дефолтную «Общую» раскладку.
+  `inherit_and_ensure_default_layout` при `start_session`/`quick_session` сначала
+  наследует `conferences:{id}:video_layouts` в `sessions:{id}:video_layouts`, и только если
+  «Общей» в итоговом списке нет — создаёт её (иначе на каждом старте появлялся orphan,
+  а наследование перезаписывало его). Логика идемпотентна, покрыта тестом.
+- У connected-абонента `video_layout_id` = индивидуальная раскладка, содержащая его слот;
+  если индивидуальной нет — «Общая». Поле вычисляется для всех участников под одним lock.
+- `abonents` в карточке сессии: гибрид — счётчики `sip/h323/rtsp/vnc/media/file` (карточка
+  списка: `entity.abonents.rtsp`) + `abonents/records/rtmp/youtube`.
+- Запись раскладки несёт `abonents` в форме, которую ждёт маппер `my → Mee`:
+  `{"abonents":{"count":N,"abonents":[...]},"records":[],"rtmp":[]}`; плоский
+  `{"count","abonents"}` или `null` роняют `.map` и white-screen сессии (проверено в браузере).
+- `payload` конференции — полный эталон ref-92 (`conference_payload_defaults.json`):
+  `audio_codecs` (16), `video_codecs` (2), `broadcast`, `styles`, `stop_rules`, `recording`,
+  `journaling`, `resolution`; хранимые настройки конференции приоритетнее системных
+  (`connections_limit` из `conference_settings` не перетирается дефолтом).
+- DTO абонента отдаёт `contact_id`/`contact_type`/`connection_url` (меню участника);
+  `hasIndividualLayout` UI считает по `video_layout_id`/`layoutId`, отдельного `{id,type}` в DTO нет.
+
+### 7.2. T1.4 — раскладки, слоты, настройки видео
+
+- `GET/POST/DELETE …/video_layouts/{id}/abonents[/{abonent_id}]`: получатели раскладки —
+  слоты с непустым `abonent_id` (плейсхолдеры `cs-<uuid>` отфильтрованы, имя/URI из live-участника,
+  `position/role` сохранены). Для `type=="individual"` список всегда слотовый (независимо от
+  mode); «все участники комнаты» — только для default в auto-режиме.
+  Attach занимает первое свободное окно (позиция не сдвигается), 409 — только если заняты все
+  `size` окон; mode раскладки не подменяется (получатели individual видны по `type`). Detach очищает окно до
+  `{position, role:"AUTO"}` (геометрия не ломается, reindex не нужен). Attach проверяет, что
+  абонент live, слоты — массив объектов (422), чужой/непривязанный layout — 404.
+- `POST /ui/video_layouts/calculate` → `{slots:[{position,x,y,width,height,z_order}]}`.
+- `PATCH …/video_layouts/{id}` валидирует `payload`/`slots` (422) и пересчитывает `size`;
+  шаблоны: `GET …/video_layouts/templates?video_layout_id=…` (manual → пресеты слотов),
+  `PATCH …/video_layouts/{id}/templates` — алиас редактирования самой записи (отдельного
+  хранилища шаблонов нет).
+- `POST /ui/video_layouts/mode` возвращает запись раскладки (UI: `.then(o => my(o.data))`),
+  мержит вложенный `payload`, требует Moderator и привязанность layout к комнате; новый режим
+  берётся из `new_mode` (auto/dynamic/manual), nested `payload.mode` — запасной/валидируемый;
+  запись раскладки откатывается при ошибке persist, смена топологии mcu/sfu применяется
+  только после успешной записи; неизвестный/чужой id → 404.
+- `GET/PATCH /settings/video`: PATCH — Operator, валидирует объект и скаляры (422),
+  мержит поверх текущего и сохраняет в configuration-документе (durable после рестарта),
+  пишет аудит `settings.video.updated`; частичный PATCH не теряет соседние поля.
+- Загрузка состояния: `normalize_loaded` отбрасывает не-объекты, чинит `payload`/`slots`/
+  `abonents`/`contacts`, удаляет висячие ссылки; непривязанные валидные раскладки
+  сохраняются (UI создаёт их до attach — рестарт между шагами не должен терять данные);
+  `normalize_resource` всегда создаёт канонические умолчания. Удаление конференции чистит
+  её scoped-ссылки и осиротевшие раскладки/аудиоканалы.
+
+### 7.3. Приёмка UI (живые вызовы, 192.168.1.132)
+
+Сценарий целиком из браузера (`/pnm/`, admin/admin_password): создать конференцию «+» →
+«Начать конференцию» → «Добавить по адресу» → протокол H.323, `192.168.1.132` → участник
+connected (`h323:192.168.1.132`; RTP: audio RX/TX PCMU ~62/62 кбит/с, video RX/TX H264
+640x360; в логе `H.323 CONNECT ... audio_port=3230 video_port=3232 has_video=true`) →
+меню участника «Настроить раскладку» → «Ручная настройка» → «Заполнить видеоокна участниками» →
+«Создать» (`POST /ui/video_layouts` manual/individual/25 слотов с реальным слотом, attach
+layout, attach abonent) → вкладка «Раскладки» и перезагрузка страницы показывают участника
+и индивидуальную раскладку; `GET …/abonents` отдаёт `video_layout_id` = individual layout.
+Прогон выполнен на финальном бинаре (release 19:05, pid 461301; git head и sha256 — в
+`summary.json → build`); сессия `a37ecc9c-…`, «Общая» раскладка осталась auto (`c438981c-…`),
+индивидуальная — `dc8d0f49-…` (manual, 25 окон, 1 получатель).
+На шагах старта/адреса/редактора/вкладки/перезагрузки — 0 ошибок консоли и 0 неуспешных
+запросов. Шаг создания формы даёт 6 transient vendor-`TypeError` (Proxy-геттеры читают
+`null` сущность до инициализации формы), при этом ни одного HTTP ≥400 и конференция
+создаётся — ошибки атрибутированы, а не «спрятаны».
+Доказательства: `docs/progress/evidence/acceptance/` — `summary.json` (id, медиастатистика,
+API-мутации, пошаговая атрибуция) и скриншоты `01-session-started.png` …
+`07-after-reload.png`.

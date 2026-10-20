@@ -169,11 +169,394 @@ fn pnm_partial_resource_payload_preserves_other_options() {
         &json!({"payload":{"mode":"manual","slots":[{"position":7,"role":"AUTO"}]}}),
         "creator",
     );
-    update_resource(&mut record, &json!({"payload":{"autoscroll":20}}));
+    update_resource(&mut record, &json!({"payload":{"autoscroll":20}})).expect("valid patch");
     assert_eq!(record["payload"]["mode"], "manual");
     assert_eq!(record["payload"]["slots"][0]["position"], 7);
-    assert!(record["contacts"]["contacts"].is_array());
+    // `my → Mee` ждёт `{abonents:{count,abonents:[...]}}`; плоский/null роняют `.map`.
     assert!(record["abonents"]["abonents"]["abonents"].is_array());
+    assert_eq!(record["abonents"]["abonents"]["count"], 0);
+    assert!(record["contacts"]["contacts"].is_array());
     assert!(validate_schedule(&json!({"cron_expression":"0 10 * * 2","time_zone":"UTC","payload":{"duration":null}}))
         .is_ok());
+}
+
+async fn attach_abonent_call(state: SharedState, room: vks_core::RoomId, layout_id: String, pid: &str) -> Response {
+    attach_layout_abonent(
+        State(state),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{room}/video_layouts/{layout_id}/abonents/{pid}")),
+        Path((room.to_string(), layout_id.clone(), pid.to_string())),
+        Json(json!({"connection_id":pid,"contact_id":"cs-1","contact_type":"call_strings"})),
+    )
+    .await
+}
+
+fn participant(pid: &str, name: &str) -> crate::hub::ParticipantSnapshot {
+    crate::hub::ParticipantSnapshot {
+        participant_id: pid.to_string(),
+        display_name: name.to_string(),
+        is_recorder: false,
+        is_speaking: false,
+        track_ids: Vec::new(),
+        is_audio_muted: false,
+        is_video_muted: false,
+        connected_at: 0,
+    }
+}
+
+/// T1.4: ручная раскладка отдаёт только занятые слоты, attach занимает свободное окно,
+/// detach освобождает окно без сдвига геометрии, битый JSON не роняет процесс
+/// (release: panic=abort), individual-layout доезжает до участника.
+#[tokio::test]
+async fn pnm_layout_abonents_attach_detach_and_malformed_payloads() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Layout room").await.unwrap();
+    state.room_hub.register_participant(&room.id, participant("sip-1@sip-gateway", "Terminal"));
+    state.room_hub.register_participant(&room.id, participant("sip-2@sip-gateway", "Second"));
+
+    let response = create(
+        State(state.clone()),
+        Extension(operator()),
+        uri("/api/v3/video_layouts"),
+        Json(json!({
+            "display_name":"Individual",
+            "payload":{"mode":"manual","preset":"preset_equal_4","type":"individual","slots":[]}
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let record = body(response).await["video_layout"].clone();
+    let layout_id = record["id"].as_str().unwrap().to_string();
+    assert_eq!(record["payload"]["size"], 4, "размер выводится из пресета");
+    let base = format!("/api/v3/sessions/{}/video_layouts/{}", room.id, layout_id);
+    let response =
+        attach(State(state.clone()), Extension(operator()), uri(&base), Path((room.id.to_string(), layout_id.clone())))
+            .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    // Ручная раскладка без слотов НЕ показывает живой ростер (в отличие от auto).
+    let response = layout_abonents(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("{base}/abonents")),
+        Path((room.id.to_string(), layout_id.clone())),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await["count"], 0);
+
+    let response = attach_abonent_call(state.clone(), room.id, layout_id.clone(), "sip-1@sip-gateway").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = attach_abonent_call(state.clone(), room.id, layout_id.clone(), "sip-2@sip-gateway").await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = layout_abonents(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("{base}/abonents")),
+        Path((room.id.to_string(), layout_id.clone())),
+    )
+    .await;
+    let abonents = body(response).await;
+    assert_eq!(abonents["count"], 2);
+    assert_eq!(abonents["abonents"][0]["display_name"], "Terminal");
+    assert_eq!(abonents["abonents"][0]["position"], 1);
+    assert_eq!(abonents["abonents"][0]["role"], "PEER");
+    assert_eq!(abonents["abonents"][1]["position"], 2);
+
+    // Individual-layout доезжает до DTO участника (hasIndividualLayout в UI).
+    let response = crate::api_v3::sessions::session_abonents(
+        State(state.clone()),
+        Extension(operator()),
+        Path(room.id.to_string()),
+    )
+    .await;
+    let connected = body(response).await["connected"].clone();
+    assert_eq!(connected[0]["video_layout_id"], layout_id);
+
+    // Битые slots: 422 на запись, без паники на чтение/удаление.
+    for malformed in [json!(null), json!([1]), json!("nope")] {
+        let response = edit_global(
+            State(state.clone()),
+            Extension(operator()),
+            uri(&format!("/api/v3/video_layouts/{layout_id}")),
+            Path(layout_id.clone()),
+            Json(json!({"payload":{"slots":malformed}})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "slots must be validated");
+    }
+
+    // Испорченное storage-состояние (slots:null) — attach/detach отвечают 409, не паникуют.
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.layouts.get_mut(&layout_id).unwrap()["payload"]["slots"] = Value::Null;
+    }
+    let response = attach_abonent_call(state.clone(), room.id, layout_id.clone(), "sip-1@sip-gateway").await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let response = detach_layout_abonent(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("{base}/abonents/sip-1@sip-gateway")),
+        Path((room.id.to_string(), layout_id.clone(), "sip-1@sip-gateway".to_string())),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    // detach из нормального состояния: окно освобождается (AUTO), позиции не сдвигаются.
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.layouts.get_mut(&layout_id).unwrap()["payload"]["slots"] = json!([
+            {"position":1,"role":"PEER","abonent_id":"sip-1@sip-gateway","display_name":"Terminal"},
+            {"position":2,"role":"PEER","abonent_id":"sip-2@sip-gateway","display_name":"Second"}
+        ]);
+    }
+    let response = detach_layout_abonent(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("{base}/abonents/sip-1@sip-gateway")),
+        Path((room.id.to_string(), layout_id.clone(), "sip-1@sip-gateway".to_string())),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = layout_abonents(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("{base}/abonents")),
+        Path((room.id.to_string(), layout_id.clone())),
+    )
+    .await;
+    let abonents = body(response).await;
+    assert_eq!(abonents["count"], 1);
+    assert_eq!(abonents["abonents"][0]["position"], 2);
+}
+
+/// T1.4: auto-раскладка показывает живой ростер; «Общая» наследуется сессией один раз
+/// (без orphan-записи), `normalize_loaded` чинит битые записи и висячие ссылки.
+#[tokio::test]
+async fn pnm_default_layout_inheritance_and_storage_normalization() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Inheritance").await.unwrap();
+    state.room_hub.register_participant(&room.id, participant("h323-a@h323-gateway", "Legacy terminal"));
+
+    let response = create(
+        State(state.clone()),
+        Extension(operator()),
+        uri("/api/v3/conferences/video_layouts"),
+        Json(json!({"payload":{"mode":"auto","type":"default"}})),
+    )
+    .await;
+    let created = body(response).await;
+    let default_id = created["video_layout"]["id"].as_str().unwrap().to_string();
+    let base = format!("/api/v3/sessions/{}/video_layouts/{}", room.id, default_id);
+    let response = attach(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&base),
+        Path((room.id.to_string(), default_id.clone())),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = layout_abonents(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("{base}/abonents")),
+        Path((room.id.to_string(), default_id.clone())),
+    )
+    .await;
+    let abonents = body(response).await;
+    assert_eq!(abonents["count"], 1);
+    assert_eq!(abonents["abonents"][0]["contact_type"], "h323");
+
+    let mut resources = state.api_v3.resources.lock().await;
+    inherit_and_ensure_default_layout(&mut resources, &room.id.to_string(), "creator");
+    let layouts_before = resources.layouts.len();
+    inherit_and_ensure_default_layout(&mut resources, &room.id.to_string(), "creator");
+    assert_eq!(resources.layouts.len(), layouts_before, "повторный вызов идемпотентен");
+    assert_eq!(
+        resources.links.get(&format!("sessions:{}:video_layouts", room.id)).map(Vec::len),
+        Some(1),
+        "сессия наследует раскладку конференции без дубля"
+    );
+
+    // Битые записи и висячие ссылки чинятся при загрузке.
+    resources.layouts.insert("broken".to_string(), json!({"payload":"not-an-object"}));
+    resources.layouts.insert("broken-record".to_string(), Value::Null);
+    resources.layouts.insert("orphan".to_string(), json!({"id":"orphan","payload":{"mode":"manual"}}));
+    resources.links.entry("sessions:dangling:video_layouts".to_string()).or_default().push("ghost".to_string());
+    normalize_loaded(&mut resources);
+    assert!(resources.layouts.contains_key(&default_id));
+    assert!(resources.layouts.contains_key("orphan"), "непривязанная раскладка не должна теряться при рестарте");
+    assert!(!resources.layouts.contains_key("broken-record"), "не-объект отбрасывается");
+    assert!(resources.layouts.contains_key("broken"), "объект с битым payload чинится, а не удаляется");
+    let fixed = resources.layouts.get(&default_id).unwrap();
+    assert!(fixed["abonents"]["abonents"]["abonents"].is_array());
+    assert!(resources.links.values().flatten().all(|id| resources.layouts.contains_key(id)));
+}
+
+/// attach в auto-раскладку не меняет mode: получатели individual видны по type.
+#[tokio::test]
+async fn pnm_attach_to_auto_layout_keeps_mode() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Auto layout room").await.unwrap();
+    state.room_hub.register_participant(&room.id, participant("sip-9@sip-gateway", "Terminal"));
+    let response = create(
+        State(state.clone()),
+        Extension(operator()),
+        uri("/api/v3/video_layouts"),
+        Json(json!({"display_name":"Auto", "payload":{"mode":"auto","preset":"preset_equal_4","slots":[]}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let layout = body(response).await["video_layout"].clone();
+    let layout_id = layout["id"].as_str().unwrap().to_string();
+    let base = format!("/api/v3/sessions/{}/video_layouts/{}", room.id, layout_id);
+    let response =
+        attach(State(state.clone()), Extension(operator()), uri(&base), Path((room.id.to_string(), layout_id.clone())))
+            .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = attach_abonent_call(state.clone(), room.id, layout_id.clone(), "sip-9@sip-gateway").await;
+    assert!(response.status().is_success());
+    let stored = state.api_v3.resources.lock().await.layouts.get(&layout_id).cloned().unwrap();
+    assert_eq!(stored["payload"]["mode"], "auto", "режим раскладки не подменяется");
+    assert_eq!(stored["payload"]["slots"][0]["abonent_id"], "sip-9@sip-gateway");
+}
+
+/// P1.1: сетка из 25 окон с 1 занятым — второй получатель занимает свободное окно,
+/// а не получает ложный 409 «Layout is full».
+#[tokio::test]
+async fn pnm_attach_second_receiver_into_grid_with_free_windows() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Receivers room").await.unwrap();
+    state.room_hub.register_participant(&room.id, participant("sip-1@sip-gateway", "First"));
+    state.room_hub.register_participant(&room.id, participant("sip-2@sip-gateway", "Second"));
+    let mut slots: Vec<Value> = (1..=25).map(|position| json!({"position": position, "role": "AUTO"})).collect();
+    slots[0] = json!({"position":1,"role":"PEER","abonent_id":"sip-1@sip-gateway","display_name":"First"});
+    let response = create(
+        State(state.clone()),
+        Extension(operator()),
+        uri("/api/v3/video_layouts"),
+        Json(json!({"display_name":"Individual","payload":{"mode":"manual","preset":"preset_equal_25","type":"individual","slots":slots}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let layout_id = body(response).await["video_layout"]["id"].as_str().unwrap().to_string();
+    let base = format!("/api/v3/sessions/{}/video_layouts/{}", room.id, layout_id);
+    let response =
+        attach(State(state.clone()), Extension(operator()), uri(&base), Path((room.id.to_string(), layout_id.clone())))
+            .await;
+    assert!(response.status().is_success());
+
+    let response = attach_abonent_call(state.clone(), room.id, layout_id.clone(), "sip-2@sip-gateway").await;
+    assert!(response.status().is_success(), "свободные окна есть — 409 недопустим");
+    let stored = state.api_v3.resources.lock().await.layouts.get(&layout_id).cloned().unwrap();
+    let occupied: Vec<_> = stored["payload"]["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|slot| slot["abonent_id"].as_str().is_some())
+        .collect();
+    assert_eq!(occupied.len(), 2);
+    assert_eq!(occupied[1]["position"], 2, "окно занято без сдвига геометрии");
+    assert_eq!(occupied[1]["display_name"], "Second");
+}
+
+/// P1.2: у individual-раскладки получатели — слоты, независимо от mode (auto).
+#[tokio::test]
+async fn pnm_individual_auto_layout_shows_only_attached_receivers() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Individual auto").await.unwrap();
+    state.room_hub.register_participant(&room.id, participant("sip-1@sip-gateway", "First"));
+    state.room_hub.register_participant(&room.id, participant("sip-2@sip-gateway", "Second"));
+    let response = create(
+        State(state.clone()),
+        Extension(operator()),
+        uri("/api/v3/video_layouts"),
+        Json(json!({"display_name":"Auto individual","payload":{"mode":"auto","preset":"preset_equal_4","type":"individual","slots":[]}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let layout_id = body(response).await["video_layout"]["id"].as_str().unwrap().to_string();
+    let base = format!("/api/v3/sessions/{}/video_layouts/{}", room.id, layout_id);
+    let response =
+        attach(State(state.clone()), Extension(operator()), uri(&base), Path((room.id.to_string(), layout_id.clone())))
+            .await;
+    assert!(response.status().is_success());
+    assert!(attach_abonent_call(state.clone(), room.id, layout_id.clone(), "sip-1@sip-gateway")
+        .await
+        .status()
+        .is_success());
+
+    let response = layout_abonents(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("{base}/abonents")),
+        Path((room.id.to_string(), layout_id.clone())),
+    )
+    .await;
+    let abonents = body(response).await;
+    assert_eq!(abonents["count"], 1, "auto-режим не должен подмешивать всех участников сессии");
+    assert_eq!(abonents["abonents"][0]["display_name"], "First");
+}
+
+/// P2.4: PATCH без display_name сохраняет имена получателей в слотах.
+#[test]
+fn pnm_layout_patch_preserves_slot_recipient_metadata() {
+    let mut record = normalize_resource(
+        "video_layouts",
+        &json!({"payload":{"mode":"manual","type":"individual","slots":[
+            {"position":1,"role":"PEER","abonent_id":"sip-1@sip-gateway","display_name":"Terminal","contact_id":"cs-1"}
+        ]}}),
+        "creator",
+    );
+    update_resource(
+        &mut record,
+        &json!({"payload":{"slots":[{"position":1,"role":"PEER","abonent_id":"sip-1@sip-gateway"},{"position":2,"role":"AUTO"}]}}),
+    )
+    .expect("valid patch");
+    assert_eq!(record["payload"]["slots"][0]["display_name"], "Terminal");
+    assert_eq!(record["payload"]["slots"][0]["contact_id"], "cs-1");
+    assert_eq!(record["payload"]["size"], 2);
+}
+
+/// P2.6: удаление комнаты не оставляет её раскладки/links в storage и глобальном списке.
+#[tokio::test]
+async fn pnm_room_purge_removes_scoped_resources() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Purge room").await.unwrap();
+    let response = create(
+        State(state.clone()),
+        Extension(operator()),
+        uri("/api/v3/video_layouts"),
+        Json(json!({"display_name":"Only room","payload":{"mode":"manual","preset":"preset_equal_4","slots":[]}})),
+    )
+    .await;
+    let layout_id = body(response).await["video_layout"]["id"].as_str().unwrap().to_string();
+    let base = format!("/api/v3/sessions/{}/video_layouts/{}", room.id, layout_id);
+    let response =
+        attach(State(state.clone()), Extension(operator()), uri(&base), Path((room.id.to_string(), layout_id.clone())))
+            .await;
+    assert!(response.status().is_success());
+    {
+        let resources = state.api_v3.resources.lock().await;
+        assert!(resources.layouts.contains_key(&layout_id));
+    }
+    let response = create(
+        State(state.clone()),
+        Extension(operator()),
+        uri("/api/v3/video_layouts"),
+        Json(json!({"display_name":"Global draft","payload":{"mode":"auto","preset":"preset_default_13","slots":[]}})),
+    )
+    .await;
+    let global_id = body(response).await["video_layout"]["id"].as_str().unwrap().to_string();
+    purge_room_resources(&state, &room.id.to_string()).await;
+    {
+        let resources = state.api_v3.resources.lock().await;
+        assert!(!resources.layouts.contains_key(&layout_id), "раскладка удалённой комнаты вычищается");
+        assert!(resources.layouts.contains_key(&global_id), "непривязанная глобальная раскладка сохраняется");
+        assert!(
+            !resources.links.keys().any(|key| key.contains(&room.id.to_string())),
+            "scoped-ссылки удалённой комнаты удалены"
+        );
+    }
 }

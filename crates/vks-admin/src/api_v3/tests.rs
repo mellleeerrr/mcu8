@@ -317,7 +317,8 @@ async fn pnm_card_resources_roundtrip_regression() {
         send(&app, request("GET", &format!("/api/v3/ui/conferences/{id}/video_layouts"), Some(&token), json!({})))
             .await;
     let layouts = json_body(response).await;
-    assert_eq!(layouts["video_layouts"][0]["id"], lid);
+    // Конференция раскладок не сеет (UI создаёт их сам); созданная и привязанная — в списке.
+    assert!(layouts["video_layouts"].as_array().unwrap().iter().any(|l| l["id"] == lid));
     let response = send(
         &app,
         request(
@@ -524,11 +525,12 @@ async fn conferences_and_sessions_flow() {
     let id = body["conference"]["id"].as_str().expect("conference id").to_string();
     assert_eq!(body["conference"]["display_name"], "Зал А");
 
-    // Контракт карточек из бандла: счётчики-числа обязаны быть объектами,
-    // иначе Vue падает на деструктуризации `entity.abonents`/`entity.contacts`.
+    // Карточка списка читает счётчики, маппер раскладок — `abonents.abonents`;
+    // одна форма обязана содержать оба набора полей.
     for key in ["sip", "h323", "rtsp", "vnc", "media", "file"] {
-        assert!(body["conference"]["abonents"][key].is_number(), "abonents.{key}: {}", body["conference"]);
+        assert!(body["conference"]["abonents"][key].is_number(), "abonents.{key}: {}", body["conference"]["abonents"]);
     }
+    assert!(body["conference"]["abonents"]["abonents"].is_array());
     for key in ["users", "sip", "h323", "rtsp", "vnc", "media", "file"] {
         assert!(body["conference"]["contacts"][key].is_number(), "contacts.{key}: {}", body["conference"]);
     }
@@ -1066,6 +1068,21 @@ async fn m4_abonents_lifecycle_and_commands() {
     assert_eq!(abonents_body["connected"][0]["details"]["audio"]["tx"]["enabled"], true);
     assert_eq!(abonents_body["connected"][0]["details"]["audio"]["rx"]["volume"], 0);
 
+    // T1.3: у сессии всегда есть «Общая» раскладка, и участник привязан к её id —
+    // без этого `sessionLayoutListByType.default.some(...)` падает в session view.
+    let layouts_resp =
+        send(&app, request("GET", &format!("/api/v3/sessions/{room_id_str}/video_layouts"), Some(&token), json!({})))
+            .await;
+    assert_eq!(layouts_resp.status(), StatusCode::OK);
+    let layouts_body = json_body(layouts_resp).await;
+    assert_eq!(layouts_body["count"], 1, "session must get a default layout");
+    assert_eq!(layouts_body["video_layouts"][0]["payload"]["type"], "default");
+    let default_layout_id = layouts_body["video_layouts"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        abonents_body["connected"][0]["video_layout_id"], default_layout_id,
+        "abonent must reference the session layout (hasIndividualLayout compares layoutId)"
+    );
+
     // engine/abonents фильтруется по session_id (иначе карточка видит чужих).
     let engine_own = send(
         &app,
@@ -1132,7 +1149,18 @@ async fn m4_abonents_lifecycle_and_commands() {
     let body_rename = json_body(check_rename).await;
     assert_eq!(body_rename["connected"][0]["display_name"], "Bob Renamed");
 
-    // 7. Video layout mode switch
+    // 7. Video layout mode switch (layout обязан быть привязан к сессии)
+    let layouts = send(
+        &app,
+        request("GET", &format!("/api/v3/ui/sessions/{room_id_str}/video_layouts"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(layouts.status(), StatusCode::OK);
+    let layouts_body = json_body(layouts).await;
+    assert_eq!(layouts_body["count"], 1, "сессия получает ровно одну «Общую» раскладку");
+    let layout_id = layouts_body["video_layouts"][0]["id"].as_str().unwrap().to_string();
+    assert!(layouts_body["video_layouts"][0]["abonents"]["abonents"]["abonents"].is_array());
+
     let mode_switch = send(
         &app,
         request(
@@ -1142,14 +1170,42 @@ async fn m4_abonents_lifecycle_and_commands() {
             json!({
                 "session_id": room_id_str,
                 "new_mode": "mcu",
-                "video_layout_id": "grid"
+                "video_layout_id": layout_id,
+                "payload": {"mode":"manual","preset":"preset_equal_4","type":"individual","size":4}
             }),
         ),
     )
     .await;
     assert_eq!(mode_switch.status(), StatusCode::OK);
     let mode_body = json_body(mode_switch).await;
-    assert_eq!(mode_body["payload"]["mode"], "mcu");
+    assert_eq!(mode_body["payload"]["mode"], "manual");
+    assert_eq!(mode_body["payload"]["preset"], "preset_equal_4");
+    assert_eq!(mode_body["payload"]["type"], "individual");
+    assert!(mode_body["abonents"]["abonents"]["abonents"].is_array());
+
+    let unknown_layout = send(
+        &app,
+        request(
+            "POST",
+            "/api/v3/ui/video_layouts/mode",
+            Some(&token),
+            json!({"session_id": room_id_str, "new_mode": "auto", "video_layout_id": "grid"}),
+        ),
+    )
+    .await;
+    assert_eq!(unknown_layout.status(), StatusCode::NOT_FOUND, "чужой layout_id не даёт фейковый 200");
+
+    let bad_mode = send(
+        &app,
+        request(
+            "POST",
+            "/api/v3/ui/video_layouts/mode",
+            Some(&token),
+            json!({"session_id": room_id_str, "video_layout_id": layout_id, "payload": {"mode": "mcu"}}),
+        ),
+    )
+    .await;
+    assert_eq!(bad_mode.status(), StatusCode::UNPROCESSABLE_ENTITY, "payload.mode — только auto/dynamic/manual");
 
     // 8. Engine command: калибровка удалена (T1.1) — честный 501, не фейковый 200.
     let eng_resp =
@@ -2047,4 +2103,149 @@ async fn step6_conference_8_tabs_settings_persistence() {
     let get_after_del =
         send(&app, request("GET", &format!("/api/v3/conferences/{conf_id}"), Some(&token), json!({}))).await;
     assert_eq!(get_after_del.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn pnm_settings_video_is_durable_and_validated() {
+    let storage = std::sync::Arc::new(vks_storage::memory::MemoryStorage::new());
+    let (mut state, _) = test_state();
+    std::sync::Arc::get_mut(&mut state).unwrap().storage = Some(storage.clone());
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+
+    let response = send(&server, request("GET", "/api/v3/settings/video", Some(&token), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["payload"]["max_frame_rate"], 30);
+
+    let response = send(
+        &server,
+        request(
+            "PATCH",
+            "/api/v3/settings/video",
+            Some(&token),
+            json!({"payload":{"max_frame_rate":60,"layout_strict":"OFF"}}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["payload"]["max_frame_rate"], 60);
+    assert_eq!(body["payload"]["layout_strict"], "OFF");
+    assert_eq!(body["payload"]["render_mode"], "AUTO", "частичный PATCH сохраняет соседей");
+
+    for invalid in [json!({"payload":{"nested":{"x":1}}}), json!({"payload":"nope"})] {
+        let response = send(&server, request("PATCH", "/api/v3/settings/video", Some(&token), invalid)).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    let (mut restored, _) = test_state();
+    std::sync::Arc::get_mut(&mut restored).unwrap().storage = Some(storage);
+    restored.sync_from_storage().await.unwrap();
+    let server = app(restored);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response = send(&server, request("GET", "/api/v3/settings/video", Some(&token), json!({}))).await;
+    let body = json_body(response).await;
+    assert_eq!(body["payload"]["max_frame_rate"], 60, "PATCH durable после рестарта");
+    assert_eq!(body["payload"]["layout_strict"], "OFF");
+}
+
+#[tokio::test]
+async fn pnm_conference_connections_limit_prefers_stored_settings() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response = send(
+        &server,
+        request(
+            "POST",
+            "/api/v3/conferences",
+            Some(&token),
+            json!({"display_name":"Limit priority","payload":{"connections_limit":7}}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["conference"]["payload"]["connections_limit"], 7, "лимит конференции приоритетнее системного");
+}
+
+#[tokio::test]
+async fn pnm_session_inherits_conference_layouts_without_orphan() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response =
+        send(&server, request("POST", "/api/v3/conferences", Some(&token), json!({"display_name":"Inherit layouts"})))
+            .await;
+    let conference_id = json_body(response).await["conference"]["id"].as_str().unwrap().to_string();
+    let response = send(
+        &server,
+        request(
+            "POST",
+            "/api/v3/ui/video_layouts",
+            Some(&token),
+            json!({"display_name":"Shared","payload":{"mode":"auto","type":"default"}}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let layout_id = json_body(response).await["video_layout"]["id"].as_str().unwrap().to_string();
+    let response = send(
+        &server,
+        request(
+            "POST",
+            &format!("/api/v3/conferences/{conference_id}/video_layouts/{layout_id}"),
+            Some(&token),
+            json!({}),
+        ),
+    )
+    .await;
+    assert!(response.status().is_success());
+
+    let response =
+        send(&server, request("POST", "/api/v3/sessions", Some(&token), json!({"conference_id":conference_id}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = send(
+        &server,
+        request("GET", &format!("/api/v3/ui/sessions/{conference_id}/video_layouts"), Some(&token), json!({})),
+    )
+    .await;
+    let layouts = json_body(response).await;
+    assert_eq!(layouts["count"], 1, "сессия наследует раскладку конференции");
+    assert_eq!(layouts["video_layouts"][0]["id"], layout_id);
+    assert!(layouts["video_layouts"][0]["abonents"]["abonents"]["abonents"].is_array());
+
+    let response = send(&server, request("GET", "/api/v3/ui/video_layouts", Some(&token), json!({}))).await;
+    let global = json_body(response).await;
+    assert_eq!(global["count"], 1, "старт сессии не оставляет orphan-раскладку");
+}
+
+#[tokio::test]
+async fn pnm_video_layouts_calculate_parses_preset_suffix() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response = send(
+        &server,
+        request(
+            "POST",
+            "/api/v3/ui/video_layouts/calculate",
+            Some(&token),
+            json!({"preset":"preset_selected_b_4_(2)","width":640,"height":360}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let slots = body["slots"].as_array().expect("slots array");
+    assert_eq!(slots.len(), 4, "размер берётся из хвоста пресета, а не из «(2)»");
+    assert_eq!(slots[0]["position"], 0);
+    assert_eq!(slots[0]["width"], 320.0);
+    assert_eq!(slots[0]["height"], 180.0);
+
+    let response =
+        send(&server, request("POST", "/api/v3/ui/video_layouts/calculate", None, json!({"preset":"preset_equal_25"})))
+            .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }

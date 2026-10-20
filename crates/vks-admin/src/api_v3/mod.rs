@@ -61,6 +61,8 @@ pub struct ApiV3State {
     /// Настройки всех 8 вкладок конференции (M1.5 / F1 / F2 / F6).
     pub conference_settings: std::sync::Mutex<std::collections::HashMap<vks_core::RoomId, serde_json::Value>>,
     pub resources: tokio::sync::Mutex<resources::ResourceState>,
+    /// `settings/video` (правится администратором; эталонные умолчания — ref-92).
+    pub video_settings: std::sync::Mutex<serde_json::Value>,
 }
 
 /// Состояние медиа-настроек абонента (громкость, mute).
@@ -166,8 +168,22 @@ pub fn router(state: SharedState) -> Router {
             "/api/v3/sessions/{id}/audiochannels/{resource_id}",
             get(resources::get_linked).patch(resources::edit_linked).post(resources::attach).delete(resources::detach),
         )
+        .route("/api/v3/sessions/{id}/video_layouts/{resource_id}/abonents", get(resources::layout_abonents))
+        .route("/api/v3/ui/sessions/{id}/video_layouts/{resource_id}/abonents", get(resources::layout_abonents))
+        .route(
+            "/api/v3/sessions/{id}/video_layouts/{resource_id}/abonents/{abonent_id}",
+            post(resources::attach_layout_abonent).delete(resources::detach_layout_abonent),
+        )
+        .route(
+            "/api/v3/ui/sessions/{id}/video_layouts/{resource_id}/abonents/{abonent_id}",
+            post(resources::attach_layout_abonent).delete(resources::detach_layout_abonent),
+        )
         .route("/api/v3/conferences/{id}/video_layouts/templates", get(resources::templates))
         .route("/api/v3/sessions/{id}/video_layouts/templates", get(resources::templates))
+        .route("/api/v3/conferences/{id}/video_layouts/{resource_id}/templates", patch(resources::edit_linked))
+        .route("/api/v3/sessions/{id}/video_layouts/{resource_id}/templates", patch(resources::edit_linked))
+        .route("/api/v3/settings/video", get(shell::settings_video).patch(shell::update_settings_video))
+        .route("/api/v3/ui/video_layouts/calculate", post(shell::video_layouts_calculate))
         .route("/api/v3/settings/audio_codecs", get(shell::settings_audio_codecs))
         .route("/api/v3/settings/video_codecs", get(shell::settings_video_codecs))
         .route("/api/v3/waitingroom", get(shell::waitingroom))

@@ -1,0 +1,157 @@
+{
+  "bitrate": 2048,
+  "resolution": {
+    "width": 1280,
+    "height": 720,
+    "fps_limit": 30
+  },
+  "connections_limit": 100,
+  "autoredial": null,
+  "presentation": null,
+  "mute_audio_on_join": false,
+  "mute_video_on_join": false,
+  "show_audio_bars": true,
+  "noise_suppression": "DEFAULT",
+  "auto_gain_control": "DEFAULT",
+  "slot_render_type": "DEFAULT",
+  "layout_strict": "DEFAULT",
+  "locked": false,
+  "styles": {
+    "individual": false,
+    "font": {
+      "family": "DEFAULT",
+      "text_float": false,
+      "height": 10,
+      "rectangle_width": 100,
+      "rectangle_y": 100,
+      "rectangle_align": "LEFT",
+      "rectangle_auto": true,
+      "text_align": "CENTER",
+      "height_auto": true,
+      "show_names": "PERMANENT",
+      "background": {
+        "red": 0,
+        "green": 0,
+        "blue": 0,
+        "alpha": 128
+      },
+      "text_foreground": {
+        "red": 255,
+        "green": 255,
+        "blue": 255,
+        "alpha": 255
+      },
+      "text_background": {
+        "red": 0,
+        "green": 0,
+        "blue": 0,
+        "alpha": 255
+      }
+    },
+    "background_type": "SILVER",
+    "border": {
+      "enabled": "ON",
+      "mode": "SIMPLE",
+      "args": {
+        "thickness": 10
+      },
+      "floating": "ON",
+      "selected": "ON",
+      "spacing": 10
+    }
+  },
+  "auto_create_layout": false,
+  "use_recording2_layout": false,
+  "slot_avatars": "DEFAULT",
+  "audio_codecs": [
+    {
+      "name": "AAC",
+      "bitrate": null
+    },
+    {
+      "name": "G711",
+      "bitrate": null
+    },
+    {
+      "name": "G722",
+      "bitrate": null
+    },
+    {
+      "name": "G7221",
+      "bitrate": 24
+    },
+    {
+      "name": "G7221",
+      "bitrate": 32
+    },
+    {
+      "name": "G7221C",
+      "bitrate": 24
+    },
+    {
+      "name": "G7221C",
+      "bitrate": 32
+    },
+    {
+      "name": "G7221C",
+      "bitrate": 48
+    },
+    {
+      "name": "G723",
+      "bitrate": null
+    },
+    {
+      "name": "G726",
+      "bitrate": 16
+    },
+    {
+      "name": "G726",
+      "bitrate": 24
+    },
+    {
+      "name": "G726",
+      "bitrate": 32
+    },
+    {
+      "name": "G726",
+      "bitrate": 40
+    },
+    {
+      "name": "G728",
+      "bitrate": null
+    },
+    {
+      "name": "G729",
+      "bitrate": null
+    },
+    {
+      "name": "OPUS",
+      "bitrate": null
+    }
+  ],
+  "video_codecs": [
+    "H264",
+    "H264-HIGH"
+  ],
+  "aspeaker": "SELECTIVE",
+  "selfview": "SELECTIVE",
+  "ui_autocall_on_session_start": "DEFAULT",
+  "mode": null,
+  "stop_rules": {
+    "empty": 600,
+    "quit_all": 60,
+    "one_abonent": null
+  },
+  "recording": {
+    "individual": false,
+    "quality": "BEST",
+    "show_presentation": "replace"
+  },
+  "journaling": false,
+  "broadcast": {
+    "individual": false,
+    "uri": null,
+    "profile": "quality"
+  },
+  "cascade": "none"
+}

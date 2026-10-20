@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vks_auth::jwt::VerifiedJwt;
@@ -435,6 +435,99 @@ pub async fn settings_video_codecs(State(state): State<SharedState>) -> Response
     Json(json!({ "video_codecs": codecs })).into_response()
 }
 
+/// Эталонные умолчания видео-настроек (`ref-92/settings_video.json`), сразу payload.
+fn default_video_settings() -> Value {
+    json!({"render_mode":"AUTO","text_timeout":20,"icons_enabled":true,"layout_strict":"ON",
+        "max_frame_rate":30,"rotate_timeout":20000,"stream_control":false,"avatars_enabled":true,
+        "packet_recovery":false,"adaptive_bitrate":false,"video_storage_size":25,
+        "performance_control":"AUTO","video_quality_first":"DEFAULT","video_quality_second":"DEFAULT",
+        "presentation_bandwidth":"AUTO"})
+}
+
+fn current_video_settings(state: &SharedState) -> Value {
+    state
+        .api_v3
+        .video_settings
+        .lock()
+        .ok()
+        .map(|guard| guard.clone())
+        .filter(Value::is_object)
+        .unwrap_or_else(default_video_settings)
+}
+
+/// `GET /api/v3/settings/video` → `{payload:{…}}` (редактор раскладок читает
+/// `layout_strict`, `max_frame_rate`; без него страница падала с PAGEERR).
+pub async fn settings_video(State(state): State<SharedState>) -> Response {
+    track("settings/video");
+    Json(json!({ "payload": current_video_settings(&state) })).into_response()
+}
+
+/// `PATCH /api/v3/settings/video` — частичное обновление, durable (в конфиг-документе).
+pub async fn update_settings_video(
+    State(state): State<SharedState>,
+    Extension(auth::ClientIp(ip)): Extension<auth::ClientIp>,
+    Extension(auth): Extension<crate::auth_middleware::AuthContext>,
+    Json(body): Json<Value>,
+) -> Response {
+    track("settings/video");
+    if auth.role < vks_core::Role::Operator {
+        return super::error_json(403, "Forbidden: Operator role required");
+    }
+    let patch = body.get("payload").cloned().unwrap_or_else(|| body.clone());
+    let Some(patch) = patch.as_object() else {
+        return super::error_json(422, "payload must be an object");
+    };
+    if patch.values().any(|value| value.is_array() || value.is_object()) {
+        return super::error_json(422, "video settings accept scalar values only");
+    }
+    let mut payload = current_video_settings(&state);
+    if let Some(target) = payload.as_object_mut() {
+        for (key, value) in patch {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    // Сначала durable-запись документа, только потом память: при ошибке состояние не меняется.
+    // Лок resources удерживается до записи — снимок не должен разъехаться с параллельной мутацией.
+    let resources = state.api_v3.resources.lock().await;
+    if let Err(error) = super::resources::persist_with_video_settings(&state, &resources, payload.clone()).await {
+        return super::error_json(500, &format!("Storage error: {error}"));
+    }
+    drop(resources);
+    if let Ok(mut guard) = state.api_v3.video_settings.lock() {
+        *guard = payload.clone();
+    }
+    state.record_audit_entry(&auth.subject, "settings.video.updated", None, &ip);
+    Json(json!({ "payload": payload })).into_response()
+}
+
+/// `POST /api/v3/ui/video_layouts/calculate` — геометрия слотов для превью
+/// (`{preset,width,height}` → `{slots:[{position,x,y,width,height,z_order}]}`).
+pub async fn video_layouts_calculate(Json(body): Json<serde_json::Value>) -> Response {
+    track("ui/video_layouts/calculate");
+    let preset = body.get("preset").and_then(serde_json::Value::as_str).unwrap_or("preset_default_13");
+    let width = body.get("width").and_then(serde_json::Value::as_f64).filter(|v| *v > 0.0).unwrap_or(1280.0);
+    let height = body.get("height").and_then(serde_json::Value::as_f64).filter(|v| *v > 0.0).unwrap_or(720.0);
+    let count = crate::api_v3::resources::preset_size(preset)
+        .map(|n| n as usize)
+        .filter(|n| (1..=64).contains(n))
+        .unwrap_or(13);
+    let cols = (count as f64).sqrt().ceil() as usize;
+    let rows = count.div_ceil(cols);
+    let slots: Vec<serde_json::Value> = (0..count)
+        .map(|index| {
+            json!({
+                "position": index,
+                "x": (index % cols) as f64 * (width / cols as f64),
+                "y": (index / cols) as f64 * (height / rows as f64),
+                "width": width / cols as f64,
+                "height": height / rows as f64,
+                "z_order": index,
+            })
+        })
+        .collect();
+    Json(json!({ "slots": slots })).into_response()
+}
+
 /// `GET /api/v3/waitingroom` → `{}` (дополняется формой из бандла при реализации).
 pub async fn waitingroom() -> Response {
     track("waitingroom");
@@ -490,9 +583,13 @@ pub struct SwitchVideoLayoutModeRequest {
     #[serde(alias = "new_mode", alias = "mode")]
     pub mode: Option<String>,
     pub video_layout_id: Option<String>,
+    /// `preset`/`type`/`size`/`slots` — остальные поля формы; UI читает их из ответа.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// `POST /api/v3/ui/video_layouts/mode` и `/api/v3/video_layouts/mode` — переключение MCU/SFU из UI.
+/// `Boe` шлёт `{session_id, video_layout_id, new_mode, display_name, payload:{mode,preset,type,size,slots}}`.
 pub async fn switch_video_layout_mode(
     State(state): State<SharedState>,
     Extension(auth): Extension<crate::auth_middleware::AuthContext>,
@@ -502,57 +599,109 @@ pub async fn switch_video_layout_mode(
     if auth.role < vks_core::Role::Moderator {
         return super::error_json(403, "Forbidden: Moderator role required");
     }
-    let room_id_str = body.session_id.or(body.conference_id);
-    if auth.room_scope.is_some() && room_id_str.is_none() {
-        return super::error_json(403, "Forbidden: room_scope requires session_id");
-    }
-    if let (Some(ref user_room), Some(ref req_room)) = (&auth.room_scope, &room_id_str) {
-        if !req_room.eq_ignore_ascii_case(user_room) {
-            return super::error_json(403, "Forbidden: room_scope mismatch");
-        }
-    }
-
-    let rid_opt = if let Some(ref rid_str) = room_id_str {
-        let found = if let Ok(u) = uuid::Uuid::parse_str(rid_str) {
-            Some(vks_core::RoomId::from_uuid(u))
-        } else if let Ok(rooms) = state.rooms.lock() {
-            rooms.values().find(|r| r.name == *rid_str || r.name.eq_ignore_ascii_case(rid_str)).map(|r| r.id)
-        } else {
-            None
-        };
-        if found.is_none() {
-            return super::error_json(404, "Session not found");
-        }
-        found
-    } else {
-        None
+    let room = match body.session_id.or(body.conference_id).as_deref() {
+        Some(id) => match super::sessions::find_room(&state, id) {
+            Some(room) => room,
+            None => return super::error_json(404, "Session not found"),
+        },
+        None => return super::error_json(422, "session_id is required"),
     };
+    if let Err(response) = super::sessions::check_permission(&auth, Some(&room.id.to_string())) {
+        return response;
+    }
 
-    let mode_str = body.mode.unwrap_or_else(|| "auto".to_string());
-    // M4.5: Only "mcu" or "sfu" triggers a topology mode switch; "auto", "manual", "dynamic" are layout presets.
-    let topology_mode = match mode_str.to_lowercase().as_str() {
+    let mode = body.mode.clone().unwrap_or_else(|| "auto".to_string());
+    let mode_lc = mode.to_lowercase();
+    let topology_mode = match mode_lc.as_str() {
         "mcu" => Some(vks_core::RoomMode::Mcu),
         "sfu" => Some(vks_core::RoomMode::Sfu),
         _ => None,
     };
 
-    if let (Some(rid), Some(new_mode)) = (rid_opt, topology_mode) {
-        let _ = crate::rooms::Rooms::update_async(&state, &rid, None, Some(new_mode), None, None).await;
+    // Поля формы UI кладёт во вложенный `payload`; верхний уровень — для совместимости.
+    let nested = body.extra.get("payload").and_then(Value::as_object).cloned().unwrap_or_default();
+    let field = |key: &str| nested.get(key).cloned().or_else(|| body.extra.get(key).cloned());
+    let size = field("size").and_then(|value| value.as_u64()).filter(|size| (1..=64).contains(size));
+    let slots = match field("slots") {
+        Some(Value::Array(slots)) if slots.iter().all(Value::is_object) => {
+            let len = slots.len() as u64;
+            Some((Value::Array(slots), len))
+        }
+        Some(_) => return super::error_json(422, "payload.slots items must be objects"),
+        None => None,
+    };
+    let inferred_size = size.or_else(|| slots.as_ref().map(|(_, len)| *len)).unwrap_or(13);
+    let type_default = match mode_lc.as_str() {
+        "dynamic" | "manual" => "individual",
+        _ => "default",
+    };
+    let preset_default = match mode_lc.as_str() {
+        "dynamic" | "manual" => format!("preset_equal_{inferred_size}"),
+        _ => "preset_default_13".to_string(),
+    };
+    // `payload.mode` — режим раскладки (auto/dynamic/manual); mcu/sfu — топология комнаты.
+    // `Boe` кладёт новый режим в `new_mode`, а в nested `payload.mode` — старое значение.
+    // Приоритет: new_mode (auto/dynamic/manual) → nested payload.mode → auto.
+    if let Some(value) = field("mode") {
+        if value.as_str().is_none_or(|value| !matches!(value, "auto" | "dynamic" | "manual")) {
+            return super::error_json(422, "payload.mode must be auto, dynamic or manual");
+        }
+    }
+    let layout_mode = match mode_lc.as_str() {
+        value @ ("auto" | "dynamic" | "manual") => value.to_string(),
+        _ => field("mode").and_then(|value| value.as_str().map(str::to_string)).unwrap_or_else(|| "auto".to_string()),
+    };
+    let mut patch = serde_json::Map::new();
+    patch.insert("mode".to_string(), json!(layout_mode));
+    patch.insert(
+        "preset".to_string(),
+        field("preset")
+            .filter(|preset| preset.as_str().is_some_and(|p| super::resources::preset_size(p).is_some()))
+            .unwrap_or_else(|| json!(preset_default)),
+    );
+    patch.insert("type".to_string(), field("type").unwrap_or_else(|| json!(type_default)));
+    patch.insert("size".to_string(), json!(inferred_size));
+    if let Some((slots, _)) = slots {
+        patch.insert("slots".to_string(), slots);
+    }
+    if let Some(autoscroll) = field("autoscroll") {
+        patch.insert("autoscroll".to_string(), autoscroll);
     }
 
-    let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    Json(json!({
-        "id": body.video_layout_id.as_deref().unwrap_or("grid"),
-        "display_name": "Default",
-        "creator_id": "admin",
-        "created_at": now_secs,
-        "payload": {
-            "mode": mode_str,
-            "preset": "auto",
-            "type": "grid"
+    let mut resources = state.api_v3.resources.lock().await;
+    let previous = resources.clone();
+    let Some(layout_id) = body.video_layout_id.clone() else {
+        // UI всегда передаёт id; молчаливый fallback маскировал бы ошибку клиента.
+        return super::error_json(422, "video_layout_id is required");
+    };
+    let attached = ["sessions", "conferences"].iter().any(|scope| {
+        resources.links.get(&format!("{scope}:{}:video_layouts", room.id)).is_some_and(|ids| ids.contains(&layout_id))
+    });
+    if !attached {
+        return super::error_json(404, "Layout is not attached to this session");
+    }
+    let Some(record) = resources.layouts.get_mut(&layout_id) else {
+        return super::error_json(404, "Layout not found");
+    };
+    if !record["payload"].is_object() {
+        return super::error_json(422, "Layout payload is malformed");
+    }
+    if let Some(payload) = record["payload"].as_object_mut() {
+        for (key, value) in &patch {
+            payload.insert(key.clone(), value.clone());
         }
-    }))
-    .into_response()
+    }
+    let mut result = record.clone();
+    if let Err(response) = super::resources::commit(&state, &mut resources, previous).await {
+        return response;
+    }
+    drop(resources);
+    if let Some(new_mode) = topology_mode {
+        let _ = crate::rooms::Rooms::update_async(&state, &room.id, None, Some(new_mode), None, None).await;
+    }
+    super::resources::with_layout_abonents(&state, &mut result, &room.id);
+    // `Boe` делает `.then(o => my(o.data))`: ответ — запись раскладки, не конверт.
+    Json(result).into_response()
 }
 
 /// `POST /api/v3/engine/command` — команды движка.
