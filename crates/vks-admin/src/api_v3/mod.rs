@@ -143,14 +143,21 @@ pub fn router(state: SharedState) -> Router {
             post(directory::add_user_to_group).delete(directory::remove_user_from_group),
         )
         .route("/api/v3/users/{id}/roles/{role_id}", post(directory::add_user_role).delete(directory::remove_user_role))
-        .route("/api/v3/roles", get(directory::list_roles))
-        .route("/api/v3/roles/{id}", get(directory::get_role))
+        .route("/api/v3/roles", get(directory::list_roles).post(directory::create_role))
+        .route(
+            "/api/v3/roles/{id}",
+            get(directory::get_role).patch(directory::update_role).delete(directory::delete_role),
+        )
         .route("/api/v3/users/{id}/call_strings", get(directory::list_user_call_strings))
         .route(
             "/api/v3/users/{id}/call_strings/{address_id}",
             post(directory::attach_user_call_string).delete(directory::detach_user_call_string),
         )
         .route("/api/v3/ui/users/{id}/call_strings", post(directory::create_user_call_string))
+        .route(
+            "/api/v3/ui/users/{id}/call_strings/{address_id}",
+            patch(directory::update_user_call_string).delete(directory::detach_user_call_string),
+        )
         .route("/api/v3/schedules", get(resources::schedules).post(resources::create_schedule))
         .route(
             "/api/v3/schedules/{id}",

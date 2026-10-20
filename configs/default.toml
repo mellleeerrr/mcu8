@@ -12,7 +12,7 @@ candidate_addr = "192.168.1.93"
 # Authentication & Identity (ADR-0009 / ADR-0022)
 # Supported auth_provider strategies: "local" | "ldap" | "oidc"
 auth_provider = "local"
-jwt_secret = "dev_secret_change_in_production_vks_mcu_2026"
+jwt_secret = "dev_ec994ad4e03aa63eafc3131719a0a50cce4dbfb474c855b0"
 jwt_ttl_secs = 86400
 
 # Default bootstrap credentials for Operator in LocalDb

@@ -356,12 +356,16 @@ async fn process_frame(
             }
             vec![ok_reply(&id, &json!({}))]
         }
-        "ui:users:search" => match super::directory::ws_users_search(state, &verified.user_id, &payload).await {
-            Ok(result) => vec![ok_reply(&id, &result)],
-            Err((code, description)) => {
-                vec![WsOutcome::json(json!({"id": id, "error": {"code": code, "description": description}}))]
+        "ui:users:search" => {
+            match super::directory::ws_users_search(state, &verified.user_id, verified.room_id.as_deref(), &payload)
+                .await
+            {
+                Ok(result) => vec![ok_reply(&id, &result)],
+                Err((code, description)) => {
+                    vec![WsOutcome::json(json!({"id": id, "error": {"code": code, "description": description}}))]
+                }
             }
-        },
+        }
         "ui:call_strings:search" => {
             match super::call_strings::ws_search(state, &verified.user_id, verified.room_id.as_deref(), &payload).await
             {

@@ -231,11 +231,14 @@ pub async fn with_security_headers(csp: String, request: Request, next: Next) ->
 /// и два `nomodule`-скрипта; в modern-браузере исполняются три);
 /// `'unsafe-inline'` в `script-src` НЕ добавляется.
 ///
-/// `'unsafe-eval'` нужен vendor-бандлам PNM 2.2.1.66: карточка пользователя
-/// использует runtime-компиляцию шаблона (`new Function`), и без него браузер
-/// пишет CSP-error при каждом открытии карточки. Vendor-сервер (`.92`) CSP не
-/// отдаёт вовсе; здесь политика сохраняется, но с минимальной уступкой под
-/// неизменяемый vendor-код. `style-src` — `'self' 'unsafe-inline'`
+/// `'unsafe-eval'` — вынужденная минимальная уступка неизменяемым vendor-бандлам
+/// 2.2.1.66: при открытии карточки пользователя/удалении `index2.bundle` реально
+/// исполняет строку как JavaScript, и без `unsafe-eval` Chromium пишет
+/// «Evaluating a string as JavaScript violates … CSP» (точный текст и источник
+/// зафиксированы в evidence T2.1, `console_error_samples` до фикса). Статический
+/// `grep` этого пути не видит — он срабатывает в runtime. Vendor-сервер `.92`
+/// CSP не отдаёт вовсе. `'unsafe-inline'` в script-src не добавляется.
+/// `style-src` — `'self' 'unsafe-inline'`
 /// (инлайн-`<style id="prostor-pnm-overrides">` и style-атрибуты Vue).
 pub fn build_csp(index_html: &str) -> String {
     let mut csp = String::from("default-src 'self'; script-src 'self' 'unsafe-eval'");

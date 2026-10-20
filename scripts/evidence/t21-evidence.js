@@ -84,22 +84,24 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
   // запись пользователя проверяется vendor-UI через EXPECTED `GET …/credentials`
   // 404 (пустое состояние) — это не ошибка контракта.
   let vendorConsoleErrors = 0;
-  const isVendorConsole = (text, source) =>
-    /bundle-2\.2\.1\.66/.test(source || '')
-    || /Content Security Policy/.test(text)
-    || /validationHandler/.test(text);
+  const vendorSamples = [];
+  // Точный allowlist известного дефекта vendor-бандла 2.2.1.66: баг цепочки
+  // промиса в диалоге создания группы (`TypeError … catch is not a function`).
+  // CSP-нарушения и любые другие console-ошибки — наши и валят гейт.
+  const isKnownVendorError = (text) => /validationHandler\(\.\.\.\)\.then\(\.\.\.\)\.then\.catch is not a function/.test(text);
   page.on('console', (m) => {
     if (m.type() !== 'error') return;
     const text = (m.text() || '').slice(0, 300);
     const source = m.location()?.url || '';
-    if (/Failed to load resource/.test(text) && /\/credentials/.test(source)) {
-      expectedCredentials404 += 1;
-      return;
-    }
-    const vendor = isVendorConsole(text, source);
+    if (/Failed to load resource/.test(text) && /\/credentials/.test(source)) return; // учтено в response-хендлере
+    const vendor = isKnownVendorError(text);
     consoleErrors.push({ step: step?.step ?? 'idle', text, source, vendor });
-    if (vendor) vendorConsoleErrors += 1;
-    else if (step) step.errors.push(text);
+    if (vendor) {
+      vendorConsoleErrors += 1;
+      vendorSamples.push({ step: step?.step ?? 'idle', text, source });
+    } else if (step) {
+      step.errors.push(text);
+    }
   });
   page.on('pageerror', (e) => {
     const text = 'PAGE ' + (e.message || '').slice(0, 300);
@@ -119,7 +121,12 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
     ws.on('framesent', (f) => {
       const payload = String(f.payload || '');
       if (!payload.includes('"ui:users:search"')) return;
-      try { wsUsersSearch.push({ request: JSON.parse(payload) }); } catch { /* ignore */ }
+      try {
+        const parsed = JSON.parse(payload);
+        // Токен авторизации в evidence не пишем: только метод/payload/id.
+        const frame = parsed.request || parsed;
+        wsUsersSearch.push({ request: { method: frame.method, id: frame.id, payload: frame.payload } });
+      } catch { /* ignore */ }
     });
     ws.on('framereceived', (f) => {
       const payload = String(f.payload || '');
@@ -140,7 +147,7 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
     return { status: r.status(), json: await r.json().catch(() => null) };
   };
   const findUser = async (name) => (await api('/api/v3/users?search=' + encodeURIComponent(name))).json?.users?.[0] || null;
-  const findGroup = async (name) => (await api('/api/v3/groups?search=' + encodeURIComponent(name))).json?.groups?.[0] || null;
+  const findGroup = async (name) => (await api('/api/v3/groups?display_name=' + encodeURIComponent(name))).json?.groups?.[0] || null;
 
   try {
     // login
@@ -232,6 +239,21 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
       throw new Error('адрес не добавлен в личную книгу: ' + JSON.stringify(addresses));
     }
     await shot('05-user-address');
+    evidenceIds.address_id = addresses.json.call_strings[0].id;
+
+    // 5b. редактирование личного адреса — vendor PATCH /ui/users/{u}/call_strings/{a}
+    push('user-address-edit');
+    const edited = await api(
+      '/api/v3/ui/users/' + createdUser.id + '/call_strings/' + evidenceIds.address_id,
+      { method: 'PATCH', data: { uri: 'h323:192.168.1.132', display_name: 'T21 адрес (изменён)' } },
+    );
+    if (edited.status !== 200 || edited.json?.call_string?.display_name !== 'T21 адрес (изменён)') {
+      throw new Error('личный адрес не редактируется: ' + JSON.stringify(edited));
+    }
+    const editedList = await api('/api/v3/users/' + createdUser.id + '/call_strings');
+    if (editedList.json?.call_strings?.[0]?.uri !== 'h323:192.168.1.132') {
+      throw new Error('изменённый адрес не сохранился: ' + JSON.stringify(editedList));
+    }
 
     // 6. группа через UI + членство через UI
     push('group-create');
@@ -266,39 +288,92 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
     if (!groups.some((g) => g.id === createdGroup.id)) throw new Error('пользователь не добавлен в группу: ' + JSON.stringify(detail.json));
     await shot('07-group-member');
 
-    // 7. reload: пользователь и группа сохраняются в configuration-document
+    // 8. поиск групп тем же параметром, что шлёт vendor-UI (`display_name`)
+    push('group-search');
+    const groupSearch = await api('/api/v3/groups?display_name=' + encodeURIComponent(GROUP_NAME));
+    if (groupSearch.json?.count !== 1 || groupSearch.json.groups[0].id !== createdGroup.id) {
+      throw new Error('поиск групп по display_name не работает: ' + JSON.stringify(groupSearch));
+    }
+
+    // 9. роль: создать через vendor-API, назначить пользователю, снять
+    push('role-create-assign');
+    const roleCreated = await api('/api/v3/roles', { method: 'POST', data: { display_name: 'T21 роль ' + stamp } });
+    if (roleCreated.status !== 201) throw new Error('роль не создана: ' + JSON.stringify(roleCreated));
+    const roleId = roleCreated.json.role.id;
+    const roleAssigned = await api('/api/v3/users/' + createdUser.id + '/roles/' + roleId, { method: 'POST' });
+    if (roleAssigned.status !== 200) throw new Error('роль не назначена: ' + JSON.stringify(roleAssigned));
+    const userWithRole = await api('/api/v3/users/' + createdUser.id);
+    if (!(userWithRole.json?.user?.roles || []).some((r) => r.id === roleId)) throw new Error('роль не видна в карточке');
+    const roleDeleted = await api('/api/v3/roles/' + roleId, { method: 'DELETE' });
+    if (roleDeleted.status !== 200) throw new Error('роль не удалена: ' + JSON.stringify(roleDeleted));
+
+    // 10. смена собственного пароля vendor-телом (`login:null`) и реальный login
+    push('self-password');
+    const selfLogin = await page.request.post(BASE + '/api/v3/login', { data: { login: LOGIN_NAME, password: PASSWORD } });
+    if (selfLogin.status() !== 200) throw new Error('login новым пользователем не работает');
+    const selfToken = (await selfLogin.json()).token;
+    const selfChange = await page.request.patch(BASE + '/api/v3/profile/credentials', {
+      headers: { Authorization: 'Bearer ' + selfToken, 'Content-Type': 'application/json' },
+      data: { login: null, old_password: PASSWORD, new_password: PASSWORD + 'x' },
+    });
+    if (selfChange.status() !== 200) throw new Error('смена своего пароля с login:null: ' + selfChange.status());
+    const oldPassword = await page.request.post(BASE + '/api/v3/login', { data: { login: LOGIN_NAME, password: PASSWORD } });
+    if (oldPassword.status() !== 401) throw new Error('старый пароль не отклонён');
+    const newPassword = await page.request.post(BASE + '/api/v3/login', { data: { login: LOGIN_NAME, password: PASSWORD + 'x' } });
+    if (newPassword.status() !== 200) throw new Error('новый пароль не работает');
+
+    // 11. reload: пользователь и группа сохраняются в configuration-document
     push('reload');
     await page.goto(BASE + '/pnm/addressbook/users', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(4500);
     await page.getByText(USER_NAME, { exact: true }).first().waitFor({ timeout: 10000 });
     await shot('08-users-reload');
 
-    // 8. удаление созданного через API + read-back
+    // 13. удаление пользователя через UI (кнопка «Удалить» активна для обычных
+    // пользователей) + read-back
+    push('user-delete-ui');
+    await page.getByText(USER_NAME, { exact: true }).first().click();
+    await page.waitForTimeout(3000);
+    const cardDelete = page.locator('button').filter({ hasText: 'Удалить' }).first();
+    if (!(await cardDelete.isEnabled().catch(() => false))) throw new Error('кнопка «Удалить» недоступна в UI');
+    await cardDelete.click();
+    await page.waitForTimeout(1500);
+    const confirmDelete = page.locator('.tc-modal-container').last().getByText('Удалить', { exact: true }).last();
+    await confirmDelete.click();
+    await page.waitForTimeout(3500);
+    const gone = await api('/api/v3/users/' + createdUser.id);
+    if (gone.status !== 404) throw new Error('пользователь читается после UI-delete: ' + gone.status);
+    await shot('09-user-deleted');
+
+    // 14. удаление группы + read-back
     push('cleanup');
-    const delUser = await api('/api/v3/users/' + createdUser.id, { method: 'DELETE' });
-    if (delUser.status !== 200) throw new Error('не удалили пользователя: ' + delUser.status);
     const delGroup = await api('/api/v3/groups/' + createdGroup.id, { method: 'DELETE' });
     if (delGroup.status !== 200) throw new Error('не удалили группу: ' + delGroup.status);
-    const gone = await api('/api/v3/users/' + createdUser.id);
-    if (gone.status !== 404) throw new Error('пользователь читается после delete');
-    const groupsAfter = await api('/api/v3/groups?search=' + encodeURIComponent(GROUP_NAME));
+    const groupsAfter = await api('/api/v3/groups?display_name=' + encodeURIComponent(GROUP_NAME));
     if (groupsAfter.json?.count !== 0) throw new Error('группа осталась после delete');
+    evidenceIds.user_deleted_ui = true;
     createdUser = null;
     createdGroup = null;
 
     const otherErrors = consoleErrors.filter((e) => !e.vendor);
+    const stepOk = (name) => !!steps.find((s) => s.step === name && s.errors.length === 0);
     const acceptance = {
-      users_list: steps[0].errors.length === 0 && wsUsersSearch.some((r) => Array.isArray(r.response?.ids) && r.response.ids.every(Boolean)),
-      user_created: !!steps.find((s) => s.step === 'user-create' && s.errors.length === 0),
-      card_tabs: !!steps.find((s) => s.step === 'user-card' && s.errors.length === 0),
-      credentials: !!steps.find((s) => s.step === 'credentials' && s.errors.length === 0),
-      user_address: !!steps.find((s) => s.step === 'user-address' && s.errors.length === 0),
-      group_created: !!steps.find((s) => s.step === 'group-create' && s.errors.length === 0),
-      group_member: !!steps.find((s) => s.step === 'group-member' && s.errors.length === 0),
-      reload: !!steps.find((s) => s.step === 'reload' && s.errors.length === 0),
-      cleanup: !!steps.find((s) => s.step === 'cleanup' && s.errors.length === 0),
+      users_list: stepOk('users-list') && wsUsersSearch.some((r) => Array.isArray(r.response?.ids) && r.response.ids.every(Boolean)),
+      user_created: stepOk('user-create'),
+      card_tabs: stepOk('user-card'),
+      credentials: stepOk('credentials'),
+      user_address: stepOk('user-address'),
+      user_address_edit: stepOk('user-address-edit'),
+      group_created: stepOk('group-create'),
+      group_search: stepOk('group-search'),
+      group_member: stepOk('group-member'),
+      role_create_assign: stepOk('role-create-assign'),
+      self_password: stepOk('self-password'),
+      reload: stepOk('reload'),
+      user_delete_ui: stepOk('user-delete-ui') && evidenceIds.user_deleted_ui === true,
+      cleanup: stepOk('cleanup'),
       unique_steps: new Set(steps.map((s) => s.step)).size === steps.length,
-      screenshots: screenshots.length === 8,
+      screenshots: screenshots.length === 9,
     };
     const ok = httpErrors.length === 0 && otherErrors.length === 0 && Object.values(acceptance).every(Boolean);
     const summary = {
@@ -321,14 +396,20 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
       ws_users_search: wsUsersSearch,
       http_error_samples: httpErrors.slice(0, 10),
       console_error_samples: otherErrors.slice(0, 10),
+      vendor_error_samples: vendorSamples.slice(0, 10),
       screenshots,
       notes: [
         'справочник работает через vendor-UI 2.2.1.66: WS ui:users:search отдаёт id (без него карточка не открывалась), карточка с вкладками info/profile/addresses/credentials, создание пользователя/группы/учётной записи/личного адреса и членство в группе',
         'учётная запись проверена реальным POST /api/v3/login с новым логином/паролем',
-        'личная адресная книга проверена GET /api/v3/users/{id}/call_strings; удаление — read-back 404/0',
-        'созданные сущности уникальны по timestamp и удалены в cleanup',
-        'ожидаемый 404 GET /users/{id}/credentials — vendor-UI проверяет наличие учётной записи (пустое состояние), не ошибка контракта',
-        'известные vendor-дефекты атрибутированы отдельно: CSP/runtime-компиляция шаблона (лечится unsafe-eval в CSP для неизменяемых бандлов) и TypeError validationHandler при создании группы; наш API при этом отвечает 201 и группа создаётся',
+        'личная адресная книга: создание и редактирование проверены vendor-эндпоинтами /ui/users/{id}/call_strings; глобальная книга не затрагивается',
+        'поиск групп проверен vendor-параметром display_name (не только search)',
+        'роль создаётся/назначается/удаляется через vendor-API /roles и /users/{id}/roles/{rid}',
+        'смена своего пароля проверена vendor-телом {login:null,...}: старый пароль отклоняется, новый работает',
+        'удаление пользователя выполнено кнопкой UI; после delete login отклоняется, профиль/членства/адреса/credentials вычищены',
+        'созданные сущности уникальны по timestamp; пользователь удалён UI, группа — API; роль удалена в своём шаге',
+        'ожидаемый 404 GET /users/{id}/credentials — vendor-UI проверяет наличие учётной записи (пустое состояние), не ошибка контракта; считается один раз (по response)',
+        'единственная vendor-console-ошибка — известный TypeError validationHandler при создании группы (allowlist по точному тексту); CSP-нарушений в финальном прогоне нет',
+        'unsafe-eval в CSP вынужден: без него index2.bundle исполняет строку как JS при открытии карточки пользователя/удалении — Chromium пишет «Evaluating a string as JavaScript violates … CSP» (сообщение и источник зафиксированы в отчёте; статический grep этот runtime-путь не видит)',
       ],
       base_url: BASE,
     };

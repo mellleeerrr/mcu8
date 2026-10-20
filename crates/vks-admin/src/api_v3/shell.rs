@@ -44,7 +44,27 @@ pub async fn profile(State(state): State<SharedState>, Extension(verified): Exte
     track("profile");
     let username_from_db = state.local_db.as_ref().and_then(|db| db.user(&verified.user_id).ok()).map(|u| u.username);
 
-    let display_name = username_from_db.clone().unwrap_or_else(|| verified.user_id.clone());
+    let directory_profile = {
+        let directory_id = state
+            .local_db
+            .as_ref()
+            .and_then(|db| db.user(&verified.user_id).ok())
+            .and_then(|local| {
+                crate::users::Users::list(&state)
+                    .into_iter()
+                    .find(|u| u.username == local.username || u.id.to_string() == verified.user_id)
+            })
+            .map(|u| u.id.to_string())
+            .unwrap_or_else(|| verified.user_id.clone());
+        let resources = state.api_v3.resources.lock().await;
+        resources.directory.users.get(&directory_id).cloned()
+    };
+    let display_name = directory_profile
+        .as_ref()
+        .map(|p| p.display_name.clone())
+        .filter(|d| !d.is_empty())
+        .or_else(|| username_from_db.clone())
+        .unwrap_or_else(|| verified.user_id.clone());
 
     // Роль — только из admin-хранилища (Users); неизвестному субъекту — Viewer
     // (least privilege). Единая точка резолвинга id/username — `Users::resolve_role`.

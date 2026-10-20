@@ -107,6 +107,22 @@ impl LocalDb {
     }
 
     /// Fetch a user by username.
+    /// Переименовать логин существующего пользователя (admin UI «Учётная
+    /// запись»). Коллизия логинов → `AlreadyExists`.
+    pub fn rename_user(&self, id: &str, new_username: &str) -> Result<User, LocalDbError> {
+        let new_username = new_username.trim();
+        if new_username.is_empty() {
+            return Err(LocalDbError::NotFound(new_username.to_string()));
+        }
+        let mut map = self.users.lock().unwrap();
+        if map.values().any(|u| u.id != id && u.username.eq_ignore_ascii_case(new_username)) {
+            return Err(LocalDbError::AlreadyExists(new_username.to_string()));
+        }
+        let user = map.get_mut(id).ok_or_else(|| LocalDbError::NotFound(id.to_string()))?;
+        user.username = new_username.to_string();
+        Ok(user.clone())
+    }
+
     pub fn user_by_name(&self, username: &str) -> Result<User, LocalDbError> {
         let map = self.users.lock().unwrap();
         map.values()
