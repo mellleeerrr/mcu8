@@ -363,7 +363,7 @@ function buildFacts() {
     layout: scenarios.every((s) => s.layout && s.layout.mode === 'manual' && s.layout.size === 4 && (s.layout.abonents || []).some((a) => a.position === 1)),
     reload_keeps_participant: scenarios.every((s) => s.layout_after_reload && s.layout_after_reload.participant_in_dom === true && (s.layout_after_reload.abonents || []).some((a) => a.position === 1)),
     kicked: scenarios.every((s) => s.kicked && s.kicked.connected_empty === true && s.kicked.disconnected_contains === true),
-    unique_steps: steps.length === 14 && new Set(steps).size === steps.length,
+    unique_steps: steps.length === 14 && new Set(steps.map((s) => s.step)).size === steps.length,
     screenshots: screenshots.length === 16,
   };
   const ok = otherErrors.length === 0 && httpErrors === 0 && Object.values(acceptance).every(Boolean);
