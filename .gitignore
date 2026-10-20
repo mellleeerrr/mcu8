@@ -16,6 +16,8 @@ client/pnm-frontend/source/
 # Архив исходников PNM (31 MB) хранится вне git; восстановление — scripts/import-pnm-frontend.sh
 client/pnm-frontend/archive/
 *.log
+# логи приёмки/смоука — часть evidence и коммитятся
+!docs/progress/evidence/**/*.log
 vks-server.log
 vks_server.log
 

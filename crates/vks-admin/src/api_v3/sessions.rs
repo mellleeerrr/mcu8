@@ -1845,19 +1845,29 @@ mod boot_reconcile_tests {
     use vks_core::ports::Storage;
     use vks_core::room::RoomMode;
 
+    fn operator_auth(room_scope: Option<&str>) -> AuthContext {
+        AuthContext {
+            subject: "operator".into(),
+            role: Role::Operator,
+            auth_type: crate::auth_middleware::AuthType::Jwt,
+            scopes: vec!["*".into()],
+            room_scope: room_scope.map(str::to_string),
+            generation: 0,
+            client_ip: "127.0.0.1".into(),
+        }
+    }
+
     /// T1.7: при старте все persisted-комнаты считаются остановленными
-    /// (живые звонки не переживают рестарт), а `POST /sessions` снова делает
+    /// (активные сессии не переживают рестарт), а `start_session` снова делает
     /// выбранную комнату активной; следующий «рестарт» опять гасит обе.
     #[tokio::test]
-    async fn boot_reconcile_marks_persisted_sessions_stopped_until_started() {
+    async fn boot_reconcile_stops_sessions_until_started() {
         let storage: Arc<dyn Storage> = Arc::new(vks_storage::MemoryStorage::new());
-        let mut room_a = vks_core::Room::new("boot-a", RoomMode::Sfu);
+        let room_a = vks_core::Room::new("boot-a", RoomMode::Sfu);
         let id_a = room_a.id;
-        room_a.created_ms = 1_700_000_000_000;
         storage.upsert_room(&room_a).await.unwrap();
-        let mut room_b = vks_core::Room::new("boot-b", RoomMode::Sfu);
+        let room_b = vks_core::Room::new("boot-b", RoomMode::Sfu);
         let id_b = room_b.id;
-        room_b.created_ms = 1_700_000_000_001;
         storage.upsert_room(&room_b).await.unwrap();
 
         let state = Arc::new(AppState::with_storage(storage.clone()));
@@ -1875,35 +1885,37 @@ mod boot_reconcile_tests {
             assert!(session["session"].is_null(), "у остановленной сессии нет живого session");
         }
 
-        let auth = AuthContext {
-            subject: "operator".into(),
-            role: Role::Operator,
-            auth_type: crate::auth_middleware::AuthType::Jwt,
-            scopes: vec!["*".into()],
-            room_scope: None,
-            generation: 0,
-            client_ip: "127.0.0.1".into(),
-        };
         let response = start_session(
             State(state.clone()),
-            Extension(auth),
+            Extension(operator_auth(None)),
             None,
             Json(StartSessionRequest { conference_id: Some(id_a.to_string()) }),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let after = sessions_payload(&state, &SessionsQuery::default());
-        for session in after["sessions"].as_array().unwrap() {
-            let expected = if session["id"].as_str() == Some(&id_a.to_string()) { "ACTIVE" } else { "STOPPED" };
-            assert_eq!(session["state"], expected, "{session}");
-        }
+        assert_eq!(after["count"], 2, "после старта обе комнаты остаются в выдаче");
+        let sessions = after["sessions"].as_array().unwrap();
+        let active: Vec<_> = sessions.iter().filter(|s| s["state"] == "ACTIVE").collect();
+        assert_eq!(active.len(), 1, "активна ровно одна сессия: {after}");
+        assert_eq!(active[0]["id"], id_a.to_string());
+        assert!(active[0]["session"].is_object(), "у активной сессии есть живой session");
+        let stopped_b = sessions.iter().find(|s| s["id"] == id_b.to_string()).expect("room_b в выдаче");
+        assert_eq!(stopped_b["state"], "STOPPED");
+        assert_eq!(stopped_b["has_stopped"], true);
 
         // Имитация второго рестарта: тот же storage, новое состояние.
         let restarted = Arc::new(AppState::with_storage(storage));
         restarted.sync_from_storage().await.unwrap();
         let payload = sessions_payload(&restarted, &SessionsQuery::default());
+        assert_eq!(payload["count"], 2);
+        {
+            let stopped = restarted.api_v3.stopped_sessions.lock().unwrap();
+            assert!(stopped.contains(&id_a) && stopped.contains(&id_b), "после рестарта обе комнаты снова STOPPED");
+        }
         for session in payload["sessions"].as_array().unwrap() {
             assert_eq!(session["state"], "STOPPED", "после рестарта активная сессия снова STOPPED: {session}");
+            assert!(session["session"].is_null(), "после рестарта живого session нет: {session}");
         }
     }
 }
