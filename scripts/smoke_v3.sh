@@ -142,7 +142,11 @@ jq -e --arg id "$ADDRESS_ID" 'all(.call_strings[]; .id != $id)' <<<"$HTTP_BODY" 
 req PATCH "/api/v3/call_strings/$ADDRESS_ID" '{"display_name":"smoke address patched"}'
 [ "$(jq -r '.call_string.display_name' <<<"$HTTP_BODY")" = "smoke address patched" ] \
     && ok "address patched" || fail "address patch did not apply: $HTTP_BODY"
+DELETED_ADDRESS=$ADDRESS_ID
 req DELETE "/api/v3/call_strings/$ADDRESS_ID"
+[ "$(http_status GET "/api/v3/call_strings/$DELETED_ADDRESS")" = "404" ] \
+    && ok "address deleted (GET 404)" || fail "address still readable after delete"
+ADDRESS_ID=""
 ADDRESS_ID=""
 ok "address deleted"
 
@@ -248,9 +252,15 @@ req DELETE "/api/v3/conferences/$CONF_ID"
 [ "$(http_status GET "/api/v3/conferences/$DELETED_CONF")" = "404" ] \
     && ok "conference deleted (GET 404)" || fail "conference still readable after delete"
 CONF_ID=""
+DELETED_CHANNEL=$CHANNEL_ID
 req DELETE "/api/v3/audiochannels/$CHANNEL_ID"
+[ "$(http_status GET "/api/v3/audiochannels/$DELETED_CHANNEL")" = "404" ] \
+    && ok "audio channel deleted (GET 404)" || fail "audio channel still readable after delete"
 CHANNEL_ID=""
+DELETED_LAYOUT=$LAYOUT_ID
 req DELETE "/api/v3/video_layouts/$LAYOUT_ID"
+[ "$(http_status GET "/api/v3/video_layouts/$DELETED_LAYOUT")" = "404" ] \
+    && ok "layout deleted (GET 404)" || fail "layout still readable after delete"
 LAYOUT_ID=""
 ok "cleanup complete"
 

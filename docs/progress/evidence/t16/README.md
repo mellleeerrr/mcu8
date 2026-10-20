@@ -58,7 +58,7 @@ kick из UI (call_end + подтверждение «Отключить»).
 
 ```bash
 # 1) API/живой smoke (логи в этом каталоге обновляются вручную)
-./scripts/smoke_v3.sh                                        # 21 проверка
+./scripts/smoke_v3.sh                                        # 24 проверки
 SMOKE_URI=h323:192.168.1.132 ./scripts/smoke_v3.sh           # 27 проверок
 SMOKE_URI=sip:192.168.1.132  ./scripts/smoke_v3.sh           # 27 проверок
 

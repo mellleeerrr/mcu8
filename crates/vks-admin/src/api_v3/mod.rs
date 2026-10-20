@@ -130,6 +130,7 @@ pub fn router(state: SharedState) -> Router {
             post(resources::attach_layout_contact).delete(resources::detach_layout_contact),
         )
         .route("/api/v3/audiochannels", get(resources::list_global).post(resources::create))
+        .route("/api/v3/ui/audiochannels", get(resources::list_global))
         .route(
             "/api/v3/audiochannels/{id}",
             get(resources::get_global).patch(resources::edit_global).delete(resources::remove_global),

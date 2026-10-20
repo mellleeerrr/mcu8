@@ -51,13 +51,26 @@ function buildFacts() {
   const trace = [];
   const steps = [];
   const scenarios = [];
+  const createdSessions = new Set();
+  let consoleErrors = [];
   let step = null;
   let token = null;
 
   const flush = () => { if (step) { steps.push(step); step = null; } };
   const push = (name) => { flush(); step = { step: name, errors: [], fails: [] }; };
-  page.on('console', (m) => { if (m.type() === 'error' && step) step.errors.push(m.text().slice(0, 200)); });
-  page.on('pageerror', (e) => { if (step) step.errors.push('PAGE ' + e.message.slice(0, 200)); });
+  page.on('console', (m) => {
+    if (m.type() !== 'error') return;
+    const text = (m.text() || '').slice(0, 300);
+    const location = m.location()?.url || '';
+    const frame = m.stackTrace?.()[0]?.url || '';
+    consoleErrors.push({ step: step?.step ?? 'idle', text, source: location || frame });
+    if (step) step.errors.push(text);
+  });
+  page.on('pageerror', (e) => {
+    const text = 'PAGE ' + (e.message || '').slice(0, 300);
+    consoleErrors.push({ step: step?.step ?? 'idle', text, source: e.stack || '' });
+    if (step) step.errors.push(text);
+  });
   page.on('response', (r) => {
     const u = new URL(r.url());
     if (!u.pathname.startsWith('/api/v3')) return;
@@ -73,9 +86,13 @@ function buildFacts() {
     });
     return { status: r.status(), json: await r.json().catch(() => null) };
   };
+  // Гасим только сессии, созданные этим прогоном (на общем стенде не трогаем чужие).
   const stopAll = async () => {
-    const ss = await api('/api/v3/sessions?page_size=200');
-    for (const s of (ss.json?.sessions || []).filter((s) => s.state === 'ACTIVE')) await api('/api/v3/sessions/' + s.id, { method: 'DELETE' });
+    for (const id of createdSessions) {
+      await api('/api/v3/sessions/' + id, { method: 'DELETE' });
+      await api('/api/v3/conferences/' + id, { method: 'DELETE' });
+    }
+    createdSessions.clear();
     await new Promise((r) => setTimeout(r, 2500));
   };
   const ensureSaved = async (uri, name) => {
@@ -138,6 +155,7 @@ function buildFacts() {
     await page.waitForTimeout(6500);
     rec.session_id = page.url().match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/)?.[1];
     if (!rec.session_id) throw new Error('не удалось определить id конференции из URL ' + page.url());
+    createdSessions.add(rec.session_id);
     push('start-' + sc.protocol);
     await page.locator('[data-qa="conference-tools-start-button"]').click();
     await page.waitForTimeout(9000);
@@ -290,24 +308,35 @@ function buildFacts() {
     await new Promise((r) => setTimeout(r, 3500));
   }
 
-  const createErrors = steps.filter((s) => s.step.startsWith('create-conference')).reduce((n, s) => n + s.errors.length, 0);
-  const otherErrors = steps.filter((s) => !s.step.startsWith('create-conference')).reduce((n, s) => n + s.errors.length, 0);
+  // Атрибуция ошибок: vendor-ошибки формы создания конференции — только если
+  // кадр действительно из бандла 2.2.1.66 и шаг create-conference; иначе other.
+  const isVendorCreate = (e) => e.step.startsWith('create-conference-') && /bundle-2\.2\.1\.66/.test(e.source || '');
+  const vendorErrors = consoleErrors.filter(isVendorCreate);
+  const otherErrors = consoleErrors.filter((e) => !isVendorCreate(e));
+  const createErrors = vendorErrors.length;
   const httpErrors = steps.reduce((n, s) => n + s.fails.length, 0);
-  const vendorFields = [...new Set((steps.flatMap((s) => s.errors).join('\n').match(/reading '[a-zA-Z]+'/g) || []))];
+  const notConnected = scenarios.filter((s) => !s.connected).map((s) => s.protocol);
+  const vendorFields = [...new Set((vendorErrors.map((e) => e.text).join('\n').match(/reading '[a-zA-Z]+'/g) || []))];
+  const ok = otherErrors.length === 0 && httpErrors === 0 && notConnected.length === 0;
   const summary = {
     generated_at: new Date().toISOString(), base: BASE,
     build,
+    ok,
     totals: {
-      console_errors: createErrors + otherErrors,
+      console_errors: consoleErrors.length,
       vendor_create_form_typeerrors: createErrors,
-      other_console_errors: otherErrors,
+      other_console_errors: otherErrors.length,
       http_errors: httpErrors,
       steps: steps.length,
+      unique_steps: new Set(steps.map((s) => s.step)).size,
     },
+    unconnected_protocols: notConnected,
     notes: [
       `transient vendor TypeError на открытие формы создания конференции (2.2.1.66), поля: ${vendorFields.join(', ')}; HTTP>=400 при этом 0 — атрибутировано, не скрыто`,
       'SIP и H.323: вызов из UI через автодополнение сохранённого адреса, рост медиа-счётчиков, mute камеры/микрофона из UI, ручная раскладка 4 слота, позиция 1 переживает reload, kick из UI',
       'summary.json и http-trace.json генерируются этим скриптом; первичные доказательства — PNG + smoke-логи + серверный лог',
+      'провенанс: build.git_head — коммит, на котором запущен генератор; коммит с evidence является его docs-only потомком (кода не меняет), бинарник подтверждён sha256 и pid',
+      'stopAll() завершает только сессии, созданные этим прогоном; чужие ACTIVE-сессии не затрагиваются',
     ],
     screenshots: screenshots.map((f) => ({ file: f })),
     scenarios,
@@ -331,6 +360,7 @@ function buildFacts() {
     fs.rmSync(correlateFile);
   }
   console.log(JSON.stringify({
+    ok,
     totals: summary.totals,
     screenshots,
     scenarios: scenarios.map((s) => ({
@@ -339,4 +369,8 @@ function buildFacts() {
     })),
   }, null, 1));
   await browser.close();
+  if (!ok) {
+    console.error('evidence FAILED: unconnected=' + JSON.stringify(notConnected) + ', other_console_errors=' + otherErrors.length + ', http_errors=' + httpErrors);
+    process.exit(1);
+  }
 })().catch((e) => { console.error(e); process.exit(1); });
