@@ -401,8 +401,13 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
       expected_credentials_404: expectedCredentials404 === 2,
       // Оба ожидаемых 404 относятся к пользователям, созданным этим прогоном
       // (а не к произвольным/чужим id) — иначе allowlist маскировал бы регрессию.
+      // Vendor-UI может запросить credentials одной и той же карточки дважды,
+      // поэтому важно не «2 разных id», а что все 404 относятся к созданным в
+      // прогоне пользователям (регрессия «404 для всех» даёт чужие id).
       expected_credentials_known_users:
-        expectedCredentialUsers.size === 2 && [...expectedCredentialUsers].every((id) => knownUserIds.has(id)),
+        expectedCredentials404 === 2 &&
+        expectedCredentialUsers.size > 0 &&
+        [...expectedCredentialUsers].every((id) => knownUserIds.has(id)),
       // Артефакт коммитится только с чистого дерева; иначе provenance недостоверен.
       clean_build: build.git_dirty === false && build.git_head.length === 40 && build.binary_sha256 !== null,
       // Бинарник собран ПОСЛЕ коммита, на котором сделан прогон: иначе evidence
