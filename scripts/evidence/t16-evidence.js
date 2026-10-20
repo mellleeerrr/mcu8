@@ -159,6 +159,9 @@ function buildFacts() {
     const sc = PROTOCOLS[pi];
     const rec = { protocol: sc.protocol, uri: sc.uri };
     await stopAll();
+    // Терминал принимает только один протокол одновременно: после предыдущего
+    // сценария даём ему освободиться, иначе SIP/H.323 отвечает `486 Busy Here`.
+    if (pi > 0) await page.waitForTimeout(16000);
     const base = pi * 8 + 1;
     const num = (n) => String(base + n).padStart(2, '0');
     const file = (n, suffix) => `${num(n)}-${sc.prefix}-${suffix}.png`;
@@ -216,16 +219,21 @@ function buildFacts() {
       await modal.getByText(codec, { exact: true }).first().click().catch(() => {});
       await page.waitForTimeout(400);
     }
-    await page.evaluate(() => {
-      const btns = [...document.querySelectorAll('button')].filter((b) => b.textContent.trim() === 'Добавить' && b.offsetWidth && !b.disabled);
-      btns[btns.length - 1]?.click();
-    });
     let connected = null;
-    for (let i = 0; i < 35; i++) {
-      await page.waitForTimeout(2000);
-      const ab = await api('/api/v3/sessions/' + rec.session_id + '/abonents');
-      connected = (ab.json?.connected || []).find((a) => a.connection_url === sc.uri);
-      if (connected) break;
+    // До 4 попыток: endpoint мог ещё не освободиться после предыдущего вызова
+    // (`486 Busy Here`). Модалка остаётся открытой, повторяем «Добавить».
+    for (let attempt = 0; attempt < 4 && !connected; attempt++) {
+      if (attempt > 0) await page.waitForTimeout(12000);
+      await page.evaluate(() => {
+        const btns = [...document.querySelectorAll('button')].filter((b) => b.textContent.trim() === 'Добавить' && b.offsetWidth && !b.disabled);
+        btns[btns.length - 1]?.click();
+      }).catch(() => {});
+      for (let i = 0; i < (attempt === 0 ? 35 : 20); i++) {
+        await page.waitForTimeout(2000);
+        const ab = await api('/api/v3/sessions/' + rec.session_id + '/abonents');
+        connected = (ab.json?.connected || []).find((a) => a.connection_url === sc.uri);
+        if (connected) break;
+      }
     }
     rec.connected = !!connected;
     if (!rec.connected) { rec.steps = steps.filter((s) => s.step.endsWith(sc.protocol) || s.step === 'create-conference-' + sc.protocol); scenarios.push(rec); continue; }
@@ -347,7 +355,7 @@ function buildFacts() {
   const notConnected = scenarios.filter((s) => !s.connected).map((s) => s.protocol);
   const vendorFields = [...new Set((vendorErrors.map((e) => e.text).join('\n').match(/reading '[a-zA-Z]+'/g) || []))];
   const acceptance = {
-    protocol_matches: scenarios.length === 2 && scenarios.every((s) => s.protocol_matches === true),
+    protocol_matches: scenarios.length === 2 && scenarios.every((s) => s.address_selected?.protocol_matches === true),
     connected: scenarios.length === 2 && scenarios.every((s) => s.connected === true),
     media_grows: scenarios.every((s) => s.media_grows === true),
     controls_off: scenarios.every((s) => s.controls && s.controls.camera_rx_enabled === false && s.controls.mic_rx_enabled === false && s.controls.speaker_tx_enabled === false),
