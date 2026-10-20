@@ -122,7 +122,8 @@ async fn users_crud_groups_roles_and_credentials() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(crate::users::Users::resolve_role(&state, &id), Some(Role::Participant));
 
-    // Administrator назначается, но снять его нельзя (vendor `Undeletable`)
+    // Administrator назначается и снимается у обычного пользователя (vendor UI
+    // предлагает удаление чипа роли), но не у bootstrap/себя.
     let response =
         send(&app, request("POST", &format!("/api/v3/users/{id}/roles/{ADMIN_ROLE_ID}"), Some(&token), json!({})))
             .await;
@@ -131,8 +132,8 @@ async fn users_crud_groups_roles_and_credentials() {
     let response =
         send(&app, request("DELETE", &format!("/api/v3/users/{id}/roles/{ADMIN_ROLE_ID}"), Some(&token), json!({})))
             .await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert_eq!(crate::users::Users::resolve_role(&state, &id), Some(Role::Operator));
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(crate::users::Users::resolve_role(&state, &id), Some(Role::Participant));
 
     // --- учётные записи ---
     let response = send(
@@ -402,15 +403,42 @@ async fn delete_user_cascades_credentials_memberships_and_profile() {
     .await;
     assert_eq!(response.status(), StatusCode::CREATED);
 
+    // личный адрес и кастомная роль — тоже должны исчезнуть каскадом
+    let address = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/ui/users/{id}/call_strings"),
+            Some(&token),
+            json!({"uri": "sip:deleteme@example.com"}),
+        ),
+    )
+    .await;
+    assert_eq!(address.status(), StatusCode::CREATED);
+    let address_id = json_body(address).await["call_string"]["id"].as_str().unwrap().to_string();
+    let role =
+        send(&app, request("POST", "/api/v3/roles", Some(&token), json!({"display_name": "Удаляемая роль"}))).await;
+    let role_id = json_body(role).await["role"]["id"].as_str().unwrap().to_string();
+    let assigned =
+        send(&app, request("POST", &format!("/api/v3/users/{id}/roles/{role_id}"), Some(&token), json!({}))).await;
+    assert_eq!(assigned.status(), StatusCode::OK);
+
     let response = send(&app, request("DELETE", &format!("/api/v3/users/{id}"), Some(&token), json!({}))).await;
     assert_eq!(response.status(), StatusCode::OK);
     // учётные данные удалены: login невозможен
     let response =
         send(&app, request("POST", "/api/v3/login", None, json!({"login": "deleteme", "password": "secret1"}))).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "deleted user must not authenticate");
-    // профиль и членства удалены: размер группы 0
+    // профиль, членства, личный адрес и роль удалены
     let response = send(&app, request("GET", &format!("/api/v3/groups/{group_id}"), Some(&token), json!({}))).await;
     assert_eq!(json_body(response).await["group"]["size"], 0);
+    let response =
+        send(&app, request("GET", &format!("/api/v3/users/{id}/call_strings"), Some(&token), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND, "address book must be gone with the user");
+    assert!(!address_id.is_empty());
+    let role_body =
+        json_body(send(&app, request("GET", &format!("/api/v3/roles/{role_id}"), Some(&token), json!({}))).await).await;
+    assert_eq!(role_body["role"]["size"], 0, "role membership must be gone");
     // повторное удаление — 404
     let response = send(&app, request("DELETE", &format!("/api/v3/users/{id}"), Some(&token), json!({}))).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -798,6 +826,11 @@ async fn legacy_localdb_id_credentials_can_be_patched_and_deleted() {
     assert_eq!(login.status(), StatusCode::OK);
     // Смена пароля инвалидирует старые токены (generation) — берём свежий.
     let fresh_token = json_body(login).await["token"].as_str().unwrap().to_string();
+    assert_eq!(
+        send(&app, request("GET", "/api/v3/users", Some(&token), json!({}))).await.status(),
+        StatusCode::UNAUTHORIZED,
+        "старый токен после смены пароля отозван"
+    );
     let response =
         send(&app, request("DELETE", &format!("/api/v3/users/{admin_id}/credentials"), Some(&fresh_token), json!({})))
             .await;
@@ -805,6 +838,11 @@ async fn legacy_localdb_id_credentials_can_be_patched_and_deleted() {
     let login =
         send(&app, request("POST", "/api/v3/login", None, json!({"login": "admin", "password": "s3cret2"}))).await;
     assert_eq!(login.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        send(&app, request("GET", "/api/v3/users", Some(&fresh_token), json!({}))).await.status(),
+        StatusCode::UNAUTHORIZED,
+        "токен после удаления credentials отозван (generation синхронизирован)"
+    );
 }
 
 #[tokio::test]
@@ -822,4 +860,214 @@ async fn ws_and_http_deletable_flags_match_for_own_card() {
     let ws = ws_users_search(&state, "u-admin", None, &json!({})).await.expect("ws search");
     let ws_self = ws["users"].as_array().unwrap().iter().find(|user| user["id"] == admin_id).expect("own card in ws");
     assert_eq!(ws_self["defaults"]["deletable"], false, "WS-вьюер должен совпадать с HTTP");
+}
+
+#[tokio::test]
+async fn include_users_is_an_intersection_not_exclusion() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let first = created_user(&app, &token, "Include A").await;
+    let second = created_user(&app, &token, "Include B").await;
+    let response = send(&app, request("GET", &format!("/api/v3/users?users={second}"), Some(&token), json!({}))).await;
+    let body = json_body(response).await;
+    let ids: Vec<&str> = body["users"].as_array().unwrap().iter().filter_map(|u| u["id"].as_str()).collect();
+    assert_eq!(ids, vec![second.as_str()], "users — include-список vendor (includeUsers)");
+    assert_eq!(body["count"], 1);
+    let ws = ws_users_search(&state, "u-admin", None, &json!({"users": [second]})).await.expect("ws search");
+    let ws_ids: Vec<&str> = ws["users"].as_array().unwrap().iter().filter_map(|u| u["id"].as_str()).collect();
+    assert_eq!(ws_ids, vec![second.as_str()]);
+    // exclude_users по-прежнему исключает
+    let response =
+        send(&app, request("GET", &format!("/api/v3/users?exclude_users={first}"), Some(&token), json!({}))).await;
+    let body = json_body(response).await;
+    assert!(!body["users"].as_array().unwrap().iter().any(|u| u["id"] == first.as_str()));
+}
+
+#[tokio::test]
+async fn administrator_can_be_unassigned_from_non_bootstrap_user() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let id = created_user(&app, &token, "Ещё админ").await;
+    let add =
+        send(&app, request("POST", &format!("/api/v3/users/{id}/roles/{ADMIN_ROLE_ID}"), Some(&token), json!({})))
+            .await;
+    assert_eq!(add.status(), StatusCode::OK);
+    let remove =
+        send(&app, request("DELETE", &format!("/api/v3/users/{id}/roles/{ADMIN_ROLE_ID}"), Some(&token), json!({})))
+            .await;
+    assert_eq!(remove.status(), StatusCode::OK, "vendor UI предлагает снятие роли обычному пользователю");
+    let body = user_body(&app, &token, &id).await;
+    assert!(!body["user"]["roles"].as_array().unwrap().iter().any(|r| r["id"] == ADMIN_ROLE_ID));
+    // bootstrap-администратор защищён
+    let admin_id = Users::list(&state).into_iter().find(|u| u.role == Role::Operator).unwrap().id.to_string();
+    let denied = send(
+        &app,
+        request("DELETE", &format!("/api/v3/users/{admin_id}/roles/{ADMIN_ROLE_ID}"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn favorite_personal_address_exposed_as_primary() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let id = created_user(&app, &token, "Адресат").await;
+    let first = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/ui/users/{id}/call_strings"),
+            Some(&token),
+            json!({"uri": "sip:one@example.com"}),
+        ),
+    )
+    .await;
+    let first_id = json_body(first).await["call_string"]["id"].as_str().unwrap().to_string();
+    let second = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/ui/users/{id}/call_strings"),
+            Some(&token),
+            json!({"uri": "sip:two@example.com"}),
+        ),
+    )
+    .await;
+    let second_id = json_body(second).await["call_string"]["id"].as_str().unwrap().to_string();
+    let response = send(
+        &app,
+        request("POST", &format!("/api/v3/users/{id}/call_strings/{first_id}/favorite"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = user_body(&app, &token, &id).await;
+    assert_eq!(body["user"]["address"]["id"], first_id.as_str(), "primary address в карточке");
+    let response = send(
+        &app,
+        request("POST", &format!("/api/v3/users/{id}/call_strings/{second_id}/favorite"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = user_body(&app, &token, &id).await;
+    assert_eq!(body["user"]["address"]["id"], second_id.as_str());
+    let response = send(
+        &app,
+        request("DELETE", &format!("/api/v3/users/{id}/call_strings/{second_id}/favorite"), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = user_body(&app, &token, &id).await;
+    assert!(body["user"]["address"].is_null());
+    let missing = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/users/{id}/call_strings/{}/favorite", uuid::Uuid::new_v4()),
+            Some(&token),
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn user_search_matches_login_email_and_phone() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let response = send(
+        &app,
+        request(
+            "POST",
+            "/api/v3/users",
+            Some(&token),
+            json!({"display_name": "Поисковый", "emails": ["zebra@example.com"], "phones": ["+79990001122"]}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let found =
+        json_body(send(&app, request("GET", "/api/v3/users?search=zebra", Some(&token), json!({}))).await).await;
+    assert_eq!(found["count"], 1, "поиск по email");
+    let found =
+        json_body(send(&app, request("GET", "/api/v3/users?search=990001122", Some(&token), json!({}))).await).await;
+    assert_eq!(found["count"], 1, "поиск по телефону");
+}
+
+#[tokio::test]
+async fn role_and_group_update_and_credentials_lifecycle() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    // роль: PATCH имени/описания
+    let role = send(
+        &app,
+        request("POST", "/api/v3/roles", Some(&token), json!({"display_name": "Роль до", "description": "old"})),
+    )
+    .await;
+    let role_id = json_body(role).await["role"]["id"].as_str().unwrap().to_string();
+    let response = send(
+        &app,
+        request(
+            "PATCH",
+            &format!("/api/v3/roles/{role_id}"),
+            Some(&token),
+            json!({"display_name": "Роль после", "description": "new"}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let get =
+        json_body(send(&app, request("GET", &format!("/api/v3/roles/{role_id}"), Some(&token), json!({}))).await).await;
+    assert_eq!(get["role"]["display_name"], "Роль после");
+    assert_eq!(get["role"]["description"], "new");
+    // группа: PATCH имени
+    let group = send(&app, request("POST", "/api/v3/groups", Some(&token), json!({"display_name": "Группа до"}))).await;
+    let group_id = json_body(group).await["group"]["id"].as_str().unwrap().to_string();
+    let response = send(
+        &app,
+        request("PATCH", &format!("/api/v3/groups/{group_id}"), Some(&token), json!({"display_name": "Группа после"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let get =
+        json_body(send(&app, request("GET", &format!("/api/v3/groups/{group_id}"), Some(&token), json!({}))).await)
+            .await;
+    assert_eq!(get["group"]["display_name"], "Группа после");
+    // credentials: create → update password → login → delete → login 401
+    let id = created_user(&app, &token, "Учётка lifecycle").await;
+    let create = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/users/{id}/credentials"),
+            Some(&token),
+            json!({"login": "lifecycle", "password": "secret1"}),
+        ),
+    )
+    .await;
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let update = send(
+        &app,
+        request("PATCH", &format!("/api/v3/users/{id}/credentials"), Some(&token), json!({"password": "secret2"})),
+    )
+    .await;
+    assert_eq!(update.status(), StatusCode::OK);
+    let login =
+        send(&app, request("POST", "/api/v3/login", None, json!({"login": "lifecycle", "password": "secret1"}))).await;
+    assert_eq!(login.status(), StatusCode::UNAUTHORIZED);
+    let login =
+        send(&app, request("POST", "/api/v3/login", None, json!({"login": "lifecycle", "password": "secret2"}))).await;
+    assert_eq!(login.status(), StatusCode::OK);
+    let delete =
+        send(&app, request("DELETE", &format!("/api/v3/users/{id}/credentials"), Some(&token), json!({}))).await;
+    assert_eq!(delete.status(), StatusCode::OK);
+    let login =
+        send(&app, request("POST", "/api/v3/login", None, json!({"login": "lifecycle", "password": "secret2"}))).await;
+    assert_eq!(login.status(), StatusCode::UNAUTHORIZED);
 }

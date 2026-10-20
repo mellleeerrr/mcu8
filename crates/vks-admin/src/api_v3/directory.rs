@@ -125,6 +125,8 @@ pub struct DirectoryUser {
     pub roles: Vec<String>,
     /// Логин учётной записи (если создана); для bootstrap-админа `None`.
     pub login: Option<String>,
+    /// Основной личный адрес (vendor «звёздочка»/primary address).
+    pub primary_address: Option<String>,
 }
 
 /// Группа пользователей (`GET /groups`).
@@ -401,7 +403,12 @@ fn profile_json(
         "phone": profile.phones.first(),
         "email": profile.emails.first(),
         "groups": groups,
-        "address": Value::Null,
+        "address": profile
+            .primary_address
+            .as_deref()
+            .and_then(|address_id| directory.user_addresses.get(user_id).and_then(|map| map.get(address_id)))
+            .map(|address| super::call_strings::address_value(profile.primary_address.as_deref().unwrap_or_default(), address))
+            .unwrap_or(Value::Null),
         "payload": Value::Null,
         "defaults": {"editable": true, "deletable": is_deletable(viewer, user_id), "disableable": false},
         "terminal": Value::Null,
@@ -479,14 +486,26 @@ fn filtered_users(
     let role_id = params.get("role_id").and_then(Value::as_str).unwrap_or_default();
     let exclude_groups = id_list(params, &["exclude_groups"]);
     let exclude_roles = id_list(params, &["exclude_roles"]);
-    let exclude_users = id_list(params, &["exclude_users", "users"]);
+    let exclude_users = id_list(params, &["exclude_users", "users_exclude"]);
+    // Vendor `includeUsers → users`: это include/intersection, НЕ exclude.
+    let include_users = id_list(params, &["users"]);
     let mut rows: Vec<Value> = sorted_users(state, directory, viewer)
         .into_iter()
         .filter(|(user, value)| {
-            if !search.is_empty()
-                && !value["display_name"].as_str().unwrap_or_default().to_lowercase().contains(&search)
-            {
-                return false;
+            if !search.is_empty() {
+                let display = value["display_name"].as_str().unwrap_or_default().to_lowercase();
+                let profile = profile(directory, user);
+                let emails = profile.map(|p| p.emails.iter().map(|e| e.to_lowercase()).collect::<Vec<_>>());
+                let phones = profile.map(|p| p.phones.iter().map(|e| e.to_lowercase()).collect::<Vec<_>>());
+                let login = profile.and_then(|p| p.login.clone()).unwrap_or_default().to_lowercase();
+                let matches = display.contains(&search)
+                    || user.username.to_lowercase().contains(&search)
+                    || login.contains(&search)
+                    || emails.is_some_and(|items| items.iter().any(|item| item.contains(&search)))
+                    || phones.is_some_and(|items| items.iter().any(|item| item.contains(&search)));
+                if !matches {
+                    return false;
+                }
             }
             if !group_id.is_empty() {
                 let groups = profile(directory, user).map(|p| p.groups.clone()).unwrap_or_default();
@@ -505,6 +524,9 @@ fn filtered_users(
                 }
             }
             let uid = user.id.to_string();
+            if !include_users.is_empty() && !include_users.iter().any(|id| id == &uid) {
+                return false;
+            }
             if exclude_users.iter().any(|id| id == &uid) {
                 return false;
             }
@@ -1455,6 +1477,9 @@ pub async fn delete_role(
     for (user_id, role) in updates {
         if let Err(error) = Users::update_async(&state, &user_id, None, Some(role)).await {
             tracing::error!(error = %error, "directory: role cleanup persistence failed");
+            // Роль уже удалена из профилей; без обновления internal-роли часть
+            // пользователей сохранит повышенные права до рестарта — не 200.
+            return error_json(500, "Storage error");
         }
     }
     state.record_audit_entry(
@@ -1505,9 +1530,15 @@ async fn change_role(
         return error_json(404, "User not found");
     };
     let user_id = user.id.to_string();
-    // Built-in Administrator назначен всегда; снять его нельзя (`Undeletable`).
-    if !add && role_id == ADMIN_ROLE_ID {
-        return error_json(403, "The Administrator role cannot be removed");
+    // Снять Administrator нельзя только с встроенного администратора
+    // (`BOOTSTRAP_ADMIN_USER_ID`); у обычных пользователей vendor-UI предлагает
+    // удаление чипа роли (`isDeletable=true`), поэтому 403 для всех был регрессией.
+    let self_id = caller_id(&state, &auth.subject);
+    if !add
+        && role_id == ADMIN_ROLE_ID
+        && (user.id == vks_core::UserId::bootstrap_operator() || self_id.as_deref() == Some(user_id.as_str()))
+    {
+        return error_json(403, "The Administrator role cannot be removed from the built-in administrator or yourself");
     }
     let roles;
     let new_internal;
@@ -1586,7 +1617,9 @@ fn local_login(state: &crate::state::AppState, user: &crate::state::UserRecord) 
 fn sync_generation(state: &crate::state::AppState, user_id: &str, generation: u64) {
     if let Ok(mut users) = state.users.lock() {
         if let Some(user) = users.values_mut().find(|u| u.id.to_string() == user_id) {
-            user.generation = generation;
+            // Только вперёд: иначе LDAP-sync с меньшим generation «воскресил» бы
+            // отозванные токены.
+            user.generation = user.generation.max(generation);
         }
     }
 }
@@ -1838,7 +1871,9 @@ pub async fn delete_user_credentials(
     {
         return response;
     }
-    state.notify_revocation(user_id.clone(), db.generation(&local.id));
+    let generation = db.generation(&local.id);
+    sync_generation(&state, &user_id, generation);
+    state.notify_revocation(user_id.clone(), generation);
     state.record_audit_entry(
         &auth.subject,
         "user.credentials.deleted",
@@ -2056,6 +2091,80 @@ pub async fn detach_user_call_string(
     Json(json!({"status": "ok"})).into_response()
 }
 
+/// `POST /api/v3/users/{id}/call_strings/{address_id}/favorite` — назначить
+/// основной (primary) личный адрес; vendor показывает «звёздочку» при >1 адресе
+/// и ожидает этот вызов. `DELETE` — снять primary, если он совпадает.
+pub async fn favorite_user_call_string(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
+    Path((user_id, address_id)): Path<(String, String)>,
+) -> Response {
+    track("users.call_strings.favorite");
+    if let Some(response) = require_manage(&auth) {
+        return response;
+    }
+    let Some(user) = find_user(&state, &user_id) else {
+        return error_json(404, "User not found");
+    };
+    let user_id = user.id.to_string();
+    if let Err(response) = commit_directory(&state, |resources| {
+        let present = resources.directory.user_addresses.get(&user_id).is_some_and(|map| map.contains_key(&address_id));
+        if !present {
+            return Err(error_json(404, "Call string not found"));
+        }
+        ensure_profile(&mut resources.directory, &user).primary_address = Some(address_id.clone());
+        Ok(())
+    })
+    .await
+    {
+        return response;
+    }
+    state.record_audit_entry(
+        &auth.subject,
+        "user.call_string.favorited",
+        Some(user_id),
+        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
+    );
+    Json(json!({"status": "ok", "address_id": address_id})).into_response()
+}
+
+/// `DELETE …/favorite` — снять основной адрес (идемпотентно).
+pub async fn unfavorite_user_call_string(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
+    Path((user_id, address_id)): Path<(String, String)>,
+) -> Response {
+    track("users.call_strings.unfavorite");
+    if let Some(response) = require_manage(&auth) {
+        return response;
+    }
+    let Some(user) = find_user(&state, &user_id) else {
+        return error_json(404, "User not found");
+    };
+    let user_id = user.id.to_string();
+    if let Err(response) = commit_directory(&state, |resources| {
+        if let Some(profile) = resources.directory.users.get_mut(&user_id) {
+            if profile.primary_address.as_deref() == Some(address_id.as_str()) {
+                profile.primary_address = None;
+            }
+        }
+        Ok(())
+    })
+    .await
+    {
+        return response;
+    }
+    state.record_audit_entry(
+        &auth.subject,
+        "user.call_string.unfavorited",
+        Some(user_id),
+        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
+    );
+    Json(json!({"status": "ok"})).into_response()
+}
+
 /// Проверка адреса: протокол (или host) обязателен, пробелы/управляющие символы
 /// запрещены. `canonical_uri` сам добавляет `sip:`, поэтому проверяем остаток.
 fn validate_call_string_uri(uri: &str) -> Result<(), String> {
@@ -2210,14 +2319,8 @@ pub(crate) async fn ws_user_call_strings(
     if role < Role::Moderator {
         return Err((403, "Forbidden: insufficient permissions"));
     }
-    let user_id = {
-        let users = state.users.lock().expect("users store poisoned");
-        users
-            .values()
-            .find(|u| !u.deleted && (u.id.to_string() == contact_id || u.username == contact_id))
-            .map(|u| u.id.to_string())
-            .ok_or((404, "User not found"))?
-    };
+    let user = find_user(state, contact_id).ok_or((404, "User not found"))?;
+    let user_id = user.id.to_string();
     let resources = state.api_v3.resources.lock().await;
     let records = resources
         .directory
@@ -2225,22 +2328,23 @@ pub(crate) async fn ws_user_call_strings(
         .get(&user_id)
         .map(|map| map.iter().map(|(id, a)| (id.clone(), a.clone())).collect::<Vec<_>>())
         .unwrap_or_default();
-    let mut values = user_addresses_json(records.into_iter());
+    let values = user_addresses_json(records.into_iter());
+    let list = ListParams::parse(payload);
     let search = payload
         .get("search")
         .or_else(|| payload.get("query"))
         .and_then(Value::as_str)
-        .unwrap_or_default()
+        .unwrap_or(&list.search)
         .to_lowercase();
     let uri_filter = payload.get("uri").and_then(Value::as_str).unwrap_or_default().to_lowercase();
-    values.retain(|value| {
-        let name = value["display_name"].as_str().unwrap_or_default().to_lowercase();
-        let uri = value["uri"].as_str().unwrap_or_default().to_lowercase();
-        (search.is_empty() || name.contains(&search) || uri.contains(&search))
-            && (uri_filter.is_empty() || uri.contains(&uri_filter))
-    });
-    let count = values.len();
-    Ok(json!({"call_strings": values, "count": count}))
+    let values: Vec<Value> = values
+        .into_iter()
+        .filter(|value| {
+            uri_filter.is_empty() || value["uri"].as_str().unwrap_or_default().to_lowercase().contains(&uri_filter)
+        })
+        .collect();
+    let (count, value) = sort_and_page(values, &search, &list.sort_field, list.sort_order, list.page, list.page_size);
+    Ok(json!({"call_strings": value, "count": count}))
 }
 
 #[cfg(test)]

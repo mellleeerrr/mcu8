@@ -69,6 +69,7 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
   const consoleErrors = [];
   const httpErrors = [];
   let expectedCredentials404 = 0;
+  const expectedCredentialUsers = new Set();
   const screenshots = [];
   const wsUsersSearch = [];
   let step = null;
@@ -113,6 +114,7 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
     if (!u.pathname.startsWith('/api/v3') || r.status() < 400 || u.pathname === '/api/v3/login') return;
     if (r.status() === 404 && r.request().method() === 'GET' && /^\/api\/v3\/users\/[0-9a-f-]+\/credentials$/.test(u.pathname)) {
       expectedCredentials404 += 1;
+      expectedCredentialUsers.add(u.pathname.split('/')[4]);
       return;
     }
     httpErrors.push({ step: step?.step ?? 'idle', method: r.request().method(), path: u.pathname + u.search, status: r.status() });
@@ -377,6 +379,7 @@ const ADDRESS_URI = `sip:t21_${stamp}@example.com`;
       // Ровно два реальных vendor-запроса credentials завершаются 404 (пустое
       // состояние). Регрессия «404 для всех» больше не проходит гейт.
       expected_credentials_404: expectedCredentials404 === 2,
+      expected_credentials_distinct_users: expectedCredentialUsers.size === 2,
       // Артефакт коммитится только с чистого дерева; иначе provenance недостоверен.
       clean_build: build.git_dirty === false && build.git_head.length === 40 && build.binary_sha256 !== null,
     };

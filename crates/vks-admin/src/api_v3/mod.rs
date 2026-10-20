@@ -153,6 +153,14 @@ pub fn router(state: SharedState) -> Router {
             "/api/v3/users/{id}/call_strings/{address_id}",
             post(directory::attach_user_call_string).delete(directory::detach_user_call_string),
         )
+        .route(
+            "/api/v3/users/{id}/call_strings/{address_id}/favorite",
+            post(directory::favorite_user_call_string).delete(directory::unfavorite_user_call_string),
+        )
+        .route(
+            "/api/v3/ui/users/{id}/call_strings/{address_id}/favorite",
+            post(directory::favorite_user_call_string).delete(directory::unfavorite_user_call_string),
+        )
         .route("/api/v3/ui/users/{id}/call_strings", post(directory::create_user_call_string))
         .route(
             "/api/v3/ui/users/{id}/call_strings/{address_id}",
