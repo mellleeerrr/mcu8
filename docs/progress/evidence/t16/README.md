@@ -25,7 +25,7 @@ kick из UI (call_end + подтверждение «Отключить»).
 | Микрофон выключается (`audio.tx.enabled=false`) из UI | ✅ | ✅ |
 | Ручная раскладка: mode=manual, size=4, участник в position 1 | ✅ | ✅ |
 | После reload участник остаётся в position 1 и виден в редакторе | ✅ | ✅ |
-| Kick из UI: диалог подтверждения → участник исчез | ✅ | ✅ |
+| Kick из UI: диалог подтверждения → `connected` пуст, участник в «Неподключившиеся» | ✅ | ✅ |
 | Console errors на шагах вызова/контролов/раскладки/reload/kick | 0 | 0 |
 | HTTP ≥400 за сценарий | 0 | 0 |
 
@@ -37,8 +37,8 @@ kick из UI (call_end + подтверждение «Отключить»).
 ## Честная атрибуция ошибок
 
 На шаге **открытия формы создания конференции** vendor-оболочка 2.2.1.66 даёт
-6 transient `TypeError` (`Proxy.get: route/displayName/mode/length`) на каждую
-форму. Это не запросы к нашему API: HTTP ≥400 за сценарий — 0, и на всех
+6 transient vendor `TypeError` на каждую форму (поля `route`, `displayName`,
+`length`, `mode`, `connectionsLimit`; точный список — в `summary.json → notes`). Это не запросы к нашему API: HTTP ≥400 за сценарий — 0, и на всех
 остальных шагах (вызов, контролы, раскладка, reload, kick) ошибок нет.
 Ошибки не скрыты: `summary.json → totals` даёт
 `console_errors=12 = vendor_create_form_typeerrors=12`, `other_console_errors=0`.
@@ -64,6 +64,7 @@ SMOKE_URI=sip:192.168.1.132  ./scripts/smoke_v3.sh           # 27 проверо
 
 # 2) UI-evidence (нужны node+playwright+Chromium и свободный endpoint)
 PLAYWRIGHT_MODULE=/path/to/node_modules/playwright \
+CHROME_PATH=/path/to/chrome \
 SERVER_LOG=vks_server.log \
 node scripts/evidence/t16-evidence.js
 ```

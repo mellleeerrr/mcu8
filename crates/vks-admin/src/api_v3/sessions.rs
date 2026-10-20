@@ -1899,7 +1899,8 @@ mod boot_reconcile_tests {
         let active: Vec<_> = sessions.iter().filter(|s| s["state"] == "ACTIVE").collect();
         assert_eq!(active.len(), 1, "активна ровно одна сессия: {after}");
         assert_eq!(active[0]["id"], id_a.to_string());
-        assert!(active[0]["session"].is_object(), "у активной сессии есть живой session");
+        assert_eq!(active[0]["session"]["id"], id_a.to_string(), "у активной сессии session именно room_a");
+        assert_eq!(active[0]["has_stopped"], false, "активная сессия не в stopped_sessions");
         let stopped_b = sessions.iter().find(|s| s["id"] == id_b.to_string()).expect("room_b в выдаче");
         assert_eq!(stopped_b["state"], "STOPPED");
         assert_eq!(stopped_b["has_stopped"], true);

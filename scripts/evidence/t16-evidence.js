@@ -18,19 +18,17 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
-const { chromium } = require(process.env.PLAYWRIGHT_MODULE
-  || '/home/pro/.dsh/source/node_modules/.pnpm/playwright@1.63.0-alpha-2026-08-31/node_modules/playwright');
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:8080';
 const OUT = path.resolve(process.env.EVIDENCE_DIR || 'docs/progress/evidence/t16');
 const SERVER_LOG = process.env.SERVER_LOG || '';
-const CHROME = process.env.CHROME_PATH
-  || path.join(process.env.HOME, '.cache/ms-playwright/chromium-1243/chrome-linux64/chrome');
+const CHROME = process.env.CHROME_PATH || chromium.executablePath();
 fs.mkdirSync(OUT, { recursive: true });
 
 const PROTOCOLS = [
-  { name: 'H.323', prefix: 'h323', uri: 'h323:192.168.1.132', suggestion: 'Зал 132 (h323)' },
-  { name: 'SIP', prefix: 'sip', uri: 'sip:192.168.1.132', suggestion: 'Зал 132 (sip)' },
+  { protocol: 'H.323', prefix: 'h323', uri: 'h323:192.168.1.132', suggestion: 'Зал 132 (h323)' },
+  { protocol: 'SIP', prefix: 'sip', uri: 'sip:192.168.1.132', suggestion: 'Зал 132 (sip)' },
 ];
 
 function buildFacts() {
@@ -91,11 +89,11 @@ function buildFacts() {
     const ab = await api('/api/v3/sessions/' + cid + '/abonents');
     const a = (ab.json?.connected || []).find((x) => x.connection_url === url);
     if (!a) return null;
-    const f = (dir, d) => ({ active: d.active, codec: d.codec, packets: d.packets, bitrate: d.bitrate, resolution: d.resolution });
+    const f = (d) => ({ active: d.active, codec: d.codec, packets: d.packets, bitrate: d.bitrate, resolution: d.resolution });
     return {
       abonent_id: a.id, display_name: a.display_name,
-      audio: { rx: f('rx', a.details.audio.rx), tx: f('tx', a.details.audio.tx) },
-      video: { rx: f('rx', a.details.video.rx), tx: f('tx', a.details.video.tx) },
+      audio: { rx: f(a.details.audio.rx), tx: f(a.details.audio.tx) },
+      video: { rx: f(a.details.video.rx), tx: f(a.details.video.tx) },
     };
   };
   const shot = async (file) => { await page.screenshot({ path: path.join(OUT, file) }); return file; };
@@ -126,7 +124,7 @@ function buildFacts() {
   const screenshots = [];
   for (let pi = 0; pi < PROTOCOLS.length; pi++) {
     const sc = PROTOCOLS[pi];
-    const rec = { protocol: sc.name, uri: sc.uri };
+    const rec = { protocol: sc.protocol, uri: sc.uri };
     await stopAll();
     const base = pi * 6 + 1;
     const num = (n) => String(base + n).padStart(2, '0');
@@ -270,13 +268,16 @@ function buildFacts() {
     await page.waitForTimeout(2500);
     await page.locator('.abonent-item-connected button').nth(7).click();
     await page.waitForTimeout(1500);
-    screenshots.push(await shot(`${String(base + 6).padStart(2, '0')}-${sc.prefix}-kick-confirm.png`));
+    screenshots.push(await shot(file(6, 'kick-confirm')));
     const confirm = page.getByText('Отключить', { exact: true }).last();
     if (await confirm.count()) await confirm.click();
     await page.waitForTimeout(2500);
-    const empty = (await api('/api/v3/sessions/' + rec.session_id + '/abonents')).json;
-    rec.kicked = (empty?.connected || []).length === 0;
-    screenshots.push(await shot(`${String(base + 7).padStart(2, '0')}-${sc.prefix}-kicked.png`));
+    const afterKick = (await api('/api/v3/sessions/' + rec.session_id + '/abonents')).json;
+    rec.kicked = {
+      connected_empty: (afterKick?.connected || []).length === 0,
+      disconnected_contains: (afterKick?.disconnected || []).some((d) => d.connection_url === sc.uri),
+    };
+    screenshots.push(await shot(file(7, 'kicked')));
     scenarios.push(rec);
 
     // уходим со страницы, чтобы polling удалённой конференции не попал в следующий шаг
@@ -292,6 +293,7 @@ function buildFacts() {
   const createErrors = steps.filter((s) => s.step.startsWith('create-conference')).reduce((n, s) => n + s.errors.length, 0);
   const otherErrors = steps.filter((s) => !s.step.startsWith('create-conference')).reduce((n, s) => n + s.errors.length, 0);
   const httpErrors = steps.reduce((n, s) => n + s.fails.length, 0);
+  const vendorFields = [...new Set((steps.flatMap((s) => s.errors).join('\n').match(/reading '[a-zA-Z]+'/g) || []))];
   const summary = {
     generated_at: new Date().toISOString(), base: BASE,
     build,
@@ -303,7 +305,7 @@ function buildFacts() {
       steps: steps.length,
     },
     notes: [
-      '6 transient vendor Proxy-getter TypeError на каждое открытие формы создания конференции (2.2.1.66): route/displayName/mode/length; HTTP>=400 при этом 0 — атрибутировано, не скрыто',
+      `transient vendor TypeError на открытие формы создания конференции (2.2.1.66), поля: ${vendorFields.join(', ')}; HTTP>=400 при этом 0 — атрибутировано, не скрыто`,
       'SIP и H.323: вызов из UI через автодополнение сохранённого адреса, рост медиа-счётчиков, mute камеры/микрофона из UI, ручная раскладка 4 слота, позиция 1 переживает reload, kick из UI',
       'summary.json и http-trace.json генерируются этим скриптом; первичные доказательства — PNG + smoke-логи + серверный лог',
     ],
@@ -314,12 +316,19 @@ function buildFacts() {
   };
   fs.writeFileSync(path.join(OUT, 'summary.json'), JSON.stringify(summary, null, 2));
   fs.writeFileSync(path.join(OUT, 'http-trace.json'), JSON.stringify(trace, null, 2));
+  const correlateFile = path.join(OUT, 'server-correlate.txt');
   if (SERVER_LOG && fs.existsSync(SERVER_LOG)) {
-    const ids = scenarios.map((s) => s.session_id).filter(Boolean);
+    const ids = scenarios.flatMap((s) => [
+      s.session_id,
+      s.media_after?.abonent_id,
+      s.media_before?.abonent_id,
+    ]).filter(Boolean);
     const lines = fs.readFileSync(SERVER_LOG, 'utf8').split('\n')
-      .filter((l) => ids.some((id) => l.includes(id)) || /outbound dial connected|Gateway call terminated via hangup/i.test(l))
-      .slice(-40);
-    fs.writeFileSync(path.join(OUT, 'server-correlate.txt'), lines.join('\n') + '\n');
+      .filter((l) => ids.some((id) => l.includes(id)))
+      .slice(-60);
+    fs.writeFileSync(correlateFile, lines.join('\n') + '\n');
+  } else if (fs.existsSync(correlateFile)) {
+    fs.rmSync(correlateFile);
   }
   console.log(JSON.stringify({
     totals: summary.totals,

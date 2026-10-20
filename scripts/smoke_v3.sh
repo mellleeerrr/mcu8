@@ -114,7 +114,7 @@ SESSION_ID=$(jq -r '.session.id' <<<"$HTTP_BODY")
 ok "session started ($SESSION_ID)"
 
 req GET "/api/v3/ui/sessions?page=1&page_size=100"
-jq -e --arg id "$SESSION_ID" '.sessions | any(.id == $id or ._id == $id or ._key == $id)' <<<"$HTTP_BODY" >/dev/null \
+jq -e --arg id "$SESSION_ID" '.sessions | any(.id == $id)' <<<"$HTTP_BODY" >/dev/null \
     && ok "session visible in ui/sessions" || fail "session not listed in ui/sessions: $HTTP_BODY"
 
 # --- адресная книга ------------------------------------------------------
@@ -124,7 +124,7 @@ ADDRESS_ID=$(jq -r '.call_string.id' <<<"$HTTP_BODY")
 [ -n "$ADDRESS_ID" ] && [ "$ADDRESS_ID" != "null" ] || fail "create address: $HTTP_BODY"
 ok "address created ($ADDRESS_ID)"
 
-req GET "/api/v3/ui/call_strings?page=1&page_size=100&uri=${ADDRESS_URI%%:*}"
+req GET "/api/v3/ui/call_strings?page=1&page_size=100&uri=${ADDRESS_URI#*:}"
 jq -e --arg id "$ADDRESS_ID" '.call_strings | any(.id == $id)' <<<"$HTTP_BODY" >/dev/null \
     && ok "address searchable by uri substring" || fail "address not found by uri filter: $HTTP_BODY"
 
