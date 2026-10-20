@@ -604,7 +604,7 @@ Bash+curl+jq смоук вертикали `/api/v3` (healthz → login → ко
 живым вызовом: `SMOKE_URI=h323:192.168.1.132` или `sip:192.168.1.132`
 проверяет connected, рост RTP rx/tx (ожидание до 20 с), mute камеры/микрофона,
 volume и kick. Всегда удаляет созданные сущности. Прогоны: API 24 проверки,
-живые H.323/SIP — по 28; логи в `docs/progress/evidence/t16/smoke-*.log`.
+живые H.323/SIP — по 31; логи в `docs/progress/evidence/t16/smoke-*.log`.
 
 ### 11.3. Ограничения
 

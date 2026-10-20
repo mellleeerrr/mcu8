@@ -1,30 +1,34 @@
 == smoke_v3: http://127.0.0.1:8080
   ok  healthz
   ok  login (admin)
-  ok  conference created (023f31ec-544c-4f6c-9e85-db0c5d3abd6c)
-  ok  session started (023f31ec-544c-4f6c-9e85-db0c5d3abd6c)
+  ok  conference created (c185cb86-f28f-4d08-9da8-d3ca3e5bfc72)
+  ok  session started (c185cb86-f28f-4d08-9da8-d3ca3e5bfc72)
   ok  session visible in ui/sessions
-  ok  address created (cs-1a62c097-b89d-482b-b88e-2121cd033504)
+  ok  address created (cs-b337fd52-629f-4a1d-bede-e3d37fe62be1)
   ok  address searchable by uri substring
   ok  address included by protocols=sip filter
   ok  address excluded by protocols=h323 filter
   ok  address patched
+  ok  address deleted (GET 404)
   ok  address deleted
-  ok  audiochannel created (5f52eba7-0292-4153-a063-9a12a524a55a)
+  ok  audiochannel created (a9bfcd04-e184-4b61-a92a-310105bc096c)
   ok  audiochannel attached and visible
   ok  audiochannel detached
-  ok  layout created (c59d62c7-266b-455c-8f68-e3ea870aabd0)
+  ok  layout created (b9104ceb-a702-4ba5-a800-3741ee3ecbfc)
   ok  layout visible in session layouts
   ok  layout attached, slots empty until live call
   ok  layout detached from session
 == live call: sip:192.168.1.132 (timeout 90s)
-  ok  call connected (sip-fd0aeba0-89dc-4638-ae9f-2b1da90e1239@sip-gateway)
-  ok  RTP audio counters grow (rx 0->30, tx 5->212)
-  ok  microphone muted (audio.tx.enabled=false)
-  ok  camera off (video.tx.enabled=false)
+  ok  call connected (sip-1f87ff32-8877-4ce5-bf7f-db5ad0d81f00@sip-gateway)
+  ok  RTP audio counters grow (rx 0->19, tx 44->197)
+  ok  speaker muted (audio.tx.enabled=false)
+  ok  microphone muted (audio.rx.enabled=false)
+  ok  camera off (video.rx.enabled=false)
   ok  volume control applied (audio.rx.volume=-60)
   ok  abonent kicked from session
   ok  session stopped (state STOPPED)
   ok  conference deleted (GET 404)
+  ok  audio channel deleted (GET 404)
+  ok  layout deleted (GET 404)
   ok  cleanup complete
-PASS: 27 проверок
+PASS: 31 проверок
