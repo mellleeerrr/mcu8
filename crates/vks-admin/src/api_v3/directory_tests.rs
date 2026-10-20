@@ -1203,3 +1203,60 @@ async fn detach_primary_address_clears_it() {
     let body = user_body(&app, &token, &id).await;
     assert!(body["user"]["address"].is_null(), "detach обязан очистить primary address");
 }
+
+/// Регрессия cross-user credentials alias: пользователь без учётки не должен
+/// «находить» чужой LocalDb-логин, совпавший с его внутренним username, а
+/// занять такой логин другому пользователю нельзя.
+#[tokio::test]
+async fn credential_login_cannot_alias_another_user_without_credentials() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let admin = login_token(&app, "admin", "s3cret").await;
+    let owner = created_user(&app, &admin, "AliasOwner").await;
+    let other = created_user(&app, &admin, "AliasOther").await;
+
+    let response =
+        send(&app, request("GET", &format!("/api/v3/users/{owner}/credentials"), Some(&admin), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND, "учётки owner ещё нет");
+
+    // other пытается зарегистрировать логин, равный внутреннему username owner.
+    let response = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/users/{other}/credentials"),
+            Some(&admin),
+            json!({"login": "AliasOwner", "password": "secret7"}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT, "{:?}", json_body(response).await);
+
+    let response = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/users/{owner}/credentials"),
+            Some(&admin),
+            json!({"login": "alias_owner_login", "password": "secret7"}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED, "{:?}", json_body(response).await);
+    let body = json_body(
+        send(&app, request("GET", &format!("/api/v3/users/{owner}/credentials"), Some(&admin), json!({}))).await,
+    )
+    .await;
+    assert_eq!(body["login"], "alias_owner_login", "owner видит только свою учётку");
+
+    let response =
+        send(&app, request("GET", &format!("/api/v3/users/{other}/credentials"), Some(&admin), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND, "чужой логин не должен просачиваться");
+
+    let login = send(
+        &app,
+        request("POST", "/api/v3/login", None, json!({"login": "alias_owner_login", "password": "secret7"})),
+    )
+    .await;
+    assert_eq!(login.status(), StatusCode::OK);
+}

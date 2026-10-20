@@ -300,14 +300,15 @@ pub async fn delete_role(
         resources.directory.roles.remove(&id);
         for user in Users::list(&state) {
             if let Some(profile) = resources.directory.users.get_mut(&user.id.to_string()) {
-                // Материализуем неявную built-in роль всегда, когда её нет в
-                // профиле: иначе профиль с одной кастомной ролью терял бы доступ.
-                if let Some(builtin) = role_name(user.role) {
-                    if !profile.roles.iter().any(|role| role == builtin) {
-                        profile.roles.push(builtin.to_string());
-                    }
-                }
                 if profile.roles.iter().any(|r| r == &id) {
+                    // Материализуем неявную built-in роль только у тех, у кого
+                    // удаляемая роль реально была: остальным профилям не меняем
+                    // состав ролей (никакого churn'а).
+                    if let Some(builtin) = role_name(user.role) {
+                        if !profile.roles.iter().any(|role| role == builtin) {
+                            profile.roles.push(builtin.to_string());
+                        }
+                    }
                     profile.roles.retain(|r| r != &id);
                     let new_internal = internal_role(&profile.roles);
                     if new_internal != user.role {

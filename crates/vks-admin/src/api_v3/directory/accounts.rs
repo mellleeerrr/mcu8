@@ -23,14 +23,21 @@ fn credential_json(login: &str) -> Value {
     json!({"login": login, "expire_at": 0, "block_at": 0})
 }
 
-/// LocalDb-идентичность пользователя: id + логин. id имеет приоритет, legacy
-/// bootstrap-расклад (`u-admin` ≠ core-id) резолвится по внутреннему username.
-fn local_identity(state: &crate::state::AppState, user: &crate::state::UserRecord) -> Option<(String, String)> {
+/// LocalDb-идентичность пользователя: id + логин. id имеет приоритет; fallback
+/// по внутреннему username разрешён ТОЛЬКО для bootstrap-расклада (`u-admin`),
+/// иначе пользователь без учётки «нашёл» бы чужой логин, совпавший с его
+/// display_name (cross-user credentials alias).
+pub(super) fn local_identity(
+    state: &crate::state::AppState,
+    user: &crate::state::UserRecord,
+) -> Option<(String, String)> {
     let db = state.local_db.as_ref()?;
-    db.user(&user.id.to_string())
-        .or_else(|_| db.user_by_name(&user.username))
-        .ok()
-        .map(|local| (local.id, local.username))
+    if let Ok(local) = db.user(&user.id.to_string()) {
+        return Some((local.id, local.username));
+    }
+    let local = db.user_by_name(&user.username).ok()?;
+    let bootstrap = user.id == UserId::bootstrap_operator();
+    (bootstrap || local.id == "u-admin").then_some((local.id, local.username))
 }
 
 fn local_login(state: &crate::state::AppState, user: &crate::state::UserRecord) -> Option<String> {
@@ -101,7 +108,7 @@ pub async fn create_user_credentials(
     let Some(db) = state.local_db.clone() else {
         return error_json(503, "Authentication is not configured");
     };
-    if db.user(&user.id.to_string()).is_ok() {
+    if local_identity(&state, &user).is_some() {
         return error_json(409, "Credentials already exist");
     }
     let login = body.login.as_deref().map(str::trim).unwrap_or_default();
@@ -115,7 +122,9 @@ pub async fn create_user_credentials(
     if password.is_empty() {
         return error_json(400, "password is required");
     }
-    if db.user_by_name(login).is_ok() {
+    // Логин не должен совпадать и с внутренним username другого пользователя:
+    // иначе legacy-fallback и Users-идентичность начнут пересекаться.
+    if db.user_by_name(login).is_ok() || Users::username_taken(&state, login, Some(user.id)) {
         return error_json(409, "Login already exists");
     }
     let user_id = user.id.to_string();
@@ -162,7 +171,17 @@ async fn persist_credentials(
         .unwrap_or_else(|| user_id.to_string());
     let local = match local_id {
         Some(local_id) => db.user(local_id),
-        None => db.user(&user_id.to_string()).or_else(|_| db.user_by_name(&username)),
+        None => match db.user(&user_id.to_string()) {
+            Ok(local) => Ok(local),
+            Err(_) => {
+                let local = db.user_by_name(&username).map_err(|e| e.to_string())?;
+                let bootstrap = *user_id == UserId::bootstrap_operator() || local.id == "u-admin";
+                if !bootstrap {
+                    return Err("local credentials not found".to_string());
+                }
+                Ok(local)
+            }
+        },
     }
     .map_err(|e| e.to_string())?;
     if let Some(storage) = &state.storage {
@@ -214,7 +233,7 @@ pub async fn update_user_credentials(
     let mut login = current_login.clone();
     if let Some(requested) = new_login {
         if requested != current_login {
-            if db.user_by_name(requested).is_ok() {
+            if db.user_by_name(requested).is_ok() || Users::username_taken(&state, requested, Some(user.id)) {
                 return error_json(409, "Login already exists");
             }
             if let Err(error) = db.rename_user(&current_id, requested) {
@@ -375,7 +394,7 @@ pub async fn update_profile_credentials(
     let mut login = current_login.clone();
     if let Some(requested) = requested_login {
         if requested != current_login {
-            if db.user_by_name(requested).is_ok() {
+            if db.user_by_name(requested).is_ok() || Users::username_taken(&state, requested, Some(user.id)) {
                 return error_json(409, "Login already exists");
             }
             let local_id = db.user_by_name(&current_login).map(|u| u.id).unwrap_or_else(|_| user.id.to_string());

@@ -22,6 +22,7 @@ mod addresses;
 mod groups;
 mod roles;
 
+use accounts::local_identity;
 pub use accounts::{
     create_user_credentials, delete_user_credentials, get_user_credentials, profile_credentials,
     update_profile_credentials, update_user_credentials,
@@ -290,12 +291,18 @@ fn find_user(state: &crate::state::AppState, id: &str) -> Option<crate::state::U
 /// отображаемому имени): vendor допускает одинаковые display_name, а RBAC-резолв
 /// должен оставаться однозначным. `display_name` не меняется.
 fn unique_username(state: &crate::state::AppState, display_name: &str) -> String {
-    if !Users::username_taken(state, display_name, None) {
+    // Пространства LocalDb-логинов и внутренних username не должны пересекаться:
+    // иначе legacy-fallback резолва учётки может указать на чужого пользователя.
+    let available = |candidate: &str| {
+        !Users::username_taken(state, candidate, None)
+            && state.local_db.as_ref().is_none_or(|db| db.user_by_name(candidate).is_err())
+    };
+    if available(display_name) {
         return display_name.to_string();
     }
     for suffix in 2..1000 {
         let candidate = format!("{display_name} ({suffix})");
-        if !Users::username_taken(state, &candidate, None) {
+        if available(&candidate) {
             return candidate;
         }
     }
@@ -836,8 +843,10 @@ pub async fn delete_user(
     //    войти даже при частичном сбое следующих шагов.
     let mut generation = 0;
     if let Some(db) = state.local_db.as_ref() {
-        db.remove_user(&user_id);
-        generation = db.generation(&user_id);
+        // legacy bootstrap-расклад: LocalDb-строка может жить под `u-admin`.
+        let local_id = local_identity(&state, &user).map(|(id, _)| id).unwrap_or_else(|| user_id.clone());
+        db.remove_user(&local_id);
+        generation = db.generation(&local_id);
     }
     if let Some(storage) = state.storage.as_ref() {
         if let Err(error) = storage.delete_user_credentials(user.id).await {

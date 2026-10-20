@@ -59,8 +59,9 @@
 
 ## Что покрыто кодом/тестами вне UI-прогона
 
-30 тестов справочника (27 HTTP-интеграционных в `directory_tests.rs` + 3
-inline `#[cfg(test)]` в `directory.rs`) дополнительно проверяют: каскадное удаление (credentials/профиль/членства/адреса, login
+31 тест справочника (28 в `directory_tests.rs`: 27 HTTP/tokio + 1 unit-тест
+сериализации; + 3 inline `#[cfg(test)]` в `directory.rs`) дополнительно
+проверяют: каскадное удаление (credentials/профиль/членства/адреса, login
 удалённого → 401), флаги `defaults.deletable`, `room_scope` не читает
 глобальный справочник, WS у Moderator, CRUD ролей, сохранение неявной роли
 Administrator при добавлении Operator, переименование логина, Unicode-дубли и
