@@ -1,0 +1,76 @@
+//! Live H.323 connect against a physical terminal (manual, `#[ignore]`).
+//!
+//! ```text
+//! VKS_LIVE_H323=192.168.1.132 VKS_LIVE_LOCAL_IP=192.168.1.93 \
+//!   cargo test -p vks-gateway-h323 --test live_h323 -- --ignored --nocapture
+//! ```
+//!
+//! Proves the Rust ↔ Python sidecar path end to end: H.225 CONNECT, H.245
+//! master/slave + TCS + OLC for audio (and video when the peer opens it), then
+//! real inbound RTP counted on the ports the sidecar advertised.
+
+use std::time::Duration;
+
+use tokio::net::UdpSocket;
+use vks_gateway_h323::H323UacClient;
+
+#[tokio::test]
+#[ignore = "live H.323 call to a physical terminal; requires the sidecar venv and network access"]
+async fn live_h323_connect() {
+    let target = std::env::var("VKS_LIVE_H323").unwrap_or_else(|_| "192.168.1.132".to_string());
+    let local_ip = std::env::var("VKS_LIVE_LOCAL_IP").unwrap_or_else(|_| "192.168.1.93".to_string());
+
+    let audio = UdpSocket::bind("0.0.0.0:0").await.expect("bind H.323 audio RTP");
+    let audio_port = audio.local_addr().expect("audio addr").port();
+    let video = UdpSocket::bind("0.0.0.0:0").await.expect("bind H.323 video RTP");
+    let video_port = video.local_addr().expect("video addr").port();
+
+    let session = H323UacClient::new(&local_ip)
+        .dial_with_media(&format!("h323:{target}"), audio_port, Some(video_port), Duration::from_secs(45))
+        .await
+        .expect("H.323 CONNECT with H.245 media channels");
+
+    println!(
+        "===== H.323 CONNECTED =====\n call_id={} call_ref={}\n peer media: audio {}:{} pt={} (local pt={})\n peer media: video {:?}:{:?} pt={:?} (local pt={:?})",
+        session.call_id,
+        session.call_ref,
+        session.remote_ip,
+        session.remote_audio_port.unwrap_or(0),
+        session.remote_audio_payload_type,
+        session.local_audio_payload_type,
+        session.remote_video_ip,
+        session.remote_video_port,
+        session.remote_video_payload_type,
+        session.local_video_payload_type,
+    );
+
+    let mut audio_packets = 0u32;
+    let mut video_packets = 0u32;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut audio_buffer = [0u8; 2048];
+    let mut video_buffer = [0u8; 2048];
+    while tokio::time::Instant::now() < deadline {
+        tokio::select! {
+            result = audio.recv_from(&mut audio_buffer) => {
+                if let Ok((len, source)) = result {
+                    audio_packets += 1;
+                    if audio_packets == 1 {
+                        println!("first H.323 audio RTP from {source}: {len} bytes, pt={}", audio_buffer[1] & 0x7f);
+                    }
+                }
+            }
+            result = video.recv_from(&mut video_buffer) => {
+                if let Ok((len, source)) = result {
+                    video_packets += 1;
+                    if video_packets == 1 {
+                        println!("first H.323 video RTP from {source}: {len} bytes, pt={}", video_buffer[1] & 0x7f);
+                    }
+                }
+            }
+        }
+    }
+    println!("===== LIVE MEDIA (8 s, H.323) =====\n audio: {audio_packets} packets\n video: {video_packets} packets");
+
+    session.hangup().await.expect("H.323 release");
+    assert!(audio_packets > 0, "H.323 call connected but no audio RTP arrived");
+}

@@ -727,9 +727,7 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         if geometry.is_empty() {
             let slot_count = assignments.values().copied().max().unwrap_or(0).saturating_add(1);
             let preset_name = layout["payload"]["preset"].as_str().unwrap_or_default();
-            let preset_size = layout["payload"]["size"]
-                .as_u64()
-                .and_then(|value| u8::try_from(value).ok());
+            let preset_size = layout["payload"]["size"].as_u64().and_then(|value| u8::try_from(value).ok());
             let preset_name = vks_layout::preset::resolve(preset_name, preset_size);
             let parsed = vks_layout::preset::PresetId::parse(&preset_name)
                 .filter(|preset| u32::from(preset.size) >= slot_count)
@@ -1443,8 +1441,78 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         mcu.bridge_participant(room, pid, vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)]);
         let rects = mcu.slot_rects(room).expect("MCU room");
         assert_eq!(rects.len(), 4, "4 preset cells, empty AUTO cells stay black");
+        // Вендорная таблица `preset_selected_b_4` (3×3, блок 3×2): крупная зона
+        // 1920×720 и три мелких 640×360 под ней — не авто-сетка 2×2.
         let large = rects.get(&0).expect("selected scheme slot 0");
-        assert_eq!((large.x, large.y, large.w, large.h), (0, 270, 1920, 810), "big bottom zone 75/25, not 2x2 grid");
+        assert_eq!((large.x, large.y, large.w, large.h), (0, 0, 1920, 720), "vendor 2/3 zone, not a 2x2 grid");
+        let small = rects.get(&1).expect("selected scheme slot 1");
+        assert_eq!((small.x, small.y, small.w, small.h), (0, 720, 640, 360), "small cell under the big zone");
+    }
+
+    /// Живой JSON раскладки, сохранённой UI в E2E на :8080 (сессия
+    /// `c437bf65…`, layout `86a1a258…`): manual 4, `preset_equal_4`,
+    /// окна 1..4 все AUTO (это состояние после «Очистить все видеоокна»).
+    /// Привязок нет, но геометрия 2×2 обязана доехать до MCU — иначе шлюз
+    /// получает sqrt-сетку по числу участников вместо выбранной схемы.
+    #[tokio::test]
+    async fn live_manual_equal_4_layout_gives_exact_2x2_cells() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        let layout = serde_json::json!({
+            "id": "86a1a258-3bef-40b0-bb0a-7c2d5c0cfa1d",
+            "payload": {
+                "autoscroll": 0,
+                "mode": "manual",
+                "preset": "preset_equal_4",
+                "size": 4,
+                "slots": [
+                    {"position": 1, "role": "AUTO"},
+                    {"position": 2, "role": "AUTO"},
+                    {"position": 3, "role": "AUTO"},
+                    {"position": 4, "role": "AUTO"}
+                ],
+                "type": "individual"
+            }
+        });
+        manager.apply_layout(room, layout).await.expect("manual layout must reach the MCU");
+
+        let rects = mcu.slot_rects(room).expect("MCU room must exist after a manual layout");
+        assert_eq!(rects.len(), 4, "equal 2×2, not a sqrt grid by participant count");
+        let cell = |slot: u32| {
+            let rect = rects.get(&slot).expect("cell");
+            (rect.x, rect.y, rect.w, rect.h)
+        };
+        assert_eq!(cell(0), (0, 0, 960, 540), "top-left cell");
+        assert_eq!(cell(3), (960, 540, 960, 540), "bottom-right cell");
+
+        // SIP-участник садится в свободную ячейку 0, кадр виден в композите.
+        let pid = vks_core::ParticipantId::new();
+        mcu.bridge_participant(room, pid, vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)]);
+        assert!(mcu.set_participant_frame(
+            room,
+            pid,
+            vks_media_mcu::frame::Frame::new(320, 180, vec![77u8; 320 * 180 * 3 / 2])
+        ));
+        let composite = mcu.tick_video_at(room, 0).expect("composite frame");
+        assert_eq!(composite.data[270 * 1920 + 480], 77, "gateway frame in the top-left cell");
+    }
+
+    /// Компромисс: авто-раскладка без окон не создаёт MCU-комнату (2 МБ
+    /// композита) в каждой SFU-сессии; MCU берёт сетку по числу участников.
+    #[tokio::test]
+    async fn auto_layout_without_slots_does_not_create_mcu_room() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        let layout = serde_json::json!({
+            "id": "b74fc0b2-4920-411d-9b53-88b247b0ec50",
+            "payload": {"mode": "auto", "preset": "preset_default_13", "size": 13, "slots": [], "type": "default"}
+        });
+        manager.apply_layout(room, layout).await.expect("auto layout is a no-op, not an error");
+        assert!(mcu.slot_rects(room).is_none(), "idle SFU room must not allocate an MCU composite");
     }
 
     /// Идентификаторы участников: UUID-производные → true, адресная книга/имена

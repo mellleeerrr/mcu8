@@ -66,12 +66,10 @@ impl Default for CodecConfig {
         // осознанно. Audio хранится строкой `NAME[:bitrate]`, чтобы PATCH
         // сохранял битрейт варианта G.722.1/C и G.726.
         Self {
-            video: [
-                "H261", "H263", "H263+", "H264", "H264-HIGH", "H264-SVC", "H265", "VP8",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+            video: ["H261", "H263", "H263+", "H264", "H264-HIGH", "H264-SVC", "H265", "VP8"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             audio: [
                 "AAC",
                 "G711",

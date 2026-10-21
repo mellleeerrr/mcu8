@@ -681,70 +681,58 @@ async fn pnm_audiochannels_list_filters_and_counts_speakers_listeners() {
     assert_eq!(resources.audiochannels["a1"]["listeners"], 2);
 }
 
-/// `GET /video_layout_grids` — вендорный каталог пресетов: поиск по
-/// `display_name`/`id`, сортировка, пагинация (`count` — total), `get_grid`
-/// ищет по всему каталогу, включая custom-геометрии.
+/// `GET /video_layout_grids` — эталон 2.2.1.66 отдаёт **ровно 6** встроенных
+/// custom-схем (`video_layout_grids._`), а не синтетический список пресетов:
+/// пресеты `preset_*` — статическая карта UI и в grid-каталог не входят.
 #[tokio::test]
-async fn pnm_video_layout_grids_expose_presets_and_support_paging_search() {
+async fn pnm_video_layout_grids_return_six_custom_schemes() {
     let all = all_grids();
-    assert!(all.len() > 100, "каталог пресетов должен быть полным: {}", all.len());
+    assert_eq!(all.len(), 6, "эталонный каталог custom-схем");
+    assert!(all.iter().all(|grid| !grid["id"].as_str().unwrap_or_default().starts_with("preset_")));
 
     let response = grids(Query(HashMap::new())).await;
     assert_eq!(response.status(), StatusCode::OK);
     let listed = body(response).await;
-    assert_eq!(listed["count"].as_u64().unwrap() as usize, all.len());
-    // Дефолтная страница списков PNM — 100 записей.
-    assert_eq!(listed["grids"].as_array().unwrap().len(), 100);
+    assert_eq!(listed["count"], 6);
+    let items = listed["grids"].as_array().unwrap();
+    assert_eq!(items.len(), 6);
+    // payload в единицах сетки (8×8, 10×8, 4×4), а не в пикселях/10000.
+    assert_eq!(items[0]["payload"]["width"], 8);
+    assert_eq!(items[0]["payload"]["height"], 8);
+    assert_eq!(items[0]["payload"]["slots"].as_array().unwrap().len(), 2);
+    assert_eq!(items[0]["payload"]["centered_row"], json!(null));
+    // Вендорные custom-схемы редактируемые и удаляемые, но не отключаемые.
+    assert_eq!(items[0]["defaults"], json!({"deletable":true,"editable":true,"disableable":false}));
 
-    // Поиск по id: пресет 2×2 и его вариант `_(2)` присутствуют с геометрией на 4 окна.
-    let response = grids(Query(HashMap::from([("search".to_string(), "preset_selected_b_4".to_string())]))).await;
+    // Поиск UI-маппера приходит как `display_name`.
+    let response = grids(Query(HashMap::from([("display_name".to_string(), "Custom scheme 6".to_string())]))).await;
     let found = body(response).await;
-    assert_eq!(found["count"], 2, "{found}");
-    let found_ids: Vec<&str> =
-        found["grids"].as_array().unwrap().iter().filter_map(|grid| grid["id"].as_str()).collect();
-    assert_eq!(found_ids, ["preset_selected_b_4", "preset_selected_b_4_(2)"]);
-    assert_eq!(found["grids"][0]["payload"]["slots"].as_array().unwrap().len(), 4);
+    assert_eq!(found["count"], 1, "{found}");
+    assert_eq!(found["grids"][0]["id"], "9bf78747-e1b2-42c9-b10e-1ece67a269e7");
+    assert_eq!(found["grids"][0]["payload"]["slots"][0], json!({"x":1,"y":0,"width":2,"height":2}));
 
-    // UI-маппер присылает поиск как `display_name`.
-    let response = grids(Query(HashMap::from([("display_name".to_string(), "Сетка 4".to_string())]))).await;
-    let by_name = body(response).await;
-    assert_eq!(by_name["count"], 1, "{by_name}");
-    assert_eq!(by_name["grids"][0]["id"], "preset_equal_4");
-
-    // Пагинация: count — total, не размер страницы; сортировка по id.
+    // Пагинация: count — total, не размер страницы.
     let response = grids(Query(HashMap::from([
         ("page".to_string(), "2".to_string()),
-        ("page_size".to_string(), "5".to_string()),
+        ("page_size".to_string(), "2".to_string()),
         ("sort_field".to_string(), "id".to_string()),
         ("sort_order".to_string(), "0".to_string()),
     ])))
     .await;
     let paged = body(response).await;
-    assert_eq!(paged["count"].as_u64().unwrap() as usize, all.len());
-    assert_eq!(paged["grids"].as_array().unwrap().len(), 5);
-    let ids: Vec<&str> = paged["grids"].as_array().unwrap().iter().filter_map(|grid| grid["id"].as_str()).collect();
-    assert!(ids.windows(2).all(|pair| pair[0] <= pair[1]), "id по возрастанию: {ids:?}");
+    assert_eq!(paged["count"], 6);
+    assert_eq!(paged["grids"].as_array().unwrap().len(), 2);
 
-    // get_grid: пресеты, variant и custom-геометрии.
+    // get_grid: UUID custom-схемы; id пресета больше не является grid-записью.
+    let response = get_grid(Path("9bf78747-e1b2-42c9-b10e-1ece67a269e7".to_string())).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await["grid"]["display_name"], "Custom scheme 6");
     let response = get_grid(Path("preset_equal_4".to_string())).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let grid = body(response).await["grid"].clone();
-    assert_eq!(grid["payload"]["width"], 10000);
-    assert_eq!(grid["payload"]["slots"].as_array().unwrap().len(), 4);
-    assert_eq!(grid["defaults"]["deletable"], false);
-    let response = get_grid(Path("custom_8x8_double_34".to_string())).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(body(response).await["grid"]["payload"]["slots"].as_array().unwrap().len(), 34);
-    let response = get_grid(Path("preset_selected_b_4_(2)".to_string())).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let response = get_grid(Path("missing-grid".to_string())).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-/// Шаблоны раскладок повторяют эталон TrueConf 2.2.1.66: сервер отдаёт их
-/// только для manual (один шаблон с реальными слотами), auto/dynamic — count 0.
-/// Подвыбор схемы в редакторе строит сам UI по `rangeMap`; базовая схема и
-/// `size` хранятся раздельно, полный id собирается в потребителях.
+/// Шаблоны — полные записи привязанных manual-раскладок (эталон: id,
+/// display_name, creator_id, created_at, payload); auto/dynamic не синтезируются.
 async fn fetch_templates(state: SharedState, room: vks_core::RoomId, params: HashMap<String, String>) -> Value {
     let path = format!("/api/v3/sessions/{}/video_layouts/templates", room);
     let response =
@@ -756,6 +744,13 @@ async fn fetch_templates(state: SharedState, room: vks_core::RoomId, params: Has
 async fn pnm_layout_templates_match_reference_contract() {
     let state = state();
     let room = Rooms::create_async(&state, "Templates room").await.unwrap();
+
+    // Пустая комната: шаблонов нет — сервер ничего не выдумывает.
+    let empty = fetch_templates(state.clone(), room.id, HashMap::new()).await;
+    assert_eq!(empty["count"], 0, "{empty}");
+    assert_eq!(empty["video_layout_templates"], json!([]));
+
+    // dynamic-раскладка в шаблоны не попадает.
     let response = create(
         State(state.clone()),
         Extension(operator()),
@@ -764,31 +759,20 @@ async fn pnm_layout_templates_match_reference_contract() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::CREATED);
-    let created = body(response).await;
-    assert_eq!(created["video_layout"]["payload"]["preset"], "preset_equal", "база и size хранятся раздельно");
-    assert_eq!(created["video_layout"]["payload"]["size"], 4);
-    let layout_id = created["video_layout"]["id"].as_str().unwrap().to_string();
+    let dynamic_id = body(response).await["video_layout"]["id"].as_str().unwrap().to_string();
     let base = format!("/api/v3/sessions/{}/video_layouts", room.id);
     let response = attach(
         State(state.clone()),
         Extension(operator()),
-        uri(&format!("{base}/{layout_id}")),
-        Path((room.id.to_string(), layout_id.clone())),
+        uri(&format!("{base}/{dynamic_id}")),
+        Path((room.id.to_string(), dynamic_id)),
     )
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let dynamic = fetch_templates(state.clone(), room.id, HashMap::new()).await;
+    assert_eq!(dynamic["count"], 0, "{dynamic}");
 
-    let listed =
-        fetch_templates(state.clone(), room.id, HashMap::from([("video_layout_id".to_string(), layout_id.clone())]))
-            .await;
-    assert_eq!(listed["count"], 0, "{listed}");
-    assert_eq!(listed["video_layout_templates"], json!([]));
-
-    // Без `video_layout_id` — тоже пусто, как у эталона для auto-раскладки.
-    let default_templates = fetch_templates(state.clone(), room.id, HashMap::new()).await;
-    assert_eq!(default_templates["count"], 0, "{default_templates}");
-
-    // manual — ровно один шаблон с реальными слотами и полным id.
+    // manual — полная запись layout в `video_layout_templates`.
     let slots = json!([
         {"position":1,"role":"PEER","abonent_id":"sip-1@sip-gateway","contact_id":"cs-1"}
     ]);
@@ -809,55 +793,202 @@ async fn pnm_layout_templates_match_reference_contract() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    let manual = fetch_templates(state, room.id, HashMap::from([("video_layout_id".to_string(), manual_id)])).await;
-    assert_eq!(manual["count"], 1);
-    assert_eq!(manual["video_layout_templates"][0]["payload"]["mode"], "manual");
-    assert_eq!(manual["video_layout_templates"][0]["payload"]["preset"], "preset_selected_b_4");
-    assert_eq!(manual["video_layout_templates"][0]["payload"]["slots"][0]["position"], 1);
+    let manual = fetch_templates(state, room.id, HashMap::new()).await;
+    assert_eq!(manual["count"], 1, "{manual}");
+    let template = &manual["video_layout_templates"][0];
+    assert_eq!(template["id"], json!(manual_id));
+    assert!(template["display_name"].is_string());
+    assert!(template["creator_id"].is_string());
+    assert!(template["created_at"].is_number());
+    assert_eq!(template["payload"]["mode"], "manual");
+    assert_eq!(template["payload"]["preset"], "preset_selected_b_4");
+    assert_eq!(template["payload"]["slots"][0]["position"], 1);
 }
 
-/// `POST /ui/video_layouts/calculate` — геометрия по реальной схеме пресета:
-/// selected_b_4 — крупная зона + полоса, `_(2)` меняет пропорцию, неизвестный
-/// preset падает в равномерную сетку, pip/overlap накладывает окна.
+/// `POST /ui/video_layouts/calculate` — точная геометрия эталона 2.2.1.66:
+/// 1-based позиции, крупная зона selected_b_4 сверху 2/3, equal_2 центрирован,
+/// `_(2)` даёт 5/9, pip-окна с z_order=1, неизвестный/dynamic preset → 400.
 async fn calculate_geometry(preset: &str) -> Value {
     let response =
         crate::api_v3::shell::video_layouts_calculate(Json(json!({"preset":preset,"width":1280,"height":720}))).await;
-    assert_eq!(response.status(), StatusCode::OK);
     body(response).await
 }
 
 #[tokio::test]
-async fn pnm_calculate_uses_preset_scheme_geometry() {
+async fn pnm_calculate_uses_reference_preset_geometry() {
     let selected = calculate_geometry("preset_selected_b_4").await["slots"].as_array().unwrap().clone();
     assert_eq!(selected.len(), 4);
-    let equal = calculate_geometry("preset_equal_4").await["slots"].as_array().unwrap().clone();
-    assert_eq!(equal.len(), 4);
-    assert_ne!(selected, equal, "calculate обязан учитывать схему пресета");
+    assert_eq!(selected[0]["position"], 1);
+    assert_eq!(selected[3]["position"], 4);
+    assert_eq!(
+        (
+            selected[0]["x"].as_f64(),
+            selected[0]["y"].as_f64(),
+            selected[0]["width"].as_f64(),
+            selected[0]["height"].as_f64()
+        ),
+        (Some(0.0), Some(0.0), Some(1280.0), Some(480.0)),
+        "эталон: крупная зона selected_b_4 сверху, 2/3 высоты"
+    );
+    assert_eq!(selected[1]["width"], 426.0);
+    assert_eq!(selected[2]["width"], 427.0);
 
-    let area = |slot: &Value| slot["width"].as_f64().unwrap() * slot["height"].as_f64().unwrap();
-    assert!(area(&selected[0]) > area(&selected[1]) * 2.0, "selected_b_4: крупная зона + полоса");
-    for slot in &selected {
-        let (x, y) = (slot["x"].as_f64().unwrap(), slot["y"].as_f64().unwrap());
-        assert!(x >= 0.0 && y >= 0.0);
-        assert!(x + slot["width"].as_f64().unwrap() <= 1280.0 + 1e-6);
-        assert!(y + slot["height"].as_f64().unwrap() <= 720.0 + 1e-6);
-    }
+    let equal_two = calculate_geometry("preset_equal_2").await["slots"].as_array().unwrap().clone();
+    assert_eq!(equal_two[0]["y"], 180.0, "equal_2 центрирован по вертикали");
+    assert_eq!(equal_two[0]["height"], 360.0);
 
     let variant = calculate_geometry("preset_selected_b_4_(2)").await["slots"].as_array().unwrap().clone();
-    assert_ne!(selected, variant, "вариант _(2) обязан менять пропорцию");
+    assert_eq!(variant[0]["height"], 400.0, "вариант _(2): крупная зона 5/9");
 
-    // Неизвестный id: fallback — equal по размеру из id.
-    let fallback = calculate_geometry("preset_unknown_4").await["slots"].as_array().unwrap().clone();
-    assert_eq!(fallback.len(), 4);
-    assert_eq!(fallback, equal, "fallback должен быть равномерной сеткой");
+    let overlap = calculate_geometry("preset_selected_b_overlap_4").await["slots"].as_array().unwrap().clone();
+    assert_eq!(overlap.len(), 4);
+    assert_eq!(overlap[0]["width"], 1280.0);
+    assert_eq!(overlap[0]["z_order"], 0);
+    assert_eq!(overlap[1]["z_order"], 1, "pip-окна поверх большой зоны");
 
-    // pip/overlap: первое окно на весь канвас, остальные — поверх него.
-    let response = crate::api_v3::shell::video_layouts_calculate(Json(json!({
-        "preset":"preset_equal_4","width":1280,"height":720,"pip":true,"overlap_factor":1.5
-    })))
+    // dynamic/base id не являются manual-пресетами — эталон отвечает 400.
+    for invalid in ["preset_default_13", "preset_equal", "preset_unknown_4", "preset_equal_5"] {
+        let response = crate::api_v3::shell::video_layouts_calculate(Json(json!({
+            "preset": invalid, "width":1280, "height":720
+        })))
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{invalid}");
+    }
+}
+
+/// Запоминает раскладки, доехавшие до медиа-движка.
+#[derive(Default)]
+struct RecordingLayoutDialer {
+    layouts: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl crate::state::OutboundDialer for RecordingLayoutDialer {
+    async fn dial(
+        &self,
+        _room_id: vks_core::RoomId,
+        _uri: &str,
+        _display_name: Option<&str>,
+    ) -> Result<String, String> {
+        Err("dial must not be used by layout tests".into())
+    }
+
+    async fn apply_layout(&self, room_id: vks_core::RoomId, layout: Value) -> Result<(), String> {
+        let id = layout["id"].as_str().unwrap_or_default().to_string();
+        self.layouts.lock().expect("layouts poisoned").push((room_id.to_string(), id));
+        Ok(())
+    }
+}
+
+/// «Применить» в UI — это `POST …/video_layouts/{id}` (attach). Раскладка
+/// обязана доехать до MCU сразу, без ожидания PATCH/abonent-мутации.
+#[tokio::test]
+async fn pnm_attach_layout_pushes_it_to_media_engine() {
+    let dialer = Arc::new(RecordingLayoutDialer::default());
+    let mut app = AppState::new().with_dialer(dialer.clone());
+    app.storage = Some(Arc::new(vks_storage::memory::MemoryStorage::new()));
+    let state: SharedState = Arc::new(app);
+    let room = Rooms::create_async(&state, "Apply layout").await.unwrap();
+
+    let response = create(
+        State(state.clone()),
+        Extension(operator()),
+        uri("/api/v3/video_layouts"),
+        Json(json!({
+            "display_name": "Applied 4",
+            "payload": {"mode":"manual","type":"individual","preset":"preset_equal_4",
+                "slots":[{"position":1,"role":"AUTO"}]}
+        })),
+    )
     .await;
-    let pip = body(response).await["slots"].as_array().unwrap().clone();
-    assert_eq!(pip.len(), 4);
-    assert_eq!(pip[0]["width"].as_f64().unwrap(), 1280.0);
-    assert_eq!(pip[0]["height"].as_f64().unwrap(), 720.0);
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let layout_id = body(response).await["video_layout"]["id"].as_str().unwrap().to_string();
+
+    let path = format!("/api/v3/conferences/{}/video_layouts/{layout_id}", room.id);
+    let response =
+        attach(State(state.clone()), Extension(operator()), uri(&path), Path((room.id.to_string(), layout_id.clone())))
+            .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let applied = dialer.layouts.lock().expect("layouts poisoned").clone();
+    assert_eq!(applied.len(), 1, "attach обязан один раз передать layout в движок");
+    assert_eq!(applied[0], (room.id.to_string(), layout_id.clone()));
+
+    let response =
+        detach(State(state.clone()), Extension(operator()), uri(&path), Path((room.id.to_string(), layout_id.clone())))
+            .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    // После detach привязанных раскладок нет — push нечего, движок не дёргаем.
+    assert_eq!(dialer.layouts.lock().expect("layouts poisoned").len(), 1);
+}
+
+/// Корень дублей default-раскладок: повторный старт комнаты не должен
+/// создавать новую «Общую», если канонический payload уже есть.
+#[test]
+fn default_layout_is_reused_between_rooms() {
+    let mut resources = ResourceState::default();
+    inherit_and_ensure_default_layout(&mut resources, "room-a", "creator");
+    inherit_and_ensure_default_layout(&mut resources, "room-b", "creator");
+    assert_eq!(resources.layouts.len(), 1, "одна каноническая default-раскладка: {:?}", resources.layouts.keys());
+    let a = &resources.links["sessions:room-a:video_layouts"];
+    let b = &resources.links["sessions:room-b:video_layouts"];
+    assert_eq!(a, b, "обе комнаты ссылаются на один id");
+    assert_eq!(a.len(), 1);
+}
+
+/// Copy-on-write: правка общей default-раскладки из одной комнаты не меняет
+/// раскладку другой; ссылка текущего scope переключается на клон.
+#[tokio::test]
+async fn editing_shared_default_layout_clones_for_current_scope() {
+    let state = state();
+    let room_a = Rooms::create_async(&state, "COW room A").await.unwrap();
+    let room_b = Rooms::create_async(&state, "COW room B").await.unwrap();
+    let response = create(
+        State(state.clone()),
+        Extension(operator()),
+        uri("/api/v3/video_layouts"),
+        Json(json!({"display_name":"Shared default","payload":{"type":"default","mode":"auto","preset":"preset_default_13","size":13}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let layout = body(response).await["video_layout"].clone();
+    let layout_id = layout["id"].as_str().unwrap().to_string();
+    for room in [&room_a, &room_b] {
+        let path = format!("/api/v3/conferences/{}/video_layouts/{layout_id}", room.id);
+        let response = attach(
+            State(state.clone()),
+            Extension(operator()),
+            uri(&path),
+            Path((room.id.to_string(), layout_id.clone())),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    let path = format!("/api/v3/conferences/{}/video_layouts/{layout_id}", room_a.id);
+    let response = edit_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&path),
+        Path((room_a.id.to_string(), layout_id.clone())),
+        Json(json!({"display_name":"Edited in A"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let edited = body(response).await["video_layout"].clone();
+    let edited_id = edited["id"].as_str().unwrap().to_string();
+    assert_ne!(edited_id, layout_id, "при 2 ссылках правка создаёт клон");
+
+    let resources = state.api_v3.resources.lock().await;
+    assert_eq!(resources.layouts[&layout_id]["display_name"], "Shared default", "оригинал не изменён");
+    assert_eq!(resources.layouts[&edited_id]["display_name"], "Edited in A");
+    assert_eq!(
+        resources.links[&format!("conferences:{}:video_layouts", room_a.id)],
+        vec![edited_id],
+        "scope A переключён на клон"
+    );
+    assert_eq!(
+        resources.links[&format!("conferences:{}:video_layouts", room_b.id)],
+        vec![layout_id],
+        "scope B остался на оригинале"
+    );
 }

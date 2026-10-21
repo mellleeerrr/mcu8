@@ -37,7 +37,7 @@ pub use core::{Layout, LayoutError, LayoutKind, NormalizedLayout, NormalizedSlot
 pub use focus::FocusLayout;
 pub use grid::GridLayout;
 pub use preset::{
-    GridDefaults, GridInfo, GridPayload, GridSlot, Position, PresetId, PresetInfo, PresetScheme, SlotRect,
+    CalculatedSlot, GridDefaults, GridInfo, GridPayload, GridSlot, Position, PresetId, PresetScheme, SlotRect,
 };
 pub use rect::{Canvas, NormalizedRect, Rect};
 pub use renderer::{DrawCommand, FrameMeta, Renderer};

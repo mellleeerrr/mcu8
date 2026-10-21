@@ -584,13 +584,16 @@ fn overlay_slots(scheme: &PresetScheme, count: usize, variant: Option<u8>, overl
 
 /// Геометрия пресета в пикселях канваса `width` × `height`.
 ///
-/// `overlap_factor` масштабирует окна pip-режима (значения ≤ 0/NaN → 1.0);
-/// `pip = true` принудительно включает наложение даже у не-overlap пресета.
-/// Возвращает ровно `preset.size` слотов (минимум один) — все внутри канваса,
-/// без NaN/бесконечностей. Пересечения возможны только у overlap/pip.
+/// Для вендорных manual-пресетов берётся эталонная схема
+/// ([`geometry_for_manual`]); для dynamic/auto/неизвестных id — общий
+/// эвристический fallback (`overlap_factor`/`pip` включают наложение).
+/// Все rect внутри канваса, без NaN; пересечения возможны только у overlap.
 pub fn geometry(preset: &PresetId, width: f64, height: f64, overlap_factor: f64, pip: bool) -> Vec<SlotRect> {
     let width = dimension(width, 1280.0);
     let height = dimension(height, 720.0);
+    if let Some(slots) = geometry_for_manual(&preset.to_string(), width, height) {
+        return slots.into_iter().map(|slot| slot.rect).collect();
+    }
     let count = usize::from(preset.size.max(1));
     let overlay = preset.overlap || preset.pip || pip;
     let normalized = if overlay {
@@ -615,7 +618,518 @@ fn scale_rect(rect: SlotRect, width: f64, height: f64) -> SlotRect {
     SlotRect::new(x, y, rect_width, rect_height)
 }
 
-/// Элемент каталога пресетов.
+/// Один слот эталонной геометрии: прямоугольник + порядок наложения.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CalculatedSlot {
+    /// Пиксельная геометрия окна.
+    pub rect: SlotRect,
+    /// Порядок наложения (0 — нижний слой, 1 — окно поверх).
+    pub z_order: u8,
+}
+
+/// true, если id входит в эталонный список manual-пресетов (65 шт.).
+pub fn is_manual_preset(id: &str) -> bool {
+    MANUAL_SCHEMES.iter().any(|(preset, _)| *preset == id)
+}
+
+fn safe_dimension(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
+/// Пиксельный rect ячейки/блока сетки `cols × rows` по эталонной формуле
+/// (`x = floor(coord * canvas / grid)` — так эталон распределяет остаток).
+fn cell_rect(cell: (u16, u16, u16, u16), cols: u16, rows: u16, canvas: (f64, f64)) -> SlotRect {
+    let (x, y, w, h) = cell;
+    let (width, height) = canvas;
+    let left = (width * f64::from(x) / f64::from(cols)).floor();
+    let right = (width * f64::from(x + w) / f64::from(cols)).floor();
+    let top = (height * f64::from(y) / f64::from(rows)).floor();
+    let bottom = (height * f64::from(y + h) / f64::from(rows)).floor();
+    SlotRect::new(left, top, right - left, bottom - top)
+}
+
+/// Эталонная геометрия manual-пресета (`None` для dynamic/auto/неизвестного id).
+///
+/// Явные сетки повторяют `preset_schemes._` эталона 2.2.1.66: блоки-«крупные
+/// зоны» идут первыми, оставшиеся ячейки — построчно. Overlay-схемы хранят
+/// доли канваса из live-ответа `calculate` (1280×720).
+pub fn geometry_for_manual(id: &str, width: f64, height: f64) -> Option<Vec<CalculatedSlot>> {
+    let (_, scheme) = MANUAL_SCHEMES.iter().find(|(preset, _)| *preset == id)?;
+    let width = safe_dimension(width, 1280.0);
+    let height = safe_dimension(height, 720.0);
+    let mut slots = Vec::new();
+    match scheme {
+        ManualScheme::Grid { cols, rows, blocks } => {
+            for &(x, y, w, h) in *blocks {
+                slots.push(CalculatedSlot { rect: cell_rect((x, y, w, h), *cols, *rows, (width, height)), z_order: 0 });
+            }
+            for y in 0..*rows {
+                for x in 0..*cols {
+                    let covered =
+                        blocks.iter().any(|&(bx, by, bw, bh)| bx <= x && x < bx + bw && by <= y && y < by + bh);
+                    if !covered {
+                        slots.push(CalculatedSlot {
+                            rect: cell_rect((x, y, 1, 1), *cols, *rows, (width, height)),
+                            z_order: 0,
+                        });
+                    }
+                }
+            }
+        }
+        ManualScheme::Explicit { cols, rows, slots: explicit } => {
+            for &(x, y, w, h) in *explicit {
+                slots.push(CalculatedSlot { rect: cell_rect((x, y, w, h), *cols, *rows, (width, height)), z_order: 0 });
+            }
+        }
+        ManualScheme::Overlay { windows } => {
+            for &(x, y, w, h) in *windows {
+                let left = (x * width).round().clamp(0.0, width);
+                let top = (y * height).round().clamp(0.0, height);
+                let slot_width = (w * width).round().clamp(0.0, width - left);
+                let slot_height = (h * height).round().clamp(0.0, height - top);
+                let z_order = if w * h >= 0.5 { 0 } else { 1 };
+                slots.push(CalculatedSlot { rect: SlotRect::new(left, top, slot_width, slot_height), z_order });
+            }
+        }
+    }
+    Some(slots)
+}
+
+/// Вендорные manual-пресеты (`preset_types._` + `preset_schemes._` эталона 2.2.1.66).
+/// Порядок совпадает с эталонным списком `preset_types._`.
+pub const MANUAL_PRESETS: [&str; 65] = [
+    "preset_equal_1",
+    "preset_equal_2",
+    "preset_selected_b_3",
+    "preset_selected_t_3",
+    "preset_selected_r_3",
+    "preset_selected_l_3",
+    "preset_equal_3",
+    "preset_equal_4",
+    "preset_selected_r_4",
+    "preset_selected_l_4",
+    "preset_selected_b_4",
+    "preset_selected_t_4",
+    "preset_selected_b_4_(2)",
+    "preset_selected_t_4_(2)",
+    "preset_equal_6",
+    "preset_selected_rb_6",
+    "preset_selected_rt_6",
+    "preset_selected_r_5",
+    "preset_selected_l_5",
+    "preset_selected_b_5",
+    "preset_selected_t_5",
+    "preset_selected_rb_8",
+    "preset_selected_rt_8",
+    "preset_equal_8",
+    "preset_equal_9",
+    "preset_selected_b_9",
+    "preset_selected_btb_9",
+    "preset_selected_rlr_9",
+    "preset_selected_rb_9",
+    "preset_selected_rt_9",
+    "preset_equal_16",
+    "preset_selected_rb_13",
+    "preset_selected_rt_13",
+    "preset_double_btb_10",
+    "preset_double_b_10",
+    "preset_double_rlr_10",
+    "preset_double_r_10",
+    "preset_selected_btb_11",
+    "preset_selected_rlr_11",
+    "preset_double_triple_11",
+    "preset_selected_c_13",
+    "preset_selected_rbl_13",
+    "preset_equal_20",
+    "preset_square_24",
+    "preset_equal_25",
+    "preset_selected_rb_25",
+    "preset_selected_rt_25",
+    "preset_equal_36",
+    "preset_selected_rb_37",
+    "preset_selected_rb_57",
+    "preset_selected_rb_61",
+    "preset_selected_rb_77",
+    "preset_double_b_34",
+    "preset_double_b_42",
+    "preset_double_btb_34",
+    "preset_double_rlr_34",
+    "preset_selected_rb_overlap_2",
+    "preset_selected_rt_overlap_2",
+    "preset_selected_r_overlap_6",
+    "preset_selected_l_overlap_6",
+    "preset_selected_b_overlap_4",
+    "preset_selected_t_overlap_4",
+    "preset_double_b_overlap_5",
+    "preset_double_t_overlap_5",
+    "preset_selected_rlr_overlap_11",
+];
+
+/// Эталонная схема manual-пресета: явная сетка (`Grid`/`Explicit`) или
+/// оверлейные окна (`Overlay`, доли канваса 0..1).
+enum ManualScheme {
+    Grid { cols: u16, rows: u16, blocks: &'static [(u16, u16, u16, u16)] },
+    Explicit { cols: u16, rows: u16, slots: &'static [(u16, u16, u16, u16)] },
+    Overlay { windows: &'static [(f64, f64, f64, f64)] },
+}
+
+static MANUAL_SCHEMES: &[(&str, ManualScheme)] = &[
+    ("preset_equal_1", ManualScheme::Grid { cols: 1, rows: 1, blocks: &[] }),
+    ("preset_equal_2", ManualScheme::Explicit { cols: 2, rows: 4, slots: &[(0, 1, 1, 2), (1, 1, 1, 2)] }),
+    ("preset_selected_b_3", ManualScheme::Grid { cols: 2, rows: 2, blocks: &[(0, 0, 2, 1)] }),
+    ("preset_selected_t_3", ManualScheme::Grid { cols: 2, rows: 2, blocks: &[(0, 1, 2, 1)] }),
+    ("preset_selected_r_3", ManualScheme::Grid { cols: 2, rows: 2, blocks: &[(0, 0, 1, 2)] }),
+    ("preset_selected_l_3", ManualScheme::Grid { cols: 2, rows: 2, blocks: &[(1, 0, 1, 2)] }),
+    ("preset_equal_3", ManualScheme::Explicit { cols: 4, rows: 2, slots: &[(0, 0, 2, 1), (2, 0, 2, 1), (1, 1, 2, 1)] }),
+    ("preset_equal_4", ManualScheme::Grid { cols: 2, rows: 2, blocks: &[] }),
+    ("preset_selected_r_4", ManualScheme::Grid { cols: 3, rows: 3, blocks: &[(0, 0, 2, 3)] }),
+    ("preset_selected_l_4", ManualScheme::Grid { cols: 3, rows: 3, blocks: &[(1, 0, 2, 3)] }),
+    ("preset_selected_b_4", ManualScheme::Grid { cols: 3, rows: 3, blocks: &[(0, 0, 3, 2)] }),
+    ("preset_selected_t_4", ManualScheme::Grid { cols: 3, rows: 3, blocks: &[(0, 1, 3, 2)] }),
+    (
+        "preset_selected_b_4_(2)",
+        ManualScheme::Explicit { cols: 3, rows: 9, slots: &[(0, 0, 3, 5), (0, 5, 1, 4), (1, 5, 1, 4), (2, 5, 1, 4)] },
+    ),
+    (
+        "preset_selected_t_4_(2)",
+        ManualScheme::Explicit { cols: 3, rows: 9, slots: &[(0, 0, 1, 4), (1, 0, 1, 4), (2, 0, 1, 4), (0, 4, 3, 5)] },
+    ),
+    ("preset_equal_6", ManualScheme::Grid { cols: 3, rows: 2, blocks: &[] }),
+    ("preset_selected_rb_6", ManualScheme::Grid { cols: 3, rows: 3, blocks: &[(0, 0, 2, 2)] }),
+    ("preset_selected_rt_6", ManualScheme::Grid { cols: 3, rows: 3, blocks: &[(0, 1, 2, 2)] }),
+    ("preset_selected_r_5", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(0, 0, 3, 4)] }),
+    ("preset_selected_l_5", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(1, 0, 3, 4)] }),
+    ("preset_selected_b_5", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(0, 0, 4, 3)] }),
+    ("preset_selected_t_5", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(0, 1, 4, 3)] }),
+    ("preset_selected_rb_8", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(0, 0, 3, 3)] }),
+    ("preset_selected_rt_8", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(0, 1, 3, 3)] }),
+    ("preset_equal_8", ManualScheme::Grid { cols: 4, rows: 2, blocks: &[] }),
+    ("preset_equal_9", ManualScheme::Grid { cols: 3, rows: 3, blocks: &[] }),
+    ("preset_selected_b_9", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(0, 0, 4, 2)] }),
+    ("preset_selected_btb_9", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(0, 1, 4, 2)] }),
+    ("preset_selected_rlr_9", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(1, 0, 2, 4)] }),
+    ("preset_selected_rb_9", ManualScheme::Grid { cols: 4, rows: 3, blocks: &[(0, 0, 2, 2)] }),
+    ("preset_selected_rt_9", ManualScheme::Grid { cols: 4, rows: 3, blocks: &[(0, 1, 2, 2)] }),
+    ("preset_equal_16", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[] }),
+    ("preset_selected_rb_13", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(0, 0, 2, 2)] }),
+    ("preset_selected_rt_13", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(0, 2, 2, 2)] }),
+    ("preset_double_btb_10", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(0, 1, 2, 2), (2, 1, 2, 2)] }),
+    ("preset_double_b_10", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(0, 0, 2, 2), (2, 0, 2, 2)] }),
+    ("preset_double_rlr_10", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(1, 0, 2, 2), (1, 2, 2, 2)] }),
+    ("preset_double_r_10", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(0, 0, 2, 2), (0, 2, 2, 2)] }),
+    ("preset_selected_btb_11", ManualScheme::Grid { cols: 5, rows: 5, blocks: &[(0, 1, 5, 3)] }),
+    ("preset_selected_rlr_11", ManualScheme::Grid { cols: 5, rows: 5, blocks: &[(1, 0, 3, 5)] }),
+    (
+        "preset_double_triple_11",
+        ManualScheme::Grid {
+            cols: 6,
+            rows: 6,
+            blocks: &[(0, 0, 3, 3), (3, 0, 3, 3), (0, 3, 2, 2), (2, 3, 2, 2), (4, 3, 2, 2)],
+        },
+    ),
+    ("preset_selected_c_13", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(1, 1, 2, 2)] }),
+    ("preset_selected_rbl_13", ManualScheme::Grid { cols: 4, rows: 4, blocks: &[(1, 0, 2, 2)] }),
+    ("preset_equal_20", ManualScheme::Grid { cols: 5, rows: 4, blocks: &[] }),
+    (
+        "preset_square_24",
+        ManualScheme::Grid { cols: 6, rows: 6, blocks: &[(1, 1, 2, 2), (3, 1, 2, 2), (1, 3, 2, 2), (3, 3, 2, 2)] },
+    ),
+    ("preset_equal_25", ManualScheme::Grid { cols: 5, rows: 5, blocks: &[] }),
+    ("preset_selected_rb_25", ManualScheme::Grid { cols: 7, rows: 7, blocks: &[(0, 0, 5, 5)] }),
+    ("preset_selected_rt_25", ManualScheme::Grid { cols: 7, rows: 7, blocks: &[(0, 2, 5, 5)] }),
+    ("preset_equal_36", ManualScheme::Grid { cols: 6, rows: 6, blocks: &[] }),
+    ("preset_selected_rb_37", ManualScheme::Grid { cols: 8, rows: 6, blocks: &[(0, 0, 4, 3)] }),
+    ("preset_selected_rb_57", ManualScheme::Grid { cols: 9, rows: 9, blocks: &[(0, 0, 5, 5)] }),
+    ("preset_selected_rb_61", ManualScheme::Grid { cols: 10, rows: 8, blocks: &[(0, 0, 5, 4)] }),
+    ("preset_selected_rb_77", ManualScheme::Grid { cols: 10, rows: 8, blocks: &[(0, 0, 2, 2)] }),
+    ("preset_double_b_34", ManualScheme::Grid { cols: 8, rows: 8, blocks: &[(0, 0, 4, 4), (4, 0, 4, 4)] }),
+    ("preset_double_b_42", ManualScheme::Grid { cols: 10, rows: 8, blocks: &[(0, 0, 5, 4), (5, 0, 5, 4)] }),
+    ("preset_double_btb_34", ManualScheme::Grid { cols: 8, rows: 8, blocks: &[(0, 2, 4, 4), (4, 2, 4, 4)] }),
+    ("preset_double_rlr_34", ManualScheme::Grid { cols: 8, rows: 8, blocks: &[(2, 0, 4, 4), (2, 4, 4, 4)] }),
+    (
+        "preset_selected_rb_overlap_2",
+        ManualScheme::Overlay {
+            windows: &[
+                (0.000000000, 0.000000000, 1.000000000, 1.000000000),
+                (0.687500000, 0.687500000, 0.250000000, 0.250000000),
+            ],
+        },
+    ),
+    (
+        "preset_selected_rt_overlap_2",
+        ManualScheme::Overlay {
+            windows: &[
+                (0.000000000, 0.000000000, 1.000000000, 1.000000000),
+                (0.687500000, 0.062500000, 0.250000000, 0.250000000),
+            ],
+        },
+    ),
+    (
+        "preset_selected_r_overlap_6",
+        ManualScheme::Overlay {
+            windows: &[
+                (0.000000000, 0.000000000, 1.000000000, 1.000000000),
+                (0.782812500, 0.050000000, 0.189062500, 0.180555556),
+                (0.782812500, 0.230555556, 0.189062500, 0.180555556),
+                (0.782812500, 0.411111111, 0.189062500, 0.177777778),
+                (0.782812500, 0.588888889, 0.189062500, 0.180555556),
+                (0.782812500, 0.769444444, 0.189062500, 0.180555556),
+            ],
+        },
+    ),
+    (
+        "preset_selected_l_overlap_6",
+        ManualScheme::Overlay {
+            windows: &[
+                (0.000000000, 0.000000000, 1.000000000, 1.000000000),
+                (0.028125000, 0.050000000, 0.189062500, 0.180555556),
+                (0.028125000, 0.230555556, 0.189062500, 0.180555556),
+                (0.028125000, 0.411111111, 0.189062500, 0.177777778),
+                (0.028125000, 0.588888889, 0.189062500, 0.180555556),
+                (0.028125000, 0.769444444, 0.189062500, 0.180555556),
+            ],
+        },
+    ),
+    (
+        "preset_selected_b_overlap_4",
+        ManualScheme::Overlay {
+            windows: &[
+                (0.000000000, 0.000000000, 1.000000000, 1.000000000),
+                (0.214062500, 0.794444444, 0.189062500, 0.180555556),
+                (0.403125000, 0.794444444, 0.189062500, 0.180555556),
+                (0.592187500, 0.794444444, 0.187500000, 0.180555556),
+            ],
+        },
+    ),
+    (
+        "preset_selected_t_overlap_4",
+        ManualScheme::Overlay {
+            windows: &[
+                (0.000000000, 0.000000000, 1.000000000, 1.000000000),
+                (0.214062500, 0.050000000, 0.189062500, 0.180555556),
+                (0.403125000, 0.050000000, 0.189062500, 0.180555556),
+                (0.592187500, 0.050000000, 0.187500000, 0.180555556),
+            ],
+        },
+    ),
+    (
+        "preset_double_b_overlap_5",
+        ManualScheme::Overlay {
+            windows: &[
+                (0.000000000, 0.000000000, 0.500000000, 1.000000000),
+                (0.500000000, 0.000000000, 0.500000000, 1.000000000),
+                (0.214062500, 0.794444444, 0.189062500, 0.180555556),
+                (0.403125000, 0.794444444, 0.189062500, 0.180555556),
+                (0.592187500, 0.794444444, 0.187500000, 0.180555556),
+            ],
+        },
+    ),
+    (
+        "preset_double_t_overlap_5",
+        ManualScheme::Overlay {
+            windows: &[
+                (0.000000000, 0.000000000, 0.500000000, 1.000000000),
+                (0.500000000, 0.000000000, 0.500000000, 1.000000000),
+                (0.214062500, 0.050000000, 0.189062500, 0.180555556),
+                (0.403125000, 0.050000000, 0.189062500, 0.180555556),
+                (0.592187500, 0.050000000, 0.187500000, 0.180555556),
+            ],
+        },
+    ),
+    (
+        "preset_selected_rlr_overlap_11",
+        ManualScheme::Overlay {
+            windows: &[
+                (0.000000000, 0.000000000, 1.000000000, 1.000000000),
+                (0.028125000, 0.050000000, 0.189062500, 0.180555556),
+                (0.782812500, 0.050000000, 0.189062500, 0.180555556),
+                (0.028125000, 0.230555556, 0.189062500, 0.180555556),
+                (0.782812500, 0.230555556, 0.189062500, 0.180555556),
+                (0.028125000, 0.411111111, 0.189062500, 0.177777778),
+                (0.782812500, 0.411111111, 0.189062500, 0.177777778),
+                (0.028125000, 0.588888889, 0.189062500, 0.180555556),
+                (0.782812500, 0.588888889, 0.189062500, 0.180555556),
+                (0.028125000, 0.769444444, 0.189062500, 0.180555556),
+                (0.782812500, 0.769444444, 0.189062500, 0.180555556),
+            ],
+        },
+    ),
+];
+
+/// Эталонное число окон manual-пресета (live `calculate`, 1280×720).
+pub fn expected_slot_count(id: &str) -> Option<usize> {
+    Some(match id {
+        "preset_equal_1" => 1,
+        "preset_equal_2" => 2,
+        "preset_selected_b_3" => 3,
+        "preset_selected_t_3" => 3,
+        "preset_selected_r_3" => 3,
+        "preset_selected_l_3" => 3,
+        "preset_equal_3" => 3,
+        "preset_equal_4" => 4,
+        "preset_selected_r_4" => 4,
+        "preset_selected_l_4" => 4,
+        "preset_selected_b_4" => 4,
+        "preset_selected_t_4" => 4,
+        "preset_selected_b_4_(2)" => 4,
+        "preset_selected_t_4_(2)" => 4,
+        "preset_equal_6" => 6,
+        "preset_selected_rb_6" => 6,
+        "preset_selected_rt_6" => 6,
+        "preset_selected_r_5" => 5,
+        "preset_selected_l_5" => 5,
+        "preset_selected_b_5" => 5,
+        "preset_selected_t_5" => 5,
+        "preset_selected_rb_8" => 8,
+        "preset_selected_rt_8" => 8,
+        "preset_equal_8" => 8,
+        "preset_equal_9" => 9,
+        "preset_selected_b_9" => 9,
+        "preset_selected_btb_9" => 9,
+        "preset_selected_rlr_9" => 9,
+        "preset_selected_rb_9" => 9,
+        "preset_selected_rt_9" => 9,
+        "preset_equal_16" => 16,
+        "preset_selected_rb_13" => 13,
+        "preset_selected_rt_13" => 13,
+        "preset_double_btb_10" => 10,
+        "preset_double_b_10" => 10,
+        "preset_double_rlr_10" => 10,
+        "preset_double_r_10" => 10,
+        "preset_selected_btb_11" => 11,
+        "preset_selected_rlr_11" => 11,
+        "preset_double_triple_11" => 11,
+        "preset_selected_c_13" => 13,
+        "preset_selected_rbl_13" => 13,
+        "preset_equal_20" => 20,
+        "preset_square_24" => 24,
+        "preset_equal_25" => 25,
+        "preset_selected_rb_25" => 25,
+        "preset_selected_rt_25" => 25,
+        "preset_equal_36" => 36,
+        "preset_selected_rb_37" => 37,
+        "preset_selected_rb_57" => 57,
+        "preset_selected_rb_61" => 61,
+        "preset_selected_rb_77" => 77,
+        "preset_double_b_34" => 34,
+        "preset_double_b_42" => 42,
+        "preset_double_btb_34" => 34,
+        "preset_double_rlr_34" => 34,
+        "preset_selected_rb_overlap_2" => 2,
+        "preset_selected_rt_overlap_2" => 2,
+        "preset_selected_r_overlap_6" => 6,
+        "preset_selected_l_overlap_6" => 6,
+        "preset_selected_b_overlap_4" => 4,
+        "preset_selected_t_overlap_4" => 4,
+        "preset_double_b_overlap_5" => 5,
+        "preset_double_t_overlap_5" => 5,
+        "preset_selected_rlr_overlap_11" => 11,
+        _ => return None,
+    })
+}
+/// Слот встроенной custom-геометрии (эталонный payload `video_layout_grids._`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GridSlot {
+    /// Левый край (в единицах сетки).
+    pub x: u32,
+    /// Верхний край.
+    pub y: u32,
+    /// Ширина.
+    pub width: u32,
+    /// Высота.
+    pub height: u32,
+}
+
+/// Payload custom-геометрии (точная форма вендорного `/video_layout_grids`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GridPayload {
+    /// Ширина сетки (единицы сетки, не пиксели).
+    pub width: u32,
+    /// Высота сетки.
+    pub height: u32,
+    /// Центрировать неполный последний ряд (`null` у вендорных схем).
+    pub centered_row: Option<bool>,
+    /// Окна геометрии.
+    pub slots: Vec<GridSlot>,
+}
+
+/// Флаги встроенной геометрии.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GridDefaults {
+    /// Можно ли удалить.
+    pub deletable: bool,
+    /// Можно ли редактировать.
+    pub editable: bool,
+    /// Можно ли отключить.
+    pub disableable: bool,
+}
+
+impl GridDefaults {
+    /// Вендорные `Custom scheme 1..6`: редактируемые/удаляемые, но не отключаемые.
+    pub const fn builtin() -> Self {
+        Self { deletable: true, editable: true, disableable: false }
+    }
+}
+
+/// Встроенная grid-геометрия редактора раскладок.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GridInfo {
+    /// Идентификатор геометрии (UUID эталона).
+    pub id: String,
+    /// Отображаемое имя.
+    pub display_name: String,
+    /// Геометрия.
+    pub payload: GridPayload,
+    /// Флаги.
+    pub defaults: GridDefaults,
+}
+
+/// Слот эталонной custom-схемы в единицах сетки: `(x, y, width, height)`.
+type GridSlotSpec = (u32, u32, u32, u32);
+/// Строка эталонной custom-схемы: `(id, display_name, сетка, слоты)`.
+type BuiltinGridSpec = (&'static str, &'static str, u32, u32, &'static [GridSlotSpec]);
+
+/// Эталонные строки `video_layout_grids._` (live 2.2.1.66): id, имя, сетка, слоты.
+const BUILTIN_GRIDS: [BuiltinGridSpec; 6] = [
+    ("6fb877aa-92de-4b83-9f83-6c9386e06443", "Custom scheme 1", 8, 8, &[(0, 0, 4, 4), (4, 0, 4, 4)]),
+    ("277103cc-57e1-4501-a2e6-7cd369b64e59", "Custom scheme 2", 10, 8, &[(0, 0, 5, 4), (5, 0, 5, 4)]),
+    ("4ff117e7-cb6b-4396-9652-941b73535d20", "Custom scheme 3", 8, 6, &[(0, 0, 3, 4)]),
+    ("eda71ad0-0dfe-46d1-8910-4c4b495afce1", "Custom scheme 4", 10, 8, &[(0, 0, 5, 4)]),
+    ("45070592-a240-4e0a-9d5d-60dc365d7ce4", "Custom scheme 5", 10, 8, &[(0, 0, 2, 2)]),
+    ("9bf78747-e1b2-42c9-b10e-1ece67a269e7", "Custom scheme 6", 4, 4, &[(1, 0, 2, 2)]),
+];
+
+/// Встроенные grid-геометрии: ровно 6 эталонных custom-схем.
+pub fn builtin_grids() -> Vec<GridInfo> {
+    BUILTIN_GRIDS
+        .iter()
+        .map(|(id, name, width, height, slots)| GridInfo {
+            id: (*id).to_string(),
+            display_name: (*name).to_string(),
+            payload: GridPayload {
+                width: *width,
+                height: *height,
+                centered_row: None,
+                slots: slots.iter().map(|&(x, y, width, height)| GridSlot { x, y, width, height }).collect(),
+            },
+            defaults: GridDefaults::builtin(),
+        })
+        .collect()
+}
+
+// --- Совместимость с текущим admin-каталогом (preset-схемы в `/video_layout_grids`) ---
+// Эталонный TrueConf 2.2.1.66 отдаёт в `video_layout_grids` только 6 custom-схем,
+// но admin до перехода на live-контракт строит каталог из `catalog()`; символы
+// сохраняются публичными, чтобы не ломать `api_v3/resources.rs`.
+
+/// Масштаб координат grid-payload (0..=10000).
+pub const GRID_SCALE: u32 = 10_000;
+
+/// Элемент каталога пресетов (совместимость с admin-каталогом).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresetInfo {
     /// Вендорный id (`preset_selected_b_4`).
@@ -632,7 +1146,6 @@ pub struct PresetInfo {
     pub display_name: String,
 }
 
-/// Раскладки, для которых каталог гарантирует пресеты.
 const SELECTED_POSITIONS: [Position; 9] = [
     Position::B,
     Position::T,
@@ -644,21 +1157,14 @@ const SELECTED_POSITIONS: [Position; 9] = [
     Position::Rlr,
     Position::Btb,
 ];
-/// Размеры схемы `selected` (включая вендорный «общий» размер 13).
 const SELECTED_SIZES: [u8; 8] = [2, 3, 4, 6, 9, 12, 16, 25];
-/// Позиции, для которых вендор определяет `_overlap` (pip) варианты.
 const OVERLAP_POSITIONS: [Position; 6] =
     [Position::B, Position::T, Position::R, Position::L, Position::Rb, Position::Rt];
-/// Схемы с вендорским суффиксом `_(2)`.
 const VARIANT_POSITIONS: [Position; 2] = [Position::B, Position::T];
-/// Размеры вариантов `_(2)`.
 const VARIANT_SIZES: [u8; 6] = [4, 6, 9, 12, 16, 25];
-/// Позиции схемы `double`.
 const DOUBLE_POSITIONS: [Position; 3] = [Position::B, Position::T, Position::Rlr];
-/// Размеры схемы `double`.
 const DOUBLE_SIZES: [u8; 5] = [2, 4, 6, 9, 12];
 
-/// Человекочитаемое имя позиции для `display_name`.
 fn position_display(position: Position) -> &'static str {
     match position {
         Position::B => "снизу",
@@ -673,7 +1179,6 @@ fn position_display(position: Position) -> &'static str {
     }
 }
 
-/// Имя пресета для списков PNM.
 fn preset_display_name(preset: &PresetId) -> String {
     let mut name = match preset.scheme {
         PresetScheme::Equal => format!("Сетка {}", preset.size),
@@ -703,15 +1208,9 @@ fn preset_info(preset: PresetId) -> PresetInfo {
     }
 }
 
-/// Каталог вендорных пресетов для `/api/v3/video_layout_grids`.
-///
-/// Включает `preset_default_13`, `preset_equal_1..=25`, все позиции
-/// `selected` для размеров [`SELECTED_SIZES`], pip-варианты `_overlap`,
-/// варианты `_(2)` и схемы `double`. Порядок детерминирован: default →
-/// equal → selected → overlap → variants → double.
+/// Каталог вендорных пресетов для admin (`/api/v3/video_layout_grids`).
 pub fn catalog() -> Vec<PresetInfo> {
     let mut items = Vec::new();
-
     items.push(preset_info(PresetId {
         scheme: PresetScheme::Default,
         size: 13,
@@ -719,11 +1218,9 @@ pub fn catalog() -> Vec<PresetInfo> {
         overlap: false,
         pip: false,
     }));
-
     for size in 1..=25u8 {
         items.push(preset_info(PresetId::equal(size)));
     }
-
     for position in SELECTED_POSITIONS {
         for size in SELECTED_SIZES {
             items.push(preset_info(PresetId {
@@ -735,7 +1232,6 @@ pub fn catalog() -> Vec<PresetInfo> {
             }));
         }
     }
-
     for position in OVERLAP_POSITIONS {
         for size in SELECTED_SIZES {
             items.push(preset_info(PresetId {
@@ -747,7 +1243,6 @@ pub fn catalog() -> Vec<PresetInfo> {
             }));
         }
     }
-
     for position in VARIANT_POSITIONS {
         for size in VARIANT_SIZES {
             items.push(preset_info(PresetId {
@@ -759,7 +1254,6 @@ pub fn catalog() -> Vec<PresetInfo> {
             }));
         }
     }
-
     for position in DOUBLE_POSITIONS {
         for size in DOUBLE_SIZES {
             items.push(preset_info(PresetId {
@@ -771,160 +1265,35 @@ pub fn catalog() -> Vec<PresetInfo> {
             }));
         }
     }
-
     items
 }
 
-/// Масштаб координат grid-payload (вендорный формат — 10000 единиц).
-pub const GRID_SCALE: u32 = 10_000;
-
-/// Слот фиксированной grid-геометрии (координаты в [`GRID_SCALE`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GridSlot {
-    /// Позиция окна (0-based).
-    pub position: u32,
-    /// Левый край.
-    pub x: u32,
-    /// Верхний край.
-    pub y: u32,
-    /// Ширина.
-    pub width: u32,
-    /// Высота.
-    pub height: u32,
-    /// Порядок наложения (0 — самый нижний).
-    pub z_order: u32,
-}
-
-/// Payload grid-геометрии (форма вендорного `/video_layout_grids`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GridPayload {
-    /// Ширина канваса в единицах [`GRID_SCALE`].
-    pub width: u32,
-    /// Высота канваса в единицах [`GRID_SCALE`].
-    pub height: u32,
-    /// Центрировать неполный последний ряд.
-    pub centered_row: bool,
-    /// Окна геометрии.
-    pub slots: Vec<GridSlot>,
-}
-
-/// Флаги встроенной геометрии (нельзя удалить/изменить/отключить).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GridDefaults {
-    /// Можно ли удалить.
-    pub deletable: bool,
-    /// Можно ли редактировать.
-    pub editable: bool,
-    /// Можно ли отключить.
-    pub disableable: bool,
-}
-
-impl GridDefaults {
-    /// Встроенная геометрия: read-only.
-    pub const fn fixed() -> Self {
-        Self { deletable: false, editable: false, disableable: false }
-    }
-}
-
-/// Встроенная grid-геометрия редактора раскладок.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GridInfo {
-    /// Идентификатор геометрии.
-    pub id: String,
-    /// Отображаемое имя.
-    pub display_name: String,
-    /// Геометрия.
-    pub payload: GridPayload,
-    /// Флаги.
-    pub defaults: GridDefaults,
-}
-
-/// Округляет пиксельную координату в единицы [`GRID_SCALE`].
 fn grid_coord(value: f64) -> u32 {
     value.round().clamp(0.0, f64::from(GRID_SCALE)) as u32
 }
 
-/// Переводит пиксельные rect'ы 10000×10000 в слоты grid-payload.
+/// Переводит пиксельные rect в слоты `0..=GRID_SCALE` (совместимость с admin).
 pub fn slots_to_grid(rects: &[SlotRect]) -> Vec<GridSlot> {
     rects
         .iter()
-        .enumerate()
-        .map(|(index, rect)| {
+        .map(|rect| {
             let x = grid_coord(rect.x);
             let y = grid_coord(rect.y);
-            let width = grid_coord(rect.width).min(GRID_SCALE - x);
-            let height = grid_coord(rect.height).min(GRID_SCALE - y);
-            GridSlot { position: u32::try_from(index).unwrap_or(u32::MAX), x, y, width, height, z_order: 0 }
+            GridSlot {
+                x,
+                y,
+                width: grid_coord(rect.width).min(GRID_SCALE - x),
+                height: grid_coord(rect.height).min(GRID_SCALE - y),
+            }
         })
         .collect()
-}
-
-/// Вендорные custom-геометрии редактора (`cols` — ширина сетки, `count` — окон).
-const CUSTOM_GRIDS: [(&str, &str, usize, usize, usize); 6] = [
-    ("custom_8x8_double_34", "8×8 Double 34", 8, 8, 34),
-    ("custom_10x8_double_42", "10×8 Double 42", 10, 8, 42),
-    ("custom_8x6_selected_37", "8×6 Selected 37", 8, 6, 37),
-    ("custom_10x8_selected_77", "10×8 Selected 77", 10, 8, 77),
-    ("custom_4x4_selected_13", "4×4 Selected 13", 4, 4, 13),
-    ("custom_8x8_selected_61", "8×8 Selected 61", 8, 8, 61),
-];
-
-/// Легаси `preset_default_N` из прежнего плоского каталога (для get_grid).
-const LEGACY_DEFAULT_SIZES: [u8; 10] = [1, 2, 3, 4, 6, 8, 9, 12, 13, 16];
-
-/// Фиксированная сетка `cols × rows` c `count` окнами, заполняющая канвас.
-fn custom_grid(id: &str, display_name: &str, cols: usize, capacity_rows: usize, count: usize) -> GridInfo {
-    let cols = cols.max(1);
-    let count = count.max(1).min(cols * capacity_rows.max(1));
-    let rows = count.div_ceil(cols);
-    let cell_width = GRID_SCALE / u32::try_from(cols).unwrap_or(u32::MAX);
-    let cell_height = GRID_SCALE / u32::try_from(rows).unwrap_or(u32::MAX);
-    let centered_row = !count.is_multiple_of(cols);
-    let mut slots = Vec::with_capacity(count);
-    for index in 0..count {
-        let row = index / cols;
-        let col = index % cols;
-        let in_row = cols.min(count - row * cols);
-        let row_offset = if centered_row && in_row < cols {
-            (u32::try_from(cols - in_row).unwrap_or(0) * cell_width) / 2
-        } else {
-            0
-        };
-        let x = row_offset + u32::try_from(col).unwrap_or(0) * cell_width;
-        let y = u32::try_from(row).unwrap_or(0) * cell_height;
-        let width = if col + 1 == cols { GRID_SCALE - x } else { (GRID_SCALE - x).min(cell_width) };
-        let height = if row + 1 == rows { GRID_SCALE - y } else { (GRID_SCALE - y).min(cell_height) };
-        slots.push(GridSlot { position: u32::try_from(index).unwrap_or(u32::MAX), x, y, width, height, z_order: 0 });
-    }
-    GridInfo {
-        id: id.to_string(),
-        display_name: display_name.to_string(),
-        payload: GridPayload { width: GRID_SCALE, height: GRID_SCALE, centered_row, slots },
-        defaults: GridDefaults::fixed(),
-    }
-}
-
-/// Встроенные grid-геометрии: 6 custom-схем редактора + легаси
-/// `preset_default_N` (чтобы `get_grid` не ломался на старых id).
-pub fn builtin_grids() -> Vec<GridInfo> {
-    let mut grids: Vec<GridInfo> =
-        CUSTOM_GRIDS.iter().map(|(id, name, cols, rows, count)| custom_grid(id, name, *cols, *rows, *count)).collect();
-    for size in LEGACY_DEFAULT_SIZES {
-        let preset = PresetId::equal(size);
-        let slots = slots_to_grid(&geometry(&preset, f64::from(GRID_SCALE), f64::from(GRID_SCALE), 1.0, false));
-        grids.push(GridInfo {
-            id: format!("preset_default_{size}"),
-            display_name: size.to_string(),
-            payload: GridPayload { width: GRID_SCALE, height: GRID_SCALE, centered_row: false, slots },
-            defaults: GridDefaults::fixed(),
-        });
-    }
-    grids
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+
+    use serde_json::{json, Value};
 
     use super::*;
 
@@ -933,9 +1302,27 @@ mod tests {
     }
 
     fn inside(rect: &SlotRect, width: f64, height: f64) {
-        assert!(rect.is_valid(), "{rect:?}: NaN/отрицательные координаты");
+        assert!(rect.is_valid(), "{rect:?}: NaN/отрицательные размеры");
+        assert!(rect.x >= -1e-9 && rect.y >= -1e-9, "{rect:?}: отрицательная координата");
         assert!(rect.x + rect.width <= width + 1e-9, "{rect:?} выходит за ширину {width}");
         assert!(rect.y + rect.height <= height + 1e-9, "{rect:?} выходит за высоту {height}");
+    }
+
+    fn slots_json(slots: &[CalculatedSlot]) -> Vec<Value> {
+        slots
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                json!({
+                    "position": index + 1,
+                    "x": slot.rect.x as u64,
+                    "y": slot.rect.y as u64,
+                    "width": slot.rect.width as u64,
+                    "height": slot.rect.height as u64,
+                    "z_order": slot.z_order,
+                })
+            })
+            .collect()
     }
 
     #[test]
@@ -969,7 +1356,7 @@ mod tests {
         let overlap = parse("preset_selected_rb_overlap");
         assert_eq!(overlap.scheme, PresetScheme::Selected(Position::Rb));
         assert_eq!(overlap.size, PresetId::DEFAULT_SIZE);
-        assert!(overlap.overlap, "_overlap включает наложение");
+        assert!(overlap.overlap);
         assert!(overlap.pip);
 
         let sized_overlap = parse("preset_selected_rb_overlap_2");
@@ -978,7 +1365,6 @@ mod tests {
 
         assert_eq!(parse("preset_default_13").scheme, PresetScheme::Default);
         assert_eq!(parse("preset_double_rlr_10").scheme, PresetScheme::Double(Position::Rlr));
-        // Bare-схемы вендорного списка получают размер по умолчанию.
         assert_eq!(parse("preset_equal").size, PresetId::DEFAULT_SIZE);
         assert_eq!(parse("preset_selected_b").size, PresetId::DEFAULT_SIZE);
         for invalid in ["", "equal_4", "preset_", "preset_unknown_4", "preset_equal_0", "preset_selected_zz_4"] {
@@ -986,112 +1372,181 @@ mod tests {
         }
     }
 
+    /// Ровно 65 manual-пресетов эталона 2.2.1.66; dynamic/auto/базовые id не
+    /// принимаются `calculate` и не должны попадать в список.
     #[test]
-    fn catalog_contains_required_vendor_presets() {
-        let ids: HashSet<String> = catalog().into_iter().map(|info| info.id).collect();
-        for required in [
-            "preset_default_13",
-            "preset_equal_1",
-            "preset_equal_4",
-            "preset_equal_25",
-            "preset_selected_b_2",
-            "preset_selected_b_4",
-            "preset_selected_b_4_(2)",
-            "preset_selected_rb_4",
-            "preset_selected_rlr_16",
-            "preset_selected_btb_25",
-            "preset_selected_rb_overlap_2",
-            "preset_selected_b_overlap_4",
-            "preset_double_b_4",
-            "preset_double_t_6",
-            "preset_double_rlr_12",
-        ] {
-            assert!(ids.contains(required), "каталог должен содержать {required}");
+    fn manual_presets_match_reference() {
+        assert_eq!(MANUAL_PRESETS.len(), 65);
+        let unique: HashSet<&str> = MANUAL_PRESETS.iter().copied().collect();
+        assert_eq!(unique.len(), MANUAL_PRESETS.len(), "дубли id в списке manual-пресетов");
+        for id in MANUAL_PRESETS {
+            assert!(is_manual_preset(id), "{id} отсутствует в MANUAL_SCHEMES");
+            assert!(expected_slot_count(id).is_some(), "{id}: нет эталонного числа окон");
+            assert!(geometry_for_manual(id, 1280.0, 720.0).is_some(), "{id}: нет эталонной геометрии");
         }
-        let unique: HashSet<&str> = ids.iter().map(String::as_str).collect();
-        assert_eq!(unique.len(), ids.len(), "id каталога не должны дублироваться");
+        for dynamic in [
+            "preset_default_13",
+            "preset_equal",
+            "preset_selected_b",
+            "preset_double_btb",
+            "preset_selected_rb_overlap",
+            "preset_unknown_4",
+        ] {
+            assert!(!is_manual_preset(dynamic), "{dynamic} не является manual-пресетом");
+            assert!(geometry_for_manual(dynamic, 1280.0, 720.0).is_none());
+        }
     }
 
+    /// Послотовая сверка с live-ответами `POST /api/v3/ui/video_layouts/calculate`
+    /// эталона 192.168.1.92 (1280×720): 65 manual-пресетов, позиции 1..N.
     #[test]
-    fn every_catalog_preset_has_valid_geometry() {
-        for info in catalog() {
-            let preset = PresetId::parse(&info.id).unwrap_or_else(|| panic!("{} не разбирается", info.id));
-            assert_eq!(preset.to_string(), info.id, "id каталога должен быть каноническим");
-            for (width, height) in [(1280.0, 720.0), (1920.0, 1080.0), (640.0, 480.0)] {
-                let slots = geometry(&preset, width, height, 1.0, false);
-                assert_eq!(slots.len(), usize::from(info.size), "{}: число слотов", info.id);
-                for slot in &slots {
-                    inside(slot, width, height);
+    fn geometry_matches_reference_1280x720() {
+        let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/reference_calculate_1280x720.json"))
+            .expect("fixture эталонной геометрии");
+        let expected = fixture.as_object().expect("объект id → slots");
+        assert_eq!(expected.len(), MANUAL_PRESETS.len());
+        for id in MANUAL_PRESETS {
+            let want = expected.get(id).unwrap_or_else(|| panic!("{id} отсутствует в fixture")).clone();
+            let got = slots_json(&geometry_for_manual(id, 1280.0, 720.0).unwrap());
+            assert_eq!(Value::Array(got), want, "{id}: расхождение с эталоном");
+        }
+    }
+
+    /// Property-тест геометрии: число окон, положительная площадь, канвас,
+    /// 1-based позиции и отсутствие пересечений у неперекрывающихся схем.
+    #[test]
+    fn geometry_properties_hold_for_all_manual_presets() {
+        for id in MANUAL_PRESETS {
+            let expected = expected_slot_count(id).unwrap();
+            for (width, height) in [(1280.0, 720.0), (1920.0, 1080.0), (640.0, 480.0), (1000.0, 700.0)] {
+                let slots = geometry_for_manual(id, width, height).unwrap();
+                assert_eq!(slots.len(), expected, "{id}: число окон на {width}×{height}");
+                let mut area = 0.0;
+                for (index, slot) in slots.iter().enumerate() {
+                    inside(&slot.rect, width, height);
+                    assert!(slot.rect.width > 0.0 && slot.rect.height > 0.0, "{id}: пустой слот {}", index + 1);
+                    area += slot.rect.width * slot.rect.height;
+                }
+                // У pip/overlap-схем окна лежат поверх крупной зоны — сумма
+                // площадей законно больше канваса; проверяем только неперекрытие.
+                if slots.iter().all(|slot| slot.z_order == 0) {
+                    assert!(area <= width * height + 1e-6, "{id}: сумма площадей больше канваса");
+                }
+                // Пересекаться могут только окна поверх крупной зоны (z_order=1).
+                for (i, left) in slots.iter().enumerate() {
+                    for right in &slots[i + 1..] {
+                        assert!(
+                            left.z_order > 0 || right.z_order > 0 || !intersects(&left.rect, &right.rect),
+                            "{id}: пересечение слотов {} и {}",
+                            i + 1,
+                            i + 2
+                        );
+                    }
                 }
             }
         }
     }
 
+    fn intersects(a: &SlotRect, b: &SlotRect) -> bool {
+        let epsilon = 1e-6;
+        a.x + a.width > b.x + epsilon
+            && b.x + b.width > a.x + epsilon
+            && a.y + a.height > b.y + epsilon
+            && b.y + b.height > a.y + epsilon
+    }
+
+    /// Ключевые пресеты 2×2/3×3/25/34: точные пиксели эталона.
+    #[test]
+    fn reference_schemes_have_expected_pixels() {
+        let slots = |id: &str| geometry_for_manual(id, 1280.0, 720.0).unwrap();
+        let rects = |id: &str| slots(id).iter().map(|slot| slot.rect).collect::<Vec<_>>();
+
+        assert_eq!(
+            rects("preset_equal_2"),
+            vec![SlotRect::new(0.0, 180.0, 640.0, 360.0), SlotRect::new(640.0, 180.0, 640.0, 360.0)]
+        );
+        assert_eq!(
+            rects("preset_equal_3"),
+            vec![
+                SlotRect::new(0.0, 0.0, 640.0, 360.0),
+                SlotRect::new(640.0, 0.0, 640.0, 360.0),
+                SlotRect::new(320.0, 360.0, 640.0, 360.0),
+            ]
+        );
+        let selected = rects("preset_selected_b_4");
+        assert_eq!(selected[0], SlotRect::new(0.0, 0.0, 1280.0, 480.0), "крупная зона сверху 2/3");
+        assert_eq!(selected[1], SlotRect::new(0.0, 480.0, 426.0, 240.0));
+        assert_eq!(selected[2], SlotRect::new(426.0, 480.0, 427.0, 240.0));
+        assert_eq!(selected[3], SlotRect::new(853.0, 480.0, 427.0, 240.0));
+
+        let variant = rects("preset_selected_b_4_(2)");
+        assert_eq!(variant[0], SlotRect::new(0.0, 0.0, 1280.0, 400.0), "вариант 5/9");
+        assert_eq!(variant[1].height, 320.0);
+
+        assert_eq!(rects("preset_selected_rb_25")[0], SlotRect::new(0.0, 0.0, 914.0, 514.0));
+        assert_eq!(
+            rects("preset_double_b_10")[..2],
+            [SlotRect::new(0.0, 0.0, 640.0, 360.0), SlotRect::new(640.0, 0.0, 640.0, 360.0),]
+        );
+        assert_eq!(rects("preset_square_24")[0], SlotRect::new(213.0, 120.0, 427.0, 240.0));
+        assert_eq!(rects("preset_selected_rb_37")[0], SlotRect::new(0.0, 0.0, 640.0, 360.0));
+        assert_eq!(rects("preset_selected_rb_77")[0], SlotRect::new(0.0, 0.0, 256.0, 180.0));
+    }
+
+    #[test]
+    fn overlap_schemes_are_full_canvas_with_pip_windows() {
+        let slots = geometry_for_manual("preset_selected_b_overlap_4", 1280.0, 720.0).unwrap();
+        assert_eq!(slots.len(), 4);
+        assert_eq!(slots[0].rect, SlotRect::new(0.0, 0.0, 1280.0, 720.0));
+        assert_eq!(slots[0].z_order, 0);
+        assert_eq!(slots[1].rect, SlotRect::new(274.0, 572.0, 242.0, 130.0));
+        assert_eq!(slots[1].z_order, 1);
+
+        let pip = geometry_for_manual("preset_selected_rb_overlap_2", 1280.0, 720.0).unwrap();
+        assert_eq!(pip.len(), 2);
+        assert_eq!(pip[1].rect, SlotRect::new(880.0, 495.0, 320.0, 180.0));
+        assert_eq!(pip[1].z_order, 1);
+
+        // double-overlap: две крупные половины и окна поверх.
+        let double = geometry_for_manual("preset_double_b_overlap_5", 1280.0, 720.0).unwrap();
+        assert_eq!(double.len(), 5);
+        assert_eq!(double[0].rect, SlotRect::new(0.0, 0.0, 640.0, 720.0));
+        assert_eq!(double[1].rect, SlotRect::new(640.0, 0.0, 640.0, 720.0));
+        assert!(double[2..].iter().all(|slot| slot.z_order == 1));
+    }
+
     #[test]
     fn geometry_is_inside_canvas_even_for_bad_dimensions() {
-        let preset = parse("preset_equal_9");
-        for (width, height) in [(f64::NAN, f64::NAN), (0.0, -5.0), (f64::INFINITY, 720.0)] {
-            let slots = geometry(&preset, width, height, f64::NAN, false);
-            assert_eq!(slots.len(), 9);
-            for slot in &slots {
-                inside(slot, 1280.0, 720.0);
+        for id in ["preset_equal_9", "preset_selected_b_4_(2)", "preset_selected_rb_overlap_2"] {
+            let slots = geometry_for_manual(id, f64::NAN, 0.0).unwrap();
+            for slot in slots {
+                inside(&slot.rect, 1280.0, 720.0);
             }
         }
     }
 
     #[test]
-    fn schemes_and_variants_have_distinct_geometry() {
-        let equal = geometry(&parse("preset_equal_4"), 1280.0, 720.0, 1.0, false);
-        let selected = geometry(&parse("preset_selected_b_4"), 1280.0, 720.0, 1.0, false);
-        let variant = geometry(&parse("preset_selected_b_4_(2)"), 1280.0, 720.0, 1.0, false);
-        assert_ne!(equal, selected, "equal_4 и selected_b_4 должны различаться");
-        assert_ne!(selected, variant, "вариант _(2) обязан менять геометрию");
-        assert_ne!(equal, variant);
-        // Первый слот selected — крупная зона, остальные — полоса мелких.
-        assert!(selected[0].width * selected[0].height > selected[1].width * selected[1].height);
-        // Пропорция 75/25 у варианта 1 меняется на 66/34 у варианта _(2).
-        assert!(selected[0].height != variant[0].height);
-
-        let double = geometry(&parse("preset_double_b_4"), 1280.0, 720.0, 1.0, false);
-        assert_eq!(double.len(), 4);
-        assert!(double[0].width * double[0].height > double[2].width * double[2].height);
-    }
-
-    #[test]
-    fn overlap_presets_overlay_small_windows() {
-        let preset = parse("preset_selected_rb_overlap_4");
-        let slots = geometry(&preset, 1280.0, 720.0, 1.0, false);
-        assert_eq!(slots.len(), 4);
-        let big = slots[0];
-        assert_eq!((big.x, big.y, big.width, big.height), (0.0, 0.0, 1280.0, 720.0));
-        // Маленькие окна поверх большой зоны и внутри канваса.
-        for slot in &slots[1..] {
-            inside(slot, 1280.0, 720.0);
-            assert!(slot.width < big.width && slot.height < big.height);
-        }
-        // `pip = true` форсирует наложение у обычного пресета.
-        let forced = geometry(&parse("preset_equal_4"), 1280.0, 720.0, 1.0, true);
-        assert_eq!(forced.len(), 4);
-        assert_eq!(forced[0].width, 1280.0);
-        assert!(forced[1].width < 1280.0);
-    }
-
-    #[test]
-    fn builtin_grids_have_expected_geometry() {
+    fn builtin_grids_match_reference_contract() {
         let grids = builtin_grids();
-        let ids: HashSet<&str> = grids.iter().map(|grid| grid.id.as_str()).collect();
-        assert_eq!(ids.len(), grids.len(), "id grid-геометрий уникальны");
-        for (id, _, _, _, count) in CUSTOM_GRIDS {
-            let grid = grids.iter().find(|grid| grid.id == id).unwrap_or_else(|| panic!("{id} отсутствует"));
-            assert_eq!(grid.payload.slots.len(), count, "{id}: число окон");
-            assert_eq!(grid.payload.width, GRID_SCALE);
-            assert_eq!(grid.payload.height, GRID_SCALE);
-            for slot in &grid.payload.slots {
-                assert!(slot.x + slot.width <= GRID_SCALE, "{id}: слот выходит за канвас");
-                assert!(slot.y + slot.height <= GRID_SCALE, "{id}: слот выходит за канвас");
-            }
+        assert_eq!(grids.len(), 6);
+        let expected = [
+            ("6fb877aa-92de-4b83-9f83-6c9386e06443", "Custom scheme 1", 8, 8, 2),
+            ("277103cc-57e1-4501-a2e6-7cd369b64e59", "Custom scheme 2", 10, 8, 2),
+            ("4ff117e7-cb6b-4396-9652-941b73535d20", "Custom scheme 3", 8, 6, 1),
+            ("eda71ad0-0dfe-46d1-8910-4c4b495afce1", "Custom scheme 4", 10, 8, 1),
+            ("45070592-a240-4e0a-9d5d-60dc365d7ce4", "Custom scheme 5", 10, 8, 1),
+            ("9bf78747-e1b2-42c9-b10e-1ece67a269e7", "Custom scheme 6", 4, 4, 1),
+        ];
+        for (grid, (id, name, width, height, slots)) in grids.iter().zip(expected) {
+            assert_eq!(grid.id, id);
+            assert_eq!(grid.display_name, name);
+            assert_eq!(grid.payload.width, width);
+            assert_eq!(grid.payload.height, height);
+            assert_eq!(grid.payload.centered_row, None);
+            assert_eq!(grid.payload.slots.len(), slots);
+            assert_eq!(grid.defaults, GridDefaults { deletable: true, editable: true, disableable: false });
         }
-        assert!(ids.contains("preset_default_13"));
-        assert!(ids.contains("preset_default_4"));
+        let unique: HashSet<&str> = grids.iter().map(|grid| grid.id.as_str()).collect();
+        assert_eq!(unique.len(), grids.len());
     }
 }

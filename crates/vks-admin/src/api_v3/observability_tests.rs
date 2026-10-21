@@ -515,3 +515,24 @@ async fn stats_cpu_network_have_no_sleep_and_memory_has_timestamp() {
     assert!(disk["count"].as_u64().unwrap_or(0) >= 1, "{disk}");
     assert!(disk["spaces"][0]["total"].as_u64().unwrap() > 0, "{disk}");
 }
+
+#[tokio::test]
+async fn stats_disk_prefers_real_filesystems_and_root_first() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+
+    let disk = json_body(send(&app, auth_request("GET", "/api/v3/system/stats/disk", &token)).await).await;
+    let spaces = disk["spaces"].as_array().unwrap_or_else(|| panic!("spaces missing: {disk}"));
+    assert!(!spaces.is_empty(), "{disk}");
+    let names: Vec<&str> = spaces.iter().filter_map(|space| space["name"].as_str()).collect();
+
+    // UI берёт первый элемент как выбранный диск: это должен быть корень,
+    // а не tmpfs (`/run`, `/dev/shm`, `/tmp`) — иначе виджет показывал «/run 11 Gb».
+    assert_eq!(names[0], "/", "root filesystem must be first: {names:?}");
+    for pseudo in ["/run", "/dev/shm", "/tmp"] {
+        assert!(!names.contains(&pseudo), "pseudo filesystem {pseudo} leaked into disk list: {names:?}");
+    }
+    assert!(spaces[0]["total"].as_u64().unwrap_or(0) > 100, "root must be a real disk: {disk}");
+    assert!(spaces[0]["used"].as_u64().unwrap_or(0) <= spaces[0]["total"].as_u64().unwrap_or(0), "{disk}");
+}

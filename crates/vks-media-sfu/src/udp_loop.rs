@@ -48,14 +48,26 @@ pub(crate) enum IncomingPacket {
 
 /// Magic cookie STUN (RFC 5389 §6).
 const STUN_MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xa4, 0x42];
+/// Минимальный размер фиксированного заголовка RTP (RFC 3550 §5.1);
+/// короче — это уже не RTP, а обрезанная/чужая датаграмма.
+const RTP_FIXED_HEADER_LEN: usize = 12;
+/// Минимальный корректный RTCP-пакет: заголовок (4) + SSRC первого отчёта (4)
+/// (RFC 3550 §6.4.1); короче — не RTCP.
+const RTCP_MIN_LEN: usize = 8;
 
 /// Определяет протокол входящей датагрампы по первым байтам (RFC 7983 §7).
 ///
-/// Функция не паникует на коротких пакетах: датаграммы короче 2 байт
-/// считаются RTP-подобными и отбрасываются дальше по пайплайну.
+/// Функция не паникует на коротких пакетах и не выдаёт `Rtp`/`Rtcp` за
+/// датаграммы, которые физически не могут быть этим протоколом: `Rtp`
+/// требует полного фиксированного заголовка (12 байт), `Rtcp` — минимум
+/// заголовка с SSRC (8 байт). Всё недоказанное — `Unknown` (отбросить).
+///
+/// Контракт: `IncomingPacket::Rtp` ⇒ `len >= 12 && version == 2 &&`
+/// `второй октет ∉ 192..=223`; `IncomingPacket::Rtcp` ⇒ `len >= 8 &&`
+/// `version == 2 && второй октет ∈ 192..=223`.
 pub(crate) fn classify_incoming(data: &[u8]) -> IncomingPacket {
     if data.len() < 2 {
-        return IncomingPacket::Rtp;
+        return IncomingPacket::Unknown;
     }
 
     // 1. STUN: RFC 7983 отводит под STUN первый байт 0..=3, а magic cookie
@@ -76,9 +88,9 @@ pub(crate) fn classify_incoming(data: &[u8]) -> IncomingPacket {
         // бит (0..=127), а старший бит второго октета — M (marker).
         // Поэтому RTCP отличается по полному второму октету.
         if (192..=223).contains(&data[1]) {
-            return IncomingPacket::Rtcp;
+            return if data.len() >= RTCP_MIN_LEN { IncomingPacket::Rtcp } else { IncomingPacket::Unknown };
         }
-        return IncomingPacket::Rtp;
+        return if data.len() >= RTP_FIXED_HEADER_LEN { IncomingPacket::Rtp } else { IncomingPacket::Unknown };
     }
 
     IncomingPacket::Unknown
@@ -179,7 +191,9 @@ impl UdpMediaLoop {
                                         //    router'у как RtpPacket (иначе, например, PLI уйдёт
                                         //    подписчикам как RTP с чужим SSRC). Учёт — отдельный.
                                         stats.packets_rtcp.fetch_add(1, Ordering::Relaxed);
-                                        trace!(%src, size, "incoming RTCP packet dropped (not routed as media)");
+                                        // pt — тип RTCP-пакета (200 SR, 201 RR, 205 RTPFB/NACK,
+                                        // 206 PSFB/PLI/FIR…), fmt — подтип (FMT) для диагностики.
+                                        trace!(%src, size, pt = buf[1], fmt = buf[0] & 0x1f, "incoming RTCP packet dropped (not routed as media)");
                                     }
                                     IncomingPacket::Unknown => {
                                         // 4. Неизвестный протокол / мусор.
@@ -356,6 +370,28 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::time::{sleep, Duration};
 
+    /// Собирает валидный RTP-пакет: фиксированный заголовок (12 байт) + payload.
+    fn rtp_packet(ssrc: u32, sequence: u16, payload_type: u8, marker: bool, payload: &[u8]) -> Vec<u8> {
+        let mut packet = Vec::with_capacity(RTP_FIXED_HEADER_LEN + payload.len());
+        packet.push(0x80); // V=2, P=0, X=0, CC=0
+        packet.push(if marker { payload_type | 0x80 } else { payload_type });
+        packet.extend_from_slice(&sequence.to_be_bytes());
+        packet.extend_from_slice(&0u32.to_be_bytes()); // timestamp
+        packet.extend_from_slice(&ssrc.to_be_bytes());
+        packet.extend_from_slice(payload);
+        packet
+    }
+
+    /// Собирает валидный RTCP-пакет (заголовок 4 байта + SSRC, минимум 8 байт).
+    fn rtcp_packet(payload_type: u8, fmt: u8, ssrc: u32) -> Vec<u8> {
+        let mut packet = Vec::with_capacity(RTCP_MIN_LEN);
+        packet.push(0x80 | (fmt & 0x1f));
+        packet.push(payload_type);
+        packet.extend_from_slice(&1u16.to_be_bytes()); // length = 1 → 8 байт
+        packet.extend_from_slice(&ssrc.to_be_bytes());
+        packet
+    }
+
     #[tokio::test]
     async fn udp_media_loop_send_and_receive() {
         let server = UdpMediaLoop::bind("127.0.0.1:0").await.expect("bind server");
@@ -366,7 +402,7 @@ mod tests {
 
         // Минимальный валидный RTP-заголовок: медиа-луп классифицирует датаграммы
         // по RFC 7983 и не пропускает в router() пакеты других протоколов.
-        let test_payload = vec![0x80, 0x60, 0x00, 0x01];
+        let test_payload = rtp_packet(0xdead_beef, 1, 96, false, &[10, 20, 30, 40]);
 
         let received = Arc::new(AtomicBool::new(false));
         let received_clone = received.clone();
@@ -424,7 +460,7 @@ mod tests {
 
     #[test]
     fn test_classify_incoming_protocols() {
-        // STUN Binding Request (0x0001).
+        // ---------- STUN: ловим все типы сообщений, не только Binding Request ----------
         let mut stun_request = vec![
             0x00, 0x01, // Binding Request
             0x00, 0x00, // Length = 0
@@ -433,46 +469,152 @@ mod tests {
         stun_request.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]); // Trans ID
         assert_eq!(classify_incoming(&stun_request), IncomingPacket::Stun);
 
-        // Любое STUN-сообщение, не только Binding Request: Binding Success (0x0101).
         let mut stun_success = stun_request.clone();
-        stun_success[0] = 0x01;
+        stun_success[0] = 0x01; // Binding Success 0x0101
         assert_eq!(classify_incoming(&stun_success), IncomingPacket::Stun);
 
-        // DTLS Handshake (content type 22 = 0x16).
-        let dtls_handshake = [0x16, 0xfe, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x00];
-        assert_eq!(classify_incoming(&dtls_handshake), IncomingPacket::Dtls);
+        let mut stun_indication = stun_request.clone();
+        stun_indication[1] = 0x11; // Send Indication 0x0011
+        assert_eq!(classify_incoming(&stun_indication), IncomingPacket::Stun);
 
-        // RTCP PLI (PT 206 / PSFB).
-        let pli = build_rtcp_pli(0x0000_0001, 0x1234_5678);
-        assert_eq!(classify_incoming(&pli), IncomingPacket::Rtcp);
-
-        // RTCP Sender Report (PT 200).
-        let sr = [
-            0x80, 200, 0x00, 0x06, // V=2, PT=200, length=6
-            0x00, 0x00, 0x00, 0x01, // sender SSRC
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // NTP timestamp
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // RTP timestamp / counts
-        ];
-        assert_eq!(classify_incoming(&sr), IncomingPacket::Rtcp);
-
-        // RTP (PT 96, маркерный бит снят).
-        let rtp = [0x80, 96, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x11, 0x22, 0x33, 0x44];
-        assert_eq!(classify_incoming(&rtp), IncomingPacket::Rtp);
-
-        // RTP с установленным marker-битом (PT остаётся 7-битным).
-        let rtp_marker = [0x80, 0xE0, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x11, 0x22, 0x33, 0x44];
-        assert_eq!(classify_incoming(&rtp_marker), IncomingPacket::Rtp);
-
-        // Неизвестный протокол: RTP-версия 1 (старшие биты 0b01).
-        assert_eq!(classify_incoming(&[0x40, 0x00, 0x00, 0x00]), IncomingPacket::Unknown);
-        // ZRTP (RFC 7983: первый байт 16..=19).
-        assert_eq!(classify_incoming(&[0x10, 0x00, 0x00, 0x00]), IncomingPacket::Unknown);
         // STUN-подобный первый байт без magic cookie — не STUN.
         assert_eq!(classify_incoming(&[0x00, 0x01, 0x00, 0x00, 0xde, 0xad, 0xbe, 0xef]), IncomingPacket::Unknown);
 
-        // Короткие датаграммы не паникуют.
-        assert_eq!(classify_incoming(&[]), IncomingPacket::Rtp);
-        assert_eq!(classify_incoming(&[0x80]), IncomingPacket::Rtp);
+        // ---------- DTLS (RFC 7983: первый байт 20..=63) ----------
+        for content_type in [20u8, 21, 22, 23, 63] {
+            let mut dtls = vec![content_type, 0xfe, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x00];
+            assert_eq!(classify_incoming(&dtls), IncomingPacket::Dtls, "DTLS content_type={content_type}");
+            dtls[0] = 19; // ZRTP — уже не DTLS
+            assert_eq!(classify_incoming(&dtls), IncomingPacket::Unknown);
+        }
+        assert_eq!(classify_incoming(&[64, 0x00, 0x00, 0x00]), IncomingPacket::Unknown); // TURN channel
+
+        // ---------- RTCP: PT 192..=223, padding, compound, границы ----------
+        for pt in 192u8..=223 {
+            assert_eq!(classify_incoming(&rtcp_packet(pt, 0, 0x0000_0001)), IncomingPacket::Rtcp, "RTCP PT={pt}");
+        }
+        // P-бит (padding, 0x20) не мешает классификации.
+        let mut padded_sr = rtcp_packet(200, 0, 1);
+        padded_sr[0] |= 0x20;
+        padded_sr.extend_from_slice(&[0, 0, 0, 2]);
+        assert_eq!(classify_incoming(&padded_sr), IncomingPacket::Rtcp);
+        // Compound RTCP: SR + SDES — классифицируется по первому пакету.
+        let mut compound = rtcp_packet(200, 5, 0xaaaa_bbbb);
+        compound.extend_from_slice(&rtcp_packet(202, 1, 0xaaaa_bbbb));
+        assert_eq!(classify_incoming(&compound), IncomingPacket::Rtcp);
+        // PLI из продакшн-билдера.
+        assert_eq!(classify_incoming(&build_rtcp_pli(1, 2)), IncomingPacket::Rtcp);
+        // Граница второго октета: 191 — RTP, 192/223 — RTCP, 224 — RTP (marker).
+        assert_eq!(classify_incoming(&rtp_packet(1, 1, 63, true, &[])), IncomingPacket::Rtp); // 0xBF
+        assert_eq!(classify_incoming(&rtp_packet(1, 1, 64, true, &[])), IncomingPacket::Rtcp); // 0xC0
+        assert_eq!(classify_incoming(&rtp_packet(1, 1, 95, true, &[])), IncomingPacket::Rtcp); // 0xDF
+        assert_eq!(classify_incoming(&rtp_packet(1, 1, 96, true, &[])), IncomingPacket::Rtp); // 0xE0
+
+        // Неполный RTCP-заголовок — не RTCP; минимальный RTCP (RR, 8 байт) — RTCP.
+        assert_eq!(classify_incoming(&[0x81, 206]), IncomingPacket::Unknown);
+        assert_eq!(classify_incoming(&[0x81, 206, 0x00, 0x02]), IncomingPacket::Unknown);
+        assert_eq!(classify_incoming(&rtcp_packet(201, 0, 7)), IncomingPacket::Rtcp);
+
+        // ---------- RTP: version=2, 7-битный PT, marker, padding, длина ----------
+        assert_eq!(classify_incoming(&rtp_packet(0x1122_3344, 1, 96, false, &[1, 2, 3])), IncomingPacket::Rtp);
+        assert_eq!(classify_incoming(&rtp_packet(0x1122_3344, 1, 96, true, &[1, 2, 3])), IncomingPacket::Rtp);
+        assert_eq!(classify_incoming(&rtp_packet(1, 1, 0, true, &[])), IncomingPacket::Rtp); // 0x80
+        assert_eq!(classify_incoming(&rtp_packet(1, 1, 127, true, &[])), IncomingPacket::Rtp); // 0xFF
+        let mut padded_rtp = rtp_packet(1, 1, 96, false, &[0, 0, 0, 4]);
+        padded_rtp[0] |= 0x20; // P=1
+        assert_eq!(classify_incoming(&padded_rtp), IncomingPacket::Rtp);
+        // RFC 5761 §4: PT 64..95 в rtcp-mux запрещены; при marker=1 второй октет
+        // попадает в 192..=223, и такая нестандартная RTP-датаграмма трактуется как RTCP.
+        assert_eq!(classify_incoming(&rtp_packet(1, 1, 72, true, &[])), IncomingPacket::Rtcp);
+        // Ровно 12 байт — минимальный RTP; 11 байт — уже не RTP.
+        assert_eq!(classify_incoming(&rtp_packet(1, 1, 96, false, &[])), IncomingPacket::Rtp);
+        assert_eq!(classify_incoming(&rtp_packet(1, 1, 96, false, &[0])[..11]), IncomingPacket::Unknown);
+
+        // ---------- Unknown: чужие версии и протоколы ----------
+        assert_eq!(classify_incoming(&[0x40, 0x00, 0x00, 0x00]), IncomingPacket::Unknown); // version 1
+        assert_eq!(classify_incoming(&[0x10, 0x00, 0x00, 0x00]), IncomingPacket::Unknown); // ZRTP 16..19
+        assert_eq!(classify_incoming(&[0x50, 0x00, 0x00, 0x00]), IncomingPacket::Unknown); // 80..127
+        assert_eq!(classify_incoming(&[0x00, 0x00, 0x00, 0x00]), IncomingPacket::Unknown); // version 0 без cookie
+
+        // ---------- Короткие датаграммы: без паники и не «медиа» ----------
+        assert_eq!(classify_incoming(&[]), IncomingPacket::Unknown);
+        assert_eq!(classify_incoming(&[0x80]), IncomingPacket::Unknown);
+        assert_eq!(classify_incoming(&[0x81, 206]), IncomingPacket::Unknown);
+    }
+
+    /// Исчерпывающая проверка контракта классификатора по первым двум байтам +
+    /// детерминированный fuzz (без внешних зависимостей): классификатор не
+    /// паникует и не может выдать RTP/RTCP для заведомо невалидных датаграмм.
+    #[test]
+    fn test_classify_incoming_invariants_exhaustive_and_fuzz() {
+        let mut buf = [0u8; RTP_FIXED_HEADER_LEN];
+        for b0 in 0u8..=255 {
+            for b1 in 0u8..=255 {
+                buf[0] = b0;
+                buf[1] = b1;
+                match classify_incoming(&buf) {
+                    IncomingPacket::Rtcp => {
+                        assert!(b0 >> 6 == 2 && (192..=223).contains(&b1));
+                        // Инвариант demux↔движок: RTCP никогда не даёт RTP SSRC.
+                        assert_eq!(parse_rtp_ssrc(&buf), None);
+                    }
+                    IncomingPacket::Rtp => {
+                        assert!(b0 >> 6 == 2 && !(192..=223).contains(&b1));
+                        // Инвариант demux↔движок: любой Rtp после классификации
+                        // всегда даёт SSRC (движку не нужен fallback без SSRC).
+                        assert!(parse_rtp_ssrc(&buf).is_some());
+                    }
+                    IncomingPacket::Dtls => assert!((20..=63).contains(&b0)),
+                    // В buf cookie STUN нулевая, поэтому Stun здесь невозможен;
+                    // отдельный кейс ниже.
+                    IncomingPacket::Stun => panic!("STUN without magic cookie must not be classified as STUN"),
+                    IncomingPacket::Unknown => {}
+                }
+                // Классификация зависит от префикса, а не от «хвоста» датаграммы.
+                let mut longer = buf.to_vec();
+                longer.extend_from_slice(&[0xAA; 64]);
+                assert_eq!(classify_incoming(&longer), classify_incoming(&buf));
+            }
+        }
+        // STUN с cookie — единственный способ получить Stun.
+        for b0 in 0u8..=3 {
+            let mut stun = vec![b0, 0x01, 0x00, 0x00, 0x21, 0x12, 0xa4, 0x42];
+            stun.extend_from_slice(&[0u8; 12]);
+            assert_eq!(classify_incoming(&stun), IncomingPacket::Stun);
+            stun[7] ^= 0xFF; // ломаем cookie
+            assert_ne!(classify_incoming(&stun), IncomingPacket::Stun);
+        }
+
+        // Детерминированный LCG-фузз: произвольные длины 0..=64.
+        let mut state = 0x1234_5678_9abc_def0u64;
+        for _ in 0..20_000 {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            let len = (state >> 33) as usize % 65;
+            let mut packet = vec![0u8; len];
+            for byte in &mut packet {
+                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                *byte = (state >> 56) as u8;
+            }
+            match classify_incoming(&packet) {
+                IncomingPacket::Rtp => {
+                    assert!(
+                        packet.len() >= RTP_FIXED_HEADER_LEN
+                            && packet[0] >> 6 == 2
+                            && !(192..=223).contains(&packet[1])
+                    );
+                    assert!(parse_rtp_ssrc(&packet).is_some(), "Rtp без SSRC сломал бы маршрутизацию");
+                }
+                IncomingPacket::Rtcp => {
+                    assert!(packet.len() >= RTCP_MIN_LEN && packet[0] >> 6 == 2 && (192..=223).contains(&packet[1]));
+                    assert_eq!(parse_rtp_ssrc(&packet), None, "RTCP не должен давать RTP SSRC");
+                }
+                IncomingPacket::Dtls => assert!((20..=63).contains(&packet[0])),
+                IncomingPacket::Stun => {
+                    assert!(packet.len() >= 8 && packet[0] <= 3 && packet[4..8] == STUN_MAGIC_COOKIE)
+                }
+                IncomingPacket::Unknown => {}
+            }
+        }
     }
 
     #[test]
@@ -509,7 +651,7 @@ mod tests {
         let sub_received = Arc::new(AtomicBool::new(false));
         let sub_received_clone = sub_received.clone();
         // Валидный RTP-заголовок (V=2, PT=96) — иначе классификатор отбросит пакет.
-        let routed_payload = vec![0x80, 0x60, 0x00, 0x01];
+        let routed_payload = rtp_packet(0x0000_1234, 7, 96, false, &[99, 88, 77]);
         let expected_payload = routed_payload.clone();
 
         let _sub_task = subscriber.start_receive_loop(move |_src, packet| {
@@ -571,6 +713,104 @@ mod tests {
 
         server.shutdown();
         publisher.shutdown();
+    }
+
+    /// End-to-end через реальные UDP-сокеты и настоящий `SfuEngine`: несколько
+    /// RTP SSRC + вперемешку RTCP всех типов (SR/RR/PLI/NACK/BYE/compound) —
+    /// подписчик получает только RTP, в правильном порядке, без дублей/потерь.
+    #[tokio::test]
+    async fn test_udp_media_loop_multiple_ssrc_and_rtcp_do_not_mix() {
+        use vks_core::ports::media_engine::{MediaEngine, RoomCaps, RoomMediaCfg, SubscribeRequest};
+        use vks_core::track::{Track, TrackKind};
+        use vks_core::{ParticipantId, RoomId, RoomMode};
+
+        let engine = Arc::new(crate::engine::SfuEngine::new());
+        let room = RoomId::new();
+        engine
+            .create_room(RoomMediaCfg { room_id: room, mode: RoomMode::Sfu, caps: RoomCaps::default() })
+            .await
+            .unwrap();
+
+        let publisher_id = ParticipantId::new();
+        let subscriber_id = ParticipantId::new();
+        let video = Track::new(publisher_id, TrackKind::Video);
+        let audio = Track::new(publisher_id, TrackKind::Audio);
+        let (video_track, audio_track) = (video.id, audio.id);
+        engine.add_publisher(room, publisher_id, vec![video, audio]).await.unwrap();
+        engine
+            .add_subscriber(room, subscriber_id, SubscribeRequest { track_ids: Vec::new(), audio_only: false })
+            .await
+            .unwrap();
+
+        const VIDEO_SSRC: u32 = 0x1111_2222;
+        const AUDIO_SSRC: u32 = 0x3333_4444;
+        engine.register_ssrc(room, publisher_id, video_track, VIDEO_SSRC);
+        engine.register_ssrc(room, publisher_id, audio_track, AUDIO_SSRC);
+
+        let server = UdpMediaLoop::bind("127.0.0.1:0").await.unwrap();
+        let publisher = UdpMediaLoop::bind("127.0.0.1:0").await.unwrap();
+        let subscriber = UdpMediaLoop::bind("127.0.0.1:0").await.unwrap();
+        engine.register_endpoint(room, subscriber_id, subscriber.local_addr());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let _sub_task = subscriber.start_receive_loop(move |_src, packet| {
+            let _ = tx.send(packet.payload.to_vec());
+        });
+
+        let engine_clone = engine.clone();
+        let server_addr = server.local_addr();
+        let _srv_task =
+            server.start_routing_loop(move |src, packet| engine_clone.route_udp_packet(src, packet.payload));
+
+        let video_frame_1 = rtp_packet(VIDEO_SSRC, 1, 96, false, &[0x10, 0x00, 0x00, 0x01]);
+        let audio_frame = rtp_packet(AUDIO_SSRC, 1, 111, false, &[0xf8, 0xff, 0xfe]);
+        let video_frame_2 = rtp_packet(VIDEO_SSRC, 2, 96, true, &[0x20, 0x00, 0x00, 0x02]);
+
+        // Порядок как в живом rtcp-mux потоке: RTP ↔ RTCP.
+        let mut compound = rtcp_packet(200, 0, VIDEO_SSRC);
+        compound.extend_from_slice(&rtcp_packet(202, 1, VIDEO_SSRC)); // compound: SR + SDES
+        let datagrams: Vec<Vec<u8>> = vec![
+            video_frame_1.clone(),
+            rtcp_packet(200, 0, VIDEO_SSRC),        // SR
+            rtcp_packet(201, 0, AUDIO_SSRC),        // RR
+            build_rtcp_pli(0, VIDEO_SSRC).to_vec(), // PSFB / PLI (206)
+            rtcp_packet(205, 1, VIDEO_SSRC),        // RTPFB / NACK
+            rtcp_packet(203, 0, AUDIO_SSRC),        // BYE
+            compound,                               // compound RTCP (SR + SDES)
+            audio_frame.clone(),
+            video_frame_2.clone(),
+        ];
+
+        let rtcp_datagrams = 6; // #2..#7 в списке выше
+        for datagram in &datagrams {
+            publisher.send_raw(server_addr, datagram).await.unwrap();
+        }
+
+        // Подписчик получает ровно 3 RTP-пакета в порядке отправки.
+        for want in [&video_frame_1, &audio_frame, &video_frame_2] {
+            let got = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .expect("subscriber must receive RTP packet")
+                .expect("subscriber channel closed");
+            assert_eq!(&got, want, "subscriber received a non-RTP or reordered datagram");
+        }
+        // …и ни одной RTCP-датаграммы сверх этого.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await.is_err(),
+            "RTCP must never reach subscribers as media"
+        );
+
+        let stats = server.stats();
+        assert_eq!(stats.packets_received.load(Ordering::Relaxed), datagrams.len() as u64);
+        assert_eq!(stats.packets_rtcp.load(Ordering::Relaxed), rtcp_datagrams);
+        assert_eq!(stats.packets_dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.packets_sent.load(Ordering::Relaxed), 3);
+        // Symmetric RTP: эндпоинт паблишера выучен по первому RTP.
+        assert_eq!(engine.get_endpoint(room, publisher_id), Some(publisher.local_addr()));
+
+        server.shutdown();
+        publisher.shutdown();
+        subscriber.shutdown();
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Persistable PNM conference resources. These are real definitions and links,
 //! not canned success responses: creation, attachment, edits and removal share one store.
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -669,7 +669,22 @@ pub fn inherit_and_ensure_default_layout(resources: &mut ResourceState, room_id:
     }
     let record = normalize_resource("video_layouts", &json!({"payload":{"type":"default"}}), creator);
     let id = record["id"].as_str().unwrap_or_default().to_string();
-    resources.layouts.insert(id.clone(), record);
+    // Переиспользуем уже существующую каноническую «Общую» раскладку вместо
+    // создания новой на каждую комнату/сессию. Без этого БД плодит по
+    // default-раскладке на старт (в живом стенде было 147 layouts, после
+    // дедупа 29). Сравниваем только payload: id/created_at/display_name
+    // у копий различаются, а геометрия и режим — нет.
+    let canonical = record["payload"].clone();
+    let reusable = resources.layouts.values().find_map(|layout| {
+        (layout["payload"] == canonical).then(|| layout["id"].as_str().map(ToString::to_string)).flatten()
+    });
+    let id = match reusable {
+        Some(existing) => existing,
+        None => {
+            resources.layouts.insert(id.clone(), record);
+            id
+        }
+    };
     resources.links.entry(key).or_default().push(id);
 }
 
@@ -909,10 +924,7 @@ pub async fn list_linked(
             }
         }
     }
-    let mut items: Vec<Value> = ids
-        .iter()
-        .filter_map(|id| collection(&resources, kind).get(id).cloned())
-        .collect();
+    let mut items: Vec<Value> = ids.iter().filter_map(|id| collection(&resources, kind).get(id).cloned()).collect();
     if kind == "video_layouts" {
         for record in &mut items {
             with_layout_abonents(&state, record, &room.id);
@@ -974,7 +986,35 @@ pub async fn edit_linked(
         return response;
     }
     let previous = resources.clone();
-    let Some(record) = collection_mut(&mut resources, kind).get_mut(&resource_id) else {
+    // Copy-on-write: одна каноническая «Общая» раскладка теперь может быть
+    // привязана к нескольким комнатам/сессиям. Правка из одной комнаты не
+    // должна менять раскладку всех остальных, поэтому при нескольких ссылках
+    // клонируем запись и переключаем ссылку текущего scope на клон.
+    let mut target_id = resource_id.clone();
+    if kind == "video_layouts" {
+        let scope_key = scoped_key(uri.path(), &room.id.to_string(), kind);
+        let refs = resources.links.values().filter(|ids| ids.iter().any(|id| id == &resource_id)).count();
+        if refs > 1 {
+            let Some(mut clone) = resources.layouts.get(&resource_id).cloned() else {
+                return error_json(404, "Resource not found");
+            };
+            let new_id = Uuid::new_v4().to_string();
+            clone["id"] = json!(new_id);
+            clone["created_at"] = json!(crate::state::now_unix_ms() / 1000);
+            resources.layouts.insert(new_id.clone(), clone);
+            if let Some(ids) = resources.links.get_mut(&scope_key) {
+                for id in ids.iter_mut() {
+                    if *id == resource_id {
+                        *id = new_id.clone();
+                    }
+                }
+            } else {
+                resources.links.insert(scope_key, vec![new_id.clone()]);
+            }
+            target_id = new_id;
+        }
+    }
+    let Some(record) = collection_mut(&mut resources, kind).get_mut(&target_id) else {
         return error_json(404, "Resource not found");
     };
     if let Err(message) = update_resource(record, &body) {
@@ -1121,6 +1161,13 @@ pub async fn attach(
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
     }
+    // «Применить» в UI — это POST attach: выбранная раскладка должна сразу
+    // доехать до MCU. Раньше движок получал её только через PATCH/abonent-
+    // мутации, поэтому переключение раскладки не меняло композит.
+    if kind == "video_layouts" {
+        drop(resources);
+        super::sessions::push_layout_to_engine(&state, room.id).await;
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1145,6 +1192,12 @@ pub async fn detach(
         .retain(|value| value != &resource_id);
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
+    }
+    // Снятие раскладки возвращает комнату к «Общей» — движок тоже должен
+    // увидеть новый активный layout, иначе на экране остаётся отвязанная сетка.
+    if kind(uri.path()) == "video_layouts" {
+        drop(resources);
+        super::sessions::push_layout_to_engine(&state, room.id).await;
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1366,42 +1419,14 @@ pub async fn remove_schedule(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Полный каталог grid-геометрий: вендорные пресеты (`vks_layout::preset::catalog`)
-/// и встроенные custom-схемы. Дубли (`preset_default_13`) схлопываются по id,
-/// каталожная запись приоритетнее легаси-записи из `builtin_grids`.
+/// Каталог `/video_layout_grids`: ровно 6 встроенных custom-схем эталона.
+/// Пресеты `preset_*` — статическая карта vendor-UI и в этот каталог не входят.
 fn all_grids() -> Vec<Value> {
-    use vks_layout::preset::{self, PresetId};
-
-    let mut grids = Vec::new();
-    let mut seen = HashSet::new();
-    let scale = f64::from(preset::GRID_SCALE);
-    for info in preset::catalog() {
-        let Some(parsed) = PresetId::parse(&info.id) else { continue };
-        if !seen.insert(info.id.clone()) {
-            continue;
-        }
-        let slots = preset::slots_to_grid(&preset::geometry(&parsed, scale, scale, 1.0, false));
-        grids.push(json!({
-            "id": info.id,
-            "display_name": info.display_name,
-            "payload": {
-                "width": preset::GRID_SCALE,
-                "height": preset::GRID_SCALE,
-                "centered_row": false,
-                "slots": slots,
-            },
-            "defaults": {"deletable": false, "editable": false, "disableable": false},
-        }));
-    }
-    for grid in preset::builtin_grids() {
-        if !seen.insert(grid.id.clone()) {
-            continue;
-        }
-        if let Ok(value) = serde_json::to_value(&grid) {
-            grids.push(value);
-        }
-    }
-    grids
+    // Эталон TrueConf 2.2.1.66 отдаёт в `/video_layout_grids` ровно 6
+    // встроенных custom-схем; `preset_*` — статическая карта UI, в этот
+    // каталог не входят. Держим только builtin, иначе UI рисует 179
+    // псевдо-схем и ломает страницу «Раскладки».
+    vks_layout::preset::builtin_grids().into_iter().filter_map(|grid| serde_json::to_value(&grid).ok()).collect()
 }
 
 /// Контракт списков PNM для grid-каталога: поиск по `display_name`/`id`,
@@ -1483,11 +1508,6 @@ pub async fn user(
     }
 }
 
-/// Шаблон превью для UI: `Hee` читает `video_layout_templates[].payload.{mode,preset,slots}`.
-fn preview_template(preset: &str, mode: &str, slots: Value) -> Value {
-    json!({"payload":{"mode":mode,"preset":preset,"slots":slots}})
-}
-
 /// `GET …/video_layouts/templates?video_layout_id=…` — шаблоны превью.
 ///
 /// manual — ровно один шаблон с реальными слотами (как раньше); auto/dynamic —
@@ -1517,17 +1537,29 @@ pub async fn templates(
             .cloned(),
         None => {
             let attached = resources.links.get(&key).cloned().unwrap_or_default();
-            let default = attached
+            // Если конкретная раскладка не запрошена, показываем последнюю
+            // ручную/индивидуальную: именно её оператор только что сохранил.
+            // Fallback — «Общая» (default), затем первая привязанная.
+            let selected = attached
                 .iter()
+                .rev()
                 .find(|id| {
                     resources
                         .layouts
                         .get(*id)
-                        .is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
+                        .is_some_and(|layout| layout["payload"]["type"].as_str() != Some("default"))
+                })
+                .or_else(|| {
+                    attached.iter().find(|id| {
+                        resources
+                            .layouts
+                            .get(*id)
+                            .is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
+                    })
                 })
                 .or_else(|| attached.first())
                 .cloned();
-            default.and_then(|id| resources.layouts.get(&id).cloned())
+            selected.and_then(|id| resources.layouts.get(&id).cloned())
         }
     };
     // Эталон TrueConf 2.2.1.66 отдаёт шаблоны только для manual-раскладок
@@ -1535,13 +1567,10 @@ pub async fn templates(
     // `rangeMap`, а не сервер. Не выдумываем лишние шаблоны.
     let templates = match layout {
         Some(layout) if layout["payload"]["mode"].as_str() == Some("manual") => {
-            let preset = layout["payload"]["preset"].as_str().unwrap_or("preset_equal_1");
-            let size = layout["payload"]["size"].as_u64().and_then(|value| u8::try_from(value).ok());
-            vec![preview_template(
-                &vks_layout::preset::resolve(preset, size),
-                "manual",
-                layout["payload"]["slots"].clone(),
-            )]
+            // UI ждёт полноценную запись раскладки (id/display_name/
+            // creator_id/created_at/payload), а не только preview-payload:
+            // по id он открывает редактор, по created_at сортирует.
+            vec![layout]
         }
         _ => Vec::new(),
     };

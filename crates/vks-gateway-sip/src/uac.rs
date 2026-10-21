@@ -1,5 +1,5 @@
 //! Real outbound SIP dialogs with negotiated RTP codecs and remote teardown.
-use crate::rtp_bridge::negotiate_media;
+use crate::rtp_bridge::negotiate_media_detailed;
 use crate::sip_message::{build_ack, build_bye, build_cancel, build_invite, SipResponse};
 use std::net::SocketAddr;
 use std::sync::{
@@ -42,6 +42,8 @@ pub struct ActiveSipSession {
     pub local_video_payload_type: Option<u8>,
     pub remote_video_ip: Option<String>,
     pub remote_dtmf_payload_type: Option<u8>,
+    /// Raw `200 OK` SDP body, kept verbatim for diagnostics and live-call evidence.
+    pub answer_sdp: String,
     pub socket: Arc<UdpSocket>,
     ended: Arc<AtomicBool>,
 }
@@ -256,10 +258,18 @@ impl SipUacClient {
                         build_ack(contact_clean, &c.ip, c.port, &c.call_id, &c.from_tag, Some(to_tag), &c.branch, true);
                     ack = ack.replace(&format!("To: <sip:{contact_clean}>"), &format!("To: <sip:{}>", c.uri));
                     c.socket.send_to(ack.as_bytes(), c.target).await?;
-                    let Some(media) = negotiate_media(sdp_offer, response.body) else {
-                        let bye = build_bye(contact, &c.ip, c.port, &c.call_id, &c.from_tag, to_tag, 2);
-                        c.socket.send_to(bye.as_bytes(), c.target).await?;
-                        return Err(SipDialError::InvalidSdpAnswer);
+                    let media = match negotiate_media_detailed(sdp_offer, response.body) {
+                        Ok(media) => media,
+                        Err(failure) => {
+                            // The peer selected a codec this gateway cannot bridge (or nothing
+                            // common is left): refuse the call instead of reporting a connected
+                            // session with dead media. As the offerer we can only ACK+BYE here;
+                            // the UAS side answers the same typed failure with 488.
+                            warn!(call_id=%c.call_id, ?failure, "SIP answer refused: no mutually bridged codec");
+                            let bye = build_bye(contact, &c.ip, c.port, &c.call_id, &c.from_tag, to_tag, 2);
+                            c.socket.send_to(bye.as_bytes(), c.target).await?;
+                            return Err(SipDialError::InvalidSdpAnswer);
+                        }
                     };
                     let session = ActiveSipSession {
                         call_id: c.call_id.clone(),
@@ -277,11 +287,12 @@ impl SipUacClient {
                         local_video_payload_type: media.local_video_payload_type,
                         remote_video_ip: media.video_ip,
                         remote_dtmf_payload_type: media.dtmf_payload_type,
+                        answer_sdp: response.body.to_string(),
                         socket: c.socket.clone(),
                         ended: Arc::new(AtomicBool::new(false)),
                     };
                     Self::monitor_dialog(session.clone(), ack);
-                    info!(call_id=%session.call_id,audio_port=?session.remote_audio_port,video_port=?session.remote_video_port,"SIP dialog confirmed with usable media");
+                    info!(call_id=%session.call_id,audio_port=?session.remote_audio_port,video_port=?session.remote_video_port,audio_codec=media.audio_codec,video_codec=?media.video_codec,"SIP dialog confirmed with usable media");
                     return Ok(session);
                 }
                 300..=699 => {

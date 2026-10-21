@@ -19,6 +19,7 @@ serde_json.workspace = true
 uuid.workspace = true
 vks-core = { path = "../vks-core" }
 async-trait = "0.1"
+tokio.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

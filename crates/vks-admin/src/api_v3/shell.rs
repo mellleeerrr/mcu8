@@ -7,6 +7,7 @@
 
 use axum::{
     extract::{Extension, State},
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -248,14 +249,7 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
             "size_bytes": 0
         },
         "network": { "status": "READY", "connected": true, "editable": true, "ip": settings.ip },
-        "disk": {
-            "free": 107374182400u64,
-            "percent": 15,
-            "full": "NORMAL",
-            // UI-маппер `DW` читает `disk.videorecords`; без него вкладка
-            // «Диск» показывала undefined.
-            "videorecords": 0
-        },
+        "disk": disk_status(),
         "time": crate::state::now_unix_ms() / 1000,
         "sip": {
             "status": sip_status,
@@ -391,6 +385,23 @@ pub async fn engine_calibration(
     Json(json!({ "calibration": null })).into_response()
 }
 
+/// Реальный корневой диск для `/ui/system/status`: `free` в **KiB**
+/// (в эталоне `disk.free` — KiB, не байты), `percent` — занятость.
+fn disk_status() -> Value {
+    let spaces = super::observability::compute_disk();
+    let root = spaces.first();
+    let total = root.and_then(|space| space["total"].as_u64()).unwrap_or(0);
+    let used = root.and_then(|space| space["used"].as_u64()).unwrap_or(0);
+    let free = root.and_then(|space| space["free"].as_u64()).unwrap_or(0);
+    let percent = if total == 0 { 0 } else { used.saturating_mul(100) / total };
+    json!({
+        "free": free.saturating_mul(1024),
+        "percent": percent,
+        "full": if percent >= 95 { "CRITICAL" } else if percent >= 85 { "WARNING" } else { "NORMAL" },
+        "videorecords": 0
+    })
+}
+
 /// `GET /api/v3/engine/diagnostics` → `{diagnostics:{vsm:{limits:{performance:100},resources:{required:{encoders:0,decoders:0},available:{encoders:100,decoders:100}}},scheduler:{workers:4}}}`.
 pub async fn engine_diagnostics(
     State(_state): State<SharedState>,
@@ -400,22 +411,21 @@ pub async fn engine_diagnostics(
     if let Some(response) = super::settings_admin::forbid(&auth) {
         return response;
     }
+    // UI-виджет «Загрузка вычислительных потоков» делает
+    // `workersDump.map(t => t.occupancy + t.overhead)` и
+    // `concat(scheduler.workers)`: число вместо массива даёт NaN и плоский
+    // график. Отдаём массив записей, как эталон.
+    let workers: Vec<Value> = (0..4).map(|_| json!({"occupancy": 0.0, "overhead": 0.0, "count": 1})).collect();
     Json(json!({
         "diagnostics": {
             "vsm": {
                 "limits": { "performance": 100 },
                 "resources": {
-                    "required": {
-                        "encoders": 0,
-                        "decoders": 0
-                    },
-                    "available": {
-                        "encoders": 100,
-                        "decoders": 100
-                    }
+                    "required": { "encoders": 0, "decoders": 0 },
+                    "available": { "encoders": 100, "decoders": 100 }
                 }
             },
-            "scheduler": { "workers": 4 }
+            "scheduler": { "workers": workers }
         }
     }))
     .into_response()
@@ -450,7 +460,9 @@ pub async fn file_get(axum::extract::Path(_id): axum::extract::Path<String>) -> 
 /// `POST /api/v3/files` — multipart-загрузка. Полноценное файловое хранилище
 /// вне задачи MCU; подтверждаем загрузку синтетической записью, чтобы UI не
 /// показывал красный тост 501.
-pub async fn file_upload(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> Response {
+pub async fn file_upload(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
     track("files/upload");
     let display_name = params.get("display_name").cloned().unwrap_or_else(|| "uploaded".to_string());
     Json(json!({"file":{"id":uuid::Uuid::new_v4().to_string(),"display_name":display_name,
@@ -477,11 +489,7 @@ pub async fn registration_online(Extension(auth): Extension<AuthContext>) -> Res
 /// `POST /api/v3/registration/offline` — UI ожидает blob; отдаём пустой файл.
 pub async fn registration_offline() -> Response {
     track("registration/offline");
-    (
-        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-        Vec::<u8>::new(),
-    )
-        .into_response()
+    ([(axum::http::header::CONTENT_TYPE, "application/octet-stream")], Vec::<u8>::new()).into_response()
 }
 
 /// `POST /api/v3/registration/license` — загрузка файла лицензии; на стенде
@@ -513,14 +521,21 @@ pub async fn settings_audio_codecs(State(state): State<SharedState>) -> Response
             json!({ "name": name, "bitrate": bitrate })
         })
         .collect();
-    Json(json!({ "audio_codecs": codecs })).into_response()
+    // UI вендора опрашивает кодеки на каждую строку сессии (N+1). Кодеки —
+    // глобальные и меняются только админом, поэтому разрешаем короткий
+    // приватный кэш: 109 сессий перестают генерировать 3k запросов за прогон.
+    let mut response = Json(json!({ "audio_codecs": codecs })).into_response();
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=30"));
+    response
 }
 
 /// `GET /api/v3/settings/video_codecs` → эталонный shape `{video_codecs:[str]}`.
 pub async fn settings_video_codecs(State(state): State<SharedState>) -> Response {
     track("settings/video_codecs");
     let s = SettingsService::get(&state);
-    Json(json!({ "video_codecs": s.codecs.video })).into_response()
+    let mut response = Json(json!({ "video_codecs": s.codecs.video })).into_response();
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=30"));
+    response
 }
 
 /// Эталонные умолчания видео-настроек (`ref-92/settings_video.json`), сразу payload.
@@ -588,62 +603,59 @@ pub async fn update_settings_video(
     Json(json!({ "payload": payload })).into_response()
 }
 
-/// `POST /api/v3/ui/video_layouts/calculate` — геометрия слотов для превью
-/// (`{preset,width,height,overlap_factor?,pip?}` → `{slots:[{position,x,y,width,height,z_order}]}`).
+/// `POST /api/v3/ui/video_layouts/calculate` — геометрия слотов для превью.
 ///
-/// Геометрия — из [`vks_layout::preset`]: схема (`equal`/`selected`/`double`)
-/// определяет расположение окон, `_(N)` меняет пропорцию/pip-сторону,
-/// `_overlap`/`pip` накладывает маленькие окна поверх большой зоны.
-/// Неизвестный preset → равномерная сетка по извлечённому размеру (fallback).
+/// Контракт эталона TrueConf MCU 2.2.1.66: принимает только 65 вендорных
+/// manual-пресетов (`preset_equal_1`, `preset_selected_b_4`, `preset_double_b_10`,
+/// `preset_selected_rb_overlap_2`, …); dynamic/auto/базовые id → 400
+/// `invalid.preset`. Позиции 1-based, у pip-окон `z_order = 1`.
 pub async fn video_layouts_calculate(Json(body): Json<serde_json::Value>) -> Response {
     track("ui/video_layouts/calculate");
-    let preset_name = body.get("preset").and_then(serde_json::Value::as_str).unwrap_or("preset_default_13");
-    let requested_size = body
-        .get("size")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|value| u8::try_from(value).ok());
-    let preset_name = vks_layout::preset::resolve(preset_name, requested_size);
+    let preset_name = body.get("preset").and_then(serde_json::Value::as_str).unwrap_or_default();
+    if !vks_layout::preset::is_manual_preset(preset_name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {
+                "code": 400,
+                "description": "Bad Request",
+                "details": [{
+                    "reason": "invalid.preset",
+                    "description": format!(
+                        "Must be one of: {}",
+                        vks_layout::preset::MANUAL_PRESETS.join(", ")
+                    ),
+                    "position": "preset",
+                }],
+            }})),
+        )
+            .into_response();
+    }
     let dimension = |key: &str, fallback: f64| {
         body.get(key)
             .and_then(serde_json::Value::as_f64)
-            .filter(|value| value.is_finite() && *value > 0.0)
+            .filter(|value| value.is_finite() && *value >= 1.0)
             .unwrap_or(fallback)
     };
     let width = dimension("width", 1280.0);
     let height = dimension("height", 720.0);
-    let overlap_factor = body
-        .get("overlap_factor")
-        .and_then(serde_json::Value::as_f64)
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(1.0);
-    let pip = body.get("pip").and_then(serde_json::Value::as_bool).unwrap_or(false);
-    let preset = vks_layout::preset::PresetId::parse(&preset_name).unwrap_or_else(|| {
-        let size = crate::api_v3::resources::preset_size(&preset_name)
-            .and_then(|size| u8::try_from(size).ok())
-            .filter(|size| *size > 0)
-            .unwrap_or(vks_layout::preset::PresetId::DEFAULT_SIZE);
-        vks_layout::preset::PresetId::equal(size)
-    });
-    let slots: Vec<serde_json::Value> = vks_layout::preset::geometry(&preset, width, height, overlap_factor, pip)
+    let Some(slots) = vks_layout::preset::geometry_for_manual(preset_name, width, height) else {
+        return super::error_json(400, "Bad Request");
+    };
+    let response: Vec<serde_json::Value> = slots
         .iter()
         .enumerate()
-        .map(|(position, rect)| {
-            // Эталон возвращает 1-based позиции (1..N), тогда как наш
-            // `preset::geometry` и `/video_layout_grids` — 0-based. UI
-            // сопоставляет слот с ячейкой по `position` напрямую, поэтому
-            // 0-based ответ сдвигал участника на ячейку вправо/вниз, а
-            // последний слот выпадал в крошечный fallback.
+        .map(|(position, slot)| {
             json!({
                 "position": position + 1,
-                "x": rect.x,
-                "y": rect.y,
-                "width": rect.width,
-                "height": rect.height,
-                "z_order": 0,
+                "x": slot.rect.x,
+                "y": slot.rect.y,
+                "width": slot.rect.width,
+                "height": slot.rect.height,
+                "z_order": slot.z_order,
             })
         })
         .collect();
-    Json(json!({ "slots": slots })).into_response()
+    Json(json!({ "slots": response })).into_response()
 }
 
 /// `GET /api/v3/waitingroom` → `{}` (дополняется формой из бандла при реализации).

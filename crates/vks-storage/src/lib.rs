@@ -11,12 +11,14 @@
 //! поэтому здесь свои типизированные строки ([`rows`]) и [`error::Error`].
 
 pub mod core_adapter;
+pub mod dedup;
 pub mod error;
 pub mod memory;
 pub mod postgres;
 pub mod rows;
 pub mod sqlite;
 
+pub use dedup::{dedup_document, DedupReport};
 pub use error::{Error, Result};
 pub use memory::MemoryStorage;
 pub use postgres::PostgresStorage;

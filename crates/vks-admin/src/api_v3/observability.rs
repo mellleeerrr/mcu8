@@ -913,35 +913,58 @@ pub async fn stats_cpu(State(_state): State<SharedState>, Extension(auth): Exten
 /// запрос UI (раз в ~1 с) не нужен.
 const DISK_CACHE_TTL: Duration = Duration::from_secs(2);
 
+/// Реальные ФС для виджета «Жесткий диск»: tmpfs/devtmpfs/iso9660 и прочая
+/// псевдо-мелочь вендорному UI не нужна (он берёт первый элемент списка и
+/// показывал «/run 11 Gb» вместо корня).
+const DISK_FS_TYPES: &[&str] =
+    &["ext2", "ext3", "ext4", "xfs", "btrfs", "f2fs", "vfat", "ntfs", "ntfs3", "fuseblk", "zfs", "overlay"];
+
 type DiskSnapshot = (Instant, Vec<Value>);
 
 static DISK_CACHE: OnceLock<Mutex<Option<DiskSnapshot>>> = OnceLock::new();
 
 fn read_disk_spaces() -> Vec<Value> {
-    let output = std::process::Command::new("df").args(["-Pk"]).output();
+    // `-T` добавляет тип ФС (нужен фильтр псевдо-ФС), `-P` — POSIX-формат.
+    let output = std::process::Command::new("df").args(["-PkT"]).output();
     let mut spaces = Vec::new();
     if let Ok(output) = output {
         for line in String::from_utf8_lossy(&output.stdout).lines().skip(1) {
             let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 6 {
+            // Filesystem Type 1K-blocks Used Available Capacity Mountpoint
+            if fields.len() < 7 {
                 continue;
             }
-            let Ok(total) = fields[1].parse::<u64>() else { continue };
-            let Ok(used) = fields[2].parse::<u64>() else { continue };
-            let Ok(free) = fields[3].parse::<u64>() else { continue };
+            if !DISK_FS_TYPES.contains(&fields[1]) {
+                continue;
+            }
+            let Ok(total) = fields[2].parse::<u64>() else { continue };
+            let Ok(used) = fields[3].parse::<u64>() else { continue };
+            let Ok(free) = fields[4].parse::<u64>() else { continue };
             // `df -Pk` — KiB; UI ожидает MB.
             let (total, used, free) = (total / 1024, used / 1024, free / 1024);
             if total == 0 || fields[0].starts_with("/dev/loop") {
                 continue;
             }
-            spaces.push(json!({"name": fields[5], "total": total, "used": used, "free": free}));
+            // Mountpoint может содержать пробелы (`/run/media/... 26.04 amd64`).
+            spaces.push(json!({
+                "name": fields[6..].join(" "),
+                "total": total,
+                "used": used,
+                "free": free,
+            }));
         }
     }
+    // UI выбирает первый элемент: корень обязан быть первым, остальные — по имени.
+    spaces.sort_by(|left, right| {
+        let left_name = left["name"].as_str().unwrap_or("");
+        let right_name = right["name"].as_str().unwrap_or("");
+        (left_name != "/", left_name).cmp(&(right_name != "/", right_name))
+    });
     spaces
 }
 
-/// ФС с TTL-кэшем: `df -Pk` запускается не чаще раза в [`DISK_CACHE_TTL`].
-fn compute_disk() -> Vec<Value> {
+/// ФС с TTL-кэшем: `df -PkT` запускается не чаще раза в [`DISK_CACHE_TTL`].
+pub(crate) fn compute_disk() -> Vec<Value> {
     let mut guard = lock_or_recover(DISK_CACHE.get_or_init(|| Mutex::new(None)));
     if let Some((at, spaces)) = guard.as_ref() {
         if at.elapsed() < DISK_CACHE_TTL {
@@ -953,7 +976,7 @@ fn compute_disk() -> Vec<Value> {
     spaces
 }
 
-/// `GET /api/v3/system/stats/disk` — реальные ФС (`df -Pk`), **MB**.
+/// `GET /api/v3/system/stats/disk` — реальные ФС (`df -PkT`), **MB**.
 ///
 /// Vendor-UI `StatisticsDisk` делит значения на 1024 и подписывает «Gb»,
 /// поэтому отдаём мебибайты (как vendor-эталон и статистика памяти).

@@ -63,8 +63,8 @@ async function api(token, method, urlPath, body) {
     context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, ignoreHTTPSErrors: true });
     await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
     const page = await context.newPage();
-    page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
-    page.on('pageerror', error => pageErrors.push(String(error && error.message || error)));
+    page.on('console', message => { if (message.type() === 'error' && consoleErrors.length < 40) consoleErrors.push(message.text()); });
+    page.on('pageerror', error => { if (pageErrors.length < 20) pageErrors.push(String(error && error.stack || error.message || error)); });
     page.on('request', request => {
       if (!request.url().includes('/api/v3/')) return;
       network.push({ kind: 'request', method: request.method(), url: request.url(), body: request.postData() || '' });

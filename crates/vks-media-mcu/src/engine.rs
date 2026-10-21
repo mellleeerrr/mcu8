@@ -730,9 +730,38 @@ impl MediaEngine for McuEngine {
         Ok(())
     }
 
-    async fn apply_layout(&self, room: RoomId, layout: LayoutDescriptor) -> Result<(), MediaEngineError> {
+    async fn apply_layout(&self, room: RoomId, mut layout: LayoutDescriptor) -> Result<(), MediaEngineError> {
         let mut g = self.rooms.lock().unwrap();
         let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
+        // Уже забридженные видео-паблишеры не должны потерять ячейку: раскладка
+        // может прийти вообще без привязок («Очистить все видеоокна» → все окна
+        // AUTO, auto-пресет, возврат к «Общей» после удаления ручной). Иначе
+        // `set_participant_frame` перестал бы писать кадры и живой SIP-терминал
+        // увидел бы замерший последний снимок вместо новой сетки.
+        let bridged: Vec<ParticipantId> = state
+            .publisher_tracks
+            .iter()
+            .filter(|(_, tracks)| {
+                tracks.iter().any(|track| {
+                    matches!(track.kind, vks_core::track::TrackKind::Video | vks_core::track::TrackKind::Screen)
+                })
+            })
+            .map(|(pid, _)| *pid)
+            .collect();
+        let mut repaired = false;
+        for pid in bridged {
+            if layout.assignments.contains_key(&pid) {
+                continue;
+            }
+            let slot =
+                (0..u32::MAX).find(|slot| !layout.assignments.values().any(|existing| existing == slot)).unwrap_or(0);
+            layout.assignments.insert(pid, slot);
+            repaired = true;
+        }
+        if repaired {
+            // Раскладка изменилась на глазах клиентов и шлюза — новая версия.
+            layout.version = layout.version.saturating_add(1);
+        }
         let new_layout = RoomState::layout_from_descriptor(&layout);
         state.layout = Some(layout);
         // Begin the crossfade from the previous layout's rects to the new ones.
@@ -1183,5 +1212,56 @@ mod tests {
         let out = e.tick(rid).expect("composite");
         let index = ((cell.y + cell.h / 2) * CANVAS_SIZE.0 + (cell.x + cell.w / 2)) as usize;
         assert_eq!(out.data[index], 9, "publisher colour is rendered inside its exact cell");
+    }
+
+    /// «Очистить все видеоокна» / auto-раскладка приходят вообще без привязок.
+    /// Уже забридженный паблишер обязан сохранить ячейку, иначе
+    /// `set_participant_frame` начнёт возвращать false и живой SIP-терминал
+    /// увидит замерший последний снимок вместо новой сетки.
+    #[tokio::test]
+    async fn layout_without_assignments_keeps_bridged_publisher_visible() {
+        use vks_core::ports::media_engine::LayoutSlot;
+
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(5);
+        e.bridge_participant(rid, a, vec![video_track(a)]);
+        assert!(e.set_participant_frame(rid, a, Frame::filled(320, 180, 55)), "bridged publisher starts visible");
+
+        // 2×2 без привязок: все окна свободны (после «Очистить все видеоокна»).
+        let geometry = (0..4)
+            .map(|slot| LayoutSlot {
+                slot,
+                x: (slot % 2) * 960,
+                y: (slot / 2) * 540,
+                width: 960,
+                height: 540,
+                z_order: slot,
+            })
+            .collect();
+        e.apply_layout(
+            rid,
+            LayoutDescriptor {
+                layout_id: "preset_equal_4".into(),
+                version: 2,
+                assignments: std::collections::BTreeMap::new(),
+                geometry,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            e.set_participant_frame(rid, a, Frame::filled(320, 180, 99)),
+            "bridged publisher must keep a slot after an AUTO-only layout"
+        );
+        for _ in 0..11 {
+            e.tick(rid);
+        }
+        let rects = e.slot_rects(rid).expect("slot rects");
+        assert_eq!(rects.len(), 4, "геометрия 2×2 сохранена, а не подменена авто-сеткой");
+        let composite = e.tick(rid).expect("composite frame");
+        assert_eq!(composite.data[270 * CANVAS_SIZE.0 as usize + 480], 99, "новый кадр виден в верхней левой ячейке");
     }
 }
