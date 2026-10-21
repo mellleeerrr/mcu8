@@ -302,8 +302,8 @@ vks/
     │   ├── TEMPLATE_DECISION.md
     │   └── NNNN-*.md
     └── progress/
-        ├── PROGRESS.md
-        ├── TEMPLATE_ERROR.md
+        ├── MASTER_TASK_LIST.md   # живой трекер
+        └── archive/              # закрытые PROGRESS/REWORK/планы
         └── archive/
 ```
 

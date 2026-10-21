@@ -1,7 +1,7 @@
 # MASTER_TASK_LIST — приоритетный план доведения VKS MCU до приёмки
 
 > Рабочий трекер. Обновляется в коммите каждой задачи (статус + ссылка на коммит + ревью-оценка).
-> Источники: `docs/progress/REWORK_PLAN.md`, `docs/architecture/*`, аудит 2026-10-16,
+> Источники: закрытый `docs/progress/archive/REWORK_PLAN.md`, `docs/architecture/*`, аудит 2026-10-16,
 > живая проверка 2026-10-19/20, документ TrueConf MCU 2.2.1.66 (страница мониторинга сессии).
 >
 > Главный приёмочный сценарий (P0): **frontend → создание комнаты → настройка → запуск →
@@ -364,7 +364,7 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 ### C3. Документация и трекер
 
 **Статус:** ⚪ (T4.3–T4.4)
-**Подводные камни:** PROGRESS заявляет завершённость фаз, которой нет; REWORK_PLAN устарел;
+**Подводные камни:** архивный PROGRESS заявлял завершённость фаз, которой не было; REWORK_PLAN устарел;
 не коммитить ложные «527 tests».
 **Приёмка:** README/ARCHITECTURE/PROGRESS соответствуют коду; acceptance checklist.
 
@@ -419,7 +419,7 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 | T2.3 | Администрирование: settings/calls/{sip,h323}, video, rtp, http, styles, smtp, security, time/tz/ntp | 🟢 | `654b964`+`c078821` (код: vendor-UI контракты NTP flat/time-string/stop_rules-null, атомарный calls PATCH + merge частичных legacy-объектов (unknown/type → 422), `hot_reload_from_storage` не гасит живые сессии (B7), GET restart → 405, reload failure → 500, честный ntp_synchronized, структурная PEM/DER-проверка, room-scope forbid; 13 settings-тестов, всего 230 vks-admin; clippy/fmt 0); evidence `docs/progress/evidence/t23/`: ok=true, **35/35** acceptance, 13 шагов/4 PNG, 0 HTTP/console, clean_build+binary_after_head (HEAD 045666b), реальные UI-save: NTP (плоский PATCH + частота + reload), conference_settings one_abonent, SIP/h323/кодеки (≥3 PATCH все 200), restart_services сохраняет ACTIVE-сессию |
 | T2.4 | Наблюдаемость/сервис: stats (/proc), network, log_events, roles, license, videorecords, terminals read-only; destructive → явный отказ | 🟢 | `9c5ac55`+`c078821` (код: log_events по 8 реальным vendor-шаблонам, ZIP/CSV в локальной TZ + invoker + 128-битный static-токен, сеть/статус `{editable:false}`/session-алиасы, ping/traceroute без shell (503 если нет бинаря, `-` отвергается), tcpdump/терминалы/видео read-only 501, stats disk MB/network kbps/engine-log стабильный timestamp, license PERMANENT+params, features-массив, RBAC Operator+; 12 observability-тестов (всего 230 vks-admin); clippy/fmt 0); evidence `docs/progress/evidence/t24/`: ok=true, **36/36** acceptance, 10 шагов/5 PNG, 0 HTTP/console, 10 страниц с кликом «Сетевые интерфейсы» без 4xx, vendor Chart.js warnings allowlisted (12), clean_build+binary_after_head (HEAD 045666b) |
 | T3.1 | Мёртвый код/зависимости (/records→/videorecords, неиспользуемые модули/крейты) | 🟢 | `1405f8c`+`045666b`: удалены `/api/v3/records`, `/ui/records` и мёртвый `ui_records`; неиспользуемые direct-зависимости (`vks-layout` в server, `vks-core` в gateways) убраны; restart-роуты POST-only; layout-mode контракт починен в integration-тесте (create/attach layout + `video_layout_id`); evidence `docs/progress/evidence/t31/` — ok=true, 7/7 гейтов, workspace-тесты/clippy/fmt зелёные |
-| T3.2 | Доки/конфиг/git: один трекер, README, dev/prod, CI master, .gitignore, .cargo | ⚪ | — |
+| T3.2 | Доки/конфиг/git: один трекер, README, dev/prod, CI master, .gitignore, .cargo | 🟢 | один живой трекер `MASTER_TASK_LIST.md`, `PROGRESS/REWORK_PLAN/FRONTEND_PORT_PLAN/TEMPLATE_ERROR` → `docs/progress/archive/` (+README), ссылки в PROJECT_RULES/CODE_STYLE/ARCHITECTURE/ADR-0027 обновлены; корневой README переписан (dev/prod, 892 теста, честный статус); `configs/prod.example.toml` + пометка dev-only в `configs/default.toml`; CI `push.branches: [master]`; `.gitignore` (+pid/db-journal); профили Cargo только в корневом `Cargo.toml` (дубли из `.cargo/config.toml` убраны) |
 | T3.3 | Артефакты + финальный обход страниц + таблица паритета | ⚪ | — |
 
 Приёмка (AC1–AC9) — в утверждённом плане; ключевые: один процесс; SIP и H.323

@@ -1,4 +1,7 @@
-# Default configuration for VKS Server (PROSTOR MCU/SFU)
+# DEV-конфигурация VKS Server (PROSTOR MCU/SFU). Только для локальной разработки:
+# dev-секреты и `admin_password` ниже НЕЛЬЗЯ использовать в production.
+# Production-шаблон: configs/prod.example.toml.
+#
 # All parameters can be overridden via environment variables with prefix VKS_*
 # Example: VKS_LISTEN_ADDR="0.0.0.0:8080" VKS_JWT_SECRET="secret"
 

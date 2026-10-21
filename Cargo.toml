@@ -75,8 +75,20 @@ rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 authors = ["VKS Team"]
 
+# Профили — единственное место (раньше дублировались в .cargo/config.toml,
+# где значения молча перекрывались; см. T3.2).
+[profile.dev]
+# Быстрые итерации: debuginfo на уровне line-tables, 1 кодовый блок.
+debug = "line-tables-only"
+
 [profile.release]
-# см. docs/rules/CODE_STYLE.md и .cargo/config.toml
+# Финальная сборка для production (см. docs/rules/CODE_STYLE.md).
+opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+panic = "abort"
+
+# Прочий (benches) — без оптимизаций, быстро.
+[profile.bench]
+opt-level = 3

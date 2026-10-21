@@ -48,4 +48,4 @@
 ## 9. Коммиты
 - Формат: `type(scope): description`.
 - Types: feat, fix, docs, refactor, test, chore, ci, perf.
-- Каждый коммит с кодом обновляет PROGRESS.md.
+- Каждый коммит с кодом обновляет статус в `docs/progress/MASTER_TASK_LIST.md` (единственный живой трекер).

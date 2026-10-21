@@ -2,7 +2,7 @@
 
 - **Статус:** accepted
 - **Дата:** 2026-10-16
-- **Решение принято:** пользователь (запрос на перенос архива 1:1) + анализ команды (FRONTEND_PORT_PLAN.md)
+- **Решение принято:** пользователь (запрос на перенос архива 1:1) + анализ команды (docs/progress/archive/FRONTEND_PORT_PLAN.md)
 - **Связанные ADR:** 0010 (Dioxus), 0013 (progenitor), 0009 (JWT), 0019 (аудит), 0022 (RBAC), 0026 (MCU/SFU)
 - **Связанные требования:** задача пользователя 2026-10-16 (перенос `PNM-Frontend-20261016.zip` 1:1); R6 (конфигурируемость сервера)
 
@@ -74,9 +74,9 @@
   cache-bust словника — см. `client/pnm-frontend/NOTES.md` §«Ребренд PROSTOR»; юр. гейт R2 остаётся.
 - [x] `frontend.rs` + роуты/кэш/CSP + тесты (фаза 1).
 - [x] Удаление demo (`docs/progress/archive/demo-2026-10-16.rs`) + `build_app` в `lib.rs` (фаза 1).
-- [ ] `/api/v3` фаза 2 (boot/shell/ws/auth) + фаза 3 (sessions/conferences) — по `FRONTEND_PORT_PLAN.md` §4.5/Приложение A.
+- [ ] `/api/v3` фаза 2 (boot/shell/ws/auth) + фаза 3 (sessions/conferences) — по `docs/progress/archive/FRONTEND_PORT_PLAN.md` §4.5/Приложение A.
 - [ ] Фаза 5: Dioxus-миграция; снятие отклонения (удаление `/api/v3` и legacy).
-- [ ] Юридический гейт R2: лицензия TrueConf-сборки (+ «PROSTOR») — до релиза (отметка в PROGRESS.md).
+- [ ] Юридический гейт R2: лицензия TrueConf-сборки (+ «PROSTOR») — до релиза (отметка в docs/progress/MASTER_TASK_LIST.md).
 
 ## Обоснование выбора библиотек
 
@@ -92,4 +92,4 @@
 - axum 0.8.9: `src/routing/path_router.rs` (nest/route, трейлинг-слэш, отсутствие авто-редиректов) — https://docs.rs/axum/0.8
 - tower-http 0.6.11: `src/services/fs/serve_dir/*` (валидация путей, fallback, Range/HEAD/304, precompressed) — https://docs.rs/tower-http/0.6
 - cargo-deny 0.18: схема `[graph]/[licenses]/[advisories]/[sources]` — https://embarkstudios.github.io/cargo-deny/checks/cfg.html
-- Контракт UI: `scripts/pnm-smoke/observed_endpoints.json` + трассировка бандла (`FRONTEND_PORT_PLAN.md` Приложение A)
+- Контракт UI: `scripts/pnm-smoke/observed_endpoints.json` + трассировка бандла (`docs/progress/archive/FRONTEND_PORT_PLAN.md` Приложение A)

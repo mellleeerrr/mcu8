@@ -25,7 +25,11 @@ vks_server.log
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
 *.sqlite
+
+# Локальные pid-файлы скриптов
+*.pid
 
 # Local acceptance artifacts (tokens, SQLite, sidecar probes, logs)
 .accept/

@@ -1,0 +1,46 @@
+# ПРИМЕР production-конфигурации VKS Server.
+#
+# НЕ запускайте этот файл как есть: замените все значения-заглушки.
+# Секреты передавайте через переменные окружения VKS_* (BACKEND_RULES §6.3) —
+# файл с реальными секретами в git не коммитится.
+#
+# Запуск:
+#   cp configs/prod.example.toml /etc/vks/server.toml
+#   chmod 600 /etc/vks/server.toml
+#   VKS_CONFIG_PATH=/etc/vks/server.toml ./target/release/vks-server
+
+server_name = "vks-mcu-prod"
+listen_addr = "0.0.0.0:8080"
+media_listen_addr = "0.0.0.0:40000"
+
+# Публичный IP/DNS, который анонсируется в SDP (обязателен за NAT).
+candidate_addr = "mcu.example.com"
+
+# Аутентификация: JWT-секрет только из env, минимум 32 случайных байта:
+#   VKS_JWT_SECRET="$(openssl rand -base64 48)"
+auth_provider = "local"
+jwt_ttl_secs = 28800
+
+# Пароль оператора задаётся один раз при первом старте и меняется через UI.
+# В файле пароль не храните; bootstrap — через VKS_ADMIN_PASSWORD в secrets.
+admin_login = "admin"
+
+# Статика PNM UI (собирается scripts/import-pnm-frontend.sh).
+frontend_dir = "client/pnm-frontend/deployed/pnm"
+
+# Хранилище: PostgreSQL рекомендуется для production.
+#   VKS_DATABASE_URL="postgres://vks:password@db.internal:5432/vks"
+database_url = "postgres://vks:CHANGE_ME@db.internal:5432/vks"
+storage_allow_fallback = false
+
+# Внешние шлюзы (пусто = выключено).
+ldap_url = ""
+
+# Топология по умолчанию: "sfu" | "mcu".
+default_room_mode = "sfu"
+
+# ICE: для production используйте собственный TURN/STUN.
+ice_servers = [
+    "stun:stun.example.com:3478",
+    "turn:turn.example.com:3478?transport=udp",
+]
