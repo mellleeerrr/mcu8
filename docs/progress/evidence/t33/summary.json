@@ -2,12 +2,12 @@
  "task": "T3.3",
  "ok": true,
  "build": {
-  "git_head": "21edc17183fac7cbb8aa9bc3030c3fbc0d83b732",
-  "git_head_ct": 1792553369,
+  "git_head": "d4779c5dff23ac7e7725f723068d143f66dba87e",
+  "git_head_ct": 1792555787,
   "git_dirty": false,
-  "binary_sha256": "329e549ae4a6bee578449d971a077f97367e65224c66d324bc4ea23f99a14e4a",
-  "binary_mtime": 1792553439,
-  "server_pid": 927392
+  "binary_sha256": "17a065640103adc64c888d78067b9fec1b7ee8e7db90f576a38da4bcf3b60c5f",
+  "binary_mtime": 1792555858,
+  "server_pid": 949935
  },
  "acceptance": {
   "api_parity": true,
@@ -109,6 +109,206 @@
   "vendor_console_errors": 24
  },
  "error": null,
+ "page_walk": [
+  {
+   "slug": "sessions",
+   "url": "/pnm/monitoring/sessions",
+   "finalUrl": "http://127.0.0.1:8080/pnm/monitoring/sessions",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "addressbook",
+   "url": "/pnm/addressbook/users",
+   "finalUrl": "http://127.0.0.1:8080/pnm/addressbook/users",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "history",
+   "url": "/pnm/history",
+   "finalUrl": "http://127.0.0.1:8080/pnm/history",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "statistics",
+   "url": "/pnm/administration/statistics",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/statistics",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "mediafiles",
+   "url": "/pnm/administration/mediafiles",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/mediafiles",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "power",
+   "url": "/pnm/administration/power",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/power",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "diagnostics",
+   "url": "/pnm/administration/diagnostics",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/diagnostics",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "terminals",
+   "url": "/pnm/administration/terminals",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/terminals",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "conference_settings",
+   "url": "/pnm/administration/conference_settings",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/conference_settings",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "calls",
+   "url": "/pnm/administration/calls",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/calls",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "network",
+   "url": "/pnm/administration/network",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/network",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "video",
+   "url": "/pnm/administration/video",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/video",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "calibration",
+   "url": "/pnm/administration/calibration",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/statistics",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "backup",
+   "url": "/pnm/administration/backup",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/backup",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "reset",
+   "url": "/pnm/administration/reset",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/reset",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "date_time",
+   "url": "/pnm/administration/date_time",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/date_time",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "roles",
+   "url": "/pnm/administration/roles",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/roles/770fada3-71d8-4176-a969-e12ec2059e64",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "security",
+   "url": "/pnm/administration/security",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/security",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "event_list",
+   "url": "/pnm/administration/event_list",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/event_list",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "layout_skins",
+   "url": "/pnm/administration/layout_skins",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/layout_skins",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "license",
+   "url": "/pnm/administration/license",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/license",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  },
+  {
+   "slug": "about",
+   "url": "/pnm/administration/about",
+   "finalUrl": "http://127.0.0.1:8080/pnm/administration/about",
+   "documentStatus": 200,
+   "missing": [],
+   "http": [],
+   "console": []
+  }
+ ],
  "http_errors": [],
  "console_errors": [],
  "vendor_console_errors": [
