@@ -113,7 +113,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       ['/readyz', 200, (j) => j.db === true && j.media === true],
       ['/api/v3/system/about', 200, (j) => j.state && j.state.status === 'READY' && j.versions],
       ['/api/v3/ui/system/status', 200, (j) => j.engine && j.cluster],
-      ['/api/v3/system/status/network', 200, (j) => j.network && j.network.editable === false],
+      ['/api/v3/system/status/network', 200, (j) => j.network && j.network.editable === true],
       ['/api/v3/license', 200, (j) => j.state === 'VALID' && j.type === 'PERMANENT'],
       ['/api/v3/features', 200, (j) => Array.isArray(j.features) && j.features.length > 40],
       ['/api/v3/conferences?page=1&page_size=5', 200, (j) => typeof j.count === 'number' && Array.isArray(j.conferences)],

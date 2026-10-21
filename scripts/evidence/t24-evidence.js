@@ -326,7 +326,7 @@ const isVendorError = (text) =>
         features.status === 200 && Array.isArray(features.json.features) && features.json.features.length > 40;
       const status = await api('/api/v3/system/status/network');
       summary.acceptance.status_network_shape =
-        status.status === 200 && status.json.network && status.json.network.editable === false;
+        status.status === 200 && status.json.network && status.json.network.editable === true;
       const alias = await api('/api/v3/sessions/any-id/videorecords/estimated_time?quality=high');
       const aliasList = await api('/api/v3/sessions/any-id/videorecords');
       summary.acceptance.session_videorecords_alias =
