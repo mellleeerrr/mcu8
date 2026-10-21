@@ -1,7 +1,7 @@
 //! Статика фронтенда PNM (сборка TrueConf MCU Web UI v2.2.1-66; рантайм ребрендирован в PROSTOR)
 //! и связанные политики.
 //!
-//! Основание: `docs/progress/FRONTEND_PORT_PLAN.md` §4.2 (ADR-0027),
+//! Основание: `docs/progress/archive/FRONTEND_PORT_PLAN.md` §4.2 (ADR-0027),
 //! `docs/rules/BACKEND_RULES.md` §6 (заголовки/безопасность).
 //!
 //! Что здесь:

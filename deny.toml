@@ -1,6 +1,6 @@
 # cargo-deny конфиг: лицензии, advisories и источники зависимостей workspace VKS.
 # Основание: docs/PROJECT_RULES.md §1.3, docs/DEVELOPMENT_PLAN.md (Фаза 0),
-#            ADR-0027 (tower-http), docs/progress/FRONTEND_PORT_PLAN.md §4.8.
+#            ADR-0027 (tower-http), docs/progress/archive/FRONTEND_PORT_PLAN.md §4.8.
 # Запуск: `cargo deny check` (CI: .github/workflows/ci.yml → EmbarkStudios/cargo-deny-action).
 # Схема проверена по cargo-deny 0.20.2 (локальный бинарник + CI: cargo-deny-action@v2
 # пиннит ровно 0.20.2; проверено `check` и `--all-features check` → exit=0): секции

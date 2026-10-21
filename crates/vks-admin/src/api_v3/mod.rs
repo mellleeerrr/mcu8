@@ -1,4 +1,4 @@
-//! `/api/v3/*` — адаптер к legacy PNM UI (ADR-0027; `docs/progress/FRONTEND_PORT_PLAN.md` §4.3–4.5).
+//! `/api/v3/*` — адаптер к legacy PNM UI (ADR-0027; `docs/progress/archive/FRONTEND_PORT_PLAN.md` §4.3–4.5).
 //!
 //! Фаза 2: auth-цепочка (login + двухступенчатый lockout + инвалидация токенов при смене
 //! пароля), весь boot/shell (§4.5), WS-протокол (§4.4), catch-all 501 (вкл. `/api/v3/`).

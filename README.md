@@ -57,7 +57,8 @@ cargo build --release -p vks-server
 - живой SIP **и** H.323 до `192.168.1.132` из веб-UI (CONNECTED, рост
   аудио/видео-счётчиков, mute/unmute, ручная раскладка + reload, kick);
 - `smoke_v3.sh` — 24/31/31 проверки;
-- 22 страницы PNM и 18 API-контрактов без 4xx/console error (T3.3);
+- 22 страницы PNM и 18 API-контрактов без 4xx и без собственных console
+  error (24 известных Chart.js-ошибки vendor-бандла allowlisted, T3.3);
 - T3.1/T3.2 — мёртвый код/зависимости, единый трекер, dev/prod-конфиги.
 
 Открытый backlog P2/P3 (RS256, реальный TURN/NATS/recorder, кластер и т.п.)
