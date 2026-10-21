@@ -26,7 +26,16 @@
 > 0 failed / 109.9 s, pageerror 0, 5xx/501 0; 7 подвариантов 2×2 + UI-посадка
 > 1/N/2/N для 4/8/9/25 + calculate 4/8/9/25 + detach→визуальная «Общая»;
 > deploy нового бинаря и dedup 6→5; evidence `docs/progress/evidence/t04a/`.
-> Полная матрица 11 диапазонов/34 ячеек — T04b. Следующая — T05.
+> Полная матрица 11 диапазонов/34 ячеек — T04b.
+>
+> **T05a (реальные max frame size / bitrate) закрыт:** `a2f934e`, ревью 9.5/10
+> (`media-engine`, `protocols-net`), 1014 passed / 0 failed / 6 ignored.
+> Единый профиль env → global → conference → call_string; SDP `b=AS:4096`,
+> `max-fs=8160`, `profile-level-id=42c028`; живой SIP 1920×1080/4096 —
+> фактический RTP tx **4.02 Mbps**, 640×360/512 — **0.61 Mbps**; оба E2E
+> 108/108, page_errors 0. Удалён жёсткий 640×360 в admin-статистике.
+> H.323 H.241 и SFU b=AS — T05b. Evidence `docs/progress/evidence/t05/`.
+> Следующая — T05b, затем T06a.
 >
 > Правило цикла: перед задачей — агент «подводные камни»; после реализации — параллельное
 > code-review (оценка /10, обязательные правки); цикл не закрывается, пока хотя бы один
