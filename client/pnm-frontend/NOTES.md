@@ -108,4 +108,4 @@ cd client/pnm-frontend/deployed/pnm && sha256sum -c ../../MANIFEST.sha256
 
 `LICENSE.txt` в рантайме — проприетарная лицензия TrueConf MCU; бренд «TrueConf» и футер «АО «ТКС»»
 присутствуют в UI. Решение о правомерности использования кода в продукте VKS — за командой
-(см. ADR-0027, риск R2 плана `docs/progress/FRONTEND_PORT_PLAN.md`).
+(см. ADR-0027, риск R2 плана `docs/progress/archive/FRONTEND_PORT_PLAN.md`).
