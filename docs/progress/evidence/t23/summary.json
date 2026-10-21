@@ -1,15 +1,15 @@
 {
  "task": "T2.3",
  "ok": true,
- "started_at": "2026-10-21T04:01:37.118Z",
+ "started_at": "2026-10-21T04:51:12.085Z",
  "build": {
-  "git_head": "08486e7bbbf2998e4fd9a6631eb59d7a76b3524f",
-  "git_head_ct": 1792555098,
+  "git_head": "aa9a1ece41259d590f771465b8e8cf841287c49b",
+  "git_head_ct": 1792558086,
   "git_dirty": false,
-  "binary_sha256": "17a065640103adc64c888d78067b9fec1b7ee8e7db90f576a38da4bcf3b60c5f",
-  "binary_mtime": 1792555257,
-  "binary_path": "/proc/946253/exe",
-  "server_pid": 946253
+  "binary_sha256": "534f262ae27e45c98749c325e4ecb3939667a2a0f97b9cc5bbb48446e0996b13",
+  "binary_mtime": 1792558232,
+  "binary_path": "/proc/974570/exe",
+  "server_pid": 974570
  },
  "acceptance": {
   "settings_get_contracts": true,
@@ -86,5 +86,5 @@
  ],
  "http_errors": [],
  "console_errors": [],
- "finished_at": "2026-10-21T04:02:56.663Z"
+ "finished_at": "2026-10-21T04:52:32.510Z"
 }

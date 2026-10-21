@@ -1,21 +1,16 @@
 {
  "memory": {
-  "free": 47155,
+  "free": 47093,
   "total": 57858,
-  "used": 10703
+  "used": 10765
  },
  "cpu": {
   "count": 36,
   "load": [
    {
-    "idle": 100,
+    "idle": 91.7,
     "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 92.3,
-    "kernel_mode": 7.7,
-    "user_mode": 0
+    "user_mode": 8.3
    },
    {
     "idle": 100,
@@ -23,14 +18,9 @@
     "user_mode": 0
    },
    {
-    "idle": 100,
+    "idle": 90.9,
     "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
+    "user_mode": 9.1
    },
    {
     "idle": 100,
@@ -63,8 +53,13 @@
     "user_mode": 0
    },
    {
-    "idle": 100,
-    "kernel_mode": 0,
+    "idle": 50,
+    "kernel_mode": 8.3,
+    "user_mode": 41.7
+   },
+   {
+    "idle": 91.7,
+    "kernel_mode": 8.3,
     "user_mode": 0
    },
    {
@@ -78,13 +73,8 @@
     "user_mode": 0
    },
    {
-    "idle": 92.3,
-    "kernel_mode": 7.7,
-    "user_mode": 0
-   },
-   {
-    "idle": 66.7,
-    "kernel_mode": 25,
+    "idle": 91.7,
+    "kernel_mode": 0,
     "user_mode": 8.3
    },
    {
@@ -153,8 +143,38 @@
     "user_mode": 0
    },
    {
+    "idle": 92.3,
+    "kernel_mode": 0,
+    "user_mode": 7.7
+   },
+   {
+    "idle": 91.7,
+    "kernel_mode": 0,
+    "user_mode": 8.3
+   },
+   {
     "idle": 100,
     "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 91.7,
+    "kernel_mode": 0,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 91.7,
+    "kernel_mode": 0,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 91.7,
+    "kernel_mode": 0,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 92.3,
+    "kernel_mode": 7.7,
     "user_mode": 0
    },
    {
@@ -163,29 +183,9 @@
     "user_mode": 0
    },
    {
-    "idle": 100,
+    "idle": 91.7,
     "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
+    "user_mode": 8.3
    }
   ]
  },
@@ -199,16 +199,16 @@
     "used": 3
    },
    {
-    "free": 40046,
+    "free": 39860,
     "name": "/",
     "total": 120376,
-    "used": 74170
+    "used": 74356
    },
    {
-    "free": 28877,
+    "free": 28879,
     "name": "/dev/shm",
     "total": 28929,
-    "used": 51
+    "used": 49
    },
    {
     "free": 1,
@@ -217,10 +217,10 @@
     "used": 0
    },
    {
-    "free": 27360,
+    "free": 27351,
     "name": "/tmp",
     "total": 28929,
-    "used": 1569
+    "used": 1577
    },
    {
     "free": 1,
@@ -247,7 +247,7 @@
   "interfaces": [
    {
     "name": "ens18",
-    "rx": 0,
+    "rx": 3,
     "tx": 0
    }
   ]

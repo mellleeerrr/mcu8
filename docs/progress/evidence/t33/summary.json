@@ -2,12 +2,12 @@
  "task": "T3.3",
  "ok": true,
  "build": {
-  "git_head": "d4779c5dff23ac7e7725f723068d143f66dba87e",
-  "git_head_ct": 1792555787,
+  "git_head": "aa9a1ece41259d590f771465b8e8cf841287c49b",
+  "git_head_ct": 1792558086,
   "git_dirty": false,
-  "binary_sha256": "17a065640103adc64c888d78067b9fec1b7ee8e7db90f576a38da4bcf3b60c5f",
-  "binary_mtime": 1792555858,
-  "server_pid": 949935
+  "binary_sha256": "534f262ae27e45c98749c325e4ecb3939667a2a0f97b9cc5bbb48446e0996b13",
+  "binary_mtime": 1792558232,
+  "server_pid": 974570
  },
  "acceptance": {
   "api_parity": true,

@@ -3,7 +3,7 @@
 Сквозная вязка vendor-UI `/pnm/administration/{event_list,network,statistics,
 terminals,mediafiles,diagnostics,backup,reset,license,about}` с нашим
 `/api/v3` на реальном бинаре `vks-server`. Прогон на чистом дереве: HEAD
-`08486e7`, бинарник собран после HEAD (явные гейты `clean_build`,
+`aa9a1ec`, бинарник собран после HEAD (явные гейты `clean_build`,
 `binary_built_after_head` в `summary.json`).
 
 ## Как воспроизвести

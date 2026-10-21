@@ -100,10 +100,10 @@ vks/
 ├── Cargo.toml               # workspace root
 ├── Cargo.lock
 ├── rust-toolchain.toml      # фиксация версии компилятора (MSRV)
-├── .cargo/config.toml       # линковщик, target-cpu, features
+├── .cargo/config.toml       # wasm rustflags (профили — в корневом Cargo.toml)
 ├── deny.toml                # cargo-deny (лицензии, CVE)
 ├── .rustfmt.toml
-├── .github/workflows/       # CI: clippy, test, audit, build, e2e
+├── .github/workflows/       # CI: fmt, clippy, test, deny, build (e2e — вручную)
 │
 ├── crates/
 │   ├── vks-core/            # 🧠 ЧИСТАЯ ДОМЕННАЯ ЛОГИКА (no I/O)
@@ -193,9 +193,8 @@ vks/
 │   │   │   └── layout_bridge.rs # vks-layout → пиксельные Rect
 │   │   └── README.md
 │   │
-│   ├── vks-gateway/         # 🌐 ШЛЮЗЫ протоколов
-│   │   ├── sip/               # rvoip (SIP ↔ WebRTC)
-│   │   └── h323/              # FFI-обёртка над H323Plus/OPAL
+│   ├── vks-gateway-sip/     # 🌐 SIP-шлюз (rvoip, SIP ↔ WebRTC)
+│   ├── vks-gateway-h323/    # 🌐 H.323-шлюз (FFI над H323Plus/OPAL)
 │   │
 │   ├── vks-admin/           # 🖥️ ADMIN REST API (axum + utoipa)
 │   │   └── src/

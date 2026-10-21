@@ -61,8 +61,9 @@ cargo build --release -p vks-server
   error (24 известных Chart.js-ошибки vendor-бандла allowlisted, T3.3);
 - T3.1/T3.2 — мёртвый код/зависимости, единый трекер, dev/prod-конфиги.
 
-Открытый backlog P2/P3 (RS256, реальный TURN/NATS/recorder, кластер и т.п.)
-перечислен в мастер-списке и не входит в приёмку T1–T3.
+Открытый backlog P2 (RS256, реальный TURN/NATS/recorder, кластер и т.п.;
+исторический P3 — в audit-отчёте) перечислен в мастер-списке и не входит
+в приёмку T1–T3.
 
 - Workspace: Rust 2021, MSRV 1.94, 16 крейтов.
 - Тесты: `893` (`cargo test --workspace`, 0 сбоев).

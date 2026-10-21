@@ -1,15 +1,15 @@
 {
  "task": "T2.4",
  "ok": true,
- "started_at": "2026-10-21T04:02:57.664Z",
+ "started_at": "2026-10-21T04:52:33.561Z",
  "build": {
-  "git_head": "08486e7bbbf2998e4fd9a6631eb59d7a76b3524f",
-  "git_head_ct": 1792555098,
+  "git_head": "aa9a1ece41259d590f771465b8e8cf841287c49b",
+  "git_head_ct": 1792558086,
   "git_dirty": false,
-  "binary_sha256": "17a065640103adc64c888d78067b9fec1b7ee8e7db90f576a38da4bcf3b60c5f",
-  "binary_mtime": 1792555257,
-  "binary_path": "/proc/946253/exe",
-  "server_pid": 946253
+  "binary_sha256": "534f262ae27e45c98749c325e4ecb3939667a2a0f97b9cc5bbb48446e0996b13",
+  "binary_mtime": 1792558232,
+  "binary_path": "/proc/974570/exe",
+  "server_pid": 974570
  },
  "acceptance": {
   "log_events_contract": true,
@@ -53,10 +53,10 @@
  },
  "totals": {
   "engine_log": {
-   "startup": 1792555259,
-   "expectedProcessStart": 1792555259
+   "startup": 1792558233,
+   "expectedProcessStart": 1792558233
   },
-  "statistics_text": "PROSTOR\nПанель управления\nКонференции\nСправочник\nИстория\nАдминистрирование\n0\n0\n0\nnotifications\narrow_drop_down\narrow_back\nСтатистика\nИспользование памяти\n58 Gb\nshow_chart\n\n47.1\n\nСвободно (Gb)\n\n10.8\n\nИспользуется (Gb)\n\nИспользование жесткого диска\narrow_drop_down\n/run\n\n11.3\n\nСвободно (Gb)\n\n0.0\n\nИспользуется (Gb)\n\nСеть\nens18\nЗагрузка: 2710 кбит/сек\nОтдача: 66 кбит/сек\nЗарезервированные вычислительные ресурсы\nЗагрузка вычислительных потоков\nЗагрузка процессоров",
+  "statistics_text": "PROSTOR\nПанель управления\nКонференции\nСправочник\nИстория\nАдминистрирование\n0\n0\n0\nnotifications\narrow_drop_down\narrow_back\nСтатистика\nИспользование памяти\n58 Gb\nshow_chart\n\n47.0\n\nСвободно (Gb)\n\n10.8\n\nИспользуется (Gb)\n\nИспользование жесткого диска\narrow_drop_down\n/run\n\n11.3\n\nСвободно (Gb)\n\n0.0\n\nИспользуется (Gb)\n\nСеть\nens18\nЗагрузка: 0 кбит/сек\nОтдача: 0 кбит/сек\nЗарезервированные вычислительные ресурсы\nЗагрузка вычислительных потоков\nЗагрузка процессоров",
   "ui_pages_seen": [
    {
     "slug": "statistics",
@@ -148,5 +148,5 @@
   "Invalid scale configuration for scale: xAxes"
  ],
  "http_errors": [],
- "finished_at": "2026-10-21T04:03:56.583Z"
+ "finished_at": "2026-10-21T04:53:32.776Z"
 }
