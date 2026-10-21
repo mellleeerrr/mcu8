@@ -111,6 +111,12 @@ async fn network_interfaces_are_real_and_read_only() {
     let refused =
         send(&app, auth_request("PATCH", &format!("/api/v3/system/network/interfaces/{interface}"), &token)).await;
     assert_eq!(refused.status(), StatusCode::NOT_IMPLEMENTED);
+    // Vendor-UI сохраняет интерфейс по короткому пути — он тоже должен
+    // отвечать понятным 501, а не catch-all «Not implemented».
+    let vendor_alias = send(&app, auth_request("PATCH", &format!("/api/v3/system/network/{interface}"), &token)).await;
+    assert_eq!(vendor_alias.status(), StatusCode::NOT_IMPLEMENTED);
+    let alias_body = json_body(vendor_alias).await;
+    assert!(alias_body["error"]["description"].as_str().unwrap().contains("Network interface"));
     let unknown = send(&app, auth_request("GET", "/api/v3/system/network/interfaces/eth404", &token)).await;
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
 }

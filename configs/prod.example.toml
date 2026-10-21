@@ -13,8 +13,9 @@ server_name = "vks-mcu-prod"
 listen_addr = "0.0.0.0:8080"
 media_listen_addr = "0.0.0.0:40000"
 
-# Публичный IP/DNS, который анонсируется в SDP (обязателен за NAT).
-candidate_addr = "mcu.example.com"
+# Публичный IPv4, который анонсируется в SDP (обязателен за NAT).
+# ВАЖНО: принимается только IP-адрес (DNS-имя сервер отвергает).
+candidate_addr = "203.0.113.10"
 
 # Аутентификация: JWT-секрет только из env, минимум 32 случайных байта:
 #   VKS_JWT_SECRET="$(openssl rand -base64 48)"

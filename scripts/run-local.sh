@@ -114,5 +114,6 @@ case "${1:-restart}" in
     start) stop; start ;;
     restart) stop; build; start ;;
     status) status ;;
-    *) echo "usage: $0 {restart|start|build|stop|status}" >&2; exit 2 ;;
+    logs) tail -n 200 "$LOG" ;;
+    *) echo "usage: $0 {restart|start|build|stop|status|logs}" >&2; exit 2 ;;
 esac

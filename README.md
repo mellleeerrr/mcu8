@@ -32,7 +32,8 @@ cargo build --release -p vks-server
    export VKS_DATABASE_URL='postgres://vks:<пароль>@db.internal:5432/vks'
    VKS_CONFIG_PATH=/etc/vks/server.toml ./target/release/vks-server
    ```
-3. `candidate_addr` должен быть публичным IP/DNS (SDP за NAT), БД —
+3. `candidate_addr` должен быть публичным **IPv4** (SDP за NAT; DNS-имя не
+   принимается), БД —
    PostgreSQL; TLS/reverse-proxy и ограничение доступа к `/pnm/` — на уровне
    инфраструктуры.
 4. Перед выкладкой: `cargo fmt --all --check`, `cargo clippy --workspace
@@ -52,10 +53,15 @@ cargo build --release -p vks-server
 
 ## Состояние
 
-Функциональные задачи M3/M4 и T2.1–T2.4 закрыты и подтверждены evidence;
-T3.1 (мёртвый код/зависимости) закрыт. Остаются T3.2 (доки/конфиг/git),
-T3.3 (финальный обход/паритет) и финальная приёмка реального SIP/H.323-вызова
-с `192.168.1.132` — статус в мастер-списке.
+Задачи M3/M4 и T1.1–T3.3 закрыты и подтверждены evidence:
+- живой SIP **и** H.323 до `192.168.1.132` из веб-UI (CONNECTED, рост
+  аудио/видео-счётчиков, mute/unmute, ручная раскладка + reload, kick);
+- `smoke_v3.sh` — 24/31/31 проверки;
+- 23 страницы PNM и 18 API-контрактов без 4xx/console error (T3.3);
+- T3.1/T3.2 — мёртвый код/зависимости, единый трекер, dev/prod-конфиги.
+
+Открытый backlog P2/P3 (RS256, реальный TURN/NATS/recorder, кластер и т.п.)
+перечислен в мастер-списке и не входит в приёмку T1–T3.
 
 - Workspace: Rust 2021, MSRV 1.94, 16 крейтов.
 - Тесты: `892` (`cargo test --workspace`, 0 сбоев).

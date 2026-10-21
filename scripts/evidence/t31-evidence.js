@@ -67,7 +67,10 @@ const summary = { task: 'T3.1', ok: false, started_at: new Date().toISOString(),
     const h323Toml = fs.readFileSync('crates/vks-gateway-h323/Cargo.toml', 'utf8');
     summary.acceptance.unused_deps_removed =
       !/^vks-layout\s*=/m.test(serverToml) && !/^vks-core\s*=/m.test(sipToml) && !/^vks-core\s*=/m.test(h323Toml);
-    summary.acceptance.no_dead_records_handler = !fs.readFileSync('crates/vks-admin/src/api_v3/shell.rs', 'utf8').includes('ui_records');
+    // Ищем и обработчик, и регистрацию legacy-роутов по всему src (не только shell.rs).
+    const deadReferences = sh('grep -rn "ui_records\|api/v3/records\|api/v3/ui/records" crates/vks-admin/src || true');
+    summary.acceptance.no_dead_records_handler = deadReferences.trim() === '';
+    summary.totals.dead_references = deadReferences.trim();
 
     // Контракт video_layouts/mode: известный дефект закрыт интеграционным тестом.
     const integration = run('cargo test -p vks-server --test network_integration test_package_d_mcu_pipeline_handover_and_pnm_control_events 2>&1');

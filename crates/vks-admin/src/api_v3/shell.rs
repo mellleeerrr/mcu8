@@ -264,7 +264,7 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
 /// `editable:true` обязателен: vendor-бандл рисует список интерфейсов только
 /// для редактируемого менеджера (`ManagerContent`), при `false` показывает
 /// «Список пуст». Сохранение сети при этом честно не поддерживается —
-/// `PATCH /api/v3/system/network/{interface}` отвечает 501.
+/// `PATCH /api/v3/system/network/interfaces/{interface}` отвечает 501.
 pub async fn status_network(State(_state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
     track("system/status/network");
     if let Some(response) = super::settings_admin::forbid(&auth) {

@@ -137,6 +137,11 @@ pub fn router(state: SharedState) -> Router {
             "/api/v3/system/network/interfaces/{interface}",
             get(observability::network_interface_get).patch(observability::network_interface_patch),
         )
+        // Vendor-UI 2.2.1.66 для сохранения интерфейса ходит по короткому пути.
+        .route(
+            "/api/v3/system/network/{interface}",
+            get(observability::network_interface_get).patch(observability::network_interface_patch),
+        )
         .route("/api/v3/system/stats/memory", get(observability::stats_memory))
         .route("/api/v3/system/stats/cpu", get(observability::stats_cpu))
         .route("/api/v3/system/stats/disk", get(observability::stats_disk))

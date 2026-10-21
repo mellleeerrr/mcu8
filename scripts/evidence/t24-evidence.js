@@ -56,6 +56,19 @@ for (const pid of sh('pgrep -f "target/release/vks-server"').split('\n').filter(
   } catch { /* следующий процесс */ }
 }
 
+function processStartUnix(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(/\s+/);
+    const startTicks = Number(rest[19]);
+    const btime = Number(
+      fs.readFileSync('/proc/stat', 'utf8').split('\n').find((line) => line.startsWith('btime ')).split(/\s+/)[1],
+    );
+    return btime + Math.floor(startTicks / 100);
+  } catch { return null; }
+}
+const expectedProcessStart = build.server_pid ? processStartUnix(build.server_pid) : null;
+
 const stamp = String(Date.now()).slice(-6);
 const steps = [];
 const screenshots = [];
@@ -307,8 +320,12 @@ const isVendorError = (text) =>
         network.json.interfaces.every((item) => item.name && item.rx >= 0 && item.tx >= 0 &&
           item.rx < 100000000 && item.tx < 100000000);
       summary.acceptance.system_packages = packages.status === 200 && Array.isArray(packages.json.packages);
-      summary.acceptance.engine_log =
-        log.status === 200 && typeof log.json.language === 'string' && log.json.bounds && Array.isArray(log.json.log);
+      const startup = log.json && log.json.log && log.json.log[0] && log.json.log[0].timestamp;
+      summary.acceptance.engine_log = Boolean(
+        log.status === 200 && typeof log.json.language === 'string' && log.json.bounds && Array.isArray(log.json.log) &&
+        expectedProcessStart && Math.abs(startup - expectedProcessStart) <= 2,
+      );
+      summary.totals.engine_log = { startup, expectedProcessStart };
       fs.writeFileSync(path.join(OUT, 'stats.json'), JSON.stringify({ memory: memory.json, cpu: cpu.json, disk: disk.json, network: network.json }, null, 1) + '\n');
       fs.writeFileSync(path.join(OUT, 'engine_log.json'), JSON.stringify(log.json, null, 1) + '\n');
     });
@@ -410,6 +427,26 @@ const isVendorError = (text) =>
       summary.totals.network_tab =
         { tabFound, statusSeen: networkStatusSeen, interfacesSeen: networkInterfacesSeen, cards, rendered };
       await shot('03b-network-interfaces.png');
+      // PATCH сети не применяется, но оператор должен это УВИДЕТЬ: дергаем
+      // тот же путь, что шлёт UI, и проверяем тост api-errors.js.
+      const patchStatus = await page.evaluate(
+        (authToken) => new Promise((resolve) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('PATCH', '/api/v3/system/network/ens18');
+          xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
+          xhr.setRequestHeader('Content-Type', 'application/json');
+          xhr.onload = () => resolve(xhr.status);
+          xhr.onerror = () => resolve(0);
+          xhr.send('{}');
+        }),
+        token,
+      );
+      await page.waitForTimeout(700);
+      const toast = await page.locator('.vks-api-error-toast').last().innerText().catch(() => '');
+      summary.acceptance.network_patch_error_visible =
+        patchStatus === 501 && /not applied|Не удалось применить/i.test(toast);
+      summary.totals.network_save = { patchStatus, toast };
+      await shot('03c-network-save-error.png');
       await page.goto(`${BASE}/pnm/administration/terminals`, { waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(3000);
       await shot('04-terminals.png');

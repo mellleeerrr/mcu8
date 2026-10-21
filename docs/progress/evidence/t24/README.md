@@ -22,8 +22,8 @@ node scripts/evidence/t24-evidence.js
 
 ## Результат
 
-**ok=true, 36/36** acceptance-гейтов, 10 шагов, 5 PNG, 0 HTTP ≥ 400,
-0 console error. `vendor_errors=12` — известный баг Chart.js 2.x в
+**ok=true, 36/36** acceptance-гейтов, 10 шагов, 5 PNG, 0 HTTP ≥ 400 на страницах UI (API-негативы 422/501/503 проверяются
+намеренно), 0 console error. `vendor_errors=12` — известный баг Chart.js 2.x в
 vendor-бандле статистики (`Invalid scale configuration for scale:
 yAxes/xAxes/responsive/maintainAspectRatio`); он явно allowlisted и не скрывает
 наши ошибки.
@@ -41,11 +41,11 @@ yAxes/xAxes/responsive/maintainAspectRatio`); он явно allowlisted и не 
 | `ui_license_not_expired` | страница лицензии не показывает «01.01.1970» и «Продлить лицензию» |
 | `license_permanent_shape` | `PERMANENT`, будущий `last_expired`, `last_update_failed:false`, `serial_id`, `params.{audio,video,protocol,server,storage}` |
 | `features_array` | `/features` — объект `{features:[...]}` с массивом > 40 элементов (vendor-UI читает `data.features`) |
-| `status_network_shape` | `{network:{editable:true}}` — без этого vendor-бандл рисует «Список пуст»; сохранение сети всё равно честно 501 (нет CAP_NET_ADMIN) |
+| `status_network_shape` | `{network:{editable:true}}` — без этого vendor-бандл рисует «Список пуст»; сохранение сети отвечает 501, а `api-errors.js` показывает эту ошибку оператору |
 | `session_videorecords_alias` | `/sessions/{id}/videorecords[/estimated_time]` → 200 (раньше catch-all 501) |
 | `utils_traceroute_honest` | traceroute не установлен → честный **503** «not installed», а не 200 с OS-ошибкой |
 | `utils_ping_rejects_option` | `address=-V` → 422: опции не уходят в процесс |
-| `engine_log` | стартовая запись использует реальное время старта процесса (`btime + starttime/HZ`) и стабильна между запросами |
+| `engine_log` | стартовая запись совпадает с реальным стартом процесса (`/proc/<pid>/stat starttime + /proc/stat btime`, HZ=100) и стабильна между запросами |
 
 Остальные гейты — контракты list/detail/patch-501, ping/tcpdump/терминалы/
 видеозаписи, memory/cpu/packages, 10 страниц без 4xx и vendor Chart.js
@@ -85,7 +85,9 @@ warnings.
   backup) не выполняются: нет привилегий, UI получает 501 с описанием.
 - `/system/status/network` отдаёт `editable:true` только чтобы vendor-UI
   отрисовал список интерфейсов; сохранение сети не поддерживается (нет
-  CAP_NET_ADMIN) — `PATCH /api/v3/system/network/{interface}` честно 501.
+  CAP_NET_ADMIN) — `PATCH /api/v3/system/network/{interface}` (и vendor-алиас `/interfaces/{interface}`) честно 501, а глобальный
+  `api-errors.js` показывает красный тост с `error.description` (иначе
+  vendor-UI закрывал модалку молча).
 - `traceroute` на этом хосте не установлен → 503; `ping` работает.
 - `engine/log` — одна запись с реальным временем старта процесса, не полный
   журнал демона.

@@ -141,10 +141,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
     // ---- обход страниц ----
     const pages = [
-      ['root', '/pnm/', ['Панель управления']],
-      ['conferences', '/pnm/conferences', ['Конференции']],
-      ['directory', '/pnm/addresses', ['Справочник']],
-      ['history', '/pnm/history', ['История']],
+      ['sessions', '/pnm/monitoring/sessions', ['Неактивные конференции']],
+      ['addressbook', '/pnm/addressbook/users', ['Пользователи']],
+      ['history', '/pnm/history', ['Время начала']],
       ['statistics', '/pnm/administration/statistics', ['Статистика', 'Использование памяти']],
       ['mediafiles', '/pnm/administration/mediafiles', ['Медиафайлы']],
       ['power', '/pnm/administration/power', ['Питание']],
@@ -152,7 +151,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       ['terminals', '/pnm/administration/terminals', ['Терминалы']],
       ['conference_settings', '/pnm/administration/conference_settings', ['Настройки конференции']],
       ['calls', '/pnm/administration/calls', ['Вызовы']],
-      ['network', '/pnm/administration/network', ['Сеть']],
+      ['network', '/pnm/administration/network', ['Сетевые интерфейсы']],
       ['video', '/pnm/administration/video', ['Видео']],
       ['calibration', '/pnm/administration/calibration', ['Статистика']],
       ['backup', '/pnm/administration/backup', ['Импорт/Экспорт']],
@@ -174,15 +173,24 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const text = await page.locator('body').innerText();
       const missing = labels.filter((label) => !text.includes(label));
       const record = {
-        slug, url, missing,
+        slug, url, finalUrl: page.url(), missing,
         http: httpErrors.slice(beforeHttp),
         console: consoleErrors.slice(beforeConsole),
       };
+      if (slug === 'calibration' && !page.url().endsWith('/administration/statistics')) {
+        record.missing = [...record.missing, 'redirect to statistics'];
+      }
+      if (slug === 'addressbook' && !page.url().includes('/addressbook/users')) {
+        record.missing = [...record.missing, 'addressbook route'];
+      }
+      if (slug === 'sessions' && !page.url().includes('/monitoring/sessions')) {
+        record.missing = [...record.missing, 'sessions route'];
+      }
       if (missing.length || record.http.length || record.console.length) {
         summary.acceptance.page_walk = false;
         summary.acceptance[`page_problem:${slug}`] = record;
       }
-      if (['root', 'conferences', 'directory', 'history', 'statistics', 'calls'].includes(slug)) {
+      if (['sessions', 'addressbook', 'history', 'statistics', 'calls', 'network', 'license'].includes(slug)) {
         await shot(`${String(summary.pages.length + 1).padStart(2, '0')}-${slug}.png`);
       }
     }

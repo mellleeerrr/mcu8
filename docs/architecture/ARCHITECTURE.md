@@ -199,14 +199,12 @@ vks/
 │   │
 │   ├── vks-admin/           # 🖥️ ADMIN REST API (axum + utoipa)
 │   │   └── src/
-│   │       ├── server.rs      # axum app, /metrics, /openapi.json
-│   │       ├── rooms.rs
-│   │       ├── users.rs
-│   │       ├── layouts.rs
-│   │       ├── settings.rs    # имя сервера, IP, БД, LDAP
-│   │       ├── mode.rs        # переключение MCU/SFU
-│   │       ├── records.rs     # записи
-│   │       └── audit.rs       # аудит-лог
+│   │       ├── lib.rs          # axum app, /metrics, /openapi.json
+│   │       ├── handlers.rs     # shell/legacy-роуты
+│   │       ├── api_v3/         # /api/v3 (auth, conferences, settings, history,
+│   │       │                   #          observability, call_strings, video_layouts)
+│   │       ├── rooms.rs / users.rs / settings.rs / mode.rs / audit.rs
+│   │       ├── auth_middleware.rs / state.rs / hub.rs
 │   │
 │   ├── vks-recorder/        # 🎞️ ЗАПИСЬ конференций
 │   │   └── src/

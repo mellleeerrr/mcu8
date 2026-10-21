@@ -2,7 +2,7 @@
 # Фаза 6 (DEVELOPMENT_PLAN.md): H.323 → WebRTC bridge (participant = gateway),
 # H.263/H.264 → VP8/VP9, G.711/G.729 → Opus, FFI-граница (panic hook, watchdog).
 #
-# Дерево зависимостей: vks-core, vks-common (ARCHITECTURE §3).
+# Дерево зависимостей: vks-common (ARCHITECTURE §3); vks-core напрямую не нужен.
 #
 # H323Plus — тяжёлая C++/FFI-зависимость. В этой волне — MOCK FFI-граница
 # (детерминированная, без реальных потоков: tick-счётчик); реальная FFI-
