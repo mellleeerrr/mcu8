@@ -348,6 +348,47 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
     },
 ];
 
+/// Параметры видео-секции оффера из единого профиля шлюза.
+///
+/// `max-fs` — макроблоки 16×16, `max-mbps` — макроблоки/с, `max-br` — кбит/с.
+/// Это не косметика: терминал верит fmtp и режет поток выше лимитов.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoSdpProfile {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+    pub profile_level_id: String,
+}
+
+impl Default for VideoSdpProfile {
+    fn default() -> Self {
+        Self { width: 1280, height: 720, fps: 30, bitrate_kbps: 2048, profile_level_id: "42c01f".into() }
+    }
+}
+
+impl VideoSdpProfile {
+    pub fn max_fs(&self) -> u32 {
+        self.width.div_ceil(16).max(1) * self.height.div_ceil(16).max(1)
+    }
+    pub fn max_mbps(&self) -> u32 {
+        self.max_fs().saturating_mul(self.fps.max(1))
+    }
+    fn high_profile_level_id(&self) -> String {
+        let suffix = self.profile_level_id.get(4..).unwrap_or("1f");
+        format!("6400{suffix}")
+    }
+    fn fmtp(&self, high: bool) -> String {
+        let id = if high { self.high_profile_level_id() } else { self.profile_level_id.clone() };
+        format!(
+            "packetization-mode=1;profile-level-id={id};max-mbps={};max-fs={};max-br={}",
+            self.max_mbps(),
+            self.max_fs(),
+            self.bitrate_kbps
+        )
+    }
+}
+
 /// Video codecs advertised in the outbound offer, in `m=video` order.
 ///
 /// H.264 baseline goes first (the only natively bridged video codec, and the
@@ -406,6 +447,18 @@ fn push_codec_attrs(sdp: &mut String, codecs: &[&OfferCodec]) {
     }
 }
 
+fn push_video_attrs(sdp: &mut String, codecs: &[&OfferCodec], video: &VideoSdpProfile) {
+    for codec in codecs.iter().copied() {
+        sdp.push_str(&format!("a=rtpmap:{} {}/{}\r\n", codec.payload, codec.name, codec.clock));
+        if codec.name == "H264" {
+            let high = codec.payload == 98;
+            sdp.push_str(&format!("a=fmtp:{} {}\r\n", codec.payload, video.fmtp(high)));
+        } else if let Some(fmtp) = codec.fmtp {
+            sdp.push_str(&format!("a=fmtp:{} {fmtp}\r\n", codec.payload));
+        }
+    }
+}
+
 fn payload_list(codecs: &[&OfferCodec]) -> String {
     codecs.iter().map(|codec| codec.payload.to_string()).collect::<Vec<_>>().join(" ")
 }
@@ -452,6 +505,19 @@ impl CodecProfile {
 /// Builds the offer for an explicit profile (tests and callers that must not
 /// depend on the environment).
 pub fn build_offer(profile: CodecProfile, local_ip: &str, audio_port: u16, video_port: Option<u16>) -> String {
+    build_offer_with_video(profile, &VideoSdpProfile::default(), local_ip, audio_port, video_port)
+}
+
+/// Строит оффер с видео-лимитами из единого профиля шлюза: `b=AS`,
+/// `max-fs/max-mbps/max-br`, `profile-level-id` соответствуют реальному
+/// энкодеру, а не зашитым 640×360.
+pub fn build_offer_with_video(
+    profile: CodecProfile,
+    video_profile: &VideoSdpProfile,
+    local_ip: &str,
+    audio_port: u16,
+    video_port: Option<u16>,
+) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let audio = profile.audio();
     let video = profile.video();
@@ -471,7 +537,8 @@ m=audio {audio_port} RTP/AVP {}\r\n",
     if let Some(vport) = video_port {
         if !video.is_empty() {
             sdp.push_str(&format!("m=video {vport} RTP/AVP {}\r\n", payload_list(&video)));
-            push_codec_attrs(&mut sdp, &video);
+            sdp.push_str(&format!("b=AS:{}\r\n", video_profile.bitrate_kbps));
+            push_video_attrs(&mut sdp, &video, video_profile);
             sdp.push_str(&format!("a=sendrecv\r\na=rtcp:{}\r\n", vport + 1));
         }
     }
@@ -483,6 +550,59 @@ m=audio {audio_port} RTP/AVP {}\r\n",
 /// окружения (`VKS_SDP_CODEC_MATRIX`, по умолчанию `native`).
 pub fn build_plain_sdp(local_ip: &str, audio_port: u16, video_port: Option<u16>) -> String {
     build_offer(CodecProfile::from_env(), local_ip, audio_port, video_port)
+}
+
+/// То же, но с профилем видео из настроек комнаты/гейтвея.
+pub fn build_plain_sdp_with_video(
+    video_profile: &VideoSdpProfile,
+    local_ip: &str,
+    audio_port: u16,
+    video_port: Option<u16>,
+) -> String {
+    build_offer_with_video(CodecProfile::from_env(), video_profile, local_ip, audio_port, video_port)
+}
+
+/// Лимиты видео, которые терминал объявил в answer. Если поле отсутствует,
+/// используется наш профиль; если присутствует — исходящий поток обязан быть
+/// не выше него.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VideoAnswerLimits {
+    pub max_fs: Option<u32>,
+    pub max_br: Option<u32>,
+    pub max_mbps: Option<u32>,
+    /// `b=AS` видео-секции answer (кбит/с), если терминал его прислал.
+    pub b_as: Option<u32>,
+}
+
+/// Читает `max-fs/max-br/max-mbps` из видео-секции answer. `payload_type`
+/// выбирает конкретный fmtp (терминал может прислать несколько H.264).
+#[must_use]
+pub fn video_answer_limits(answer: &str, payload_type: Option<u8>) -> VideoAnswerLimits {
+    let Some(parsed) = parse_sdp(answer) else { return VideoAnswerLimits::default() };
+    let Some(video) = parsed.media.iter().find(|media| media.kind == "video") else {
+        return VideoAnswerLimits::default();
+    };
+    let payload = payload_type
+        .filter(|payload| video.maps.contains_key(payload))
+        .or_else(|| {
+            // HashMap не даёт порядка: без явного PT берём H.264 с
+            // минимальным payload type, иначе CI-флейк между 97/98.
+            video
+                .maps
+                .iter()
+                .filter(|(_, entry)| entry.name.eq_ignore_ascii_case("H264"))
+                .map(|(payload, _)| *payload)
+                .min()
+        })
+        .or_else(|| video.maps.keys().next().copied());
+    let b_as = video.b_as;
+    let Some(payload) = payload else { return VideoAnswerLimits { b_as, ..VideoAnswerLimits::default() } };
+    let Some(fmtp) = video.fmtp.get(&payload) else {
+        return VideoAnswerLimits { b_as, ..VideoAnswerLimits::default() };
+    };
+    let number =
+        |key: &str| fmtp.get(key).and_then(|value| value.trim().parse::<u32>().ok()).filter(|value| *value > 0);
+    VideoAnswerLimits { max_fs: number("max-fs"), max_br: number("max-br"), max_mbps: number("max-mbps"), b_as }
 }
 
 /// Извлекает IP и медиа-порты (audio, video) из SDP answer удаленного терминала.
@@ -615,9 +735,10 @@ m=video 5006 RTP/AVP 96\r\n";
         for line in [
             "m=video 41002 RTP/AVP 97 98 99 31 34 96",
             "a=rtpmap:97 H264/90000",
-            "a=fmtp:97 packetization-mode=1;profile-level-id=42801e;max-mbps=13800;max-fs=920;max-br=256",
+            "b=AS:2048",
+            "a=fmtp:97 packetization-mode=1;profile-level-id=42c01f;max-mbps=108000;max-fs=3600;max-br=2048",
             "a=rtpmap:98 H264/90000",
-            "a=fmtp:98 packetization-mode=1;profile-level-id=64001f;max-mbps=13800;max-fs=920;max-br=256",
+            "a=fmtp:98 packetization-mode=1;profile-level-id=64001f;max-mbps=108000;max-fs=3600;max-br=2048",
             "a=rtpmap:99 H265/90000",
             "a=fmtp:99 profile-id=1",
             "a=rtpmap:31 H261/90000",
@@ -627,6 +748,51 @@ m=video 5006 RTP/AVP 96\r\n";
         ] {
             assert!(sdp.contains(line), "offer misses `{line}`:\n{sdp}");
         }
+    }
+
+    #[test]
+    fn offer_video_limits_follow_effective_profile() {
+        let low =
+            VideoSdpProfile { width: 640, height: 360, fps: 15, bitrate_kbps: 512, profile_level_id: "42c01e".into() };
+        let high = VideoSdpProfile {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 4096,
+            profile_level_id: "42c028".into(),
+        };
+        let low_sdp = build_offer_with_video(CodecProfile::Native, &low, "192.168.1.93", 41000, Some(41002));
+        assert!(low_sdp.contains("b=AS:512"), "{low_sdp}");
+        assert!(low_sdp.contains("max-fs=920;max-br=512"), "{low_sdp}");
+        assert!(low_sdp.contains("max-mbps=13800"), "{low_sdp}");
+        assert!(low_sdp.contains("profile-level-id=42c01e"), "{low_sdp}");
+        let high_sdp = build_offer_with_video(CodecProfile::Native, &high, "192.168.1.93", 41000, Some(41002));
+        assert!(high_sdp.contains("b=AS:4096"), "{high_sdp}");
+        assert!(high_sdp.contains("max-fs=8160;max-br=4096"), "{high_sdp}");
+        assert!(high_sdp.contains("max-mbps=244800"), "{high_sdp}");
+        assert!(high_sdp.contains("profile-level-id=42c028"), "{high_sdp}");
+        let parsed = parse_sdp(&high_sdp).expect("dynamic offer must parse");
+        let video = parsed.media.iter().find(|media| media.kind == "video").expect("video section");
+        assert_eq!(video.b_as, Some(4096));
+    }
+
+    #[test]
+    fn answer_limits_read_h264_fmtp_and_b_as_deterministically() {
+        let answer = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\n\
+c=IN IP4 192.168.1.132\r\nt=0 0\r\n\
+m=audio 5000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+m=video 5002 RTP/AVP 98 97 99\r\nb=AS:3000\r\n\
+a=rtpmap:98 H264/90000\r\na=fmtp:98 profile-level-id=64001f;max-fs=8160;max-br=4096\r\n\
+a=rtpmap:97 H264/90000\r\na=fmtp:97 profile-level-id=42c01f;max-fs=920;max-br=1024;max-mbps=13800\r\n\
+a=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1\r\n";
+        let limits = video_answer_limits(answer, Some(97));
+        assert_eq!(limits.max_fs, Some(920));
+        assert_eq!(limits.max_br, Some(1024));
+        assert_eq!(limits.max_mbps, Some(13800));
+        assert_eq!(limits.b_as, Some(3000));
+        // Без явного PT выбираем H.264, а не H.265: порядок maps не задаёт протокол.
+        let fallback = video_answer_limits(answer, None);
+        assert_eq!(fallback.max_fs, Some(920), "без PT выбираем H.264 с минимальным payload type (97)");
     }
 
     #[test]
@@ -734,6 +900,7 @@ struct SdpMedia {
     payloads: Vec<u8>,
     maps: std::collections::HashMap<u8, RtpMapEntry>,
     fmtp: std::collections::HashMap<u8, std::collections::HashMap<String, String>>,
+    b_as: Option<u32>,
 }
 
 struct SdpDescription {
@@ -762,6 +929,10 @@ fn parse_sdp(sdp: &str) -> Option<SdpDescription> {
                 payloads,
                 ..SdpMedia::default()
             });
+        } else if let Some(value) = line.strip_prefix("b=AS:") {
+            if let Some(media) = description.media.last_mut() {
+                media.b_as = value.trim().parse::<u32>().ok();
+            }
         } else if let Some(value) = line.strip_prefix("c=IN IP4 ") {
             if let Some(ip) = value.split('/').next().map(str::trim) {
                 // 0.0.0.0 (hold) and multicast addresses are not media endpoints;

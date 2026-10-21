@@ -42,10 +42,14 @@ impl VideoProfile {
                 profile.profile = value.trim().to_string();
             }
         }
-        profile.width = (profile.width.clamp(160, 3840) / 2) * 2;
-        profile.height = (profile.height.clamp(120, 2160) / 2) * 2;
+        profile.width = (profile.width.clamp(160, 1920) / 2) * 2;
+        profile.height = (profile.height.clamp(120, 1080) / 2) * 2;
         profile.fps = profile.fps.clamp(1, 60);
-        profile.bitrate_kbps = profile.bitrate_kbps.clamp(64, 20_000);
+        profile.bitrate_kbps = profile.bitrate_kbps.clamp(64, 8192);
+        if profile.profile != "baseline" {
+            tracing::warn!(profile = %profile.profile, "gateway video profile is baseline-only until T05b; ignoring env");
+            profile.profile = "baseline".into();
+        }
         profile.level = std::env::var("VKS_GATEWAY_VIDEO_LEVEL")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -56,6 +60,60 @@ impl VideoProfile {
     fn frame_bytes(&self) -> usize {
         self.width as usize * self.height as usize * 3 / 2
     }
+
+    /// Макроблоки 16×16 для H.264 `max-fs` (RFC 6184).
+    pub(super) fn max_fs(&self) -> u32 {
+        self.width.div_ceil(16).max(1) * self.height.div_ceil(16).max(1)
+    }
+
+    pub(super) fn max_mbps(&self) -> u32 {
+        self.max_fs().saturating_mul(self.fps.max(1))
+    }
+
+    /// `profile-level-id` для Baseline: `42c0` + level_idc. Именно такие
+    /// constraint-флаги (`constraint_set0/1`) выдаёт x264 в SPS при
+    /// `-profile:v baseline`; `42e0…` был рассинхроном SDP и реального SPS.
+    pub(super) fn profile_level_id(&self) -> String {
+        let idc = level_idc(&self.level);
+        format!("42c0{idc:02x}")
+    }
+
+    /// Клампит исходящий профиль по лимитам answer'а терминала. Терминал
+    /// может принять видео, но с меньшими `max-fs/max-br/max-mbps`, чем наш
+    /// оффер; кодировать выше них нельзя — пакеты будут отброшены.
+    pub(super) fn clamp_to_answer(&mut self, max_fs: Option<u32>, max_br: Option<u32>, max_mbps: Option<u32>) {
+        if let Some(max_fs) = max_fs.filter(|value| *value > 0) {
+            if self.max_fs() > max_fs {
+                // Стандартная лестница 16:9: терминалы ожидают один из этих
+                // размеров, а не произвольное деление пополам (480×270).
+                const LADDER: &[(u32, u32)] =
+                    &[(1920, 1080), (1280, 720), (960, 540), (640, 360), (480, 270), (320, 180)];
+                let (width, height) = LADDER
+                    .iter()
+                    .copied()
+                    .find(|(width, height)| macroblocks(*width, *height) <= max_fs)
+                    .unwrap_or((320, 180));
+                self.width = width;
+                self.height = height;
+            }
+        }
+        if let Some(max_br) = max_br.filter(|value| *value > 0) {
+            self.bitrate_kbps = self.bitrate_kbps.min(max_br);
+        }
+        if let Some(max_mbps) = max_mbps.filter(|value| *value > 0) {
+            let fps = max_mbps / self.max_fs().max(1);
+            self.fps = self.fps.min(fps).max(1);
+        }
+        self.level = h264_level(self.width, self.height, self.fps).to_string();
+    }
+}
+
+/// `level_idc` из строки уровня (`3.1` → 31, `4.0` → 40).
+fn level_idc(level: &str) -> u8 {
+    let mut parts = level.split('.');
+    let major = parts.next().and_then(|value| value.parse::<u8>().ok()).unwrap_or(3);
+    let minor = parts.next().and_then(|value| value.parse::<u8>().ok()).unwrap_or(1);
+    major.saturating_mul(10).saturating_add(minor)
 }
 
 fn env_u32(key: &str) -> Option<u32> {
@@ -64,6 +122,10 @@ fn env_u32(key: &str) -> Option<u32> {
 
 /// Минимальный H.264 level, покрывающий `width×height@fps` (уровень нужен
 /// peer'у для декодера; занижать его нельзя).
+fn macroblocks(width: u32, height: u32) -> u32 {
+    width.div_ceil(16).max(1) * height.div_ceil(16).max(1)
+}
+
 fn h264_level(width: u32, height: u32, fps: u32) -> &'static str {
     let pixels_per_second = u64::from(width) * u64::from(height) * u64::from(fps);
     if width <= 1280 && height <= 720 && pixels_per_second <= 1280 * 720 * 30 {
@@ -352,7 +414,10 @@ pub(super) async fn spawn_video_media_bridge(
     let render_stats = session.stats.clone();
     let render_profile = session.profile.clone();
     let render = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_micros(66_667));
+        // fps из профиля, а не жёсткие 15 fps: иначе SPS/поле обещают 30,
+        // а в эфир уходит 15 кадров/с.
+        let frame_interval = frame_interval(&render_profile);
+        let mut interval = tokio::time::interval(frame_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while !render_cancelled.load(Relaxed) {
             interval.tick().await;
@@ -678,6 +743,69 @@ impl H264Depacketizer {
     }
 }
 
+/// Применяет настройки к профилю: global `max_frame_rate`, затем payload
+/// комнаты (`bitrate`, `resolution.width/height/fps_limit`) — комната
+/// приоритетнее. Вынесено из `GatewayManager`, чтобы проверять без AppState.
+pub(super) fn apply_video_settings(
+    profile: &mut VideoProfile,
+    global: &serde_json::Value,
+    conference: Option<&serde_json::Value>,
+) {
+    if let Some(fps) = global.get("max_frame_rate").and_then(serde_json::Value::as_u64) {
+        profile.fps = u32::try_from(fps.clamp(1, 60)).unwrap_or(profile.fps);
+    }
+    if let Some(value) = conference {
+        let payload = value.get("payload").unwrap_or(value);
+        if let Some(bitrate) = payload.get("bitrate").and_then(serde_json::Value::as_u64) {
+            profile.bitrate_kbps = u32::try_from(bitrate.clamp(64, 8192)).unwrap_or(profile.bitrate_kbps);
+        }
+        if let Some(resolution) = payload.get("resolution") {
+            if let Some(width) = resolution.get("width").and_then(serde_json::Value::as_u64) {
+                profile.width = u32::try_from(width.clamp(16, 1920)).unwrap_or(profile.width);
+            }
+            if let Some(height) = resolution.get("height").and_then(serde_json::Value::as_u64) {
+                profile.height = u32::try_from(height.clamp(16, 1080)).unwrap_or(profile.height);
+            }
+            if let Some(fps) = resolution.get("fps_limit").and_then(serde_json::Value::as_u64) {
+                profile.fps = u32::try_from(fps.clamp(1, 60)).unwrap_or(profile.fps);
+            }
+        }
+    }
+    normalize_profile(profile);
+}
+
+/// Профиль конкретного адреса (`call_string.sip/h323`) — высший приоритет:
+/// оператор задал его для этого терминала, а не для всей комнаты.
+pub(super) fn apply_call_string_settings(profile: &mut VideoProfile, value: &serde_json::Value) {
+    let payload = value.get("payload").unwrap_or(value);
+    if let Some(bitrate) = payload.get("bitrate").and_then(serde_json::Value::as_u64) {
+        profile.bitrate_kbps = u32::try_from(bitrate.clamp(64, 8192)).unwrap_or(profile.bitrate_kbps);
+    }
+    if let Some(resolution) = payload.get("resolution") {
+        if let Some(width) = resolution.get("width").and_then(serde_json::Value::as_u64) {
+            profile.width = u32::try_from(width.clamp(16, 1920)).unwrap_or(profile.width);
+        }
+        if let Some(height) = resolution.get("height").and_then(serde_json::Value::as_u64) {
+            profile.height = u32::try_from(height.clamp(16, 1080)).unwrap_or(profile.height);
+        }
+        if let Some(fps) = resolution.get("fps_limit").and_then(serde_json::Value::as_u64) {
+            profile.fps = u32::try_from(fps.clamp(1, 60)).unwrap_or(profile.fps);
+        }
+    }
+    normalize_profile(profile);
+}
+
+fn normalize_profile(profile: &mut VideoProfile) {
+    profile.width = (profile.width.clamp(160, 1920) / 2) * 2;
+    profile.height = (profile.height.clamp(120, 1080) / 2) * 2;
+    profile.level = h264_level(profile.width, profile.height, profile.fps).to_string();
+}
+
+/// Каденция рендера из профиля: 30 fps → 33 333 мкс, 15 fps → 66 666 мкс.
+fn frame_interval(profile: &VideoProfile) -> Duration {
+    Duration::from_micros(1_000_000 / u64::from(profile.fps.max(1)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,6 +830,117 @@ mod tests {
         let sps = units.iter().find(|unit| unit[0] & 31 == 7).expect("real encoder SPS");
         assert_eq!(sps[1], 66, "encoder must use Baseline");
         assert_eq!(sps[3], 30, "SPS must not advertise3.1 when peer accepted3.0");
+    }
+
+    #[test]
+    fn profile_derives_h264_limits_and_level() {
+        let profile = VideoProfile {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 4096,
+            profile: "baseline".into(),
+            level: "4.0".into(),
+        };
+        assert_eq!(profile.max_fs(), 8160, "1080p = 68×120 macroblocks");
+        assert_eq!(profile.profile_level_id(), "42c028");
+        assert_eq!(frame_interval(&profile), Duration::from_micros(33_333));
+        let low = VideoProfile {
+            width: 640,
+            height: 360,
+            fps: 15,
+            bitrate_kbps: 512,
+            profile: "baseline".into(),
+            level: "3.0".into(),
+        };
+        assert_eq!(low.max_fs(), 920);
+        assert_eq!(low.profile_level_id(), "42c01e");
+        assert_eq!(frame_interval(&low), Duration::from_micros(66_666));
+    }
+
+    #[test]
+    fn conference_settings_override_global_and_env() {
+        let mut profile = VideoProfile::default();
+        apply_video_settings(
+            &mut profile,
+            &serde_json::json!({"max_frame_rate": 25}),
+            Some(&serde_json::json!({
+                "payload": {
+                    "bitrate": 4096,
+                    "resolution": {"width": 1920, "height": 1080, "fps_limit": 30}
+                }
+            })),
+        );
+        assert_eq!((profile.width, profile.height), (1920, 1080));
+        assert_eq!(profile.bitrate_kbps, 4096);
+        assert_eq!(profile.fps, 30, "resolution.fps_limit приоритетнее global max_frame_rate");
+        assert_eq!(profile.level, "4.0");
+        apply_video_settings(&mut profile, &serde_json::json!({"max_frame_rate": 10}), None);
+        assert_eq!(profile.fps, 10, "без комнаты остаётся global fps");
+    }
+
+    #[test]
+    fn call_string_settings_override_conference() {
+        let mut profile = VideoProfile::default();
+        apply_video_settings(
+            &mut profile,
+            &serde_json::json!({"max_frame_rate": 25}),
+            Some(&serde_json::json!({"bitrate": 4096, "resolution": {"width": 1920, "height": 1080, "fps_limit": 30}})),
+        );
+        apply_call_string_settings(
+            &mut profile,
+            &serde_json::json!({"bitrate": 256, "resolution": {"width": 320, "height": 180, "fps_limit": 10}}),
+        );
+        assert_eq!((profile.width, profile.height), (320, 180));
+        assert_eq!(profile.bitrate_kbps, 256);
+        assert_eq!(profile.fps, 10);
+        assert_eq!(profile.level, "3.1", "ниже 3.1 профиль не опускаем: baseline 3.1 — минимальный рабочий");
+    }
+
+    #[test]
+    fn answer_limits_handle_each_limit_independently() {
+        let base = VideoProfile {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 4096,
+            profile: "baseline".into(),
+            level: "4.0".into(),
+        };
+        let mut only_fs = base.clone();
+        only_fs.clamp_to_answer(Some(920), None, None);
+        assert_eq!((only_fs.width, only_fs.height), (640, 360));
+        assert_eq!(only_fs.fps, 30);
+        assert_eq!(only_fs.bitrate_kbps, 4096);
+        let mut only_br = base.clone();
+        only_br.clamp_to_answer(None, Some(512), None);
+        assert_eq!((only_br.width, only_br.height), (1920, 1080));
+        assert_eq!(only_br.bitrate_kbps, 512);
+        let mut only_mbps = base.clone();
+        only_mbps.clamp_to_answer(None, None, Some(244_800));
+        assert_eq!((only_mbps.width, only_mbps.height), (1920, 1080));
+        assert_eq!(only_mbps.fps, 30);
+        let mut tiny = base;
+        tiny.clamp_to_answer(Some(1), None, None);
+        assert_eq!((tiny.width, tiny.height), (320, 180));
+        assert!(tiny.max_fs() > 1, "при невозможном лимите остаётся минимальный размер");
+    }
+
+    #[test]
+    fn answer_limits_clamp_bitrate_size_and_fps() {
+        let mut profile = VideoProfile {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 4096,
+            profile: "baseline".into(),
+            level: "4.0".into(),
+        };
+        profile.clamp_to_answer(Some(920), Some(512), Some(13_800));
+        assert_eq!((profile.width, profile.height), (640, 360));
+        assert_eq!(profile.bitrate_kbps, 512);
+        assert_eq!(profile.fps, 15);
+        assert_eq!(profile.level, "3.1");
     }
 
     fn payload(data: &[u8], sequence: u16, timestamp: u32) -> RtpPayload<'_> {

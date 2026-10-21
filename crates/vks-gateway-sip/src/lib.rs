@@ -31,9 +31,10 @@ pub mod uac;
 pub use call::{CallState, SipCall, SipGateway};
 pub use codec::{CodecMap, NegotiatedCodec, SipCodec, WebRtcCodec};
 pub use rtp_bridge::{
-    build_offer, build_plain_sdp, decode_ulaw, downsample_48k_to_8k, encode_ulaw, negotiate_media,
-    negotiate_media_detailed, parse_remote_media_ports, parse_rtp_header, ulaw_to_f32, upsample_8k_to_48k,
-    write_rtp_header, CodecProfile, NegotiatedMedia, NegotiationFailure, OfferCodec, PortPair, RtpPortPool,
+    build_offer, build_offer_with_video, build_plain_sdp, build_plain_sdp_with_video, decode_ulaw,
+    downsample_48k_to_8k, encode_ulaw, negotiate_media, negotiate_media_detailed, parse_remote_media_ports,
+    parse_rtp_header, ulaw_to_f32, upsample_8k_to_48k, video_answer_limits, write_rtp_header, CodecProfile,
+    NegotiatedMedia, NegotiationFailure, OfferCodec, PortPair, RtpPortPool, VideoAnswerLimits, VideoSdpProfile,
     AUDIO_OFFER, VIDEO_OFFER,
 };
 pub use sip_message::{build_ack, build_bye, build_cancel, build_invite, SipResponse};

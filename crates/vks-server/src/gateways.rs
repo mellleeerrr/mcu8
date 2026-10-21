@@ -23,6 +23,17 @@ mod audio;
 #[path = "gateway_video.rs"]
 mod video;
 
+/// Находит `call_string.sip|h323` сохранённого адреса по URI. Вынесено из
+/// async-метода, чтобы приоритет адреса проверялся без блокировок AppState.
+fn find_call_string_override<'a>(
+    addresses: &'a std::collections::BTreeMap<String, vks_admin::api_v3::resources::AddressRecord>,
+    uri: &str,
+) -> Option<&'a serde_json::Value> {
+    let record = addresses.values().find(|record| record.uri.eq_ignore_ascii_case(uri))?;
+    let protocol = if uri.starts_with("h323:") { "h323" } else { "sip" };
+    record.payload.get("call_string").and_then(|value| value.get(protocol))
+}
+
 /// Observed packet/frame counters. Negotiated capabilities are not traffic statistics.
 #[derive(Default)]
 pub struct GatewayMediaStats {
@@ -197,17 +208,37 @@ impl GatewayManager {
 
     /// Живой профиль шлюзового видео: env-переопределения + `max_frame_rate`
     /// из `/api/v3/settings/video`. Больше не прибит к `640x360/15/256k`.
-    fn video_profile(&self) -> video::VideoProfile {
+    fn video_profile(&self, room_id: RoomId, call_string: Option<&serde_json::Value>) -> video::VideoProfile {
         let mut profile = video::VideoProfile::from_env();
         let state = self.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade));
         if let Some(state) = state {
-            if let Ok(settings) = state.api_v3.video_settings.lock() {
-                if let Some(fps) = settings.get("max_frame_rate").and_then(serde_json::Value::as_u64) {
-                    profile.fps = u32::try_from(fps.clamp(1, 60)).unwrap_or(profile.fps);
-                }
-            }
+            let global = state.api_v3.video_settings.lock().map(|settings| settings.clone()).unwrap_or_default();
+            let conference =
+                state.api_v3.conference_settings.lock().ok().and_then(|settings| settings.get(&room_id).cloned());
+            video::apply_video_settings(&mut profile, &global, conference.as_ref());
+        }
+        if let Some(overrides) = call_string {
+            video::apply_call_string_settings(&mut profile, overrides);
         }
         profile
+    }
+
+    /// Ищет сохранённый адрес по URI и берёт `call_string.sip|h323`: настройки
+    /// конкретного терминала приоритетнее комнаты и глобальных.
+    async fn call_string_video_profile(&self, uri: &str) -> Option<serde_json::Value> {
+        let state = self.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))?;
+        let resources = state.api_v3.resources.lock().await;
+        find_call_string_override(&resources.addresses, uri).cloned()
+    }
+
+    fn sdp_video_profile(profile: &video::VideoProfile) -> vks_gateway_sip::VideoSdpProfile {
+        vks_gateway_sip::VideoSdpProfile {
+            width: profile.width,
+            height: profile.height,
+            fps: profile.fps,
+            bitrate_kbps: profile.bitrate_kbps,
+            profile_level_id: profile.profile_level_id(),
+        }
     }
 
     /// Статус доступности SIP-шлюза для `ui_system_status`.
@@ -845,6 +876,18 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             armed: true,
             registered: None,
         };
+        let call_string_profile = self.call_string_video_profile(trimmed).await;
+        let mut answer_limits = vks_gateway_sip::VideoAnswerLimits::default();
+        let mut video_profile = self.video_profile(room_id, call_string_profile.as_ref());
+        let offered_video_profile = video_profile.clone();
+        tracing::info!(
+            room = %room_id,
+            width = video_profile.width,
+            height = video_profile.height,
+            fps = video_profile.fps,
+            bitrate_kbps = video_profile.bitrate_kbps,
+            "outbound gateway video profile"
+        );
         let (remote_ip, remote_audio_port, audio_payload_type, dtmf_payload_type, video_remote, call_id) = if is_h323 {
             let session = self
                 .h323_uac_client
@@ -882,7 +925,8 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                 session.call_id.clone(),
             )
         } else {
-            let offer = vks_gateway_sip::build_plain_sdp(
+            let offer = vks_gateway_sip::build_plain_sdp_with_video(
+                &Self::sdp_video_profile(&video_profile),
                 &self.candidate_ip,
                 rtp_port,
                 video_pair.as_ref().map(|pair| pair.rtp_port),
@@ -893,6 +937,10 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                 .await
                 .map_err(|error| format!("SIP outbound dial failed: {error}"))?;
             setup.sip = Some(session.clone());
+            answer_limits =
+                vks_gateway_sip::video_answer_limits(&session.answer_sdp, session.remote_video_payload_type);
+            let answer_bitrate = answer_limits.max_br.iter().chain(answer_limits.b_as.iter()).copied().min();
+            video_profile.clamp_to_answer(answer_limits.max_fs, answer_bitrate, answer_limits.max_mbps);
             let audio_port = session
                 .remote_audio_port
                 .filter(|port| *port > 0)
@@ -926,7 +974,6 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             ip.parse::<std::net::IpAddr>().map_err(|_| "Invalid negotiated video IP".to_string())?;
         }
         let mut has_video = video_configuration.is_some();
-        let video_profile = self.video_profile();
         let media_details = serde_json::json!({
             "audio_codec": if audio_payload_type == 8 { "PCMA" } else { "PCMU" },
             "audio_payload_type": audio_payload_type, "audio_clock_rate": 8000,
@@ -938,6 +985,16 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             "video_clock_rate": if has_video { Some(90000) } else { None },
             "runtime_video_size": if has_video { Some(format!("{}x{}", video_profile.width, video_profile.height)) } else { None },
             "runtime_video_max_fps": if has_video { Some(video_profile.fps) } else { None },
+            "runtime_video_bitrate_kbps": if has_video { Some(video_profile.bitrate_kbps) } else { None },
+            "offered_video_size": if has_video { Some(format!("{}x{}", offered_video_profile.width, offered_video_profile.height)) } else { None },
+            "offered_video_bitrate_kbps": if has_video { Some(offered_video_profile.bitrate_kbps) } else { None },
+            "offered_video_max_fs": if has_video { Some(offered_video_profile.max_fs()) } else { None },
+            "offered_video_max_mbps": if has_video { Some(offered_video_profile.max_mbps()) } else { None },
+            "offered_video_b_as": if has_video { Some(offered_video_profile.bitrate_kbps) } else { None },
+            "answer_video_max_fs": answer_limits.max_fs,
+            "answer_video_max_br": answer_limits.max_br,
+            "answer_video_max_mbps": answer_limits.max_mbps,
+            "answer_video_b_as": answer_limits.b_as,
         });
         {
             let mut registry = self.registry.lock().map_err(|_| "Registry lock poisoned".to_string())?;
@@ -1006,7 +1063,7 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                 controls: controls.clone(),
                 cancelled: cancel_flag.clone(),
                 stats: media_stats,
-                profile: self.video_profile(),
+                profile: video_profile.clone(),
             })
             .await;
             if let Err(error) = start {
@@ -1385,6 +1442,42 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         let result = manager.dial(room, "sip:127.0.0.1:9", None).await;
         assert!(result.is_err(), "RTP port exhaustion must never produce a fake connected call");
         assert!(manager.registry.lock().unwrap().by_participant.is_empty());
+    }
+
+    #[test]
+    fn call_string_lookup_matches_uri_case_insensitively_and_picks_protocol() {
+        let mut addresses = std::collections::BTreeMap::new();
+        addresses.insert(
+            "addr-1".to_string(),
+            vks_admin::api_v3::resources::AddressRecord {
+                id: "addr-1".into(),
+                uri: "SIP:Probe@192.168.1.132".into(),
+                display_name: "Probe".into(),
+                created_at: 1,
+                payload: serde_json::json!({
+                    "call_string": {
+                        "sip": {"bitrate": 256, "resolution": {"width": 320, "height": 180, "fps_limit": 10}},
+                        "h323": {"bitrate": 512}
+                    }
+                }),
+            },
+        );
+        let sip = find_call_string_override(&addresses, "sip:probe@192.168.1.132").expect("sip override");
+        assert_eq!(sip["bitrate"], 256);
+        assert_eq!(sip["resolution"]["width"], 320);
+        addresses.insert(
+            "addr-2".to_string(),
+            vks_admin::api_v3::resources::AddressRecord {
+                id: "addr-2".into(),
+                uri: "h323:probe@192.168.1.132".into(),
+                display_name: "Probe H323".into(),
+                created_at: 2,
+                payload: serde_json::json!({"call_string": {"sip": {"bitrate": 111}, "h323": {"bitrate": 512}}}),
+            },
+        );
+        let h323 = find_call_string_override(&addresses, "h323:probe@192.168.1.132").expect("h323 override");
+        assert_eq!(h323["bitrate"], 512);
+        assert!(find_call_string_override(&addresses, "sip:other@192.168.1.132").is_none());
     }
 
     #[test]

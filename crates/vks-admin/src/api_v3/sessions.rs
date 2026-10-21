@@ -1220,6 +1220,37 @@ fn attach_gateway_statistics(state: &SharedState, pid: &str, value: &mut Value) 
             value["details"]["audio"][direction]["present"] = json!(running);
         }
     }
+    // Намерение энкодера (размер/битрейт/fps), а не измеренный поток:
+    // UI показывает это как параметры tx, фактические counters — ниже.
+    for (source, target) in [
+        ("offered_video_max_fs", "offered_max_fs"),
+        ("offered_video_max_mbps", "offered_max_mbps"),
+        ("offered_video_b_as", "offered_b_as"),
+        ("answer_video_max_fs", "answer_max_fs"),
+        ("answer_video_max_br", "answer_max_br"),
+        ("answer_video_max_mbps", "answer_max_mbps"),
+        ("answer_video_b_as", "answer_b_as"),
+    ] {
+        if let Some(limit) = stats.get(source) {
+            value["details"]["video"]["tx"][target] = limit.clone();
+        }
+    }
+    if let Some(size) = stats.get("offered_video_size").and_then(Value::as_str) {
+        value["details"]["video"]["tx"]["offered_resolution"] = json!(size);
+    }
+    if let Some(kbps) = stats.get("offered_video_bitrate_kbps").and_then(Value::as_u64) {
+        value["details"]["video"]["tx"]["offered_bitrate"] = json!(kbps.saturating_mul(1000));
+    }
+    if let Some(size) = stats.get("runtime_video_size").and_then(Value::as_str) {
+        value["details"]["video"]["tx"]["resolution"] = json!(size);
+    }
+    if let Some(fps) = stats.get("runtime_video_max_fps").and_then(Value::as_u64) {
+        value["details"]["video"]["tx"]["frame_rate"] = json!(fps);
+        value["details"]["video"]["tx"]["fps"] = json!(fps);
+    }
+    if let Some(kbps) = stats.get("runtime_video_bitrate_kbps").and_then(Value::as_u64) {
+        value["details"]["video"]["tx"]["requested_bitrate"] = json!(kbps.saturating_mul(1000));
+    }
     if let Some(running) = stats.get("video_codec_running").and_then(Value::as_bool) {
         for direction in ["rx", "tx"] {
             value["details"]["video"][direction]["present"] = json!(running);
@@ -1230,18 +1261,22 @@ fn attach_gateway_statistics(state: &SharedState, pid: &str, value: &mut Value) 
             value["details"]["video"][direction]["frame_rate"] = fps.clone();
         }
     }
-    if stats["video_tx_packets"].as_u64().unwrap_or(0) > 0 {
-        // The gateway encoder always emits 640x360 baseline H.264.
-        value["details"]["video"]["tx"]["width"] = json!(640);
-        value["details"]["video"]["tx"]["height"] = json!(360);
-        value["details"]["video"]["tx"]["resolution"] = json!("640x360");
-    }
-    if stats["decoded_video_frames"].as_u64().unwrap_or(0) > 0 {
-        // The gateway decoder normalises every incoming stream to the same
-        // composite tile, so this is the real decoded geometry.
-        value["details"]["video"]["rx"]["width"] = json!(640);
-        value["details"]["video"]["rx"]["height"] = json!(360);
-        value["details"]["video"]["rx"]["resolution"] = json!("640x360");
+    if let Some(size) = stats.get("runtime_video_size").and_then(Value::as_str) {
+        if let Some((width, height)) = size.split_once('x') {
+            if let (Ok(width), Ok(height)) = (width.parse::<u64>(), height.parse::<u64>()) {
+                // Единственный источник геометрии — профиль, из которого
+                // реально запущены энкодер и декодер. Прежние жёсткие
+                // 640×360 затирали любой профиль и делали проверки лживыми.
+                value["details"]["video"]["tx"]["width"] = json!(width);
+                value["details"]["video"]["tx"]["height"] = json!(height);
+                value["details"]["video"]["tx"]["resolution"] = json!(size);
+                if stats["decoded_video_frames"].as_u64().unwrap_or(0) > 0 {
+                    value["details"]["video"]["rx"]["width"] = json!(width);
+                    value["details"]["video"]["rx"]["height"] = json!(height);
+                    value["details"]["video"]["rx"]["resolution"] = json!(size);
+                }
+            }
+        }
     }
     value["media"] = stats;
 }

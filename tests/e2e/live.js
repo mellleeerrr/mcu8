@@ -21,6 +21,10 @@ const LOGIN = process.env.VKS_LOGIN || 'admin';
 const PASSWORD = process.env.VKS_PASSWORD || 'admin_password';
 const SIP_URI = process.env.VKS_SIP_URI || 'sip:probe-e2e@192.168.1.132';
 const SIP_NAME = process.env.VKS_SIP_NAME || 'E2E SIP Probe';
+const VIDEO_LOW = process.env.VKS_VIDEO_LOW === '1';
+const VIDEO_WIDTH = VIDEO_LOW ? 640 : 1920;
+const VIDEO_HEIGHT = VIDEO_LOW ? 360 : 1080;
+const VIDEO_BITRATE = VIDEO_LOW ? 512 : 4096;
 const ART = path.resolve(process.env.VKS_ARTIFACTS || 'artifacts/e2e');
 const CHROMIUM = process.env.VKS_CHROMIUM
   || '/home/pro/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome';
@@ -136,6 +140,20 @@ async function api(token, method, urlPath, body) {
     await page.waitForTimeout(1500);
     await page.screenshot({ path: path.join(ART, '03-session.png') });
 
+    // 4c. T05: профиль 1920×1080/4096 ставим после старта и автосохранения
+    // модалки (UI мог перезаписать defaults), прямо перед дозвоном: gateway
+    // читает его в момент dial.
+    const profilePatch = await api(token, 'PATCH', `/api/v3/conferences/${conferenceId}`, {
+      payload: {
+        bitrate: VIDEO_BITRATE,
+        resolution: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT, fps_limit: 30 },
+        max_frame_rate: 30,
+      },
+    });
+    check(`settings: conference profile ${VIDEO_WIDTH}x${VIDEO_HEIGHT}/${VIDEO_BITRATE} patched`, profilePatch.status === 200,
+      `status=${profilePatch.status} ${profilePatch.text.slice(0, 300)}`);
+    await page.waitForTimeout(500);
+
     // 5. Добавление участника по адресу (SIP).
     let addAddress = page.locator('#abonent-blank-add-address-button, #abonent-table-add-address-button');
     if (!(await addAddress.count())) {
@@ -178,6 +196,39 @@ async function api(token, method, urlPath, body) {
     await page.waitForTimeout(4000);
     const participantVisible = await page.getByText(SIP_NAME, { exact: false }).count();
     check('sip: participant visible in conference UI', participantVisible > 0, `matches=${participantVisible}`);
+
+    // 4b. T05: runtime-профиль шлюза (намерение энкодера) соответствует
+    // настройкам комнаты; SDP b=AS/max-fs проверяются unit-тестом, здесь —
+    // то, что реально ушло в FFmpeg после answer-clamp.
+    const runtimeAbonents = await api(token, 'GET', `/api/v3/sessions/${sessionId}/abonents`);
+    const sipRuntime = (runtimeAbonents.json && runtimeAbonents.json.abonents || [])
+      .find(item => String(item.display_name || '').includes(SIP_NAME));
+    const sipVideoTx = sipRuntime && sipRuntime.details && sipRuntime.details.video && sipRuntime.details.video.tx;
+    check(`video: offer size ${VIDEO_WIDTH}x${VIDEO_HEIGHT}`,
+      Boolean(sipVideoTx && sipVideoTx.offered_resolution === `${VIDEO_WIDTH}x${VIDEO_HEIGHT}`), JSON.stringify(sipVideoTx));
+    check(`video: offer bitrate ${VIDEO_BITRATE} kbps`,
+      Boolean(sipVideoTx && sipVideoTx.offered_bitrate === VIDEO_BITRATE * 1000), JSON.stringify(sipVideoTx));
+    check('video: SDP max-fs matches profile',
+      Boolean(sipVideoTx && sipVideoTx.offered_max_fs === (VIDEO_LOW ? 920 : 8160)), JSON.stringify(sipVideoTx));
+    check('video: answer max-br captured from terminal',
+      Boolean(sipVideoTx && Number.isInteger(sipVideoTx.answer_max_br) && sipVideoTx.answer_max_br > 0),
+      JSON.stringify(sipVideoTx));
+    check(`video: encoder requested ${VIDEO_BITRATE} kbps`,
+      Boolean(sipVideoTx && sipVideoTx.requested_bitrate === VIDEO_BITRATE * 1000), JSON.stringify(sipVideoTx));
+    check('video: encoder profile fps 30', Boolean(sipVideoTx && sipVideoTx.fps === 30),
+      JSON.stringify(sipVideoTx));
+    check('video: encoded fps >= 20 (live render cadence)', Boolean(sipVideoTx && sipVideoTx.frame_rate >= 20),
+      JSON.stringify(sipVideoTx));
+    const measured = sipVideoTx && sipVideoTx.bitrate || 0;
+    check(VIDEO_LOW ? 'video: measured RTP tx < 1.5 Mbps' : 'video: measured RTP tx ~4 Mbps',
+      VIDEO_LOW ? measured > 0 && measured < 1_500_000 : measured >= 2_500_000 && measured <= 5_000_000,
+      String(measured));
+    // Эффективный размер — после answer-clamp. Терминал 192.168.1.132
+    // принимает 1080p (max-br≈20 Mbps, max-fs не ограничивает), поэтому
+    // высокий профиль остаётся 1920×1080, низкий — 640×360.
+    const effectiveSize = VIDEO_LOW ? '640x360' : '1920x1080';
+    check(`video: effective size ${effectiveSize} after answer-clamp`,
+      Boolean(sipVideoTx && sipVideoTx.resolution === effectiveSize), JSON.stringify(sipVideoTx));
     if (participantVisible === 0) {
       // UI могла назвать абонента по URI; проверяем по адресу.
       check('sip: participant visible by uri', (await page.getByText('192.168.1.132', { exact: false }).count()) > 0);
