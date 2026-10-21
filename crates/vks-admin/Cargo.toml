@@ -26,6 +26,8 @@ async-trait = "0.1"
 tokio = { workspace = true, features = ["full"] }
 bytes.workspace = true
 prost.workspace = true
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+chrono-tz = "0.10.4"
 
 # utoipa — опциональная генерация OpenAPI (не в default-сборке).
 [dependencies.utoipa]

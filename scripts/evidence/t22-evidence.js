@@ -156,6 +156,18 @@ const summary = {
     // Детерминированный старт: чистим историю от предыдущих прогонов/проб.
     await api('/api/v3/call_history/clean', { method: 'POST' });
 
+    // 0. стоп никогда не запускавшейся конференции не пишет фантомную историю.
+    await record('history-stop-never-started', async () => {
+      const created = await api('/api/v3/conferences', { method: 'POST', data: { display_name: 'T22NeverStarted' } });
+      const neverId = created.json.conference && created.json.conference.id;
+      if (!neverId) throw new Error('never-started conference create');
+      const stopped = await api(`/api/v3/sessions/${neverId}`, { method: 'DELETE' });
+      if (stopped.status !== 204) throw new Error(`never-started stop ${stopped.status}`);
+      const list = await api('/api/v3/call_history');
+      summary.acceptance.history_stop_never_started = list.status === 200 && list.json.count === 0;
+      await api(`/api/v3/conferences/${neverId}`, { method: 'DELETE' });
+    });
+
     // 1. конференция + сессия + попытка вызова
     const created = await record('conference-create', async () => {
       const response = await page.request.post(BASE + '/api/v3/conferences', {
@@ -203,6 +215,7 @@ const summary = {
       const session = list.json.sessions.find((row) => row.display_name === CONF_NAME);
       if (!session) throw new Error('нет записи созданной конференции');
       historyId = session.id;
+      summary.history_started_at = session.started_at;
       summary.acceptance.history_list_schema =
         typeof session.display_name === 'string' &&
         typeof session.started_at === 'number' &&
@@ -229,6 +242,11 @@ const summary = {
       if (detail.status !== 200) throw new Error(`detail ${detail.status}`);
       const calls = detail.json.session.call_strings || [];
       const call = calls.find((row) => row.connection_url === CALL_URI);
+      summary.acceptance.history_call_contact_shape =
+        !!call &&
+        call.contact && call.contact.contact_type === 'call_strings' &&
+        Array.isArray(call.invitations) &&
+        call.invitations[0].call_string_id === call.id;
       summary.acceptance.history_detail_calls =
         !!call &&
         call.display_name === CALL_NAME &&
@@ -270,6 +288,13 @@ const summary = {
       summary.acceptance.export_zip_integrity = /No errors detected|OK/.test(test) && csvText.startsWith('Название;ID;Маршрут;');
       summary.acceptance.export_csv_rows =
         csvText.includes(CONF_NAME) && csvText.includes('Administrator') && csvText.includes(dtmf);
+      // CSV-даты — в таймзоне администратора (Europe/Moscow), как UI.
+      const startedSec = summary.history_started_at;
+      const expectedDate = startedSec
+        ? new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(startedSec * 1000))
+        : null;
+      summary.acceptance.export_csv_timezone = !!expectedDate && csvText.includes(expectedDate);
+      summary.csv_timezone = { expectedDate };
       summary.export = { ...(summary.export || {}), filename, csv_bytes: Buffer.byteLength(csvText) };
       const pageSize = await api('/api/v3/call_history?page_size=1');
       summary.acceptance.history_pagination =

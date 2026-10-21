@@ -235,15 +235,24 @@ fn session_calls(
         let finish_reason = native_stop_reason(attempt.failure_reason.as_deref().unwrap_or("Ended By Remote"));
         // Время вызова — когда адрес создан/начат, а не старт всей сессии.
         let started_at = (attempt.record.created_at as i64).min(finished).max(0);
+        // Vendor-UI (маппер H) читает abonents[].abonent_id/contact/connection/
+        // started_at/stopped_at/stop_reason; без этой формы реальные
+        // подключения классифицировались бы как MISSED.
         let abonents: Vec<Value> = attempt
             .participant_id
             .as_deref()
             .and_then(|participant_id| participants.iter().find(|p| p.participant_id == participant_id))
             .map(|participant| {
                 vec![json!({
-                    "id": participant.participant_id,
+                    "abonent_id": participant.participant_id,
+                    "contact_id": attempt.record.id,
                     "display_name": participant.display_name,
-                    "connected_at": participant.connected_at,
+                    "contact": {"contact_type": "call_strings", "id": attempt.record.id},
+                    "connection": {"type_id": "OUTGOING", "connection_url": uri},
+                    "started_at": participant.connected_at as i64,
+                    "stopped_at": finished,
+                    "stop_reason": finish_reason,
+                    "moved_to": Value::Null,
                 })]
             })
             .unwrap_or_default();
@@ -256,16 +265,24 @@ fn session_calls(
             "finish_reason": finish_reason,
             "contact_type": "call_strings",
             "contact_id": attempt.record.id,
+            "call_string_id": attempt.record.id,
             "payload": attempt.record.payload,
         });
         calls.push(HistoryCall {
-            id: attempt.record.id,
+            id: attempt.record.id.clone(),
             started_at,
             deleted_at: Some(stopped_at),
-            display_name: attempt.record.display_name,
-            connection_url: uri,
-            payload: attempt.record.payload,
-            contact: None,
+            display_name: attempt.record.display_name.clone(),
+            connection_url: uri.clone(),
+            payload: attempt.record.payload.clone(),
+            contact: Some(json!({
+                "id": attempt.record.id,
+                "contact_type": "call_strings",
+                "display_name": attempt.record.display_name,
+                "deleted_at": Value::Null,
+                "avatar": Value::Null,
+                "address": uri,
+            })),
             invitations: vec![invitation],
             abonents,
         });
@@ -413,6 +430,7 @@ pub async fn detail(
             "stopped_by": nullable_id(&session.stopped_by),
             "creator": creator,
             "stopper": stopper,
+            "started_by": creator,
             "dtmf": session.dtmf,
             "route": session.route,
             "call_strings": session.calls,
@@ -501,6 +519,7 @@ pub async fn export(
         query.filtered(&resources.history.sessions).into_iter().cloned().collect::<Vec<_>>()
     };
     let names = contact_names(&state).await;
+    let timezone = current_timezone(&state).await;
     // Случайный токен: имя файла нельзя угадать, даже если роут статики
     // vendor-совместимо отдаёт архивы без заголовка (UI скачивает через <a>).
     let filename = format!(
@@ -508,7 +527,7 @@ pub async fn export(
         format_date_utc((now_unix_ms() / 1000) as i64),
         uuid::Uuid::new_v4().simple()
     );
-    let archive = build_history_zip(&filename.replace(".zip", ".csv"), &sessions, &names);
+    let archive = build_history_zip(&filename.replace(".zip", ".csv"), &sessions, &names, &timezone);
     store_export(&state, &filename, archive);
     Json(json!({ "filename": filename })).into_response()
 }
@@ -529,12 +548,14 @@ pub async fn export_session(
         return super::error_json(404, "Session not found");
     };
     let names = contact_names(&state).await;
+    let timezone = current_timezone(&state).await;
     let filename = format!(
         "Conference_history_{}_{}.zip",
         sanitize_filename(&session.display_name),
         uuid::Uuid::new_v4().simple()
     );
-    let archive = build_history_zip(&filename.replace(".zip", ".csv"), std::slice::from_ref(&session), &names);
+    let archive =
+        build_history_zip(&filename.replace(".zip", ".csv"), std::slice::from_ref(&session), &names, &timezone);
     store_export(&state, &filename, archive);
     Json(json!({ "filename": filename })).into_response()
 }
@@ -546,15 +567,20 @@ pub async fn clean(State(state): State<SharedState>, Extension(auth): Extension<
         return super::error_json(403, "Forbidden: Operator role required");
     }
     let names = contact_names(&state).await;
+    let timezone = current_timezone(&state).await;
     let mut resources = state.api_v3.resources.lock().await;
     if resources.history.sessions.is_empty() {
+        // Очистка пустой истории всё равно инвалидирует ранее выданные файлы.
+        if let Ok(mut exports) = state.api_v3.history_exports.lock() {
+            exports.clear();
+        }
         return Json(json!({ "filename": Value::Null })).into_response();
     }
     let previous = resources.clone();
     resources.history.sessions.clear();
     let stamp = format_date_utc((now_unix_ms() / 1000) as i64).replace('-', "");
     let filename = format!("Conference_history_backup_{stamp}_{}.zip", uuid::Uuid::new_v4().simple());
-    let archive = build_history_zip(&filename.replace(".zip", ".csv"), &previous.history.sessions, &names);
+    let archive = build_history_zip(&filename.replace(".zip", ".csv"), &previous.history.sessions, &names, &timezone);
     // Старые выгрузки больше не должны оставаться скачиваемыми после clean.
     if let Ok(mut exports) = state.api_v3.history_exports.lock() {
         exports.clear();
@@ -646,9 +672,37 @@ async fn contact_names(state: &AppState) -> std::collections::HashMap<String, St
     names
 }
 
-/// CSV как у vendor: разделитель `;`, русские заголовки, даты
-/// `ДД.ММ.ГГГГ ЧЧ:ММ:СС` (UTC — системная TZ сервера не фиксирована).
-fn build_history_csv(sessions: &[HistorySession], names: &std::collections::HashMap<String, String>) -> Vec<u8> {
+async fn current_timezone(state: &AppState) -> String {
+    let stored = state
+        .api_v3
+        .resources
+        .lock()
+        .await
+        .admin_settings
+        .get("timezone")
+        .and_then(|value| value.get("timezone"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    stored.unwrap_or_else(super::shell::system_timezone)
+}
+
+/// Дата в TZ администратора (vendor CSV показывает локальное время).
+fn format_datetime_tz(secs: i64, timezone: &str) -> String {
+    use chrono::TimeZone;
+    let zone: chrono_tz::Tz = timezone.parse().unwrap_or(chrono_tz::UTC);
+    zone.timestamp_opt(secs, 0)
+        .single()
+        .map(|datetime| datetime.format("%d.%m.%Y %H:%M:%S").to_string())
+        .unwrap_or_else(|| format_datetime(secs))
+}
+
+/// CSV как у vendor: разделитель `;`, русские заголовки, даты `ДД.ММ.ГГГГ ЧЧ:ММ:СС`
+/// в таймзоне администратора (как UI-список/карточка).
+fn build_history_csv(
+    sessions: &[HistorySession],
+    names: &std::collections::HashMap<String, String>,
+    timezone: &str,
+) -> Vec<u8> {
     let mut text =
         String::from("Название;ID;Маршрут;Время начала;Время окончания;Длительность;Участники;Запуск;Остановка\n");
     for session in sessions {
@@ -661,8 +715,8 @@ fn build_history_csv(sessions: &[HistorySession], names: &std::collections::Hash
             csv_escape(&session.display_name),
             csv_escape(&id),
             csv_escape(session.route.as_deref().unwrap_or("")),
-            format_datetime(session.started_at),
-            format_datetime(session.stopped_at),
+            format_datetime_tz(session.started_at, timezone),
+            format_datetime_tz(session.stopped_at, timezone),
             format_duration(duration),
             session.abonents_count,
             csv_escape(&run),
@@ -688,8 +742,9 @@ fn build_history_zip(
     csv_name: &str,
     sessions: &[HistorySession],
     names: &std::collections::HashMap<String, String>,
+    timezone: &str,
 ) -> Vec<u8> {
-    let data = build_history_csv(sessions, names);
+    let data = build_history_csv(sessions, names, timezone);
     let name = csv_name.as_bytes();
     let crc = crc32(&data);
     let (dos_time, dos_date) = dos_timestamp((now_unix_ms() / 1000) as i64);
@@ -852,7 +907,7 @@ mod tests {
         let mut names = std::collections::HashMap::new();
         names.insert("creator".to_string(), "Administrator".to_string());
         names.insert("stopper".to_string(), "Operator".to_string());
-        let csv = String::from_utf8(build_history_csv(&[evil], &names)).unwrap();
+        let csv = String::from_utf8(build_history_csv(&[evil], &names, "UTC")).unwrap();
         assert!(csv
             .starts_with("Название;ID;Маршрут;Время начала;Время окончания;Длительность;Участники;Запуск;Остановка\n"));
         assert!(csv.contains("\"Name;with\"\"quotes\""));
@@ -863,14 +918,14 @@ mod tests {
         // CSV-инъекция нейтрализуется апострофом.
         let mut formula = session("=1+1", 0, 1);
         formula.dtmf = None;
-        let csv = String::from_utf8(build_history_csv(&[formula], &names)).unwrap();
+        let csv = String::from_utf8(build_history_csv(&[formula], &names, "UTC")).unwrap();
         assert!(csv.contains("'=1+1"), "{csv}");
     }
 
     #[test]
     fn zip_is_valid_store_archive_with_single_csv() {
         let names = std::collections::HashMap::new();
-        let archive = build_history_zip("Conference_history_2026-01-01.csv", &[session("Alpha", 0, 5)], &names);
+        let archive = build_history_zip("Conference_history_2026-01-01.csv", &[session("Alpha", 0, 5)], &names, "UTC");
         assert_eq!(&archive[..4], b"PK\x03\x04");
         let eocd = archive.len() - 22;
         assert_eq!(&archive[eocd..eocd + 4], b"PK\x05\x06");
@@ -884,7 +939,7 @@ mod tests {
         let data_start = 30 + name_len + extra_len;
         let data_len = u32::from_le_bytes(archive[18..22].try_into().unwrap()) as usize;
         let local_crc = u32::from_le_bytes(archive[14..18].try_into().unwrap());
-        let expected = build_history_csv(&[session("Alpha", 0, 5)], &names);
+        let expected = build_history_csv(&[session("Alpha", 0, 5)], &names, "UTC");
         // Реальное извлечение: CRC и байты CSV совпадают с записанными.
         assert_eq!(&archive[data_start..data_start + data_len], expected.as_slice());
         assert_eq!(local_crc, crc32(&expected));

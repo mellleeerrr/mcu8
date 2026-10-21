@@ -540,6 +540,15 @@ pub async fn stop_session(
     }
     match find_room(&state, &id) {
         Some(room) => {
+            // Останавливать можно только живую сессию: create_conference и
+            // boot-reconcile заранее помечают комнату stopped, поэтому DELETE
+            // /sessions на никогда не запускавшейся конференции — идемпотентный
+            // 204 без фантомной записи в истории (симметрично delete-пути).
+            let was_stopped =
+                state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
+            if was_stopped {
+                return StatusCode::NO_CONTENT.into_response();
+            }
             state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").insert(room.id);
             super::call_strings::cancel_pending_calls(&state, &room.id);
             let stopped_participants: Vec<String> = state

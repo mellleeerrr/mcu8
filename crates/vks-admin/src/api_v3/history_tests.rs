@@ -2,7 +2,7 @@
 //! vendor-эндпоинтов, CSV/ZIP-экспорт, clean и персистентность между рестартами.
 
 use axum::http::StatusCode;
-use serde_json::{json, Value};
+use serde_json::json;
 use tower::ServiceExt;
 use vks_core::{Role, RoomId};
 
@@ -84,7 +84,8 @@ async fn history_endpoints_list_detail_export_and_clean() {
     )
     .await;
     assert_eq!(calls["count"], 1);
-    assert_eq!(calls["call_strings"][0]["contact_type"], Value::Null);
+    assert_eq!(calls["call_strings"][0]["contact"]["contact_type"], "call_strings");
+    assert_eq!(detail["session"]["started_by"]["id"], "caller");
 
     // экспорт: {filename}, ZIP по /static (без токена) валиден для python/unzip
     let export = json_body(
@@ -337,6 +338,127 @@ async fn session_export_returns_downloadable_zip() {
 
     let missing = send(&app, request("GET", "/api/v3/call_history/unknown/export", Some(&token), json!({}))).await;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+/// Никогда не запускавшаяся конференция: DELETE /sessions — идемпотентный
+/// 204 без фантомной записи; повторная остановка живой сессии не дублирует.
+#[tokio::test]
+async fn stopping_never_started_and_repeated_stop_writes_no_phantom_history() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let created = json_body(
+        send(&app, request("POST", "/api/v3/conferences", Some(&token), json!({"display_name": "НеЗапускСтоп"}))).await,
+    )
+    .await;
+    let room_id = created["conference"]["id"].as_str().unwrap().to_string();
+    let response = send(&app, request("DELETE", &format!("/api/v3/sessions/{room_id}"), Some(&token), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let body = json_body(send(&app, request("GET", "/api/v3/call_history", Some(&token), json!({}))).await).await;
+    assert_eq!(body["count"], 0, "stop без старта не пишет историю");
+
+    let started =
+        send(&app, request("POST", "/api/v3/sessions", Some(&token), json!({"conference_id": room_id}))).await;
+    assert_eq!(started.status(), StatusCode::OK);
+    assert_eq!(
+        send(&app, request("DELETE", &format!("/api/v3/sessions/{room_id}"), Some(&token), json!({}))).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        send(&app, request("DELETE", &format!("/api/v3/sessions/{room_id}"), Some(&token), json!({}))).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    let body = json_body(send(&app, request("GET", "/api/v3/call_history", Some(&token), json!({}))).await).await;
+    assert_eq!(body["count"], 1, "повторная остановка не дублирует: {body}");
+}
+
+/// Реальный подключённый участник: vendor-форма abonents (H) и contact вызова,
+/// иначе UI классифицирует вызов как MISSED.
+#[tokio::test]
+async fn history_call_snapshot_has_vendor_abonent_shape() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let room = Rooms::create_async(&state, "С участником").await.unwrap();
+    seed_attempt(&state, &room.id);
+    state.room_hub.register_participant(
+        &room.id,
+        crate::hub::ParticipantSnapshot {
+            participant_id: "sip-1@192.168.1.132".into(),
+            display_name: "Polycom".into(),
+            is_recorder: false,
+            is_speaking: false,
+            track_ids: vec![],
+            is_audio_muted: false,
+            is_video_muted: false,
+            connected_at: 1_800_000_100,
+        },
+    );
+    record_stopped(&state, &room, "caller", "Manual").await;
+    let body = json_body(
+        send(&app, request("GET", "/api/v3/call_history?sort_field=started_at", Some(&token), json!({}))).await,
+    )
+    .await;
+    let history_id = body["sessions"][0]["id"].as_str().unwrap();
+    let detail = json_body(
+        send(&app, request("GET", &format!("/api/v3/call_history/{history_id}"), Some(&token), json!({}))).await,
+    )
+    .await;
+    let call = &detail["session"]["call_strings"][0];
+    assert_eq!(call["contact"]["contact_type"], "call_strings");
+    assert_eq!(call["invitations"][0]["call_string_id"], "call-1");
+    let abonent = &call["abonents"][0];
+    assert_eq!(abonent["abonent_id"], "sip-1@192.168.1.132");
+    assert_eq!(abonent["display_name"], "Polycom");
+    assert_eq!(abonent["contact"]["contact_type"], "call_strings");
+    assert_eq!(abonent["connection"]["type_id"], "OUTGOING");
+    assert_eq!(abonent["connection"]["connection_url"], "sip:192.168.1.132");
+    assert_eq!(abonent["started_at"], 1_800_000_100);
+    assert_eq!(abonent["stop_reason"], "Ended By Remote");
+}
+
+/// CSV даты — в таймзоне администратора (как UI), не в UTC.
+#[tokio::test]
+async fn export_csv_uses_configured_timezone() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.admin_settings.insert("timezone".into(), json!({"timezone": "Europe/Moscow"}));
+    }
+    let room = Rooms::create_async(&state, "Таймзона").await.unwrap();
+    record_stopped(&state, &room, "caller", "Manual").await;
+    let export =
+        json_body(send(&app, request("GET", "/api/v3/call_history/export", Some(&token), json!({}))).await).await;
+    let filename = export["filename"].as_str().unwrap().to_string();
+    let download = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!("/static/call_history/{filename}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(download.into_body(), usize::MAX).await.unwrap();
+    // ZIP store: CSV лежит после local header; декодируем данные без внешних крейтов.
+    let name_len = u16::from_le_bytes(bytes[26..28].try_into().unwrap()) as usize;
+    let extra_len = u16::from_le_bytes(bytes[28..30].try_into().unwrap()) as usize;
+    let data_len = u32::from_le_bytes(bytes[18..22].try_into().unwrap()) as usize;
+    let start = 30 + name_len + extra_len;
+    let csv = String::from_utf8(bytes[start..start + data_len].to_vec()).unwrap();
+    let expected = {
+        use chrono::TimeZone;
+        chrono_tz::Europe::Moscow
+            .timestamp_opt(room.created_ms as i64 / 1000, 0)
+            .single()
+            .unwrap()
+            .format("%d.%m.%Y %H:%M:%S")
+            .to_string()
+    };
+    assert!(csv.contains(&expected), "CSV должен быть в Europe/Moscow (+3): {csv}");
 }
 
 /// Дата-фильтр vendor-UI (`date_from`/`date_to`, секунды) реально сужает
