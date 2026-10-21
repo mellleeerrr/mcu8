@@ -1,6 +1,6 @@
 # T1.6 — приёмка SIP+H.323 из UI, живые контролы, раскладка, `smoke_v3.sh`
 
-Дата: 2026-10-20. Стенд: release `vks-server`; точные `git_head`, `git_dirty`,
+Дата: 2026-10-21. Стенд: release `vks-server`; точные `git_head`, `git_dirty`,
 `binary_sha256` и `server_pid` — в `summary.json → build` (единственный источник
 истины; здесь значения не дублируются, чтобы не устаревать).
 UI `/pnm/`, endpoint `192.168.1.132` (SIP 5060, H.323 1720; одновременно

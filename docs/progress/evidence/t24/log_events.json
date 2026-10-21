@@ -1,12 +1,12 @@
 {
- "count": 4824,
+ "count": 1682,
  "log_events": [
   {
    "additional_info": null,
-   "created_at": 1792551396,
+   "created_at": 1792553447,
    "event_object": {},
    "event_type": "login_success",
-   "id": 10311,
+   "id": 3608,
    "invoker": {
     "avatar": null,
     "ip": "127.0.0.1",
@@ -21,13 +21,103 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551382,
+   "created_at": 1792553383,
+   "event_object": {},
+   "event_type": "login_success",
+   "id": 3607,
+   "invoker": {
+    "avatar": null,
+    "ip": "127.0.0.1",
+    "name": "admin"
+   },
+   "object_type": "users",
+   "payload": {
+    "error": null,
+    "ip": "127.0.0.1",
+    "login": "admin"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792553142,
+   "event_object": {},
+   "event_type": "login_success",
+   "id": 3580,
+   "invoker": {
+    "avatar": null,
+    "ip": "127.0.0.1",
+    "name": "admin"
+   },
+   "object_type": "users",
+   "payload": {
+    "error": null,
+    "ip": "127.0.0.1",
+    "login": "admin"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792553070,
+   "event_object": {},
+   "event_type": "login_success",
+   "id": 3579,
+   "invoker": {
+    "avatar": null,
+    "ip": "127.0.0.1",
+    "name": "admin"
+   },
+   "object_type": "users",
+   "payload": {
+    "error": null,
+    "ip": "127.0.0.1",
+    "login": "admin"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792553027,
+   "event_object": {},
+   "event_type": "login_success",
+   "id": 3578,
+   "invoker": {
+    "avatar": null,
+    "ip": "127.0.0.1",
+    "name": "admin"
+   },
+   "object_type": "users",
+   "payload": {
+    "error": null,
+    "ip": "127.0.0.1",
+    "login": "admin"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792552971,
+   "event_object": {},
+   "event_type": "login_success",
+   "id": 3577,
+   "invoker": {
+    "avatar": null,
+    "ip": "127.0.0.1",
+    "name": "admin"
+   },
+   "object_type": "users",
+   "payload": {
+    "error": null,
+    "ip": "127.0.0.1",
+    "login": "admin"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792552956,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 10310,
+   "id": 3576,
    "invoker": {
     "avatar": null,
     "ip": "",
@@ -42,13 +132,13 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551379,
+   "created_at": 1792552953,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 10309,
+   "id": 3575,
    "invoker": {
     "avatar": null,
     "ip": "",
@@ -63,13 +153,13 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551379,
+   "created_at": 1792552953,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 10308,
+   "id": 3574,
    "invoker": {
     "avatar": null,
     "ip": "",
@@ -84,13 +174,13 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551379,
+   "created_at": 1792552953,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 10307,
+   "id": 3573,
    "invoker": {
     "avatar": null,
     "ip": "",
@@ -105,13 +195,13 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551379,
+   "created_at": 1792552953,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 10306,
+   "id": 3572,
    "invoker": {
     "avatar": null,
     "ip": "",
@@ -126,13 +216,13 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551379,
+   "created_at": 1792552953,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 10305,
+   "id": 3571,
    "invoker": {
     "avatar": null,
     "ip": "",
@@ -147,13 +237,13 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551351,
+   "created_at": 1792552926,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 10299,
+   "id": 3565,
    "invoker": {
     "avatar": null,
     "ip": "",
@@ -168,13 +258,13 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551351,
+   "created_at": 1792552926,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 10297,
+   "id": 3563,
    "invoker": {
     "avatar": null,
     "ip": "",
@@ -189,13 +279,13 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551351,
+   "created_at": 1792552921,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 6864,
+   "id": 3562,
    "invoker": {
     "avatar": null,
     "ip": "",
@@ -210,13 +300,13 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551351,
+   "created_at": 1792552913,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 6862,
+   "id": 3561,
    "invoker": {
     "avatar": null,
     "ip": "",
@@ -231,13 +321,13 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551351,
+   "created_at": 1792552910,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 3431,
+   "id": 3560,
    "invoker": {
     "avatar": null,
     "ip": "",
@@ -252,13 +342,13 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551346,
+   "created_at": 1792552910,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 10296,
+   "id": 3559,
    "invoker": {
     "avatar": null,
     "ip": "",
@@ -273,13 +363,13 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551346,
+   "created_at": 1792552904,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 6861,
+   "id": 3558,
    "invoker": {
     "avatar": null,
     "ip": "",
@@ -294,118 +384,13 @@
   },
   {
    "additional_info": null,
-   "created_at": 1792551346,
+   "created_at": 1792552904,
    "event_object": {
     "config_after": {},
     "config_before": {}
    },
    "event_type": "updating_configuration_security_success",
-   "id": 3430,
-   "invoker": {
-    "avatar": null,
-    "ip": "",
-    "name": "00000000-0000-0000-0000-000000000001"
-   },
-   "object_type": "nodes",
-   "payload": {
-    "error": null,
-    "ip": "",
-    "login": "00000000-0000-0000-0000-000000000001"
-   }
-  },
-  {
-   "additional_info": null,
-   "created_at": 1792551338,
-   "event_object": {
-    "config_after": {},
-    "config_before": {}
-   },
-   "event_type": "updating_configuration_security_success",
-   "id": 10295,
-   "invoker": {
-    "avatar": null,
-    "ip": "",
-    "name": "00000000-0000-0000-0000-000000000001"
-   },
-   "object_type": "nodes",
-   "payload": {
-    "error": null,
-    "ip": "",
-    "login": "00000000-0000-0000-0000-000000000001"
-   }
-  },
-  {
-   "additional_info": null,
-   "created_at": 1792551338,
-   "event_object": {
-    "config_after": {},
-    "config_before": {}
-   },
-   "event_type": "updating_configuration_security_success",
-   "id": 6860,
-   "invoker": {
-    "avatar": null,
-    "ip": "",
-    "name": "00000000-0000-0000-0000-000000000001"
-   },
-   "object_type": "nodes",
-   "payload": {
-    "error": null,
-    "ip": "",
-    "login": "00000000-0000-0000-0000-000000000001"
-   }
-  },
-  {
-   "additional_info": null,
-   "created_at": 1792551338,
-   "event_object": {
-    "config_after": {},
-    "config_before": {}
-   },
-   "event_type": "updating_configuration_security_success",
-   "id": 3429,
-   "invoker": {
-    "avatar": null,
-    "ip": "",
-    "name": "00000000-0000-0000-0000-000000000001"
-   },
-   "object_type": "nodes",
-   "payload": {
-    "error": null,
-    "ip": "",
-    "login": "00000000-0000-0000-0000-000000000001"
-   }
-  },
-  {
-   "additional_info": null,
-   "created_at": 1792551335,
-   "event_object": {
-    "config_after": {},
-    "config_before": {}
-   },
-   "event_type": "updating_configuration_security_success",
-   "id": 10294,
-   "invoker": {
-    "avatar": null,
-    "ip": "",
-    "name": "00000000-0000-0000-0000-000000000001"
-   },
-   "object_type": "nodes",
-   "payload": {
-    "error": null,
-    "ip": "",
-    "login": "00000000-0000-0000-0000-000000000001"
-   }
-  },
-  {
-   "additional_info": null,
-   "created_at": 1792551335,
-   "event_object": {
-    "config_after": {},
-    "config_before": {}
-   },
-   "event_type": "updating_configuration_security_success",
-   "id": 10293,
+   "id": 3557,
    "invoker": {
     "avatar": null,
     "ip": "",

@@ -1,15 +1,15 @@
 {
  "task": "T2.2",
  "ok": true,
- "started_at": "2026-10-21T02:54:36.936Z",
+ "started_at": "2026-10-21T03:31:49.424Z",
  "build": {
-  "git_head": "ad214aec9a875e69bd9827e78bea633e59d486fd",
-  "git_head_ct": 1792551203,
+  "git_head": "21edc17183fac7cbb8aa9bc3030c3fbc0d83b732",
+  "git_head_ct": 1792553369,
   "git_dirty": false,
-  "binary_sha256": "721eac186f87a162457da95e243603d464977eef538d85c4cc93d5ce51733fbb",
-  "binary_mtime": 1792551272,
-  "binary_path": "/proc/897427/exe",
-  "server_pid": 897427
+  "binary_sha256": "329e549ae4a6bee578449d971a077f97367e65224c66d324bc4ea23f99a14e4a",
+  "binary_mtime": 1792553439,
+  "binary_path": "/proc/927392/exe",
+  "server_pid": 927392
  },
  "acceptance": {
   "history_stop_never_started": true,
@@ -44,17 +44,17 @@
   "vendor_console_errors": 0
  },
  "error": null,
- "history_started_at": 1792551285,
+ "history_started_at": 1792553518,
  "csv_timezone": {
-  "expectedDate": "21.10.2026 05:54:45",
+  "expectedDate": "21.10.2026 06:31:58",
   "timezone": "Europe/Moscow"
  },
  "export": {
-  "filename": "Conference_history_2026-10-21_50147bc359b0491886493a3d001b08be.zip",
+  "filename": "Conference_history_2026-10-21_8835c05445de451b95cd69fa627b4ae5.zip",
   "csv_bytes": 290,
-  "ui_filename": "Conference_history_T22History_276936_b503189688334a9596d35fbbc43aeddc.zip"
+  "ui_filename": "Conference_history_T22History_509424_2f14e962b2ab46fb90af2fe81c873543.zip"
  },
- "finished_at": "2026-10-21T02:55:11.100Z",
+ "finished_at": "2026-10-21T03:32:23.586Z",
  "steps": [
   "history-stop-never-started",
   "conference-create",

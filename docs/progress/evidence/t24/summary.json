@@ -1,15 +1,15 @@
 {
  "task": "T2.4",
  "ok": true,
- "started_at": "2026-10-21T02:56:33.056Z",
+ "started_at": "2026-10-21T03:30:44.008Z",
  "build": {
-  "git_head": "ad214aec9a875e69bd9827e78bea633e59d486fd",
-  "git_head_ct": 1792551203,
+  "git_head": "21edc17183fac7cbb8aa9bc3030c3fbc0d83b732",
+  "git_head_ct": 1792553369,
   "git_dirty": false,
-  "binary_sha256": "721eac186f87a162457da95e243603d464977eef538d85c4cc93d5ce51733fbb",
-  "binary_mtime": 1792551272,
-  "binary_path": "/proc/897427/exe",
-  "server_pid": 897427
+  "binary_sha256": "329e549ae4a6bee578449d971a077f97367e65224c66d324bc4ea23f99a14e4a",
+  "binary_mtime": 1792553439,
+  "binary_path": "/proc/927392/exe",
+  "server_pid": 927392
  },
  "acceptance": {
   "log_events_contract": true,
@@ -46,11 +46,16 @@
   "ui_pages": true,
   "ui_network_interfaces_tab": true,
   "ui_license_not_expired": true,
+  "network_patch_error_visible": true,
   "clean_build": true,
   "binary_built_after_head": true
  },
  "totals": {
-  "statistics_text": "PROSTOR\nПанель управления\nКонференции\nСправочник\nИстория\nАдминистрирование\n0\n0\n0\nnotifications\narrow_drop_down\narrow_back\nСтатистика\nИспользование памяти\n58 Gb\nshow_chart\n\n47.1\n\nСвободно (Gb)\n\n10.7\n\nИспользуется (Gb)\n\nИспользование жесткого диска\narrow_drop_down\n/run\n\n11.3\n\nСвободно (Gb)\n\n0.0\n\nИспользуется (Gb)\n\nСеть\nens18\nЗагрузка: 18 кбит/сек\nОтдача: 4 кбит/сек\nЗарезервированные вычислительные ресурсы\nЗагрузка вычислительных потоков\nЗагрузка процессоров",
+  "engine_log": {
+   "startup": 1792553441,
+   "expectedProcessStart": 1792553441
+  },
+  "statistics_text": "PROSTOR\nПанель управления\nКонференции\nСправочник\nИстория\nАдминистрирование\n0\n0\n0\nnotifications\narrow_drop_down\narrow_back\nСтатистика\nИспользование памяти\n58 Gb\nshow_chart\n\n47.0\n\nСвободно (Gb)\n\n10.9\n\nИспользуется (Gb)\n\nИспользование жесткого диска\narrow_drop_down\n/run\n\n11.3\n\nСвободно (Gb)\n\n0.0\n\nИспользуется (Gb)\n\nСеть\nens18\nЗагрузка: 4 кбит/сек\nОтдача: 16 кбит/сек\nЗарезервированные вычислительные ресурсы\nЗагрузка вычислительных потоков\nЗагрузка процессоров",
   "ui_pages_seen": [
    {
     "slug": "statistics",
@@ -110,12 +115,18 @@
    "cards": 1,
    "rendered": true
   },
-  "gates": 36,
-  "gates_passed": 36,
+  "network_save": {
+   "patchStatus": 501,
+   "toast": "Не удалось применить изменения: Network interface configuration is not supported by this MCU build (read-only mode): the change was not applied"
+  },
+  "gates": 37,
+  "gates_passed": 37,
   "http_errors": 0,
   "console_errors": 0,
+  "intentional_console_501": 1,
+  "intentional_http_501": 1,
   "vendor_errors": 12,
-  "screenshots": 5,
+  "screenshots": 6,
   "steps": 10
  },
  "error": null,
@@ -136,5 +147,5 @@
   "Invalid scale configuration for scale: xAxes"
  ],
  "http_errors": [],
- "finished_at": "2026-10-21T02:57:31.552Z"
+ "finished_at": "2026-10-21T03:31:42.856Z"
 }

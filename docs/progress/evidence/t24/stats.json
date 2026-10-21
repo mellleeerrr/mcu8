@@ -1,65 +1,35 @@
 {
  "memory": {
-  "free": 47207,
+  "free": 47039,
   "total": 57858,
-  "used": 10651
+  "used": 10819
  },
  "cpu": {
   "count": 36,
   "load": [
    {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
+    "idle": 83.3,
+    "kernel_mode": 8.3,
+    "user_mode": 8.3
    },
    {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
+    "idle": 84.6,
+    "kernel_mode": 7.7,
+    "user_mode": 7.7
    },
    {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
+    "idle": 76.9,
+    "kernel_mode": 15.4,
+    "user_mode": 7.7
    },
    {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
+    "idle": 81.8,
+    "kernel_mode": 9.1,
+    "user_mode": 9.1
    },
    {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
+    "idle": 83.3,
+    "kernel_mode": 16.7,
     "user_mode": 0
    },
    {
@@ -68,49 +38,139 @@
     "user_mode": 8.3
    },
    {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
     "idle": 91.7,
+    "kernel_mode": 8.3,
+    "user_mode": 0
+   },
+   {
+    "idle": 58.3,
     "kernel_mode": 0,
+    "user_mode": 41.7
+   },
+   {
+    "idle": 81.8,
+    "kernel_mode": 9.1,
+    "user_mode": 9.1
+   },
+   {
+    "idle": 0,
+    "kernel_mode": 54.5,
+    "user_mode": 45.5
+   },
+   {
+    "idle": 83.3,
+    "kernel_mode": 8.3,
     "user_mode": 8.3
    },
    {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 91.7,
-    "kernel_mode": 0,
+    "idle": 83.3,
+    "kernel_mode": 8.3,
     "user_mode": 8.3
+   },
+   {
+    "idle": 83.3,
+    "kernel_mode": 8.3,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 75,
+    "kernel_mode": 8.3,
+    "user_mode": 16.7
+   },
+   {
+    "idle": 83.3,
+    "kernel_mode": 8.3,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 83.3,
+    "kernel_mode": 8.3,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 83.3,
+    "kernel_mode": 8.3,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 76.9,
+    "kernel_mode": 15.4,
+    "user_mode": 7.7
+   },
+   {
+    "idle": 76.9,
+    "kernel_mode": 7.7,
+    "user_mode": 15.4
+   },
+   {
+    "idle": 83.3,
+    "kernel_mode": 8.3,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 58.3,
+    "kernel_mode": 8.3,
+    "user_mode": 33.3
+   },
+   {
+    "idle": 83.3,
+    "kernel_mode": 8.3,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 81.8,
+    "kernel_mode": 9.1,
+    "user_mode": 9.1
+   },
+   {
+    "idle": 76.9,
+    "kernel_mode": 7.7,
+    "user_mode": 15.4
+   },
+   {
+    "idle": 83.3,
+    "kernel_mode": 8.3,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 83.3,
+    "kernel_mode": 8.3,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 76.9,
+    "kernel_mode": 7.7,
+    "user_mode": 15.4
+   },
+   {
+    "idle": 85.7,
+    "kernel_mode": 7.1,
+    "user_mode": 7.1
+   },
+   {
+    "idle": 76.9,
+    "kernel_mode": 7.7,
+    "user_mode": 15.4
+   },
+   {
+    "idle": 81.8,
+    "kernel_mode": 9.1,
+    "user_mode": 9.1
+   },
+   {
+    "idle": 83.3,
+    "kernel_mode": 8.3,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 83.3,
+    "kernel_mode": 8.3,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 81.8,
+    "kernel_mode": 9.1,
+    "user_mode": 9.1
    },
    {
     "idle": 83.3,
@@ -118,74 +178,14 @@
     "user_mode": 16.7
    },
    {
-    "idle": 91.7,
+    "idle": 90.9,
+    "kernel_mode": 9.1,
+    "user_mode": 0
+   },
+   {
+    "idle": 83.3,
     "kernel_mode": 8.3,
-    "user_mode": 0
-   },
-   {
-    "idle": 92.3,
-    "kernel_mode": 0,
-    "user_mode": 7.7
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 66.7,
-    "kernel_mode": 8.3,
-    "user_mode": 25
-   },
-   {
-    "idle": 91.7,
-    "kernel_mode": 0,
     "user_mode": 8.3
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 92.3,
-    "kernel_mode": 0,
-    "user_mode": 7.7
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 91.7,
-    "kernel_mode": 8.3,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
    }
   ]
  },
@@ -199,10 +199,10 @@
     "used": 3
    },
    {
-    "free": 40065,
+    "free": 40058,
     "name": "/",
     "total": 120376,
-    "used": 74151
+    "used": 74157
    },
    {
     "free": 28879,
@@ -217,10 +217,10 @@
     "used": 0
    },
    {
-    "free": 27375,
+    "free": 27366,
     "name": "/tmp",
     "total": 28929,
-    "used": 1554
+    "used": 1562
    },
    {
     "free": 1,
@@ -247,8 +247,8 @@
   "interfaces": [
    {
     "name": "ens18",
-    "rx": 0,
-    "tx": 0
+    "rx": 17,
+    "tx": 23
    }
   ]
  }

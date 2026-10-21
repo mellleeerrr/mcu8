@@ -2,7 +2,7 @@
 
 Read-only сквозной прогон vendor-UI по всем основным и административным
 страницам + проверка 18 контрактов `/api/v3`, которыми живёт UI. Ничего не
-создаёт, не меняет и не удаляет. Прогон на чистом дереве: HEAD `ad214ae`,
+создаёт, не меняет и не удаляет. Прогон на чистом дереве: HEAD `21edc17`,
 бинарник собран после HEAD (`clean_build`, `binary_built_after_head` — в
 `summary.json`).
 
@@ -16,35 +16,34 @@ node scripts/evidence/t33-evidence.js
 
 ## Результат
 
-**ok=true, 5/5** acceptance-гейтов: 23 страницы без 4xx/console error,
-18/18 API-контрактов, 6 PNG, 0 HTTP ≥ 400, 0 наших console error,
-24 известных vendor Chart.js warning (allowlisted). «Калибровка» удалена:
+**ok=true, 5/5** acceptance-гейтов: 22 страницы без 4xx/console error,
+19 проверок API (18 контрактов, один повтор), 7 PNG, 0 HTTP ≥ 400,
+0 наших console error, 24 известных vendor Chart.js warning (allowlisted). «Калибровка» удалена:
 deep-link `/pnm/administration/calibration` уводит на статистику, API отдаёт
 `{calibration:null}`.
 
 ## Таблица паритета (UI ↔ наш API)
 
-| Страница PNM | Ключевые запросы UI | Наш ответ | Evidence |
+| Страница PNM | Реальный URL | Ключевые запросы UI | Evidence |
 |---|---|---|---|
-| `/pnm/` панель | `/ui/system/status`, `/ui/sessions`, `/conferences` | 200, READY, конференции | `01-root.png`, t16 |
-| Конференции | `/ui/sessions`, `/conferences`, `/abonents/count` | 200, список/создание | `02-conferences.png`, t16 |
-| Справочник | `/call_strings`, `/users`, `/groups`, `/references` | 200, CRUD | `03-directory.png`, t21 |
-| История | `/call_history`, `/session_history`, export | 200, фильтры/сортировка/ZIP | `04-history.png`, t22 |
-| Статистика | `/ui/system/status`, `/system/stats/{memory,cpu,disk,network}`, `/engine/diagnostics` | 200, MB/kbps/delta | `05-statistics.png`, t24 |
-| Медиафайлы | `/videorecords`, `/conferences/{id}/videorecords` | 200, read-only | t24 |
-| Терминалы | `/system/terminals` | 200 `{count,terminals}` | t24 |
-| Сеть / интерфейсы | `/system/status/network`, `/system/network/interfaces` | 200, `editable:true`, список ens18 | `06-calls.png`, t24 |
-| Вызовы | `/settings/calls`, `/settings/calls/sip`, `/settings/calls/h323` | 200, PATCH сохраняет | `06-calls.png`, t23 |
-| Настройки конференции | `/settings/calls`, stop_rules | 200, `one_abonent` | t23 |
-| Видео | `/settings/video`, `/settings/video_codecs` | 200, PATCH | t23 |
-| Калибровка | `/engine/calibration` | 200 `{calibration:null}`, deep-link → статистика | t24 |
-| Импорт/экспорт, сброс, питание | snapshot/clean/reboot-* | read-only 501 с описанием | t24 |
-| Дата/время | `/system/time`, `/system/ntp`, time-zones | 200, плоский NTP PATCH | t23 |
-| Роли/безопасность | `/users`, `/groups`, `/settings/security` | 200, RBAC | t21, t23 |
-| Журнал событий | `/log_events`, export, static ZIP | 200, CSV локальная TZ | t24 |
-| Стили раскладок | `/settings/styles`, `/video_layouts/templates` | 200, PATCH | t23 |
-| Лицензия | `/license`, `/features` | 200, PERMANENT/50 фич | t24 |
-| О программе | `/system/about` | 200, versions/READY | t24 |
+| Конференции (дашборд) | `/pnm/monitoring/sessions` | `/ui/sessions`, `/conferences`, `/abonents/count` | `01-sessions.png`, t16 |
+| Справочник | `/pnm/addressbook/users` | `/call_strings`, `/users`, `/groups`, `/references` | `02-addressbook.png`, t21 |
+| История | `/pnm/history` | `/call_history`, `/session_history`, export | `03-history.png`, t22 |
+| Статистика | `/pnm/administration/statistics` | `/ui/system/status`, `/system/stats/*`, `/engine/diagnostics` | `04-statistics.png`, t24 |
+| Вызовы | `/pnm/administration/calls` | `/settings/calls`, `/settings/calls/sip|h323` | `05-calls.png`, t23 |
+| Сеть / интерфейсы | `/pnm/administration/network` | `/system/status/network`, `/system/network/interfaces` | `06-network.png`, t24 |
+| Лицензия | `/pnm/administration/license` | `/license`, `/features` | `07-license.png`, t24 |
+| Медиафайлы | `/pnm/administration/mediafiles` | `/videorecords` (read-only) | t24 |
+| Терминалы | `/pnm/administration/terminals` | `/system/terminals` | t24 |
+| Настройки конференции | `/pnm/administration/conference_settings` | `/settings/calls`, stop_rules | t23 |
+| Видео | `/pnm/administration/video` | `/settings/video`, `/settings/video_codecs` | t23 |
+| Калибровка | `/pnm/administration/calibration` | 308 → `/administration/statistics`; `/engine/calibration` = `null` | t24 |
+| Дата/время | `/pnm/administration/date_time` | `/system/time`, `/system/ntp`, time-zones | t23 |
+| Роли/безопасность | `/pnm/administration/roles`, `/security` | `/users`, `/groups`, `/settings/security` | t21, t23 |
+| Журнал событий | `/pnm/administration/event_list` | `/log_events`, export, static ZIP | t24 |
+| Импорт/экспорт, сброс, питание | `/backup`, `/reset`, `/power` | snapshot/clean/reboot-* — read-only 501 | t24 |
+| Стили раскладок | `/pnm/administration/layout_skins` | `/settings/styles`, `/video_layouts/templates` | t23 |
+| О программе | `/pnm/administration/about` | `/system/about` | t24 |
 
 Полная JSON-таблица по 18 проверенным endpoint — в `summary.json →
 totals.api_parity`.

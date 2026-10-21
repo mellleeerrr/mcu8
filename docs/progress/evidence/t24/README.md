@@ -3,7 +3,7 @@
 Сквозная вязка vendor-UI `/pnm/administration/{event_list,network,statistics,
 terminals,mediafiles,diagnostics,backup,reset,license,about}` с нашим
 `/api/v3` на реальном бинаре `vks-server`. Прогон на чистом дереве: HEAD
-`ad214ae`, бинарник собран после HEAD (явные гейты `clean_build`,
+`21edc17`, бинарник собран после HEAD (явные гейты `clean_build`,
 `binary_built_after_head` в `summary.json`).
 
 ## Как воспроизвести
@@ -14,16 +14,18 @@ BASE_URL=http://127.0.0.1:8080 \
 node scripts/evidence/t24-evidence.js
 ```
 
-Скрипт логинится через vendor-UI, проходит **36 acceptance-гейтов** (API +
+Скрипт логинится через vendor-UI, проходит **37 acceptance-гейтов** (API +
 обход 10 страниц; вкладка «Сетевые интерфейсы» открывается отдельным кликом),
-делает 5 PNG и всегда
+делает 6 PNG и всегда
 пишет `summary.json`; при провале — `ok:false`, exit 1. Мутации
 сети/tcpdump/терминалов/видеозаписей проверяются как явные 501 (read-only).
 
 ## Результат
 
-**ok=true, 36/36** acceptance-гейтов, 10 шагов, 5 PNG, 0 HTTP ≥ 400 на страницах UI (API-негативы 422/501/503 проверяются
-намеренно), 0 console error. `vendor_errors=12` — известный баг Chart.js 2.x в
+**ok=true, 37/37** acceptance-гейтов, 10 шагов, 6 PNG, 0 HTTP ≥ 400 на страницах UI
+(API-негативы 422/501/503 проверяются намеренно), 0 **непреднамеренных**
+console error (один 501 в гейте видимой ошибки сохранения сети исключён из
+счётчика и записан как `intentional_console_501=1`). `vendor_errors=12` — известный баг Chart.js 2.x в
 vendor-бандле статистики (`Invalid scale configuration for scale:
 yAxes/xAxes/responsive/maintainAspectRatio`); он явно allowlisted и не скрывает
 наши ошибки.
@@ -45,6 +47,7 @@ yAxes/xAxes/responsive/maintainAspectRatio`); он явно allowlisted и не 
 | `session_videorecords_alias` | `/sessions/{id}/videorecords[/estimated_time]` → 200 (раньше catch-all 501) |
 | `utils_traceroute_honest` | traceroute не установлен → честный **503** «not installed», а не 200 с OS-ошибкой |
 | `utils_ping_rejects_option` | `address=-V` → 422: опции не уходят в процесс |
+| `network_patch_error_visible` | нажатие Save/`PATCH /system/network/ens18` → 501, а глобальный `api-errors.js` показывает красный тост с `error.description` (проверяется текст тоста, не только HTTP-код) |
 | `engine_log` | стартовая запись совпадает с реальным стартом процесса (`/proc/<pid>/stat starttime + /proc/stat btime`, HZ=100) и стабильна между запросами |
 
 Остальные гейты — контракты list/detail/patch-501, ping/tcpdump/терминалы/
@@ -66,7 +69,7 @@ warnings.
     токен. Файл живёт в общем `ExportStore` (TTL 1 ч, cap 32), `/static/log_events`
     отдаётся без авторизации по непредсказуемому имени.
   - Сеть: интерфейсы из `ip -j addr`/`ip -j route`, статус
-    `/system/status/network` → `{editable:false}`, `PATCH` → 501.
+    `/system/status/network` → `{editable:true}`, `PATCH` → 501 + видимый тост.
   - `ping`/`traceroute`: реальные процессы, адрес валидируется (буквы/цифры/
     `.:-_`, не начинается с `-`), `kill_on_drop`, таймаут 10 с; отсутствующий
     бинарь → 503.

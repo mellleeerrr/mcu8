@@ -2,12 +2,12 @@
  "task": "T3.3",
  "ok": true,
  "build": {
-  "git_head": "ad214aec9a875e69bd9827e78bea633e59d486fd",
-  "git_head_ct": 1792551203,
+  "git_head": "21edc17183fac7cbb8aa9bc3030c3fbc0d83b732",
+  "git_head_ct": 1792553369,
   "git_dirty": false,
-  "binary_sha256": "721eac186f87a162457da95e243603d464977eef538d85c4cc93d5ce51733fbb",
-  "binary_mtime": 1792551272,
-  "server_pid": 897427
+  "binary_sha256": "329e549ae4a6bee578449d971a077f97367e65224c66d324bc4ea23f99a14e4a",
+  "binary_mtime": 1792553439,
+  "server_pid": 927392
  },
  "acceptance": {
   "api_parity": true,
@@ -17,12 +17,13 @@
   "binary_built_after_head": true
  },
  "pages": [
-  "01-root.png",
-  "02-conferences.png",
-  "03-directory.png",
-  "04-history.png",
-  "05-statistics.png",
-  "06-calls.png"
+  "01-sessions.png",
+  "02-addressbook.png",
+  "03-history.png",
+  "04-statistics.png",
+  "05-calls.png",
+  "06-network.png",
+  "07-license.png"
  ],
  "totals": {
   "api_parity": {
@@ -101,8 +102,8 @@
   },
   "acceptance": 5,
   "failed": 0,
-  "pages": 23,
-  "screenshots": 6,
+  "pages": 22,
+  "screenshots": 7,
   "http_errors": 0,
   "console_errors": 0,
   "vendor_console_errors": 24
