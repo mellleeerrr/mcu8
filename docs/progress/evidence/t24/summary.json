@@ -1,0 +1,121 @@
+{
+ "task": "T2.4",
+ "ok": true,
+ "started_at": "2026-10-21T01:41:41.734Z",
+ "build": {
+  "git_head": "7f2fec7f6a1f94afe6028158646b30f4b342c78e",
+  "git_head_ct": 1792546712,
+  "git_dirty": false,
+  "binary_sha256": "c05530672a5305b6fb9b7d82deba72929a070be77e3fe076541a22d4f35818ec",
+  "binary_mtime": 1792546783,
+  "binary_path": "/proc/825895/exe",
+  "server_pid": 825895
+ },
+ "acceptance": {
+  "log_events_contract": true,
+  "log_events_pagination": true,
+  "log_events_filter_search": true,
+  "log_events_date_filter": true,
+  "log_events_export_zip": true,
+  "log_events_static_404": true,
+  "network_interfaces_list": true,
+  "network_interface_detail": true,
+  "network_interface_patch_501": true,
+  "utils_ping": true,
+  "tcpdumps_status": true,
+  "tcpdumps_list": true,
+  "tcpdumps_mutations_501": true,
+  "terminals_list": true,
+  "terminals_mutations_501": true,
+  "videorecords_list": true,
+  "videorecords_estimated": true,
+  "videorecords_delete_501": true,
+  "stats_memory": true,
+  "stats_cpu": true,
+  "stats_disk": true,
+  "stats_network": true,
+  "system_packages": true,
+  "engine_log": true,
+  "ui_pages": true
+ },
+ "totals": {
+  "ui_pages_seen": [
+   {
+    "slug": "statistics",
+    "missing": [],
+    "http": []
+   },
+   {
+    "slug": "mediafiles",
+    "missing": [],
+    "http": []
+   },
+   {
+    "slug": "terminals",
+    "missing": [],
+    "http": []
+   },
+   {
+    "slug": "network",
+    "missing": [],
+    "http": []
+   },
+   {
+    "slug": "event_list",
+    "missing": [],
+    "http": []
+   },
+   {
+    "slug": "diagnostics",
+    "missing": [],
+    "http": []
+   },
+   {
+    "slug": "backup",
+    "missing": [],
+    "http": []
+   },
+   {
+    "slug": "reset",
+    "missing": [],
+    "http": []
+   },
+   {
+    "slug": "license",
+    "missing": [],
+    "http": []
+   },
+   {
+    "slug": "about",
+    "missing": [],
+    "http": []
+   }
+  ],
+  "gates": 25,
+  "gates_passed": 25,
+  "http_errors": 0,
+  "console_errors": 0,
+  "vendor_errors": 12,
+  "screenshots": 4,
+  "steps": 9
+ },
+ "error": null,
+ "acceptance_failed": [],
+ "console_errors": [],
+ "vendor_errors": [
+  "Invalid scale configuration for scale: yAxes",
+  "Invalid scale configuration for scale: xAxes",
+  "Invalid scale configuration for scale: yAxes",
+  "Invalid scale configuration for scale: xAxes",
+  "Invalid scale configuration for scale: responsive",
+  "Invalid scale configuration for scale: maintainAspectRatio",
+  "Invalid scale configuration for scale: yAxes",
+  "Invalid scale configuration for scale: xAxes",
+  "Invalid scale configuration for scale: responsive",
+  "Invalid scale configuration for scale: maintainAspectRatio",
+  "Invalid scale configuration for scale: yAxes",
+  "Invalid scale configuration for scale: xAxes"
+ ],
+ "http_errors": [],
+ "finished_at": "2026-10-21T01:42:36.282Z"
+}

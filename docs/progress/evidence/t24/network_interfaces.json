@@ -1,0 +1,21 @@
+{
+ "count": 1,
+ "interfaces": [
+  {
+   "addresses": [
+    {
+     "ipaddress": "192.168.1.93",
+     "netmask": "255.255.255.0"
+    }
+   ],
+   "gateway": "192.168.1.1",
+   "interface": "ens18",
+   "mac": "BC:24:11:BC:96:40",
+   "nameservers": [
+    "127.0.0.53"
+   ],
+   "ready": true,
+   "use_dhcp": true
+  }
+ ]
+}

@@ -1,15 +1,15 @@
 {
  "task": "T2.3",
- "ok": false,
- "started_at": "2026-10-21T01:25:30.837Z",
+ "ok": true,
+ "started_at": "2026-10-21T01:40:23.181Z",
  "build": {
-  "git_head": "67c61ac9559c148192fcaedcaf79913dc7b17a1f",
-  "git_head_ct": 1792545812,
-  "git_dirty": true,
+  "git_head": "7f2fec7f6a1f94afe6028158646b30f4b342c78e",
+  "git_head_ct": 1792546712,
+  "git_dirty": false,
   "binary_sha256": "c05530672a5305b6fb9b7d82deba72929a070be77e3fe076541a22d4f35818ec",
-  "binary_mtime": 1792545883,
-  "binary_path": "/proc/821070/exe",
-  "server_pid": 821070
+  "binary_mtime": 1792546783,
+  "binary_path": "/proc/825895/exe",
+  "server_pid": 825895
  },
  "acceptance": {
   "settings_get_contracts": true,
@@ -31,12 +31,56 @@
   "smtp_reset": true,
   "ntp_toggle": true,
   "ntp_status_not_faked": true,
-  "ntp_status_source": "yes",
-  "system_time_patch_vendor_string": false,
+  "system_time_patch_vendor_string": true,
   "system_time_patch": true,
   "timezone_patch_profile": true,
-  "time_zones_list": true
+  "time_zones_list": true,
+  "ntp_ui_save": true,
+  "ntp_ui_restarted_services": true,
+  "conference_settings_ui_one_abonent": true,
+  "sip_save_restart_services": true,
+  "settings_ui_pages": true,
+  "settings_ui_save": true,
+  "settings_ui_save_restored": true,
+  "ui_time_shows_ntp": true,
+  "ui_security_form": true
  },
- "totals": {},
- "error": "locator.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator('[title=\"Частота синхронизации\"]')\n\n    at /home/pro/Рабочий стол/mcu/scripts/evidence/t23-evidence.js:359:61\n    at async record (/home/pro/Рабочий стол/mcu/scripts/evidence/t23-evidence.js:102:19)\n    at async /home/pro/Рабочий стол/mcu/scripts/evidence/t23-evidence.js:339:5"
+ "totals": {
+  "steps": 12,
+  "acceptance": 32,
+  "failed": 0,
+  "screenshots": 4,
+  "http_errors": 0,
+  "console_errors": 0,
+  "vendor_console_errors": 0
+ },
+ "error": null,
+ "host_ntp_status": "yes",
+ "conference_settings_ui_patch_statuses": [
+  200,
+  200
+ ],
+ "steps": [
+  "settings-get-contracts",
+  "settings-patch-persist",
+  "calls-vendor-and-legacy",
+  "http-tls-multipart",
+  "smtp-test-and-reset",
+  "ntp-time-timezone",
+  "settings-ui-ntp-save",
+  "settings-ui-conference-one-abonent",
+  "sip-save-restart-services",
+  "settings-ui-pages",
+  "settings-ui-save",
+  "settings-ui-screenshots"
+ ],
+ "screenshots": [
+  "02-administration-date-time.png",
+  "03-administration-conference-settings.png",
+  "01-administration-calls.png",
+  "03-administration-security.png"
+ ],
+ "http_errors": [],
+ "console_errors": [],
+ "finished_at": "2026-10-21T01:41:40.533Z"
 }

@@ -1,7 +1,9 @@
 # T2.2 — История конференций (call_history)
 
 Дата: 2026-10-21. Evidence UI-прогона на vendor-оболочке 2.2.1.66 против
-нашего `/api/v3` (бинарник собран после коммита, см. `summary.json.build`).
+нашего `/api/v3`. Прогон на чистом дереве: HEAD `7f2fec7`, бинарник собран
+после HEAD (`summary.json.build`, `clean_build=true`,
+`binary_built_after_head=true`).
 
 ## Что проверено
 
@@ -35,7 +37,8 @@
 
 ## Реализация (backend)
 
-- `crates/vks-admin/src/api_v3/history.rs`: `HistoryState` (MAX 500, дедуп по
+- `crates/vks-admin/src/api_v3/history.rs` + `history/export.rs`: `HistoryState`
+  (MAX 500, дедуп по
   `room_id+started_ms` — два старта в одну секунду не склеиваются), запись в
   `record_stopped` ДО очистки `call_attempts`/участников, снимок payload
   конференции, call `started_at` = время адреса/вызова, `abonents` из
@@ -69,12 +72,15 @@
 
 ## Тесты
 
-`cargo test -p vks-admin --lib history` — 15 тестов (список/детали/ui, фильтры
+`cargo test -p vks-admin --lib history` — 21 тест (список/детали/ui, фильтры
 дат/сортировка/пагинация, CSV-экранирование и формулы, ZIP store с реальным
-извлечением/CRC, dedupe, restart, clean+инвалидация, DTMF/route/call-snapshot,
-per-session export, quick-start identity, delete/повторная остановка без
-фантомов, vendor-форма abonents/contact, CSV-таймзона). Полный прогон:
-201 vks-admin + 34 vks-auth, clippy/fmt без замечаний.
+извлечением/CRC, dedupe, restart, clean+инвалидация+durable-маркер, DTMF/route/
+call-snapshot, per-session export, quick-start identity, delete/повторная
+остановка без фантомов, vendor-форма abonents/contact, завершившийся вызов
+сохраняет abonent, входящий вызов = INCOMING, CSV-таймзона, MAX_SESSIONS,
+статические 404/traversal, date-фильтр экспорта, null stopper, clean 403,
+cap/TTL `ExportStore`). Полный прогон: 220 vks-admin lib + 35 vks-server lib,
+`cargo clippy --all-targets` и `cargo fmt --check` без замечаний.
 
 ## Воспроизведение
 

@@ -1,0 +1,255 @@
+{
+ "memory": {
+  "free": 47492,
+  "total": 57858,
+  "used": 10366
+ },
+ "cpu": {
+  "count": 36,
+  "load": [
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 100,
+    "kernel_mode": 0,
+    "user_mode": 0
+   }
+  ]
+ },
+ "disk": {
+  "count": 8,
+  "spaces": [
+   {
+    "free": 11846244,
+    "name": "/run",
+    "total": 11849412,
+    "used": 3168
+   },
+   {
+    "free": 45492052,
+    "name": "/",
+    "total": 123265600,
+    "used": 71465864
+   },
+   {
+    "free": 29572976,
+    "name": "/dev/shm",
+    "total": 29623520,
+    "used": 50544
+   },
+   {
+    "free": 1024,
+    "name": "/run/credentials/systemd-journald.service",
+    "total": 1024,
+    "used": 0
+   },
+   {
+    "free": 28059588,
+    "name": "/tmp",
+    "total": 29623524,
+    "used": 1563936
+   },
+   {
+    "free": 1024,
+    "name": "/run/credentials/systemd-resolved.service",
+    "total": 1024,
+    "used": 0
+   },
+   {
+    "free": 5920564,
+    "name": "/run/user/1000",
+    "total": 5924704,
+    "used": 4140
+   },
+   {
+    "free": 0,
+    "name": "/run/media/pro/Ubuntu",
+    "total": 6366186,
+    "used": 6366186
+   }
+  ]
+ },
+ "network": {
+  "count": 1,
+  "interfaces": [
+   {
+    "name": "ens18",
+    "rx": 3027837497,
+    "tx": 8126974047
+   }
+  ]
+ }
+}

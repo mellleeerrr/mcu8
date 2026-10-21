@@ -1,0 +1,422 @@
+{
+ "count": 2582,
+ "log_events": [
+  {
+   "additional_info": null,
+   "created_at": 1792546905,
+   "event_object": {},
+   "event_type": "login_success",
+   "id": 6069,
+   "invoker": {
+    "avatar": null,
+    "ip": "127.0.0.1",
+    "name": "admin"
+   },
+   "object_type": "users",
+   "payload": {
+    "error": null,
+    "ip": "127.0.0.1",
+    "login": "admin"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546890,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6068,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546887,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6067,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546887,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6066,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546887,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6065,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546887,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6064,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546887,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6063,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546860,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6062,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546860,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6060,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546860,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 3030,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546855,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6059,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546855,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 3029,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546847,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6058,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546847,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 3028,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546844,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6057,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546844,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6056,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546844,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 3027,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546844,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 3026,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546841,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6055,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  },
+  {
+   "additional_info": null,
+   "created_at": 1792546841,
+   "event_object": {
+    "config_after": {},
+    "config_before": {}
+   },
+   "event_type": "updating_configuration_security_success",
+   "id": 6054,
+   "invoker": {
+    "avatar": null,
+    "ip": "",
+    "name": "00000000-0000-0000-0000-000000000001"
+   },
+   "object_type": "nodes",
+   "payload": {
+    "error": null,
+    "ip": "",
+    "login": "00000000-0000-0000-0000-000000000001"
+   }
+  }
+ ]
+}
