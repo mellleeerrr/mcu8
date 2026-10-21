@@ -1,8 +1,8 @@
 {
  "memory": {
-  "free": 47492,
+  "free": 47171,
   "total": 57858,
-  "used": 10366
+  "used": 10687
  },
  "cpu": {
   "count": 36,
@@ -193,52 +193,52 @@
   "count": 8,
   "spaces": [
    {
-    "free": 11846244,
+    "free": 11568,
     "name": "/run",
-    "total": 11849412,
-    "used": 3168
+    "total": 11571,
+    "used": 3
    },
    {
-    "free": 45492052,
+    "free": 40867,
     "name": "/",
-    "total": 123265600,
-    "used": 71465864
+    "total": 120376,
+    "used": 73349
    },
    {
-    "free": 29572976,
+    "free": 28879,
     "name": "/dev/shm",
-    "total": 29623520,
-    "used": 50544
+    "total": 28929,
+    "used": 49
    },
    {
-    "free": 1024,
+    "free": 1,
     "name": "/run/credentials/systemd-journald.service",
-    "total": 1024,
+    "total": 1,
     "used": 0
    },
    {
-    "free": 28059588,
+    "free": 27381,
     "name": "/tmp",
-    "total": 29623524,
-    "used": 1563936
+    "total": 28929,
+    "used": 1547
    },
    {
-    "free": 1024,
+    "free": 1,
     "name": "/run/credentials/systemd-resolved.service",
-    "total": 1024,
+    "total": 1,
     "used": 0
    },
    {
-    "free": 5920564,
+    "free": 5781,
     "name": "/run/user/1000",
-    "total": 5924704,
-    "used": 4140
+    "total": 5785,
+    "used": 4
    },
    {
     "free": 0,
     "name": "/run/media/pro/Ubuntu",
-    "total": 6366186,
-    "used": 6366186
+    "total": 6216,
+    "used": 6216
    }
   ]
  },
@@ -247,8 +247,8 @@
   "interfaces": [
    {
     "name": "ens18",
-    "rx": 3027837497,
-    "tx": 8126974047
+    "rx": 0,
+    "tx": 0
    }
   ]
  }

@@ -1,15 +1,15 @@
 {
  "task": "T2.4",
  "ok": true,
- "started_at": "2026-10-21T01:41:41.734Z",
+ "started_at": "2026-10-21T02:22:19.236Z",
  "build": {
-  "git_head": "7f2fec7f6a1f94afe6028158646b30f4b342c78e",
-  "git_head_ct": 1792546712,
+  "git_head": "045666b7725b16b2864c96c05f1c0c9dceb7ae2a",
+  "git_head_ct": 1792549148,
   "git_dirty": false,
-  "binary_sha256": "c05530672a5305b6fb9b7d82deba72929a070be77e3fe076541a22d4f35818ec",
-  "binary_mtime": 1792546783,
-  "binary_path": "/proc/825895/exe",
-  "server_pid": 825895
+  "binary_sha256": "aa2614e9add57281275d220204d4f3c3dc097f830845da7c73f390cb303439a1",
+  "binary_mtime": 1792549213,
+  "binary_path": "/proc/870829/exe",
+  "server_pid": 870829
  },
  "acceptance": {
   "log_events_contract": true,
@@ -17,6 +17,7 @@
   "log_events_filter_search": true,
   "log_events_date_filter": true,
   "log_events_export_zip": true,
+  "log_events_export_local_time_invoker": true,
   "log_events_static_404": true,
   "network_interfaces_list": true,
   "network_interface_detail": true,
@@ -36,9 +37,20 @@
   "stats_network": true,
   "system_packages": true,
   "engine_log": true,
-  "ui_pages": true
+  "license_permanent_shape": true,
+  "features_array": true,
+  "status_network_shape": true,
+  "session_videorecords_alias": true,
+  "utils_ping_rejects_option": true,
+  "utils_traceroute_honest": true,
+  "ui_pages": true,
+  "ui_network_interfaces_tab": true,
+  "ui_license_not_expired": true,
+  "clean_build": true,
+  "binary_built_after_head": true
  },
  "totals": {
+  "statistics_text": "PROSTOR\nПанель управления\nКонференции\nСправочник\nИстория\nАдминистрирование\n0\n0\n0\nnotifications\narrow_drop_down\narrow_back\nСтатистика\nИспользование памяти\n58 Gb\nshow_chart\n\n47.1\n\nСвободно (Gb)\n\n10.7\n\nИспользуется (Gb)\n\nИспользование жесткого диска\narrow_drop_down\n/run\n\n11.3\n\nСвободно (Gb)\n\n0.0\n\nИспользуется (Gb)\n\nСеть\nens18\nЗагрузка: 358 кбит/сек\nОтдача: 166 кбит/сек\nЗарезервированные вычислительные ресурсы\nЗагрузка вычислительных потоков\nЗагрузка процессоров",
   "ui_pages_seen": [
    {
     "slug": "statistics",
@@ -91,13 +103,13 @@
     "http": []
    }
   ],
-  "gates": 25,
-  "gates_passed": 25,
+  "gates": 36,
+  "gates_passed": 36,
   "http_errors": 0,
   "console_errors": 0,
   "vendor_errors": 12,
-  "screenshots": 4,
-  "steps": 9
+  "screenshots": 5,
+  "steps": 10
  },
  "error": null,
  "acceptance_failed": [],
@@ -117,5 +129,5 @@
   "Invalid scale configuration for scale: xAxes"
  ],
  "http_errors": [],
- "finished_at": "2026-10-21T01:42:36.282Z"
+ "finished_at": "2026-10-21T02:23:17.124Z"
 }

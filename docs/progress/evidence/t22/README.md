@@ -1,7 +1,7 @@
 # T2.2 — История конференций (call_history)
 
 Дата: 2026-10-21. Evidence UI-прогона на vendor-оболочке 2.2.1.66 против
-нашего `/api/v3`. Прогон на чистом дереве: HEAD `7f2fec7`, бинарник собран
+нашего `/api/v3`. Прогон на чистом дереве: HEAD `045666b`, бинарник собран
 после HEAD (`summary.json.build`, `clean_build=true`,
 `binary_built_after_head=true`).
 

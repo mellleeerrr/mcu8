@@ -3,7 +3,8 @@
 Сквозная вязка vendor-UI `/pnm/administration/{event_list,network,statistics,
 terminals,mediafiles,diagnostics,backup,reset,license,about}` с нашим
 `/api/v3` на реальном бинаре `vks-server`. Прогон на чистом дереве: HEAD
-`7f2fec7`, бинарник собран после HEAD.
+`045666b`, бинарник собран после HEAD (явные гейты `clean_build`,
+`binary_built_after_head` в `summary.json`).
 
 ## Как воспроизвести
 
@@ -13,86 +14,93 @@ BASE_URL=http://127.0.0.1:8080 \
 node scripts/evidence/t24-evidence.js
 ```
 
-Скрипт логинится через vendor-UI, проходит 25 acceptance-гейтов (API + обход
-10 страниц), делает 4 PNG и всегда пишет `summary.json`; при провале —
-`ok:false`, exit 1. Все гейты read-only, кроме `PATCH interface`/`POST/DELETE
-tcpdumps`/`POST terminals`/`DELETE videorecords`, которые обязаны вернуть 501
-(мутации не поддерживаются — см. ограничения).
+Скрипт логинится через vendor-UI, проходит **36 acceptance-гейтов** (API + обход
+10 страниц с переключением вкладки «Сетевые интерфейсы»), делает 5 PNG и всегда
+пишет `summary.json`; при провале — `ok:false`, exit 1. Мутации
+сети/tcpdump/терминалов/видеозаписей проверяются как явные 501 (read-only).
 
 ## Результат
 
-**ok=true, 25/25** acceptance-гейтов, 9 шагов, 4 PNG, 0 HTTP ≥ 400,
+**ok=true, 36/36** acceptance-гейтов, 10 шагов, 5 PNG, 0 HTTP ≥ 400,
 0 console error. `vendor_errors=12` — известный баг Chart.js 2.x в
 vendor-бандле статистики (`Invalid scale configuration for scale:
-yAxes/xAxes/responsive/maintainAspectRatio`), он явноallowlisted и не
-скрывает наши ошибки. `clean_build=true`, `binary_built_after_head=true`.
+yAxes/xAxes/responsive/maintainAspectRatio`); он явно allowlisted и не скрывает
+наши ошибки.
 
-| Гейт | Что проверяет |
+Ключевые проверки последнего прогона:
+
+| Гейт | Что доказывает |
 |---|---|
-| `log_events_contract` | `GET /api/v3/log_events` → `{count, log_events:[{id,event_type,object_type,created_at,payload,invoker,event_object,additional_info}]}` |
-| `log_events_pagination` | `page/page_size` не ломает `count` |
-| `log_events_filter_search` | `event_types=login_success&search=admin` возвращает только login_success |
-| `log_events_date_filter` | `date_from` (секунды) сужает журнал |
-| `log_events_export_zip` | `GET /log_events/export` → `{filename}`, файл на `/static/log_events/{filename}` — валидный ZIP (PK..) с CSV (`ID;Дата;Событие;...`) |
-| `log_events_static_404` | неизвестный файл → 404, попытка traversal (`..%2F`) не отдаёт данные |
-| `network_interfaces_list` / `_detail` | `{count,interfaces:[{interface,mac,use_dhcp,gateway,nameservers,ready,addresses}]}`, detail `{interface:{...}}` |
-| `network_interface_patch_501` | изменение сети не применяется (нет CAP_NET_ADMIN) → 501 с описанием |
-| `utils_ping` | реальный `ping -c 3 -W 2 -n` для `127.0.0.1`; невалидный хост (`bad host; rm -rf /`) → 422 (валидация адреса, без shell) |
-| `tcpdumps_status` / `_list` | `{running:false}` и `{files:[]}` |
-| `tcpdumps_mutations_501` | старт/стоп захвата → 501 |
-| `terminals_list` | `/api/v3/terminals` и alias `/api/v3/ui/terminals` → `{count:0,terminals:[]}` |
-| `terminals_mutations_501` | POST терминала → 501, credentials отсутствующего терминала → 404 |
-| `videorecords_list` / `_estimated` / `_delete_501` | `{count:0,videorecords:[]}`, `estimated_time` → `{recording_time:3600}`, удаление → 501 |
-| `stats_memory` | `/system/stats/memory` → `{total,used,free}` в MB из `/proc/meminfo` |
-| `stats_cpu` | `{count,load:[{user_mode,kernel_mode,idle}]}` — дельта `/proc/stat` за 120 мс по ядрам |
-| `stats_disk` | `{count,spaces:[{name,total,used,free}]}` из `df -Pk` (KB) |
-| `stats_network` | `{count,interfaces:[{name,rx,tx}]}` из `/proc/net/dev` |
-| `system_packages` | `{packages:[]}` |
-| `engine_log` | `{language,bounds:{id:{min,max},timestamp:{min,max}},log:[...]}` — запись о старте процесса |
-| `ui_pages` | все 10 страниц рендерят свои секции, без 4xx и неизвестных console error |
+| `log_events_export_local_time_invoker` | CSV внутри ZIP содержит **локальное** (MSK) время события и непустого пользователя из `invoker`; `unzip -t` подтверждает CRC/central directory |
+| `log_events_pagination` | `page=2&page_size=1` даёт ровно 1 запись и тот же `count` |
+| `log_events_static_404` | неизвестный файл → 404, traversal (`..%2F`) → 400/404 |
+| `stats_disk` | значения — **MB**: `total` совпадает с `df -Pk /` / 1024 (UI делит на 1024 и пишет Gb); в UI `/run` = 11.3 Gb |
+| `stats_network` | **kbps**, а не накопительные байты: значения < 100 000 000; UI «Загрузка: 358 кбит/сек» |
+| `ui_network_interfaces_tab` | клик по вкладке «Сетевые интерфейсы» вызывает новый `/api/v3/system/status/network` и не даёт 4xx/console error |
+| `ui_license_not_expired` | страница лицензии не показывает «01.01.1970» и «Продлить лицензию» |
+| `license_permanent_shape` | `PERMANENT`, будущий `last_expired`, `last_update_failed:false`, `serial_id`, `params.{audio,video,protocol,server,storage}` |
+| `features_array` | `/features` — массив > 40 элементов (vendor-UI итерирует массив) |
+| `status_network_shape` | `{network:{editable:false}}` — UI не предлагает сохранять сеть (нет CAP_NET_ADMIN) |
+| `session_videorecords_alias` | `/sessions/{id}/videorecords[/estimated_time]` → 200 (раньше catch-all 501) |
+| `utils_traceroute_honest` | traceroute не установлен → честный **503** «not installed», а не 200 с OS-ошибкой |
+| `utils_ping_rejects_option` | `address=-V` → 422: опции не уходят в процесс |
+| `engine_log` | стартовая запись имеет стабильный timestamp (не «сейчас» на каждый запрос) |
+
+Остальные гейты — контракты list/detail/patch-501, ping/tcpdump/терминалы/
+видеозаписи, memory/cpu/packages, 10 страниц без 4xx и vendor Chart.js
+warnings.
 
 ## Реализация
 
 - `crates/vks-admin/src/api_v3/observability.rs`:
-  - `log_events`: audit-записи → 53 vendor-шаблона событий; события без
-    vendor-шаблона (`create_room` и т.п.) не выдумываются, а отфильтровываются,
-    поэтому журнал содержит только валидные `event_type`; фильтры
-    `event_types/search/date_from/date_to`, пагинация, сортировка;
-  - `log_events_export`: CSV (`ID;Дата;Событие;Объект;Пользователь;IP;Дополнительно`,
-    экранирование `;`/кавычек, защита от CSV-формул) в ZIP; архив кладётся в
-    общий `ExportStore` (TTL 1 ч, cap 32) и отдаётся `/static/log_events/{name}`
-    без авторизации по непредсказуемому имени; traversal отвергается;
-  - `zip_store.rs` — общий ZIP-писатель (store, CRC32, корректные DOS-даты и
-    central directory), используется историей и журналом;
-  - сеть читается из `ip -j addr`/`ip -j route`, `PATCH` — явный 501;
-  - ping/traceroute — реальные процессы с валидацией адреса (никакого shell);
-  - tcpdump/терминалы/видеозаписи — read-only с явными 501 на мутации;
-  - статистика — `/proc/meminfo`, `/proc/stat`, `df -Pk`, `/proc/net/dev`;
-    `engine/log` — bounded-запись о старте; `system/packages` — пустой список.
-- Маршруты и `ExportStore` добавлены в `api_v3/mod.rs`; catch-all 501 остаётся
-  для неизвестных `/api/v3/*`, поэтому новые страницы не получают 404.
+  - `log_events`: audit → 8 vendor-типов (`login_success/failed/rejected`,
+    `updating_password_success`, `creating_credentials_success`,
+    `updating_login_success`, `deleting_credentials_success`,
+    `updating_configuration_security_success`); остальные действия не
+    синтезируются. Фильтры `event_types/search/date_from/date_to`,
+    пагинация, сортировка.
+  - Экспорт: CSV (`;`, экранирование, защита от формул) в ZIP; даты — в
+    сохранённой IANA-зоне (та же, что в UI), пользователь — `invoker.name` с
+    fallback на `payload.login`, filename — локальное время + **128-битный**
+    токен. Файл живёт в общем `ExportStore` (TTL 1 ч, cap 32), `/static/log_events`
+    отдаётся без авторизации по непредсказуемому имени.
+  - Сеть: интерфейсы из `ip -j addr`/`ip -j route`, статус
+    `/system/status/network` → `{editable:false}`, `PATCH` → 501.
+  - `ping`/`traceroute`: реальные процессы, адрес валидируется (буквы/цифры/
+    `.:-_`, не начинается с `-`), `kill_on_drop`, таймаут 10 с; отсутствующий
+    бинарь → 503.
+  - tcpdump/терминалы/видеозаписи — read-only, мутации 501; session-алиасы
+    видеозаписей.
+  - Статистика: memory/disk — MB, network — kbps (дельта 200 мс), cpu — дельта
+    `/proc/stat`, disk — `df -Pk`/1024, packages — пустой список.
+  - license/features/diagnostics/calibration — Operator+ (`forbid`), license
+    постоянная с реальными `params`, features — массив.
+- `shell.rs`: `/license`, `/features`, `/system/status/network`;
+  `boot.rs`: `/system/about` с `versions.{server,installer,ui,api,engine,sip/h323,vile}`.
 
 ## Честные ограничения
 
-- Мутации T2.4 (настройка сети, tcpdump, терминалы, удаление видеозаписей,
-  reboot/shutdown, backup) осознанно не выполняются: сервер работает без
-  привилегий и не должен терять удалённый доступ. UI получает 501 с
-  человекочитаемым описанием, а не молчаливый «успех».
-- `/system/stats/disk` отдаёт `spaces` из `df`; vendor-эталон `.92` на этом
-  запросе отвечал 500, поэтому форма сверена с кодом UI (`{count,spaces}`).
-- `engine/log` — не полноценный журнал демона: одна запись о старте с
-  bounded id/timestamp; реальные логи доступны в stdout/системном журнале.
-- `system/packages` — пустой список: инвентаризация пакетов ОС не ведётся.
-- Журнал событий содержит только audit-события, для которых есть vendor-шаблон
-  (53 типа); CRUD комнат/пользователей не имеет vendor-шаблонов и не
-  синтезируется.
-- Chart.js в vendor-бандле ругается на конфиг осей статистики — это баг
-  вендора, allowlisted в evidence (`vendor_errors`), а не ответ API.
+- Мутации T2.4 (сеть, tcpdump, терминалы, удаление записей, reboot/shutdown,
+  backup) не выполняются: нет привилегий, UI получает 501 с описанием.
+- `/system/status/network` отдаёт `editable:false`: список интерфейсов
+  показывается, но сохранение сети не поддерживается (нет CAP_NET_ADMIN).
+- `traceroute` на этом хосте не установлен → 503; `ping` работает.
+- `engine/log` — одна стабильная запись о старте, не полный журнал демона.
+- `system/packages` — пустой список (инвентаризация ОС не ведётся).
+- CSV журнала содержит только 8 vendor-типов событий; внутренние CRUD-действия
+  без vendor-шаблонов в журнал не попадают (остаются в audit API).
+- Chart.js в vendor-бандле ругается на конфиг осей статистики — баг вендора,
+  allowlisted (`vendor_errors`), а не ответ API.
+- `log_events` хранится в памяти (AuditLog) и неограничен по размеру; экспорт
+  собирает все события под Operator-ролью (осознанный trade-off, TTL/cap у
+  выгрузок есть).
 
 ## Тесты
 
-`cargo test -p vks-admin --lib api_v3::observability` — 7 тестов: журнал
+`cargo test -p vks-admin --lib api_v3::observability` — **12** тестов: журнал
 (пагинация/фильтры/поиск/даты/экспорт/static 404/RBAC), сеть
 (список/detail/patch 501/404), ping/tcpdump/терминалы, видеозаписи, 403 для
-нижних ролей, формы системной статистики. Полный прогон: 220 vks-admin lib +
-35 vks-server lib, clippy/fmt без замечаний.
+нижних ролей, статистика (форма), **единицы disk MB / network kbps**, CSV
+локальная TZ + invoker, license/features/status/alias + Viewer 403,
+traceroute 503/-V 422, стабильный engine log. Полный прогон: 230 vks-admin lib
++ 35 vks-server lib, clippy/fmt без замечаний.

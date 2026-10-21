@@ -1,0 +1,41 @@
+{
+ "task": "T3.1",
+ "ok": true,
+ "started_at": "2026-10-21T02:23:17.706Z",
+ "build": {
+  "git_head": "045666b7725b16b2864c96c05f1c0c9dceb7ae2a",
+  "git_head_ct": 1792549148,
+  "git_dirty": false,
+  "binary_sha256": "aa2614e9add57281275d220204d4f3c3dc097f830845da7c73f390cb303439a1",
+  "binary_mtime": 1792549213,
+  "server_pid": 870829
+ },
+ "acceptance": {
+  "legacy_records_removed": true,
+  "videorecords_works": true,
+  "unused_deps_removed": true,
+  "no_dead_records_handler": true,
+  "layout_mode_contract_test": true,
+  "admin_tests_green": true,
+  "workspace_checks": true
+ },
+ "totals": {
+  "legacy_statuses": {
+   "records": 501,
+   "ui_records": 501,
+   "videorecords": 200
+  },
+  "tests": {
+   "admin_lib": 230,
+   "integration": true
+  },
+  "integration_tail": [
+   "test test_package_d_mcu_pipeline_handover_and_pnm_control_events ... ok",
+   "",
+   "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 1.71s"
+  ]
+ },
+ "error": null,
+ "acceptance_failed": [],
+ "finished_at": "2026-10-21T02:23:44.287Z"
+}
