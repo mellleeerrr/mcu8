@@ -1,28 +1,31 @@
 {
  "task": "T2.2",
  "ok": true,
- "started_at": "2026-10-20T23:50:42.523Z",
+ "started_at": "2026-10-21T00:27:48.907Z",
  "build": {
-  "git_head": "dce1abd15b96eba1888d00ef18f4e7468b954899",
-  "git_head_ct": 1792540130,
+  "git_head": "4d2d16ba37269f177554a3a0f5dfcde8d04cc2cf",
+  "git_head_ct": 1792542401,
   "git_dirty": false,
-  "binary_sha256": "ca6f9a52215304ae174cd972fea3e1455cab3e789757b2b611734918ffefe32d",
-  "binary_mtime": 1792540198,
-  "binary_path": "/proc/746439/exe",
-  "server_pid": 746439
+  "binary_sha256": "f0f3a843ab6da80a4ad3469e633de14f97244e8f51ae13e7cc49199e077f2753",
+  "binary_mtime": 1792542464,
+  "binary_path": "/proc/770146/exe",
+  "server_pid": 770146
  },
  "acceptance": {
+  "history_stop_never_started": true,
   "conference_dtmf": true,
   "conference_route": true,
   "history_list_schema": true,
   "history_dtmf_route": true,
   "history_date_filter": true,
+  "history_call_contact_shape": true,
   "history_detail_calls": true,
   "ui_session_history": true,
   "ui_call_history": true,
   "export_zip": true,
   "export_zip_integrity": true,
   "export_csv_rows": true,
+  "export_csv_timezone": true,
   "history_pagination": true,
   "history_list_ui": true,
   "history_detail_ui": true,
@@ -34,20 +37,25 @@
   "binary_built_after_head": true
  },
  "totals": {
-  "steps": 12,
+  "steps": 13,
   "screenshots": 3,
   "http_errors": 0,
   "console_errors": 0,
   "vendor_console_errors": 0
  },
  "error": null,
- "export": {
-  "filename": "Conference_history_2026-10-20_07b0806a8bd3451f950db1a57b216d94.zip",
-  "csv_bytes": 290,
-  "ui_filename": "Conference_history_T22History_242523_e4e1fdc93fd9424ba18c15b49c1a81f3.zip"
+ "history_started_at": 1792542477,
+ "csv_timezone": {
+  "expectedDate": "21.10.2026"
  },
- "finished_at": "2026-10-20T23:51:16.729Z",
+ "export": {
+  "filename": "Conference_history_2026-10-21_5bf0d73cc55948e68eff9d8ce1b50e88.zip",
+  "csv_bytes": 290,
+  "ui_filename": "Conference_history_T22History_468907_b0e0c0ebd0684e37ab744a27c58ab46d.zip"
+ },
+ "finished_at": "2026-10-21T00:28:23.402Z",
  "steps": [
+  "history-stop-never-started",
   "conference-create",
   "session-start",
   "call-string-create",
