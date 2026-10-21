@@ -36,7 +36,13 @@ cargo build --release -p vks-server
    принимается), БД —
    PostgreSQL; TLS/reverse-proxy и ограничение доступа к `/pnm/` — на уровне
    инфраструктуры.
-4. Перед выкладкой: `cargo fmt --all --check`, `cargo clippy --workspace
+4. Production fail-closed: `configs/prod.example.toml` содержит
+   `allow_insecure_defaults = false`. Без сильного `VKS_ADMIN_PASSWORD` и
+   `VKS_JWT_SECRET` (≥32 байта) сервер завершается с кодом 78 и не стартует;
+   существующая БД с паролем `admin`/`admin_password` также блокируется.
+   Развёртывание: [`deploy/README.md`](deploy/README.md) (systemd-юнит,
+   `/etc/vks/vks.env`, hardening).
+5. Перед выкладкой: `cargo fmt --all --check`, `cargo clippy --workspace
    --all-targets -- -D warnings`, `cargo test --workspace`.
 
 ## Документация
@@ -54,18 +60,21 @@ cargo build --release -p vks-server
 ## Состояние
 
 Задачи T1.1–T3.3 закрыты и подтверждены evidence:
-- живой SIP **и** H.323 до `192.168.1.132` из веб-UI (CONNECTED, рост
-  аудио/видео-счётчиков, mute/unmute, ручная раскладка + reload, kick);
+- живой SIP-вызов до `192.168.1.132` из веб-UI (CONNECTED, двусторонние
+  аудио/видео, mute/unmute, ручная раскладка + reload, kick); H.323-терминал
+  сейчас отвечает `remote_release`, это внешний блокер (см. мастер-план);
 - `smoke_v3.sh` — 24/31/31 проверки;
 - 22 страницы PNM и 18 API-контрактов без 4xx и без собственных console
-  error (24 известных Chart.js-ошибки vendor-бандла allowlisted, T3.3);
-- T3.1/T3.2 — мёртвый код/зависимости, единый трекер, dev/prod-конфиги.
+  error (вендорские Chart.js-ошибки allowlisted, T3.3);
+- T3.1/T3.2 — мёртвый код/зависимости, единый трекер, dev/prod-конфиги;
+- production fail-closed: dev-дефолты и опубликованный dev-JWT не проходят
+  в prod; один менеджер процесса (systemd), см. `deploy/`.
 
 Открытый backlog P2 (RS256, реальный TURN/NATS/recorder, кластер и т.п.;
 исторический P3 — в audit-отчёте) перечислен в мастер-списке и не входит
 в приёмку T1–T3.
 
 - Workspace: Rust 2021, MSRV 1.94, 16 крейтов.
-- Тесты: `893` (`cargo test --workspace`, 0 сбоев).
+- Тесты: `970` (`cargo test --workspace --all-targets`, 0 сбоев, 6 ignored).
 - `cargo fmt --check` и `cargo clippy --workspace --all-targets -- -D warnings` —
   0 замечаний.

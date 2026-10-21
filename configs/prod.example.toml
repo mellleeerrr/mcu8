@@ -22,12 +22,17 @@ candidate_addr = "203.0.113.10"
 auth_provider = "local"
 jwt_ttl_secs = 28800
 
-# Пароль оператора задаётся один раз при первом старте и меняется через UI.
-# В файле пароль не храните; bootstrap — через VKS_ADMIN_PASSWORD в secrets.
+# Fail-closed: без сильного VKS_JWT_SECRET сервер не стартует; слабая/пустая
+# БД без VKS_ADMIN_PASSWORD тоже даёт exit 78. Для dev — configs/default.toml.
+allow_insecure_defaults = false
+
+# Пароль оператора нужен только для первого bootstrap или разовой ротации
+# слабой БД; после этого его можно убрать из env. В файле пароль не храните.
 admin_login = "admin"
 
 # Статика PNM UI (собирается scripts/import-pnm-frontend.sh).
-frontend_dir = "client/pnm-frontend/deployed/pnm"
+# В production-раскладке: /opt/vks/frontend/pnm (см. deploy/README.md).
+frontend_dir = "/opt/vks/frontend/pnm"
 
 # Хранилище: PostgreSQL рекомендуется для production.
 #   VKS_DATABASE_URL="postgres://vks:password@db.internal:5432/vks"

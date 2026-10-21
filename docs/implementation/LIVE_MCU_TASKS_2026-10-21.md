@@ -47,7 +47,7 @@
 **Зачем:** проверять цепочку вживую, а не только unit-тестами.
 
 **Шаги:**
-1. Найти/создать `tests/e2e/` и `playwright.config.ts` (Node 22, chromium уже
+1. Найти/создать `tests/e2e/live.js` (Node 22, chromium уже
    установлен в `~/.cache/ms-playwright`).
 2. Сценарий login → `/pnm/monitoring/sessions` → создать комнату → открыть
    комнату → «Добавить участника» → модалка с SIP/H323 адресом.

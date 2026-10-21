@@ -112,7 +112,7 @@
   `client/pnm-frontend/deployed/pnm`
 - Node.js **24.21.0**
 - Playwright **1.64.1**, Chromium **1243** (`~/.cache/ms-playwright`)
-- E2E: `tests/e2e/live.js` (34 проверки), конфиг `playwright.config.ts`
+- E2E: `tests/e2e/live.js` (Playwright API, 34 проверки)
 - Эталон: TrueConf MCU **2.2.1.66**, `https://192.168.1.92/`
 
 ### 4.5 Известные дубли версий (P2, кандидаты на унификацию)

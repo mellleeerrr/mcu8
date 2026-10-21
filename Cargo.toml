@@ -5,9 +5,8 @@
 # и в дереве зависимостей (docs/PROJECT_RULES.md §7.2 → ARCHITECTURE.md §3).
 # Добавление нового крейта — только через ADR (docs/decisions/DECISIONS.md).
 #
-# В фазе 0 наполняются только vks-common и vks-proto; остальные крейты
-# перечислены как workspace members, чтобы дерево соответствовало архитектуре,
-# и будут наполняться в фазах 1–8 по DEVELOPMENT_PLAN.md.
+# Все 16 крейтов наполнены; границы и зависимости зафиксированы в
+# docs/architecture/ARCHITECTURE.md §3. Новый крейт — только через ADR.
 
 [workspace]
 resolver = "2"

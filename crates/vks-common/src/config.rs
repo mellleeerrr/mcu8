@@ -36,13 +36,19 @@ pub struct Config {
     pub jwt_ttl_secs: i64,
     /// Логин оператора, bootstrapping в LocalDb (`VKS_ADMIN_LOGIN`; dev: `admin`).
     pub admin_login: String,
-    /// Пароль оператора (`VKS_ADMIN_PASSWORD`; dev: `admin` — предупреждение в лог).
+    /// Пароль оператора (`VKS_ADMIN_PASSWORD`). Нужен для первого bootstrap
+    /// или разовой ротации слабой БД; на каждом старте не обязателен.
     pub admin_password: String,
     /// Адрес прослушивания WebRTC UDP-трафика (`VKS_MEDIA_LISTEN_ADDR`; dev: `127.0.0.1:0`).
     pub media_listen_addr: String,
     /// Разрешить ли fallback на MemoryStorage при отказе БД (`VKS_STORAGE_ALLOW_FALLBACK`; dev: false).
     /// По умолчанию: false (fail-fast: сбой подключения к сконфигурированной БД прерывает startup).
     pub storage_allow_fallback: bool,
+    /// Разрешить небезопасные dev-дефолты (`admin/admin`, короткий JWT).
+    /// Secure-by-default: `false`; `configs/default.toml` явно включает `true`.
+    /// В production сервер отказывается стартовать с дефолтным оператором,
+    /// известным dev-секретом или коротким JWT.
+    pub allow_insecure_defaults: bool,
     /// Список адресов ICE-серверов (STUN/TURN, e.g. "stun:stun.l.google.com:19302") (`VKS_ICE_SERVERS`).
     pub ice_servers: Vec<String>,
     /// Публичный или LAN IP кандидата WebRTC для анонса в SDP (`VKS_CANDIDATE_ADDR`).
@@ -63,7 +69,18 @@ pub enum ConfigError {
     InvalidMediaListenAddr(String, String),
     #[error("invalid candidate_addr '{0}': must be a valid IP address")]
     InvalidCandidateAddr(String),
+    #[error("insecure defaults are disabled but jwt_secret is shorter than 32 bytes or is the published dev secret")]
+    WeakJwtSecret,
+    #[error("insecure defaults are disabled but admin_password is a known/weak/placeholder value (set a strong VKS_ADMIN_PASSWORD)")]
+    InsecureAdminPassword,
+    #[error(
+        "insecure defaults are disabled but no persistent database_url is configured (or storage_allow_fallback=true)"
+    )]
+    NoPersistentStorage,
 }
+
+/// Опубликованный dev-секрет из `configs/default.toml`: в prod запрещён.
+pub const DEV_JWT_SECRET: &str = "dev_ec994ad4e03aa63eafc3131719a0a50cce4dbfb474c855b0";
 
 /// Маскирует строковые секреты.
 pub fn redact_secret(s: &str) -> &'static str {
@@ -186,9 +203,10 @@ impl Default for Config {
             jwt_secret: String::new(),
             jwt_ttl_secs: 86_400,
             admin_login: "admin".into(),
-            admin_password: "admin".into(),
+            admin_password: String::new(),
             media_listen_addr: "127.0.0.1:0".into(),
             storage_allow_fallback: false,
+            allow_insecure_defaults: false,
             ice_servers: Vec::new(),
             candidate_addr: None,
         }
@@ -217,6 +235,33 @@ impl Config {
         fig = fig.merge(Env::prefixed("VKS_").map(|key| Uncased::new(key.as_str().to_lowercase())));
 
         fig.extract()
+    }
+
+    /// Известные weak/placeholder-пароли (точные варианты для проверки
+    /// `LocalDb::authenticate`, который case-sensitive).
+    pub const KNOWN_WEAK_PASSWORDS: &'static [&'static str] = &[
+        "admin",
+        "admin_password",
+        "changeme",
+        "change_me",
+        "change_me_strong_password",
+        "password",
+        "secret",
+        "CHANGE_ME",
+        "CHANGE_ME_STRONG_PASSWORD",
+    ];
+
+    /// Возвращает true для дефолтных/placeholder-паролей, которые нельзя
+    /// использовать в production. Общая функция для config- и DB-проверок.
+    /// Ограничение: произвольный короткий пароль по хэшу не отличить от
+    /// пользовательского; такие пароли ловятся только при заданном
+    /// `admin_password`/через UI-ротацию.
+    pub fn is_weak_password(password: &str) -> bool {
+        let p = password.trim();
+        p.is_empty()
+            || p.len() < 12
+            || Self::KNOWN_WEAK_PASSWORDS.iter().any(|w| p.eq_ignore_ascii_case(w))
+            || p.to_ascii_uppercase().contains("CHANGE_ME")
     }
 
     /// Валидирует значения полей конфигурации (M0.3).
@@ -250,6 +295,28 @@ impl Config {
             }
         }
 
+        // Prod fail-closed: dev-дефолты не должны переезжать в production.
+        // admin_password опционален на каждом старте: он нужен только для
+        // первого bootstrap или для разовой ротации слабой БД. Если он задан,
+        // то обязан быть сильным; пустой проверяется после гидратации БД.
+        if !self.allow_insecure_defaults {
+            let password = self.admin_password.trim();
+            if !password.is_empty() && Self::is_weak_password(password) {
+                return Err(ConfigError::InsecureAdminPassword);
+            }
+            let jwt = self.jwt_secret.trim();
+            if jwt.len() < 32 || jwt == DEV_JWT_SECRET {
+                return Err(ConfigError::WeakJwtSecret);
+            }
+            if self.storage_allow_fallback
+                || self.database_url.trim().is_empty()
+                || self.database_url.contains(":memory:")
+                || self.database_url.to_ascii_uppercase().contains("CHANGE_ME")
+            {
+                return Err(ConfigError::NoPersistentStorage);
+            }
+        }
+
         Ok(())
     }
 }
@@ -258,6 +325,10 @@ impl Config {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    fn dev_config() -> Config {
+        Config { allow_insecure_defaults: true, ..Config::default() }
+    }
 
     // Защита от гонок при параллельных тестах: env-переменные глобальны,
     // поэтому тест, который их устанавливает, держит мьютекс.
@@ -273,7 +344,7 @@ mod tests {
         assert_eq!(c.jwt_secret, "");
         assert_eq!(c.jwt_ttl_secs, 86_400);
         assert_eq!(c.admin_login, "admin");
-        assert_eq!(c.admin_password, "admin");
+        assert_eq!(c.admin_password, "");
         assert_eq!(c.media_listen_addr, "127.0.0.1:0");
         assert_eq!(c.candidate_addr, None);
     }
@@ -388,7 +459,7 @@ default_room_mode = "mcu"
             database_url: "postgres://vks_user:mypassword@localhost:5432/vks".into(),
             jwt_secret: "super_secret_jwt".into(),
             admin_password: "admin_cleartext_password".into(),
-            ..Default::default()
+            ..dev_config()
         };
         let debug_str = format!("{cfg:?}");
         assert!(!debug_str.contains("super_secret_jwt"), "jwt_secret leaked in Debug");
@@ -399,42 +470,42 @@ default_room_mode = "mcu"
 
     #[test]
     fn validate_accepts_valid_config() {
-        let cfg = Config::default();
+        let cfg = dev_config();
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn validate_rejects_invalid_auth_provider() {
-        let cfg = Config { auth_provider: "invalid_provider".into(), ..Default::default() };
+        let cfg = Config { auth_provider: "invalid_provider".into(), ..dev_config() };
         assert_eq!(cfg.validate(), Err(ConfigError::InvalidAuthProvider("invalid_provider".into())));
     }
 
     #[test]
     fn validate_rejects_invalid_room_mode() {
-        let cfg = Config { default_room_mode: "invalid_mode".into(), ..Default::default() };
+        let cfg = Config { default_room_mode: "invalid_mode".into(), ..dev_config() };
         assert_eq!(cfg.validate(), Err(ConfigError::InvalidRoomMode("invalid_mode".into())));
     }
 
     #[test]
     fn validate_rejects_non_positive_jwt_ttl() {
-        let cfg0 = Config { jwt_ttl_secs: 0, ..Default::default() };
+        let cfg0 = Config { jwt_ttl_secs: 0, ..dev_config() };
         assert_eq!(cfg0.validate(), Err(ConfigError::InvalidJwtTtl(0)));
-        let cfg_neg = Config { jwt_ttl_secs: -100, ..Default::default() };
+        let cfg_neg = Config { jwt_ttl_secs: -100, ..dev_config() };
         assert_eq!(cfg_neg.validate(), Err(ConfigError::InvalidJwtTtl(-100)));
     }
 
     #[test]
     fn validate_rejects_invalid_socket_addrs() {
-        let cfg = Config { listen_addr: "not_an_ip".into(), ..Default::default() };
+        let cfg = Config { listen_addr: "not_an_ip".into(), ..dev_config() };
         assert!(matches!(cfg.validate(), Err(ConfigError::InvalidListenAddr(_, _))));
 
-        let cfg2 = Config { media_listen_addr: "999.999.999.999:7777".into(), ..Default::default() };
+        let cfg2 = Config { media_listen_addr: "999.999.999.999:7777".into(), ..dev_config() };
         assert!(matches!(cfg2.validate(), Err(ConfigError::InvalidMediaListenAddr(_, _))));
     }
 
     #[test]
     fn validate_candidate_addr_accepts_valid_ip() {
-        let mut cfg = Config { candidate_addr: Some("192.168.1.93".into()), ..Default::default() };
+        let mut cfg = Config { candidate_addr: Some("192.168.1.93".into()), ..dev_config() };
         assert!(cfg.validate().is_ok());
 
         cfg.candidate_addr = Some("::1".into());
@@ -446,7 +517,7 @@ default_room_mode = "mcu"
 
     #[test]
     fn validate_candidate_addr_rejects_invalid_ip() {
-        let mut cfg = Config { candidate_addr: Some("not-an-ip".into()), ..Default::default() };
+        let mut cfg = Config { candidate_addr: Some("not-an-ip".into()), ..dev_config() };
         assert_eq!(cfg.validate(), Err(ConfigError::InvalidCandidateAddr("not-an-ip".into())));
 
         cfg.candidate_addr = Some("192.168.1.999".into());
@@ -470,5 +541,151 @@ default_room_mode = "mcu"
             redact_dsn("host=localhost port=5432 user=postgres password=secret123 dbname=vks"),
             "host=localhost port=5432 user=postgres password=*** dbname=vks"
         );
+    }
+
+    #[test]
+    fn validate_rejects_insecure_defaults_in_prod_mode() {
+        let cfg = Config {
+            allow_insecure_defaults: false,
+            admin_password: "admin".into(),
+            jwt_secret: "x".repeat(48),
+            ..dev_config()
+        };
+        assert_eq!(cfg.validate(), Err(ConfigError::InsecureAdminPassword));
+    }
+
+    #[test]
+    fn validate_rejects_short_jwt_in_prod_mode() {
+        let cfg = Config {
+            allow_insecure_defaults: false,
+            admin_password: "strong-production-password".into(),
+            jwt_secret: "short".into(),
+            ..dev_config()
+        };
+        assert_eq!(cfg.validate(), Err(ConfigError::WeakJwtSecret));
+    }
+
+    #[test]
+    fn validate_accepts_strong_prod_config() {
+        let cfg = Config {
+            allow_insecure_defaults: false,
+            admin_password: "strong-production-password".into(),
+            jwt_secret: "x".repeat(48),
+            database_url: "postgres://vks:pass@db:5432/vks".into(),
+            ..dev_config()
+        };
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+    }
+
+    #[test]
+    fn prod_example_without_secrets_is_rejected() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let vars = [
+            "VKS_ADMIN_PASSWORD",
+            "VKS_JWT_SECRET",
+            "VKS_ALLOW_INSECURE_DEFAULTS",
+            "VKS_DATABASE_URL",
+            "VKS_STORAGE_ALLOW_FALLBACK",
+        ];
+        let saved: Vec<_> = vars.iter().map(|v| (*v, std::env::var(v).ok())).collect();
+        for v in vars {
+            std::env::remove_var(v);
+        }
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/prod.example.toml");
+        let cfg = Config::load(Some(path)).expect("prod example must parse");
+        let result = cfg.validate();
+        for (v, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(v, value),
+                None => std::env::remove_var(v),
+            }
+        }
+        assert_eq!(result, Err(ConfigError::WeakJwtSecret));
+    }
+
+    #[test]
+    fn prod_mode_allows_empty_admin_password_if_jwt_and_storage_are_strong() {
+        let cfg = Config {
+            allow_insecure_defaults: false,
+            admin_password: String::new(),
+            jwt_secret: "x".repeat(48),
+            database_url: "postgres://vks:pass@db:5432/vks".into(),
+            ..dev_config()
+        };
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+    }
+
+    #[test]
+    fn prod_mode_rejects_placeholder_password_and_memory_storage() {
+        let weak = Config {
+            allow_insecure_defaults: false,
+            admin_password: "CHANGE_ME_STRONG_PASSWORD".into(),
+            jwt_secret: "x".repeat(48),
+            database_url: "postgres://vks:pass@db:5432/vks".into(),
+            ..dev_config()
+        };
+        assert_eq!(weak.validate(), Err(ConfigError::InsecureAdminPassword));
+
+        let memory = Config {
+            allow_insecure_defaults: false,
+            admin_password: String::new(),
+            jwt_secret: "x".repeat(48),
+            database_url: String::new(),
+            ..dev_config()
+        };
+        assert_eq!(memory.validate(), Err(ConfigError::NoPersistentStorage));
+
+        let placeholder = Config {
+            allow_insecure_defaults: false,
+            admin_password: String::new(),
+            jwt_secret: "x".repeat(48),
+            database_url: "postgres://vks:CHANGE_ME@db:5432/vks".into(),
+            ..dev_config()
+        };
+        assert_eq!(placeholder.validate(), Err(ConfigError::NoPersistentStorage));
+    }
+
+    #[test]
+    fn dev_config_explicitly_opts_into_insecure_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved: Vec<_> = ["VKS_JWT_SECRET", "VKS_ADMIN_PASSWORD", "VKS_ALLOW_INSECURE_DEFAULTS"]
+            .iter()
+            .map(|v| (*v, std::env::var(v).ok()))
+            .collect();
+        for v in ["VKS_JWT_SECRET", "VKS_ADMIN_PASSWORD", "VKS_ALLOW_INSECURE_DEFAULTS"] {
+            std::env::remove_var(v);
+        }
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/default.toml");
+        let cfg = Config::load(Some(path)).expect("dev config must parse");
+        assert!(cfg.allow_insecure_defaults);
+        assert_eq!(cfg.jwt_secret, DEV_JWT_SECRET);
+        for (v, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(v, value),
+                None => std::env::remove_var(v),
+            }
+        }
+    }
+
+    #[test]
+    fn prod_mode_rejects_published_dev_jwt_secret() {
+        let cfg = Config {
+            allow_insecure_defaults: false,
+            admin_password: "strong-production-password".into(),
+            jwt_secret: DEV_JWT_SECRET.into(),
+            ..dev_config()
+        };
+        assert_eq!(cfg.validate(), Err(ConfigError::WeakJwtSecret));
+    }
+
+    #[test]
+    fn dev_mode_allows_dev_defaults_explicitly() {
+        let cfg = Config {
+            allow_insecure_defaults: true,
+            admin_password: "admin".into(),
+            jwt_secret: "short".into(),
+            ..Config::default()
+        };
+        assert!(cfg.validate().is_ok());
     }
 }

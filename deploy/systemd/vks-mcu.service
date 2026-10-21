@@ -1,3 +1,6 @@
+# DEV ONLY: user-level unit для локального стенда. Не устанавливайте
+# system-wide: запускает release-бинарь от текущего пользователя и пишет
+# dev-лог в репозиторий. Production — vks-mcu-prod.service.
 [Unit]
 Description=VKS MCU local stand (PROSTOR UI, SIP/H.323, SQLite)
 Documentation=file:///home/pro/mcu/docs/implementation/LIVE_MCU_TASKS_2026-10-21.md

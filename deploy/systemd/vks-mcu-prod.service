@@ -1,0 +1,47 @@
+[Unit]
+Description=VKS MCU production (PROSTOR PNM, SIP/H.323, PostgreSQL)
+After=network-online.target
+Wants=network-online.target
+# Restart policy limits belong to [Unit]; systemd ignores them in [Service].
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/opt/vks
+# Секреты обязательны: без файла unit падает до запуска сервера.
+EnvironmentFile=/etc/vks/vks.env
+# Конфиг читается из credential-копии: исходник 0600 root:root, DynamicUser
+# не нуждается в доступе к /etc/vks.
+LoadCredential=server.toml:/etc/vks/server.toml
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/vks/bin/vks-server --config %d/server.toml
+Restart=on-failure
+RestartSec=3
+RestartPreventExitStatus=78
+KillSignal=SIGTERM
+TimeoutStopSec=30
+LimitNOFILE=65536
+UMask=0077
+
+# Hardening: запись только в State/LogsDirectory; /opt/vks и /etc/vks — read-only.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/vks /var/log/vks
+StateDirectory=vks
+LogsDirectory=vks
+
+[Install]
+WantedBy=multi-user.target

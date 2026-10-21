@@ -35,9 +35,14 @@ vks_server.log
 .accept/
 .accept_*
 .h323_*
+.h323-venv/
+deploy/vks.env
 __pycache__/
 
 # Живые E2E-артефакты (скриншоты/trace/network) — генерируются заново
 /artifacts/
 node_modules/
 tests/e2e/node_modules/
+test-results/
+playwright-report/
+blob-report/

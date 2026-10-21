@@ -8,6 +8,7 @@
 pub mod cluster;
 pub mod frontend;
 pub mod gateways;
+pub mod operator_policy;
 pub mod recorder;
 
 pub use cluster::ClusterManager;

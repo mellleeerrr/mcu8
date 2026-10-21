@@ -1,5 +1,7 @@
 # DEV-конфигурация VKS Server (PROSTOR MCU/SFU). Только для локальной разработки:
 # dev-секреты и `admin_password` ниже НЕЛЬЗЯ использовать в production.
+# Явный opt-in: production-конфиг требует `allow_insecure_defaults = false`.
+allow_insecure_defaults = true
 # Production-шаблон: configs/prod.example.toml.
 #
 # All parameters can be overridden via environment variables with prefix VKS_*

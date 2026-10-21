@@ -34,6 +34,13 @@ use vks_signaling::handler::HandlerConfig;
 use vks_signaling::sdp::RtpMap;
 use vks_storage::{MemoryStorage, PostgresStorage, SqliteStorage};
 
+/// Ошибка конфигурации: отдельный exit-код 78 (EX_CONFIG), чтобы systemd с
+/// `RestartPreventExitStatus=78` не повторял заведомо неудачный запуск.
+fn config_exit(err: impl std::fmt::Display) -> ! {
+    error!(error = %err, "configuration rejected; aborting startup");
+    std::process::exit(78);
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Инициализация трейсинга
@@ -55,7 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let config_path = config_path.or_else(|| std::env::var("VKS_CONFIG_PATH").ok()).or_else(|| {
-        if std::path::Path::new("configs/default.toml").exists() {
+        // В release нельзя молча подхватить dev-конфиг из CWD: production
+        // обязан передать --config/VKS_CONFIG_PATH явно.
+        if cfg!(debug_assertions) && std::path::Path::new("configs/default.toml").exists() {
             Some("configs/default.toml".to_string())
         } else {
             None
@@ -69,17 +78,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => {
             if config_path.is_some() {
-                error!(error = %e, path = ?config_path, "failed to load configured config file; aborting startup (fail-fast)");
-                return Err(e.into());
+                config_exit(format!("failed to load configured config file {config_path:?}: {e}"));
             } else {
-                warn!(error = %e, "failed to load config file, falling back to defaults");
-                Config::load(None).unwrap_or_default()
+                config_exit(format!("failed to load configuration: {e}"));
             }
         }
     };
 
-    // M0.3: Валидация конфигурации перед продолжением старта
-    config.validate()?;
+    // M0.3: Валидация конфигурации перед продолжением старта.
+    // 78 (EX_CONFIG) — отдельный код, чтобы systemd не устраивал restart-loop.
+    if let Err(e) = config.validate() {
+        config_exit(e);
+    }
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -162,19 +172,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!(ttl_secs = config.jwt_ttl_secs, "API v3 auth enabled (HS256; RS256 — долг §4.3)");
     }
 
-    // LocalDb-оператор (dev-дефолт admin/admin; прод — VKS_ADMIN_PASSWORD).
-    if local_db.user(vks_core::BOOTSTRAP_ADMIN_USER_ID).is_err() {
-        match local_db.register(vks_core::BOOTSTRAP_ADMIN_USER_ID, &config.admin_login, &config.admin_password) {
-            Ok(_) => {
-                info!(login = %config.admin_login, id = vks_core::BOOTSTRAP_ADMIN_USER_ID, "local_db operator registered")
+    // Startup-политика оператора: bootstrap, отказ на слабой БД и разовая
+    // ротация известного dev-дефолта. Вынесено в тестируемый модуль.
+    let operator =
+        match vks_server::operator_policy::ensure_operator(&config, &local_db, admin_state.storage.as_ref()).await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                error!(error = %e, "operator policy rejected startup");
+                std::process::exit(78);
             }
-            Err(e) => warn!(error = %e, "local_db operator bootstrap skipped"),
+        };
+    match operator {
+        vks_server::operator_policy::OperatorOutcome::Registered => {
+            info!(login = %config.admin_login, id = vks_core::BOOTSTRAP_ADMIN_USER_ID, "local_db operator registered")
         }
-    } else {
-        info!(login = %config.admin_login, id = vks_core::BOOTSTRAP_ADMIN_USER_ID, "operator credentials restored from persistent storage");
+        vks_server::operator_policy::OperatorOutcome::Restored => {
+            info!(login = %config.admin_login, id = vks_core::BOOTSTRAP_ADMIN_USER_ID, "operator credentials restored from persistent storage")
+        }
+        vks_server::operator_policy::OperatorOutcome::Rotated { login } => {
+            warn!(login = %login, "rotated weak operator password from VKS_ADMIN_PASSWORD and persisted it")
+        }
     }
-    if config.admin_password == "admin" {
-        warn!("admin password is the dev default; set VKS_ADMIN_PASSWORD before production");
+
+    info!(
+        allow_insecure_defaults = config.allow_insecure_defaults,
+        "security policy: insecure dev defaults {}",
+        if config.allow_insecure_defaults { "ENABLED (dev only!)" } else { "disabled (production)" }
+    );
+    if config.allow_insecure_defaults {
+        warn!(
+            "SECURITY: allow_insecure_defaults=true — dev defaults are accepted; never expose this listener to untrusted networks"
+        );
     }
 
     // M1.9: AuthProvider factory (local/ldap/oidc)

@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
-# Единый локальный рантайм MCU: ровно один процесс из свежего release-бинаря.
+# Единый локальный рантайм MCU.
 #
-# Проблема, которую решает скрипт: старый `vks-server` продолжает слушать :8080
-# после пересборки, и UI работает со старой сборкой (405/501 на существующих
-# маршрутах). Скрипт всегда останавливает предыдущий процесс перед запуском.
+# Владелец процесса ровно один:
+#  - если установлен systemd-юнит (prod `vks-mcu-prod` или dev `vks-mcu`),
+#    скрипт управляет ТОЛЬКО им и никогда не запускает второй процесс вручную;
+#  - если юнита нет, запускает свежий release-бинарь из репозитория.
 #
 # Использование:
-#   ./scripts/run-local.sh            # restart: stop + build + start
-#   ./scripts/run-local.sh start      # stop + start (без сборки)
+#   ./scripts/run-local.sh            # restart: build + restart/start
+#   ./scripts/run-local.sh start      # start (unit или manual)
 #   ./scripts/run-local.sh build      # только сборка
-#   ./scripts/run-local.sh stop       # остановить по PID-файлу
-#   ./scripts/run-local.sh status     # healthz/readyz/порт/версия бинаря
+#   ./scripts/run-local.sh stop       # остановить владельца
+#   ./scripts/run-local.sh status     # unit/healthz/readyz/порт/бинарь
+#   ./scripts/run-local.sh logs       # journalctl для unit, иначе repo-лог
 #
 # Переменные:
-#   VKS_CONFIG  — путь к TOML (по умолчанию configs/default.toml)
-#   VKS_PORT    — порт для health-проверок (по умолчанию 8080)
+#   VKS_CONFIG  — TOML для manual-режима (по умолчанию configs/default.toml)
+#   VKS_PORT    — порт health-проверок (по умолчанию 8080)
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 CONFIG="${VKS_CONFIG:-$ROOT/configs/default.toml}"
 PORT="${VKS_PORT:-8080}"
 BIN="$ROOT/target/release/vks-server"
@@ -31,21 +33,69 @@ build() {
     cargo build --release -p vks-server --manifest-path "$ROOT/Cargo.toml"
 }
 
-# PID слушателя порта: $! после nohup может указывать на обёртку, а не на бинарь.
 listener_pid() {
     ss -ltnp 2>/dev/null | grep ":${PORT} " | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2
+}
+
+# Установленный unit — не только активный: остановленный unit всё равно
+# владелец, и manual-запуск создаст конфликт при следующем systemctl start.
+unit_spec() {
+    command -v systemctl >/dev/null 2>&1 || return 1
+    if systemctl cat vks-mcu-prod.service >/dev/null 2>&1; then
+        printf '# system vks-mcu-prod.service\n'
+        return 0
+    fi
+    if systemctl --user cat vks-mcu.service >/dev/null 2>&1; then
+        printf '# user vks-mcu.service\n'
+        return 0
+    fi
+    return 1
+}
+
+unit_do() {
+    local scope="$1" unit="$2"; shift 2
+    if [[ "$scope" == "user" ]]; then
+        systemctl --user "$@" "$unit"
+    else
+        systemctl "$@" "$unit"
+    fi
+}
+
+check_unit_overrides() {
+    local spec scope unit
+    spec="$(unit_spec)" || return 0
+    read -r _ scope unit <<<"$spec"
+    if [[ -n "${VKS_CONFIG:-}" || -n "${VKS_PORT:-}" ]]; then
+        log "VKS_CONFIG/VKS_PORT игнорируются: активен $scope unit $unit (его ExecStart/порт — источник истины)"
+        return 1
+    fi
+}
+
+wait_health() {
+    for _ in $(seq 1 30); do
+        if curl -fsS "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
+            local pid
+            pid="$(listener_pid)"
+            [[ -n "$pid" ]] && echo "$pid" > "$PIDFILE"
+            log "healthz OK, pid=${pid:-?}"
+            return 0
+        fi
+        sleep 1
+    done
+    log "healthz не поднялся за 30с; журнал/лог:"
+    show_logs 20 || true
+    return 1
 }
 
 terminate() {
     local pid="$1"
     [[ -n "$pid" ]] || return 0
     kill -0 "$pid" 2>/dev/null || return 0
-    # Чужие процессы не трогаем: только наш release-бинарь. После пересборки
-    # старый процесс держит уже удалённый файл — readlink отдаёт «$BIN (deleted)».
-    local exe
-    exe="$(readlink "/proc/${pid}/exe" 2>/dev/null || true)"
+    local exe bin_real
+    exe="$(readlink -f "/proc/${pid}/exe" 2>/dev/null || readlink "/proc/${pid}/exe" 2>/dev/null || true)"
     exe="${exe% (deleted)}"
-    if [[ "$exe" != "$BIN" ]]; then
+    bin_real="$(readlink -f "$BIN" 2>/dev/null || printf '%s' "$BIN")"
+    if [[ "$exe" != "$bin_real" ]]; then
         log "pid=$pid не наш бинарь ($exe) — не трогаю"
         return 0
     fi
@@ -59,7 +109,7 @@ terminate() {
     kill -KILL "$pid" 2>/dev/null || true
 }
 
-stop() {
+stop_manual() {
     if [[ -f "$PIDFILE" ]]; then
         terminate "$(cat "$PIDFILE" 2>/dev/null || true)"
         rm -f "$PIDFILE"
@@ -74,28 +124,99 @@ stop() {
     return 1
 }
 
-start() {
+start_manual() {
     [[ -x "$BIN" ]] || { log "нет бинаря $BIN — сначала build"; exit 1; }
     [[ -f "$CONFIG" ]] || { log "нет конфига $CONFIG"; exit 1; }
     log "старт: $BIN --config $CONFIG"
-    # Свой session, отвязанные stdio и exec: обёртка не держит пайп и не получает SIGHUP.
     ( cd "$ROOT" && exec setsid "$BIN" --config "$CONFIG" </dev/null >>"$LOG" 2>&1 ) &
-    for _ in $(seq 1 30); do
-        if curl -fsS "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
-            local pid
-            pid="$(listener_pid)"
-            [[ -n "$pid" ]] && echo "$pid" > "$PIDFILE"
-            log "healthz OK, pid=${pid:-?}"
-            return 0
+    wait_health
+}
+
+stop() {
+    local spec scope unit
+    if spec="$(unit_spec)"; then
+        read -r _ scope unit <<<"$spec"
+        check_unit_overrides || return 2
+        if [[ "$scope" == "system" && "$(id -u)" -ne 0 ]]; then
+            log "unit $scope $unit не остановлен: нужен root (sudo)"
+            return 2
         fi
-        sleep 1
-    done
-    log "healthz не поднялся за 30с; хвост лога:"
-    tail -20 "$LOG" || true
-    return 1
+        log "останавливаю $scope unit $unit"
+        unit_do "$scope" "$unit" stop
+        rm -f "$PIDFILE"
+        # Unit мог быть inactive, а порт держал старый manual-процесс.
+        stop_manual || return 1
+        return 0
+    fi
+    stop_manual
+}
+
+start() {
+    local spec scope unit
+    if spec="$(unit_spec)"; then
+        read -r _ scope unit <<<"$spec"
+        check_unit_overrides || return 2
+        if [[ "$scope" == "system" && "$(id -u)" -ne 0 ]]; then
+            log "unit $scope $unit не запущен: нужен root (sudo)"
+            return 2
+        fi
+        log "запускаю $scope unit $unit"
+        unit_do "$scope" "$unit" start
+        wait_health
+        return
+    fi
+    start_manual
+}
+
+restart() {
+    local spec scope unit
+    build
+    if spec="$(unit_spec)"; then
+        read -r _ scope unit <<<"$spec"
+        check_unit_overrides || return 2
+        if [[ "$scope" == "system" && "$(id -u)" -ne 0 ]]; then
+            log "unit $scope $unit не перезапущен: нужен root (sudo)"
+            return 2
+        fi
+        log "перезапускаю $scope unit $unit"
+        if [[ "$scope" == "system" ]]; then
+            log "ВНИМАНИЕ: system-unit запускает /opt/vks/bin; сборка в repo не разворачивается автоматически"
+        fi
+        unit_do "$scope" "$unit" restart
+        wait_health
+        return
+    fi
+    stop_manual
+    start_manual
+}
+
+show_logs() {
+    local lines="${1:-200}" spec scope unit
+    if spec="$(unit_spec)"; then
+        read -r _ scope unit <<<"$spec"
+        if [[ "$scope" == "user" ]]; then
+            journalctl --user -u "$unit" -n "$lines" --no-pager 2>/dev/null || tail -n "$lines" "$LOG"
+        else
+            journalctl -u "$unit" -n "$lines" --no-pager 2>/dev/null || tail -n "$lines" "$LOG"
+        fi
+        return
+    fi
+    tail -n "$lines" "$LOG"
 }
 
 status() {
+    if spec="$(unit_spec)"; then
+        read -r _ scope unit <<<"$spec"
+        if [[ "$scope" == "user" ]]; then
+            printf 'unit: user %s\n' "$unit"
+            systemctl --user show "$unit" -p ActiveState -p MainPID -p NRestarts 2>/dev/null || true
+        else
+            printf 'unit: system %s\n' "$unit"
+            systemctl show "$unit" -p ActiveState -p MainPID -p NRestarts 2>/dev/null || true
+        fi
+    else
+        printf 'unit: не установлен (manual-режим)\n'
+    fi
     printf 'binary: %s\n' "$(stat -c '%y %s bytes' "$BIN" 2>/dev/null || echo 'нет')"
     printf 'sources HEAD: %s\n' "$(git -C "$ROOT" log -1 --format='%h %cI %s' 2>/dev/null || echo '?')"
     if [[ -f "$PIDFILE" ]]; then printf 'pidfile: %s (%s)\n' "$(cat "$PIDFILE")" "$PIDFILE"; fi
@@ -111,9 +232,9 @@ status() {
 case "${1:-restart}" in
     build) build ;;
     stop) stop ;;
-    start) stop; start ;;
-    restart) stop; build; start ;;
+    start) start ;;
+    restart) restart ;;
     status) status ;;
-    logs) tail -n 200 "$LOG" ;;
+    logs) show_logs ;;
     *) echo "usage: $0 {restart|start|build|stop|status|logs}" >&2; exit 2 ;;
 esac

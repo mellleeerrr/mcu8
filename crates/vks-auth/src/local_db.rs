@@ -112,6 +112,13 @@ impl LocalDb {
         }
     }
 
+    /// Проверяет, принимает ли пользователь любой из перечисленных паролей.
+    /// Нужно только для startup-проверки известных dev-дефолтов; не логирует
+    /// и не меняет состояние. Пустой список всегда false.
+    pub fn authenticates_any(&self, username: &str, passwords: &[&str]) -> bool {
+        passwords.iter().any(|p| self.authenticate(username, p).is_ok())
+    }
+
     /// Переименовать логин существующего пользователя (admin UI «Учётная
     /// запись»). Коллизия логинов без учёта регистра Unicode → `AlreadyExists`.
     pub fn rename_user(&self, id: &str, new_username: &str) -> Result<User, LocalDbError> {
@@ -446,5 +453,15 @@ mod tests {
         assert_eq!(db2.generation("u30"), gen);
         let auth = db2.authenticate("grace", "grace_secret").unwrap();
         assert_eq!(auth.id, "u30");
+    }
+
+    #[test]
+    fn authenticates_any_detects_weak_defaults_only() {
+        let db = LocalDb::new();
+        db.register("u-weak", "weak_user", "admin_password").unwrap();
+        assert!(db.authenticates_any("weak_user", &["admin", "admin_password"]));
+        assert!(!db.authenticates_any("weak_user", &["admin", "strong-pass"]));
+        assert!(!db.authenticates_any("missing_user", &["admin_password"]));
+        assert!(!db.authenticates_any("weak_user", &[]));
     }
 }
