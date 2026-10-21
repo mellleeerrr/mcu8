@@ -132,6 +132,39 @@ impl RoomState {
             slot_to_pid.insert(*slot_id, vpid);
         }
 
+        // Точная геометрия из PNM-раскладки (`preset_selected_b_4_(2)`,
+        // `overlap`, `pip`): compositor рисует участника ровно в присланном
+        // прямоугольнике. Без неё — прежняя авто-сетка (legacy/SFU).
+        if !desc.geometry.is_empty() {
+            let mut layout = Layout::new(LayoutKind::Custom);
+            layout.version = desc.version;
+            let mut cells = desc.geometry.clone();
+            cells.sort_by_key(|cell| cell.slot);
+            for (index, cell) in cells.iter().enumerate() {
+                let x = cell.x.min(canvas.width.saturating_sub(1));
+                let y = cell.y.min(canvas.height.saturating_sub(1));
+                let width = cell.width.max(1).min(canvas.width.saturating_sub(x));
+                let height = cell.height.max(1).min(canvas.height.saturating_sub(y));
+                let pid = slot_to_pid.get(&cell.slot).copied();
+                layout.slots.push(vks_layout::Slot::with_attributes(
+                    cell.slot,
+                    pid,
+                    vks_layout::Rect::new(x, y, width, height),
+                    cell.z_order as i32 + index as i32,
+                    false,
+                    false,
+                ));
+            }
+            // Участник, которого нет в geometry (добавлен позже), получает
+            // свободную ячейку в правом нижнем углу, а не пропадает.
+            for (&slot_id, &vpid) in &slot_to_pid {
+                if !cells.iter().any(|cell| cell.slot == slot_id) {
+                    layout.slots.push(vks_layout::Slot::new(slot_id, Some(vpid), canvas.as_rect()));
+                }
+            }
+            return layout;
+        }
+
         let max_slot = slot_to_pid.keys().copied().max().unwrap_or(0);
         let assigned_count = slot_to_pid.len();
 
@@ -486,6 +519,7 @@ impl McuEngine {
                     layout_id: "grid".into(),
                     version: 0,
                     assignments: BTreeMap::new(),
+                    geometry: Vec::new(),
                 });
                 if !descriptor.assignments.contains_key(&pid) {
                     let slot = (0..u32::MAX)
@@ -778,7 +812,7 @@ mod tests {
         let mut assignments = std::collections::BTreeMap::new();
         assignments.insert(a, 0);
         assignments.insert(b, 1);
-        let layout = LayoutDescriptor { layout_id: "L".into(), version: 1, assignments };
+        let layout = LayoutDescriptor { layout_id: "L".into(), version: 1, assignments, geometry: Vec::new() };
         e.apply_layout(rid, layout).await.unwrap();
         e.add_subscriber(rid, p(100), sub_req()).await.unwrap();
 
@@ -898,7 +932,7 @@ mod tests {
         // Custom slot assignment: presenter to slot 0, audience to slot 1
         assignments.insert(presenter, 0);
         assignments.insert(audience, 1);
-        let layout = LayoutDescriptor { layout_id: "focus".into(), version: 1, assignments };
+        let layout = LayoutDescriptor { layout_id: "focus".into(), version: 1, assignments, geometry: Vec::new() };
         e.apply_layout(rid, layout).await.unwrap();
 
         let rects = e.slot_rects(rid).expect("slot rects");
@@ -990,7 +1024,7 @@ mod tests {
         let mut assignments = std::collections::BTreeMap::new();
         assignments.insert(a, 0);
         assignments.insert(b, 1);
-        let layout = LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments };
+        let layout = LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments, geometry: Vec::new() };
         e.apply_layout(rid, layout).await.unwrap();
 
         // Feed frames for slot 0 (a) and slot 1 (b)
@@ -1037,7 +1071,7 @@ mod tests {
         let mut assignments = std::collections::BTreeMap::new();
         assignments.insert(a, 7);
         assignments.insert(b, 42);
-        let layout = LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments };
+        let layout = LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments, geometry: Vec::new() };
         e.apply_layout(rid, layout).await.unwrap();
 
         // Under M0.4 / M3.2, sparse slot IDs must create exactly 2 slots without 40+ holes
@@ -1053,5 +1087,101 @@ mod tests {
         assert_eq!(r7.h, 1080);
         assert_eq!(r42.w, 960);
         assert_eq!(r42.h, 1080);
+    }
+
+    /// P0: выбранная раскладка должна доводить абонента до ЕГО ячейки.
+    /// `apply_layout` (pid→slot 3) + `bridge_participant` не должны
+    /// переназначать слот в «первый свободный» (slot 0).
+    #[tokio::test]
+    async fn chosen_layout_places_publisher_into_its_own_slot() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(3);
+        let mut assignments = std::collections::BTreeMap::new();
+        assignments.insert(a, 3);
+        let layout = LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments, geometry: Vec::new() };
+        e.apply_layout(rid, layout).await.unwrap();
+
+        e.bridge_participant(rid, a, vec![video_track(a)]);
+
+        let rects = e.slot_rects(rid).expect("slot rects");
+        assert_eq!(rects.len(), 1, "chosen layout must not add an auto-assigned slot 0");
+        assert!(rects.contains_key(&3), "publisher keeps the requested slot 3");
+
+        // Colour (77 in the Y plane) must appear exactly inside slot 3's rect.
+        let frame = Frame::new(320, 180, vec![77u8; 320 * 180 * 3 / 2]);
+        assert!(e.set_participant_frame(rid, a, frame), "assigned publisher must be able to write a frame");
+        let out = e.tick(rid).expect("composite frame");
+        let rect = rects.get(&3).unwrap();
+        let x = (rect.x + rect.w / 2) as usize;
+        let y = (rect.y + rect.h / 2) as usize;
+        assert_eq!(out.data[y * CANVAS_SIZE.0 as usize + x], 77, "slot 3 must show the publisher's colour");
+    }
+
+    /// Поздний участник при готовой раскладке занимает минимальный свободный
+    /// u32-слот, а «сидящий» сохраняет свой.
+    #[tokio::test]
+    async fn late_joiner_takes_minimal_free_slot_of_chosen_layout() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let seated = p(1);
+        let late = p(2);
+        let mut assignments = std::collections::BTreeMap::new();
+        assignments.insert(seated, 3);
+        let layout = LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments, geometry: Vec::new() };
+        e.apply_layout(rid, layout).await.unwrap();
+
+        e.bridge_participant(rid, late, vec![video_track(late)]);
+
+        // Assignment появляется сразу (slot 0 свободен), а геометрия нового
+        // слота — после 300-мс crossfade: `slot_rects` внутри окна отдаёт
+        // rects предыдущей раскладки.
+        assert!(
+            e.set_participant_frame(rid, late, Frame::filled(320, 180, 5)),
+            "late joiner must own a slot as soon as it is bridged"
+        );
+        for _ in 0..11 {
+            e.tick(rid);
+        }
+
+        let rects = e.slot_rects(rid).expect("slot rects");
+        assert!(rects.contains_key(&3), "seated participant keeps slot 3");
+        assert!(rects.contains_key(&0), "late joiner takes the minimal free slot 0");
+    }
+
+    /// Точная геометрия PNM (`calculate`/`preset_selected_b_4_(2)`) должна
+    /// перекрывать авто-сетку: композитор рисует кадр ровно в присланном rect.
+    #[tokio::test]
+    async fn exact_geometry_overrides_auto_grid() {
+        use vks_core::ports::media_engine::LayoutSlot;
+
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(7);
+        let mut assignments = std::collections::BTreeMap::new();
+        assignments.insert(a, 0);
+        let layout = LayoutDescriptor {
+            layout_id: "preset_selected_rb_4".into(),
+            version: 1,
+            assignments,
+            geometry: vec![LayoutSlot { slot: 0, x: 960, y: 540, width: 960, height: 540, z_order: 0 }],
+        };
+        e.apply_layout(rid, layout).await.unwrap();
+        e.bridge_participant(rid, a, vec![video_track(a)]);
+        for _ in 0..11 {
+            e.tick(rid);
+        }
+
+        let rects = e.slot_rects(rid).expect("slot rects");
+        let cell = rects.get(&0).expect("slot 0");
+        assert_eq!((cell.x, cell.y, cell.w, cell.h), (960, 540, 960, 540), "exact rect, not 1x1 sqrt grid");
+
+        assert!(e.set_participant_frame(rid, a, Frame::filled(320, 180, 9)));
+        let out = e.tick(rid).expect("composite");
+        let index = ((cell.y + cell.h / 2) * CANVAS_SIZE.0 + (cell.x + cell.w / 2)) as usize;
+        assert_eq!(out.data[index], 9, "publisher colour is rendered inside its exact cell");
     }
 }

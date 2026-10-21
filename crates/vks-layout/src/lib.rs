@@ -14,6 +14,7 @@
 //! - [`grid`] — [`GridLayout`]: N тайлов в балансированную сетку.
 //! - [`focus`] — [`FocusLayout`]: крупный фокус + полоса мелких.
 //! - [`renderer`] — [`Renderer`]: Layout + frame-meta → `Vec<DrawCommand>`.
+//! - [`preset`] — вендорные пресеты PNM: id, схемы и геометрия слотов.
 //!
 //! ## Инварианты
 //! - Все rect в пикселях на canvas (общая валюта MCU/клиента).
@@ -28,11 +29,15 @@
 mod core;
 mod focus;
 mod grid;
+pub mod preset;
 mod rect;
 mod renderer;
 
 pub use core::{Layout, LayoutError, LayoutKind, NormalizedLayout, NormalizedSlot, ParticipantId, Slot, SlotId};
 pub use focus::FocusLayout;
 pub use grid::GridLayout;
+pub use preset::{
+    GridDefaults, GridInfo, GridPayload, GridSlot, Position, PresetId, PresetInfo, PresetScheme, SlotRect,
+};
 pub use rect::{Canvas, NormalizedRect, Rect};
 pub use renderer::{DrawCommand, FrameMeta, Renderer};

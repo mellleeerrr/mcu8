@@ -93,6 +93,18 @@ pub struct Media {
     pub direction: Option<String>,
     /// `a=candidate:...` (RFC 8839 / RFC 5245 ICE-кандидаты).
     pub candidates: Vec<String>,
+    /// `b=AS:<kbps>` — полоса на media-секцию (RFC 8866 §5.8).
+    pub b_as: Option<u32>,
+    /// `a=fmtp:<pt> <params>` — формат-специфичные параметры кодека.
+    pub fmtp: Vec<String>,
+    /// `a=rtcp-fb:<pt> <fb>` — RTCP feedback (NACK/PLI/FIR/REMB/TWCC).
+    pub rtcp_fb: Vec<String>,
+    /// `a=extmap:<id> <uri>` — RTP header extensions.
+    pub extmap: Vec<String>,
+    /// `a=rid:<id> send|recv ...` — simulcast RID-ы.
+    pub rid: Vec<String>,
+    /// `a=simulcast:send ...` / `a=simulcast:recv ...`.
+    pub simulcast: Option<String>,
 }
 
 /// SDP-документ: session-секция + медиа-секции.
@@ -149,8 +161,11 @@ impl Sdp {
                 continue;
             }
             // Строки-заглушки сессионного уровня — пропуск (не ошибка).
+            // `b=AS:` внутри media-секции несёт полосу и должен сохраняться.
+            let media_b_as = in_media.is_some() && line.starts_with("b=AS:");
             let skip = line.starts_with(['c', 't', 'z', 'b', 'p', 'i', 'r', 'u', 'k', 'y', 'f', 'q'])
-                && line.chars().nth(1) == Some('=');
+                && line.chars().nth(1) == Some('=')
+                && !media_b_as;
             if skip {
                 continue;
             }
@@ -160,6 +175,7 @@ impl Sdp {
                 .or_else(|| line.strip_prefix("o=").map(|v| ("o", v)))
                 .or_else(|| line.strip_prefix("s=").map(|v| ("s", v)))
                 .or_else(|| line.strip_prefix("m=").map(|v| ("m", v)))
+                .or_else(|| line.strip_prefix("b=").map(|v| ("b", v)))
                 .or_else(|| line.strip_prefix("a=").map(|v| ("a", v)))
                 .ok_or_else(|| SdpError::BadLine { index, line: line.to_string() })?;
 
@@ -170,6 +186,13 @@ impl Sdp {
                 }
                 "o" => doc.origin = value.trim().to_string(),
                 "s" => doc.session_name = value.trim().to_string(),
+                "b" => {
+                    if let (Some(media), Some(rest)) = (in_media.as_mut(), value.trim().strip_prefix("AS:")) {
+                        if let Ok(kbps) = rest.parse::<u32>() {
+                            media.b_as = Some(kbps);
+                        }
+                    }
+                }
                 "m" => {
                     if let Some(media) = in_media.take() {
                         doc.media.push(media);
@@ -216,6 +239,12 @@ impl Sdp {
                 setup: None,
                 direction: None,
                 candidates: Vec::new(),
+                b_as: None,
+                fmtp: Vec::new(),
+                rtcp_fb: Vec::new(),
+                extmap: Vec::new(),
+                rid: Vec::new(),
+                simulcast: None,
             };
         }
         let kind = MediaKind::from_str_loose(parts[0]).unwrap_or(MediaKind::Audio);
@@ -240,6 +269,12 @@ impl Sdp {
             setup: None,
             direction: None,
             candidates: Vec::new(),
+            b_as: None,
+            fmtp: Vec::new(),
+            rtcp_fb: Vec::new(),
+            extmap: Vec::new(),
+            rid: Vec::new(),
+            simulcast: None,
         }
     }
 
@@ -270,6 +305,11 @@ impl Sdp {
             Some(("ice-pwd", rest)) => media.ice_pwd = Some(rest.trim().to_string()),
             Some(("fingerprint", rest)) => media.fingerprint = Some(rest.trim().to_string()),
             Some(("setup", rest)) => media.setup = Some(rest.trim().to_string()),
+            Some(("fmtp", rest)) => media.fmtp.push(rest.trim().to_string()),
+            Some(("rtcp-fb", rest)) => media.rtcp_fb.push(rest.trim().to_string()),
+            Some(("extmap", rest)) => media.extmap.push(rest.trim().to_string()),
+            Some(("rid", rest)) => media.rid.push(rest.trim().to_string()),
+            Some(("simulcast", rest)) => media.simulcast = Some(rest.trim().to_string()),
             _ => {
                 // direction может прийти без значения ("a=sendrecv", "a=inactive").
                 if matches!(attr, "sendrecv" | "sendonly" | "recvonly" | "inactive") {
@@ -299,6 +339,9 @@ impl Sdp {
             };
             out.push_str(&format!("m={} {} UDP/TLS/RTP/SAVPF{fmt_str}\n", media.kind.as_str(), media.port));
             out.push_str("c=IN IP4 0.0.0.0\n");
+            if let Some(b_as) = media.b_as {
+                out.push_str(&format!("b=AS:{b_as}\n"));
+            }
             out.push_str("a=rtcp-mux\n");
             if let Some(mid) = &media.mid {
                 out.push_str(&format!("a=mid:{mid}\n"));
@@ -309,6 +352,21 @@ impl Sdp {
                 } else {
                     out.push_str(&format!("a=rtpmap:{} {}/{}\n", rtp.payload, rtp.codec, rtp.clock));
                 }
+            }
+            for fmtp in &media.fmtp {
+                out.push_str(&format!("a=fmtp:{fmtp}\n"));
+            }
+            for fb in &media.rtcp_fb {
+                out.push_str(&format!("a=rtcp-fb:{fb}\n"));
+            }
+            for ext in &media.extmap {
+                out.push_str(&format!("a=extmap:{ext}\n"));
+            }
+            for rid in &media.rid {
+                out.push_str(&format!("a=rid:{rid}\n"));
+            }
+            if let Some(simulcast) = &media.simulcast {
+                out.push_str(&format!("a=simulcast:{simulcast}\n"));
             }
             if let Some(msid) = &media.msid {
                 out.push_str(&format!("a=msid:{msid}\n"));
@@ -364,6 +422,14 @@ pub struct SfuAnswerProfile {
     pub host_candidate: IceCandidate,
     /// DTLS fingerprint (sha-256, colon-separated hex).
     pub fingerprint: String,
+    /// `b=AS:<kbps>` для media-секций (0/None — не объявлять).
+    pub b_as: Option<u32>,
+    /// `a=fmtp` строки (полный формат `"96 profile-level-id=..."`).
+    pub fmtp: Vec<String>,
+    /// `a=rtcp-fb` строки (`"96 nack pli"`).
+    pub rtcp_fb: Vec<String>,
+    /// `a=extmap` строки (`"3 urn:ietf:params:rtp-hdrext:toffset"`).
+    pub extmap: Vec<String>,
 }
 
 impl Sdp {
@@ -404,6 +470,12 @@ impl Sdp {
                 setup: Some("passive".to_string()),
                 direction: Some(direction.to_string()),
                 candidates: Vec::new(),
+                b_as: profile.b_as,
+                fmtp: profile.fmtp.clone(),
+                rtcp_fb: profile.rtcp_fb.clone(),
+                extmap: profile.extmap.clone(),
+                rid: Vec::new(),
+                simulcast: None,
             };
             answer.media.push(m);
         }
@@ -466,6 +538,12 @@ mod tests {
                     setup: Some("actpass".into()),
                     direction: Some("sendrecv".into()),
                     candidates: Vec::new(),
+                    b_as: None,
+                    fmtp: Vec::new(),
+                    rtcp_fb: Vec::new(),
+                    extmap: Vec::new(),
+                    rid: Vec::new(),
+                    simulcast: None,
                 },
                 Media {
                     kind: MediaKind::Video,
@@ -481,6 +559,12 @@ mod tests {
                     setup: Some("actpass".into()),
                     direction: Some("sendrecv".into()),
                     candidates: Vec::new(),
+                    b_as: None,
+                    fmtp: Vec::new(),
+                    rtcp_fb: Vec::new(),
+                    extmap: Vec::new(),
+                    rid: Vec::new(),
+                    simulcast: None,
                 },
             ],
         }
@@ -502,6 +586,10 @@ mod tests {
                 typ: "host".into(),
             },
             fingerprint: "sha-256 FF:00:11".into(),
+            b_as: Some(2048),
+            fmtp: vec!["96 profile-level-id=42e01f;packetization-mode=1".into()],
+            rtcp_fb: vec!["96 nack".into(), "96 nack pli".into(), "96 ccm fir".into()],
+            extmap: vec!["1 urn:ietf:params:rtp-hdrext:sdes:mid".into()],
         }
     }
 
@@ -615,6 +703,45 @@ a=ssrc:5000 cname:x
         assert_eq!(parsed.media[1].rtp_maps[0].codec, "VP8");
         assert_eq!(parsed.media[1].direction.as_deref(), Some("recvonly"));
         assert!(parsed.media[1].ssrcs.iter().any(|s| s.contains("5000")));
+    }
+
+    #[test]
+    fn media_bandwidth_and_feedback_roundtrip() {
+        let sample = r#"v=0
+o=- 1 1 IN IP4 0.0.0.0
+s=-
+t=0 0
+m=video 9 UDP/TLS/RTP/SAVPF 96
+c=IN IP4 0.0.0.0
+b=AS:2048
+a=mid:1
+a=rtpmap:96 H264/90000
+a=fmtp:96 profile-level-id=42e01f;packetization-mode=1
+a=rtcp-fb:96 nack
+a=rtcp-fb:96 nack pli
+a=rtcp-fb:96 ccm fir
+a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01
+a=rid:hi send
+a=simulcast:send hi;lo
+a=sendrecv
+"#;
+        let parsed = Sdp::parse(sample).expect("parse");
+        let video = &parsed.media[0];
+        assert_eq!(video.b_as, Some(2048));
+        assert!(video.fmtp.iter().any(|v| v.starts_with("96 ") && v.contains("packetization-mode=1")));
+        assert!(video.rtcp_fb.iter().any(|v| v == "96 nack pli"));
+        assert!(video.rtcp_fb.iter().any(|v| v == "96 ccm fir"));
+        assert!(video.extmap.iter().any(|v| v.starts_with("3 ")));
+        assert_eq!(video.rid, vec!["hi send".to_string()]);
+        assert_eq!(video.simulcast.as_deref(), Some("send hi;lo"));
+
+        let text = parsed.to_sdp_text();
+        assert!(text.contains("b=AS:2048"));
+        assert!(text.contains("a=fmtp:96 "));
+        assert!(text.contains("a=rtcp-fb:96 nack pli"));
+        assert!(text.contains("a=extmap:3 "));
+        let again = Sdp::parse(&text).expect("reparse");
+        assert_eq!(again.media[0].b_as, Some(2048));
     }
 
     #[test]

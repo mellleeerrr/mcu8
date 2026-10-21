@@ -19,7 +19,7 @@
     el.setAttribute('role', 'alert');
     el.textContent = text;
     el.style.cssText = [
-      'position:fixed', 'z-index:2147483647', 'right:24px', 'bottom:24px',
+      'position:fixed', 'z-index:9000', 'pointer-events:none', 'right:24px', 'bottom:24px',
       'max-width:460px', 'padding:14px 18px', 'border-radius:8px',
       'background:#c62828', 'color:#fff', 'font:14px/1.4 sans-serif',
       'box-shadow:0 6px 24px rgba(0,0,0,.35)', 'white-space:pre-line',

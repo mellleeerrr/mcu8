@@ -24,6 +24,7 @@
 //! Дерево зависимостей: `vks-core` — корень, не зависит от других
 //! внутренних крейтов (ARCHITECTURE §3).
 
+pub mod media_policy;
 pub mod participant;
 pub mod ports;
 pub mod room;
@@ -32,6 +33,7 @@ pub mod track;
 pub mod transparency;
 
 // Re-exports for convenience (flat API).
+pub use media_policy::{EffectiveMedia, MediaLayer};
 pub use participant::{Participant, ParticipantId, Permission, Permissions, Role, UserId, BOOTSTRAP_ADMIN_USER_ID};
 pub use ports::{
     // storage
@@ -57,6 +59,7 @@ pub use ports::{
     Layout,
     // media
     LayoutDescriptor,
+    LayoutSlot,
     MediaEngine,
     MediaEngineError,
     MediaTrack,

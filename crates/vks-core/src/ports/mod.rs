@@ -28,7 +28,7 @@ pub use auth::{AuthError, AuthProvider, Credentials, User};
 pub use clock::{Clock, ClockError, FixedClock, SystemClock};
 pub use events::{Event, EventId, EventKind, EventStream, Events, EventsError, Subscription, SubscriptionHandle};
 pub use media_engine::{
-    LayoutDescriptor, MediaEngine, MediaEngineError, MediaTrack, PublisherHandle, RoomCaps, RoomMediaCfg,
+    LayoutDescriptor, LayoutSlot, MediaEngine, MediaEngineError, MediaTrack, PublisherHandle, RoomCaps, RoomMediaCfg,
     RoomMediaHandle, SubscribeRequest, SubscriberHandle,
 };
 pub use rng::{DeterministicRng, Rng, RngError};

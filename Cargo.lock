@@ -5152,6 +5152,7 @@ dependencies = [
  "vks-auth",
  "vks-common",
  "vks-core",
+ "vks-layout",
  "vks-proto",
  "vks-storage",
 ]
@@ -5350,6 +5351,7 @@ dependencies = [
  "vks-core",
  "vks-gateway-h323",
  "vks-gateway-sip",
+ "vks-layout",
  "vks-media-mcu",
  "vks-media-sfu",
  "vks-proto",

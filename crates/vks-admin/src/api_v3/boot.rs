@@ -30,8 +30,8 @@ pub async fn system_about(State(state): State<SharedState>) -> Response {
         "versions": {
             "server": env!("CARGO_PKG_VERSION"),
             "installer": env!("CARGO_PKG_VERSION"),
-            "ui": "PROSTOR 2.2.1.66",
-            "api": "3",
+            "ui": "2.2.1.66",
+            "api": "2.2.1.66",
             "engine": "1.0.0",
             "sip/h323": "1.0.0",
             "vile": "1.0.0"
@@ -60,14 +60,16 @@ pub async fn about(State(state): State<SharedState>) -> Response {
 /// `GET /api/v3/references?language=…` → пустые строки (маппер `AW` мягкий).
 pub async fn references() -> Response {
     track("references");
+    // Эталон отдаёт реальные ссылки trueconf.com. Пустые строки ломали
+    // «Помощь», «Купить» и «Продлить лицензию» (UI делал href="").
     Json(serde_json::json!({
-        "key": "",
-        "index": "",
-        "buy": "",
-        "contacts": "",
-        "trial_full_version": "",
-        "license_renewal": "",
-        "free_license_restrictions": ""
+        "key": "https://trueconf.com/products/mcu.html",
+        "index": "https://trueconf.com/",
+        "buy": "https://trueconf.com/buy.html",
+        "contacts": "https://trueconf.com/contacts.html",
+        "trial_full_version": "https://trueconf.com/download/mcu.html",
+        "license_renewal": "https://trueconf.com/buy.html",
+        "free_license_restrictions": "https://trueconf.com/products/mcu/free-license.html"
     }))
     .into_response()
 }

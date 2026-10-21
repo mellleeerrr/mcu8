@@ -89,6 +89,17 @@ pub async fn profile(State(state): State<SharedState>, Extension(verified): Exte
             "id": verified.user_id,
             "display_name": display_name,
             "role": role.as_str(),
+            // Эталонный `profile` отдаёт `roles[]` (карточка/гейты UI), а не
+            // только строку `role`. Оставляем оба поля: старое читается
+            // нашими проверками, новое — vendor-маппером.
+            "roles": [{
+                "id": role.as_str(),
+                "display_name": role.as_str(),
+                "permissions": permissions
+            }],
+            "view_own_only": false,
+            "address": "",
+            "payload": {},
             "permissions": permissions,
             "locale_id": "ru_RU",
             "time_zone_id": timezone,
@@ -237,18 +248,31 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
             "size_bytes": 0
         },
         "network": { "status": "READY", "connected": true, "editable": true, "ip": settings.ip },
-        "disk": { "free": 107374182400u64, "percent": 15, "full": "NORMAL" },
+        "disk": {
+            "free": 107374182400u64,
+            "percent": 15,
+            "full": "NORMAL",
+            // UI-маппер `DW` читает `disk.videorecords`; без него вкладка
+            // «Диск» показывала undefined.
+            "videorecords": 0
+        },
+        "time": crate::state::now_unix_ms() / 1000,
         "sip": {
             "status": sip_status,
             "connected": sip_healthy,
+            "enable": sip_healthy,
             "registration": sip_healthy,
-            "account": if sip_healthy { "sip:vks@local" } else { "" }
+            // `sip.account` в эталоне — boolean (isAvailable), не строка.
+            "account": sip_healthy,
+            "local_address": settings.ip
         },
         "h323": {
             "status": h323_status,
             "connected": h323_healthy,
+            "enable": h323_healthy,
             "registration": h323_healthy,
-            "account": if h323_healthy { "h323:vks@local" } else { "" }
+            "account": h323_healthy,
+            "local_address": settings.ip
         },
         "cluster": {
             "status": cluster_status,
@@ -283,8 +307,13 @@ pub async fn license(State(_state): State<SharedState>, Extension(auth): Extensi
     if let Some(response) = super::settings_admin::forbid(&auth) {
         return response;
     }
+    Json(license_payload()).into_response()
+}
+
+/// Общий конверт `/license` для регистрации/активации: UI читает те же поля.
+fn license_payload() -> Value {
     let now = crate::state::now_unix_ms() as i64 / 1000;
-    Json(json!({
+    json!({
         "state": "VALID",
         "type": "PERMANENT",
         "demo": false,
@@ -323,8 +352,7 @@ pub async fn license(State(_state): State<SharedState>, Extension(auth): Extensi
             "server": {"numa": true, "server": true, "secrecy": false, "unrestricted": false, "max_conferences": 4},
             "storage": {"recording": true}
         }
-    }))
-    .into_response()
+    })
 }
 
 /// `GET /api/v3/features` → `{features:[...]}` (vendor-UI итерирует массив).
@@ -393,6 +421,76 @@ pub async fn engine_diagnostics(
     .into_response()
 }
 
+/// `GET /api/v3/tags_to_objects` — список тегов (у нас тегов нет).
+pub async fn tags_to_objects_get() -> Response {
+    track("tags_to_objects");
+    Json(json!({"count":0,"tags_to_objects":[]})).into_response()
+}
+
+/// `POST /api/v3/tags_to_objects` — теги эталонного UI. Теги не влияют на
+/// воспроизведение; принимаем и подтверждаем, чтобы не отдавать 501.
+pub async fn tags_to_objects(Json(_body): Json<Value>) -> Response {
+    track("tags_to_objects");
+    Json(json!({"status":"OK"})).into_response()
+}
+
+/// `GET /api/v3/files` — файловый менеджер. Поиск идёт через
+/// `ui:files:search`; HTTP-список нужен только для счётчика.
+pub async fn files_list() -> Response {
+    track("files");
+    Json(json!({"count":0,"files":[]})).into_response()
+}
+
+/// `GET /api/v3/files/{id}` — файл не хранится этим стендом.
+pub async fn file_get(axum::extract::Path(_id): axum::extract::Path<String>) -> Response {
+    track("files/get");
+    Json(json!({"error":{"code":404,"description":"File not found","details":[]}})).into_response()
+}
+
+/// `POST /api/v3/files` — multipart-загрузка. Полноценное файловое хранилище
+/// вне задачи MCU; подтверждаем загрузку синтетической записью, чтобы UI не
+/// показывал красный тост 501.
+pub async fn file_upload(axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>) -> Response {
+    track("files/upload");
+    let display_name = params.get("display_name").cloned().unwrap_or_else(|| "uploaded".to_string());
+    Json(json!({"file":{"id":uuid::Uuid::new_v4().to_string(),"display_name":display_name,
+        "protocol":"file","payload":{"extension":"bin","size":0,"primary":false,"loop":false,"zoom":false}}}))
+    .into_response()
+}
+
+/// `DELETE /api/v3/files/{id}` — идемпотентно.
+pub async fn file_delete(axum::extract::Path(_id): axum::extract::Path<String>) -> Response {
+    track("files/delete");
+    axum::http::StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST /api/v3/registration/online` — активация лицензии. На стенде лицензия
+/// постоянная; отвечаем текущим `/license`-совместимым конвертом.
+pub async fn registration_online(Extension(auth): Extension<AuthContext>) -> Response {
+    track("registration/online");
+    if let Some(response) = super::settings_admin::forbid(&auth) {
+        return response;
+    }
+    Json(license_payload()).into_response()
+}
+
+/// `POST /api/v3/registration/offline` — UI ожидает blob; отдаём пустой файл.
+pub async fn registration_offline() -> Response {
+    track("registration/offline");
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        Vec::<u8>::new(),
+    )
+        .into_response()
+}
+
+/// `POST /api/v3/registration/license` — загрузка файла лицензии; на стенде
+/// лицензия уже постоянная, файл не нужен.
+pub async fn registration_license() -> Response {
+    track("registration/license");
+    Json(json!({"status":"OK"})).into_response()
+}
+
 /// `GET /api/v3/users/credentials/expire` → `{users:[]}` — маппер `MW`
 /// деструктурирует `users` (без него store-ре-throw кладёт консоль).
 /// Пусто: парольных TTL у нас нет; при включении — фильтр по `block_at`.
@@ -401,20 +499,28 @@ pub async fn users_credentials_expire() -> Response {
     Json(json!({ "users": [] })).into_response()
 }
 
-/// `GET /api/v3/settings/audio_codecs` → `{audio_codecs:[{id, description}]}`.
+/// `GET /api/v3/settings/audio_codecs` → эталонный shape
+/// `{audio_codecs:[{name,bitrate}]}` (bitrate null для кодеков без вариантов).
 pub async fn settings_audio_codecs(State(state): State<SharedState>) -> Response {
     track("settings/audio_codecs");
     let s = SettingsService::get(&state);
-    let codecs: Vec<serde_json::Value> = s.codecs.audio.iter().map(|c| json!({ "id": c, "description": c })).collect();
+    let codecs: Vec<serde_json::Value> = s
+        .codecs
+        .audio
+        .iter()
+        .map(|spec| {
+            let (name, bitrate) = crate::settings::CodecConfig::audio_parts(spec);
+            json!({ "name": name, "bitrate": bitrate })
+        })
+        .collect();
     Json(json!({ "audio_codecs": codecs })).into_response()
 }
 
-/// `GET /api/v3/settings/video_codecs` → `{video_codecs:[{id, description}]}`.
+/// `GET /api/v3/settings/video_codecs` → эталонный shape `{video_codecs:[str]}`.
 pub async fn settings_video_codecs(State(state): State<SharedState>) -> Response {
     track("settings/video_codecs");
     let s = SettingsService::get(&state);
-    let codecs: Vec<serde_json::Value> = s.codecs.video.iter().map(|c| json!({ "id": c, "description": c })).collect();
-    Json(json!({ "video_codecs": codecs })).into_response()
+    Json(json!({ "video_codecs": s.codecs.video })).into_response()
 }
 
 /// Эталонные умолчания видео-настроек (`ref-92/settings_video.json`), сразу payload.
@@ -483,27 +589,57 @@ pub async fn update_settings_video(
 }
 
 /// `POST /api/v3/ui/video_layouts/calculate` — геометрия слотов для превью
-/// (`{preset,width,height}` → `{slots:[{position,x,y,width,height,z_order}]}`).
+/// (`{preset,width,height,overlap_factor?,pip?}` → `{slots:[{position,x,y,width,height,z_order}]}`).
+///
+/// Геометрия — из [`vks_layout::preset`]: схема (`equal`/`selected`/`double`)
+/// определяет расположение окон, `_(N)` меняет пропорцию/pip-сторону,
+/// `_overlap`/`pip` накладывает маленькие окна поверх большой зоны.
+/// Неизвестный preset → равномерная сетка по извлечённому размеру (fallback).
 pub async fn video_layouts_calculate(Json(body): Json<serde_json::Value>) -> Response {
     track("ui/video_layouts/calculate");
-    let preset = body.get("preset").and_then(serde_json::Value::as_str).unwrap_or("preset_default_13");
-    let width = body.get("width").and_then(serde_json::Value::as_f64).filter(|v| *v > 0.0).unwrap_or(1280.0);
-    let height = body.get("height").and_then(serde_json::Value::as_f64).filter(|v| *v > 0.0).unwrap_or(720.0);
-    let count = crate::api_v3::resources::preset_size(preset)
-        .map(|n| n as usize)
-        .filter(|n| (1..=64).contains(n))
-        .unwrap_or(13);
-    let cols = (count as f64).sqrt().ceil() as usize;
-    let rows = count.div_ceil(cols);
-    let slots: Vec<serde_json::Value> = (0..count)
-        .map(|index| {
+    let preset_name = body.get("preset").and_then(serde_json::Value::as_str).unwrap_or("preset_default_13");
+    let requested_size = body
+        .get("size")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok());
+    let preset_name = vks_layout::preset::resolve(preset_name, requested_size);
+    let dimension = |key: &str, fallback: f64| {
+        body.get(key)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(fallback)
+    };
+    let width = dimension("width", 1280.0);
+    let height = dimension("height", 720.0);
+    let overlap_factor = body
+        .get("overlap_factor")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0);
+    let pip = body.get("pip").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let preset = vks_layout::preset::PresetId::parse(&preset_name).unwrap_or_else(|| {
+        let size = crate::api_v3::resources::preset_size(&preset_name)
+            .and_then(|size| u8::try_from(size).ok())
+            .filter(|size| *size > 0)
+            .unwrap_or(vks_layout::preset::PresetId::DEFAULT_SIZE);
+        vks_layout::preset::PresetId::equal(size)
+    });
+    let slots: Vec<serde_json::Value> = vks_layout::preset::geometry(&preset, width, height, overlap_factor, pip)
+        .iter()
+        .enumerate()
+        .map(|(position, rect)| {
+            // Эталон возвращает 1-based позиции (1..N), тогда как наш
+            // `preset::geometry` и `/video_layout_grids` — 0-based. UI
+            // сопоставляет слот с ячейкой по `position` напрямую, поэтому
+            // 0-based ответ сдвигал участника на ячейку вправо/вниз, а
+            // последний слот выпадал в крошечный fallback.
             json!({
-                "position": index,
-                "x": (index % cols) as f64 * (width / cols as f64),
-                "y": (index / cols) as f64 * (height / rows as f64),
-                "width": width / cols as f64,
-                "height": height / rows as f64,
-                "z_order": index,
+                "position": position + 1,
+                "x": rect.x,
+                "y": rect.y,
+                "width": rect.width,
+                "height": rect.height,
+                "z_order": 0,
             })
         })
         .collect();
@@ -681,6 +817,9 @@ pub async fn switch_video_layout_mode(
     if let Some(new_mode) = topology_mode {
         let _ = crate::rooms::Rooms::update_async(&state, &room.id, None, Some(new_mode), None, None).await;
     }
+    // Применённая из редактора раскладка должна сразу доехать до MCU, иначе
+    // выбранная схема и позиции участников остаются только в UI.
+    super::sessions::push_layout_to_engine(&state, room.id).await;
     super::resources::with_layout_abonents(&state, &mut result, &room.id);
     // `Boe` делает `.then(o => my(o.data))`: ответ — запись раскладки, не конверт.
     Json(result).into_response()

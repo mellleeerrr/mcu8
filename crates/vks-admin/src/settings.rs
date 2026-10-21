@@ -61,7 +61,65 @@ pub struct CodecConfig {
 
 impl Default for CodecConfig {
     fn default() -> Self {
-        Self { video: vec!["vp8".to_string(), "vp9".to_string()], audio: vec!["opus".to_string(), "g722".to_string()] }
+        // Матрица из эталона TrueConf MCU 2.2.1.66 + требования заказчика:
+        // G.719 и H.261/H.265, которых в эталонном списке не было, добавлены
+        // осознанно. Audio хранится строкой `NAME[:bitrate]`, чтобы PATCH
+        // сохранял битрейт варианта G.722.1/C и G.726.
+        Self {
+            video: [
+                "H261", "H263", "H263+", "H264", "H264-HIGH", "H264-SVC", "H265", "VP8",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            audio: [
+                "AAC",
+                "G711",
+                "G719",
+                "G722",
+                "G7221:24",
+                "G7221:32",
+                "G7221C:24",
+                "G7221C:32",
+                "G7221C:48",
+                "G723",
+                "G726:16",
+                "G726:24",
+                "G726:32",
+                "G726:40",
+                "G728",
+                "G729",
+                "OPUS",
+                "ILBC",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        }
+    }
+}
+
+impl CodecConfig {
+    /// Ранее сохранённые настройки содержали урезанный список `vp8/vp9` +
+    /// `opus/g722`. При гидрации из БД такой список нужно расширить до
+    /// эталонной матрицы, иначе UI и SIP не увидят требуемые кодеки.
+    pub fn migrate_legacy(&mut self) {
+        let legacy_video = self.video.iter().map(String::as_str).eq(["vp8", "vp9"]);
+        let legacy_audio = self.audio.iter().map(|spec| Self::audio_parts(spec).0).eq(["opus", "g722"]);
+        if legacy_video && legacy_audio {
+            *self = Self::default();
+        }
+    }
+
+    /// Разбирает `G7221:24` в `("G7221", Some(24))`; без суффикса —
+    /// `("AAC", None)`. Формат терпит и `G7221/24`, и регистр.
+    pub fn audio_parts(spec: &str) -> (String, Option<u32>) {
+        let spec = spec.trim();
+        let (name, bitrate) = spec
+            .split_once(':')
+            .or_else(|| spec.split_once('/'))
+            .map_or((spec, None), |(name, bitrate)| (name, bitrate.trim().parse().ok()));
+        (name.trim().to_string(), bitrate)
     }
 }
 

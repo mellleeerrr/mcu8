@@ -2265,9 +2265,15 @@ async fn pnm_video_layouts_calculate_parses_preset_suffix() {
     let body = json_body(response).await;
     let slots = body["slots"].as_array().expect("slots array");
     assert_eq!(slots.len(), 4, "размер берётся из хвоста пресета, а не из «(2)»");
-    assert_eq!(slots[0]["position"], 0);
-    assert_eq!(slots[0]["width"], 320.0);
-    assert_eq!(slots[0]["height"], 180.0);
+    // Эталонный `/ui/video_layouts/calculate` отдаёт позиции 1..N (проверено
+    // live на TrueConf MCU 2.2.1.66), не 0..N-1.
+    assert_eq!(slots[0]["position"], 1);
+    assert_eq!(slots[3]["position"], 4);
+    // `selected_b_4_(2)` — крупная зона (66/34), а не равномерная 2×2.
+    let first_width = slots[0]["width"].as_f64().expect("ширина первого слота");
+    let first_height = slots[0]["height"].as_f64().expect("высота первого слота");
+    assert!((first_width - 640.0).abs() < 1e-6, "крупная зона занимает всю ширину: {first_width}");
+    assert!((first_height - 360.0 * 0.66).abs() < 1e-6, "вариант _(2) задаёт пропорцию 66/34: {first_height}");
 
     let response =
         send(&server, request("POST", "/api/v3/ui/video_layouts/calculate", None, json!({"preset":"preset_equal_25"})))

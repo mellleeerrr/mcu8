@@ -441,3 +441,77 @@ async fn engine_log_has_stable_startup_timestamp() {
     let started = first["log"][0]["timestamp"].as_i64().unwrap();
     assert!(started <= now && started > now - 86_400, "started={started} now={now}");
 }
+
+#[tokio::test]
+async fn statistics_aggregates_system_and_engine() {
+    let (state, _issuer) = test_state();
+    let room = crate::rooms::Rooms::create(&state, "stats-room");
+    state.room_hub.register_participant(
+        &room.id,
+        crate::hub::ParticipantSnapshot {
+            participant_id: "p1".to_string(),
+            display_name: "P1".to_string(),
+            is_recorder: false,
+            is_speaking: false,
+            track_ids: Vec::new(),
+            is_audio_muted: false,
+            is_video_muted: false,
+            connected_at: 0,
+        },
+    );
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+
+    let stats = json_body(send(&app, auth_request("GET", "/api/v3/statistics", &token)).await).await;
+    assert!(stats["timestamp"].as_i64().unwrap() > 0, "{stats}");
+    assert!(stats["system"]["cpu"]["load"].is_array(), "{stats}");
+    assert!(stats["system"]["cpu"]["count"].as_u64().unwrap() >= 1, "{stats}");
+    assert!(stats["system"]["memory"]["total"].as_u64().unwrap() > 0, "{stats}");
+    assert!(stats["system"]["disk"]["spaces"].is_array(), "{stats}");
+    assert!(stats["system"]["network"]["interfaces"].is_array(), "{stats}");
+    assert_eq!(stats["system"]["media_healthy"], true, "{stats}");
+    assert_eq!(stats["engine"]["rooms"], 1, "{stats}");
+    assert_eq!(stats["engine"]["participants"], 1, "{stats}");
+    assert!(stats["engine"]["mode"].is_string(), "{stats}");
+    assert!(stats["engine"]["codecs"]["audio"].as_array().is_some_and(|codecs| !codecs.is_empty()), "{stats}");
+    assert!(stats["engine"]["codecs"]["video"].as_array().is_some_and(|codecs| !codecs.is_empty()), "{stats}");
+}
+
+#[tokio::test]
+async fn stats_cpu_network_have_no_sleep_and_memory_has_timestamp() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+
+    // Два подряд вызова каждого эндпоинта: со sleep(120ms)+sleep(200ms) это
+    // заняло бы >=640 мс; без sleep — единицы миллисекунд.
+    let started = std::time::Instant::now();
+    for _ in 0..2 {
+        let cpu = json_body(send(&app, auth_request("GET", "/api/v3/system/stats/cpu", &token)).await).await;
+        assert_eq!(
+            cpu["count"].as_u64().unwrap_or(0) as usize,
+            cpu["load"].as_array().unwrap().len(),
+            "cpu shape unchanged: {cpu}"
+        );
+        let network = json_body(send(&app, auth_request("GET", "/api/v3/system/stats/network", &token)).await).await;
+        assert_eq!(
+            network["count"].as_u64().unwrap() as usize,
+            network["interfaces"].as_array().unwrap().len(),
+            "network shape unchanged: {network}"
+        );
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(100),
+        "stats handlers must not sleep: {:?}",
+        started.elapsed()
+    );
+
+    let memory = json_body(send(&app, auth_request("GET", "/api/v3/system/stats/memory", &token)).await).await;
+    assert!(memory["total"].as_u64().unwrap() > 0, "{memory}");
+    assert!(memory["timestamp"].as_i64().unwrap() > 0, "memory must carry timestamp: {memory}");
+    assert!(memory["used"].as_u64().unwrap() <= memory["total"].as_u64().unwrap());
+
+    let disk = json_body(send(&app, auth_request("GET", "/api/v3/system/stats/disk", &token)).await).await;
+    assert!(disk["count"].as_u64().unwrap_or(0) >= 1, "{disk}");
+    assert!(disk["spaces"][0]["total"].as_u64().unwrap() > 0, "{disk}");
+}

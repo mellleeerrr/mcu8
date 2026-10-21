@@ -198,6 +198,11 @@ fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_sto
         "created_at":r.created_ms/1000,
         "duration":stored_settings.get("duration").cloned().unwrap_or(Value::Null),
         "stopped_at":if is_stopped {stored_settings.get("stopped_at").cloned().unwrap_or(Value::Null)} else {Value::Null},
+        // Эталонный `ui/conferences` отдаёт `stop_at`; UI-таблица читает его
+        // для времени завершения. Оставляем `stopped_at` для старых мапперов.
+        "stop_at":if is_stopped {stored_settings.get("stopped_at").cloned().unwrap_or(Value::Null)} else {Value::Null},
+        "scheduled_stop_at": Value::Null,
+        "stopped_by": if is_stopped {stored_settings.get("stopped_by").cloned().unwrap_or(Value::Null)} else {Value::Null},
         "session":if is_stopped {Value::Null} else {json!({"id":r.id.to_string(),"display_name":r.name,"started_at":r.created_ms/1000})},
         "start_at": Value::Null,
         "tags": Value::Null,
@@ -218,7 +223,8 @@ fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_sto
         // а маппер `Mee` — `abonents.abonents.map`; отдаём обе формы сразу.
         "abonents": {
             "count": 0, "abonents": [], "records": [], "rtmp": [], "youtube": [],
-            "sip": sip_count, "h323": h323_count, "rtsp": 0, "vnc": 0, "media": 0, "file": 0
+            "sip": sip_count, "h323": h323_count, "rtsp": 0, "vnc": 0, "media": 0, "file": 0,
+            "alias": 0, "confloop": 0
         },
         "contacts": { "users": 0, "sip": sip_count, "h323": h323_count, "alias": 0, "rtsp": 0, "vnc": 0, "media": 0, "file": 0 },
         "payload": payload_map
@@ -386,6 +392,52 @@ async fn prepare_session_resources(state: &SharedState, room_id: &str, creator: 
     super::resources::commit(state, &mut resources, previous).await
 }
 
+/// JSON «активной» раскладки комнаты для медиа-движка.
+///
+/// Смотрит links `sessions:{room}:video_layouts`, затем
+/// `conferences:{room}:video_layouts`; выбирает раскладку `payload.type ==
+/// "default"` (иначе первую привязанную). Возвращает копию ресурса, чтобы не
+/// держать лок `resources` на время `await` в движке.
+async fn current_layout_json(state: &SharedState, room_id: &RoomId) -> Option<Value> {
+    let resources = state.api_v3.resources.lock().await;
+    // Собираем ссылки конференции и сессии. Индивидуальная/ручная раскладка
+    // приоритетнее «Общей»: именно её оператор выбрал и применил последней.
+    // Раньше движок всегда видел `type=default` и игнорировал выбор.
+    let mut ids: Vec<String> = Vec::new();
+    for scope in ["conferences", "sessions"] {
+        let key = format!("{scope}:{room_id}:video_layouts");
+        for id in resources.links.get(&key).cloned().unwrap_or_default() {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    let selected = ids.iter().rev().find(|id| {
+        resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() != Some("default"))
+    });
+    let selected = selected.or_else(|| {
+        ids.iter().rev().find(|id| {
+            resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
+        })
+    });
+    resources.layouts.get(selected?).cloned()
+}
+
+/// Проводит текущую «Общую» раскладку комнаты в медиа-движок. Вызывается
+/// после старта сессии и после каждого изменения раскладки, чтобы живой
+/// PATCH/attach/detach доезжал до MCU без перезапуска.
+pub(super) async fn push_layout_to_engine(state: &SharedState, room_id: RoomId) {
+    let Some(layout) = current_layout_json(state, &room_id).await else {
+        return;
+    };
+    let Some(dialer) = state.outbound_dialer() else {
+        return;
+    };
+    if let Err(error) = dialer.apply_layout(room_id, layout).await {
+        tracing::warn!(room = %room_id, %error, "Chosen layout was not applied to the media engine");
+    }
+}
+
 pub async fn start_session(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
@@ -427,6 +479,10 @@ pub async fn start_session(
     if let Err(response) = prepare_session_resources(&state, &room.id.to_string(), &auth.subject).await {
         return response;
     }
+    // Выбранная раскладка проводится в медиа-движок ДО первого моста/дозвона:
+    // MCU получает assignments, поэтому абонент попадает в свою ячейку, а не
+    // в первый свободный слот. Ошибка движка старт сессии не ломает.
+    push_layout_to_engine(&state, room.id).await;
     let contacts = state.api_v3.resources.lock().await.contacts.get(&room.id.to_string()).cloned().unwrap_or_default();
     let autocall = state
         .api_v3
@@ -2036,5 +2092,68 @@ mod boot_reconcile_tests {
             assert_eq!(session["state"], "STOPPED", "после рестарта активная сессия снова STOPPED: {session}");
             assert!(session["session"].is_null(), "после рестарта живого session нет: {session}");
         }
+    }
+}
+
+#[cfg(test)]
+mod layout_selection_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// P0: выбранная оператором ручная/индивидуальная раскладка приоритетнее
+    /// «Общей» — иначе редактор сохраняет слоты, а движок продолжает вещать
+    /// default-сетку. Fallback на default остаётся, когда ручных нет.
+    #[tokio::test]
+    async fn current_layout_json_prefers_manual_over_default() {
+        let state: SharedState = Arc::new(AppState::new());
+        let room = RoomId::new();
+        {
+            let mut resources = state.api_v3.resources.lock().await;
+            resources
+                .layouts
+                .insert("individual".into(), json!({"id": "individual", "payload": {"type": "individual"}}));
+            resources.layouts.insert("shared".into(), json!({"id": "shared", "payload": {"type": "default"}}));
+            resources
+                .links
+                .insert(format!("sessions:{room}:video_layouts"), vec!["individual".into(), "shared".into()]);
+        }
+        let layout = current_layout_json(&state, &room).await.expect("manual layout is linked");
+        assert_eq!(layout["id"], "individual");
+    }
+
+    /// Если ручных раскладок нет, движок получает «Общую».
+    #[tokio::test]
+    async fn current_layout_json_falls_back_to_default() {
+        let state: SharedState = Arc::new(AppState::new());
+        let room = RoomId::new();
+        {
+            let mut resources = state.api_v3.resources.lock().await;
+            resources.layouts.insert("shared".into(), json!({"id": "shared", "payload": {"type": "default"}}));
+            resources.links.insert(format!("sessions:{room}:video_layouts"), vec!["shared".into()]);
+        }
+        let layout = current_layout_json(&state, &room).await.expect("default layout is linked");
+        assert_eq!(layout["id"], "shared");
+    }
+
+    /// Без links раскладки нет — старт сессии не должен пытаться её применить.
+    #[tokio::test]
+    async fn current_layout_json_is_none_without_links() {
+        let state: SharedState = Arc::new(AppState::new());
+        assert!(current_layout_json(&state, &RoomId::new()).await.is_none());
+    }
+
+    /// Fallback на `conferences:` links, если session-ссылок ещё нет,
+    /// и на первую привязанную раскладку, если default отсутствует.
+    #[tokio::test]
+    async fn current_layout_json_falls_back_to_conferences_and_first() {
+        let state: SharedState = Arc::new(AppState::new());
+        let room = RoomId::new();
+        {
+            let mut resources = state.api_v3.resources.lock().await;
+            resources.layouts.insert("only".into(), json!({"id": "only", "payload": {"type": "individual"}}));
+            resources.links.insert(format!("conferences:{room}:video_layouts"), vec!["only".into()]);
+        }
+        let layout = current_layout_json(&state, &room).await.expect("first linked layout");
+        assert_eq!(layout["id"], "only");
     }
 }

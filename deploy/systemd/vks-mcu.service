@@ -1,0 +1,20 @@
+[Unit]
+Description=VKS MCU local stand (PROSTOR UI, SIP/H.323, SQLite)
+Documentation=file:///home/pro/mcu/docs/implementation/LIVE_MCU_TASKS_2026-10-21.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pro/mcu
+ExecStart=/home/pro/mcu/target/release/vks-server --config /home/pro/mcu/configs/default.toml
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=30
+LimitNOFILE=65536
+StandardOutput=append:/home/pro/mcu/vks_server.log
+StandardError=append:/home/pro/mcu/vks_server.log
+
+[Install]
+WantedBy=default.target

@@ -299,7 +299,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn layout() -> LayoutDescriptor {
-        LayoutDescriptor { layout_id: "L1".into(), version: 1, assignments: BTreeMap::new() }
+        LayoutDescriptor { layout_id: "L1".into(), version: 1, assignments: BTreeMap::new(), geometry: Vec::new() }
     }
 
     /// Sfu → Mcu: готов сразу, layout сохранён, epoch=1, событие.

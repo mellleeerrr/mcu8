@@ -136,6 +136,15 @@ pub trait OutboundDialer: Send + Sync {
     /// Возвращает идентификатор участника (participant_id).
     async fn dial(&self, room_id: RoomId, uri: &str, display_name: Option<&str>) -> Result<String, String>;
 
+    /// Передаёт выбранную раскладку комнаты в медиа-движок (MCU).
+    ///
+    /// `layout` — PNM-ресурс `video_layouts` целиком (`id` + `payload.slots[]`
+    /// с `position` и идентификаторами абонентов). Реализации без
+    /// медиа-плоскости оставляют no-op, чтобы старт сессии не зависел от MCU.
+    async fn apply_layout(&self, _room_id: RoomId, _layout: serde_json::Value) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Measured media counters for an active gateway connection.
     fn media_stats(&self, _participant_id: &str) -> Option<serde_json::Value> {
         None
@@ -558,7 +567,8 @@ impl AppState {
 
             // M1.5: Hydrate server settings
             if let Ok(Some(settings_json)) = storage.get_settings().await {
-                if let Ok(loaded) = serde_json::from_str::<crate::settings::Settings>(&settings_json) {
+                if let Ok(mut loaded) = serde_json::from_str::<crate::settings::Settings>(&settings_json) {
+                    loaded.codecs.migrate_legacy();
                     let mut current = self.settings.lock().map_err(|e| e.to_string())?;
                     *current = loaded.clone();
                     self.mode.lock().map_err(|e| e.to_string())?.global_mode = loaded.default_mode;

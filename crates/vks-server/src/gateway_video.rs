@@ -8,9 +8,72 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 
-const WIDTH: usize = 640;
-const HEIGHT: usize = 360;
-const FRAME_BYTES: usize = WIDTH * HEIGHT * 3 / 2;
+/// Профиль кодирования шлюзового видео. Заменяет прежние жёсткие
+/// `640x360/15fps/256k/baseline/3.0`: оператор задаёт размер/битрейт/fps
+/// через env (`VKS_GATEWAY_VIDEO_*`), а `max_frame_rate` из
+/// `/api/v3/settings/video` подхватывается в `GatewayManager`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct VideoProfile {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+    pub profile: String,
+    pub level: String,
+}
+
+impl Default for VideoProfile {
+    fn default() -> Self {
+        Self { width: 1280, height: 720, fps: 30, bitrate_kbps: 2048, profile: "baseline".into(), level: "3.1".into() }
+    }
+}
+
+impl VideoProfile {
+    /// Читает переопределения из env. Невалидные/нулевые значения игнорируются,
+    /// чтобы опечатка в unit-файле не отключила видео.
+    pub(super) fn from_env() -> Self {
+        let mut profile = Self::default();
+        profile.width = env_u32("VKS_GATEWAY_VIDEO_WIDTH").unwrap_or(profile.width);
+        profile.height = env_u32("VKS_GATEWAY_VIDEO_HEIGHT").unwrap_or(profile.height);
+        profile.fps = env_u32("VKS_GATEWAY_VIDEO_FPS").unwrap_or(profile.fps);
+        profile.bitrate_kbps = env_u32("VKS_GATEWAY_VIDEO_BITRATE_KBPS").unwrap_or(profile.bitrate_kbps);
+        if let Ok(value) = std::env::var("VKS_GATEWAY_VIDEO_PROFILE") {
+            if !value.trim().is_empty() {
+                profile.profile = value.trim().to_string();
+            }
+        }
+        profile.width = (profile.width.clamp(160, 3840) / 2) * 2;
+        profile.height = (profile.height.clamp(120, 2160) / 2) * 2;
+        profile.fps = profile.fps.clamp(1, 60);
+        profile.bitrate_kbps = profile.bitrate_kbps.clamp(64, 20_000);
+        profile.level = std::env::var("VKS_GATEWAY_VIDEO_LEVEL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| h264_level(profile.width, profile.height, profile.fps).to_string());
+        profile
+    }
+
+    fn frame_bytes(&self) -> usize {
+        self.width as usize * self.height as usize * 3 / 2
+    }
+}
+
+fn env_u32(key: &str) -> Option<u32> {
+    std::env::var(key).ok()?.trim().parse().ok().filter(|value| *value > 0)
+}
+
+/// Минимальный H.264 level, покрывающий `width×height@fps` (уровень нужен
+/// peer'у для декодера; занижать его нельзя).
+fn h264_level(width: u32, height: u32, fps: u32) -> &'static str {
+    let pixels_per_second = u64::from(width) * u64::from(height) * u64::from(fps);
+    if width <= 1280 && height <= 720 && pixels_per_second <= 1280 * 720 * 30 {
+        "3.1"
+    } else if width <= 1920 && height <= 1088 && pixels_per_second <= 1920 * 1088 * 30 {
+        "4.0"
+    } else {
+        "4.2"
+    }
+}
 
 pub(super) struct VideoBridgeSession {
     pub room_id: vks_core::RoomId,
@@ -25,6 +88,7 @@ pub(super) struct VideoBridgeSession {
     pub controls: GatewayMediaControls,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
     pub stats: Arc<GatewayMediaStats>,
+    pub profile: VideoProfile,
 }
 
 pub(super) async fn codec_available() -> bool {
@@ -46,19 +110,24 @@ pub(super) async fn codec_available() -> bool {
         .await
 }
 
-fn spawn_codec(encoder: bool) -> Result<Child, String> {
+fn spawn_codec(encoder: bool, profile: &VideoProfile) -> Result<Child, String> {
     let mut command = Command::new("ffmpeg");
     command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1", "-filter_threads", "1"]);
     if encoder {
+        let size = format!("{}x{}", profile.width, profile.height);
+        let fps = profile.fps.to_string();
+        let bitrate = format!("{}k", profile.bitrate_kbps);
+        let buffer = format!("{}k", profile.bitrate_kbps.saturating_mul(2));
+        let keyint = profile.fps.to_string();
         command.args([
             "-f",
             "rawvideo",
             "-pixel_format",
             "yuv420p",
             "-video_size",
-            "640x360",
+            size.as_str(),
             "-framerate",
-            "15",
+            fps.as_str(),
             "-i",
             "pipe:0",
             "-an",
@@ -73,19 +142,19 @@ fn spawn_codec(encoder: bool) -> Result<Child, String> {
             "-pix_fmt",
             "yuv420p",
             "-profile:v",
-            "baseline",
+            profile.profile.as_str(),
             "-level:v",
-            "3.0",
+            profile.level.as_str(),
             "-b:v",
-            "256k",
+            bitrate.as_str(),
             "-maxrate",
-            "256k",
+            bitrate.as_str(),
             "-bufsize",
-            "128k",
+            buffer.as_str(),
             "-g",
-            "15",
+            keyint.as_str(),
             "-keyint_min",
-            "15",
+            keyint.as_str(),
             "-x264-params",
             "repeat-headers=1:aud=1:scenecut=0",
             "-flush_packets",
@@ -95,6 +164,7 @@ fn spawn_codec(encoder: bool) -> Result<Child, String> {
             "pipe:1",
         ]);
     } else {
+        let scale = format!("scale={}:{}", profile.width, profile.height);
         command.args([
             "-flags",
             "low_delay",
@@ -110,7 +180,7 @@ fn spawn_codec(encoder: bool) -> Result<Child, String> {
             "pipe:0",
             "-an",
             "-vf",
-            "scale=640:360",
+            scale.as_str(),
             "-threads",
             "1",
             "-pix_fmt",
@@ -159,8 +229,8 @@ pub(super) async fn spawn_video_media_bridge(
     if !codec_available().await {
         return Err("FFmpeg with libx264 is unavailable; video was not started".into());
     }
-    let mut encoder = spawn_codec(true)?;
-    let mut decoder = match spawn_codec(false) {
+    let mut encoder = spawn_codec(true, &session.profile)?;
+    let mut decoder = match spawn_codec(false, &session.profile) {
         Ok(child) => child,
         Err(error) => {
             let _ = encoder.kill().await;
@@ -209,10 +279,13 @@ pub(super) async fn spawn_video_media_bridge(
     let decoded_controls = session.controls.clone();
     let room = session.room_id;
     let participant = session.participant_id;
+    let video_width = session.profile.width;
+    let video_height = session.profile.height;
+    let frame_bytes = session.profile.frame_bytes();
     let decoder_output_failed = worker_failed.clone();
     let decoder_output = tokio::spawn(async move {
         loop {
-            let mut bytes = vec![0; FRAME_BYTES];
+            let mut bytes = vec![0; frame_bytes];
             if decoder_stdout.read_exact(&mut bytes).await.is_err() {
                 break;
             }
@@ -220,7 +293,7 @@ pub(super) async fn spawn_video_media_bridge(
                 && decoded_engine.set_participant_frame(
                     room,
                     participant,
-                    vks_media_mcu::frame::Frame::new(WIDTH as u32, HEIGHT as u32, bytes),
+                    vks_media_mcu::frame::Frame::new(video_width, video_height, bytes),
                 )
             {
                 decoded_stats.decoded_video_frames.fetch_add(1, Relaxed);
@@ -277,17 +350,19 @@ pub(super) async fn spawn_video_media_bridge(
     let render_engine = session.engine.clone();
     let render_cancelled = session.cancelled.clone();
     let render_stats = session.stats.clone();
+    let render_profile = session.profile.clone();
     let render = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_micros(66_667));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while !render_cancelled.load(Relaxed) {
             interval.tick().await;
             let engine = render_engine.clone();
+            let render_profile = render_profile.clone();
             let rendered = tokio::task::spawn_blocking(move || {
                 let frame = engine
                     .tick_video_at(room, super::audio::media_clock_ms())
                     .or_else(|| engine.composite_frame(room))?;
-                Some(resize_i420(&frame))
+                Some(resize_i420(&frame, &render_profile))
             })
             .await;
             if let Ok(Some(bytes)) = rendered {
@@ -372,9 +447,11 @@ pub(super) async fn spawn_video_media_bridge(
     }))
 }
 
-fn resize_i420(frame: &vks_media_mcu::frame::Frame) -> Vec<u8> {
-    let mut output = vec![128; FRAME_BYTES];
-    output[..WIDTH * HEIGHT].fill(16);
+fn resize_i420(frame: &vks_media_mcu::frame::Frame, profile: &VideoProfile) -> Vec<u8> {
+    let width = profile.width as usize;
+    let height = profile.height as usize;
+    let mut output = vec![128; profile.frame_bytes()];
+    output[..width * height].fill(16);
     if frame.width == 0 || frame.height == 0 {
         return output;
     }
@@ -382,18 +459,18 @@ fn resize_i420(frame: &vks_media_mcu::frame::Frame) -> Vec<u8> {
     let source_height = frame.height as usize;
     for plane in 0..if frame.is_yuv420p() { 3 } else { 1 } {
         let divisor = if plane == 0 { 1 } else { 2 };
-        let width = WIDTH / divisor;
-        let height = HEIGHT / divisor;
+        let plane_width = width / divisor;
+        let plane_height = height / divisor;
         let source_stride = source_width / divisor;
         let source_rows = source_height / divisor;
         let source_offset =
             if plane == 0 { 0 } else { source_width * source_height + (plane - 1) * source_width * source_height / 4 };
-        let output_offset = if plane == 0 { 0 } else { WIDTH * HEIGHT + (plane - 1) * WIDTH * HEIGHT / 4 };
-        for y in 0..height {
-            let source_y = y * source_rows / height;
-            for x in 0..width {
-                let source_x = x * source_stride / width;
-                output[output_offset + y * width + x] =
+        let output_offset = if plane == 0 { 0 } else { width * height + (plane - 1) * width * height / 4 };
+        for y in 0..plane_height {
+            let source_y = y * source_rows / plane_height;
+            for x in 0..plane_width {
+                let source_x = x * source_stride / plane_width;
+                output[output_offset + y * plane_width + x] =
                     frame.data.get(source_offset + source_y * source_stride + source_x).copied().unwrap_or(16);
             }
         }
@@ -608,11 +685,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires ffmpeg with libx264"]
     async fn ffmpeg_encoder_sps_respects_negotiated_level_30() {
-        let mut encoder = spawn_codec(true).unwrap();
+        let profile = VideoProfile { level: "3.0".into(), ..VideoProfile::default() };
+        let mut encoder = spawn_codec(true, &profile).unwrap();
         let mut stdin = encoder.stdin.take().unwrap();
         let mut stdout = encoder.stdout.take().unwrap();
-        let mut frame = vec![128; FRAME_BYTES];
-        frame[..WIDTH * HEIGHT].fill(76);
+        let mut frame = vec![128; profile.frame_bytes()];
+        frame[..(profile.width * profile.height) as usize].fill(76);
         stdin.write_all(&frame).await.unwrap();
         stdin.write_all(&frame).await.unwrap();
         drop(stdin);
@@ -669,11 +747,15 @@ mod tests {
                 vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)],
             );
         }
-        let pixels = 640 * 360;
+        let pixels = (VideoProfile::default().width * VideoProfile::default().height) as usize;
         let mut red = vec![76; pixels];
         red.extend(vec![85; pixels / 4]);
         red.extend(vec![255; pixels / 4]);
-        assert!(sender_engine.set_participant_frame(room, sender, vks_media_mcu::frame::Frame::new(640, 360, red)));
+        assert!(sender_engine.set_participant_frame(
+            room,
+            sender,
+            vks_media_mcu::frame::Frame::new(VideoProfile::default().width, VideoProfile::default().height, red)
+        ));
         let sender_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let receiver_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let sender_address = sender_socket.local_addr().unwrap();
@@ -698,6 +780,7 @@ mod tests {
             controls: sender_controls,
             cancelled: cancelled.clone(),
             stats: sender_stats.clone(),
+            profile: VideoProfile::default(),
         })
         .await
         .expect("real H264 encoder/decoder must start");
@@ -714,6 +797,7 @@ mod tests {
             controls: receiver_controls,
             cancelled: cancelled.clone(),
             stats: receiver_stats.clone(),
+            profile: VideoProfile::default(),
         })
         .await
         .unwrap();

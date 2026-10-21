@@ -195,6 +195,21 @@ impl GatewayManager {
         }
     }
 
+    /// Живой профиль шлюзового видео: env-переопределения + `max_frame_rate`
+    /// из `/api/v3/settings/video`. Больше не прибит к `640x360/15/256k`.
+    fn video_profile(&self) -> video::VideoProfile {
+        let mut profile = video::VideoProfile::from_env();
+        let state = self.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade));
+        if let Some(state) = state {
+            if let Ok(settings) = state.api_v3.video_settings.lock() {
+                if let Some(fps) = settings.get("max_frame_rate").and_then(serde_json::Value::as_u64) {
+                    profile.fps = u32::try_from(fps.clamp(1, 60)).unwrap_or(profile.fps);
+                }
+            }
+        }
+        profile
+    }
+
     /// Статус доступности SIP-шлюза для `ui_system_status`.
     pub fn sip_status(&self) -> serde_json::Value {
         let sip = self.sip.lock().unwrap();
@@ -616,10 +631,144 @@ pub fn terminate_gateway_participant_in_room(
     }
 }
 
+/// `sip-<uuid>@sip-gateway` / `part-room-<uuid>`: UUID внутри строки.
+///
+/// `parse_participant_id` сам ищет UUID, но для строк без UUID молча хеширует
+/// их в синтетический UUID — такой слот раскладки никогда не совпадёт с
+/// реально забридженным участником и стал бы лишней пустой ячейкой композита.
+fn layout_identifier_has_uuid(value: &str) -> bool {
+    value.split(['@', ':', '/', '_', ' ']).any(|token| {
+        let token = token.trim();
+        let start = token.len().saturating_sub(36);
+        token.is_char_boundary(start) && uuid::Uuid::parse_str(&token[start..]).is_ok()
+    })
+}
+
 #[async_trait::async_trait]
 impl vks_admin::state::OutboundDialer for GatewayManager {
     fn media_stats(&self, participant_id: &str) -> Option<serde_json::Value> {
         GatewayManager::media_stats(self, participant_id)
+    }
+
+    /// Проводит выбранную PNM-раскладку в MCU: слот → участник.
+    ///
+    /// Из `payload.slots[]` берётся `position` и первый непустой идентификатор
+    /// (`contact_id`, `call_string_id`, `abonent_id`, `connection_id`); он
+    /// нормализуется `parse_participant_id`, чтобы `sip-<uuid>@sip-gateway`
+    /// и голый UUID давали один и тот же `ParticipantId`. Слоты без
+    /// идентификатора/позиции пропускаются (пустые окна сетки).
+    ///
+    /// Идентификатор без UUID (`cs-1`, имя адресной книги) отбрасывается:
+    /// `parse_participant_id` превратил бы его в sha-256 UUIDv5, который
+    /// никогда не совпадёт с реально забридженным участником, — такой слот
+    /// стал бы лишней пустой ячейкой в композите.
+    async fn apply_layout(&self, room_id: RoomId, layout: serde_json::Value) -> Result<(), String> {
+        use vks_core::ports::media_engine::{LayoutDescriptor, LayoutSlot, MediaEngine};
+
+        let Some(mcu) = &self.mcu_engine else {
+            return Ok(());
+        };
+        let layout_id = layout["id"].as_str().filter(|id| !id.is_empty()).unwrap_or("grid").to_string();
+        let version =
+            layout["payload"]["version"].as_u64().and_then(|version| u32::try_from(version).ok()).unwrap_or(1);
+        let Some(slots) = layout["payload"]["slots"].as_array() else {
+            return Ok(());
+        };
+
+        // PNM исторически смешивает 0-based (`calculate`) и 1-based
+        // (`attach_layout_abonent`: position = max+1) позиции. Приводим к
+        // 0-based: если нулевой позиции нет, вычитаем минимальную.
+        let raw_positions: Vec<u32> = slots
+            .iter()
+            .filter_map(|slot| slot["position"].as_u64().and_then(|value| u32::try_from(value).ok()))
+            .collect();
+        let shift = if raw_positions.contains(&0) { 0 } else { raw_positions.iter().copied().min().unwrap_or(0) };
+
+        let mut assignments = std::collections::BTreeMap::new();
+        let mut geometry = Vec::new();
+        for (index, slot) in slots.iter().enumerate() {
+            let Some(position) = slot["position"].as_u64().and_then(|value| u32::try_from(value).ok()) else {
+                continue;
+            };
+            let position = position.saturating_sub(shift);
+            let identifier = ["contact_id", "call_string_id", "abonent_id", "connection_id"]
+                .iter()
+                .filter_map(|key| slot[*key].as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .find(|value| uuid::Uuid::parse_str(value).is_ok() || layout_identifier_has_uuid(value));
+            if let Some(identifier) = identifier {
+                assignments.insert(crate::parse_participant_id(identifier), position);
+            }
+            let number = |key: &str| {
+                slot[key].as_f64().filter(|value| value.is_finite()).map(|value| value.max(0.0).round() as u32)
+            };
+            if let (Some(x), Some(y), Some(width), Some(height)) =
+                (number("x"), number("y"), number("width"), number("height"))
+            {
+                if width > 0 && height > 0 {
+                    geometry.push(LayoutSlot {
+                        slot: position,
+                        x,
+                        y,
+                        width,
+                        height,
+                        z_order: slot["z_order"]
+                            .as_u64()
+                            .and_then(|value| u32::try_from(value).ok())
+                            .unwrap_or(index as u32),
+                    });
+                }
+            }
+        }
+        // Реальные PNM-раскладки хранят только `position`/`role`; геометрия
+        // задаётся `payload.preset` (`preset_equal_25`, `preset_selected_b_4_(2)`…).
+        // Без этого MCU рисовал sqrt-сетку и выбранная схема терялась.
+        if geometry.is_empty() {
+            let slot_count = assignments.values().copied().max().unwrap_or(0).saturating_add(1);
+            let preset_name = layout["payload"]["preset"].as_str().unwrap_or_default();
+            let preset_size = layout["payload"]["size"]
+                .as_u64()
+                .and_then(|value| u8::try_from(value).ok());
+            let preset_name = vks_layout::preset::resolve(preset_name, preset_size);
+            let parsed = vks_layout::preset::PresetId::parse(&preset_name)
+                .filter(|preset| u32::from(preset.size) >= slot_count)
+                .unwrap_or_else(|| {
+                    vks_layout::preset::PresetId::equal(u8::try_from(slot_count.clamp(1, 64)).unwrap_or(1))
+                });
+            let overlap_factor = layout["payload"]["overlap_factor"]
+                .as_f64()
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(1.0);
+            let pip = layout["payload"]["pip"].as_bool().unwrap_or(false);
+            for (index, rect) in
+                vks_layout::preset::geometry(&parsed, 1920.0, 1080.0, overlap_factor, pip).iter().enumerate()
+            {
+                geometry.push(LayoutSlot {
+                    slot: index as u32,
+                    x: rect.x.round().max(0.0) as u32,
+                    y: rect.y.round().max(0.0) as u32,
+                    width: rect.width.round().max(1.0) as u32,
+                    height: rect.height.round().max(1.0) as u32,
+                    z_order: index as u32,
+                });
+            }
+        }
+        if assignments.is_empty() && geometry.is_empty() {
+            return Ok(());
+        }
+        // Auto-раскладка без привязок — это режим «сетка по числу участников»;
+        // не создаём MCU-комнату (2 МБ композита) для каждой SFU-сессии.
+        if assignments.is_empty() && layout["payload"]["mode"].as_str() != Some("manual") {
+            return Ok(());
+        }
+        geometry.sort_by_key(|cell| cell.slot);
+        // Комната может ещё не существовать в MCU: сессия стартует раньше,
+        // чем шлюз дозвонится и забриджит первого участника.
+        mcu.ensure_room(room_id);
+        mcu.apply_layout(room_id, LayoutDescriptor { layout_id, version, assignments, geometry })
+            .await
+            .map_err(|error| format!("MCU layout apply failed: {error}"))
     }
 
     async fn dial(&self, room_id: RoomId, uri: &str, display_name: Option<&str>) -> Result<String, String> {
@@ -762,6 +911,7 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             ip.parse::<std::net::IpAddr>().map_err(|_| "Invalid negotiated video IP".to_string())?;
         }
         let mut has_video = video_configuration.is_some();
+        let video_profile = self.video_profile();
         let media_details = serde_json::json!({
             "audio_codec": if audio_payload_type == 8 { "PCMA" } else { "PCMU" },
             "audio_payload_type": audio_payload_type, "audio_clock_rate": 8000,
@@ -771,8 +921,8 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             "video_tx_payload_type": video_configuration.as_ref().map(|configuration| configuration.2),
             "video_rx_payload_type": video_configuration.as_ref().map(|configuration| configuration.3),
             "video_clock_rate": if has_video { Some(90000) } else { None },
-            "runtime_video_size": if has_video { Some("640x360") } else { None },
-            "runtime_video_max_fps": if has_video { Some(15) } else { None },
+            "runtime_video_size": if has_video { Some(format!("{}x{}", video_profile.width, video_profile.height)) } else { None },
+            "runtime_video_max_fps": if has_video { Some(video_profile.fps) } else { None },
         });
         {
             let mut registry = self.registry.lock().map_err(|_| "Registry lock poisoned".to_string())?;
@@ -841,6 +991,7 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                 controls: controls.clone(),
                 cancelled: cancel_flag.clone(),
                 stats: media_stats,
+                profile: self.video_profile(),
             })
             .await;
             if let Err(error) = start {
@@ -1235,6 +1386,79 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         mcu.tick_video_at(room, 0);
         mcu.tick_video_at(room, 334);
         assert_eq!(mcu.slot_rects(room).unwrap().len(), 2, "real gateway video has no compositor slots");
+    }
+
+    /// P0: JSON раскладки из админки доводит абонента шлюза до его ячейки.
+    #[tokio::test]
+    async fn gateway_manager_applies_layout_slots_to_mcu() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        let pid = vks_core::ParticipantId::new();
+        let participant = format!("sip-{}@sip-gateway", pid.as_uuid());
+        let layout = serde_json::json!({
+            "id": "l1",
+            "payload": {"slots": [
+                // 1-based позиция из `attach_layout_abonent` + точная геометрия.
+                {"position": 1, "contact_id": participant, "x": 0, "y": 0, "width": 960, "height": 540, "z_order": 0},
+                // Идентификатор адресной книги без UUID: фантомный слот отброшен.
+                {"position": 2, "contact_id": "cs-1"}
+            ]}
+        });
+        manager.apply_layout(room, layout).await.expect("chosen layout must reach the MCU");
+
+        mcu.bridge_participant(room, pid, vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)]);
+        let rects = mcu.slot_rects(room).expect("MCU room must exist");
+        assert_eq!(rects.len(), 1, "one real participant, no auto slot and no phantom slot 2");
+        let cell = rects.get(&0).expect("1-based position 1 normalizes to slot 0");
+        assert_eq!((cell.x, cell.y, cell.w, cell.h), (0, 0, 960, 540), "exact PNM geometry, not sqrt grid");
+    }
+
+    /// Реальные PNM-раскладки не хранят x/y: геометрия выводится из
+    /// `payload.preset`; `preset_selected_b_4` даёт большую нижнюю зону 75/25,
+    /// а не sqrt-сетку 2×2.
+    #[tokio::test]
+    async fn gateway_manager_derives_geometry_from_preset() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        let pid = vks_core::ParticipantId::new();
+        let participant = format!("sip-{}@sip-gateway", pid.as_uuid());
+        let layout = serde_json::json!({
+            "id": "l2",
+            "payload": {
+                "preset": "preset_selected_b_4",
+                "size": 4,
+                "slots": [
+                    {"position": 1, "abonent_id": participant, "role": "PEER"},
+                    {"position": 2, "role": "AUTO"},
+                    {"position": 3, "role": "AUTO"},
+                    {"position": 4, "role": "AUTO"}
+                ]
+            }
+        });
+        manager.apply_layout(room, layout).await.expect("preset geometry must reach the MCU");
+        mcu.bridge_participant(room, pid, vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)]);
+        let rects = mcu.slot_rects(room).expect("MCU room");
+        assert_eq!(rects.len(), 4, "4 preset cells, empty AUTO cells stay black");
+        let large = rects.get(&0).expect("selected scheme slot 0");
+        assert_eq!((large.x, large.y, large.w, large.h), (0, 270, 1920, 810), "big bottom zone 75/25, not 2x2 grid");
+    }
+
+    /// Идентификаторы участников: UUID-производные → true, адресная книга/имена
+    /// (sha-256 UUIDv5 у `parse_participant_id`) → false.
+    #[test]
+    fn layout_identifier_accepts_only_uuid_shaped_values() {
+        let pid = vks_core::ParticipantId::new();
+        assert!(layout_identifier_has_uuid(&format!("sip-{}@sip-gateway", pid.as_uuid())));
+        assert!(layout_identifier_has_uuid(&format!("h323-{}@h323-gateway", pid.as_uuid())));
+        assert!(layout_identifier_has_uuid(&format!("part-room-{}", pid.as_uuid())));
+        assert!(layout_identifier_has_uuid(&pid.as_uuid().to_string()));
+        assert!(!layout_identifier_has_uuid("cs-1"));
+        assert!(!layout_identifier_has_uuid("Terminal #2"));
+        assert!(!layout_identifier_has_uuid(""));
     }
 
     #[tokio::test]

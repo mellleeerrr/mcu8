@@ -147,6 +147,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/system/stats/cpu", get(observability::stats_cpu))
         .route("/api/v3/system/stats/disk", get(observability::stats_disk))
         .route("/api/v3/system/stats/network", get(observability::stats_network))
+        // Единый агрегат для страницы «Статистика» (те же формы, что у
+        // legacy-эндпоинтов выше, + live-сводка комнат/движка).
+        .route("/api/v3/statistics", get(observability::statistics))
         .route("/api/v3/system/packages", get(observability::system_packages))
         .route("/api/v3/engine/log", get(observability::engine_log))
         .route("/api/v3/ui/terminals", get(observability::terminals_list))
@@ -240,6 +243,16 @@ pub fn router(state: SharedState) -> Router {
             "/api/v3/ui/users/{id}/call_strings/{address_id}/favorite",
             post(directory::favorite_user_call_string).delete(directory::unfavorite_user_call_string),
         )
+        // Карточка пользователя в справочнике: эталон зовёт `/ui/users/{id}`,
+        // а не `/users/{id}`. Без алиаса карточка падала в 501.
+        .route("/api/v3/ui/users/{id}", get(directory::get_user))
+        .route("/api/v3/tags_to_objects", get(shell::tags_to_objects_get).post(shell::tags_to_objects))
+        .route("/api/v3/tags_to_objects/", get(shell::tags_to_objects_get).post(shell::tags_to_objects))
+        .route("/api/v3/files", get(shell::files_list).post(shell::file_upload))
+        .route("/api/v3/files/{id}", get(shell::file_get).delete(shell::file_delete))
+        .route("/api/v3/registration/online", get(shell::registration_online).post(shell::registration_online))
+        .route("/api/v3/registration/offline", post(shell::registration_offline))
+        .route("/api/v3/registration/license", post(shell::registration_license))
         .route("/api/v3/ui/users/{id}/call_strings", post(directory::create_user_call_string))
         .route(
             "/api/v3/ui/users/{id}/call_strings/{address_id}",

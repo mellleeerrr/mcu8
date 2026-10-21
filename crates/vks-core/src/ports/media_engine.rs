@@ -130,6 +130,27 @@ impl SubscribeRequest {
     }
 }
 
+/// Геометрия одной ячейки раскладки (canvas-координаты, пиксели).
+///
+/// `LayoutDescriptor.geometry` позволяет админке/PNM задать точную сетку
+/// (`preset_selected_b_4_(2)`, `overlap`, `pip`), а не только число слотов:
+/// MCU-композитор рисует участника ровно в этом прямоугольнике.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayoutSlot {
+    /// Идентификатор ячейки (совпадает с `assignments` value).
+    pub slot: u32,
+    /// Левый край, px.
+    pub x: u32,
+    /// Верхний край, px.
+    pub y: u32,
+    /// Ширина, px.
+    pub width: u32,
+    /// Высота, px.
+    pub height: u32,
+    /// Порядок наложения (больше — выше).
+    pub z_order: u32,
+}
+
 /// Описание раскладки (layout) для apply_layout.
 ///
 /// В SFU: клиентский SDK использует это для CSS/Taffy-дескриптора.
@@ -144,6 +165,9 @@ pub struct LayoutDescriptor {
     pub version: u32,
     /// Присвоения: participant_id → slot (BTreeMap = deterministic).
     pub assignments: BTreeMap<ParticipantId, u32>,
+    /// Точная геометрия ячеек; пусто — движок выбирает сетку сам (legacy/SFU).
+    #[serde(default)]
+    pub geometry: Vec<LayoutSlot>,
 }
 
 /// Порт MediaEngine — единый интерфейс для SFU и MCU.

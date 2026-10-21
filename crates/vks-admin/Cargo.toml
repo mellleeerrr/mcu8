@@ -14,6 +14,7 @@ vks-core = { path = "../vks-core" }
 vks-auth = { path = "../vks-auth" }
 vks-common = { path = "../vks-common" }
 vks-proto = { path = "../vks-proto" }
+vks-layout = { path = "../vks-layout" }
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true

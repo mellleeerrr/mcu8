@@ -595,6 +595,7 @@ pub async fn video_codecs_patch(
     codecs_patch(state, auth, body, CodecKind::Video).await
 }
 
+#[derive(Clone, Copy)]
 enum CodecKind {
     Audio,
     Video,
@@ -618,14 +619,37 @@ async fn codecs_patch(state: SharedState, auth: AuthContext, body: Value, kind: 
     if list.is_empty() || list.len() > 32 {
         return super::error_json(422, &format!("{key}: 1..=32 codecs required"));
     }
-    let mut codecs = Vec::with_capacity(list.len());
+    let mut codecs: Vec<String> = Vec::with_capacity(list.len());
     for item in list {
-        let id = item.get("id").and_then(Value::as_str).unwrap_or_default().trim();
-        if id.is_empty() || id.len() > 32 {
-            return super::error_json(422, &format!("{key}: each codec needs id (1..=32 chars)"));
+        let (name, bitrate) = match item {
+            Value::String(name) => (name.trim().to_string(), None),
+            Value::Object(map) => {
+                let name = map
+                    .get("name")
+                    .or_else(|| map.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let bitrate = map
+                    .get("bitrate")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .filter(|value| *value > 0);
+                (name, bitrate)
+            }
+            _ => (String::new(), None),
+        };
+        if name.is_empty() || name.len() > 32 {
+            return super::error_json(422, &format!("{key}: each codec needs name/id (1..=32 chars)"));
         }
-        if !codecs.iter().any(|existing: &String| existing == id) {
-            codecs.push(id.to_string());
+        // Audio хранит битрейт варианта (`G7221:24`), video — только имя.
+        let spec = match (kind, bitrate) {
+            (CodecKind::Audio, Some(bitrate)) => format!("{name}:{bitrate}"),
+            _ => name,
+        };
+        if !codecs.iter().any(|existing| existing.eq_ignore_ascii_case(&spec)) {
+            codecs.push(spec);
         }
     }
     let mut settings = crate::settings::SettingsService::get(&state);
@@ -635,7 +659,16 @@ async fn codecs_patch(state: SharedState, auth: AuthContext, body: Value, kind: 
     }
     crate::settings::SettingsService::set_async(&state, settings).await;
     state.record_audit_entry(&auth.subject, "settings.codecs.updated", None, "");
-    let response: Vec<Value> = codecs.into_iter().map(|id| json!({"id": id, "description": id})).collect();
+    let response: Vec<Value> = match kind {
+        CodecKind::Audio => codecs
+            .into_iter()
+            .map(|spec| {
+                let (name, bitrate) = crate::settings::CodecConfig::audio_parts(&spec);
+                json!({"name": name, "bitrate": bitrate})
+            })
+            .collect(),
+        CodecKind::Video => codecs.into_iter().map(|name| json!(name)).collect(),
+    };
     Json(json!({ key: response })).into_response()
 }
 

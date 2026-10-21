@@ -13,6 +13,8 @@
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use axum::{
     extract::{Path, Query, State},
@@ -25,6 +27,7 @@ use serde_json::{json, Value};
 use tokio::time::{timeout, Duration};
 
 use crate::auth_middleware::AuthContext;
+use crate::settings::SettingsService;
 use crate::state::{now_unix_ms, SharedState};
 use vks_core::ports::storage::RecordEntry;
 
@@ -775,15 +778,35 @@ fn meminfo_kb(key: &str) -> Option<u64> {
     })
 }
 
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Память хоста в MB (`/proc/meminfo`): `total`, `used`, `free` (доступно).
+fn compute_memory() -> Value {
+    let total = meminfo_kb("MemTotal").unwrap_or(0) / 1024;
+    let available = meminfo_kb("MemAvailable").unwrap_or(0) / 1024;
+    json!({"total": total, "used": total.saturating_sub(available), "free": available})
+}
+
 /// `GET /api/v3/system/stats/memory` — реальная память хоста (`/proc/meminfo`), MB.
 pub async fn stats_memory(State(_state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
     super::track("system/stats/memory");
     if let Some(response) = forbid(&auth) {
         return response;
     }
-    let total = meminfo_kb("MemTotal").unwrap_or(0) / 1024;
-    let available = meminfo_kb("MemAvailable").unwrap_or(0) / 1024;
-    Json(json!({"total": total, "used": total.saturating_sub(available), "free": available})).into_response()
+    let mut memory = compute_memory();
+    if let Some(object) = memory.as_object_mut() {
+        object.insert("timestamp".to_string(), json!(unix_now_secs()));
+    }
+    Json(memory).into_response()
 }
 
 fn cpu_times() -> Vec<(u64, u64, u64)> {
@@ -805,20 +828,26 @@ fn cpu_times() -> Vec<(u64, u64, u64)> {
         .collect()
 }
 
-/// `GET /api/v3/system/stats/cpu` — загрузка по ядрам (дельта `/proc/stat`).
-pub async fn stats_cpu(State(_state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
-    super::track("system/stats/cpu");
-    if let Some(response) = forbid(&auth) {
-        return response;
-    }
-    let first = cpu_times();
-    tokio::time::sleep(Duration::from_millis(120)).await;
-    let second = cpu_times();
-    let load: Vec<Value> = second
+/// Минимальный интервал между двумя сэмплами `/proc/stat` (иначе дельта шумная).
+const CPU_MIN_INTERVAL: Duration = Duration::from_millis(200);
+/// Если запросов не было дольше этого окна, старая дельта не показательна —
+/// начинаем новый сэмпл (первый ответ после простоя — нули, следующий — реальный).
+const CPU_MAX_WINDOW: Duration = Duration::from_secs(5);
+
+struct CpuCache {
+    at: Instant,
+    previous: Vec<(u64, u64, u64)>,
+    load: Vec<Value>,
+}
+
+static CPU_CACHE: OnceLock<Mutex<Option<CpuCache>>> = OnceLock::new();
+
+fn cpu_load(previous: &[(u64, u64, u64)], current: &[(u64, u64, u64)]) -> Vec<Value> {
+    current
         .iter()
         .enumerate()
         .map(|(index, current)| {
-            let previous = first.get(index).unwrap_or(&(0, 0, 0));
+            let previous = previous.get(index).copied().unwrap_or((0, 0, 0));
             let user = current.0.saturating_sub(previous.0) as f64;
             let kernel = current.1.saturating_sub(previous.1) as f64;
             let idle = current.2.saturating_sub(previous.2) as f64;
@@ -826,19 +855,69 @@ pub async fn stats_cpu(State(_state): State<SharedState>, Extension(auth): Exten
             let percent = |value: f64| (value * 1000.0 / total).round() / 10.0;
             json!({"user_mode": percent(user), "kernel_mode": percent(kernel), "idle": percent(idle)})
         })
-        .collect();
-    Json(json!({"count": load.len(), "load": load})).into_response()
+        .collect()
 }
 
-/// `GET /api/v3/system/stats/disk` — реальные ФС (`df -Pk`), **MB**.
+/// Загрузка CPU по ядрам без `sleep`: дельта с предыдущим запросом.
 ///
-/// Vendor-UI `StatisticsDisk` делит значения на 1024 и подписывает «Gb»,
-/// поэтому отдаём мебибайты (как vendor-эталон и статистика памяти).
-pub async fn stats_disk(State(_state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
-    super::track("system/stats/disk");
+/// Если с прошлого сэмпла прошло меньше [`CPU_MIN_INTERVAL`], отдаётся
+/// последний рассчитанный результат (первый вызов — нули). Это убирает
+/// блокировку запроса на 120 мс при сохранении vendor-формы ответа.
+fn compute_cpu() -> (usize, Vec<Value>) {
+    let current = cpu_times();
+    let mut guard = lock_or_recover(CPU_CACHE.get_or_init(|| Mutex::new(None)));
+    let now = Instant::now();
+    if current.is_empty() {
+        // Не смогли прочитать /proc/stat — не затираем предыдущий сэмпл.
+        return match guard.as_ref() {
+            Some(cache) => (cache.load.len(), cache.load.clone()),
+            None => (0, Vec::new()),
+        };
+    }
+    if let Some(cache) = guard.as_mut() {
+        let elapsed = now.duration_since(cache.at);
+        if elapsed < CPU_MIN_INTERVAL {
+            return (cache.load.len(), cache.load.clone());
+        }
+        let count = current.len();
+        if elapsed > CPU_MAX_WINDOW || cache.previous.len() != count {
+            let load = vec![json!({"user_mode": 0.0, "kernel_mode": 0.0, "idle": 100.0}); count];
+            cache.at = now;
+            cache.previous = current;
+            cache.load = load.clone();
+            return (count, load);
+        }
+        let load = cpu_load(&cache.previous, &current);
+        cache.at = now;
+        cache.previous = current;
+        cache.load = load.clone();
+        return (count, load);
+    }
+    let count = current.len();
+    let load = vec![json!({"user_mode": 0.0, "kernel_mode": 0.0, "idle": 100.0}); count];
+    *guard = Some(CpuCache { at: now, previous: current, load: load.clone() });
+    (count, load)
+}
+
+/// `GET /api/v3/system/stats/cpu` — загрузка по ядрам (дельта `/proc/stat`).
+pub async fn stats_cpu(State(_state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
+    super::track("system/stats/cpu");
     if let Some(response) = forbid(&auth) {
         return response;
     }
+    let (count, load) = compute_cpu();
+    Json(json!({"count": count, "load": load})).into_response()
+}
+
+/// TTL кэша `df`: файловая система меняется медленно, спавн `df` на каждый
+/// запрос UI (раз в ~1 с) не нужен.
+const DISK_CACHE_TTL: Duration = Duration::from_secs(2);
+
+type DiskSnapshot = (Instant, Vec<Value>);
+
+static DISK_CACHE: OnceLock<Mutex<Option<DiskSnapshot>>> = OnceLock::new();
+
+fn read_disk_spaces() -> Vec<Value> {
     let output = std::process::Command::new("df").args(["-Pk"]).output();
     let mut spaces = Vec::new();
     if let Ok(output) = output {
@@ -858,12 +937,38 @@ pub async fn stats_disk(State(_state): State<SharedState>, Extension(auth): Exte
             spaces.push(json!({"name": fields[5], "total": total, "used": used, "free": free}));
         }
     }
+    spaces
+}
+
+/// ФС с TTL-кэшем: `df -Pk` запускается не чаще раза в [`DISK_CACHE_TTL`].
+fn compute_disk() -> Vec<Value> {
+    let mut guard = lock_or_recover(DISK_CACHE.get_or_init(|| Mutex::new(None)));
+    if let Some((at, spaces)) = guard.as_ref() {
+        if at.elapsed() < DISK_CACHE_TTL {
+            return spaces.clone();
+        }
+    }
+    let spaces = read_disk_spaces();
+    *guard = Some((Instant::now(), spaces.clone()));
+    spaces
+}
+
+/// `GET /api/v3/system/stats/disk` — реальные ФС (`df -Pk`), **MB**.
+///
+/// Vendor-UI `StatisticsDisk` делит значения на 1024 и подписывает «Gb»,
+/// поэтому отдаём мебибайты (как vendor-эталон и статистика памяти).
+pub async fn stats_disk(State(_state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
+    super::track("system/stats/disk");
+    if let Some(response) = forbid(&auth) {
+        return response;
+    }
+    let spaces = compute_disk();
     Json(json!({"count": spaces.len(), "spaces": spaces})).into_response()
 }
 
 /// Счётчики `/proc/net/dev`: `(rx_bytes, tx_bytes)` по интерфейсу.
-fn netdev_counters() -> std::collections::HashMap<String, (u64, u64)> {
-    let mut counters = std::collections::HashMap::new();
+fn netdev_counters() -> BTreeMap<String, (u64, u64)> {
+    let mut counters = BTreeMap::new();
     if let Ok(text) = std::fs::read_to_string("/proc/net/dev") {
         for line in text.lines().skip(2) {
             let Some((name, rest)) = line.split_once(':') else { continue };
@@ -880,7 +985,64 @@ fn netdev_counters() -> std::collections::HashMap<String, (u64, u64)> {
     counters
 }
 
-/// `GET /api/v3/system/stats/network` — скорость RX/TX, **kbps** (дельта за 200 мс).
+/// Минимальный интервал между сэмплами сетевых счётчиков.
+const NET_MIN_INTERVAL: Duration = Duration::from_millis(200);
+/// Старое окно не используем: после простоя считаем скорость заново.
+const NET_MAX_WINDOW: Duration = Duration::from_secs(5);
+
+struct NetCache {
+    at: Instant,
+    previous: BTreeMap<String, (u64, u64)>,
+    interfaces: Vec<Value>,
+}
+
+static NET_CACHE: OnceLock<Mutex<Option<NetCache>>> = OnceLock::new();
+
+/// Скорость RX/TX в kbit/s по фактическому времени между запросами.
+fn compute_network() -> Vec<Value> {
+    let current = netdev_counters();
+    let mut guard = lock_or_recover(NET_CACHE.get_or_init(|| Mutex::new(None)));
+    let now = Instant::now();
+    if current.is_empty() {
+        // Не смогли прочитать /proc/net/dev — отдаём последний снимок.
+        return guard.as_ref().map(|cache| cache.interfaces.clone()).unwrap_or_default();
+    }
+    if let Some(cache) = guard.as_mut() {
+        let elapsed = now.duration_since(cache.at);
+        if elapsed < NET_MIN_INTERVAL {
+            return cache.interfaces.clone();
+        }
+        if elapsed > NET_MAX_WINDOW {
+            let interfaces: Vec<Value> = current.keys().map(|name| json!({"name": name, "rx": 0, "tx": 0})).collect();
+            cache.at = now;
+            cache.previous = current;
+            cache.interfaces = interfaces.clone();
+            return interfaces;
+        }
+        let seconds = elapsed.as_secs_f64().max(0.001);
+        let interfaces: Vec<Value> = current
+            .iter()
+            .map(|(name, (rx, tx))| {
+                let (previous_rx, previous_tx) = cache.previous.get(name).copied().unwrap_or((*rx, *tx));
+                let kbps = |delta: u64| ((delta as f64) * 8.0 / 1000.0 / seconds).round() as u64;
+                json!({
+                    "name": name,
+                    "rx": kbps(rx.saturating_sub(previous_rx)),
+                    "tx": kbps(tx.saturating_sub(previous_tx)),
+                })
+            })
+            .collect();
+        cache.at = now;
+        cache.previous = current;
+        cache.interfaces = interfaces.clone();
+        return interfaces;
+    }
+    let interfaces: Vec<Value> = current.keys().map(|name| json!({"name": name, "rx": 0, "tx": 0})).collect();
+    *guard = Some(NetCache { at: now, previous: current, interfaces: interfaces.clone() });
+    interfaces
+}
+
+/// `GET /api/v3/system/stats/network` — скорость RX/TX, **kbps**.
 ///
 /// `/proc/net/dev` отдаёт накопительные байты; vendor-UI подписывает значения
 /// «кбит/сек» и не конвертирует, поэтому считаем дельту и переводим в kbit/s.
@@ -889,19 +1051,53 @@ pub async fn stats_network(State(_state): State<SharedState>, Extension(auth): E
     if let Some(response) = forbid(&auth) {
         return response;
     }
-    let first = netdev_counters();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let second = netdev_counters();
-    let interfaces: Vec<Value> = second
-        .iter()
-        .map(|(name, (rx, tx))| {
-            let (previous_rx, previous_tx) = first.get(name).copied().unwrap_or((*rx, *tx));
-            // Байты за 0.2 с → килобиты в секунду: delta * 8 / 1000 / 0.2.
-            let kbps = |delta: u64| ((delta as f64) * 8.0 / 1000.0 / 0.2).round() as u64;
-            json!({"name": name, "rx": kbps(rx.saturating_sub(previous_rx)), "tx": kbps(tx.saturating_sub(previous_tx))})
-        })
-        .collect();
+    let interfaces = compute_network();
     Json(json!({"count": interfaces.len(), "interfaces": interfaces})).into_response()
+}
+
+/// `GET /api/v3/statistics` — единый агрегат для страницы «Статистика».
+///
+/// Отдаёт те же формы `cpu`/`memory`/`disk`/`network`, что и legacy-эндпоинты
+/// (совместимость с vendor-UI), плюс live-сводку движка (комнаты, участники,
+/// глобальный режим, настроенные кодеки) и состояние медиа-подсистемы.
+pub async fn statistics(State(state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
+    super::track("statistics");
+    if let Some(response) = forbid(&auth) {
+        return response;
+    }
+    let (cpu_count, cpu_load) = compute_cpu();
+    let memory = compute_memory();
+    let disk = compute_disk();
+    let network = compute_network();
+    let media_healthy = state.is_media_healthy();
+
+    let (rooms_count, participants) = match state.rooms.lock() {
+        Ok(rooms) => {
+            let participants = rooms.keys().map(|room_id| state.room_hub.list_participants(room_id).len()).sum();
+            (rooms.len(), participants)
+        }
+        Err(_) => (0, 0),
+    };
+    let mode = state.mode.lock().map(|mode| mode.global_mode.as_str()).unwrap_or("sfu");
+    let codecs = SettingsService::get(&state).codecs;
+
+    Json(json!({
+        "timestamp": unix_now_secs(),
+        "system": {
+            "cpu": {"count": cpu_count, "load": cpu_load},
+            "memory": memory,
+            "disk": {"count": disk.len(), "spaces": disk},
+            "network": {"count": network.len(), "interfaces": network},
+            "media_healthy": media_healthy,
+        },
+        "engine": {
+            "rooms": rooms_count,
+            "participants": participants,
+            "mode": mode,
+            "codecs": {"audio": codecs.audio, "video": codecs.video},
+        },
+    }))
+    .into_response()
 }
 
 /// `GET /api/v3/system/packages` — установленные пакеты; в этой сборке их нет.

@@ -134,6 +134,19 @@ impl HandlerConfig {
                 typ: "host".into(),
             },
             fingerprint: self.fingerprint.clone(),
+            b_as: Some(2048),
+            fmtp: Vec::new(),
+            rtcp_fb: vec![
+                "96 nack".into(),
+                "96 nack pli".into(),
+                "96 ccm fir".into(),
+                "96 goog-remb".into(),
+                "96 transport-cc".into(),
+            ],
+            extmap: vec![
+                "1 urn:ietf:params:rtp-hdrext:sdes:mid".into(),
+                "3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01".into(),
+            ],
         }
     }
 }
