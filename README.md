@@ -37,9 +37,10 @@ cargo build --release -p vks-server
    PostgreSQL; TLS/reverse-proxy и ограничение доступа к `/pnm/` — на уровне
    инфраструктуры.
 4. Production fail-closed: `configs/prod.example.toml` содержит
-   `allow_insecure_defaults = false`. Без сильного `VKS_ADMIN_PASSWORD` и
-   `VKS_JWT_SECRET` (≥32 байта) сервер завершается с кодом 78 и не стартует;
-   существующая БД с паролем `admin`/`admin_password` также блокируется.
+   `allow_insecure_defaults = false`. Без сильного `VKS_JWT_SECRET` (≥32 байта)
+   сервер завершается с кодом 78; для новой БД и для разовой ротации слабого
+   пароля нужен сильный `VKS_ADMIN_PASSWORD`. Существующая БД с известным
+   weak-паролем блокируется, пока пароль не ротирован.
    Развёртывание: [`deploy/README.md`](deploy/README.md) (systemd-юнит,
    `/etc/vks/vks.env`, hardening).
 5. Перед выкладкой: `cargo fmt --all --check`, `cargo clippy --workspace

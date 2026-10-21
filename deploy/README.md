@@ -33,13 +33,20 @@ directory (verified on systemd 259).
 
 ```bash
 sudo install -d -m 0755 /opt/vks /opt/vks/bin /opt/vks/frontend
+sudo install -d -m 0755 /opt/vks/share/vks-mcu
 sudo install -d -m 0750 /etc/vks
+sudo install -m 0644 crates/vks-gateway-h323/python/h323_sidecar.py \
+  crates/vks-gateway-h323/python/h323_asn.py /opt/vks/share/vks-mcu/
+sudo install -m 0644 crates/vks-gateway-h323/python/requirements.lock /opt/vks/share/vks-mcu/
 sudo install -m 0755 target/release/vks-server /opt/vks/bin/vks-server
 sudo cp -a client/pnm-frontend/deployed/pnm /opt/vks/frontend/
 sudo install -m 0600 configs/prod.example.toml /etc/vks/server.toml
 sudo install -m 0600 deploy/vks.env.example /etc/vks/vks.env
 sudoedit /etc/vks/server.toml      # absolute database_url, candidate_addr, frontend_dir
 sudoedit /etc/vks/vks.env          # >=32-byte JWT secret; password for first start
+# ВАЖНО: VKS_* env перекрывает TOML. В vks.env.example намеренно нет
+# database_url/candidate_addr/frontend_dir, чтобы источником истины оставался
+# server.toml. Если добавите их в env — правьте именно env.
 sudo install -m 0644 deploy/systemd/vks-mcu-prod.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemd-analyze verify /etc/systemd/system/vks-mcu-prod.service
@@ -102,12 +109,18 @@ malicious administrator. The effective value is logged at startup.
 
 ## H.323 sidecar
 
-The sidecar looks for `VKS_H323_PYTHON`, then `~/.local/share/vks-mcu/h323-venv`.
-With `DynamicUser=yes` and `ProtectHome=true`, provision a venv under
-`/opt/vks/h323-venv` (0755) and set
-`VKS_H323_PYTHON=/opt/vks/h323-venv/bin/python3`. Keep the existing home venv
-for local development only. `PYTHONDONTWRITEBYTECODE=1` is set in the unit
-because `/opt/vks` is read-only.
+The sidecar looks for `VKS_H323_PYTHON`/`VKS_H323_HELPER`, then a set of
+release-relative paths under `/opt/vks`. With `DynamicUser=yes` and
+`ProtectHome=true`, provision the helper and venv under `/opt/vks`:
+
+```bash
+sudo python3 -m venv /opt/vks/h323-venv
+sudo /opt/vks/h323-venv/bin/pip install -r /opt/vks/share/vks-mcu/requirements.lock
+```
+
+`vks.env.example` already points `VKS_H323_PYTHON` and `VKS_H323_HELPER` there.
+Keep the existing home venv for local development only. `PYTHONDONTWRITEBYTECODE=1`
+is set in the unit because `/opt/vks` is read-only.
 
 ## Verification
 
