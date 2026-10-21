@@ -289,12 +289,21 @@ const summary = {
       summary.acceptance.export_csv_rows =
         csvText.includes(CONF_NAME) && csvText.includes('Administrator') && csvText.includes(dtmf);
       // CSV-даты — в таймзоне администратора (Europe/Moscow), как UI.
+      // Проверяем полные дату+время (не только дату), иначе ошибка часового
+      // пояса на несколько часов осталась бы незамеченной.
       const startedSec = summary.history_started_at;
+      const parts = startedSec
+        ? new Intl.DateTimeFormat('ru-RU', {
+            timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+          }).formatToParts(new Date(startedSec * 1000))
+        : [];
+      const part = (type) => (parts.find((item) => item.type === type) || {}).value;
       const expectedDate = startedSec
-        ? new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(startedSec * 1000))
+        ? `${part('day')}.${part('month')}.${part('year')} ${part('hour')}:${part('minute')}:${part('second')}`
         : null;
       summary.acceptance.export_csv_timezone = !!expectedDate && csvText.includes(expectedDate);
-      summary.csv_timezone = { expectedDate };
+      summary.csv_timezone = { expectedDate, timezone: 'Europe/Moscow' };
       summary.export = { ...(summary.export || {}), filename, csv_bytes: Buffer.byteLength(csvText) };
       const pageSize = await api('/api/v3/call_history?page_size=1');
       summary.acceptance.history_pagination =

@@ -1,0 +1,360 @@
+#!/usr/bin/env node
+// T2.4 acceptance evidence: журнал событий, сеть/диагностика, статистика,
+// терминалы и медиафайлы PNM через vendor-UI 2.2.1.66 на нашем `/api/v3`.
+//
+// Запуск:
+//   PLAYWRIGHT_MODULE=/path/to/playwright \
+//   BASE_URL=http://127.0.0.1:8080 \
+//   node scripts/evidence/t24-evidence.js
+//
+// Любой провал acceptance-гейта → `ok:false` и exit 1.
+
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+const OUT_PRELIGHT = process.env.EVIDENCE_DIR || 'docs/progress/evidence/t24';
+let chromium;
+try {
+  chromium = require(process.env.PLAYWRIGHT_MODULE || 'playwright').chromium;
+} catch (e) {
+  fs.mkdirSync(OUT_PRELIGHT, { recursive: true });
+  fs.writeFileSync(
+    path.join(OUT_PRELIGHT, 'summary.json'),
+    JSON.stringify({ ok: false, phase: 'playwright-require', error: String(e) }, null, 1) + '\n',
+  );
+  console.error(e);
+  process.exit(1);
+}
+
+const BASE = (process.env.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
+const OUT = process.env.EVIDENCE_DIR || 'docs/progress/evidence/t24';
+const ADMIN_LOGIN = process.env.ADMIN_LOGIN || 'admin';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin_password';
+fs.mkdirSync(OUT, { recursive: true });
+
+const sh = (cmd) => { try { return execSync(cmd, { encoding: 'utf8' }).trim(); } catch { return ''; } };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const build = {
+  git_head: sh('git rev-parse HEAD'),
+  git_head_ct: Number(sh('git log -1 --format=%ct HEAD')) || 0,
+  git_dirty: sh('git status --porcelain') !== '',
+  binary_sha256: null,
+  binary_mtime: null,
+  binary_path: null,
+  server_pid: null,
+};
+for (const pid of sh('pgrep -f "target/release/vks-server"').split('\n').filter(Boolean)) {
+  try {
+    const exe = `/proc/${pid}/exe`;
+    build.binary_sha256 = crypto.createHash('sha256').update(fs.readFileSync(exe)).digest('hex');
+    build.binary_mtime = Math.floor(fs.statSync(exe).mtimeMs / 1000);
+    build.binary_path = exe;
+    build.server_pid = Number(pid);
+    break;
+  } catch { /* следующий процесс */ }
+}
+
+const stamp = String(Date.now()).slice(-6);
+const steps = [];
+const screenshots = [];
+const httpErrors = [];
+const consoleErrors = [];
+const vendorErrors = [];
+let token = null;
+
+const summary = {
+  task: 'T2.4',
+  ok: false,
+  started_at: new Date().toISOString(),
+  build,
+  acceptance: {},
+  totals: {},
+  error: null,
+};
+
+// Chart.js 2.x в vendor-бандле ругается на конфиг осей — это баг вендора,
+// а не наш ответ API: отдельный список, чтобы не прятать настоящие ошибки.
+const isVendorError = (text) =>
+  /Invalid scale configuration for scale: (yAxes|xAxes|responsive|maintainAspectRatio)/.test(text) ||
+  /validationHandler.*catch is not a function/.test(text);
+
+(async () => {
+  const browser = await chromium.launch({
+    args: ['--no-sandbox', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--ignore-certificate-errors'],
+  });
+  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1600, height: 1000 } });
+  const page = await context.newPage();
+  page.on('response', (response) => {
+    if (response.status() >= 400 && response.url().includes('/api/v3/')) {
+      httpErrors.push(`${response.status()} ${response.request().method()} ${response.url().replace(BASE, '')}`);
+    }
+  });
+  page.on('console', (message) => {
+    if (message.type() !== 'error') return;
+    const text = message.text();
+    if (isVendorError(text)) vendorErrors.push(text);
+    else consoleErrors.push(text);
+  });
+  page.on('pageerror', (error) => consoleErrors.push(String(error)));
+
+  const record = async (name, fn) => {
+    const value = await fn();
+    steps.push(name);
+    summary.totals[name] = value;
+    return value;
+  };
+  const shot = async (name) => {
+    await page.screenshot({ path: path.join(OUT, name), fullPage: true });
+    screenshots.push(name);
+  };
+  const api = async (pathname, options = {}) => {
+    const headers = { Authorization: `Bearer ${token}` };
+    const request = { method: options.method || 'GET', headers, failOnStatusCode: false };
+    if (options.data !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      request.data = options.data;
+    }
+    const response = await page.request.fetch(BASE + pathname, request);
+    const text = await response.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch { /* не-JSON */ }
+    return { status: response.status(), json, text, headers: response.headers() };
+  };
+
+  try {
+    // ---------- login через vendor-UI ----------
+    await page.goto(BASE + '/pnm/', { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(2500);
+    if (await page.locator('input[type=password]').count()) {
+      await page.fill('input[type=text], input[autocomplete=username]', ADMIN_LOGIN).catch(() => {});
+      await page.fill('input[type=password]', ADMIN_PASSWORD);
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(5000);
+    }
+    token = await page.evaluate(() => {
+      for (const key of Object.keys(localStorage)) {
+        const value = localStorage.getItem(key);
+        if (value && value.includes('eyJ')) {
+          try { const parsed = JSON.parse(value); if (parsed.token) return parsed.token; }
+          catch { if (value.startsWith('eyJ')) return value; }
+        }
+      }
+      return null;
+    });
+    if (!token) {
+      token = (await (await page.request.post(BASE + '/api/v3/login', { data: { login: ADMIN_LOGIN, password: ADMIN_PASSWORD } })).json()).token;
+    }
+    if (!token) throw new Error('нет токена после UI-логина');
+
+    // ---------- 1. log_events: список/фильтры/поиск/даты ----------
+    await record('log-events-list', async () => {
+      const all = await api('/api/v3/log_events');
+      const events = (all.json && all.json.log_events) || [];
+      summary.acceptance.log_events_contract =
+        all.status === 200 && typeof all.json.count === 'number' && all.json.count >= events.length && events.length > 0 &&
+        events.every((event) => typeof event.id === 'number' && event.event_type && event.object_type && event.created_at !== undefined);
+      summary.acceptance.log_events_pagination = (await api('/api/v3/log_events?page=1&page_size=1')).json.log_events.length <= 1;
+
+      const filtered = await api('/api/v3/log_events?event_types=login_success&search=' + encodeURIComponent(ADMIN_LOGIN));
+      const filteredEvents = (filtered.json && filtered.json.log_events) || [];
+      summary.acceptance.log_events_filter_search =
+        filtered.status === 200 && filteredEvents.length > 0 &&
+        filteredEvents.every((event) => event.event_type === 'login_success');
+      const from = Math.floor(Date.now() / 1000) - 3600;
+      const dated = await api(`/api/v3/log_events?date_from=${from}`);
+      summary.acceptance.log_events_date_filter = dated.status === 200 && dated.json.count >= 1;
+      fs.writeFileSync(path.join(OUT, 'log_events.json'), JSON.stringify(all.json, null, 1) + '\n');
+      fs.writeFileSync(path.join(OUT, 'log_events_filtered.json'), JSON.stringify(filtered.json, null, 1) + '\n');
+    });
+
+    // ---------- 2. log_events: ZIP-экспорт и статическая выдача ----------
+    await record('log-events-export', async () => {
+      const exported = await api('/api/v3/log_events/export');
+      const filename = exported.json && exported.json.filename;
+      const download = await api(`/static/log_events/${filename}`);
+      const body = download.text;
+      const zipOk = download.status === 200 && body.startsWith('PK\u0003\u0004') && body.includes('PK\u0005\u0006');
+      const csvOk = body.includes('ID;') || body.includes('event_type');
+      const missing = await api('/static/log_events/nope.zip');
+      const traversal = await api('/static/log_events/..%2Fsecret.zip');
+      summary.acceptance.log_events_export_zip =
+        exported.status === 200 && typeof filename === 'string' && filename.endsWith('.zip') && zipOk && csvOk;
+      summary.acceptance.log_events_static_404 = missing.status === 404 && [400, 404].includes(traversal.status);
+      fs.writeFileSync(path.join(OUT, 'log_events_export.json'), JSON.stringify({ ...exported.json, bytes: body.length }, null, 1) + '\n');
+    });
+
+    // ---------- 3. сетевые интерфейсы ----------
+    await record('network-interfaces', async () => {
+      const list = await api('/api/v3/system/network/interfaces');
+      const interfaces = (list.json && list.json.interfaces) || [];
+      summary.acceptance.network_interfaces_list =
+        list.status === 200 && list.json.count === interfaces.length && interfaces.length >= 1 &&
+        interfaces.every((item) => typeof item.interface === 'string' && typeof item.ready === 'boolean' && Array.isArray(item.addresses));
+      const first = interfaces[0] && interfaces[0].interface;
+      const detail = await api(`/api/v3/system/network/interfaces/${encodeURIComponent(first)}`);
+      summary.acceptance.network_interface_detail =
+        detail.status === 200 && detail.json.interface && detail.json.interface.ready === true &&
+        Array.isArray(detail.json.interface.addresses) && !!detail.json.interface.mac;
+      const patch = await api(`/api/v3/system/network/interfaces/${encodeURIComponent(first)}`, {
+        method: 'PATCH',
+        data: { interface: { use_dhcp: true } },
+      });
+      summary.acceptance.network_interface_patch_501 = patch.status === 501;
+      fs.writeFileSync(path.join(OUT, 'network_interfaces.json'), JSON.stringify(list.json, null, 1) + '\n');
+      fs.writeFileSync(path.join(OUT, 'network_interface.json'), JSON.stringify(detail.json, null, 1) + '\n');
+    });
+
+    // ---------- 4. диагностика: ping / tcpdumps ----------
+    await record('diagnostics-ping', async () => {
+      const ping = await api('/api/v3/system/utils/ping?address=127.0.0.1');
+      const invalid = await api('/api/v3/system/utils/ping?address=' + encodeURIComponent('bad host; rm -rf /'));
+      summary.acceptance.utils_ping =
+        ping.status === 200 &&
+        ((Array.isArray(ping.json.ping) && ping.json.ping.length >= 1) || String(ping.json.stdout || '').includes('PING')) &&
+        invalid.status === 422;
+    });
+
+    await record('diagnostics-tcpdumps', async () => {
+      const status = await api('/api/v3/system/utils/tcpdumps/status');
+      const files = await api('/api/v3/system/utils/tcpdumps');
+      const start = await api('/api/v3/system/utils/tcpdumps', { method: 'POST', data: { interface: 'lo' } });
+      const stop = await api('/api/v3/system/utils/tcpdumps', { method: 'DELETE' });
+      summary.acceptance.tcpdumps_status = status.status === 200 && status.json.running === false;
+      summary.acceptance.tcpdumps_list = files.status === 200 && Array.isArray(files.json.files);
+      summary.acceptance.tcpdumps_mutations_501 = start.status === 501 && stop.status === 501;
+      fs.writeFileSync(path.join(OUT, 'tcpdumps_status.json'), JSON.stringify(status.json, null, 1) + '\n');
+      fs.writeFileSync(path.join(OUT, 'tcpdumps.json'), JSON.stringify(files.json, null, 1) + '\n');
+    });
+
+    // ---------- 5. терминалы ----------
+    await record('terminals', async () => {
+      const list = await api('/api/v3/terminals');
+      const alias = await api('/api/v3/ui/terminals');
+      const post = await api('/api/v3/terminals', { method: 'POST', data: { address: '192.168.1.50' } });
+      const credentials = await api('/api/v3/terminals/credentials?terminal=1');
+      summary.acceptance.terminals_list =
+        list.status === 200 && list.json.count === 0 && Array.isArray(list.json.terminals) &&
+        alias.status === 200 && alias.json.count === 0;
+      summary.acceptance.terminals_mutations_501 = post.status === 501 && credentials.status === 404;
+      fs.writeFileSync(path.join(OUT, 'terminals.json'), JSON.stringify(list.json, null, 1) + '\n');
+    });
+
+    // ---------- 6. видеозаписи ----------
+    await record('videorecords', async () => {
+      const list = await api('/api/v3/videorecords');
+      const estimated = await api('/api/v3/conferences/1/videorecords/estimated_time');
+      const remove = await api('/api/v3/videorecords/1', { method: 'DELETE' });
+      summary.acceptance.videorecords_list = list.status === 200 && list.json.count === 0 && Array.isArray(list.json.videorecords);
+      summary.acceptance.videorecords_estimated =
+        estimated.status === 200 && (typeof estimated.json.recording_time === 'number' || typeof estimated.json.time === 'number');
+      summary.acceptance.videorecords_delete_501 = remove.status === 501;
+      fs.writeFileSync(path.join(OUT, 'videorecords.json'), JSON.stringify(list.json, null, 1) + '\n');
+    });
+
+    // ---------- 7. статистика/пакеты/журнал движка ----------
+    await record('system-stats', async () => {
+      const memory = await api('/api/v3/system/stats/memory');
+      const cpu = await api('/api/v3/system/stats/cpu');
+      const disk = await api('/api/v3/system/stats/disk');
+      const network = await api('/api/v3/system/stats/network');
+      const packages = await api('/api/v3/system/packages');
+      const log = await api('/api/v3/engine/log');
+      summary.acceptance.stats_memory =
+        memory.status === 200 && memory.json.total > 0 && memory.json.used >= 0 && memory.json.free >= 0;
+      summary.acceptance.stats_cpu =
+        cpu.status === 200 && cpu.json.count >= 1 && cpu.json.load.length === cpu.json.count &&
+        cpu.json.load.every((core) => core.user_mode >= 0 && core.kernel_mode >= 0 && core.idle >= 0);
+      summary.acceptance.stats_disk =
+        disk.status === 200 && disk.json.count === disk.json.spaces.length && disk.json.spaces.length >= 1 &&
+        disk.json.spaces.every((space) => space.name && space.total > 0 && space.used >= 0 && space.free >= 0);
+      summary.acceptance.stats_network =
+        network.status === 200 && network.json.count === network.json.interfaces.length &&
+        network.json.interfaces.every((item) => item.name && item.rx >= 0 && item.tx >= 0);
+      summary.acceptance.system_packages = packages.status === 200 && Array.isArray(packages.json.packages);
+      summary.acceptance.engine_log =
+        log.status === 200 && typeof log.json.language === 'string' && log.json.bounds && Array.isArray(log.json.log);
+      fs.writeFileSync(path.join(OUT, 'stats.json'), JSON.stringify({ memory: memory.json, cpu: cpu.json, disk: disk.json, network: network.json }, null, 1) + '\n');
+      fs.writeFileSync(path.join(OUT, 'engine_log.json'), JSON.stringify(log.json, null, 1) + '\n');
+    });
+
+    // ---------- 8. UI: все T2.4-страницы без 4xx и неизвестных ошибок ----------
+    await record('ui-pages', async () => {
+      const pages = [
+        ['statistics', ['Статистика', 'Использование памяти']],
+        ['mediafiles', ['Медиафайлы', 'Загруженные медиафайлы']],
+        ['terminals', ['Терминалы', 'Список терминалов']],
+        ['network', ['Сеть', 'Диагностика']],
+        ['event_list', ['Журнал событий']],
+        ['diagnostics', ['Диагностика', 'Исполнительный модуль']],
+        ['backup', ['Импорт/Экспорт', 'База данных']],
+        ['reset', ['Очистка данных']],
+        ['license', ['Лицензия', 'Информация о лицензии']],
+        ['about', ['О программе', 'Информация о программе']],
+      ];
+      summary.acceptance.ui_pages = true;
+      const seen = [];
+      for (const [slug, labels] of pages) {
+        const before = httpErrors.length;
+        await page.goto(`${BASE}/pnm/administration/${slug}`, { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(3000);
+        const text = await page.locator('body').innerText();
+        const missing = labels.filter((label) => !text.includes(label));
+        seen.push({ slug, missing, http: httpErrors.slice(before) });
+        if (missing.length || httpErrors.length > before) {
+          summary.acceptance.ui_pages = false;
+          summary.acceptance[`ui_problem:${slug}`] = { missing, http: httpErrors.slice(before) };
+        }
+      }
+      summary.totals.ui_pages_seen = seen;
+      await shot('01-statistics.png');
+      await page.goto(`${BASE}/pnm/administration/event_list`, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(3000);
+      await shot('02-event-list.png');
+      await page.goto(`${BASE}/pnm/administration/network`, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(3000);
+      await shot('03-network.png');
+      await page.goto(`${BASE}/pnm/administration/terminals`, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(3000);
+      await shot('04-terminals.png');
+    });
+
+    // ---------- 9. итог ----------
+    const acceptance = Object.entries(summary.acceptance);
+    const failed = acceptance.filter(([, ok]) => ok !== true).map(([key]) => key);
+    summary.acceptance_failed = failed;
+    summary.console_errors = consoleErrors;
+    summary.vendor_errors = vendorErrors;
+    summary.http_errors = httpErrors;
+    summary.ok =
+      build.git_dirty === false &&
+      build.binary_mtime !== null &&
+      build.binary_mtime >= build.git_head_ct &&
+      failed.length === 0 &&
+      consoleErrors.length === 0 &&
+      httpErrors.length === 0;
+    summary.totals = {
+      ...summary.totals,
+      gates: acceptance.length,
+      gates_passed: acceptance.length - failed.length,
+      http_errors: httpErrors.length,
+      console_errors: consoleErrors.length,
+      vendor_errors: vendorErrors.length,
+      screenshots: screenshots.length,
+      steps: steps.length,
+    };
+  } catch (error) {
+    summary.error = String((error && error.stack) || error);
+  } finally {
+    summary.finished_at = new Date().toISOString();
+    fs.writeFileSync(path.join(OUT, 'summary.json'), JSON.stringify(summary, null, 1) + '\n');
+    await browser.close();
+    const acceptance = Object.entries(summary.acceptance);
+    const failed = acceptance.filter(([, ok]) => ok !== true).map(([key]) => key);
+    console.log(`T2.4 evidence: ${summary.ok ? 'OK' : 'FAIL'} ${acceptance.length - failed.length}/${acceptance.length} gates`);
+    if (failed.length) console.log('failed:', failed.join(', '));
+    if (summary.error) console.log(summary.error);
+    process.exit(summary.ok ? 0 : 1);
+  }
+})();

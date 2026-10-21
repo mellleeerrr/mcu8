@@ -277,6 +277,9 @@ fn log_events_csv(events: &[LogEvent], locale: &str) -> Vec<u8> {
 
 /// `GET /static/log_events/{filename}` — скачивание ранее выданного ZIP.
 pub async fn static_log_export(State(state): State<SharedState>, Path(filename): Path<String>) -> Response {
+    if filename.contains(['/', '\\']) || filename.contains("..") {
+        return error_json(400, "invalid export filename").into_response();
+    }
     let bytes = state.api_v3.log_exports.lock().ok().and_then(|mut exports| exports.get(&filename));
     match bytes {
         Some(bytes) => ([(header::CONTENT_TYPE, "application/zip")], bytes.as_ref().to_vec()).into_response(),

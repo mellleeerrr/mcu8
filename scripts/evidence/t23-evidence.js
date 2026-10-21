@@ -202,13 +202,18 @@ const summary = {
       summary.acceptance.rtp_patch_persist = rtp.status === 200 && rtpAfter.mtu === 1400;
       await api('/api/v3/settings/rtp', { method: 'PATCH', data: { payload: originalRtp } });
 
+      const h323Before = (await payloadOf('/api/v3/settings/calls/h323')).payload;
       const h323 = await api('/api/v3/settings/calls/h323', {
         method: 'PATCH',
-        data: { payload: { h323_id: `mcu-${stamp}`, h323_e164: '1001' } },
+        data: { payload: { ...h323Before, h323_id: `mcu-${stamp}`, h323_e164: '1001' } },
       });
       const h323After = (await payloadOf('/api/v3/settings/calls/h323')).payload;
+      const h323Restore = await api('/api/v3/settings/calls/h323', { method: 'PATCH', data: { payload: h323Before } });
+      const h323Restored = (await payloadOf('/api/v3/settings/calls/h323')).payload;
       summary.acceptance.h323_patch_persist =
         h323.status === 200 && h323After.h323_id === `mcu-${stamp}` && h323After.h323_e164 === '1001';
+      summary.acceptance.h323_restored =
+        h323Restore.status === 200 && h323Restored.h323_id === h323Before.h323_id && h323Restored.h323_e164 === h323Before.h323_e164;
     });
 
     // ---------- 3. calls: vendor-поля + legacy media ----------
@@ -238,14 +243,29 @@ const summary = {
       const after = (await api('/api/v3/settings/http')).json;
       summary.acceptance.http_multipart_upload =
         upload.status === 200 && after.port === 8443 && after.crt && after.crt.common_name === 'mcu.crt' && !!after.key;
-      const check = await api('/api/v3/settings/http/check', {
+      // Vendor-UI вызывает check на КАЖДЫЙ файл отдельно (второй слот — из
+      // уже загруженного состояния), поэтому гейт повторяет именно одиночные
+      // запросы, а не удобную пару.
+      const checkCrt = await api('/api/v3/settings/http/check', {
         method: 'POST',
         multipart: {
           crt: { name: 'mcu.crt', mimeType: 'application/x-pem-file', buffer: Buffer.from('-----BEGIN CERTIFICATE-----\nT23\n-----END CERTIFICATE-----\n') },
+        },
+      });
+      const checkKey = await api('/api/v3/settings/http/check', {
+        method: 'POST',
+        multipart: {
           key: { name: 'mcu.key', mimeType: 'application/x-pem-file', buffer: Buffer.from('-----BEGIN PRIVATE KEY-----\nT23\n-----END PRIVATE KEY-----\n') },
         },
       });
-      summary.acceptance.http_check_after_upload = check.status === 200;
+      const garbage = await api('/api/v3/settings/http/check', {
+        method: 'POST',
+        multipart: {
+          crt: { name: 'bad.crt', mimeType: 'application/x-pem-file', buffer: Buffer.from('not a certificate\n') },
+        },
+      });
+      summary.acceptance.http_check_single_file =
+        checkCrt.status === 200 && checkKey.status === 200 && garbage.status === 400;
       const reset = await api('/api/v3/settings/http/reset', { method: 'POST' });
       const resetAfter = (await api('/api/v3/settings/http')).json;
       summary.acceptance.http_reset = reset.status === 200 && resetAfter.port === 443;
@@ -285,11 +305,24 @@ const summary = {
       const timeDisabled = await api('/api/v3/system/time');
       summary.acceptance.ntp_toggle =
         ntp.status === 200 && enable.status === 200 && timeEnabled.json.time.ntp === true && disable.status === 200 && timeDisabled.json.time.ntp === false;
+      // ntp_synchronized отражает реальный статус ОС, а не флаг "NTP включён".
+      const hostSync = sh('timedatectl show -p NTPSynchronized --value');
+      const expectedSync = hostSync === 'yes';
+      summary.acceptance.ntp_status_not_faked = timeEnabled.json.time.ntp_synchronized === expectedSync;
+      summary.acceptance.ntp_status_source = hostSync || 'unavailable';
+
+      // Vendor-UI: PATCH /system/time присылает локальную строку.
+      const uiTime = '22.10.2026 04:45:00';
+      const timePatch = await api('/api/v3/system/time', { method: 'PATCH', data: { time: uiTime } });
+      const expectedTime = Math.floor(new Date('2026-10-22T04:45:00+03:00').getTime() / 1000);
+      summary.acceptance.system_time_patch_vendor_string =
+        timePatch.status === 200 && Math.abs(timePatch.json.time.time - expectedTime) <= 120;
+      await api('/api/v3/system/time', { method: 'PATCH', data: { payload: { seconds: 0 } } });
 
       const now = Math.floor(Date.now() / 1000);
-      const timePatch = await api('/api/v3/system/time', { method: 'PATCH', data: { time: now } });
+      const timeNumber = await api('/api/v3/system/time', { method: 'PATCH', data: { time: now } });
       summary.acceptance.system_time_patch =
-        timePatch.status === 200 && Math.abs(timePatch.json.time.time - now) <= 5 && timePatch.json.time.timezone === 'Europe/Moscow';
+        timeNumber.status === 200 && Math.abs(timeNumber.json.time.time - now) <= 5 && timeNumber.json.time.timezone === 'Europe/Moscow';
 
       const zone = await api('/api/v3/system/timezone', { method: 'PATCH', data: { timezone: 'UTC' } });
       const profileUtc = await api('/api/v3/profile');
@@ -302,6 +335,94 @@ const summary = {
       summary.acceptance.time_zones_list = (await api('/api/v3/time-zones')).json.count === 428;
     });
 
+    // ---------- 6b. UI: NTP-конфиг реально сохраняется через форму ----------
+    await record('settings-ui-ntp-save', async () => {
+      const mutations = [];
+      const listener = (response) => {
+        const url = response.url();
+        if (url.includes('/api/v3/') && ['PATCH', 'POST'].includes(response.request().method())) {
+          mutations.push({ path: url.replace(BASE, ''), status: response.status(), body: response.request().postData() });
+        }
+      };
+      page.on('response', listener);
+      await api('/api/v3/system/ntp/disable', { method: 'POST' });
+      await page.goto(`${BASE}/pnm/administration/date_time`, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(3000);
+      const switchOn = await page.evaluate(() => {
+        const el = [...document.querySelectorAll('input')].find((input) => String(input.id).includes('tc-switch'));
+        return el ? el.checked : null;
+      });
+      if (!switchOn) {
+        await page.locator('label.tc-switch__text').first().click();
+        await page.waitForTimeout(1200);
+      }
+      await page.locator('[title="Частота синхронизации"]').click();
+      await page.waitForTimeout(600);
+      const freq = page.locator('.tc-context-menu-item[title="1 час"]');
+      if (await freq.count()) await freq.first().click({ force: true });
+      await page.waitForTimeout(600);
+      const textInputs = page.locator('.tc-text-field__input:visible');
+      const count = await textInputs.count();
+      const primary = textInputs.nth(count - 3);
+      await primary.click();
+      await page.keyboard.type(`pool.${stamp}.ntp.org`, { delay: 25 });
+      await page.waitForTimeout(400);
+      await page.getByRole('button', { name: 'Сохранить', exact: true }).first().click();
+      await page.waitForTimeout(3000);
+      page.off('response', listener);
+      const patch = mutations.find((m) => m.path === '/api/v3/system/ntp' && m.status === 200);
+      const server = (await api('/api/v3/system/ntp')).json.ntp.server;
+      summary.acceptance.ntp_ui_save =
+        !!patch && String(patch.body || '').includes('"ntp":"pool.') && server === `pool.${stamp}.ntp.org`;
+      summary.acceptance.ntp_ui_restarted_services =
+        mutations.some((m) => m.path === '/api/v3/system/ntp/enable' && m.status === 200);
+      await shot('02-administration-date-time.png');
+      // Cleanup: выключить NTP и очистить сервер.
+      await api('/api/v3/system/ntp', { method: 'PATCH', data: { payload: { server: null, fallback: [], poll_interval_min: null, poll_interval_max: null } } });
+      await api('/api/v3/system/ntp/disable', { method: 'POST' });
+    });
+
+    // ---------- 6c. UI: conference_settings one_abonent включается и выключается ----------
+    await record('settings-ui-conference-one-abonent', async () => {
+      const statuses = [];
+      const listener = (response) => {
+        if (response.url().includes('/api/v3/settings/calls') && response.request().method() === 'PATCH') statuses.push(response.status());
+      };
+      page.on('response', listener);
+      const saveOne = async (enable) => {
+        await page.goto(`${BASE}/pnm/administration/conference_settings`, { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(2500);
+        const boxes = page.locator('input[type=checkbox]');
+        if ((await boxes.count()) < 3) return null;
+        const box = boxes.nth(2);
+        const checked = await box.isChecked();
+        if (enable !== checked) await box.click({ force: true });
+        await page.getByRole('button', { name: 'Сохранить', exact: true }).first().click();
+        await page.waitForTimeout(2500);
+        await page.goto(`${BASE}/pnm/administration/conference_settings`, { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(2000);
+        const reloaded = page.locator('input[type=checkbox]');
+        return (await reloaded.count()) >= 3 ? reloaded.nth(2).isChecked() : null;
+      };
+      const enabled = await saveOne(true);
+      const disabled = await saveOne(false);
+      page.off('response', listener);
+      summary.acceptance.conference_settings_ui_one_abonent =
+        enabled === true && disabled === false && statuses.length >= 2 && statuses.every((status) => status === 200);
+      summary.acceptance.conference_settings_ui_patch_statuses = statuses;
+      await shot('03-administration-conference-settings.png');
+    });
+
+    // ---------- 6d. SIP save → restart_services 200 (раньше был 501) ----------
+    await record('sip-save-restart-services', async () => {
+      const original = (await payloadOf('/api/v3/settings/calls/sip')).payload;
+      const sip = await api('/api/v3/settings/calls/sip', { method: 'PATCH', data: { payload: { ...original, sip_port: 5062 } } });
+      const restart = await api('/api/v3/system/restart_services', { method: 'POST' });
+      const restore = await api('/api/v3/settings/calls/sip', { method: 'PATCH', data: { payload: original } });
+      summary.acceptance.sip_save_restart_services =
+        sip.status === 200 && restart.status === 200 && restart.json.status === 'ok' && restore.status === 200;
+    });
+
     // ---------- 7. UI: страницы настроек грузятся без ошибок ----------
     await record('settings-ui-pages', async () => {
       const pages = [
@@ -311,6 +432,7 @@ const summary = {
         ['layout_skins', ['Стили раскладок', 'Стиль раскладки']],
         ['conference_settings', ['Настройки конференции']],
         ['security', ['Безопасность', 'Пароли', 'Авторизация']],
+        ['network', ['Сеть', 'Порты', 'SMTP', 'HTTPS']],
       ];
       summary.acceptance.settings_ui_pages = true;
       for (const [slug, labels] of pages) {
@@ -362,7 +484,6 @@ const summary = {
       await page.waitForTimeout(3000);
       const text = await page.locator('body').innerText();
       summary.acceptance.ui_time_shows_ntp = text.includes('Синхронизировать время с NTP-сервером');
-      await shot('02-administration-date-time.png');
       await page.goto(`${BASE}/pnm/administration/security`, { waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(3000);
       const security = await page.locator('body').innerText();
