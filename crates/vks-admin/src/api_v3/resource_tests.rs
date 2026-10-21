@@ -917,8 +917,13 @@ async fn pnm_attach_layout_pushes_it_to_media_engine() {
         detach(State(state.clone()), Extension(operator()), uri(&path), Path((room.id.to_string(), layout_id.clone())))
             .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    // После detach привязанных раскладок нет — push нечего, движок не дёргаем.
-    assert_eq!(dialer.layouts.lock().expect("layouts poisoned").len(), 1);
+    // T02: scope после detach не остаётся без раскладки — добавляется/применяется
+    // каноническая «Общая», и движок получает валидный active.
+    assert_eq!(dialer.layouts.lock().expect("layouts poisoned").len(), 2);
+    let resources = state.api_v3.resources.lock().await;
+    assert!(resources.links[&format!("conferences:{}:video_layouts", room.id)]
+        .iter()
+        .any(|id| resources.layouts.get(id).is_some_and(|layout| layout["payload"]["type"] == "default")));
 }
 
 /// Корень дублей default-раскладок: повторный старт комнаты не должен
@@ -990,5 +995,633 @@ async fn editing_shared_default_layout_clones_for_current_scope() {
         resources.links[&format!("conferences:{}:video_layouts", room_b.id)],
         vec![layout_id],
         "scope B остался на оригинале"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T02: active layout, COW atomicity, refcounted delete, canonical default.
+// ---------------------------------------------------------------------------
+
+async fn create_layout(state: &SharedState, name: &str, payload: serde_json::Value) -> String {
+    let response = create(
+        State(state.clone()),
+        Extension(operator()),
+        uri("/api/v3/video_layouts"),
+        Json(json!({"display_name": name, "payload": payload})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    body(response).await["video_layout"]["id"].as_str().unwrap().to_string()
+}
+
+async fn attach_to(state: &SharedState, room: &crate::state::RoomRecord, layout_id: &str) -> StatusCode {
+    attach(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/conferences/{}/video_layouts/{layout_id}", room.id)),
+        Path((room.id.to_string(), layout_id.to_string())),
+    )
+    .await
+    .status()
+}
+
+#[tokio::test]
+async fn t02_attach_apply_sequence_uses_last_attached_without_reordering_links() {
+    let dialer = Arc::new(RecordingLayoutDialer::default());
+    let mut app = AppState::new().with_dialer(dialer.clone());
+    app.storage = Some(Arc::new(vks_storage::memory::MemoryStorage::new()));
+    let state: SharedState = Arc::new(app);
+    let room = Rooms::create_async(&state, "A/B/apply A").await.unwrap();
+    let a =
+        create_layout(&state, "A", json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}))
+            .await;
+    let b =
+        create_layout(&state, "B", json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}))
+            .await;
+    assert_eq!(attach_to(&state, &room, &a).await, StatusCode::NO_CONTENT);
+    assert_eq!(attach_to(&state, &room, &b).await, StatusCode::NO_CONTENT);
+    assert_eq!(attach_to(&state, &room, &a).await, StatusCode::NO_CONTENT);
+    let resources = state.api_v3.resources.lock().await;
+    assert_eq!(
+        resources.links[&format!("conferences:{}:video_layouts", room.id)],
+        vec![a.clone(), b.clone()],
+        "attach не пересортировывает UI-порядок links"
+    );
+    assert_eq!(resources.active_layouts[&format!("conferences:{}:video_layouts", room.id)], a);
+    drop(resources);
+    let applied = dialer.layouts.lock().unwrap().clone();
+    assert_eq!(applied.last(), Some(&(room.id.to_string(), a)), "последний attach должен победить");
+}
+
+#[tokio::test]
+async fn t02_attach_default_after_manual_activates_default() {
+    let state = state();
+    let room = Rooms::create_async(&state, "default after manual").await.unwrap();
+    let shared = create_layout(&state, "Common", json!({"type":"default","mode":"auto"})).await;
+    let manual = create_layout(
+        &state,
+        "Manual",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &manual).await, StatusCode::NO_CONTENT);
+    assert_eq!(attach_to(&state, &room, &shared).await, StatusCode::NO_CONTENT);
+    let resources = state.api_v3.resources.lock().await;
+    assert_eq!(resources.active_layouts[&format!("conferences:{}:video_layouts", room.id)], shared);
+}
+
+#[tokio::test]
+async fn t02_generic_create_reuses_canonical_default() {
+    let state = state();
+    let first = create_layout(&state, "", json!({"type":"default"})).await;
+    let second = create_layout(&state, "", json!({"type":"default"})).await;
+    assert_eq!(first, second, "каноническая «Общая» должна переиспользоваться");
+    let resources = state.api_v3.resources.lock().await;
+    assert_eq!(resources.layouts.len(), 1);
+}
+
+#[tokio::test]
+async fn t02_remove_shared_layout_is_409_without_mutation() {
+    let state = state();
+    let room_a = Rooms::create_async(&state, "shared A").await.unwrap();
+    let room_b = Rooms::create_async(&state, "shared B").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Shared",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room_a, &layout).await, StatusCode::NO_CONTENT);
+    assert_eq!(attach_to(&state, &room_b, &layout).await, StatusCode::NO_CONTENT);
+    let before = state.api_v3.resources.lock().await.clone();
+    let response = remove_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/video_layouts/{layout}")),
+        Path(layout.clone()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let after = state.api_v3.resources.lock().await.clone();
+    assert_eq!(before.layouts, after.layouts);
+    assert_eq!(before.links, after.links);
+}
+
+#[tokio::test]
+async fn t02_detach_inherited_or_absent_layout_is_404() {
+    let state = state();
+    let room = Rooms::create_async(&state, "detach absent").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Only conference",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &layout).await, StatusCode::NO_CONTENT);
+    let response = detach(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{layout}", room.id)),
+        Path((room.id.to_string(), layout.clone())),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND, "inherited id нельзя снять из сессии как свой");
+    let response = detach(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/conferences/{}/video_layouts/{layout}", room.id)),
+        Path((room.id.to_string(), layout.clone())),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let resources = state.api_v3.resources.lock().await;
+    let key = format!("conferences:{}:video_layouts", room.id);
+    assert!(resources.active_layouts.contains_key(&key), "после detach active должен указывать на default");
+    assert!(resources.links[&key].iter().any(|id| resources.layouts[id]["payload"]["type"] == "default"));
+}
+
+#[tokio::test]
+async fn t02_cow_validation_error_leaves_no_ghost() {
+    let state = state();
+    let room_a = Rooms::create_async(&state, "cow A").await.unwrap();
+    let room_b = Rooms::create_async(&state, "cow B").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Shared",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room_a, &layout).await, StatusCode::NO_CONTENT);
+    assert_eq!(attach_to(&state, &room_b, &layout).await, StatusCode::NO_CONTENT);
+    let before = state.api_v3.resources.lock().await.clone();
+    let response = edit_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/conferences/{}/video_layouts/{layout}", room_a.id)),
+        Path((room_a.id.to_string(), layout.clone())),
+        Json(json!({"payload":{"slots":"not-an-array"}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let after = state.api_v3.resources.lock().await.clone();
+    assert_eq!(
+        serde_json::to_string(&before).unwrap(),
+        serde_json::to_string(&after).unwrap(),
+        "422 не должен менять документ ни на байт"
+    );
+}
+
+#[tokio::test]
+async fn t02_cow_from_inherited_session_keeps_conference_original() {
+    let state = state();
+    let room = Rooms::create_async(&state, "inherited COW").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Shared",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &layout).await, StatusCode::NO_CONTENT);
+    let response = edit_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{layout}", room.id)),
+        Path((room.id.to_string(), layout.clone())),
+        Json(json!({"display_name":"Session copy"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let edited_id = body(response).await["video_layout"]["id"].as_str().unwrap().to_string();
+    assert_ne!(edited_id, layout, "inherited layout должен клонироваться в session");
+    let resources = state.api_v3.resources.lock().await;
+    assert_eq!(resources.layouts[&layout]["display_name"], "Shared", "оригинал конференции не изменён");
+    let session_key = format!("sessions:{}:video_layouts", room.id);
+    assert!(resources.links[&session_key].contains(&edited_id), "клон должен быть привязан к session");
+    assert_eq!(resources.active_layouts[&session_key], edited_id);
+}
+
+#[tokio::test]
+async fn t02_edit_global_shared_is_409() {
+    let state = state();
+    let room_a = Rooms::create_async(&state, "global A").await.unwrap();
+    let room_b = Rooms::create_async(&state, "global B").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Shared",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room_a, &layout).await, StatusCode::NO_CONTENT);
+    assert_eq!(attach_to(&state, &room_b, &layout).await, StatusCode::NO_CONTENT);
+    let response = edit_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/video_layouts/{layout}")),
+        Path(layout.clone()),
+        Json(json!({"display_name":"Changed"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn t02_mode_switch_on_shared_layout_copies_on_write() {
+    let state = state();
+    let room_a = Rooms::create_async(&state, "mode A").await.unwrap();
+    let room_b = Rooms::create_async(&state, "mode B").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Shared default",
+        json!({"type":"default","mode":"auto","preset":"preset_default_13","size":13}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room_a, &layout).await, StatusCode::NO_CONTENT);
+    assert_eq!(attach_to(&state, &room_b, &layout).await, StatusCode::NO_CONTENT);
+    let response = crate::api_v3::shell::switch_video_layout_mode(
+        State(state.clone()),
+        Extension(operator()),
+        Json(crate::api_v3::shell::SwitchVideoLayoutModeRequest {
+            session_id: Some(room_a.id.to_string()),
+            conference_id: None,
+            mode: Some("manual".into()),
+            video_layout_id: Some(layout.clone()),
+            extra: serde_json::Map::new(),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cloned = body(response).await;
+    let cloned_id = cloned["id"].as_str().expect("layout id in mode response").to_string();
+    assert_ne!(cloned_id, layout, "mode на shared-раскладке должен сделать COW-клон");
+    let resources = state.api_v3.resources.lock().await;
+    assert_eq!(resources.layouts[&layout]["payload"]["mode"], "auto", "оригинал не изменён");
+    assert_eq!(resources.layouts[&cloned_id]["payload"]["mode"], "manual");
+    let session_key = format!("sessions:{}:video_layouts", room_a.id);
+    assert_eq!(resources.active_layouts[&session_key], cloned_id);
+    let other_key = format!("conferences:{}:video_layouts", room_b.id);
+    assert_eq!(resources.links[&other_key], vec![layout], "другая комната осталась на оригинале");
+}
+
+#[tokio::test]
+async fn t02_remove_default_is_409_and_single_layout_removal_restores_default() {
+    let state = state();
+    let room = Rooms::create_async(&state, "remove rules").await.unwrap();
+    let shared = create_layout(&state, "Common", json!({"type":"default"})).await;
+    assert_eq!(attach_to(&state, &room, &shared).await, StatusCode::NO_CONTENT);
+    let response = remove_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/video_layouts/{shared}")),
+        Path(shared.clone()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT, "default нельзя удалить, пока он привязан");
+
+    let manual = create_layout(
+        &state,
+        "Manual",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &manual).await, StatusCode::NO_CONTENT);
+    let response = remove_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/video_layouts/{manual}")),
+        Path(manual.clone()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let resources = state.api_v3.resources.lock().await;
+    assert!(!resources.layouts.contains_key(&manual));
+    let key = format!("conferences:{}:video_layouts", room.id);
+    assert!(resources.active_layouts.contains_key(&key));
+    assert!(resources.links[&key].iter().any(|id| resources.layouts[id]["payload"]["type"] == "default"));
+}
+
+#[tokio::test]
+async fn t02_cow_alias_resolves_repeated_old_id_without_clone_storm() {
+    let state = state();
+    let room = Rooms::create_async(&state, "alias room").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Shared",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &layout).await, StatusCode::NO_CONTENT);
+    let first = edit_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{layout}", room.id)),
+        Path((room.id.to_string(), layout.clone())),
+        Json(json!({"display_name":"First copy"})),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_id = body(first).await["video_layout"]["id"].as_str().unwrap().to_string();
+    let count_before = state.api_v3.resources.lock().await.layouts.len();
+    // UI продолжает присылать старый id — alias должен вести в клон, не плодя новые.
+    let second = edit_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{layout}", room.id)),
+        Path((room.id.to_string(), layout.clone())),
+        Json(json!({"display_name":"Second edit"})),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_id = body(second).await["video_layout"]["id"].as_str().unwrap().to_string();
+    assert_eq!(second_id, first_id);
+    let resources = state.api_v3.resources.lock().await;
+    assert_eq!(resources.layouts.len(), count_before, "alias не должен создавать второй клон");
+    assert_eq!(resources.layouts[&first_id]["display_name"], "Second edit");
+}
+
+#[tokio::test]
+async fn t02_read_path_resolves_old_id_to_cow_clone_and_list_has_no_duplicate() {
+    let state = state();
+    let room = Rooms::create_async(&state, "read alias").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Shared",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &layout).await, StatusCode::NO_CONTENT);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        inherit_and_ensure_default_layout(&mut resources, &room.id.to_string(), "tester");
+    }
+    let response = edit_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{layout}", room.id)),
+        Path((room.id.to_string(), layout.clone())),
+        Json(json!({"display_name":"Session copy"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let clone_id = body(response).await["video_layout"]["id"].as_str().unwrap().to_string();
+    let response = get_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{layout}", room.id)),
+        Path((room.id.to_string(), layout.clone())),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "GET по старому id после COW не должен 404");
+    assert_eq!(body(response).await["video_layout"]["id"], clone_id);
+
+    let response = list_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts", room.id)),
+        Path(room.id.to_string()),
+        Query(std::collections::HashMap::new()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = body(response).await;
+    let ids: Vec<&str> =
+        listed["video_layouts"].as_array().unwrap().iter().filter_map(|item| item["id"].as_str()).collect();
+    assert_eq!(ids.iter().filter(|id| **id == clone_id).count(), 1);
+    assert!(!ids.contains(&layout.as_str()), "оригинал не должен дублироваться в списке сессии");
+}
+
+#[tokio::test]
+async fn t02_detach_clone_does_not_leave_alias_404() {
+    let state = state();
+    let room = Rooms::create_async(&state, "detach clone alias").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Shared",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &layout).await, StatusCode::NO_CONTENT);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        inherit_and_ensure_default_layout(&mut resources, &room.id.to_string(), "tester");
+    }
+    let edited = edit_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{layout}", room.id)),
+        Path((room.id.to_string(), layout.clone())),
+        Json(json!({"display_name":"Clone"})),
+    )
+    .await;
+    assert_eq!(edited.status(), StatusCode::OK);
+    let clone_id = body(edited).await["video_layout"]["id"].as_str().unwrap().to_string();
+    let detached = detach(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{clone_id}", room.id)),
+        Path((room.id.to_string(), clone_id.clone())),
+    )
+    .await;
+    assert_eq!(detached.status(), StatusCode::NO_CONTENT);
+    let got = get_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{layout}", room.id)),
+        Path((room.id.to_string(), layout.clone())),
+    )
+    .await;
+    assert_eq!(got.status(), StatusCode::OK, "после detach клона старый id должен снова открывать оригинал");
+    assert_eq!(body(got).await["video_layout"]["id"], layout);
+}
+
+#[tokio::test]
+async fn t02_conference_cow_updates_live_session_mirror_without_duplicate() {
+    let state = state();
+    let room = Rooms::create_async(&state, "conference cow mirror").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Shared",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &layout).await, StatusCode::NO_CONTENT);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        inherit_and_ensure_default_layout(&mut resources, &room.id.to_string(), "tester");
+    }
+    let edited = edit_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/conferences/{}/video_layouts/{layout}", room.id)),
+        Path((room.id.to_string(), layout.clone())),
+        Json(json!({"display_name":"Conference clone"})),
+    )
+    .await;
+    assert_eq!(edited.status(), StatusCode::OK);
+    let clone_id = body(edited).await["video_layout"]["id"].as_str().unwrap().to_string();
+    {
+        let resources = state.api_v3.resources.lock().await;
+        let session_key = format!("sessions:{}:video_layouts", room.id);
+        assert!(resources.links[&session_key].contains(&clone_id), "mirror сессии перешёл на клон");
+        assert!(!resources.links[&session_key].contains(&layout), "stale original убран из mirror");
+        assert!(resources.links[&session_key].contains(&resources.active_layouts[&session_key]));
+    }
+    let listed = list_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts", room.id)),
+        Path(room.id.to_string()),
+        Query(std::collections::HashMap::new()),
+    )
+    .await;
+    let listed = body(listed).await;
+    let ids: Vec<&str> =
+        listed["video_layouts"].as_array().unwrap().iter().filter_map(|item| item["id"].as_str()).collect();
+    assert!(ids.contains(&clone_id.as_str()), "клон виден");
+    assert!(!ids.contains(&layout.as_str()), "в списке сессии не должно быть stale оригинала");
+    let got = get_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{layout}", room.id)),
+        Path((room.id.to_string(), layout.clone())),
+    )
+    .await;
+    assert_eq!(got.status(), StatusCode::OK);
+    assert_eq!(body(got).await["video_layout"]["id"], clone_id);
+}
+
+#[tokio::test]
+async fn t02_inherit_uses_conference_active_for_first_bridge() {
+    let mut resources = ResourceState::default();
+    let manual = normalize_resource(
+        "video_layouts",
+        &json!({"display_name":"Manual","payload":{"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}}),
+        "tester",
+    );
+    let manual_id = manual["id"].as_str().unwrap().to_string();
+    resources.layouts.insert(manual_id.clone(), manual);
+    let room = "11111111-1111-4111-8111-111111111111";
+    let conference_key = format!("conferences:{room}:video_layouts");
+    resources.links.insert(conference_key.clone(), vec![manual_id.clone()]);
+    resources.active_layouts.insert(conference_key, manual_id.clone());
+    inherit_and_ensure_default_layout(&mut resources, room, "tester");
+    let session_key = format!("sessions:{room}:video_layouts");
+    assert_eq!(resources.active_layouts[&session_key], manual_id, "T01: active конференции должен наследоваться");
+}
+
+#[tokio::test]
+async fn t02_normalize_legacy_picks_last_non_default() {
+    let mut resources = ResourceState::default();
+    let default = normalize_resource("video_layouts", &json!({"payload":{"type":"default"}}), "tester");
+    let default_id = default["id"].as_str().unwrap().to_string();
+    let manual = normalize_resource(
+        "video_layouts",
+        &json!({"payload":{"type":"individual","mode":"manual","slots":[]}}),
+        "tester",
+    );
+    let manual_id = manual["id"].as_str().unwrap().to_string();
+    resources.layouts.insert(default_id.clone(), default);
+    resources.layouts.insert(manual_id.clone(), manual);
+    let key = "conferences:22222222-2222-4222-8222-222222222222:video_layouts";
+    resources.links.insert(key.to_string(), vec![default_id, manual_id.clone()]);
+    normalize_loaded(&mut resources);
+    assert_eq!(resources.active_layouts[key], manual_id, "миграция без active = T01-effective (последняя non-default)");
+}
+
+#[tokio::test]
+async fn t02_detach_inactive_layout_keeps_active() {
+    let state = state();
+    let room = Rooms::create_async(&state, "detach inactive").await.unwrap();
+    let a =
+        create_layout(&state, "A", json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}))
+            .await;
+    let b =
+        create_layout(&state, "B", json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}))
+            .await;
+    assert_eq!(attach_to(&state, &room, &a).await, StatusCode::NO_CONTENT);
+    assert_eq!(attach_to(&state, &room, &b).await, StatusCode::NO_CONTENT);
+    let key = format!("conferences:{}:video_layouts", room.id);
+    assert_eq!(state.api_v3.resources.lock().await.active_layouts[&key], b);
+    let response = detach(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/conferences/{}/video_layouts/{a}", room.id)),
+        Path((room.id.to_string(), a)),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let resources = state.api_v3.resources.lock().await;
+    assert_eq!(resources.active_layouts[&key], b, "detach неактивной не должен трогать active");
+}
+
+#[tokio::test]
+async fn t02_conference_alias_survives_detach_of_mirrored_clone_in_session() {
+    let state = state();
+    let room = Rooms::create_async(&state, "alias scope cleanup").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Shared",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &layout).await, StatusCode::NO_CONTENT);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        inherit_and_ensure_default_layout(&mut resources, &room.id.to_string(), "tester");
+    }
+    let edited = edit_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/conferences/{}/video_layouts/{layout}", room.id)),
+        Path((room.id.to_string(), layout.clone())),
+        Json(json!({"display_name":"Conference clone"})),
+    )
+    .await;
+    let clone_id = body(edited).await["video_layout"]["id"].as_str().unwrap().to_string();
+    // Detach клона в session не должен сносить conference-alias.
+    let detached = detach(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{clone_id}", room.id)),
+        Path((room.id.to_string(), clone_id.clone())),
+    )
+    .await;
+    assert_eq!(detached.status(), StatusCode::NO_CONTENT);
+    let got = get_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/conferences/{}/video_layouts/{layout}", room.id)),
+        Path((room.id.to_string(), layout.clone())),
+    )
+    .await;
+    assert_eq!(got.status(), StatusCode::OK, "conference alias старого id должен сохраниться");
+    assert_eq!(body(got).await["video_layout"]["id"], clone_id);
+}
+
+#[tokio::test]
+async fn t02_start_session_pushes_conference_active_to_engine() {
+    let dialer = Arc::new(RecordingLayoutDialer::default());
+    let mut app = AppState::new().with_dialer(dialer.clone());
+    app.storage = Some(Arc::new(vks_storage::memory::MemoryStorage::new()));
+    let state: SharedState = Arc::new(app);
+    let room = Rooms::create_async(&state, "first bridge active").await.unwrap();
+    let manual = create_layout(
+        &state,
+        "Manual",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &manual).await, StatusCode::NO_CONTENT);
+    let response = crate::api_v3::sessions::start_session(
+        State(state.clone()),
+        Extension(operator()),
+        None,
+        Json(crate::api_v3::sessions::StartSessionRequest { conference_id: Some(room.id.to_string()) }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let applied = dialer.layouts.lock().unwrap().clone();
+    assert!(
+        applied.iter().any(|(room_id, layout_id)| room_id == &room.id.to_string() && layout_id == &manual),
+        "на первый мост должна уйти active раскладка конференции, получено {applied:?}"
     );
 }

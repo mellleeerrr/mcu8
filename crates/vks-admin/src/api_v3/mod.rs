@@ -73,6 +73,10 @@ pub struct ApiV3State {
     /// Настройки всех 8 вкладок конференции (M1.5 / F1 / F2 / F6).
     pub conference_settings: std::sync::Mutex<std::collections::HashMap<vks_core::RoomId, serde_json::Value>>,
     pub resources: tokio::sync::Mutex<resources::ResourceState>,
+    /// Per-room сериализация push в медиа-движок: две конкурентные мутации
+    /// не должны применить раскладки в обратном порядке.
+    pub layout_pushes:
+        std::sync::Mutex<std::collections::HashMap<vks_core::RoomId, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     /// `settings/video` (правится администратором; эталонные умолчания — ref-92).
     pub video_settings: std::sync::Mutex<serde_json::Value>,
     /// Сгенерированные ZIP-архивы истории (export/clean) для

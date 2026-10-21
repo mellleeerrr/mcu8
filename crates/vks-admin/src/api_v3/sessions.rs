@@ -400,33 +400,44 @@ async fn prepare_session_resources(state: &SharedState, room_id: &str, creator: 
 /// держать лок `resources` на время `await` в движке.
 async fn current_layout_json(state: &SharedState, room_id: &RoomId) -> Option<Value> {
     let resources = state.api_v3.resources.lock().await;
-    // Собираем ссылки конференции и сессии. Индивидуальная/ручная раскладка
-    // приоритетнее «Общей»: именно её оператор выбрал и применил последней.
-    // Раньше движок всегда видел `type=default` и игнорировал выбор.
-    let mut ids: Vec<String> = Vec::new();
-    for scope in ["conferences", "sessions"] {
-        let key = format!("{scope}:{room_id}:video_layouts");
-        for id in resources.links.get(&key).cloned().unwrap_or_default() {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
+    let room = room_id.to_string();
+    // Явная active-карта: session → conference → fallback. Порядок links —
+    // UI-контракт, active им не кодируется.
+    if let Some(id) = super::resources::active_id_for(&resources, &room) {
+        if let Some(layout) = resources.layouts.get(&id) {
+            return Some(layout.clone());
         }
     }
-    let selected = ids.iter().rev().find(|id| {
-        resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() != Some("default"))
-    });
-    let selected = selected.or_else(|| {
-        ids.iter().rev().find(|id| {
+    for scope in ["sessions", "conferences"] {
+        let key = format!("{scope}:{room}:video_layouts");
+        let ids = resources.links.get(&key).cloned().unwrap_or_default();
+        if let Some(id) = ids.iter().rev().find(|id| {
+            resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() != Some("default"))
+        }) {
+            return resources.layouts.get(id).cloned();
+        }
+        if let Some(id) = ids.iter().rev().find(|id| {
             resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
-        })
-    });
-    resources.layouts.get(selected?).cloned()
+        }) {
+            return resources.layouts.get(id).cloned();
+        }
+    }
+    None
 }
 
 /// Проводит текущую «Общую» раскладку комнаты в медиа-движок. Вызывается
 /// после старта сессии и после каждого изменения раскладки, чтобы живой
 /// PATCH/attach/detach доезжал до MCU без перезапуска.
 pub(super) async fn push_layout_to_engine(state: &SharedState, room_id: RoomId) {
+    let room_lock = state
+        .api_v3
+        .layout_pushes
+        .lock()
+        .expect("layout_pushes poisoned")
+        .entry(room_id)
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _guard = room_lock.lock().await;
     let Some(layout) = current_layout_json(state, &room_id).await else {
         return;
     };
@@ -2133,6 +2144,37 @@ mod layout_selection_tests {
         }
         let layout = current_layout_json(&state, &room).await.expect("default layout is linked");
         assert_eq!(layout["id"], "shared");
+    }
+
+    /// Явная active-карта важнее порядка links: A/B/apply A даёт A.
+    #[tokio::test]
+    async fn current_layout_json_honors_explicit_active_over_link_order() {
+        let state: SharedState = Arc::new(AppState::new());
+        let room = RoomId::new();
+        {
+            let mut resources = state.api_v3.resources.lock().await;
+            resources.layouts.insert("a".into(), json!({"id":"a","payload":{"type":"individual"}}));
+            resources.layouts.insert("b".into(), json!({"id":"b","payload":{"type":"individual"}}));
+            resources.links.insert(format!("sessions:{room}:video_layouts"), vec!["a".into(), "b".into()]);
+            resources.active_layouts.insert(format!("sessions:{room}:video_layouts"), "a".into());
+        }
+        let layout = current_layout_json(&state, &room).await.expect("active layout");
+        assert_eq!(layout["id"], "a");
+    }
+
+    /// Conference active применяется к сессии, если у сессии нет своего выбора.
+    #[tokio::test]
+    async fn current_layout_json_falls_back_to_conference_active() {
+        let state: SharedState = Arc::new(AppState::new());
+        let room = RoomId::new();
+        {
+            let mut resources = state.api_v3.resources.lock().await;
+            resources.layouts.insert("conf".into(), json!({"id":"conf","payload":{"type":"individual"}}));
+            resources.links.insert(format!("conferences:{room}:video_layouts"), vec!["conf".into()]);
+            resources.active_layouts.insert(format!("conferences:{room}:video_layouts"), "conf".into());
+        }
+        let layout = current_layout_json(&state, &room).await.expect("conference active");
+        assert_eq!(layout["id"], "conf");
     }
 
     /// Без links раскладки нет — старт сессии не должен пытаться её применить.

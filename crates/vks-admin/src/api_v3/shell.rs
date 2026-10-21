@@ -799,29 +799,39 @@ pub async fn switch_video_layout_mode(
     }
 
     let mut resources = state.api_v3.resources.lock().await;
-    let previous = resources.clone();
     let Some(layout_id) = body.video_layout_id.clone() else {
         // UI всегда передаёт id; молчаливый fallback маскировал бы ошибку клиента.
         return super::error_json(422, "video_layout_id is required");
     };
-    let attached = ["sessions", "conferences"].iter().any(|scope| {
-        resources.links.get(&format!("{scope}:{}:video_layouts", room.id)).is_some_and(|ids| ids.contains(&layout_id))
-    });
-    if !attached {
+    let scope_key = format!("sessions:{}:video_layouts", room.id);
+    let layout_id = super::resources::resolve_layout_alias(&resources, &scope_key, &layout_id);
+    if !super::resources::layout_visible(&resources, &room.id.to_string(), &layout_id) {
         return super::error_json(404, "Layout is not attached to this session");
     }
-    let Some(record) = resources.layouts.get_mut(&layout_id) else {
+    let Some(source) = resources.layouts.get(&layout_id).cloned() else {
         return super::error_json(404, "Layout not found");
     };
-    if !record["payload"].is_object() {
+    if !source["payload"].is_object() {
         return super::error_json(422, "Layout payload is malformed");
     }
-    if let Some(payload) = record["payload"].as_object_mut() {
+    let previous = resources.clone();
+    let mut draft = source;
+    if let Some(payload) = draft["payload"].as_object_mut() {
         for (key, value) in &patch {
             payload.insert(key.clone(), value.clone());
         }
     }
-    let mut result = record.clone();
+    let owners = resources.links.values().filter(|ids| ids.iter().any(|value| value == &layout_id)).count();
+    let direct = resources.links.get(&scope_key).is_some_and(|ids| ids.iter().any(|value| value == &layout_id));
+    let target_id = if direct && owners <= 1 {
+        resources.layouts.insert(layout_id.clone(), draft.clone());
+        layout_id.clone()
+    } else {
+        super::resources::cow_replace(&mut resources, &scope_key, &layout_id, draft.clone())
+    };
+    // Переключение режима из редактора — это «Применить»: layout становится active.
+    super::resources::set_active(&mut resources, &scope_key, &target_id);
+    let mut result = resources.layouts.get(&target_id).cloned().unwrap_or(draft);
     if let Err(response) = super::resources::commit(&state, &mut resources, previous).await {
         return response;
     }

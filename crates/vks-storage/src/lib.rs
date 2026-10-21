@@ -11,6 +11,7 @@
 //! поэтому здесь свои типизированные строки ([`rows`]) и [`error::Error`].
 
 pub mod core_adapter;
+pub mod db_lock;
 pub mod dedup;
 pub mod error;
 pub mod memory;

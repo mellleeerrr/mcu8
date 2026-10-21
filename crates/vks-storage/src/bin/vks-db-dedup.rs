@@ -20,9 +20,15 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use vks_storage::dedup::{canonical_default_layout, dedup_document, CONFIGURATION_KEY};
 
 fn backup_path(db: &Path) -> std::path::PathBuf {
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let name = db.file_name().and_then(|n| n.to_str()).unwrap_or("vks_data.db");
-    db.with_file_name(format!("{name}.before-dedup-{ts}"))
+    let mut candidate = db.with_file_name(format!("{name}.before-dedup-{ts}"));
+    let mut suffix = 1u32;
+    while candidate.exists() {
+        candidate = db.with_file_name(format!("{name}.before-dedup-{ts}-{suffix}"));
+        suffix += 1;
+    }
+    candidate
 }
 
 /// Проверка ссылочной целостности после очистки (links → layouts/audiochannels).
@@ -68,15 +74,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("db not found: {db}").into());
     }
 
-    let backup = if apply { Some(backup_path(db_path)) } else { None };
-    if let Some(backup) = &backup {
-        std::fs::copy(db_path, backup)?;
-        println!("backup: {}", backup.display());
-    }
+    // Lock берём до чтения/backup: живой сервер держит тот же lock.
+    let _lock = if apply {
+        Some(
+            vks_storage::db_lock::DbLock::acquire(db_path)
+                .map_err(|e| format!("refusing --apply: {e}; stop the server or run against a copy"))?,
+        )
+    } else {
+        None
+    };
 
     let url = format!("sqlite://{}", db_path.display());
     let options = SqliteConnectOptions::from_str(&url)?.create_if_missing(false);
     let pool = SqlitePoolOptions::new().max_connections(1).connect_with(options).await?;
+
+    if apply {
+        let backup = backup_path(db_path);
+        let escaped = backup.display().to_string().replace('\'', "''");
+        sqlx::query(&format!("VACUUM INTO '{escaped}'")).execute(&pool).await?;
+        let backup_options = SqliteConnectOptions::from_str(&format!("sqlite://{}", backup.display()))?
+            .create_if_missing(false)
+            .read_only(true);
+        let backup_pool = SqlitePoolOptions::new().max_connections(1).connect_with(backup_options).await?;
+        let check: String = sqlx::query_scalar("PRAGMA quick_check").fetch_one(&backup_pool).await?;
+        if check != "ok" {
+            return Err(format!("backup quick_check failed: {check}").into());
+        }
+        println!("backup: {} (quick_check ok)", backup.display());
+    }
 
     let mut tx = pool.begin().await?;
     let stored: Option<String> =

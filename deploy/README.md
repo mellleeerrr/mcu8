@@ -129,3 +129,42 @@ is set in the unit because `/opt/vks` is read-only.
 - `systemd-analyze security vks-mcu-prod.service` (score should improve vs a
   plain unit).
 - Only one `vks-server` process: `pgrep -af vks-server`.
+
+## Database maintenance and dedup
+
+The server holds an advisory `flock` on `<database_url path>.lock` for its whole
+lifetime. A second server on the same SQLite file exits with code 78, and
+`vks-db-dedup --apply` refuses to run while the lock is held. This is deliberate:
+the running server keeps the PNM document in memory and would overwrite an
+offline edit on its next commit.
+
+Safe procedure:
+
+1. Stop the service (`sudo systemctl stop vks-mcu-prod`) or make a copy of the
+   DB and run the tool against the copy.
+2. Dry-run and inspect the JSON report:
+   `vks-db-dedup /var/lib/vks/vks_data.db`
+3. Apply on the stopped DB: `vks-db-dedup /var/lib/vks/vks_data.db --apply`.
+   Before `--apply` the tool takes the same lock, creates
+   `<db>.before-dedup-<nanos>` with `VACUUM INTO` and verifies it with
+   `PRAGMA quick_check`; the document update runs in one transaction.
+4. Start the service and run the `Verification` checks above.
+
+Dry-run is read-only and does not take the lock. The operation is idempotent:
+a second `--apply` reports zero removals/rewrites. The tool only removes
+byte-identical default layouts that are referenced, preserves the UI order of
+`links`, remaps `active_layouts`/`layout_aliases`, and never touches legacy
+manual-default layouts (different payload).
+
+### Upgrade order (active layouts)
+
+An older binary does not know `active_layouts` and would drop it on its next
+persist (the advisory lock does not help: old builds never took it). Upgrade in
+this order, never overlap the two versions on one DB:
+
+1. `sudo systemctl stop vks-mcu-prod` (or stop the user unit).
+2. Back up the SQLite file; run `vks-db-dedup <db>` to inspect, then
+   `vks-db-dedup <db> --apply` once.
+3. Install the new binary/config and `sudo systemctl start vks-mcu-prod`.
+4. Verify `/readyz`, then `vks-db-dedup <db>` again — it must report zero
+   removals/rewrites (idempotent).

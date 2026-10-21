@@ -342,6 +342,29 @@ pub fn dedup_document(document: &mut Value) -> DedupReport {
         }
         report.links_rewritten += counter;
 
+        // active_layouts и COW-алиасы обязаны пережить дедуп: иначе после
+        // перезапуска active укажет на удалённый дубль.
+        if let Some(resources) = document.get_mut("resources").and_then(Value::as_object_mut) {
+            if let Some(active) = resources.get_mut("active_layouts").and_then(Value::as_object_mut) {
+                for value in active.values_mut() {
+                    if let Some(id) = value.as_str() {
+                        if let Some(mapped) = layout_aliases.get(id) {
+                            *value = json!(mapped);
+                        }
+                    }
+                }
+            }
+            if let Some(aliases) = resources.get_mut("layout_aliases").and_then(Value::as_object_mut) {
+                for value in aliases.values_mut() {
+                    if let Some(id) = value.as_str() {
+                        if let Some(mapped) = layout_aliases.get(id) {
+                            *value = json!(mapped);
+                        }
+                    }
+                }
+            }
+        }
+
         // Ссылки вне links (links/история/настройки) — проверяем до удаления.
         let mut outside_refs: BTreeMap<String, usize> = BTreeMap::new();
         if let Some(resources) = document.get("resources").and_then(Value::as_object) {
@@ -443,12 +466,76 @@ pub fn dedup_document(document: &mut Value) -> DedupReport {
                 .count();
         }
     }
+    ensure_active_layouts(document);
+
     report.document_bytes_after = document.to_string().len();
     report
 }
 
+/// Идемпотентно выводит active_layouts из links, если поле отсутствует или
+/// указывает на удалённый/непривязанный layout. Порядок links не меняется.
+fn ensure_active_layouts(document: &mut Value) {
+    let Some(resources) = document.get_mut("resources").and_then(Value::as_object_mut) else { return };
+    let layouts: std::collections::BTreeSet<String> =
+        resources.get("layouts").and_then(Value::as_object).map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    let links = resources.get("links").and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut active: BTreeMap<String, String> = resources
+        .get("active_layouts")
+        .and_then(Value::as_object)
+        .map(|m| m.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect())
+        .unwrap_or_default();
+    for (key, ids) in &links {
+        if !key.ends_with(":video_layouts") {
+            continue;
+        }
+        let list: Vec<&str> = ids.as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+        if list.is_empty() {
+            active.remove(key);
+            continue;
+        }
+        if active.get(key).is_some_and(|id| list.contains(&id.as_str()) && layouts.contains(id)) {
+            continue;
+        }
+        // T01-effective: последняя non-default в links, иначе canonical/default.
+        // Иначе миграция потеряет выбранную individual у 21 scope.
+        let chosen = list
+            .iter()
+            .rev()
+            .find(|id| {
+                resources
+                    .get("layouts")
+                    .and_then(|l| l.get(**id))
+                    .is_some_and(|layout| layout["payload"]["type"].as_str() != Some("default"))
+            })
+            .or_else(|| {
+                list.iter()
+                    .find(|id| resources.get("layouts").and_then(|l| l.get(**id)).is_some_and(is_canonical_default))
+            })
+            .or_else(|| list.iter().rev().find(|id| layouts.contains(**id)))
+            .or_else(|| list.first());
+        if let Some(id) = chosen {
+            active.insert(key.clone(), (*id).to_string());
+        }
+    }
+    active.retain(|key, id| key.ends_with(":video_layouts") && links.contains_key(key) && layouts.contains(id));
+    if active.is_empty() {
+        resources.remove("active_layouts");
+    } else {
+        resources.insert("active_layouts".to_string(), serde_json::to_value(active).unwrap_or_else(|_| json!({})));
+    }
+}
+
+/// Каноническая «Общая»: auto/empty default (а не legacy manual-default).
+fn is_canonical_default(layout: &Value) -> bool {
+    let payload = &layout["payload"];
+    payload.get("type").and_then(Value::as_str) == Some("default")
+        && payload.get("mode").and_then(Value::as_str).unwrap_or("auto") == "auto"
+        && payload.get("slots").and_then(Value::as_array).is_none_or(Vec::is_empty)
+}
+
 /// Возвращает id канонической default-раскладки (для починки
-/// `server_settings.default_layout`): самый популярный среди ссылок default.
+/// `server_settings.default_layout`): canonical auto/empty приоритетнее
+/// legacy manual-default, затем самый популярный среди ссылок.
 #[must_use]
 pub fn canonical_default_layout(document: &Value) -> Option<String> {
     let resources = document.get("resources")?.as_object()?;
@@ -469,11 +556,9 @@ pub fn canonical_default_layout(document: &Value) -> Option<String> {
         })
         .collect();
     candidates.sort_by(|a, b| {
-        refcount
-            .get(b.0)
-            .copied()
-            .unwrap_or(0)
-            .cmp(&refcount.get(a.0).copied().unwrap_or(0))
+        is_canonical_default(b.1)
+            .cmp(&is_canonical_default(a.1))
+            .then(refcount.get(b.0).copied().unwrap_or(0).cmp(&refcount.get(a.0).copied().unwrap_or(0)))
             .then(
                 a.1.get("created_at")
                     .and_then(Value::as_u64)
@@ -557,6 +642,36 @@ mod tests {
         assert!(layouts.get("L-orphan").is_some(), "orphan не удаляем");
         let links = &doc["resources"]["links"];
         assert_eq!(links["sessions:room-a:video_layouts"], json!(["L-def-1", "L-ind-1"]));
+    }
+
+    #[test]
+    fn active_layouts_are_remapped_and_filled_idempotently() {
+        let mut doc = json!({
+            "version": 1,
+            "resources": {
+                "layouts": {
+                    "L-default": {"id":"L-default","payload":{"type":"default","mode":"auto","slots":[]}},
+                    "L-dup": {"id":"L-dup","payload":{"type":"default","mode":"auto","slots":[]}},
+                    "L-manual": {"id":"L-manual","payload":{"type":"individual","mode":"manual","slots":[]}}
+                },
+                "links": {
+                    "sessions:room-a:video_layouts": ["L-default","L-dup","L-manual"],
+                    "sessions:room-b:video_layouts": ["L-manual"]
+                },
+                "active_layouts": {
+                    "sessions:room-a:video_layouts": "L-dup"
+                }
+            }
+        });
+        let report = dedup_document(&mut doc);
+        assert_eq!(report.layouts_before, 3);
+        let active = &doc["resources"]["active_layouts"];
+        assert_eq!(active["sessions:room-a:video_layouts"], "L-default", "active перемаплен на canonical");
+        assert_eq!(active["sessions:room-b:video_layouts"], "L-manual", "active выведен из links");
+        let once = doc.to_string();
+        let second = dedup_document(&mut doc);
+        assert!(second.layout_aliases.is_empty());
+        assert_eq!(doc.to_string(), once, "повторный прогон байт-идентичен");
     }
 
     #[test]

@@ -91,6 +91,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_exit(e);
     }
 
+    // Один владелец SQLite-файла: CLI dedup берёт тот же lock, поэтому не может
+    // сделать backup/--apply, пока сервер держит состояние в памяти.
+    let _db_lock = match vks_storage::db_lock::sqlite_path_from_url(&config.database_url) {
+        Some(path) => match vks_storage::db_lock::DbLock::acquire(&path) {
+            Ok(lock) => Some(lock),
+            Err(e) => config_exit(format!("failed to acquire storage lock: {e}")),
+        },
+        None => None,
+    };
+
     info!(
         version = env!("CARGO_PKG_VERSION"),
         server_name = %config.server_name,

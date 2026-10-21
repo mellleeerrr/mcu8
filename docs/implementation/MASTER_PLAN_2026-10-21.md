@@ -100,6 +100,24 @@ T08, T09, T11b), затем полная матрица раскладок (T04b
 
 ## T02. Целостность БД и жизненный цикл раскладок (P0)
 
+**Статус:** 🟢 закрыт 2026-10-21, ревью 9.5/10 (`layout-ui`), 995 passed / 0 failed / 6 ignored.
+**Реализовано (отличия от исходного плана — осознанные):**
+- Явная `active_layouts: scope_key → layout_id` вместо «последний в links»: порядок
+  `links` остался UI-контрактом и не пересортировывается; active восстанавливается
+  из links при загрузке старого документа.
+- COW распространён на все мутаторы: `edit_linked`, `switch_video_layout_mode`,
+  abonent/contact attach/detach, `edit_global`; alias старого id резолвится на
+  write- и read-path, зеркало сессии обновляется при COW конференции, alias
+  очищается при detach.
+- `detach`/`remove_global`: scoped 404 для inherited/absent, 409 для default,
+  409 для shared (>1 scope) без мутаций; после удаления — canonical default + push.
+- `create` canonical default переиспользует существующую запись (два POST → один id).
+- Per-room сериализация push в движок; advisory lock на `<db>.lock` у сервера и
+  `vks-db-dedup --apply`; `VACUUM INTO` + `quick_check`; dedup remap active/aliases,
+  заполняет active для всех video-keys, предпочитает canonical auto/empty.
+- Тесты: 14 T02 API-сценариев, read-path/alias/mirror, dedup active/idempotent,
+  black-box отказ CLI при held lock.
+
 **Проблемы (подтверждены кодом).**
 1. COW (`resources.rs:989–1021`) клонирует и переключает ссылку **до**
    валидации body; при 422 в памяти остаётся «призрак», следующий commit его

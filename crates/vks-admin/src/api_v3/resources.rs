@@ -26,6 +26,15 @@ pub struct ResourceState {
     pub links: BTreeMap<String, Vec<String>>,
     pub schedules: BTreeMap<String, Value>,
     pub contacts: BTreeMap<String, Vec<Value>>,
+    /// Явно выбранная активная раскладка по scope-key
+    /// (`sessions:{room}:video_layouts` / `conferences:{room}:video_layouts`).
+    /// Порядок `links` остаётся UI-контрактом и не кодирует active.
+    #[serde(default)]
+    pub active_layouts: BTreeMap<String, String>,
+    /// Алиасы COW: `scope-key|old-id -> new-id`, чтобы UI, продолжающий
+    /// присылать старый id после клонирования, попадал в клон текущей комнаты.
+    #[serde(default)]
+    pub layout_aliases: BTreeMap<String, String>,
     /// Глобальная адресная книга (`/api/v3/call_strings`): сохранённые адреса
     /// переживают рестарт и участвуют в автодополнении «Добавить по адресу».
     #[serde(default, deserialize_with = "deserialize_addresses")]
@@ -150,19 +159,43 @@ fn attached(
     resource_id: &str,
 ) -> Option<Response> {
     let key = scoped_key(path, &room_id.to_string(), kind);
-    let mut attached = resources.links.get(&key).is_some_and(|ids| ids.iter().any(|id| id == resource_id));
-    if !attached && path.contains("/sessions/") {
-        // Живая сессия наследует ресурсы конференции, в том числе раскладки,
-        // созданные уже после старта. Без этого UI сессии видел только
-        // «Общую» и не мог применить новую раскладку к MCU.
-        let inherited = format!("conferences:{}:{kind}", room_id);
-        attached = resources.links.get(&inherited).is_some_and(|ids| ids.iter().any(|id| id == resource_id));
+    if kind == "video_layouts" {
+        // После COW UI может прислать старый id: alias ведёт в клон текущего scope.
+        let resolved = resolve_layout_alias(resources, &key, resource_id);
+        if layout_visible(resources, &room_id.to_string(), &resolved) {
+            return None;
+        }
+        return Some(error_json(404, "Resource is not attached to this conference or session"));
     }
+    let attached = resources.links.get(&key).is_some_and(|ids| ids.iter().any(|id| id == resource_id));
     if attached {
         None
     } else {
         Some(error_json(404, "Resource is not attached to this conference or session"))
     }
+}
+
+/// Разрешает старый id после COW для read-path (GET/PATCH/abonents/templates).
+pub(crate) fn resolve_read_layout_id(
+    resources: &ResourceState,
+    path: &str,
+    room_id: &vks_core::RoomId,
+    kind: &str,
+    resource_id: &str,
+) -> String {
+    if kind != "video_layouts" {
+        return resource_id.to_string();
+    }
+    let key = scoped_key(path, &room_id.to_string(), kind);
+    let resolved = resolve_layout_alias(resources, &key, resource_id);
+    if resolved != resource_id
+        && (!resources.layouts.contains_key(&resolved) || !layout_visible(resources, &room_id.to_string(), &resolved))
+    {
+        // Alias мог остаться после detach клона — не отдаём 404 на старый id,
+        // который всё ещё виден через conference-scope.
+        return resource_id.to_string();
+    }
+    resolved
 }
 
 fn now() -> u64 {
@@ -388,14 +421,185 @@ fn layout_contains_abonent(layout: &Value, abonent_id: &str) -> bool {
         .any(|slot| slot["abonent_id"].as_str() == Some(abonent_id))
 }
 
-/// «Общая» раскладка комнаты (fallback — первая привязанная).
+/// Канонический payload «Общей» раскладки: ровно то, что создаёт
+/// `normalize_resource` для `type=default`. Legacy `type=default` с ручными
+/// слотами/пресетом каноническим не считается и не переиспользуется.
+pub(crate) fn canonical_default_payload() -> Value {
+    json!({"mode":"auto", "preset":"preset_default_13", "type":"default", "slots":[],
+        "size":13, "autoscroll":0})
+}
+
+fn is_canonical_default(layout: &Value) -> bool {
+    layout["payload"] == canonical_default_payload()
+}
+
+pub(crate) fn resolve_layout_alias(resources: &ResourceState, scope_key: &str, id: &str) -> String {
+    let mut current = id.to_string();
+    for _ in 0..8 {
+        let alias_key = format!("{scope_key}|{current}");
+        let Some(next) = resources.layout_aliases.get(&alias_key) else { break };
+        if *next == current {
+            break;
+        }
+        current = next.clone();
+    }
+    current
+}
+
+fn scope_links(resources: &ResourceState, scope_key: &str, room_id: &str) -> Vec<String> {
+    let mut ids = resources.links.get(scope_key).cloned().unwrap_or_default();
+    if scope_key.starts_with("sessions:") {
+        let inherited = format!("conferences:{room_id}:video_layouts");
+        for id in resources.links.get(&inherited).cloned().unwrap_or_default() {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+/// Layout виден комнате: привязан к её scope напрямую или унаследован из
+/// конференции. Учитывает COW-алиасы текущего scope.
+pub(crate) fn layout_visible(resources: &ResourceState, room_id: &str, id: &str) -> bool {
+    for scope in ["sessions", "conferences"] {
+        let key = format!("{scope}:{room_id}:video_layouts");
+        let resolved = resolve_layout_alias(resources, &key, id);
+        if resources.links.get(&key).is_some_and(|ids| ids.iter().any(|value| value == id || value == &resolved)) {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn active_id_for(resources: &ResourceState, room_id: &str) -> Option<String> {
+    for scope in ["sessions", "conferences"] {
+        let key = format!("{scope}:{room_id}:video_layouts");
+        if let Some(id) = resources.active_layouts.get(&key) {
+            if resources.layouts.contains_key(id) && layout_visible(resources, room_id, id) {
+                return Some(id.clone());
+            }
+        }
+    }
+    None
+}
+
+fn fallback_layout_for_scope(resources: &ResourceState, scope_key: &str, room_id: &str) -> Option<String> {
+    let ids = scope_links(resources, scope_key, room_id);
+    if let Some(id) = ids.iter().find(|id| resources.layouts.get(*id).is_some_and(is_canonical_default)) {
+        return Some(id.clone());
+    }
+    if let Some(id) = ids.iter().rev().find(|id| {
+        resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
+    }) {
+        return Some(id.clone());
+    }
+    ids.last().cloned()
+}
+
+pub(crate) fn set_active(resources: &mut ResourceState, scope_key: &str, id: &str) {
+    resources.active_layouts.insert(scope_key.to_string(), id.to_string());
+}
+
+/// Вставляет draft как COW-клон и переключает ссылку текущего scope.
+/// Возвращает id клона.
+pub(crate) fn cow_replace(resources: &mut ResourceState, scope_key: &str, source_id: &str, mut draft: Value) -> String {
+    let new_id = Uuid::new_v4().to_string();
+    draft["id"] = json!(new_id);
+    draft["created_at"] = json!(now());
+    resources.layouts.insert(new_id.clone(), draft);
+    if let Some(ids) = resources.links.get_mut(scope_key) {
+        let mut replaced = false;
+        for id in ids.iter_mut() {
+            if *id == source_id {
+                *id = new_id.clone();
+                replaced = true;
+            }
+        }
+        if !replaced {
+            ids.push(new_id.clone());
+        }
+    } else {
+        resources.links.insert(scope_key.to_string(), vec![new_id.clone()]);
+    }
+    resources.layout_aliases.insert(format!("{scope_key}|{source_id}"), new_id.clone());
+    // COW на конференции при живой сессии: mirror-ссылка сессии должна
+    // перейти на клон, иначе сессия держит stale layout и в списке дубль.
+    let parts: Vec<&str> = scope_key.split(':').collect();
+    if parts.len() == 3 && parts[0] == "conferences" && parts[2] == "video_layouts" {
+        let mirror = format!("sessions:{}:video_layouts", parts[1]);
+        if let Some(mirror_ids) = resources.links.get_mut(&mirror) {
+            if mirror_ids.iter().any(|id| id == source_id) {
+                for id in mirror_ids.iter_mut() {
+                    if id == source_id {
+                        *id = new_id.clone();
+                    }
+                }
+                resources.layout_aliases.insert(format!("{mirror}|{source_id}"), new_id.clone());
+                if resources.active_layouts.get(&mirror).is_some_and(|id| id == source_id) {
+                    resources.active_layouts.insert(mirror, new_id.clone());
+                }
+            }
+        }
+    }
+    let active_was_source = resources.active_layouts.get(scope_key).is_some_and(|id| id == source_id);
+    if active_was_source || !resources.active_layouts.contains_key(scope_key) {
+        resources.active_layouts.insert(scope_key.to_string(), new_id.clone());
+    }
+    new_id
+}
+
+/// Гарантирует, что scope имеет каноническую «Общую» раскладку. Возвращает id.
+fn ensure_canonical_default(resources: &mut ResourceState, scope_key: &str, room_id: &str) -> Option<String> {
+    if let Some(id) = scope_links(resources, scope_key, room_id)
+        .into_iter()
+        .find(|id| resources.layouts.get(id).is_some_and(is_canonical_default))
+    {
+        if !resources.links.get(scope_key).is_some_and(|ids| ids.contains(&id)) {
+            resources.links.entry(scope_key.to_string()).or_default().push(id.clone());
+        }
+        return Some(id);
+    }
+    let id = resources
+        .layouts
+        .values()
+        .find(|layout| is_canonical_default(layout))
+        .and_then(|layout| layout["id"].as_str().map(str::to_string))
+        .unwrap_or_else(|| {
+            let record = normalize_resource("video_layouts", &json!({"payload":{"type":"default"}}), "system");
+            let id = record["id"].as_str().unwrap_or_default().to_string();
+            resources.layouts.insert(id.clone(), record);
+            id
+        });
+    resources.links.entry(scope_key.to_string()).or_default().push(id.clone());
+    Some(id)
+}
+
+/// «Общая» раскладка комнаты (canonical → legacy default → первый link).
 fn default_layout_id(resources: &ResourceState, room_id: &vks_core::RoomId) -> Option<String> {
     for scope in ["sessions", "conferences"] {
-        let Some(ids) = resources.links.get(&format!("{scope}:{room_id}:video_layouts")) else { continue };
-        let default = ids.iter().find(|id| {
+        let key = format!("{scope}:{room_id}:video_layouts");
+        if let Some(id) = resources
+            .links
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .find(|id| resources.layouts.get(*id).is_some_and(is_canonical_default))
+        {
+            return Some(id.clone());
+        }
+    }
+    for scope in ["sessions", "conferences"] {
+        let key = format!("{scope}:{room_id}:video_layouts");
+        if let Some(id) = resources.links.get(&key).into_iter().flatten().find(|id| {
             resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
-        });
-        if let Some(id) = default.or_else(|| ids.first()) {
+        }) {
+            return Some(id.clone());
+        }
+    }
+    for scope in ["sessions", "conferences"] {
+        let key = format!("{scope}:{room_id}:video_layouts");
+        if let Some(id) = resources.links.get(&key).and_then(|ids| ids.first()) {
             return Some(id.clone());
         }
     }
@@ -435,6 +639,7 @@ pub async fn layout_abonents(
     }
     let layout = {
         let resources = state.api_v3.resources.lock().await;
+        let resource_id = resolve_read_layout_id(&resources, uri.path(), &room.id, "video_layouts", &resource_id);
         if let Some(response) = attached(&resources, uri.path(), &room.id, "video_layouts", &resource_id) {
             return response;
         }
@@ -470,18 +675,21 @@ pub async fn attach_layout_abonent(
         return error_json(404, "Abonent is not connected to this session");
     };
     let mut resources = state.api_v3.resources.lock().await;
-    if let Some(response) = attached(&resources, uri.path(), &room.id, "video_layouts", &resource_id) {
-        return response;
+    let scope_key = scoped_key(uri.path(), &room.id.to_string(), "video_layouts");
+    let resource_id = resolve_layout_alias(&resources, &scope_key, &resource_id);
+    if !layout_visible(&resources, &room.id.to_string(), &resource_id) {
+        return error_json(404, "Resource is not attached to this conference or session");
     }
-    let previous = resources.clone();
-    let Some(layout) = resources.layouts.get_mut(&resource_id) else {
+    let Some(source) = resources.layouts.get(&resource_id).cloned() else {
         return error_json(404, "Resource not found");
     };
-    if !layout["payload"].is_object() {
+    if !source["payload"].is_object() {
         return error_json(422, "Layout payload is malformed");
     }
-    let limit = layout["payload"]["size"].as_u64().filter(|size| *size > 0).unwrap_or(64);
-    let Some(slots) = layout["payload"]["slots"].as_array_mut() else {
+    let previous = resources.clone();
+    let mut draft = source;
+    let limit = draft["payload"]["size"].as_u64().filter(|size| *size > 0).unwrap_or(64);
+    let Some(slots) = draft["payload"]["slots"].as_array_mut() else {
         return error_json(409, "Layout has no video windows");
     };
     if slots.iter().any(|slot| !slot.is_object()) {
@@ -529,13 +737,21 @@ pub async fn attach_layout_abonent(
             }));
         }
     }
+    let owners = resources.links.values().filter(|ids| ids.iter().any(|value| value == &resource_id)).count();
+    let direct = resources.links.get(&scope_key).is_some_and(|ids| ids.iter().any(|value| value == &resource_id));
+    let target_id = if direct && owners <= 1 {
+        resources.layouts.insert(resource_id.clone(), draft);
+        resource_id.clone()
+    } else {
+        cow_replace(&mut resources, &scope_key, &resource_id, draft)
+    };
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
     }
     // Живое изменение раскладки должно доехать до MCU без перезапуска сессии.
     drop(resources);
     super::sessions::push_layout_to_engine(&state, room.id).await;
-    Json(json!({ "status": "ok" })).into_response()
+    Json(json!({ "status": "ok", "layout_id": target_id })).into_response()
 }
 
 /// `DELETE …/video_layouts/{resource_id}/abonents/{abonent_id}` — убрать из раскладки.
@@ -552,17 +768,20 @@ pub async fn detach_layout_abonent(
         return response;
     }
     let mut resources = state.api_v3.resources.lock().await;
-    if let Some(response) = attached(&resources, uri.path(), &room.id, "video_layouts", &resource_id) {
-        return response;
+    let scope_key = scoped_key(uri.path(), &room.id.to_string(), "video_layouts");
+    let resource_id = resolve_layout_alias(&resources, &scope_key, &resource_id);
+    if !layout_visible(&resources, &room.id.to_string(), &resource_id) {
+        return error_json(404, "Resource is not attached to this conference or session");
     }
-    let previous = resources.clone();
-    let Some(layout) = resources.layouts.get_mut(&resource_id) else {
+    let Some(source) = resources.layouts.get(&resource_id).cloned() else {
         return error_json(404, "Resource not found");
     };
-    if !layout["payload"].is_object() {
+    if !source["payload"].is_object() {
         return error_json(422, "Layout payload is malformed");
     }
-    let Some(slots) = layout["payload"]["slots"].as_array_mut() else {
+    let previous = resources.clone();
+    let mut draft = source;
+    let Some(slots) = draft["payload"]["slots"].as_array_mut() else {
         return error_json(409, "Layout has no video windows");
     };
     // Окно не удаляем: размер/геометрия сетки стабильны, освободившееся окно — AUTO.
@@ -572,13 +791,27 @@ pub async fn detach_layout_abonent(
         let position = slot["position"].clone();
         *slot = json!({"position": position, "role": "AUTO"});
     }
+    let owners = resources.links.values().filter(|ids| ids.iter().any(|value| value == &resource_id)).count();
+    let direct = resources.links.get(&scope_key).is_some_and(|ids| ids.iter().any(|value| value == &resource_id));
+    let target_id = if direct && owners <= 1 {
+        resources.layouts.insert(resource_id.clone(), draft);
+        resource_id.clone()
+    } else {
+        cow_replace(&mut resources, &scope_key, &resource_id, draft)
+    };
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
     }
     // Живое изменение раскладки должно доехать до MCU без перезапуска сессии.
     drop(resources);
     super::sessions::push_layout_to_engine(&state, room.id).await;
-    (StatusCode::NO_CONTENT).into_response()
+    {
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        if let Ok(value) = axum::http::HeaderValue::from_str(&target_id) {
+            response.headers_mut().insert("x-vks-layout-id", value);
+        }
+        response
+    }
 }
 
 /// Миграция сохранённых записей: ранние версии держали в раскладке объект
@@ -586,6 +819,25 @@ pub async fn detach_layout_abonent(
 /// и висячие ссылки. Иначе `my → Mee` падает на `.map`, а мутации — на IndexMut.
 /// Непривязанные раскладки НЕ удаляются: UI создаёт их до attach, рестарт между
 /// этими шагами не должен терять данные.
+/// T01-семантика для документа без active: последняя non-default раскладка,
+/// иначе canonical/default. Используется при миграции старой БД.
+fn legacy_effective_layout(resources: &ResourceState, key: &str) -> Option<String> {
+    let ids = resources.links.get(key)?;
+    ids.iter()
+        .rev()
+        .find(|id| {
+            resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() != Some("default"))
+        })
+        .or_else(|| ids.iter().find(|id| resources.layouts.get(*id).is_some_and(is_canonical_default)))
+        .or_else(|| {
+            ids.iter().rev().find(|id| {
+                resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
+            })
+        })
+        .or_else(|| ids.first())
+        .cloned()
+}
+
 pub fn normalize_loaded(resources: &mut ResourceState) {
     resources.layouts.retain(|_, layout| {
         if !layout.is_object() {
@@ -620,6 +872,24 @@ pub fn normalize_loaded(resources: &mut ResourceState) {
         ids.retain(|id| resources.layouts.contains_key(id) || resources.audiochannels.contains_key(id));
         !ids.is_empty()
     });
+    let layout_ids: std::collections::HashSet<String> = resources.layouts.keys().cloned().collect();
+    resources.active_layouts.retain(|key, id| layout_ids.contains(id) && resources.links.contains_key(key));
+    resources.layout_aliases.retain(|key, target| {
+        layout_ids.contains(target) && key.split('|').next().is_some_and(|scope| resources.links.contains_key(scope))
+    });
+    // Для существующего документа выводим active из links (не пишем до первого commit).
+    let keys: Vec<String> = resources.links.keys().filter(|key| key.ends_with(":video_layouts")).cloned().collect();
+    for key in keys {
+        let valid = resources.active_layouts.get(&key).is_some_and(|active| {
+            resources.links.get(&key).is_some_and(|ids| ids.contains(active)) && layout_ids.contains(active)
+        });
+        if valid {
+            continue;
+        }
+        if let Some(fallback) = legacy_effective_layout(resources, &key) {
+            resources.active_layouts.insert(key, fallback);
+        }
+    }
 }
 
 /// Удаление комнаты: убираются только её scoped-ссылки и ставшие недостижимыми
@@ -632,7 +902,14 @@ pub async fn purge_room_resources(state: &SharedState, room_id: &str) {
     let removed: Vec<String> =
         resources.links.iter().filter(|(key, _)| key.contains(&marker)).flat_map(|(_, ids)| ids.clone()).collect();
     resources.links.retain(|key, _| !key.contains(&marker));
+    resources.active_layouts.retain(|key, _| !key.contains(&marker));
+    resources.layout_aliases.retain(|key, _| !key.contains(&marker));
     resources.contacts.remove(room_id);
+    if let Ok(room) = room_id.parse::<vks_core::RoomId>() {
+        if let Ok(mut pushes) = state.api_v3.layout_pushes.lock() {
+            pushes.remove(&room);
+        }
+    }
     let referenced: std::collections::HashSet<String> = resources.links.values().flatten().cloned().collect();
     for id in removed {
         if !referenced.contains(&id) {
@@ -652,6 +929,14 @@ pub fn inherit_and_ensure_default_layout(resources: &mut ResourceState, room_id:
     let inherit_key = format!("conferences:{room_id}:video_layouts");
     let key = format!("sessions:{room_id}:video_layouts");
     let conference_ids = resources.links.get(&inherit_key).cloned().unwrap_or_default();
+    // T01-гарантия: выбранная на конференции раскладка должна доехать до
+    // первого моста сессии. Session-active имеет приоритет, но при его
+    // отсутствии наследуем active конференции, а не canonical default.
+    let conference_active = resources
+        .active_layouts
+        .get(&inherit_key)
+        .cloned()
+        .filter(|id| conference_ids.contains(id) && resources.layouts.contains_key(id));
     let session_ids = resources.links.entry(key.clone()).or_default();
     for id in conference_ids {
         // Рестарт конференции не должен терять индивидуальные раскладки прошлого запуска.
@@ -659,12 +944,25 @@ pub fn inherit_and_ensure_default_layout(resources: &mut ResourceState, room_id:
             session_ids.push(id);
         }
     }
-    let has_default = resources.links.get(&key).is_some_and(|ids| {
-        ids.iter().any(|id| {
-            resources.layouts.get(id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
-        })
-    });
+    let has_default = resources
+        .links
+        .get(&key)
+        .is_some_and(|ids| ids.iter().any(|id| resources.layouts.get(id).is_some_and(is_canonical_default)));
     if has_default {
+        let canonical = resources.links[&key]
+            .iter()
+            .find(|id| resources.layouts.get(*id).is_some_and(is_canonical_default))
+            .cloned();
+        if let Some(id) = canonical {
+            let valid = resources.active_layouts.get(&key).is_some_and(|active| {
+                resources.layouts.contains_key(active)
+                    && resources.links.get(&key).is_some_and(|ids| ids.contains(active))
+            });
+            if !valid {
+                let fallback = conference_active.clone().unwrap_or(id);
+                set_active(resources, &key, &fallback);
+            }
+        }
         return;
     }
     let record = normalize_resource("video_layouts", &json!({"payload":{"type":"default"}}), creator);
@@ -685,7 +983,15 @@ pub fn inherit_and_ensure_default_layout(resources: &mut ResourceState, room_id:
             id
         }
     };
-    resources.links.entry(key).or_default().push(id);
+    resources.links.entry(key.clone()).or_default().push(id.clone());
+    let valid = resources
+        .active_layouts
+        .get(&key)
+        .is_some_and(|active| resources.links.get(&key).is_some_and(|ids| ids.contains(active)));
+    if !valid {
+        let fallback = conference_active.unwrap_or(id);
+        set_active(resources, &key, &fallback);
+    }
 }
 
 fn validate_layout_payload(payload: &Value) -> Result<(), String> {
@@ -790,6 +1096,16 @@ pub async fn create(
     let record = normalize_resource(kind, &body, &auth.subject);
     let id = record["id"].as_str().unwrap().to_string();
     let mut resources = state.api_v3.resources.lock().await;
+    // Каноническая «Общая» — одна запись на документ. UI создаёт её перед
+    // attach и после рестарта; без reuse БД плодит default-раскладки.
+    if kind == "video_layouts"
+        && is_canonical_default(&record)
+        && record["display_name"].as_str().unwrap_or_default().is_empty()
+    {
+        if let Some(existing) = resources.layouts.values().find(|layout| is_canonical_default(layout)).cloned() {
+            return (StatusCode::CREATED, Json(json!({singular(kind):existing}))).into_response();
+        }
+    }
     let previous = resources.clone();
     collection_mut(&mut resources, kind).insert(id, record.clone());
     if let Err(response) = commit(&state, &mut resources, previous).await {
@@ -855,21 +1171,53 @@ pub async fn edit_global(
     }
     let kind = kind(uri.path());
     let mut resources = state.api_v3.resources.lock().await;
+    let refs: Vec<String> = resources
+        .links
+        .iter()
+        .filter(|(_, ids)| ids.iter().any(|value| value == &id))
+        .map(|(key, _)| key.clone())
+        .collect();
+    if kind == "video_layouts" && refs.len() > 1 {
+        return error_json(409, "Layout is shared; edit it through a conference/session to copy-on-write");
+    }
     let previous = resources.clone();
-    let Some(record) = collection_mut(&mut resources, kind).get_mut(&id) else {
+    let Some(source) = collection(&resources, kind).get(&id).cloned() else {
         return error_json(404, "Resource not found");
     };
-    if let Err(message) = update_resource(record, &body) {
+    let mut draft = source;
+    if let Err(message) = update_resource(&mut draft, &body) {
         return error_json(422, &message);
     }
     if kind == "video_layouts" {
-        sanitize_layout_record(record);
+        sanitize_layout_record(&mut draft);
     }
-    let result = record.clone();
+    collection_mut(&mut resources, kind).insert(id.clone(), draft.clone());
+    let mut rooms = Vec::new();
+    for key in &refs {
+        if !key.starts_with("conferences:") && !key.starts_with("sessions:") {
+            continue;
+        }
+        let room = key.split(':').nth(1).unwrap_or_default().to_string();
+        if kind == "video_layouts" {
+            let active = resources.active_layouts.get(key).cloned();
+            if active.is_none() {
+                set_active(&mut resources, key, &id);
+            }
+        }
+        rooms.push(room);
+    }
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
     }
-    Json(json!({singular(kind):result})).into_response()
+    drop(resources);
+    if kind == "video_layouts" {
+        for room in rooms {
+            if let Ok(room) = room.parse::<vks_core::RoomId>() {
+                super::sessions::push_layout_to_engine(&state, room).await;
+            }
+        }
+    }
+    Json(json!({singular(kind):draft})).into_response()
 }
 
 pub async fn remove_global(
@@ -883,15 +1231,59 @@ pub async fn remove_global(
     }
     let kind = kind(uri.path());
     let mut resources = state.api_v3.resources.lock().await;
+    let refs: Vec<String> = resources
+        .links
+        .iter()
+        .filter(|(_, ids)| ids.iter().any(|value| value == &id))
+        .map(|(key, _)| key.clone())
+        .collect();
+    if kind == "video_layouts" && refs.len() > 1 {
+        return error_json(409, "Layout is attached to multiple rooms; detach it from each room first");
+    }
+    let is_default =
+        resources.layouts.get(&id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"));
+    if kind == "video_layouts" && is_default && !refs.is_empty() {
+        return error_json(409, "The default layout cannot be deleted while it is attached");
+    }
     let previous = resources.clone();
     if collection_mut(&mut resources, kind).remove(&id).is_none() {
         return error_json(404, "Resource not found");
     }
-    for ids in resources.links.values_mut() {
-        ids.retain(|value| value != &id);
+    for key in &refs {
+        if let Some(ids) = resources.links.get_mut(key) {
+            ids.retain(|value| value != &id);
+        }
     }
+    for key in &refs {
+        if !key.starts_with("conferences:") && !key.starts_with("sessions:") {
+            continue;
+        }
+        if kind != "video_layouts" {
+            continue;
+        }
+        let room = key.split(':').nth(1).unwrap_or_default().to_string();
+        let active = resources.active_layouts.get(key).cloned();
+        if active.as_deref() == Some(id.as_str()) || active.is_none() {
+            resources.active_layouts.remove(key);
+            let fallback = fallback_layout_for_scope(&resources, key, &room)
+                .or_else(|| ensure_canonical_default(&mut resources, key, &room));
+            if let Some(fallback) = fallback {
+                resources.active_layouts.insert(key.clone(), fallback);
+            }
+        }
+    }
+    resources.layout_aliases.retain(|_, target| target != &id);
+    let rooms: Vec<String> = refs.iter().filter_map(|key| key.split(':').nth(1).map(str::to_string)).collect();
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
+    }
+    drop(resources);
+    if kind == "video_layouts" {
+        for room in rooms {
+            if let Ok(room) = room.parse::<vks_core::RoomId>() {
+                super::sessions::push_layout_to_engine(&state, room).await;
+            }
+        }
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -919,7 +1311,12 @@ pub async fn list_linked(
     if uri.path().contains("/sessions/") {
         let inherited = format!("conferences:{}:{kind}", room.id);
         for id in resources.links.get(&inherited).cloned().unwrap_or_default() {
-            if !ids.contains(&id) {
+            // Если в session-scope уже есть COW-клон, оригинал из конференции
+            // не показываем: UI не должен видеть две строки одной раскладки.
+            let resolved =
+                if kind == "video_layouts" { resolve_layout_alias(&resources, &key, &id) } else { id.clone() };
+            let aliased = kind == "video_layouts" && resolved != id && ids.contains(&resolved);
+            if !aliased && !ids.contains(&id) {
                 ids.push(id);
             }
         }
@@ -951,6 +1348,7 @@ pub async fn get_linked(
     }
     let kind = kind(uri.path());
     let resources = state.api_v3.resources.lock().await;
+    let resource_id = resolve_read_layout_id(&resources, uri.path(), &room.id, kind, &resource_id);
     if let Some(response) = attached(&resources, uri.path(), &room.id, kind, &resource_id) {
         return response;
     }
@@ -982,54 +1380,47 @@ pub async fn edit_linked(
     }
     let kind = kind(uri.path());
     let mut resources = state.api_v3.resources.lock().await;
-    if let Some(response) = attached(&resources, uri.path(), &room.id, kind, &resource_id) {
+    let scope_key = scoped_key(uri.path(), &room.id.to_string(), kind);
+    let resource_id = resolve_layout_alias(&resources, &scope_key, &resource_id);
+    if kind == "video_layouts" {
+        if !layout_visible(&resources, &room.id.to_string(), &resource_id) {
+            return error_json(404, "Resource is not attached to this conference or session");
+        }
+    } else if let Some(response) = attached(&resources, uri.path(), &room.id, kind, &resource_id) {
         return response;
     }
     let previous = resources.clone();
-    // Copy-on-write: одна каноническая «Общая» раскладка теперь может быть
-    // привязана к нескольким комнатам/сессиям. Правка из одной комнаты не
-    // должна менять раскладку всех остальных, поэтому при нескольких ссылках
-    // клонируем запись и переключаем ссылку текущего scope на клон.
-    let mut target_id = resource_id.clone();
-    if kind == "video_layouts" {
-        let scope_key = scoped_key(uri.path(), &room.id.to_string(), kind);
-        let refs = resources.links.values().filter(|ids| ids.iter().any(|id| id == &resource_id)).count();
-        if refs > 1 {
-            let Some(mut clone) = resources.layouts.get(&resource_id).cloned() else {
-                return error_json(404, "Resource not found");
-            };
-            let new_id = Uuid::new_v4().to_string();
-            clone["id"] = json!(new_id);
-            clone["created_at"] = json!(crate::state::now_unix_ms() / 1000);
-            resources.layouts.insert(new_id.clone(), clone);
-            if let Some(ids) = resources.links.get_mut(&scope_key) {
-                for id in ids.iter_mut() {
-                    if *id == resource_id {
-                        *id = new_id.clone();
-                    }
-                }
-            } else {
-                resources.links.insert(scope_key, vec![new_id.clone()]);
-            }
-            target_id = new_id;
-        }
-    }
-    let Some(record) = collection_mut(&mut resources, kind).get_mut(&target_id) else {
+    let Some(source) = collection(&resources, kind).get(&resource_id).cloned() else {
         return error_json(404, "Resource not found");
     };
-    if let Err(message) = update_resource(record, &body) {
+    // Валидация — на draft-копии, до вставки клона/переключения ссылок.
+    let mut draft = source.clone();
+    if let Err(message) = update_resource(&mut draft, &body) {
         return error_json(422, &message);
     }
     if kind == "video_layouts" {
-        sanitize_layout_record(record);
+        sanitize_layout_record(&mut draft);
     }
-    let result = record.clone();
+    let target_id = if kind == "video_layouts" {
+        let owners = resources.links.values().filter(|ids| ids.iter().any(|value| value == &resource_id)).count();
+        let direct = resources.links.get(&scope_key).is_some_and(|ids| ids.iter().any(|value| value == &resource_id));
+        if direct && owners <= 1 {
+            resources.layouts.insert(resource_id.clone(), draft.clone());
+            resource_id.clone()
+        } else {
+            cow_replace(&mut resources, &scope_key, &resource_id, draft.clone())
+        }
+    } else {
+        collection_mut(&mut resources, kind).insert(resource_id.clone(), draft.clone());
+        resource_id.clone()
+    };
+    let result =
+        resources.layouts.get(&target_id).or_else(|| resources.audiochannels.get(&target_id)).cloned().unwrap_or(draft);
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
     }
     drop(resources);
     if kind == "video_layouts" {
-        // Живой PATCH раскладки должен сразу перестроить композит.
         super::sessions::push_layout_to_engine(&state, room.id).await;
     }
     Json(json!({singular(kind):result})).into_response()
@@ -1071,8 +1462,9 @@ pub async fn attach_layout_contact(
         return response;
     }
     let mut resources = state.api_v3.resources.lock().await;
-    let key = format!("conferences:{}:video_layouts", room.id);
-    if !resources.links.get(&key).is_some_and(|ids| ids.contains(&layout_id)) {
+    let scope_key = format!("conferences:{}:video_layouts", room.id);
+    let layout_id = resolve_layout_alias(&resources, &scope_key, &layout_id);
+    if !layout_visible(&resources, &room.id.to_string(), &layout_id) {
         return error_json(404, "Layout is not attached to this conference");
     }
     let Some(contact) = resources
@@ -1085,23 +1477,38 @@ pub async fn attach_layout_contact(
     else {
         return error_json(404, "Contact does not belong to this conference");
     };
-    let previous = resources.clone();
-    let Some(layout) = resources.layouts.get_mut(&layout_id) else {
+    let Some(source) = resources.layouts.get(&layout_id).cloned() else {
         return error_json(404, "Layout not found");
     };
-    let mut contacts = layout["contacts"]["contacts"].as_array().cloned().unwrap_or_default();
+    let previous = resources.clone();
+    let mut draft = source;
+    let mut contacts = draft["contacts"]["contacts"].as_array().cloned().unwrap_or_default();
     if !contacts.iter().any(|contact| contact["contact_id"].as_str() == Some(&contact_id)) {
         contacts.push(json!({"id":contact_id,"contact_id":contact_id,"display_name":contact["display_name"],
             "contact_type":contact["contact_type"],"type":contact["contact_type"]}));
     }
-    layout["contacts"] = json!({"count":contacts.len(),"contacts":contacts});
+    draft["contacts"] = json!({"count":contacts.len(),"contacts":contacts});
+    let owners = resources.links.values().filter(|ids| ids.iter().any(|value| value == &layout_id)).count();
+    let direct = resources.links.get(&scope_key).is_some_and(|ids| ids.iter().any(|value| value == &layout_id));
+    let target_id = if direct && owners <= 1 {
+        resources.layouts.insert(layout_id.clone(), draft);
+        layout_id.clone()
+    } else {
+        cow_replace(&mut resources, &scope_key, &layout_id, draft)
+    };
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
     }
     // Живое изменение раскладки должно доехать до MCU без перезапуска сессии.
     drop(resources);
     super::sessions::push_layout_to_engine(&state, room.id).await;
-    StatusCode::NO_CONTENT.into_response()
+    {
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        if let Ok(value) = axum::http::HeaderValue::from_str(&target_id) {
+            response.headers_mut().insert("x-vks-layout-id", value);
+        }
+        response
+    }
 }
 
 pub async fn detach_layout_contact(
@@ -1116,24 +1523,40 @@ pub async fn detach_layout_contact(
         return response;
     }
     let mut resources = state.api_v3.resources.lock().await;
-    let key = format!("conferences:{}:video_layouts", room.id);
-    if !resources.links.get(&key).is_some_and(|ids| ids.contains(&layout_id)) {
+    let scope_key = format!("conferences:{}:video_layouts", room.id);
+    let layout_id = resolve_layout_alias(&resources, &scope_key, &layout_id);
+    if !layout_visible(&resources, &room.id.to_string(), &layout_id) {
         return error_json(404, "Layout is not attached to this conference");
     }
-    let previous = resources.clone();
-    let Some(layout) = resources.layouts.get_mut(&layout_id) else {
+    let Some(source) = resources.layouts.get(&layout_id).cloned() else {
         return error_json(404, "Layout not found");
     };
-    let mut contacts = layout["contacts"]["contacts"].as_array().cloned().unwrap_or_default();
+    let previous = resources.clone();
+    let mut draft = source;
+    let mut contacts = draft["contacts"]["contacts"].as_array().cloned().unwrap_or_default();
     contacts.retain(|contact| contact["contact_id"].as_str() != Some(&contact_id));
-    layout["contacts"] = json!({"count":contacts.len(),"contacts":contacts});
+    draft["contacts"] = json!({"count":contacts.len(),"contacts":contacts});
+    let owners = resources.links.values().filter(|ids| ids.iter().any(|value| value == &layout_id)).count();
+    let direct = resources.links.get(&scope_key).is_some_and(|ids| ids.iter().any(|value| value == &layout_id));
+    let target_id = if direct && owners <= 1 {
+        resources.layouts.insert(layout_id.clone(), draft);
+        layout_id.clone()
+    } else {
+        cow_replace(&mut resources, &scope_key, &layout_id, draft)
+    };
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
     }
     // Живое изменение раскладки должно доехать до MCU без перезапуска сессии.
     drop(resources);
     super::sessions::push_layout_to_engine(&state, room.id).await;
-    StatusCode::NO_CONTENT.into_response()
+    {
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        if let Ok(value) = axum::http::HeaderValue::from_str(&target_id) {
+            response.headers_mut().insert("x-vks-layout-id", value);
+        }
+        response
+    }
 }
 
 pub async fn attach(
@@ -1151,19 +1574,27 @@ pub async fn attach(
     let kind = kind(uri.path());
     let mut resources = state.api_v3.resources.lock().await;
     let previous = resources.clone();
+    let scope_key = scoped_key(uri.path(), &room.id.to_string(), kind);
+    let resource_id = resolve_layout_alias(&resources, &scope_key, &resource_id);
     if !collection(&resources, kind).contains_key(&resource_id) {
         return error_json(404, "Resource not found");
     }
-    let list = resources.links.entry(scoped_key(uri.path(), &room.id.to_string(), kind)).or_default();
-    if !list.contains(&resource_id) {
-        list.push(resource_id);
+    if kind == "video_layouts" {
+        let list = resources.links.entry(scope_key.clone()).or_default();
+        if !list.contains(&resource_id) {
+            list.push(resource_id.clone());
+        }
+        // «Применить» = сделать активной; порядок links не меняем.
+        set_active(&mut resources, &scope_key, &resource_id);
+    } else {
+        let list = resources.links.entry(scope_key).or_default();
+        if !list.contains(&resource_id) {
+            list.push(resource_id);
+        }
     }
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
     }
-    // «Применить» в UI — это POST attach: выбранная раскладка должна сразу
-    // доехать до MCU. Раньше движок получал её только через PATCH/abonent-
-    // мутации, поэтому переключение раскладки не меняло композит.
     if kind == "video_layouts" {
         drop(resources);
         super::sessions::push_layout_to_engine(&state, room.id).await;
@@ -1183,19 +1614,48 @@ pub async fn detach(
     if let Err(response) = check_permission(&auth, Some(&room.id.to_string())) {
         return response;
     }
+    let kind = kind(uri.path());
+    let scope_key = scoped_key(uri.path(), &room.id.to_string(), kind);
     let mut resources = state.api_v3.resources.lock().await;
+    let resource_id = resolve_layout_alias(&resources, &scope_key, &resource_id);
+    let direct = resources.links.get(&scope_key).is_some_and(|ids| ids.iter().any(|value| value == &resource_id));
+    if !direct {
+        return error_json(404, "Resource is not directly attached to this scope");
+    }
+    if kind == "video_layouts" {
+        let Some(layout) = resources.layouts.get(&resource_id) else {
+            return error_json(404, "Resource not found");
+        };
+        if layout["payload"]["type"].as_str() == Some("default") {
+            return error_json(409, "The default layout cannot be detached");
+        }
+    }
     let previous = resources.clone();
-    resources
-        .links
-        .entry(scoped_key(uri.path(), &room.id.to_string(), kind(uri.path())))
-        .or_default()
-        .retain(|value| value != &resource_id);
+    if let Some(ids) = resources.links.get_mut(&scope_key) {
+        ids.retain(|value| value != &resource_id);
+    }
+    // Alias на удалённый клон больше не должен вести в пустоту — только
+    // в текущем scope: alias конференции может вести на тот же клон.
+    let alias_prefix = format!("{scope_key}|");
+    resources.layout_aliases.retain(|key, target| !(key.starts_with(&alias_prefix) && target == &resource_id));
+    if kind == "video_layouts" {
+        let valid = resources.active_layouts.get(&scope_key).is_some_and(|active| {
+            active != &resource_id && resources.links.get(&scope_key).is_some_and(|ids| ids.contains(active))
+        });
+        let active = if valid {
+            None
+        } else {
+            let fallback = fallback_layout_for_scope(&resources, &scope_key, &room.id.to_string());
+            fallback.or_else(|| ensure_canonical_default(&mut resources, &scope_key, &room.id.to_string()))
+        };
+        if let Some(active) = active {
+            set_active(&mut resources, &scope_key, &active);
+        }
+    }
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
     }
-    // Снятие раскладки возвращает комнату к «Общей» — движок тоже должен
-    // увидеть новый активный layout, иначе на экране остаётся отвязанная сетка.
-    if kind(uri.path()) == "video_layouts" {
+    if kind == "video_layouts" {
         drop(resources);
         super::sessions::push_layout_to_engine(&state, room.id).await;
     }
@@ -1529,12 +1989,14 @@ pub async fn templates(
     let resources = state.api_v3.resources.lock().await;
     let key = scoped_key(uri.path(), &room.id.to_string(), "video_layouts");
     let layout = match params.get("video_layout_id") {
-        Some(requested) => resources
-            .links
-            .get(&key)
-            .filter(|ids| ids.contains(requested))
-            .and_then(|_| resources.layouts.get(requested))
-            .cloned(),
+        Some(requested) => {
+            let requested = resolve_layout_alias(&resources, &key, requested);
+            if !layout_visible(&resources, &room.id.to_string(), &requested) {
+                None
+            } else {
+                resources.layouts.get(&requested).cloned()
+            }
+        }
         None => {
             let attached = resources.links.get(&key).cloned().unwrap_or_default();
             // Если конкретная раскладка не запрошена, показываем последнюю
