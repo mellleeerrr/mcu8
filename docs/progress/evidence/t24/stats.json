@@ -1,8 +1,8 @@
 {
  "memory": {
-  "free": 47171,
+  "free": 46979,
   "total": 57858,
-  "used": 10687
+  "used": 10879
  },
  "cpu": {
   "count": 36,
@@ -108,9 +108,9 @@
     "user_mode": 0
    },
    {
-    "idle": 100,
+    "idle": 92.3,
     "kernel_mode": 0,
-    "user_mode": 0
+    "user_mode": 7.7
    },
    {
     "idle": 100,
@@ -199,10 +199,10 @@
     "used": 3
    },
    {
-    "free": 40867,
+    "free": 40038,
     "name": "/",
     "total": 120376,
-    "used": 73349
+    "used": 74177
    },
    {
     "free": 28879,
@@ -217,10 +217,10 @@
     "used": 0
    },
    {
-    "free": 27381,
+    "free": 27380,
     "name": "/tmp",
     "total": 28929,
-    "used": 1547
+    "used": 1549
    },
    {
     "free": 1,

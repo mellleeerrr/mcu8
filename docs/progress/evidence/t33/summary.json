@@ -1,0 +1,139 @@
+{
+ "task": "T3.3",
+ "ok": true,
+ "build": {
+  "git_head": "657f7ae448996141ceae8b4350042e21190b72f2",
+  "git_head_ct": 1792550589,
+  "git_dirty": false,
+  "binary_sha256": "721eac186f87a162457da95e243603d464977eef538d85c4cc93d5ce51733fbb",
+  "binary_mtime": 1792550655,
+  "server_pid": 893828
+ },
+ "acceptance": {
+  "api_parity": true,
+  "page_walk": true,
+  "calibration_hidden": true,
+  "clean_build": true,
+  "binary_built_after_head": true
+ },
+ "pages": [
+  "01-root.png",
+  "02-conferences.png",
+  "03-directory.png",
+  "04-history.png",
+  "05-statistics.png",
+  "06-calls.png"
+ ],
+ "totals": {
+  "api_parity": {
+   "/healthz": {
+    "status": 200,
+    "ok": true
+   },
+   "/readyz": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/system/about": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/ui/system/status": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/system/status/network": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/license": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/features": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/conferences?page=1&page_size=5": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/sessions?page=1&page_size=5": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/call_history?page=1&page_size=5": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/call_strings?page=1&page_size=5": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/log_events?page=1&page_size=5": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/videorecords?page=1&page_size=5": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/settings/calls": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/settings/calls/sip": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/settings/http": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/system/time": {
+    "status": 200,
+    "ok": true
+   },
+   "/api/v3/system/ntp": {
+    "status": 200,
+    "ok": true
+   }
+  },
+  "acceptance": 5,
+  "failed": 0,
+  "pages": 23,
+  "screenshots": 6,
+  "http_errors": 0,
+  "console_errors": 0,
+  "vendor_console_errors": 24
+ },
+ "error": null,
+ "http_errors": [],
+ "console_errors": [],
+ "vendor_console_errors": [
+  "Invalid scale configuration for scale: yAxes",
+  "Invalid scale configuration for scale: xAxes",
+  "Invalid scale configuration for scale: yAxes",
+  "Invalid scale configuration for scale: xAxes",
+  "Invalid scale configuration for scale: responsive",
+  "Invalid scale configuration for scale: maintainAspectRatio",
+  "Invalid scale configuration for scale: yAxes",
+  "Invalid scale configuration for scale: xAxes",
+  "Invalid scale configuration for scale: responsive",
+  "Invalid scale configuration for scale: maintainAspectRatio",
+  "Invalid scale configuration for scale: yAxes",
+  "Invalid scale configuration for scale: xAxes",
+  "Invalid scale configuration for scale: yAxes",
+  "Invalid scale configuration for scale: xAxes",
+  "Invalid scale configuration for scale: yAxes",
+  "Invalid scale configuration for scale: xAxes",
+  "Invalid scale configuration for scale: responsive",
+  "Invalid scale configuration for scale: maintainAspectRatio",
+  "Invalid scale configuration for scale: yAxes",
+  "Invalid scale configuration for scale: xAxes",
+  "Invalid scale configuration for scale: responsive",
+  "Invalid scale configuration for scale: maintainAspectRatio",
+  "Invalid scale configuration for scale: yAxes",
+  "Invalid scale configuration for scale: xAxes"
+ ]
+}
