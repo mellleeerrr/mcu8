@@ -103,8 +103,15 @@ impl VideoProfile {
                 // Сначала уменьшаем размер по лестнице, сохраняя разумный fps
                 // (>=15): 1080p при max-mbps=49000 → 960×540@24, а не 1080p@6.
                 let mut chosen = None;
+                let applied_max_fs = self.max_fs();
                 for (width, height) in SIZE_LADDER.iter().copied() {
-                    let candidate_fps = max_mbps / macroblocks(width, height).max(1);
+                    let macroblocks = macroblocks(width, height);
+                    // Не апскейлим и не выходим за уже применённый max-fs:
+                    // иначе терминал отбросит пакеты как превышение H.241.
+                    if macroblocks > applied_max_fs {
+                        continue;
+                    }
+                    let candidate_fps = max_mbps / macroblocks.max(1);
                     if candidate_fps >= 15 {
                         chosen = Some((width, height, candidate_fps));
                         break;
@@ -947,6 +954,11 @@ mod tests {
         tiny_mbps.clamp_to_answer(None, None, Some(1_000));
         assert_eq!((tiny_mbps.width, tiny_mbps.height), (320, 180));
         assert_eq!(tiny_mbps.fps, 4);
+        let mut max_fs_and_mbps = base.clone();
+        max_fs_and_mbps.fps = 60;
+        max_fs_and_mbps.clamp_to_answer(Some(240), None, Some(8_000));
+        assert_eq!((max_fs_and_mbps.width, max_fs_and_mbps.height), (320, 180), "не выходить за max-fs");
+        assert_eq!(max_fs_and_mbps.fps, 33);
         let mut tiny = base;
         tiny.clamp_to_answer(Some(1), None, None);
         assert_eq!((tiny.width, tiny.height), (320, 180));

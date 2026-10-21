@@ -223,9 +223,8 @@ mod header_regressions {
 //   [`negotiate_media_detailed`] returns [`NegotiationFailure::UnsupportedAudio`]
 //   instead of handing a codec we cannot bridge to the RTP bridge (that would
 //   produce a connected call with dead audio). The outgoing caller answers such
-//   an SDP with ACK+BYE (a 488 Not Acceptable Here is only possible on the UAS
-//   side, which has no wire transport yet); the inbound UAS maps the same
-//   typed failure to 488.
+//   an SDP with ACK+BYE. The in-memory UAS returns `Error::InvalidInput`; a
+//   wire-level 488 requires the SIP UAS transport (T08), it is not sent today.
 //
 // Payload numbering follows RFC 3551 for static assignments (0/8/9/15/4/18/31/34)
 // and dynamic 96..127 otherwise. G.722.1 is `G7221/16000` (24/32 kbit/s) and

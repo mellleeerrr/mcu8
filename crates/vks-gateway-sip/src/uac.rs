@@ -23,10 +23,11 @@ pub enum SipDialError {
     Timeout(String, Duration),
     #[error("Invalid or unsupported SDP answer from remote terminal")]
     InvalidSdpAnswer,
-    /// Терминал выбрал кодек, который шлюз не мостит (нужен T06b-транскодер).
-    /// Явная причина вместо молчаливого «connected без медиа».
-    #[error("No mutually supported codec: {0}")]
-    NoCommonCodec(String),
+    /// Терминал выбрал кодек, который шлюз не мостит (нужен T06b-транскодер),
+    /// либо ответил 488/606 на кодек-негоциацию. Явная структура вместо
+    /// generic «invalid SDP» / молчаливого «connected без медиа».
+    #[error("No mutually supported codec: codec={codec:?} payload={payload:?} peer_status={peer_status:?}")]
+    NoCommonCodec { codec: Option<String>, payload: Option<u8>, peer_status: Option<u16> },
 }
 
 #[derive(Debug, Clone)]
@@ -267,12 +268,19 @@ impl SipUacClient {
                         Err(failure) => {
                             // The peer selected a codec this gateway cannot bridge (or nothing
                             // common is left): refuse the call instead of reporting a connected
-                            // session with dead media. As the offerer we can only ACK+BYE here;
-                            // the UAS side answers the same typed failure with 488.
+                            // session with dead media. As the offerer we can only ACK+BYE
+                            // here; the in-memory UAS reports the failure as InvalidInput
+                            // and wire-level 488 is T08.
                             warn!(call_id=%c.call_id, ?failure, "SIP answer refused: no mutually bridged codec");
                             let bye = build_bye(contact, &c.ip, c.port, &c.call_id, &c.from_tag, to_tag, 2);
                             c.socket.send_to(bye.as_bytes(), c.target).await?;
-                            return Err(SipDialError::NoCommonCodec(format!("{failure:?}")));
+                            let (codec, payload) = match failure {
+                                crate::rtp_bridge::NegotiationFailure::UnsupportedAudio { codec, payload } => {
+                                    (Some(codec), Some(payload))
+                                }
+                                _ => (None, None),
+                            };
+                            return Err(SipDialError::NoCommonCodec { codec, payload, peer_status: None });
                         }
                     };
                     let session = ActiveSipSession {
@@ -303,6 +311,13 @@ impl SipUacClient {
                     let ack =
                         build_ack(&c.uri, &c.ip, c.port, &c.call_id, &c.from_tag, response.to_tag, &c.branch, false);
                     c.socket.send_to(ack.as_bytes(), c.target).await?;
+                    if matches!(response.status_code, 488 | 606) {
+                        return Err(SipDialError::NoCommonCodec {
+                            codec: None,
+                            payload: None,
+                            peer_status: Some(response.status_code),
+                        });
+                    }
                     return Err(SipDialError::Rejected(response.status_code, response.reason.into()));
                 }
                 _ => {}
@@ -497,8 +512,10 @@ mod tests {
             )
             .await;
         match result {
-            Err(SipDialError::NoCommonCodec(reason)) => {
-                assert!(reason.contains("UnsupportedAudio"), "причина должна быть типизированной: {reason}");
+            Err(SipDialError::NoCommonCodec { codec, payload, peer_status }) => {
+                assert_eq!(codec.as_deref(), Some("G729"));
+                assert_eq!(payload, Some(18));
+                assert_eq!(peer_status, None);
             }
             other => panic!("An unsupported codec must not be shown as connected: {other:?}"),
         }
@@ -619,6 +636,44 @@ Content-Length: 0\r\n\r\n"
         match res {
             Err(SipDialError::Rejected(486, _)) => {}
             other => panic!("expected 486 rejection, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_488_maps_to_typed_no_common_codec() {
+        let mock_server = UdpSocket::bind("127.0.0.1:0").await.expect("bind mock");
+        let server_addr = mock_server.local_addr().expect("server addr");
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let (len, client_addr) = mock_server.recv_from(&mut buf).await.expect("recv invite");
+            let req = String::from_utf8_lossy(&buf[..len]);
+            let call_id = req
+                .lines()
+                .find(|l| l.to_lowercase().starts_with("call-id:"))
+                .unwrap()
+                .split(':')
+                .nth(1)
+                .unwrap()
+                .trim();
+            let response = format!(
+                "SIP/2.0 488 Not Acceptable Here\r\n\
+Via: SIP/2.0/UDP 127.0.0.1;branch=z9hG4bKtest\r\n\
+From: <sip:vks@127.0.0.1>;tag=f123\r\n\
+To: <sip:peer>;tag=remote\r\n\
+Call-ID: {call_id}\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n"
+            );
+            mock_server.send_to(response.as_bytes(), client_addr).await.expect("send 488");
+        });
+        let result =
+            SipUacClient::new("127.0.0.1").dial(&format!("sip:{server_addr}"), "v=0\r\n", Duration::from_secs(2)).await;
+        match result {
+            Err(SipDialError::NoCommonCodec { peer_status, codec, payload }) => {
+                assert_eq!(peer_status, Some(488));
+                assert!(codec.is_none() && payload.is_none());
+            }
+            other => panic!("expected typed no-common-codec for 488, got {other:?}"),
         }
     }
 

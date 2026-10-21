@@ -242,7 +242,9 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
     Json(json!({
         "codecs": {
             "matrix": matrix_mode,
-            "transcoder": matrix_mode == "full",
+            // В этой сборке транскодера нет: `full` — lab-гейт для SDP,
+            // а не признак наличия транскодирующих воркеров (T06b).
+            "transcoder": false,
             "native_audio": vks_common::codec_capabilities::NATIVE_AUDIO,
             "native_video": vks_common::codec_capabilities::NATIVE_VIDEO
         },

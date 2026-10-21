@@ -2,7 +2,7 @@
 
 **Статус:** реализовано и проверено live, коммит `T06a-коммит (git log --grep T06a)`.
 **Ветка:** master. **Гейты:** clippy `-D warnings` чисто; `cargo test
---workspace --all-targets --no-fail-fast` — **1019 passed / 0 failed / 6
+--workspace --all-targets --no-fail-fast` — **1021 passed / 0 failed / 6
 ignored**; оба E2E — **114/114 checks, 0 failed, page_errors 0**.
 
 ## Что было нечестно
@@ -27,18 +27,32 @@ ignored**; оба E2E — **114/114 checks, 0 failed, page_errors 0**.
 3. `Gateways::ensure_bridgeable_codecs`: intent комнаты/адреса проверяется до
    дозвона; список только из G.722/H.265/H.264-high даёт явную ошибку
    `no common audio|video codec: … enable transcoding (T06b)`, а не молчаливый
-   fallback. Пустой список = Native.
-4. `SipDialError::NoCommonCodec(reason)` — UAC сохраняет типизированную причину
-   `UnsupportedAudio { codec, payload }` вместо generic `InvalidSdpAnswer`.
+   fallback. Поиск intent исправлен после ревью: контакты комнаты
+   (`resources.contacts`, wrapper `call_string.<proto>`) и глобальная
+   адресная книга (плоская карта `payload.<proto>`) поддерживают camel/snake
+   ключи (`audioCodecs`/`audio_codecs`), приоритет — контакт комнаты, затем
+   глобальный адрес, затем конференция. Тот же lookup чинит T05a-приоритет
+   call_string video. Обвязка вынесена в `bridgeable_codec_selection` и
+   покрыта тестом на реальных `ResourceState` (contact wrapper + плоский
+   address payload, camel/snake, contact > address > conference) без сокета.
+   Пустой список = Native.
+4. `SipDialError::NoCommonCodec { codec, payload, peer_status }` — UAC
+   сохраняет типизированную причину `UnsupportedAudio { codec, payload }`
+   вместо generic `InvalidSdpAnswer`; ответ терминала 488/606 даёт
+   `peer_status=Some(code)`; malformed SDP остаётся `InvalidSdpAnswer`.
 5. RTP-наблюдаемость: первые 3 отвергнутых аудио-пакета логируются с
    expected/received payload type и source (codec/PT mismatch виден в журнале).
 6. API: `settings/audio_codecs` → аддитивное `supported`; `settings/
    video_codecs` → `supported_video_codecs`; `ui/system/status` → `codecs
-   {matrix, transcoder, native_audio, native_video}`. Полные списки и shape не
-   урезаны — матрица T06b остаётся intent.
+   {matrix, transcoder, native_audio, native_video}`, причём `transcoder`
+   всегда `false` в этой сборке (lab-флаг `full` не является транскодером).
+   Полные списки и shape не урезаны — матрица T06b остаётся intent.
 7. `VideoProfile::clamp_to_answer` при `max-mbps` сначала понижает размер по
    лестнице с fps ≥15 (1080p + 49000 → 960×540@24), а не оставляет 1080p@6;
-   для вырожденных значений — 320×180 с минимальным fps.
+   для вырожденных значений — 320×180 с минимальным fps. После ревью добавлен
+   guard: лестница не выбирает размер больше уже применённого `max-fs` и не
+   апскейлит (тест max-fs=240/max-mbps=8000@60 → 320×180@33). Для не-лестничных
+   профилей размер не растёт: 800×600 остаётся 800×600 либо уменьшается.
 
 ## Live-доказательства
 
@@ -62,7 +76,8 @@ ignored**; оба E2E — **114/114 checks, 0 failed, page_errors 0**.
   265, H.264-high) по-прежнему требует транскодера (T06b) и включается только
   lab-флагом; production объявляет Native.
 - Входящий SIP-wire UAS и ответ 488 на провод — T08; сейчас `on_invite`
-  возвращает типизированную in-memory ошибку.
+  возвращает `Error::InvalidInput(String)`, а не типизированный кодек-объект;
+  комментарии приведены в соответствие.
 - H.323 H.241 (maxBitRate/level) — T05b/T07.
 - `CodecMap::negotiate`/`H323CodecMap::negotiate` сохраняют legacy fallback для
   тестов; wire-пути используют строгий `try_negotiate`.

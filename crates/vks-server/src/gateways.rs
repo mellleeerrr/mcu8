@@ -25,15 +25,57 @@ mod video;
 
 /// Находит `call_string.sip|h323` сохранённого адреса по URI. Вынесено из
 /// async-метода, чтобы приоритет адреса проверялся без блокировок AppState.
-fn find_call_string_override<'a>(
-    addresses: &'a std::collections::BTreeMap<String, vks_admin::api_v3::resources::AddressRecord>,
-    uri: &str,
-) -> Option<&'a serde_json::Value> {
-    let record = addresses.values().find(|record| record.uri.eq_ignore_ascii_case(uri))?;
-    let protocol = if uri.starts_with("h323:") { "h323" } else { "sip" };
-    record.payload.get("call_string").and_then(|value| value.get(protocol))
+fn protocol_options<'a>(payload: &'a serde_json::Value, protocol: &str) -> Option<&'a serde_json::Value> {
+    // Contacts хранят wrapper `call_string.<proto>`, глобальные адреса —
+    // плоскую карту протоколов `payload.<proto>`; поддерживаем оба shape.
+    // Contact может быть как готовым payload, так и записью с wrapper
+    // `{uri, payload:{call_string:{…}}}`.
+    let payload = payload.get("payload").filter(|value| value.is_object()).unwrap_or(payload);
+    payload
+        .get("call_string")
+        .and_then(|value| value.get(protocol))
+        .or_else(|| payload.get(protocol))
+        .filter(|value| value.is_object())
 }
 
+/// Ищет intent конкретного адреса: сначала контакт этой комнаты, затем
+/// глобальную адресную книгу. `uri` сравнивается без учёта регистра.
+fn find_call_string_override<'a>(
+    resources: &'a vks_admin::api_v3::resources::ResourceState,
+    room_id: Option<RoomId>,
+    uri: &str,
+) -> Option<&'a serde_json::Value> {
+    let protocol = if uri.starts_with("h323:") { "h323" } else { "sip" };
+    let matches = |contact: &&serde_json::Value| {
+        contact.get("uri").and_then(serde_json::Value::as_str).is_some_and(|value| value.eq_ignore_ascii_case(uri))
+    };
+    if let Some(contact) = room_id
+        .and_then(|id| resources.contacts.get(&id.to_string()))
+        .and_then(|contacts| contacts.iter().find(matches))
+        .and_then(|contact| protocol_options(contact, protocol))
+    {
+        return Some(contact);
+    }
+    if let Some(contact) = resources
+        .contacts
+        .values()
+        .flat_map(|contacts| contacts.iter())
+        .find(matches)
+        .and_then(|contact| protocol_options(contact, protocol))
+    {
+        return Some(contact);
+    }
+    resources
+        .addresses
+        .values()
+        .find(|record| record.uri.eq_ignore_ascii_case(uri))
+        .and_then(|record| protocol_options(&record.payload, protocol))
+}
+
+/// Проверяет выбор кодеков комнаты/адреса до дозвона. Клиент, оставивший
+/// только несовместимые кодеки (G.722-only, H.265-only), должен получить
+/// явную причину, а не молчаливый PCMU/H.264 fallback и не «connected» без
+/// медиа. `None`/пустой список = выбор не задан, действует native-профиль.
 fn codec_name(item: &serde_json::Value) -> Option<String> {
     item.as_str()
         .or_else(|| item.get("name").and_then(serde_json::Value::as_str))
@@ -41,10 +83,6 @@ fn codec_name(item: &serde_json::Value) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
-/// Проверяет выбор кодеков комнаты/адреса до дозвона. Клиент, оставивший
-/// только несовместимые кодеки (G.722-only, H.265-only), должен получить
-/// явную причину, а не молчаливый PCMU/H.264 fallback и не «connected» без
-/// медиа. `None`/пустой список = выбор не задан, действует native-профиль.
 fn ensure_bridgeable_codec_selection(
     audio: Option<&serde_json::Value>,
     video: Option<&serde_json::Value>,
@@ -265,10 +303,27 @@ impl GatewayManager {
 
     /// Ищет сохранённый адрес по URI и берёт `call_string.sip|h323`: настройки
     /// конкретного терминала приоритетнее комнаты и глобальных.
-    async fn call_string_video_profile(&self, uri: &str) -> Option<serde_json::Value> {
+    async fn call_string_video_profile(&self, room_id: RoomId, uri: &str) -> Option<serde_json::Value> {
         let state = self.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))?;
         let resources = state.api_v3.resources.lock().await;
-        find_call_string_override(&resources.addresses, uri).cloned()
+        find_call_string_override(&resources, Some(room_id), uri).cloned()
+    }
+
+    fn bridgeable_codec_selection(
+        resources: &vks_admin::api_v3::resources::ResourceState,
+        room_id: RoomId,
+        conference: Option<&serde_json::Value>,
+        uri: &str,
+    ) -> Result<(), String> {
+        let call_string = find_call_string_override(resources, Some(room_id), uri);
+        let payload = conference.and_then(|value| value.get("payload")).or(conference);
+        let pick = |snake: &str, camel: &str| {
+            call_string
+                .and_then(|value| value.get(camel).or_else(|| value.get(snake)))
+                .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
+                .or_else(|| payload.and_then(|value| value.get(snake).or_else(|| value.get(camel))))
+        };
+        ensure_bridgeable_codec_selection(pick("audio_codecs", "audioCodecs"), pick("video_codecs", "videoCodecs"))
     }
 
     /// Проверяет, что выбранные для адреса/комнаты кодеки реально мостятся
@@ -278,21 +333,10 @@ impl GatewayManager {
         else {
             return Ok(());
         };
-        let call_string = {
-            let resources = state.api_v3.resources.lock().await;
-            find_call_string_override(&resources.addresses, uri).cloned()
-        };
         let conference =
             state.api_v3.conference_settings.lock().ok().and_then(|settings| settings.get(&room_id).cloned());
-        let payload = conference.as_ref().and_then(|value| value.get("payload")).or(conference.as_ref());
-        let pick = |call_key: &str| {
-            call_string
-                .as_ref()
-                .and_then(|value| value.get(call_key))
-                .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
-                .or_else(|| payload.and_then(|value| value.get(call_key)))
-        };
-        ensure_bridgeable_codec_selection(pick("audio_codecs"), pick("video_codecs"))
+        let resources = state.api_v3.resources.lock().await;
+        Self::bridgeable_codec_selection(&resources, room_id, conference.as_ref(), uri)
     }
 
     fn sdp_video_profile(profile: &video::VideoProfile) -> vks_gateway_sip::VideoSdpProfile {
@@ -941,7 +985,7 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             armed: true,
             registered: None,
         };
-        let call_string_profile = self.call_string_video_profile(trimmed).await;
+        let call_string_profile = self.call_string_video_profile(room_id, trimmed).await;
         let mut answer_limits = vks_gateway_sip::VideoAnswerLimits::default();
         let mut video_profile = self.video_profile(room_id, call_string_profile.as_ref());
         let offered_video_profile = video_profile.clone();
@@ -1532,8 +1576,8 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
 
     #[test]
     fn call_string_lookup_matches_uri_case_insensitively_and_picks_protocol() {
-        let mut addresses = std::collections::BTreeMap::new();
-        addresses.insert(
+        let mut resources = vks_admin::api_v3::resources::ResourceState::default();
+        resources.addresses.insert(
             "addr-1".to_string(),
             vks_admin::api_v3::resources::AddressRecord {
                 id: "addr-1".into(),
@@ -1541,17 +1585,15 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
                 display_name: "Probe".into(),
                 created_at: 1,
                 payload: serde_json::json!({
-                    "call_string": {
-                        "sip": {"bitrate": 256, "resolution": {"width": 320, "height": 180, "fps_limit": 10}},
-                        "h323": {"bitrate": 512}
-                    }
+                    "sip": {"bitrate": 256, "resolution": {"width": 320, "height": 180, "fps_limit": 10}},
+                    "h323": {"bitrate": 512}
                 }),
             },
         );
-        let sip = find_call_string_override(&addresses, "sip:probe@192.168.1.132").expect("sip override");
+        let sip = find_call_string_override(&resources, None, "sip:probe@192.168.1.132").expect("sip override");
         assert_eq!(sip["bitrate"], 256);
         assert_eq!(sip["resolution"]["width"], 320);
-        addresses.insert(
+        resources.addresses.insert(
             "addr-2".to_string(),
             vks_admin::api_v3::resources::AddressRecord {
                 id: "addr-2".into(),
@@ -1561,9 +1603,45 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
                 payload: serde_json::json!({"call_string": {"sip": {"bitrate": 111}, "h323": {"bitrate": 512}}}),
             },
         );
-        let h323 = find_call_string_override(&addresses, "h323:probe@192.168.1.132").expect("h323 override");
+        let h323 = find_call_string_override(&resources, None, "h323:probe@192.168.1.132").expect("h323 override");
         assert_eq!(h323["bitrate"], 512);
-        assert!(find_call_string_override(&addresses, "sip:other@192.168.1.132").is_none());
+        assert!(find_call_string_override(&resources, None, "sip:other@192.168.1.132").is_none());
+    }
+
+    #[test]
+    fn room_contact_intent_wins_over_global_address_and_uses_camel_keys() {
+        let mut resources = vks_admin::api_v3::resources::ResourceState::default();
+        let room = RoomId::new();
+        resources.addresses.insert(
+            "addr".into(),
+            vks_admin::api_v3::resources::AddressRecord {
+                id: "addr".into(),
+                uri: "sip:probe@192.168.1.132".into(),
+                display_name: "Probe".into(),
+                created_at: 1,
+                payload: serde_json::json!({"sip": {"audioCodecs": [{"name": "G711"}], "videoCodecs": ["H264"]}}),
+            },
+        );
+        resources.contacts.insert(
+            room.to_string(),
+            vec![serde_json::json!({
+                "uri": "SIP:probe@192.168.1.132",
+                "payload": {"call_string": {"sip": {
+                    "audioCodecs": [{"name": "G722"}],
+                    "videoCodecs": ["H265"]
+                }}}
+            })],
+        );
+        let selected =
+            find_call_string_override(&resources, Some(room), "sip:probe@192.168.1.132").expect("contact override");
+        assert_eq!(selected["audioCodecs"][0]["name"], "G722");
+        assert!(ensure_bridgeable_codec_selection(selected.get("audioCodecs"), selected.get("videoCodecs")).is_err());
+        let error = GatewayManager::bridgeable_codec_selection(&resources, room, None, "sip:probe@192.168.1.132")
+            .expect_err("contact G722-only must be refused");
+        assert!(error.contains("no common audio"), "{error}");
+        // Глобальный адрес для другого SIP URI всё ещё читается как плоская карта.
+        let global = find_call_string_override(&resources, Some(room), "sip:other@192.168.1.132");
+        assert!(global.is_none());
     }
 
     #[test]
