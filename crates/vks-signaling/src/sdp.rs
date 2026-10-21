@@ -470,9 +470,11 @@ impl Sdp {
                 setup: Some("passive".to_string()),
                 direction: Some(direction.to_string()),
                 candidates: Vec::new(),
-                b_as: profile.b_as,
-                fmtp: profile.fmtp.clone(),
-                rtcp_fb: profile.rtcp_fb.clone(),
+                // b=AS/fmtp/rtcp-fb are codec-specific: announce them only on
+                // the video m-line, so an audio section never claims 96/fmtp.
+                b_as: if media.kind == MediaKind::Video { profile.b_as } else { None },
+                fmtp: if media.kind == MediaKind::Video { profile.fmtp.clone() } else { Vec::new() },
+                rtcp_fb: if media.kind == MediaKind::Video { profile.rtcp_fb.clone() } else { Vec::new() },
                 extmap: profile.extmap.clone(),
                 rid: Vec::new(),
                 simulcast: None,
@@ -615,6 +617,11 @@ mod tests {
         assert_eq!(rtp.len(), 2);
         // fingerprint на каждой m-line.
         assert_eq!(answer.media[0].fingerprint.as_deref(), Some("sha-256 FF:00:11"));
+        // b=AS/fmtp/rtcp-fb — только на video, не на audio.
+        assert_eq!(answer.media[0].b_as, None);
+        assert!(answer.media[0].fmtp.is_empty());
+        assert_eq!(answer.media[1].b_as, Some(2048));
+        assert!(answer.media[1].fmtp.iter().any(|v| v.starts_with("96 ")));
     }
 
     #[test]

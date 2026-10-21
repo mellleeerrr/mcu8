@@ -35,6 +35,8 @@ pub struct HandlerConfig {
     pub ice_servers: Vec<sig::IceServer>,
     pub room_mode: i32,
     pub caps: Option<vks_proto::media::RoomCaps>,
+    /// `b=AS` для SFU video m-line, kbit/s.
+    pub video_bitrate_kbps: u32,
 }
 
 impl HandlerConfig {
@@ -69,7 +71,17 @@ impl HandlerConfig {
                 svc: false,
                 dtls_srtp: true,
             }),
+            video_bitrate_kbps: std::env::var("VKS_SFU_VIDEO_BITRATE_KBPS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(2048),
         }
+    }
+
+    /// Переопределяет `b=AS` видео для SFU-ответа (kbit/s).
+    pub fn with_video_bitrate(mut self, kbps: u32) -> Self {
+        self.video_bitrate_kbps = kbps.clamp(64, 20_000);
+        self
     }
 
     /// Задает список ICE-серверов (STUN/TURN).
@@ -117,6 +129,7 @@ impl HandlerConfig {
                 svc: false,
                 dtls_srtp: true,
             }),
+            video_bitrate_kbps: 2048,
         }
     }
 
@@ -134,7 +147,7 @@ impl HandlerConfig {
                 typ: "host".into(),
             },
             fingerprint: self.fingerprint.clone(),
-            b_as: Some(2048),
+            b_as: Some(self.video_bitrate_kbps),
             fmtp: Vec::new(),
             rtcp_fb: vec![
                 "96 nack".into(),
