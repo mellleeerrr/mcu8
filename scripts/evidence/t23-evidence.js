@@ -251,13 +251,13 @@ const summary = {
       const checkCrt = await api('/api/v3/settings/http/check', {
         method: 'POST',
         multipart: {
-          crt: { name: 'mcu.crt', mimeType: 'application/x-pem-file', buffer: Buffer.from('-----BEGIN CERTIFICATE-----\nT23\n-----END CERTIFICATE-----\n') },
+          crt: { name: 'mcu.crt', mimeType: 'application/x-pem-file', buffer: Buffer.from('-----BEGIN CERTIFICATE-----\nTIIB\n-----END CERTIFICATE-----\n') },
         },
       });
       const checkKey = await api('/api/v3/settings/http/check', {
         method: 'POST',
         multipart: {
-          key: { name: 'mcu.key', mimeType: 'application/x-pem-file', buffer: Buffer.from('-----BEGIN PRIVATE KEY-----\nT23\n-----END PRIVATE KEY-----\n') },
+          key: { name: 'mcu.key', mimeType: 'application/x-pem-file', buffer: Buffer.from('-----BEGIN PRIVATE KEY-----\nTIIB\n-----END PRIVATE KEY-----\n') },
         },
       });
       const garbage = await api('/api/v3/settings/http/check', {

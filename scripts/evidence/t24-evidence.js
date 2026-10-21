@@ -312,10 +312,11 @@ const isVendorError = (text) =>
     // ---------- 7b. лицензия/фичи/сетевой статус/session-alias/traceroute ----------
     await record('license-features-network-status', async () => {
       const license = await api('/api/v3/license');
-      summary.acceptance.license_permanent_shape =
+      summary.acceptance.license_permanent_shape = Boolean(
         license.status === 200 && license.json.state === 'VALID' && license.json.type === 'PERMANENT' &&
         license.json.last_expired > 4000000000 && license.json.last_update_failed === false &&
-        license.json.serial_id && license.json.params && license.json.params.protocol && license.json.params.video;
+        license.json.serial_id && license.json.params && license.json.params.protocol && license.json.params.video,
+      );
       const features = await api('/api/v3/features');
       summary.acceptance.features_array =
         features.status === 200 && Array.isArray(features.json.features) && features.json.features.length > 40;
