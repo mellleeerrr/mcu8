@@ -623,6 +623,123 @@ async fn incoming_call_is_recorded_as_incoming_connection() {
     let call = &detail["session"]["call_strings"][0];
     assert_eq!(call["abonents"][0]["connection"]["type_id"], "INCOMING");
     assert_eq!(call["abonents"][0]["abonent_id"], "sip-in-1");
+    // Ключ входящего вызова содержит `#{call_string_id}` только внутри карты
+    // попыток; наружу (connection_url/contact/invitation) обязан идти чистый URI.
+    assert_eq!(call["connection_url"], "sip:192.168.1.50", "{call}");
+    assert_eq!(call["contact"]["address"], "sip:192.168.1.50", "{call}");
+    assert_eq!(call["abonents"][0]["connection"]["connection_url"], "sip:192.168.1.50");
+    assert_eq!(call["invitations"][0]["connection_url"], "sip:192.168.1.50");
+}
+
+#[tokio::test]
+async fn repeated_start_after_stop_records_the_second_session() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let created = json_body(
+        send(&app, request("POST", "/api/v3/conferences", Some(&token), json!({"display_name": "Перезапуск"}))).await,
+    )
+    .await;
+    let room_id = created["conference"]["id"].as_str().unwrap().to_string();
+
+    // Сессия №1: старт → стоп (Manual) → durable-маркер истории остаётся.
+    assert_eq!(
+        send(&app, request("POST", "/api/v3/sessions", Some(&token), json!({"conference_id": room_id}))).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&app, request("DELETE", &format!("/api/v3/sessions/{room_id}"), Some(&token), json!({}))).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    // Сессия №2: повторный старт и удаление активной конференции должны дать
+    // отдельную запись, а не потеряться из-за маркера прошлой сессии.
+    assert_eq!(
+        send(&app, request("POST", "/api/v3/sessions", Some(&token), json!({"conference_id": room_id}))).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&app, request("DELETE", &format!("/api/v3/conferences/{room_id}"), Some(&token), json!({})))
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let body = json_body(
+        send(&app, request("GET", "/api/v3/call_history?sort_field=started_at&sort_order=1", Some(&token), json!({})))
+            .await,
+    )
+    .await;
+    assert_eq!(body["count"], 2, "повторный запуск — новая сессия истории: {body}");
+    assert_eq!(body["sessions"][0]["stop_reason"], "Deleted");
+    assert_eq!(body["sessions"][1]["stop_reason"], "Manual");
+}
+
+#[tokio::test]
+async fn history_default_order_is_newest_first_and_export_honours_sort_order() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.history.sessions.push(crate::api_v3::history::HistorySession {
+            id: "old-session".into(),
+            room_id: "old-room".into(),
+            display_name: "OldSession".into(),
+            started_at: 1_000,
+            started_ms: 1_000_000,
+            stopped_at: 1_100,
+            stop_reason: "Manual".into(),
+            abonents_count: 0,
+            creator_id: String::new(),
+            stopped_by: String::new(),
+            calls: Vec::new(),
+            dtmf: None,
+            route: None,
+            payload: json!({}),
+        });
+        resources.history.sessions.push(crate::api_v3::history::HistorySession {
+            id: "new-session".into(),
+            room_id: "new-room".into(),
+            display_name: "NewSession".into(),
+            started_at: 2_000,
+            started_ms: 2_000_000,
+            stopped_at: 2_100,
+            stop_reason: "Manual".into(),
+            abonents_count: 0,
+            creator_id: String::new(),
+            stopped_by: String::new(),
+            calls: Vec::new(),
+            dtmf: None,
+            route: None,
+            payload: json!({}),
+        });
+    }
+
+    // Bare-список: vendor-эталон newest-first даже без sort_order.
+    let list = json_body(send(&app, request("GET", "/api/v3/call_history", Some(&token), json!({}))).await).await;
+    assert_eq!(list["sessions"][0]["id"], "new-session", "{list}");
+
+    // Экспорт по умолчанию наследует порядок списка (newest-first) и уважает
+    // явный sort_order=0 (oldest-first) — CSV внутри ZIP не сжат.
+    for (query, first, second) in [("", "NewSession", "OldSession"), ("?sort_order=0", "OldSession", "NewSession")] {
+        let export = json_body(
+            send(&app, request("GET", &format!("/api/v3/call_history/export{query}"), Some(&token), json!({}))).await,
+        )
+        .await;
+        let filename = export["filename"].as_str().unwrap().to_string();
+        let download = app
+            .clone()
+            .oneshot(Request::builder().uri(format!("/static/call_history/{filename}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(download.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(download.into_body(), usize::MAX).await.unwrap();
+        let csv = String::from_utf8_lossy(&bytes);
+        let first_pos = csv.find(first).unwrap_or_else(|| panic!("{first} отсутствует в CSV"));
+        let second_pos = csv.find(second).unwrap_or_else(|| panic!("{second} отсутствует в CSV"));
+        assert!(first_pos < second_pos, "порядок экспорта неверен для {query}: {csv}");
+    }
 }
 
 #[tokio::test]

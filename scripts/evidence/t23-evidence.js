@@ -220,13 +220,15 @@ const summary = {
     await record('calls-vendor-and-legacy', async () => {
       const calls = (await payloadOf('/api/v3/settings/calls')).payload;
       summary.acceptance.calls_vendor_payload = calls.fecc !== undefined && calls.aspeaker !== undefined && calls.limits !== undefined;
+      // Не-дефолтное значение: гейт не должен «сохранять 50 и читать 50».
+      const target = calls.limits.max_participants_per_room === 52 ? 51 : 52;
       const patched = await api('/api/v3/settings/calls', {
         method: 'PATCH',
-        data: { payload: { limits: { max_participants_per_room: 50 } } },
+        data: { payload: { limits: { max_participants_per_room: target } } },
       });
       const after = (await payloadOf('/api/v3/settings/calls')).payload;
       summary.acceptance.calls_patch_persist =
-        patched.status === 200 && after.limits && after.limits.max_participants_per_room === 50 && after.fecc !== undefined;
+        patched.status === 200 && after.limits && after.limits.max_participants_per_room === target && after.fecc !== undefined;
       await api('/api/v3/settings/calls', { method: 'PATCH', data: { payload: calls } });
     });
 
@@ -391,9 +393,15 @@ const summary = {
       page.off('response', listener);
       const patch = mutations.find((m) => m.path === '/api/v3/system/ntp' && m.status === 200);
       const server = (await api('/api/v3/system/ntp')).json.ntp.server;
+      // Reload страницы: значение обязано пережить повторную загрузку UI, а не
+      // только оставаться в памяти вкладки.
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(2500);
+      const reloadedServer = (await api('/api/v3/system/ntp')).json.ntp.server;
       summary.acceptance.ntp_ui_save =
-        !!patch && String(patch.body || '').includes('"ntp":"pool.') && server === `pool.${stamp}.ntp.org`;
-      summary.acceptance.ntp_ui_restarted_services =
+        !!patch && String(patch.body || '').includes('"ntp":"pool.') &&
+        server === `pool.${stamp}.ntp.org` && reloadedServer === `pool.${stamp}.ntp.org`;
+      summary.acceptance.ntp_ui_enable =
         mutations.some((m) => m.path === '/api/v3/system/ntp/enable' && m.status === 200);
       await shot('02-administration-date-time.png');
       // Cleanup: выключить NTP и очистить сервер.
@@ -442,6 +450,29 @@ const summary = {
         sip.status === 200 && restart.status === 200 && restart.json.status === 'ok' && restore.status === 200;
     });
 
+    // ---------- 6e. restart_services не помечает живую сессию STOPPED ----------
+    await record('restart-services-preserves-active-session', async () => {
+      const created = await api('/api/v3/conferences', {
+        method: 'POST',
+        data: { display_name: `T23 Active ${stamp}` },
+      });
+      const roomId = created.json && created.json.conference && created.json.conference.id;
+      if (!roomId) throw new Error('не удалось создать конференцию для проверки restart_services');
+      try {
+        const started = await api('/api/v3/sessions', { method: 'POST', data: { conference_id: roomId } });
+        const before = await api(`/api/v3/ui/sessions/${roomId}`);
+        const restarted = await api('/api/v3/system/restart_services', { method: 'POST' });
+        const after = await api(`/api/v3/ui/sessions/${roomId}`);
+        summary.acceptance.restart_services_preserves_active_session =
+          started.status === 200 && restarted.status === 200 &&
+          before.json.session.state === 'ACTIVE' && before.json.session.has_stopped === false &&
+          after.json.session.state === 'ACTIVE' && after.json.session.has_stopped === false;
+      } finally {
+        await api(`/api/v3/sessions/${roomId}`, { method: 'DELETE' });
+        await api(`/api/v3/conferences/${roomId}`, { method: 'DELETE' });
+      }
+    });
+
     // ---------- 7. UI: страницы настроек грузятся без ошибок ----------
     await record('settings-ui-pages', async () => {
       const pages = [
@@ -471,7 +502,11 @@ const summary = {
       const before = (await payloadOf('/api/v3/settings/calls')).payload;
       const saved = [];
       const listener = (response) => {
-        if (response.url().includes('/api/v3/settings/calls') && response.request().method() === 'PATCH') saved.push(response.status());
+        const url = new URL(response.url());
+        const path = url.pathname;
+        if (path.startsWith('/api/v3/settings/') && response.request().method() === 'PATCH') {
+          saved.push({ path, status: response.status() });
+        }
       };
       page.on('response', listener);
       await page.goto(`${BASE}/pnm/administration/calls`, { waitUntil: 'domcontentloaded' });
@@ -487,8 +522,11 @@ const summary = {
       page.off('response', listener);
       const after = (await payloadOf('/api/v3/settings/calls')).payload;
       const changed = JSON.stringify(before) !== JSON.stringify(after);
+      // «Сохранить» на странице «Вызовы» шлёт несколько PATCH (calls/sip/h323/
+      // кодеки); гейт требует все 200 и хотя бы три реальных запроса.
       summary.acceptance.settings_ui_save =
-        saved.some((status) => status === 200) && changed && after.limits !== undefined;
+        saved.length >= 3 && saved.every((entry) => entry.status === 200) && changed && after.limits !== undefined;
+      summary.totals.settings_ui_patches = saved;
       await api('/api/v3/settings/calls', { method: 'PATCH', data: { payload: before } });
       const restored = (await payloadOf('/api/v3/settings/calls')).payload;
       summary.acceptance.settings_ui_save_restored = JSON.stringify(restored) === JSON.stringify(before);

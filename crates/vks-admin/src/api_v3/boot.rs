@@ -27,7 +27,15 @@ pub async fn system_about(State(state): State<SharedState>) -> Response {
     Json(serde_json::json!({
         "node_id": name,
         "server_name": name,
-        "versions": { "server": env!("CARGO_PKG_VERSION") },
+        "versions": {
+            "server": env!("CARGO_PKG_VERSION"),
+            "installer": env!("CARGO_PKG_VERSION"),
+            "ui": "PROSTOR 2.2.1.66",
+            "api": "3",
+            "engine": "1.0.0",
+            "sip/h323": "1.0.0",
+            "vile": "1.0.0"
+        },
         "state": { "status": "READY", "payload": { "package": "", "backup": "", "export": "" } }
     }))
     .into_response()

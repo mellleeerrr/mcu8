@@ -128,22 +128,10 @@ pub fn router(state: SharedState) -> Router {
         // T2.4: наблюдаемость/сервис (read-only) + явные отказы на мутации.
         .route("/api/v3/log_events", get(observability::log_events))
         .route("/api/v3/log_events/export", get(observability::log_events_export))
-        .route(
-            "/api/v3/system/restart_services",
-            post(settings_admin::restart_services).get(settings_admin::restart_services),
-        )
-        .route(
-            "/api/v3/system/restart_engine",
-            post(settings_admin::restart_services).get(settings_admin::restart_services),
-        )
-        .route(
-            "/api/v3/system/restart_web_api",
-            post(settings_admin::restart_services).get(settings_admin::restart_services),
-        )
-        .route(
-            "/api/v3/system/restart_webproxy",
-            post(settings_admin::restart_services).get(settings_admin::restart_services),
-        )
+        .route("/api/v3/system/restart_services", post(settings_admin::restart_services))
+        .route("/api/v3/system/restart_engine", post(settings_admin::restart_services))
+        .route("/api/v3/system/restart_web_api", post(settings_admin::restart_services))
+        .route("/api/v3/system/restart_webproxy", post(settings_admin::restart_services))
         .route("/api/v3/system/network/interfaces", get(observability::network_interfaces_list))
         .route(
             "/api/v3/system/network/interfaces/{interface}",
@@ -177,6 +165,10 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/videorecords", get(observability::videorecords_list))
         .route("/api/v3/videorecords/{id}", delete(observability::videorecords_delete))
         .route("/api/v3/conferences/{id}/videorecords/estimated_time", get(observability::videorecords_estimated_time))
+        .route("/api/v3/sessions/{id}/videorecords/estimated_time", get(observability::videorecords_estimated_time))
+        .route("/api/v3/sessions/{id}/videorecords", get(observability::videorecords_list))
+        .route("/api/v3/conferences/{id}/videorecords", get(observability::videorecords_list))
+        .route("/api/v3/system/status/network", get(shell::status_network))
         .route("/api/v3/license", get(shell::license))
         .route("/api/v3/features", get(shell::features))
         .route("/api/v3/engine/calibration", get(shell::engine_calibration))

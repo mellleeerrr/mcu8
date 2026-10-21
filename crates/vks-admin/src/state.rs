@@ -460,7 +460,23 @@ impl AppState {
     }
 
     /// Синхронизирует начальное состояние комнат, оверрайдов и пользователей из хранилища (M0-M1).
+    ///
+    /// Startup-гидратация: живых сессий после рестарта процесса нет, поэтому
+    /// все сохранённые комнаты помечаются остановленными.
     pub async fn sync_from_storage(&self) -> Result<(), String> {
+        self.sync_from_storage_inner(true).await
+    }
+
+    /// Hot-reload настроек без перезапуска процесса (`POST /system/restart_services`).
+    ///
+    /// В отличие от [`Self::sync_from_storage`] не помечает живые сессии
+    /// остановленными: vendor-UI вызывает его после сохранения SIP/сетевых
+    /// настроек, и активные звонки не должны «обрываться» в списке.
+    pub async fn hot_reload_from_storage(&self) -> Result<(), String> {
+        self.sync_from_storage_inner(false).await
+    }
+
+    async fn sync_from_storage_inner(&self, mark_stopped: bool) -> Result<(), String> {
         if let Some(storage) = &self.storage {
             let rooms = storage.list_rooms().await.map_err(|e| e.to_string())?;
             let overrides = storage.list_room_mode_overrides().await.unwrap_or_default();
@@ -571,8 +587,11 @@ impl AppState {
                 }
             }
             // Stored definitions survive a restart; live calls and sessions do not.
-            let room_ids: Vec<_> = self.rooms.lock().map_err(|e| e.to_string())?.keys().copied().collect();
-            self.api_v3.stopped_sessions.lock().map_err(|e| e.to_string())?.extend(room_ids);
+            // При hot-reload живые сессии сохраняются — маркер не ставим.
+            if mark_stopped {
+                let room_ids: Vec<_> = self.rooms.lock().map_err(|e| e.to_string())?.keys().copied().collect();
+                self.api_v3.stopped_sessions.lock().map_err(|e| e.to_string())?.extend(room_ids);
+            }
 
             // M0.4: Hydrate custom layouts from storage
             let layouts = storage.list_layouts().await.unwrap_or_default();
@@ -617,6 +636,39 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn hot_reload_preserves_live_sessions_but_startup_marks_stopped() {
+        use vks_core::ports::Storage;
+        let storage: std::sync::Arc<dyn Storage> = std::sync::Arc::new(vks_storage::MemoryStorage::new());
+        let room = vks_core::Room::new("Live", RoomMode::Sfu);
+        storage.upsert_room(&room).await.expect("persist room");
+        let state = AppState::with_storage(storage);
+        state.rooms.lock().unwrap().insert(
+            room.id,
+            RoomRecord {
+                id: room.id,
+                name: room.name.clone(),
+                mode: None,
+                participants: 0,
+                bitrate_kbps: 0,
+                created_ms: 1,
+            },
+        );
+
+        // Hot-reload (restart_services после сохранения SIP) не должен трогать
+        // активные сессии — иначе список UI показывает их остановленными.
+        state.hot_reload_from_storage().await.expect("hot reload");
+        assert!(
+            !state.api_v3.stopped_sessions.lock().unwrap().contains(&room.id),
+            "live session must stay active after hot reload"
+        );
+
+        // Startup-гидратация по-прежнему считает все сохранённые комнаты
+        // остановленными: после рестарта процесса живых звонков нет.
+        state.sync_from_storage().await.expect("startup hydrate");
+        assert!(state.api_v3.stopped_sessions.lock().unwrap().contains(&room.id));
+    }
 
     #[test]
     fn effective_mode_uses_global_when_no_override() {

@@ -179,11 +179,13 @@ impl PageSort {
     fn pagination(&self) -> (usize, usize) {
         let page = self.page.unwrap_or(1).max(1);
         let size = self.page_size.unwrap_or(25).clamp(1, 200);
-        ((page - 1) * size, size)
+        (page.saturating_sub(1).saturating_mul(size), size)
     }
 
     fn descending(&self) -> bool {
-        matches!(self.sort_order.as_deref(), Some("1") | Some("desc"))
+        // Vendor-список истории по умолчанию newest-first (`stopped_at` desc);
+        // явный `0`/`asc` переключает на возрастание.
+        !matches!(self.sort_order.as_deref(), Some("0") | Some("asc"))
     }
 
     fn sort_sessions(&self, rows: &mut [&HistorySession], default_field: &str) {
@@ -210,6 +212,60 @@ impl PageSort {
             calls.reverse();
         }
     }
+}
+
+/// Параметры экспорта: фильтр списка + сортировка (vendor-UI передаёт тот же
+/// `sessionHistoryListConfig`, что и списку, включая `sort_field/sort_order`).
+#[derive(Debug, Default)]
+pub struct ExportQuery {
+    pub filter: HistoryFilter,
+    pub sort: PageSort,
+}
+
+impl<'de> Deserialize<'de> for ExportQuery {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // `serde_urlencoded` (extractor Query) не умеет `#[serde(flatten)]`,
+        // поэтому раскладываем пары параметров вручную.
+        let mut raw = std::collections::HashMap::<String, String>::deserialize(deserializer)?;
+        let number = |raw: &mut std::collections::HashMap<String, String>, key: &str| -> Option<i64> {
+            raw.remove(key).and_then(|value| value.parse().ok())
+        };
+        let filter = HistoryFilter {
+            display_name: raw.remove("display_name"),
+            search: raw.remove("search"),
+            started_at: number(&mut raw, "started_at"),
+            stopped_at: number(&mut raw, "stopped_at"),
+            date_from: number(&mut raw, "date_from").or_else(|| number(&mut raw, "dateFrom")),
+            date_to: number(&mut raw, "date_to").or_else(|| number(&mut raw, "dateTo")),
+            from: number(&mut raw, "from"),
+            to: number(&mut raw, "to"),
+            creator_id: raw.remove("creator_id"),
+        };
+        let sort = PageSort {
+            page: number(&mut raw, "page").and_then(|value| usize::try_from(value).ok()),
+            page_size: number(&mut raw, "page_size").and_then(|value| usize::try_from(value).ok()),
+            sort_field: raw.remove("sort_field"),
+            sort_order: raw.remove("sort_order"),
+        };
+        Ok(Self { filter, sort })
+    }
+}
+
+/// Общая сборка ZIP-выгрузки: имя (случайный токен), CSV, bounded-хранилище.
+async fn issue_export(state: &AppState, prefix: &str, display: &str, sessions: &[HistorySession]) -> (String, Vec<u8>) {
+    let names = contact_names(state).await;
+    let timezone = current_timezone(state).await;
+    let filename = format!("{prefix}_{}_{}.zip", sanitize_filename(display), uuid::Uuid::new_v4().simple());
+    let archive = build_history_zip(&filename.replace(".zip", ".csv"), sessions, &names, &timezone);
+    (filename, archive)
+}
+
+/// Публичная обёртка для журнала событий: та же TZ, что у истории.
+pub(crate) async fn public_timezone(state: &AppState) -> String {
+    export::current_timezone(state).await
 }
 
 /// Пользователь-контакт для `creator`/`stopper` (vendor отдаёт объект, даже
@@ -268,10 +324,13 @@ fn session_calls(
     let attempts = state.api_v3.call_attempts.lock().map(|attempts| attempts.clone()).unwrap_or_default();
     let mut calls = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for ((room_id, uri), attempt) in attempts {
+    for ((room_id, _key), attempt) in attempts {
         if room_id != room.id || !seen.insert(attempt.record.id.clone()) {
             continue;
         }
+        // Ключ входящего вызова содержит внутренний суффикс `#<call_string_id>`;
+        // в историю и SDP-контакт обязан попадать исходный адрес без него.
+        let uri = attempt.record.uri.clone();
         // Участник мог уйти (BYE/kick) до остановки сессии — это нормальный
         // сценарий; состояние соединения берём из CallAttempt, а live-снимок
         // используется только как более точный источник.
@@ -602,7 +661,7 @@ pub async fn ui_call_history(
 pub async fn export(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
-    Query(filter): Query<HistoryFilter>,
+    Query(query): Query<ExportQuery>,
 ) -> Response {
     super::track("call_history/export");
     if let Some(response) = require_read(&auth) {
@@ -610,20 +669,14 @@ pub async fn export(
     }
     let sessions = {
         let resources = state.api_v3.resources.lock().await;
-        filter.filter(&resources.history.sessions).into_iter().cloned().collect::<Vec<_>>()
+        let mut rows = query.filter.filter(&resources.history.sessions);
+        query.sort.sort_sessions(&mut rows, "stopped_at");
+        rows.into_iter().cloned().collect::<Vec<_>>()
     };
-    let mut sessions = sessions;
-    sessions.sort_by_key(|session| (session.stopped_at, session.started_at));
-    let names = contact_names(&state).await;
-    let timezone = current_timezone(&state).await;
     // Случайный токен: имя файла нельзя угадать, даже если роут статики
     // vendor-совместимо отдаёт архивы без заголовка (UI скачивает через <a>).
-    let filename = format!(
-        "Conference_history_{}_{}.zip",
-        format_date_utc((now_unix_ms() / 1000) as i64),
-        uuid::Uuid::new_v4().simple()
-    );
-    let archive = build_history_zip(&filename.replace(".zip", ".csv"), &sessions, &names, &timezone);
+    let (filename, archive) =
+        issue_export(&state, "Conference_history", &format_date_utc((now_unix_ms() / 1000) as i64), &sessions).await;
     store_export(&state, &filename, archive);
     Json(json!({ "filename": filename })).into_response()
 }
@@ -642,15 +695,8 @@ pub async fn export_session(
     let Some(session) = load_session(&state, &id).await else {
         return super::error_json(404, "Session not found");
     };
-    let names = contact_names(&state).await;
-    let timezone = current_timezone(&state).await;
-    let filename = format!(
-        "Conference_history_{}_{}.zip",
-        sanitize_filename(&session.display_name),
-        uuid::Uuid::new_v4().simple()
-    );
-    let archive =
-        build_history_zip(&filename.replace(".zip", ".csv"), std::slice::from_ref(&session), &names, &timezone);
+    let (filename, archive) =
+        issue_export(&state, "Conference_history", &session.display_name, std::slice::from_ref(&session)).await;
     store_export(&state, &filename, archive);
     Json(json!({ "filename": filename })).into_response()
 }
@@ -676,7 +722,10 @@ pub async fn clean(State(state): State<SharedState>, Extension(auth): Extension<
     let filename = format!("Conference_history_backup_{stamp}_{}.zip", uuid::Uuid::new_v4().simple());
     // Архив строится ДО мутации карты выгрузок: неудачный persist не должен
     // инвалидировать ранее выданные ссылки и оставлять «висячий» backup.
-    let archive = build_history_zip(&filename.replace(".zip", ".csv"), &previous.history.sessions, &names, &timezone);
+    let mut backup = previous.history.sessions.iter().collect::<Vec<_>>();
+    PageSort::default().sort_sessions(&mut backup, "stopped_at");
+    let backup = backup.into_iter().cloned().collect::<Vec<_>>();
+    let archive = build_history_zip(&filename.replace(".zip", ".csv"), &backup, &names, &timezone);
     resources.history.sessions.clear();
     if let Err(error) = super::resources::persist(&state, &resources).await {
         *resources = previous;
@@ -710,8 +759,7 @@ pub async fn static_export(State(state): State<SharedState>, Path(filename): Pat
     match archive {
         Some(bytes) => {
             let mut response =
-                (StatusCode::OK, [(header::CONTENT_TYPE, "application/zip")], Body::from(bytes.as_ref().to_vec()))
-                    .into_response();
+                (StatusCode::OK, [(header::CONTENT_TYPE, "application/zip")], Body::from(bytes)).into_response();
             if let Ok(value) = header::HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
                 response.headers_mut().insert(header::CONTENT_DISPOSITION, value);
             }

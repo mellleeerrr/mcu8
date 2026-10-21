@@ -72,14 +72,16 @@
 
 ## Тесты
 
-`cargo test -p vks-admin --lib history` — 21 тест (список/детали/ui, фильтры
+`cargo test -p vks-admin --lib api_v3::history` — 23 теста (список/детали/ui, фильтры
 дат/сортировка/пагинация, CSV-экранирование и формулы, ZIP store с реальным
 извлечением/CRC, dedupe, restart, clean+инвалидация+durable-маркер, DTMF/route/
 call-snapshot, per-session export, quick-start identity, delete/повторная
 остановка без фантомов, vendor-форма abonents/contact, завершившийся вызов
 сохраняет abonent, входящий вызов = INCOMING, CSV-таймзона, MAX_SESSIONS,
 статические 404/traversal, date-фильтр экспорта, null stopper, clean 403,
-cap/TTL `ExportStore`). Полный прогон: 220 vks-admin lib + 35 vks-server lib,
+null stopper, чистый URI входящего вызова, повторный старт после stop, порядок
+экспорта по `sort_order`). Отдельно `api_v3::export_store` — 3 теста cap/TTL/
+replace. Полный прогон: 230 vks-admin lib + 35 vks-server lib,
 `cargo clippy --all-targets` и `cargo fmt --check` без замечаний.
 
 ## Воспроизведение

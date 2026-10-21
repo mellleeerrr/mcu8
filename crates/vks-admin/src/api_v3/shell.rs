@@ -14,6 +14,8 @@ use serde_json::{json, Value};
 
 use vks_auth::jwt::VerifiedJwt;
 
+use crate::auth_middleware::AuthContext;
+
 use super::{auth, track};
 use crate::settings::SettingsService;
 use crate::state::SharedState;
@@ -257,30 +259,89 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
     .into_response()
 }
 
-/// `GET /api/v3/license` → `{state:"VALID",type:"PERMANENT",…}` (маппер `kk`).
-pub async fn license() -> Response {
+/// `GET /api/v3/system/status/network` — vendor-вкладка «Сетевые интерфейсы».
+///
+/// Наш сервер не применяет сетевые настройки (нет CAP_NET_ADMIN), поэтому
+/// `editable:false`: UI рисует список/поля, но не предлагает сохранить.
+pub async fn status_network(State(_state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
+    track("system/status/network");
+    if let Some(response) = super::settings_admin::forbid(&auth) {
+        return response;
+    }
+    Json(json!({"network": {"editable": false}})).into_response()
+}
+
+/// `GET /api/v3/license` → постоянная лицензия в форме vendor-маппера `kk`.
+///
+/// `last_expired: 0` vendor-UI рисует как «01.01.1970» и «Продлить», поэтому
+/// для бессрочной лицензии отдаём далёкий срок и реальные `params` (UI читает
+/// их для вкладок возможностей).
+pub async fn license(State(_state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
     track("license");
+    if let Some(response) = super::settings_admin::forbid(&auth) {
+        return response;
+    }
+    let now = crate::state::now_unix_ms() as i64 / 1000;
     Json(json!({
         "state": "VALID",
         "type": "PERMANENT",
-        "count": 100,
-        "serial_id": "",
         "demo": false,
-        "first_expired": 0,
-        "last_expired": 0,
+        "count": 1,
+        "serial_id": "VKS-PERMANENT",
+        "first_expired": now,
+        "last_expired": now + 100 * 365 * 24 * 3600,
+        "last_update_failed": false,
         "params": {
-            "protocol": { "max_calls": 100 },
-            "video": { "max_active": 100 },
-            "server": { "max_conferences": 50 }
+            "audio": {
+                "codecs": {
+                    "g711": true, "g719": true, "g722": true, "g723": true, "g726": true,
+                    "g728": true, "g729": true, "ilbc": true, "opus": true, "aac-lc": true,
+                    "g722.1": true, "g722.1c": true
+                },
+                "active_speaker": true
+            },
+            "video": {
+                "fps": 60,
+                "fecc": true,
+                "codecs": {
+                    "vp8": true, "h261": true, "h263": true, "h264": true, "h265": true,
+                    "hd-4k": true, "h264-svc": true, "hd-1080p": true, "h263_plus": true,
+                    "h264-high": true, "advanced-nal-packetization": true
+                },
+                "max_active": 100,
+                "presentation": {"enable": true},
+                "rate_adaption": true,
+                "custom_layouts": true
+            },
+            "protocol": {
+                "nat": true, "sip": true, "h323": true, "ldap": null, "rtmp": true, "rtsp": true,
+                "snmp": true, "srtp": true, "webrtc": true, "max_calls": 100,
+                "conference_control": "EXTERNAL"
+            },
+            "server": {"numa": true, "server": true, "secrecy": false, "unrestricted": false, "max_conferences": 4},
+            "storage": {"recording": true}
         }
     }))
     .into_response()
 }
 
-/// `GET /api/v3/features` → `{features:{}}`.
-pub async fn features() -> Response {
+/// `GET /api/v3/features` → `{features:[...]}` (vendor-UI итерирует массив).
+pub async fn features(Extension(auth): Extension<AuthContext>) -> Response {
     track("features");
-    Json(json!({ "features": {} })).into_response()
+    if let Some(response) = super::settings_admin::forbid(&auth) {
+        return response;
+    }
+    Json(json!({
+        "features": [
+            "VLOOP", "MEDIA", "H323", "SIP", "RTSP", "VNC", "PREVIEW", "CONFLOOP", "FILE", "REC",
+            "RTMP", "YOUTUBE", "ADAPTIVE_RATE_CONTROL", "AUDIO_CHANNELS", "CONFERENCE_CONTROL",
+            "CUSTOM_LAYOUTS", "DEMO", "FECC", "JOURNAL", "MCU", "NAT", "NETSTORAGE", "NUMA",
+            "PRESENTATION", "SNMP", "SRTP", "VAD", "AAC", "G.711", "G.719", "G.722", "G.722.1",
+            "G.722.1C", "G.723", "G.726", "G.728", "G.729", "OPUS", "H.261", "H.263", "H.264",
+            "H.264-HIGH", "H.265", "4K", "FHD", "HD", "SD", "CIF", "QCIF", "ADVANCED_NAL_PACKETIZATION"
+        ]
+    }))
+    .into_response()
 }
 
 /// `GET /api/v3/engine/calibration` → `{"calibration":null}`.
@@ -289,14 +350,26 @@ pub async fn features() -> Response {
 /// байт-в-байт как у TrueConf-эталона: UI-стор корректно превращает `null` в
 /// `calibration=null`, виджет калибровки не монтируется, статистика не уводит
 /// на страницу калибровки.
-pub async fn engine_calibration() -> Response {
+pub async fn engine_calibration(
+    State(_state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Response {
     track("engine/calibration");
+    if let Some(response) = super::settings_admin::forbid(&auth) {
+        return response;
+    }
     Json(json!({ "calibration": null })).into_response()
 }
 
 /// `GET /api/v3/engine/diagnostics` → `{diagnostics:{vsm:{limits:{performance:100},resources:{required:{encoders:0,decoders:0},available:{encoders:100,decoders:100}}},scheduler:{workers:4}}}`.
-pub async fn engine_diagnostics() -> Response {
+pub async fn engine_diagnostics(
+    State(_state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Response {
     track("engine/diagnostics");
+    if let Some(response) = super::settings_admin::forbid(&auth) {
+        return response;
+    }
     Json(json!({
         "diagnostics": {
             "vsm": {

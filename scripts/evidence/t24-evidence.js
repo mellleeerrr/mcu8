@@ -117,10 +117,11 @@ const isVendorError = (text) =>
       request.data = options.data;
     }
     const response = await page.request.fetch(BASE + pathname, request);
-    const text = await response.text();
+    const buffer = await response.body();
+    const text = buffer.toString('utf8');
     let json = null;
     try { json = JSON.parse(text); } catch { /* не-JSON */ }
-    return { status: response.status(), json, text, headers: response.headers() };
+    return { status: response.status(), json, text, buffer, headers: response.headers() };
   };
 
   try {
@@ -155,7 +156,9 @@ const isVendorError = (text) =>
       summary.acceptance.log_events_contract =
         all.status === 200 && typeof all.json.count === 'number' && all.json.count >= events.length && events.length > 0 &&
         events.every((event) => typeof event.id === 'number' && event.event_type && event.object_type && event.created_at !== undefined);
-      summary.acceptance.log_events_pagination = (await api('/api/v3/log_events?page=1&page_size=1')).json.log_events.length <= 1;
+      const page = await api('/api/v3/log_events?page=2&page_size=1');
+      summary.acceptance.log_events_pagination =
+        page.status === 200 && page.json.count === all.json.count && page.json.log_events.length === 1;
 
       const filtered = await api('/api/v3/log_events?event_types=login_success&search=' + encodeURIComponent(ADMIN_LOGIN));
       const filteredEvents = (filtered.json && filtered.json.log_events) || [];
@@ -174,13 +177,30 @@ const isVendorError = (text) =>
       const exported = await api('/api/v3/log_events/export');
       const filename = exported.json && exported.json.filename;
       const download = await api(`/static/log_events/${filename}`);
-      const body = download.text;
-      const zipOk = download.status === 200 && body.startsWith('PK\u0003\u0004') && body.includes('PK\u0005\u0006');
-      const csvOk = body.includes('ID;') || body.includes('event_type');
+      const csvOk = download.text.includes('ID;');
+      const zipOk = download.status === 200 && download.buffer.length > 0 &&
+        download.buffer[0] === 0x50 && download.buffer[1] === 0x4b &&
+        download.text.includes('PK\u0005\u0006');
+      // Реальный unzip: CRC/central directory, а не только магия PK.
+      const tmp = path.join(OUT, 'export.zip');
+      fs.writeFileSync(tmp, download.buffer);
+      let unzipOk = true;
+      try { execSync(`unzip -t ${tmp} >/dev/null 2>&1`); } catch { unzipOk = false; }
+      // Время CSV — локальное (как в UI), пользователь — из invoker, не пустой.
+      const timeMeta = await api('/api/v3/system/time');
+      const timezone = timeMeta.json.timezone || 'Europe/Moscow';
+      const first = ((await api('/api/v3/log_events')).json.log_events || [])[0];
+      const expectedTime = new Intl.DateTimeFormat('ru-RU', {
+        timeZone: timezone, day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      }).format(new Date(first.created_at * 1000)).replace(',', '');
+      const invoker = first && first.invoker && first.invoker.name;
       const missing = await api('/static/log_events/nope.zip');
       const traversal = await api('/static/log_events/..%2Fsecret.zip');
       summary.acceptance.log_events_export_zip =
-        exported.status === 200 && typeof filename === 'string' && filename.endsWith('.zip') && zipOk && csvOk;
+        exported.status === 200 && typeof filename === 'string' && filename.endsWith('.zip') && zipOk && csvOk && unzipOk;
+      summary.acceptance.log_events_export_local_time_invoker =
+        download.text.includes(expectedTime) && !!invoker && download.text.includes(String(invoker));
       summary.acceptance.log_events_static_404 = missing.status === 404 && [400, 404].includes(traversal.status);
       fs.writeFileSync(path.join(OUT, 'log_events_export.json'), JSON.stringify({ ...exported.json, bytes: body.length }, null, 1) + '\n');
     });
@@ -266,17 +286,58 @@ const isVendorError = (text) =>
       summary.acceptance.stats_cpu =
         cpu.status === 200 && cpu.json.count >= 1 && cpu.json.load.length === cpu.json.count &&
         cpu.json.load.every((core) => core.user_mode >= 0 && core.kernel_mode >= 0 && core.idle >= 0);
+      // Единицы: disk — MB (UI делит на 1024 и подписывает Gb), network — kbps
+      // (UI подписывает «кбит/сек»), а не накопительные байты.
+      let rootDfMb = null;
+      try {
+        const df = execSync("df -Pk / | tail -1").toString().trim().split(/\s+/);
+        rootDfMb = Math.floor(Number(df[1]) / 1024);
+      } catch { /* нет df */ }
+      const root = disk.json.spaces.find((space) => space.name === '/');
       summary.acceptance.stats_disk =
         disk.status === 200 && disk.json.count === disk.json.spaces.length && disk.json.spaces.length >= 1 &&
-        disk.json.spaces.every((space) => space.name && space.total > 0 && space.used >= 0 && space.free >= 0);
+        disk.json.spaces.every((space) => space.name && space.total > 0 && space.used >= 0 && space.free >= 0) &&
+        (!root || !rootDfMb || Math.abs(root.total - rootDfMb) <= Math.max(8, rootDfMb / 50));
       summary.acceptance.stats_network =
         network.status === 200 && network.json.count === network.json.interfaces.length &&
-        network.json.interfaces.every((item) => item.name && item.rx >= 0 && item.tx >= 0);
+        network.json.interfaces.every((item) => item.name && item.rx >= 0 && item.tx >= 0 &&
+          item.rx < 100000000 && item.tx < 100000000);
       summary.acceptance.system_packages = packages.status === 200 && Array.isArray(packages.json.packages);
       summary.acceptance.engine_log =
         log.status === 200 && typeof log.json.language === 'string' && log.json.bounds && Array.isArray(log.json.log);
       fs.writeFileSync(path.join(OUT, 'stats.json'), JSON.stringify({ memory: memory.json, cpu: cpu.json, disk: disk.json, network: network.json }, null, 1) + '\n');
       fs.writeFileSync(path.join(OUT, 'engine_log.json'), JSON.stringify(log.json, null, 1) + '\n');
+    });
+
+    // ---------- 7b. лицензия/фичи/сетевой статус/session-alias/traceroute ----------
+    await record('license-features-network-status', async () => {
+      const license = await api('/api/v3/license');
+      summary.acceptance.license_permanent_shape =
+        license.status === 200 && license.json.state === 'VALID' && license.json.type === 'PERMANENT' &&
+        license.json.last_expired > 4000000000 && license.json.last_update_failed === false &&
+        license.json.serial_id && license.json.params && license.json.params.protocol && license.json.params.video;
+      const features = await api('/api/v3/features');
+      summary.acceptance.features_array =
+        features.status === 200 && Array.isArray(features.json.features) && features.json.features.length > 40;
+      const status = await api('/api/v3/system/status/network');
+      summary.acceptance.status_network_shape =
+        status.status === 200 && status.json.network && status.json.network.editable === false;
+      const alias = await api('/api/v3/sessions/any-id/videorecords/estimated_time?quality=high');
+      const aliasList = await api('/api/v3/sessions/any-id/videorecords');
+      summary.acceptance.session_videorecords_alias =
+        alias.status === 200 && typeof alias.json.recording_time === 'number' && aliasList.status === 200;
+      const optionPing = await api('/api/v3/system/utils/ping?address=' + encodeURIComponent('-V'));
+      summary.acceptance.utils_ping_rejects_option = optionPing.status === 422;
+      const traceroute = await api('/api/v3/system/utils/traceroute?address=127.0.0.1');
+      const tracerouteInstalled = (() => {
+        try { execSync('command -v traceroute >/dev/null 2>&1'); return true; } catch { return false; }
+      })();
+      summary.acceptance.utils_traceroute_honest =
+        tracerouteInstalled
+          ? traceroute.status === 200
+          : traceroute.status === 503 && String((traceroute.json && traceroute.json.error && traceroute.json.error.description) || '').includes('not installed');
+      fs.writeFileSync(path.join(OUT, 'license.json'), JSON.stringify(license.json, null, 1) + '\n');
+      fs.writeFileSync(path.join(OUT, 'features.json'), JSON.stringify(features.json, null, 1) + '\n');
     });
 
     // ---------- 8. UI: все T2.4-страницы без 4xx и неизвестных ошибок ----------
@@ -294,6 +355,8 @@ const isVendorError = (text) =>
         ['about', ['О программе', 'Информация о программе']],
       ];
       summary.acceptance.ui_pages = true;
+      summary.acceptance.ui_network_interfaces_tab = true;
+      summary.acceptance.ui_license_not_expired = true;
       const seen = [];
       for (const [slug, labels] of pages) {
         const before = httpErrors.length;
@@ -306,21 +369,43 @@ const isVendorError = (text) =>
           summary.acceptance.ui_pages = false;
           summary.acceptance[`ui_problem:${slug}`] = { missing, http: httpErrors.slice(before) };
         }
+        if (slug === 'statistics') {
+          // Фактическая страница статистики (раньше тут оказывался About).
+          await shot('01-statistics.png');
+          summary.totals.statistics_text = (await page.locator('body').innerText()).slice(0, 2000);
+        }
+        if (slug === 'license') {
+          const text = await page.locator('body').innerText();
+          summary.acceptance.ui_license_not_expired =
+            !text.includes('01.01.1970') && !text.includes('Продлить лицензию') && !text.includes('Лицензия истекла');
+        }
       }
       summary.totals.ui_pages_seen = seen;
-      await shot('01-statistics.png');
       await page.goto(`${BASE}/pnm/administration/event_list`, { waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(3000);
       await shot('02-event-list.png');
       await page.goto(`${BASE}/pnm/administration/network`, { waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(3000);
       await shot('03-network.png');
+      // Вкладка «Сетевые интерфейсы» дергает /system/status/network — раньше 501.
+      const beforeTab = httpErrors.length;
+      const tab = page.getByText('Сетевые интерфейсы', { exact: false }).first();
+      if (await tab.count()) {
+        await tab.click({ force: true });
+        await page.waitForTimeout(2500);
+      }
+      summary.acceptance.ui_network_interfaces_tab = httpErrors.length === beforeTab;
+      await shot('03b-network-interfaces.png');
       await page.goto(`${BASE}/pnm/administration/terminals`, { waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(3000);
       await shot('04-terminals.png');
     });
 
     // ---------- 9. итог ----------
+    summary.acceptance.clean_build =
+      build.git_dirty === false && build.git_head.length === 40 && build.binary_sha256 !== null;
+    summary.acceptance.binary_built_after_head =
+      build.binary_mtime !== null && build.git_head_ct > 0 && build.binary_mtime >= build.git_head_ct;
     const acceptance = Object.entries(summary.acceptance);
     const failed = acceptance.filter(([, ok]) => ok !== true).map(([key]) => key);
     summary.acceptance_failed = failed;

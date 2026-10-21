@@ -2,15 +2,17 @@
 //!
 //! Имена содержат случайный токен, но карта всё равно ограничена: без cap/TTL
 //! каждая выгрузка навсегда занимала бы память процесса. Архивы хранятся как
-//! `Arc<[u8]>`, поэтому отдача статики не копирует многомегабайтный ZIP.
+//! `bytes::Bytes`: клонирование дёшево, а `Body::from(Bytes)` отдаёт статику
+//! без копирования многомегабайтного ZIP в ответ.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use bytes::Bytes;
 
 #[derive(Debug)]
 struct Entry {
-    bytes: Arc<[u8]>,
+    bytes: Bytes,
     created: Instant,
 }
 
@@ -33,7 +35,7 @@ impl ExportStore {
     }
 
     /// Кладёт архив, вытесняя истёкшие и (при переполнении) самый старый файл.
-    pub fn insert(&mut self, filename: String, bytes: Vec<u8>) {
+    pub fn insert(&mut self, filename: String, bytes: impl Into<Bytes>) {
         let now = Instant::now();
         self.entries.retain(|_, entry| now.duration_since(entry.created) < self.ttl);
         if !self.entries.contains_key(&filename) && self.entries.len() >= self.cap {
@@ -43,14 +45,14 @@ impl ExportStore {
                 self.entries.remove(&oldest);
             }
         }
-        self.entries.insert(filename, Entry { bytes: Arc::from(bytes), created: now });
+        self.entries.insert(filename, Entry { bytes: bytes.into(), created: now });
     }
 
     /// Возвращает архив по имени; истёкшие (по TTL) записи не отдаются.
-    pub fn get(&mut self, filename: &str) -> Option<Arc<[u8]>> {
+    pub fn get(&mut self, filename: &str) -> Option<Bytes> {
         let now = Instant::now();
         self.entries.retain(|_, entry| now.duration_since(entry.created) < self.ttl);
-        self.entries.get(filename).map(|entry| Arc::clone(&entry.bytes))
+        self.entries.get(filename).map(|entry| entry.bytes.clone())
     }
 
     pub fn clear(&mut self) {

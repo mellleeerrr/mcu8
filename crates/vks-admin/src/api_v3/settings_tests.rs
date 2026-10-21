@@ -217,8 +217,8 @@ async fn http_settings_multipart_cert_upload_check_and_reset() {
             &[
                 ("port", None, b"8443"),
                 ("password", None, b"keypass"),
-                ("crt", Some("server.crt"), b"-----BEGIN CERTIFICATE-----\nMIIB\n"),
-                ("key", Some("server.key"), b"-----BEGIN PRIVATE KEY-----\nMIIB\n"),
+                ("crt", Some("server.crt"), b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"),
+                ("key", Some("server.key"), b"-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----\n"),
             ],
         ),
     )
@@ -259,6 +259,36 @@ async fn http_settings_multipart_cert_upload_check_and_reset() {
     )
     .await;
     assert_eq!(garbage.status(), StatusCode::BAD_REQUEST);
+
+    // Маркеры BEGIN/END вокруг не-base64 мусора и 1-байтный «DER» — не валидны.
+    let marker_garbage = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/v3/settings/http/check")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=B5")
+            .body(Body::from(
+                "--B5\r\nContent-Disposition: form-data; name=\"crt\"; filename=\"a.crt\"\r\n\r\n-----BEGIN CERTIFICATE-----\n@@@ not base64 @@@\n-----END CERTIFICATE-----\r\n--B5--\r\n",
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(marker_garbage.status(), StatusCode::BAD_REQUEST);
+    let tiny_der = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/v3/settings/http/check")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=B6")
+            .body(Body::from(
+                "--B6\r\nContent-Disposition: form-data; name=\"crt\"; filename=\"a.crt\"\r\n\r\n\u{0030}\r\n--B6--\r\n",
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(tiny_der.status(), StatusCode::BAD_REQUEST);
 
     let checked = send(
         &app,
@@ -312,7 +342,9 @@ async fn ntp_and_time_timezone_endpoints() {
     assert_eq!(enabled.status(), StatusCode::OK);
     let time = json_body(send(&app, auth_request("GET", "/api/v3/system/time", &token, json!({}))).await).await;
     assert_eq!(time["ntp"], true);
-    assert_eq!(time["ntp_synchronized"], true);
+    // `ntp_synchronized` — реальный статус ОС, а не флаг «NTP включён»:
+    // на синхронизированном и несинхронизированном хосте тест одинаково валиден.
+    assert_eq!(time["ntp_synchronized"], crate::api_v3::settings_admin::system_ntp_synchronized());
     let disabled = send(&app, auth_request("POST", "/api/v3/system/ntp/disable", &token, json!({}))).await;
     assert_eq!(disabled.status(), StatusCode::OK);
     let time = json_body(send(&app, auth_request("GET", "/api/v3/system/time", &token, json!({}))).await).await;
@@ -448,6 +480,83 @@ async fn vendor_ui_shapes_for_ntp_time_and_stop_rules_are_accepted() {
 }
 
 #[tokio::test]
+async fn partial_legacy_calls_objects_are_merged_and_invalid_ones_rejected() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let before = json_body(send(&app, auth_request("GET", "/api/v3/settings/calls", &token, json!({}))).await).await;
+
+    // Частичный `limits` применяется (раньше молча терялся с 200).
+    let partial = send(
+        &app,
+        auth_request(
+            "PATCH",
+            "/api/v3/settings/calls",
+            &token,
+            json!({"payload":{"limits":{"max_participants_per_room":52}}}),
+        ),
+    )
+    .await;
+    assert_eq!(partial.status(), StatusCode::OK);
+    let after = json_body(send(&app, auth_request("GET", "/api/v3/settings/calls", &token, json!({}))).await).await;
+    assert_eq!(after["payload"]["limits"]["max_participants_per_room"], 52);
+    assert_eq!(
+        after["payload"]["limits"]["max_tracks_per_room"], before["payload"]["limits"]["max_tracks_per_room"],
+        "остальные поля limits сохраняются"
+    );
+
+    // Неизвестное поле legacy-объекта — 422, а не 200 без изменений.
+    let unknown =
+        send(&app, auth_request("PATCH", "/api/v3/settings/calls", &token, json!({"payload":{"limits":{"nope":1}}})))
+            .await;
+    assert_eq!(unknown.status(), StatusCode::UNPROCESSABLE_ENTITY, "{:?}", json_body(unknown).await);
+    // Неверный тип — тоже 422.
+    let bad_type = send(
+        &app,
+        auth_request(
+            "PATCH",
+            "/api/v3/settings/calls",
+            &token,
+            json!({"payload":{"limits":{"max_participants_per_room":"many"}}}),
+        ),
+    )
+    .await;
+    assert_eq!(bad_type.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Сброс к исходному состоянию.
+    let restore =
+        send(&app, auth_request("PATCH", "/api/v3/settings/calls", &token, json!({"payload": before["payload"]})))
+            .await;
+    assert_eq!(restore.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn partial_flat_ntp_patch_preserves_fallback_and_intervals() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let saved = send(
+        &app,
+        auth_request(
+            "PATCH",
+            "/api/v3/system/ntp",
+            &token,
+            json!({"ntp":"pool.ntp.org","fallback":["time.google.com"],"poll_interval_min":3600,"poll_interval_max":21600}),
+        ),
+    )
+    .await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    let partial =
+        send(&app, auth_request("PATCH", "/api/v3/system/ntp", &token, json!({"ntp":"time.cloudflare.com"}))).await;
+    assert_eq!(partial.status(), StatusCode::OK);
+    let ntp = json_body(send(&app, auth_request("GET", "/api/v3/system/ntp", &token, json!({}))).await).await;
+    assert_eq!(ntp["ntp"]["server"], "time.cloudflare.com");
+    assert_eq!(ntp["ntp"]["fallback"][0], "time.google.com", "частичный PATCH не обнуляет fallback");
+    assert_eq!(ntp["ntp"]["poll_interval_min"], 3600);
+    assert_eq!(ntp["ntp"]["poll_interval_max"], 21600);
+}
+
+#[tokio::test]
 async fn rejected_calls_patch_does_not_touch_media_codecs_and_restart_services_is_200() {
     let (state, _issuer) = test_state();
     let app = app(state.clone());
@@ -469,6 +578,9 @@ async fn rejected_calls_patch_does_not_touch_media_codecs_and_restart_services_i
     let restart = send(&app, auth_request("POST", "/api/v3/system/restart_services", &token, json!({}))).await;
     assert_eq!(restart.status(), StatusCode::OK);
     assert_eq!(json_body(restart).await["status"], "ok");
+    // GET не должен выполнять мутацию (только POST, как в vendor-UI).
+    let get_restart = send(&app, auth_request("GET", "/api/v3/system/restart_services", &token, json!({}))).await;
+    assert_eq!(get_restart.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[tokio::test]

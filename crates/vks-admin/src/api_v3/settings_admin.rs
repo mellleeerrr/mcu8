@@ -279,6 +279,34 @@ payload_endpoints!(styles_get, styles_patch, "styles", "settings/styles");
 payload_endpoints!(smtp_get, smtp_patch, "smtp", "settings/smtp");
 payload_endpoints!(security_get, security_patch, "security", "settings/security");
 
+/// Накладывает частичный legacy-объект на текущее значение и валидирует его.
+///
+/// `codecs/limits/turn` пришли из раннего API, где UI присылал полный объект;
+/// теперь частичный PATCH тоже поддерживается (иначе 200 без изменений).
+fn merge_legacy<T>(current: &T, incoming: &Value, path: &str) -> Result<T, String>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let mut base = serde_json::to_value(current).map_err(|error| format!("{path}: {error}"))?;
+    merge_legacy_value(&mut base, incoming, path)?;
+    serde_json::from_value(base).map_err(|error| format!("{path}: {error}"))
+}
+
+fn merge_legacy_value(base: &mut Value, incoming: &Value, path: &str) -> Result<(), String> {
+    match (base, incoming) {
+        (Value::Object(base), Value::Object(incoming)) => {
+            for (key, value) in incoming {
+                let Some(slot) = base.get_mut(key) else {
+                    return Err(format!("{path}.{key}: unknown field"));
+                };
+                merge_legacy_value(slot, value, &format!("{path}.{key}"))?;
+            }
+        }
+        (slot, value) => *slot = value.clone(),
+    }
+    Ok(())
+}
+
 /// `GET/PATCH /api/v3/settings/calls` — vendor-payload + наши codecs/limits/turn.
 pub async fn calls_get(State(state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
     super::track("settings/calls");
@@ -321,23 +349,29 @@ pub async fn calls_patch(
     let source = body.get("payload").unwrap_or(&body).clone();
     let mut current = crate::settings::SettingsService::get(&state);
     let mut legacy_changed = false;
+    // Legacy-объекты (`codecs/limits/turn`) допускают частичный PATCH: поля
+    // накладываются на текущие значения. Неверный тип/поле → 422, а не
+    // молчаливый 200 без изменений (иначе UI считает настройку сохранённой).
     if let Some(codecs) = source.get("codecs") {
-        if let Ok(c) = serde_json::from_value::<crate::settings::CodecConfig>(codecs.clone()) {
-            current.codecs = c;
-            legacy_changed = true;
+        match merge_legacy(&current.codecs, codecs, "codecs") {
+            Ok(c) => current.codecs = c,
+            Err(error) => return super::error_json(422, &error),
         }
+        legacy_changed = true;
     }
     if let Some(limits) = source.get("limits") {
-        if let Ok(l) = serde_json::from_value::<crate::settings::LimitsConfig>(limits.clone()) {
-            current.limits = l;
-            legacy_changed = true;
+        match merge_legacy(&current.limits, limits, "limits") {
+            Ok(l) => current.limits = l,
+            Err(error) => return super::error_json(422, &error),
         }
+        legacy_changed = true;
     }
     if let Some(turn) = source.get("turn") {
-        if let Ok(t) = serde_json::from_value::<crate::settings::TurnConfig>(turn.clone()) {
-            current.turn = t;
-            legacy_changed = true;
+        match merge_legacy(&current.turn, turn, "turn") {
+            Ok(t) => current.turn = t,
+            Err(error) => return super::error_json(422, &error),
         }
+        legacy_changed = true;
     }
     let mut payload = merged_payload(&state, "calls").await;
     let mut vendor_part = source;
@@ -448,6 +482,40 @@ pub async fn http_patch(
     Json(payload).into_response()
 }
 
+/// Проверяет PEM-блок: метки BEGIN/END нужного типа и base64-тело (строками).
+fn valid_pem_block(text: &str, labels: &[&str]) -> bool {
+    labels.iter().any(|label| {
+        let begin = format!("-----BEGIN {label}-----");
+        let end = format!("-----END {label}-----");
+        let Some(start) = text.find(&begin) else { return false };
+        let Some(stop) = text.find(&end) else { return false };
+        if stop <= start + begin.len() {
+            return false;
+        }
+        let body = &text[start + begin.len()..stop];
+        let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        compact.len() >= 4 && compact.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+    })
+}
+
+/// Минимальная DER-проверка: SEQUENCE с правдоподобной длиной (без X.509-парсинга).
+fn valid_der(bytes: &[u8]) -> bool {
+    if bytes.len() < 8 || bytes[0] != 0x30 {
+        return false;
+    }
+    let length = bytes[1] as usize;
+    let header = if length & 0x80 == 0 {
+        2
+    } else {
+        let count = length & 0x7f;
+        if count == 0 || count > 4 || bytes.len() < 2 + count {
+            return false;
+        }
+        2 + count
+    };
+    bytes.len() > header
+}
+
 /// `POST /api/v3/settings/http/check` — проверка выбранного файла.
 ///
 /// Vendor-UI вызывает check на КАЖДЫЙ выбранный файл отдельно (второй слот
@@ -477,16 +545,12 @@ pub async fn http_check(
             return super::error_json(400, &format!("{name}: file too large"));
         }
         let text = String::from_utf8_lossy(&bytes);
-        let looks_pem = text.contains("-----BEGIN ");
-        let valid = match name.as_str() {
-            "crt" => text.contains("BEGIN CERTIFICATE") || (!looks_pem && bytes.first() == Some(&0x30)),
-            _ => {
-                text.contains("BEGIN PRIVATE KEY")
-                    || text.contains("BEGIN RSA PRIVATE KEY")
-                    || text.contains("BEGIN ENCRYPTED PRIVATE KEY")
-                    || (!looks_pem && bytes.first() == Some(&0x30))
-            }
+        let pem_labels: &[&str] = if name == "crt" {
+            &["CERTIFICATE"]
+        } else {
+            &["PRIVATE KEY", "RSA PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "EC PRIVATE KEY"]
         };
+        let valid = if text.contains("-----BEGIN ") { valid_pem_block(&text, pem_labels) } else { valid_der(&bytes) };
         if !valid {
             return super::error_json(400, &format!("{name}: decode file error"));
         }
@@ -633,13 +697,15 @@ pub async fn restart_services(State(state): State<SharedState>, Extension(auth):
     if let Some(response) = forbid(&auth) {
         return response;
     }
-    let reload = state.sync_from_storage().await;
+    let reload = state.hot_reload_from_storage().await;
     state.record_audit_entry(&auth.subject, "system.restart_services", None, "");
-    let applied = reload.is_ok();
-    if let Err(error) = reload {
-        tracing::warn!(%error, "restart_services: configuration reload failed");
+    match reload {
+        Ok(()) => Json(json!({"status": "ok", "applied": true, "reloaded": "settings"})).into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "restart_services: configuration reload failed");
+            super::error_json(500, &format!("Configuration reload failed: {error}"))
+        }
     }
-    Json(json!({"status": "ok", "applied": applied, "reloaded": "settings"})).into_response()
 }
 
 /// `GET /api/v3/system/ntp` → `{ntp:{server,fallback,poll_interval_min,max}}`.
@@ -664,17 +730,25 @@ pub async fn ntp_patch(
     // Vendor-UI сохраняет NTP как `{ntp:"pool.ntp.org", fallback:[...],
     // poll_interval_min, poll_interval_max}` (server — строкой, не объектом).
     let source = body.get("payload").unwrap_or(&body);
+    let mut payload = merged_payload(&state, "ntp").await;
+    // Плоская форма vendor-UI содержит все четыре поля, но частичный PATCH
+    // `{ntp:"host"}` не должен обнулять fallback/интервалы.
     let incoming = match source.get("ntp") {
         Some(Value::String(server)) => json!({
             "server": server,
-            "fallback": source.get("fallback").cloned().unwrap_or_else(|| json!([])),
-            "poll_interval_min": source.get("poll_interval_min").cloned().unwrap_or(Value::Null),
-            "poll_interval_max": source.get("poll_interval_max").cloned().unwrap_or(Value::Null),
+            "fallback": source.get("fallback").cloned()
+                .or_else(|| payload.get("fallback").cloned())
+                .unwrap_or_else(|| json!([])),
+            "poll_interval_min": source.get("poll_interval_min").cloned()
+                .or_else(|| payload.get("poll_interval_min").cloned())
+                .unwrap_or(Value::Null),
+            "poll_interval_max": source.get("poll_interval_max").cloned()
+                .or_else(|| payload.get("poll_interval_max").cloned())
+                .unwrap_or(Value::Null),
         }),
         Some(Value::Object(object)) => Value::Object(object.clone()),
         _ => source.clone(),
     };
-    let mut payload = merged_payload(&state, "ntp").await;
     if let Err(error) = merge_known(&mut payload, &incoming, "ntp", &defaults("ntp")) {
         return super::error_json(422, &error);
     }
@@ -715,7 +789,7 @@ async fn ntp_toggle(state: SharedState, auth: AuthContext, enabled: bool) -> Res
 /// `GET /api/v3/system/time` — время/таймзона/NTP-статус для vendor-UI.
 /// Реальная синхронизация часов ОС (systemd-timesyncd/chrony), а не флаг
 /// «NTP включён»: без клиента времени статус обязан быть false.
-fn system_ntp_synchronized() -> bool {
+pub(crate) fn system_ntp_synchronized() -> bool {
     let output = std::process::Command::new("timedatectl").args(["show", "-p", "NTPSynchronized", "--value"]).output();
     match output {
         Ok(output) if output.status.success() => {

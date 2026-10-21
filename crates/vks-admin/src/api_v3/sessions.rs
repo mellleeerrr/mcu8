@@ -660,6 +660,9 @@ fn ensure_conference_identity(
     object.entry("owner_id").or_insert_with(|| json!(creator));
     if mark_started {
         object.insert("started_at".to_string(), json!(crate::state::now_unix_ms() / 1000));
+        // Новый запуск — новая сессия: durable-маркер прошлой сессии больше не
+        // должен блокировать запись истории при её удалении.
+        object.remove("history_recorded_at");
     }
     if let Some(code) = code {
         object.insert("dtmf".to_string(), json!(code));

@@ -225,3 +225,158 @@ async fn system_stats_are_real_and_operator_only() {
         StatusCode::FORBIDDEN
     );
 }
+
+#[tokio::test]
+async fn stats_disk_is_megabytes_and_network_is_kbps() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+
+    let disk = json_body(send(&app, auth_request("GET", "/api/v3/system/stats/disk", &token)).await).await;
+    assert!(disk["count"].as_u64().unwrap() >= 1, "{disk}");
+    let spaces = disk["spaces"].as_array().unwrap();
+    let space = spaces
+        .iter()
+        .find(|space| space["name"] == "/")
+        .unwrap_or_else(|| spaces.first().expect("at least one filesystem"));
+    let total = space["total"].as_u64().unwrap();
+    let used = space["used"].as_u64().unwrap();
+    let free = space["free"].as_u64().unwrap();
+    assert!(total > 0 && used <= total && free <= total, "{space}");
+    // Значения — MB, а не KiB: сравниваем с df -Pk (KiB/1024).
+    if let Ok(output) = std::process::Command::new("df").arg("-Pk").arg("/").output() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        let target = space["name"].as_str().unwrap_or("/");
+        if let Some(line) = text.lines().skip(1).find(|line| line.split_whitespace().nth(5) == Some(target)) {
+            let kib: u64 = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+            if kib > 0 {
+                let expected = kib / 1024;
+                assert!(
+                    total.abs_diff(expected) <= expected / 50 + 8,
+                    "disk total={total} MB, expected ~{expected} MB ({line})"
+                );
+            }
+        }
+    }
+
+    let network = json_body(send(&app, auth_request("GET", "/api/v3/system/stats/network", &token)).await).await;
+    assert!(network["count"].as_u64().unwrap() >= 1, "{network}");
+    for interface in network["interfaces"].as_array().unwrap() {
+        let rx = interface["rx"].as_u64().unwrap();
+        let tx = interface["tx"].as_u64().unwrap();
+        // kbps, а не накопительные байты: монотонные гигабайты здесь невозможны.
+        assert!(rx < 100_000_000, "rx={rx} looks like cumulative bytes: {interface}");
+        assert!(tx < 100_000_000, "tx={tx} looks like cumulative bytes: {interface}");
+    }
+}
+
+#[tokio::test]
+async fn log_export_csv_uses_local_time_and_invoker() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    state.record_audit_entry("admin", "login_ok", None, "10.9.8.7");
+    // settings-событие, у которого нет payload.login — имя берём из invoker.
+    state.record_audit_entry("operator", "settings.sip.updated", None, "10.9.8.8");
+
+    let export = json_body(send(&app, auth_request("GET", "/api/v3/log_events/export", &token)).await).await;
+    let filename = export["filename"].as_str().unwrap();
+    // 128-битный токен, а не 32-битный предсказуемый суффикс.
+    let suffix = filename.trim_end_matches(".zip").rsplit('_').next().unwrap();
+    assert_eq!(suffix.len(), 32, "expected 128-bit token in {filename}");
+    let download = app
+        .clone()
+        .oneshot(Request::builder().uri(format!("/static/log_events/{filename}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(download.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(download.into_body(), usize::MAX).await.unwrap();
+    let csv = String::from_utf8_lossy(&bytes);
+    assert!(csv.contains("operator"), "settings event must keep invoker: {csv}");
+    let timezone = crate::api_v3::history::public_timezone(&state).await;
+    let tz = timezone.parse::<chrono_tz::Tz>().expect("valid host timezone");
+    let event = crate::api_v3::observability::collect_events(&state)
+        .into_iter()
+        .find(|event| event.event_type == "login_success")
+        .expect("login event");
+    let expected = chrono::DateTime::from_timestamp(event.created_at, 0)
+        .unwrap()
+        .with_timezone(&tz)
+        .format("%d.%m.%Y %H:%M:%S")
+        .to_string();
+    assert!(csv.contains(&expected), "CSV must use local time {expected}: {csv}");
+}
+
+#[tokio::test]
+async fn license_features_status_network_and_videorecord_alias_shapes() {
+    let (state, issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+
+    let license = json_body(send(&app, auth_request("GET", "/api/v3/license", &token)).await).await;
+    assert_eq!(license["state"], "VALID");
+    assert_eq!(license["type"], "PERMANENT");
+    assert!(license["last_expired"].as_i64().unwrap() > 4_000_000_000, "{license}");
+    assert_eq!(license["last_update_failed"], false);
+    assert_eq!(license["params"]["protocol"]["sip"], true);
+    assert_eq!(license["params"]["server"]["max_conferences"], 4);
+
+    let features = json_body(send(&app, auth_request("GET", "/api/v3/features", &token)).await).await;
+    assert!(features["features"].as_array().is_some_and(|items| items.len() > 40), "{features}");
+
+    let status = json_body(send(&app, auth_request("GET", "/api/v3/system/status/network", &token)).await).await;
+    assert_eq!(status["network"]["editable"], false);
+
+    // Vendor-UI зовёт session-алиасы (оценка записи) — не 501.
+    let estimated =
+        send(&app, auth_request("GET", "/api/v3/sessions/any-id/videorecords/estimated_time?quality=high", &token))
+            .await;
+    assert_eq!(estimated.status(), StatusCode::OK, "{:?}", json_body(estimated).await);
+    let list = send(&app, auth_request("GET", "/api/v3/sessions/any-id/videorecords", &token)).await;
+    assert_eq!(list.status(), StatusCode::OK);
+
+    // Нижние роли не читают лицензию/фичи/диагностику/калибровку.
+    let viewer = role_token(&issuer, &state, Role::Viewer);
+    for uri in ["/api/v3/license", "/api/v3/features", "/api/v3/engine/diagnostics", "/api/v3/engine/calibration"] {
+        let response = send(&app, auth_request("GET", uri, &viewer)).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri} must be Operator-only");
+    }
+}
+
+#[tokio::test]
+async fn utilities_reject_option_like_addresses_and_missing_traceroute() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    for address in ["-V", "--help", "-c100000"] {
+        let response =
+            send(&app, auth_request("GET", &format!("/api/v3/system/utils/ping?address={address}"), &token)).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{address}");
+    }
+    let traceroute = send(&app, auth_request("GET", "/api/v3/system/utils/traceroute?address=127.0.0.1", &token)).await;
+    let installed = std::process::Command::new("sh")
+        .args(["-c", "command -v traceroute >/dev/null 2>&1"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if installed {
+        assert_eq!(traceroute.status(), StatusCode::OK);
+    } else {
+        // Честный 503, а не 200 с OS-ошибкой в stderr.
+        assert_eq!(traceroute.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_body(traceroute).await;
+        assert!(body["error"]["description"].as_str().unwrap().contains("not installed"));
+    }
+}
+
+#[tokio::test]
+async fn engine_log_has_stable_startup_timestamp() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let first = json_body(send(&app, auth_request("GET", "/api/v3/engine/log", &token)).await).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let second = json_body(send(&app, auth_request("GET", "/api/v3/engine/log", &token)).await).await;
+    assert_eq!(first["log"][0]["timestamp"], second["log"][0]["timestamp"], "startup record must be stable");
+    assert_eq!(first["bounds"]["timestamp"]["min"], first["log"][0]["timestamp"]);
+}

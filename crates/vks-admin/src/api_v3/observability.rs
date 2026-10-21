@@ -81,11 +81,11 @@ fn paginate<T>(items: Vec<T>, page: usize, size: usize) -> (usize, Vec<T>) {
 
 /// Vendor `log_events`: событие плоское, UI-маппер `nu` переименовывает поля.
 #[derive(Debug, Clone)]
-struct LogEvent {
+pub(crate) struct LogEvent {
     id: u64,
-    event_type: String,
+    pub(crate) event_type: String,
     object_type: String,
-    created_at: i64,
+    pub(crate) created_at: i64,
     payload: Value,
     invoker: Value,
     event_object: Value,
@@ -111,7 +111,7 @@ fn event_type_for(action: &str) -> Option<(&'static str, &'static str)> {
     Some(mapped)
 }
 
-fn collect_events(state: &SharedState) -> Vec<LogEvent> {
+pub(crate) fn collect_events(state: &SharedState) -> Vec<LogEvent> {
     let entries = state.audit.lock().map(|audit| audit.all().to_vec()).unwrap_or_default();
     entries
         .into_iter()
@@ -225,6 +225,12 @@ pub async fn log_events(
     .into_response()
 }
 
+/// Локальная IANA-таймзона сервера (та же, что в истории): CSV/ZIP-даты
+/// обязаны совпадать с тем, что UI показывает в таблице.
+async fn export_timezone(state: &SharedState) -> String {
+    super::history::public_timezone(state).await
+}
+
 /// `GET /api/v3/log_events/export` — ZIP с CSV журнала; файл на `/static/log_events/`.
 pub async fn log_events_export(
     State(state): State<SharedState>,
@@ -240,18 +246,21 @@ pub async fn log_events_export(
     if query.sort_order.unwrap_or(1) != 0 {
         events.reverse();
     }
-    let csv = log_events_csv(&events, query.locale_id.as_deref().unwrap_or("ru_RU"));
-    // Непредсказуемый суффикс: /static отдаётся без токена (скачивание через <a>).
-    let token = format!("{:x}", uuid::Uuid::new_v4().as_u128() & 0xffff_ffff);
-    let name = format!("log_events_{}_{}.zip", chrono::Utc::now().format("%Y_%m_%d_%H%M%S"), token);
-    let zip = zip_store(&name.replace(".zip", ".csv"), &csv);
+    let timezone = export_timezone(&state).await;
+    let csv = log_events_csv(&events, query.locale_id.as_deref().unwrap_or("ru_RU"), &timezone);
+    // 128-битный случайный токен: /static отдаётся без авторизации (скачивание
+    // через <a>), 32 бита были бы перебираемы. Имя — в локальном времени UI.
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let local_now = local_now_parts(&timezone);
+    let name = format!("log_events_{local_now}_{token}.zip");
+    let zip = zip_store(&name.replace(".zip", ".csv"), &csv, local_now_epoch(&timezone));
     if let Ok(mut exports) = state.api_v3.log_exports.lock() {
         exports.insert(name.clone(), zip);
     }
     Json(json!({ "filename": name })).into_response()
 }
 
-fn log_events_csv(events: &[LogEvent], locale: &str) -> Vec<u8> {
+fn log_events_csv(events: &[LogEvent], locale: &str, timezone: &str) -> Vec<u8> {
     let header = if locale.starts_with("ru") {
         "ID;Дата;Событие;Объект;Пользователь;IP;Дополнительно\n"
     } else {
@@ -262,12 +271,18 @@ fn log_events_csv(events: &[LogEvent], locale: &str) -> Vec<u8> {
         out.push_str(&format!(
             "{};{};{};{};{};{};{}\n",
             event.id,
-            chrono::DateTime::from_timestamp(event.created_at, 0)
-                .map(|dt| dt.format("%d.%m.%Y %H:%M:%S").to_string())
-                .unwrap_or_default(),
+            format_local_datetime(event.created_at, timezone),
             csv_escape(&event.event_type),
             csv_escape(&event.object_type),
-            csv_escape(event.payload.get("login").and_then(Value::as_str).unwrap_or("")),
+            csv_escape(
+                event
+                    .invoker
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty() && *value != "00000000-0000-0000-0000-000000000000")
+                    .or_else(|| event.payload.get("login").and_then(Value::as_str))
+                    .unwrap_or(""),
+            ),
             csv_escape(event.payload.get("ip").and_then(Value::as_str).unwrap_or("")),
             csv_escape(&event.event_object.to_string()),
         ));
@@ -282,9 +297,30 @@ pub async fn static_log_export(State(state): State<SharedState>, Path(filename):
     }
     let bytes = state.api_v3.log_exports.lock().ok().and_then(|mut exports| exports.get(&filename));
     match bytes {
-        Some(bytes) => ([(header::CONTENT_TYPE, "application/zip")], bytes.as_ref().to_vec()).into_response(),
+        Some(bytes) => ([(header::CONTENT_TYPE, "application/zip")], bytes).into_response(),
         None => error_json(404, "Log export not found").into_response(),
     }
+}
+
+fn local_now_parts(timezone: &str) -> String {
+    let now = chrono::Utc::now();
+    timezone
+        .parse::<chrono_tz::Tz>()
+        .map(|tz| now.with_timezone(&tz).format("%Y_%m_%d_%H%M%S").to_string())
+        .unwrap_or_else(|_| now.format("%Y_%m_%d_%H%M%S").to_string())
+}
+
+fn local_now_epoch(timezone: &str) -> i64 {
+    let now = chrono::Utc::now();
+    timezone.parse::<chrono_tz::Tz>().map(|tz| now.with_timezone(&tz).timestamp()).unwrap_or_else(|_| now.timestamp())
+}
+
+fn format_local_datetime(epoch: i64, timezone: &str) -> String {
+    let Some(utc) = chrono::DateTime::from_timestamp(epoch, 0) else { return String::new() };
+    timezone
+        .parse::<chrono_tz::Tz>()
+        .map(|tz| utc.with_timezone(&tz).format("%d.%m.%Y %H:%M:%S").to_string())
+        .unwrap_or_else(|_| utc.format("%d.%m.%Y %H:%M:%S").to_string())
 }
 
 fn csv_escape(value: &str) -> String {
@@ -427,7 +463,7 @@ pub async fn network_interface_patch(
 
 fn validated_address(value: &str) -> Option<String> {
     let value = value.trim();
-    if value.is_empty() || value.len() > 128 {
+    if value.is_empty() || value.len() > 128 || value.starts_with('-') {
         return None;
     }
     if !value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_')) {
@@ -437,7 +473,10 @@ fn validated_address(value: &str) -> Option<String> {
 }
 
 async fn run_util(program: &str, args: &[&str]) -> Response {
-    let execution = tokio::process::Command::new(program).args(args).stdin(Stdio::null()).output();
+    if !binary_available(program) {
+        return error_json(503, &format!("{program} is not installed on this host")).into_response();
+    }
+    let execution = tokio::process::Command::new(program).args(args).stdin(Stdio::null()).kill_on_drop(true).output();
     match timeout(Duration::from_secs(10), execution).await {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -451,6 +490,14 @@ async fn run_util(program: &str, args: &[&str]) -> Response {
         Ok(Err(error)) => Json(json!({"stdout": Value::Null, "stderr": format!("{program}: {error}")})).into_response(),
         Err(_) => Json(json!({"stdout": Value::Null, "stderr": format!("{program}: timeout")})).into_response(),
     }
+}
+
+fn binary_available(program: &str) -> bool {
+    std::process::Command::new("sh")
+        .args(["-c", &format!("command -v {program} >/dev/null 2>&1")])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// `GET /api/v3/system/utils/ping?address=` — реальный ping (ограниченный ввод).
@@ -654,6 +701,7 @@ pub async fn videorecords_estimated_time(
     Extension(auth): Extension<AuthContext>,
     Query(query): Query<BTreeMap<String, String>>,
 ) -> Response {
+    super::track("videorecords/estimated_time");
     if let Some(response) = forbid(&auth) {
         return response;
     }
@@ -741,7 +789,10 @@ pub async fn stats_cpu(State(_state): State<SharedState>, Extension(auth): Exten
     Json(json!({"count": load.len(), "load": load})).into_response()
 }
 
-/// `GET /api/v3/system/stats/disk` — реальные ФС (`df -Pk`), KB.
+/// `GET /api/v3/system/stats/disk` — реальные ФС (`df -Pk`), **MB**.
+///
+/// Vendor-UI `StatisticsDisk` делит значения на 1024 и подписывает «Gb»,
+/// поэтому отдаём мебибайты (как vendor-эталон и статистика памяти).
 pub async fn stats_disk(State(_state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
     super::track("system/stats/disk");
     if let Some(response) = forbid(&auth) {
@@ -758,6 +809,8 @@ pub async fn stats_disk(State(_state): State<SharedState>, Extension(auth): Exte
             let Ok(total) = fields[1].parse::<u64>() else { continue };
             let Ok(used) = fields[2].parse::<u64>() else { continue };
             let Ok(free) = fields[3].parse::<u64>() else { continue };
+            // `df -Pk` — KiB; UI ожидает MB.
+            let (total, used, free) = (total / 1024, used / 1024, free / 1024);
             if total == 0 || fields[0].starts_with("/dev/loop") {
                 continue;
             }
@@ -767,13 +820,9 @@ pub async fn stats_disk(State(_state): State<SharedState>, Extension(auth): Exte
     Json(json!({"count": spaces.len(), "spaces": spaces})).into_response()
 }
 
-/// `GET /api/v3/system/stats/network` — счётчики RX/TX из `/proc/net/dev`.
-pub async fn stats_network(State(_state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
-    super::track("system/stats/network");
-    if let Some(response) = forbid(&auth) {
-        return response;
-    }
-    let mut interfaces = Vec::new();
+/// Счётчики `/proc/net/dev`: `(rx_bytes, tx_bytes)` по интерфейсу.
+fn netdev_counters() -> std::collections::HashMap<String, (u64, u64)> {
+    let mut counters = std::collections::HashMap::new();
     if let Ok(text) = std::fs::read_to_string("/proc/net/dev") {
         for line in text.lines().skip(2) {
             let Some((name, rest)) = line.split_once(':') else { continue };
@@ -782,12 +831,35 @@ pub async fn stats_network(State(_state): State<SharedState>, Extension(auth): E
                 continue;
             }
             let fields: Vec<u64> = rest.split_whitespace().filter_map(|value| value.parse().ok()).collect();
-            if fields.len() < 9 {
-                continue;
+            if fields.len() >= 9 {
+                counters.insert(name.to_string(), (fields[0], fields[8]));
             }
-            interfaces.push(json!({"name": name, "rx": fields[0], "tx": fields[8]}));
         }
     }
+    counters
+}
+
+/// `GET /api/v3/system/stats/network` — скорость RX/TX, **kbps** (дельта за 200 мс).
+///
+/// `/proc/net/dev` отдаёт накопительные байты; vendor-UI подписывает значения
+/// «кбит/сек» и не конвертирует, поэтому считаем дельту и переводим в kbit/s.
+pub async fn stats_network(State(_state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
+    super::track("system/stats/network");
+    if let Some(response) = forbid(&auth) {
+        return response;
+    }
+    let first = netdev_counters();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let second = netdev_counters();
+    let interfaces: Vec<Value> = second
+        .iter()
+        .map(|(name, (rx, tx))| {
+            let (previous_rx, previous_tx) = first.get(name).copied().unwrap_or((*rx, *tx));
+            // Байты за 0.2 с → килобиты в секунду: delta * 8 / 1000 / 0.2.
+            let kbps = |delta: u64| ((delta as f64) * 8.0 / 1000.0 / 0.2).round() as u64;
+            json!({"name": name, "rx": kbps(rx.saturating_sub(previous_rx)), "tx": kbps(tx.saturating_sub(previous_tx))})
+        })
+        .collect();
     Json(json!({"count": interfaces.len(), "interfaces": interfaces})).into_response()
 }
 
@@ -810,13 +882,16 @@ pub async fn engine_log(State(_state): State<SharedState>, Extension(auth): Exte
     if let Some(response) = forbid(&auth) {
         return response;
     }
-    let now = now_unix_ms() as i64 / 1000;
+    // Время старта процесса фиксируем один раз: иначе «журнал» каждый раз
+    // выглядит как новая запись (UI сортирует/дедуплицирует по timestamp).
+    static STARTED: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    let started = *STARTED.get_or_init(|| now_unix_ms() as i64 / 1000);
     Json(json!({
         "language": "ru",
-        "bounds": {"id": {"min": 1, "max": 1}, "timestamp": {"min": now, "max": now}},
+        "bounds": {"id": {"min": 1, "max": 1}, "timestamp": {"min": started, "max": started}},
         "log": [{
             "id": 1,
-            "timestamp": now,
+            "timestamp": started,
             "src": "MCU",
             "class": "INFO",
             "msg": "media runtime ready (built-in engine)",
@@ -827,8 +902,8 @@ pub async fn engine_log(State(_state): State<SharedState>, Extension(auth): Exte
 
 // ---------- ZIP writer (shared with history) ----------
 
-fn zip_store(name: &str, data: &[u8]) -> Vec<u8> {
-    super::zip_store::zip_store(name, data, now_unix_ms() as i64 / 1000)
+fn zip_store(name: &str, data: &[u8], modified_secs: i64) -> Vec<u8> {
+    super::zip_store::zip_store(name, data, modified_secs)
 }
 
 // Keep StatusCode import used in signatures through error_json; explicit helper
