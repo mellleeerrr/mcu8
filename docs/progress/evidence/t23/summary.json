@@ -1,15 +1,15 @@
 {
  "task": "T2.3",
- "ok": true,
- "started_at": "2026-10-21T00:25:33.772Z",
+ "ok": false,
+ "started_at": "2026-10-21T01:25:30.837Z",
  "build": {
-  "git_head": "cfffcb72235a81d960a1a209eee0086cd6399685",
-  "git_head_ct": 1792542265,
-  "git_dirty": false,
-  "binary_sha256": "f0f3a843ab6da80a4ad3469e633de14f97244e8f51ae13e7cc49199e077f2753",
-  "binary_mtime": 1792542329,
-  "binary_path": "/proc/769414/exe",
-  "server_pid": 769414
+  "git_head": "67c61ac9559c148192fcaedcaf79913dc7b17a1f",
+  "git_head_ct": 1792545812,
+  "git_dirty": true,
+  "binary_sha256": "c05530672a5305b6fb9b7d82deba72929a070be77e3fe076541a22d4f35818ec",
+  "binary_mtime": 1792545883,
+  "binary_path": "/proc/821070/exe",
+  "server_pid": 821070
  },
  "acceptance": {
   "settings_get_contracts": true,
@@ -19,52 +19,24 @@
   "sip_restored": true,
   "rtp_patch_persist": true,
   "h323_patch_persist": true,
+  "h323_restored": true,
   "calls_vendor_payload": true,
   "calls_patch_persist": true,
   "http_multipart_upload": true,
-  "http_check_after_upload": true,
+  "http_check_single_file": true,
   "http_reset": true,
   "smtp_empty_server_422": true,
   "smtp_patch_masked": true,
   "smtp_live_test": true,
   "smtp_reset": true,
   "ntp_toggle": true,
+  "ntp_status_not_faked": true,
+  "ntp_status_source": "yes",
+  "system_time_patch_vendor_string": false,
   "system_time_patch": true,
   "timezone_patch_profile": true,
-  "time_zones_list": true,
-  "settings_ui_pages": true,
-  "settings_ui_save": true,
-  "settings_ui_save_restored": true,
-  "ui_time_shows_ntp": true,
-  "ui_security_form": true
+  "time_zones_list": true
  },
- "totals": {
-  "steps": 9,
-  "acceptance": 25,
-  "failed": 0,
-  "screenshots": 3,
-  "http_errors": 0,
-  "console_errors": 0,
-  "vendor_console_errors": 0
- },
- "error": null,
- "steps": [
-  "settings-get-contracts",
-  "settings-patch-persist",
-  "calls-vendor-and-legacy",
-  "http-tls-multipart",
-  "smtp-test-and-reset",
-  "ntp-time-timezone",
-  "settings-ui-pages",
-  "settings-ui-save",
-  "settings-ui-screenshots"
- ],
- "screenshots": [
-  "01-administration-calls.png",
-  "02-administration-date-time.png",
-  "03-administration-security.png"
- ],
- "http_errors": [],
- "console_errors": [],
- "finished_at": "2026-10-21T00:26:20.305Z"
+ "totals": {},
+ "error": "locator.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator('[title=\"Частота синхронизации\"]')\n\n    at /home/pro/Рабочий стол/mcu/scripts/evidence/t23-evidence.js:359:61\n    at async record (/home/pro/Рабочий стол/mcu/scripts/evidence/t23-evidence.js:102:19)\n    at async /home/pro/Рабочий стол/mcu/scripts/evidence/t23-evidence.js:339:5"
 }

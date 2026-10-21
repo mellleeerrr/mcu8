@@ -309,15 +309,19 @@ const summary = {
       const hostSync = sh('timedatectl show -p NTPSynchronized --value');
       const expectedSync = hostSync === 'yes';
       summary.acceptance.ntp_status_not_faked = timeEnabled.json.time.ntp_synchronized === expectedSync;
-      summary.acceptance.ntp_status_source = hostSync || 'unavailable';
+      summary.host_ntp_status = hostSync || 'unavailable';
 
-      // Vendor-UI: PATCH /system/time присылает локальную строку.
+      // Vendor-UI: PATCH /system/time присылает локальную строку. Фиксируем
+      // UTC, чтобы ожидаемое значение не зависело от состояния прошлых прогонов.
+      await api('/api/v3/system/timezone', { method: 'PATCH', data: { timezone: 'UTC' } });
       const uiTime = '22.10.2026 04:45:00';
       const timePatch = await api('/api/v3/system/time', { method: 'PATCH', data: { time: uiTime } });
-      const expectedTime = Math.floor(new Date('2026-10-22T04:45:00+03:00').getTime() / 1000);
+      const expectedTime = Math.floor(Date.UTC(2026, 9, 22, 4, 45, 0) / 1000);
       summary.acceptance.system_time_patch_vendor_string =
-        timePatch.status === 200 && Math.abs(timePatch.json.time.time - expectedTime) <= 120;
+        timePatch.status === 200 && timePatch.json.time.timezone === 'UTC' &&
+        Math.abs(timePatch.json.time.time - expectedTime) <= 120;
       await api('/api/v3/system/time', { method: 'PATCH', data: { payload: { seconds: 0 } } });
+      await api('/api/v3/system/timezone', { method: 'PATCH', data: { timezone: 'Europe/Moscow' } });
 
       const now = Math.floor(Date.now() / 1000);
       const timeNumber = await api('/api/v3/system/time', { method: 'PATCH', data: { time: now } });
@@ -348,15 +352,16 @@ const summary = {
       await api('/api/v3/system/ntp/disable', { method: 'POST' });
       await page.goto(`${BASE}/pnm/administration/date_time`, { waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(3000);
-      const switchOn = await page.evaluate(() => {
+      const switchOn = async () => page.evaluate(() => {
         const el = [...document.querySelectorAll('input')].find((input) => String(input.id).includes('tc-switch'));
         return el ? el.checked : null;
       });
-      if (!switchOn) {
-        await page.locator('label.tc-switch__text').first().click();
+      for (let attempt = 0; attempt < 3 && (await switchOn()) !== true; attempt += 1) {
+        const label = page.locator('label.tc-switch__text', { hasText: 'Синхронизировать' }).first();
+        if (await label.count()) await label.click();
         await page.waitForTimeout(1200);
       }
-      await page.locator('[title="Частота синхронизации"]').click();
+      await page.locator('[title="Частота синхронизации"]').waitFor({ state: 'visible', timeout: 10000 });
       await page.waitForTimeout(600);
       const freq = page.locator('.tc-context-menu-item[title="1 час"]');
       if (await freq.count()) await freq.first().click({ force: true });
