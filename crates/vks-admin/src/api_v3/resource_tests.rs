@@ -1080,6 +1080,23 @@ async fn t02_generic_create_reuses_canonical_default() {
     assert_eq!(resources.layouts.len(), 1);
 }
 
+/// F1: canonical «Общая» должна реально сохраняться в storage, а не только
+/// жить в памяти до рестарта.
+#[tokio::test]
+async fn t02_canonical_create_persists_after_reload() {
+    let storage = Arc::new(vks_storage::memory::MemoryStorage::new());
+    let state = Arc::new(AppState::with_storage(storage.clone()));
+    let first = create_layout(&state, "", json!({"type":"default"})).await;
+    let second = create_layout(&state, "", json!({"type":"default"})).await;
+    assert_eq!(first, second);
+
+    let restored = AppState::with_storage(storage);
+    restored.sync_from_storage().await.expect("reload");
+    let resources = restored.api_v3.resources.lock().await;
+    assert_eq!(resources.layouts.len(), 1, "canonical default persisted exactly once");
+    assert!(resources.layouts.contains_key(&first), "returned id exists after reload");
+}
+
 #[tokio::test]
 async fn t02_remove_shared_layout_is_409_without_mutation() {
     let state = state();

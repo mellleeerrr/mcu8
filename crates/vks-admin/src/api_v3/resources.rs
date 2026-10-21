@@ -545,13 +545,16 @@ pub(crate) fn cow_replace(resources: &mut ResourceState, scope_key: &str, source
 }
 
 /// Единственная каноническая «Общая» в документе; создаёт, если её нет.
-fn canonical_layout_id(resources: &mut ResourceState) -> String {
-    if let Some(id) = resources
+fn find_canonical_layout_id(resources: &ResourceState) -> Option<String> {
+    resources
         .layouts
         .values()
         .find(|layout| is_canonical_default(layout))
         .and_then(|layout| layout["id"].as_str().map(str::to_string))
-    {
+}
+
+fn canonical_layout_id(resources: &mut ResourceState) -> String {
+    if let Some(id) = find_canonical_layout_id(resources) {
         return id;
     }
     let record = normalize_resource("video_layouts", &json!({"payload":canonical_default_payload()}), "system");
@@ -1102,9 +1105,13 @@ pub async fn create(
         && is_canonical_default(&record)
         && record["display_name"].as_str().unwrap_or_default().is_empty()
     {
-        let id = canonical_layout_id(&mut resources);
-        if let Some(existing) = resources.layouts.get(&id).cloned() {
-            return (StatusCode::CREATED, Json(json!({singular(kind):existing}))).into_response();
+        // Только поиск: find не мутирует документ. Раньше canonical_layout_id
+        // вставлял запись и возвращал 201 до commit — на свежей БД «Общая»
+        // терялась после рестарта (F1).
+        if let Some(id) = find_canonical_layout_id(&resources) {
+            if let Some(existing) = resources.layouts.get(&id).cloned() {
+                return (StatusCode::CREATED, Json(json!({singular(kind):existing}))).into_response();
+            }
         }
     }
     let previous = resources.clone();
