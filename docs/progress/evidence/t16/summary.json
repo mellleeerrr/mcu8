@@ -1,11 +1,11 @@
 {
-  "generated_at": "2026-10-21T03:39:02.362Z",
+  "generated_at": "2026-10-21T04:09:39.653Z",
   "base": "http://127.0.0.1:8080",
   "build": {
-    "git_head": "21edc17183fac7cbb8aa9bc3030c3fbc0d83b732",
+    "git_head": "08486e7bbbf2998e4fd9a6631eb59d7a76b3524f",
     "git_dirty": false,
-    "binary_sha256": "329e549ae4a6bee578449d971a077f97367e65224c66d324bc4ea23f99a14e4a",
-    "server_pid": 927392,
+    "binary_sha256": "17a065640103adc64c888d78067b9fec1b7ee8e7db90f576a38da4bcf3b60c5f",
+    "server_pid": 946253,
     "source_note": "бинарник должен соответствовать HEAD; git_dirty=true означает изменённые tracked-файлы на момент прогона (untracked-output evidence не считается)"
   },
   "ok": true,
@@ -92,7 +92,7 @@
     {
       "protocol": "H.323",
       "uri": "h323:192.168.1.132",
-      "session_id": "58a4aa1f-9753-436c-be11-40d7ff77d69e",
+      "session_id": "b67e8bfb-564a-4baf-8ce2-9cd050099150",
       "address_selected": {
         "suggestion": "Зал 132 (h323)",
         "protocol_label": "H323",
@@ -100,7 +100,7 @@
       },
       "connected": true,
       "media_before": {
-        "abonent_id": "h323-1ebaa75d-6185-4151-9a2a-000d4ee9ae5e@h323-gateway",
+        "abonent_id": "h323-4ef98870-eef4-4e94-a2d1-1f12a77960d0@h323-gateway",
         "display_name": "Зал 132 (h323)",
         "audio": {
           "rx": {
@@ -113,8 +113,8 @@
           "tx": {
             "active": true,
             "codec": "PCMU",
-            "packets": 64,
-            "bitrate": 66715,
+            "packets": 66,
+            "bitrate": 68540,
             "resolution": "0x0"
           }
         },
@@ -122,35 +122,35 @@
           "rx": {
             "active": true,
             "codec": "H264",
-            "packets": 7,
-            "bitrate": 23072,
+            "packets": 5,
+            "bitrate": 13186,
             "resolution": "640x360"
           },
           "tx": {
             "active": true,
             "codec": "H264",
-            "packets": 57,
-            "bitrate": 141490,
+            "packets": 55,
+            "bitrate": 129032,
             "resolution": "640x360"
           }
         }
       },
       "media_after": {
-        "abonent_id": "h323-1ebaa75d-6185-4151-9a2a-000d4ee9ae5e@h323-gateway",
+        "abonent_id": "h323-4ef98870-eef4-4e94-a2d1-1f12a77960d0@h323-gateway",
         "display_name": "Зал 132 (h323)",
         "audio": {
           "rx": {
             "active": true,
             "codec": "PCMU",
-            "packets": 69,
-            "bitrate": 17816,
+            "packets": 66,
+            "bitrate": 17025,
             "resolution": "0x0"
           },
           "tx": {
             "active": true,
             "codec": "PCMU",
-            "packets": 260,
-            "bitrate": 67134,
+            "packets": 263,
+            "bitrate": 67845,
             "resolution": "0x0"
           }
         },
@@ -158,15 +158,15 @@
           "rx": {
             "active": true,
             "codec": "H264",
-            "packets": 41,
-            "bitrate": 28922,
+            "packets": 39,
+            "bitrate": 26276,
             "resolution": "640x360"
           },
           "tx": {
             "active": true,
             "codec": "H264",
-            "packets": 256,
-            "bitrate": 221500,
+            "packets": 257,
+            "bitrate": 222222,
             "resolution": "640x360"
           }
         }
@@ -185,7 +185,7 @@
         "speaker_tx_enabled": true
       },
       "layout": {
-        "id": "2b490826-ca46-4f25-854a-acf47bda6466",
+        "id": "62733e8d-dc2c-4427-b0b6-7426dacd0ba5",
         "mode": "manual",
         "size": 4,
         "slots": 4,
@@ -213,7 +213,7 @@
     {
       "protocol": "SIP",
       "uri": "sip:192.168.1.132",
-      "session_id": "4c63d2e3-0bb8-4be4-b62b-39f9487e7d03",
+      "session_id": "81e5a79f-0c5c-4ff6-b5ee-05a25833131d",
       "address_selected": {
         "suggestion": "Зал 132 (sip)",
         "protocol_label": "SIP",
@@ -221,7 +221,7 @@
       },
       "connected": true,
       "media_before": {
-        "abonent_id": "sip-b97515ce-b298-47ef-958b-3cefdac907cb@sip-gateway",
+        "abonent_id": "sip-5338f62e-063d-4c84-819f-90f240633d5b@sip-gateway",
         "display_name": "Зал 132 (sip)",
         "audio": {
           "rx": {
@@ -234,8 +234,8 @@
           "tx": {
             "active": true,
             "codec": "PCMU",
-            "packets": 56,
-            "bitrate": 68251,
+            "packets": 63,
+            "bitrate": 64452,
             "resolution": "0x0"
           }
         },
@@ -244,34 +244,34 @@
             "active": true,
             "codec": "H264",
             "packets": 8,
-            "bitrate": 30455,
+            "bitrate": 25564,
             "resolution": "640x360"
           },
           "tx": {
             "active": true,
             "codec": "H264",
-            "packets": 51,
-            "bitrate": 205633,
+            "packets": 63,
+            "bitrate": 202182,
             "resolution": "640x360"
           }
         }
       },
       "media_after": {
-        "abonent_id": "sip-b97515ce-b298-47ef-958b-3cefdac907cb@sip-gateway",
+        "abonent_id": "sip-5338f62e-063d-4c84-819f-90f240633d5b@sip-gateway",
         "display_name": "Зал 132 (sip)",
         "audio": {
           "rx": {
             "active": true,
             "codec": "PCMU",
-            "packets": 75,
-            "bitrate": 20089,
+            "packets": 88,
+            "bitrate": 22515,
             "resolution": "0x0"
           },
           "tx": {
             "active": true,
             "codec": "PCMU",
-            "packets": 245,
-            "bitrate": 65625,
+            "packets": 254,
+            "bitrate": 64987,
             "resolution": "0x0"
           }
         },
@@ -279,15 +279,15 @@
           "rx": {
             "active": true,
             "codec": "H264",
-            "packets": 42,
-            "bitrate": 30307,
+            "packets": 44,
+            "bitrate": 31036,
             "resolution": "640x360"
           },
           "tx": {
             "active": true,
             "codec": "H264",
-            "packets": 253,
-            "bitrate": 234183,
+            "packets": 268,
+            "bitrate": 239311,
             "resolution": "640x360"
           }
         }
@@ -306,7 +306,7 @@
         "speaker_tx_enabled": true
       },
       "layout": {
-        "id": "7ec5bf88-f64f-4ab3-8649-b58b042b5e1c",
+        "id": "e19869b7-b820-4684-976e-0c45d38f8a41",
         "mode": "manual",
         "size": 4,
         "slots": 4,

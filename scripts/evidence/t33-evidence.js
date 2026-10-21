@@ -193,6 +193,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       }
     }
 
+    // page_walk зелёный только если каждая страница реально отдала 200,
+    // совпала по finalUrl и не дала missing-лейблов/HTTP/console ошибок.
+    summary.page_walk = walk;
+    summary.acceptance.page_walk = walk.length === pages.length && walk.every((record) =>
+      record.documentStatus === 200 && record.missing.length === 0 &&
+      record.http.length === 0 && record.console.length === 0);
+
     // ---- «Калибровка» убрана из UX: deep-link уводит на статистику, API null ----
     const calibration = await api('/api/v3/engine/calibration');
     summary.acceptance.calibration_hidden =
