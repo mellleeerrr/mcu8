@@ -349,7 +349,7 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 
 ### C1. Auth/RBAC: RS256, `iss`, permissions sync
 
-**Статус:** ⚪ (T3.1–T3.2)
+**Статус:** ⚪ (P2, ex-REWORK C1)
 **Подводные камни:** HS256 dev-секрет; `iss` опционален; `getIsProfileHasPermissions` TODO;
 не сломать v1 RBAC; refresh-токена нет.
 **Приёмка:** тесты JWT (alg none/HS256/RS256, iss), 403 на UI, профиль `permissions`.
@@ -433,3 +433,7 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 `POST /api/v3/ui/video_layouts/mode` из-за отсутствия раскладки у сессии:
 тест теперь создаёт/прикрепляет layout, передаёт `video_layout_id` и проверяет
 `mode:"auto"`/`topology:"mcu"`; passes на `1405f8c`.
+
+## Вопросы к команде
+
+Открытых вопросов нет.
