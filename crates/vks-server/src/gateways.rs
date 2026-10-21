@@ -928,12 +928,12 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
     async fn dial(&self, room_id: RoomId, uri: &str, display_name: Option<&str>) -> Result<String, String> {
         let trimmed = uri.trim();
         let is_h323 = trimmed.starts_with("h323:");
-        self.ensure_bridgeable_codecs(room_id, trimmed).await?;
         let is_sip = trimmed.starts_with("sip:")
             || (!trimmed.contains("://") && !trimmed.starts_with("webrtc:") && !trimmed.starts_with("recorder:"));
         if !is_sip && !is_h323 {
             return Err(format!("Unsupported outbound protocol scheme: {uri}"));
         }
+        self.ensure_bridgeable_codecs(room_id, trimmed).await?;
 
         let pid_str = if is_h323 {
             format!("h323-{}@h323-gateway", uuid::Uuid::new_v4())
