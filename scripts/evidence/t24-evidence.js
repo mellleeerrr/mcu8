@@ -94,27 +94,11 @@ const isVendorError = (text) =>
   /validationHandler.*catch is not a function/.test(text);
 
 (async () => {
-  const browser = await chromium.launch({
-    args: ['--no-sandbox', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--ignore-certificate-errors'],
-  });
-  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1600, height: 1000 } });
-  const page = await context.newPage();
+  // summary.json пишется даже если браузер не запустился: launch внутри try.
+  let browser = null;
+  let page = null;
   let networkStatusSeen = false;
   let networkInterfacesSeen = false;
-  page.on('response', (response) => {
-    if (response.url().includes('/api/v3/system/status/network')) networkStatusSeen = true;
-    if (response.url().includes('/api/v3/system/network/interfaces')) networkInterfacesSeen = true;
-    if (response.status() >= 400 && response.url().includes('/api/v3/')) {
-      httpErrors.push(`${response.status()} ${response.request().method()} ${response.url().replace(BASE, '')}`);
-    }
-  });
-  page.on('console', (message) => {
-    if (message.type() !== 'error') return;
-    const text = message.text();
-    if (isVendorError(text)) vendorErrors.push(text);
-    else consoleErrors.push(text);
-  });
-  page.on('pageerror', (error) => consoleErrors.push(String(error)));
 
   const record = async (name, fn) => {
     const value = await fn();
@@ -142,6 +126,26 @@ const isVendorError = (text) =>
   };
 
   try {
+    browser = await chromium.launch({
+      args: ['--no-sandbox', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--ignore-certificate-errors'],
+    });
+    const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1600, height: 1000 } });
+    page = await context.newPage();
+    page.on('response', (response) => {
+      if (response.url().includes('/api/v3/system/status/network')) networkStatusSeen = true;
+      if (response.url().includes('/api/v3/system/network/interfaces')) networkInterfacesSeen = true;
+      if (response.status() >= 400 && response.url().includes('/api/v3/')) {
+        httpErrors.push(`${response.status()} ${response.request().method()} ${response.url().replace(BASE, '')}`);
+      }
+    });
+    page.on('console', (message) => {
+      if (message.type() !== 'error') return;
+      const text = message.text();
+      if (isVendorError(text)) vendorErrors.push(text);
+      else consoleErrors.push(text);
+    });
+    page.on('pageerror', (error) => consoleErrors.push(String(error)));
+
     // ---------- login через vendor-UI ----------
     await page.goto(BASE + '/pnm/', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(2500);
@@ -336,7 +340,8 @@ const isVendorError = (text) =>
       summary.acceptance.license_permanent_shape = Boolean(
         license.status === 200 && license.json.state === 'VALID' && license.json.type === 'PERMANENT' &&
         license.json.last_expired > 4000000000 && license.json.last_update_failed === false &&
-        license.json.serial_id && license.json.params && license.json.params.protocol && license.json.params.video,
+        license.json.serial_id && license.json.params &&
+        ['protocol', 'audio', 'video', 'server', 'storage'].every((key) => Boolean(license.json.params[key])),
       );
       const features = await api('/api/v3/features');
       summary.acceptance.features_array =
@@ -432,7 +437,7 @@ const isVendorError = (text) =>
       const patchStatus = await page.evaluate(
         (authToken) => new Promise((resolve) => {
           const xhr = new XMLHttpRequest();
-          xhr.open('PATCH', '/api/v3/system/network/ens18');
+          xhr.open('PATCH', '/api/v3/system/network/interfaces/ens18');
           xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
           xhr.setRequestHeader('Content-Type', 'application/json');
           xhr.onload = () => resolve(xhr.status);
@@ -457,6 +462,10 @@ const isVendorError = (text) =>
       build.git_dirty === false && build.git_head.length === 40 && build.binary_sha256 !== null;
     summary.acceptance.binary_built_after_head =
       build.binary_mtime !== null && build.git_head_ct > 0 && build.binary_mtime >= build.git_head_ct;
+    // Ровно один намеренный негатив: иначе фильтр ниже спрятал бы лишние 501.
+    summary.acceptance.intentional_501_accounted =
+      consoleErrors.filter((text) => text.includes('Failed to load resource: the server responded with a status of 501')).length === 1 &&
+      httpErrors.filter((text) => text.includes('/api/v3/system/network/interfaces/ens18')).length === 1;
     const acceptance = Object.entries(summary.acceptance);
     const failed = acceptance.filter(([, ok]) => ok !== true).map(([key]) => key);
     summary.acceptance_failed = failed;
@@ -466,7 +475,7 @@ const isVendorError = (text) =>
     const intentionalConsole = consoleErrors.filter((text) =>
       text.includes('Failed to load resource: the server responded with a status of 501'));
     const unexpectedConsole = consoleErrors.filter((text) => !intentionalConsole.includes(text));
-    const intentionalHttp = httpErrors.filter((text) => text.includes('/api/v3/system/network/ens18'));
+    const intentionalHttp = httpErrors.filter((text) => text.includes('/api/v3/system/network/interfaces/ens18'));
     const unexpectedHttp = httpErrors.filter((text) => !intentionalHttp.includes(text));
     summary.console_errors = unexpectedConsole;
     summary.vendor_errors = vendorErrors;
@@ -495,7 +504,7 @@ const isVendorError = (text) =>
   } finally {
     summary.finished_at = new Date().toISOString();
     fs.writeFileSync(path.join(OUT, 'summary.json'), JSON.stringify(summary, null, 1) + '\n');
-    await browser.close();
+    if (browser) await browser.close();
     const acceptance = Object.entries(summary.acceptance);
     const failed = acceptance.filter(([, ok]) => ok !== true).map(([key]) => key);
     console.log(`T2.4 evidence: ${summary.ok ? 'OK' : 'FAIL'} ${acceptance.length - failed.length}/${acceptance.length} gates`);

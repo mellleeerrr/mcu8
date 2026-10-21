@@ -164,16 +164,17 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       ['license', '/pnm/administration/license', ['Лицензия']],
       ['about', '/pnm/administration/about', ['О программе']],
     ];
-    summary.acceptance.page_walk = true;
+    const walk = [];
     for (const [slug, url, labels] of pages) {
       const beforeHttp = httpErrors.length;
       const beforeConsole = consoleErrors.length;
-      await page.goto(BASE + url, { waitUntil: 'domcontentloaded' });
+      const response = await page.goto(BASE + url, { waitUntil: 'domcontentloaded' });
+      const documentStatus = response ? response.status() : 0;
       await page.waitForTimeout(2500);
       const text = await page.locator('body').innerText();
       const missing = labels.filter((label) => !text.includes(label));
       const record = {
-        slug, url, finalUrl: page.url(), missing,
+        slug, url, finalUrl: page.url(), documentStatus, missing,
         http: httpErrors.slice(beforeHttp),
         console: consoleErrors.slice(beforeConsole),
       };
@@ -186,10 +187,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       if (slug === 'sessions' && !page.url().includes('/monitoring/sessions')) {
         record.missing = [...record.missing, 'sessions route'];
       }
-      if (missing.length || record.http.length || record.console.length) {
-        summary.acceptance.page_walk = false;
-        summary.acceptance[`page_problem:${slug}`] = record;
-      }
+      walk.push(record);
       if (['sessions', 'addressbook', 'history', 'statistics', 'calls', 'network', 'license'].includes(slug)) {
         await shot(`${String(summary.pages.length + 1).padStart(2, '0')}-${slug}.png`);
       }

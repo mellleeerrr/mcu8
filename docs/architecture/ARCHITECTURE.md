@@ -314,14 +314,14 @@ vks-common         ← vks-core
 vks-layout         ← vks-core
 vks-auth           ← vks-core, vks-proto
 vks-storage        ← vks-core
-vks-media-sfu      ← vks-core, vks-proto, vks-common, vks-layout
+vks-media-sfu      ← vks-core
 vks-media-mcu      ← vks-core, vks-proto, vks-common, vks-layout
 vks-signaling      ← vks-core, vks-proto, vks-common, vks-auth
-vks-gateway-sip    ← vks-core, vks-proto, vks-common
-vks-gateway-h323   ← vks-core, vks-proto, vks-common
+vks-gateway-sip    ← vks-common
+vks-gateway-h323   ← vks-common
 vks-recorder       ← vks-core, vks-proto, vks-common
 vks-cluster        ← vks-core, vks-proto
-vks-admin          ← vks-core, vks-proto, vks-auth, vks-storage
+vks-admin          ← vks-core, vks-proto, vks-auth, vks-common
 vks-server         ← ВСЕ выше (композиционный корень)
 ```
 

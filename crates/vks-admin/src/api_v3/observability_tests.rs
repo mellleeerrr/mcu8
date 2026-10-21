@@ -156,13 +156,14 @@ async fn videorecords_map_real_records_and_refuse_delete() {
     let (state, _) = test_state();
     let app = app(state.clone());
     let token = login_token(&app, "admin", "s3cret").await;
+    let room_id = vks_core::RoomId::new();
     {
         let mut records = state.records.lock().unwrap();
         records.insert(
             "rec-1".into(),
             crate::state::RecordEntry {
                 id: "rec-1".into(),
-                room_id: vks_core::RoomId::new(),
+                room_id,
                 created_ms: 1_800_000_000_000,
                 duration_sec: 120,
                 size_bytes: 10_485_760,
@@ -181,9 +182,54 @@ async fn videorecords_map_real_records_and_refuse_delete() {
     )
     .await;
     assert!(estimated["recording_time"].is_number());
+    // session-алиас фильтрует по id из пути, а не отдаёт все записи.
+    let own =
+        json_body(send(&app, auth_request("GET", &format!("/api/v3/sessions/{room_id}/videorecords"), &token)).await)
+            .await;
+    assert_eq!(own["count"], 1, "{own}");
+    let foreign = json_body(
+        send(&app, auth_request("GET", &format!("/api/v3/sessions/{}/videorecords", vks_core::RoomId::new()), &token))
+            .await,
+    )
+    .await;
+    assert_eq!(foreign["count"], 0, "{foreign}");
     let refused = send(&app, auth_request("DELETE", "/api/v3/videorecords/rec-1", &token)).await;
     assert_eq!(refused.status(), StatusCode::NOT_IMPLEMENTED);
     assert_eq!(json_body(refused).await["error"]["code"], 501);
+}
+
+#[tokio::test]
+async fn log_events_map_real_v3_directory_actions() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    for action in [
+        "user.created",
+        "user.credentials.created",
+        "user.credentials.updated",
+        "user.credentials.deleted",
+        "profile.credentials.updated",
+    ] {
+        state.record_audit_entry("admin", action, None, "10.0.0.9");
+    }
+    let body = json_body(
+        send(
+            &app,
+            auth_request(
+                "GET",
+                "/api/v3/log_events?event_types=creating_credentials_success,updating_password_success,deleting_credentials_success",
+                &token,
+            ),
+        )
+        .await,
+    )
+    .await;
+    let types: Vec<&str> =
+        body["log_events"].as_array().unwrap().iter().filter_map(|event| event["event_type"].as_str()).collect();
+    assert!(types.contains(&"creating_credentials_success"), "{body}");
+    assert!(types.contains(&"updating_password_success"), "{body}");
+    assert!(types.contains(&"deleting_credentials_success"), "{body}");
+    assert_eq!(types.len(), 5, "все пять v3-действий должны иметь шаблон: {body}");
 }
 
 #[tokio::test]

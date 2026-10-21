@@ -53,17 +53,17 @@ cargo build --release -p vks-server
 
 ## Состояние
 
-Задачи M3/M4 и T1.1–T3.3 закрыты и подтверждены evidence:
+Задачи T1.1–T3.3 закрыты и подтверждены evidence:
 - живой SIP **и** H.323 до `192.168.1.132` из веб-UI (CONNECTED, рост
   аудио/видео-счётчиков, mute/unmute, ручная раскладка + reload, kick);
 - `smoke_v3.sh` — 24/31/31 проверки;
-- 23 страницы PNM и 18 API-контрактов без 4xx/console error (T3.3);
+- 22 страницы PNM и 18 API-контрактов без 4xx/console error (T3.3);
 - T3.1/T3.2 — мёртвый код/зависимости, единый трекер, dev/prod-конфиги.
 
 Открытый backlog P2/P3 (RS256, реальный TURN/NATS/recorder, кластер и т.п.)
 перечислен в мастер-списке и не входит в приёмку T1–T3.
 
 - Workspace: Rust 2021, MSRV 1.94, 16 крейтов.
-- Тесты: `892` (`cargo test --workspace`, 0 сбоев).
+- Тесты: `893` (`cargo test --workspace`, 0 сбоев).
 - `cargo fmt --check` и `cargo clippy --workspace --all-targets -- -D warnings` —
   0 замечаний.

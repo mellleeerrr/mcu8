@@ -14,7 +14,7 @@ node scripts/evidence/t31-evidence.js
 
 ## Результат
 
-**ok=true, 7/7** гейтов; `admin_lib=230` тестов, integration-тест пакета D
+**ok=true, 7/7** гейтов; `admin_lib=231` тест, integration-тест пакета D
 зелёный, `cargo check --workspace --all-targets` — 0.
 
 | Гейт | Что реально проверяет |
@@ -24,7 +24,7 @@ node scripts/evidence/t31-evidence.js
 | `unused_deps_removed` | в `crates/vks-server/Cargo.toml` нет **прямого** `vks-layout`; в `vks-gateway-sip`/`vks-gateway-h323` нет прямого `vks-core` |
 | `no_dead_records_handler` | `grep` по всему `crates/vks-admin/src` не находит `ui_records`/`/api/v3/records`/`/api/v3/ui/records` |
 | `layout_mode_contract_test` | `cargo test -p vks-server --test network_integration test_package_d_mcu_pipeline_handover_and_pnm_control_events` — 1 passed |
-| `admin_tests_green` | `cargo test -p vks-admin --lib` ≥ 220 passed (факт — 230) |
+| `admin_tests_green` | `cargo test -p vks-admin --lib` ≥ 220 passed (факт — 231) |
 | `workspace_checks` | `cargo check --workspace --all-targets` — exit 0 |
 
 `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` и

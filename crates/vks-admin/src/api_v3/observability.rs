@@ -16,7 +16,7 @@ use std::process::Stdio;
 
 use axum::{
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::header,
     response::{IntoResponse, Response},
     Extension, Json,
 };
@@ -101,9 +101,13 @@ fn event_type_for(action: &str) -> Option<(&'static str, &'static str)> {
         "login_fail" => ("login_failed", "users"),
         "login_locked" => ("login_rejected", "users"),
         "password.changed" => ("updating_password_success", "users"),
-        "create_user" => ("creating_credentials_success", "users"),
-        "update_user" => ("updating_login_success", "users"),
-        "delete_user" => ("deleting_credentials_success", "users"),
+        // Legacy v1-действия и реальные v3-действия UI: журнал должен
+        // показывать и старые записи аудита, и то, что шлёт текущий фронтенд.
+        "create_user" | "user.created" | "user.credentials.created" => ("creating_credentials_success", "users"),
+        "update_user" | "user.credentials.updated" | "profile.credentials.updated" => {
+            ("updating_password_success", "users")
+        }
+        "delete_user" | "user.credentials.deleted" => ("deleting_credentials_success", "users"),
         "set_settings" | "set_global_mode" | "set_room_mode" => ("updating_configuration_security_success", "nodes"),
         action if action.starts_with("settings.") => ("updating_configuration_security_success", "nodes"),
         _ => return None,
@@ -614,8 +618,7 @@ pub async fn terminals_list(
     if let Some(response) = forbid(&auth) {
         return response;
     }
-    let (page, _size) = page_bounds(&query);
-    let _ = page;
+    let _ = page_bounds(&query);
     Json(json!({"count": 0, "terminals": []})).into_response()
 }
 
@@ -687,7 +690,28 @@ pub async fn videorecords_list(
     if let Some(response) = forbid(&auth) {
         return response;
     }
-    let mut records = collect_records(&state).await;
+    let records = collect_records(&state).await;
+    videorecords_response(records, &query)
+}
+
+/// Алиасы `GET /sessions/{id}/videorecords` и `/conferences/{id}/videorecords`:
+/// запись принадлежит сессии, поэтому id из пути обязан фильтровать список.
+pub async fn session_videorecords_list(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(session_id): Path<String>,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    super::track("sessions/{id}/videorecords");
+    if let Some(response) = forbid(&auth) {
+        return response;
+    }
+    let records =
+        collect_records(&state).await.into_iter().filter(|record| record.room_id.to_string() == session_id).collect();
+    videorecords_response(records, &query)
+}
+
+fn videorecords_response(mut records: Vec<RecordEntry>, query: &PageQuery) -> Response {
     if let Some(search) = query.search.as_deref().filter(|value| !value.is_empty()) {
         let search = search.to_lowercase();
         records.retain(|record| {
@@ -701,7 +725,7 @@ pub async fn videorecords_list(
     if descending {
         records.reverse();
     }
-    let (page, size) = page_bounds(&query);
+    let (page, size) = page_bounds(query);
     let (count, page_items) = paginate(records, page, size);
     Json(json!({
         "count": count,
@@ -720,17 +744,12 @@ pub async fn videorecords_delete(Extension(auth): Extension<AuthContext>, Path(_
 }
 
 /// `GET /api/v3/conferences/{id}/videorecords/estimated_time` — оценка записи.
-pub async fn videorecords_estimated_time(
-    Extension(auth): Extension<AuthContext>,
-    Query(query): Query<BTreeMap<String, String>>,
-) -> Response {
+pub async fn videorecords_estimated_time(Extension(auth): Extension<AuthContext>) -> Response {
     super::track("videorecords/estimated_time");
     if let Some(response) = forbid(&auth) {
         return response;
     }
-    let quality = query.get("quality").map(String::as_str).unwrap_or("high");
     let recording_time = if state_disk_free_gb() < 1 { 0 } else { 3600 };
-    let _ = quality;
     Json(json!({"recording_time": recording_time})).into_response()
 }
 
@@ -927,11 +946,4 @@ pub async fn engine_log(State(_state): State<SharedState>, Extension(auth): Exte
 
 fn zip_store(name: &str, data: &[u8], modified_secs: i64) -> Vec<u8> {
     super::zip_store::zip_store(name, data, modified_secs)
-}
-
-// Keep StatusCode import used in signatures through error_json; explicit helper
-// for callers that need an empty 204 (not used yet, reserved for toggles).
-#[allow(dead_code)]
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
 }

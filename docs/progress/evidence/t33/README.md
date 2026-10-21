@@ -16,9 +16,9 @@ node scripts/evidence/t33-evidence.js
 
 ## Результат
 
-**ok=true, 5/5** acceptance-гейтов: 22 страницы без 4xx/console error,
-19 проверок API (18 контрактов, один повтор), 7 PNG, 0 HTTP ≥ 400,
-0 наших console error, 24 известных vendor Chart.js warning (allowlisted). «Калибровка» удалена:
+**ok=true, 5/5** acceptance-гейтов: 22 страницы (каждая отдала HTTP 200, совпал finalUrl и не было missing-лейблов/console error),
+19 проверок API (18 контрактов, один повтор), 7 PNG, per-page артефакт `page_walk` в summary, 0 HTTP ≥ 400,
+0 наших console error, 24 известных vendor Chart.js console **error** (allowlisted). «Калибровка» удалена:
 deep-link `/pnm/administration/calibration` уводит на статистику, API отдаёт
 `{calibration:null}`.
 
@@ -28,13 +28,13 @@ deep-link `/pnm/administration/calibration` уводит на статистик
 |---|---|---|---|
 | Конференции (дашборд) | `/pnm/monitoring/sessions` | `/ui/sessions`, `/conferences`, `/abonents/count` | `01-sessions.png`, t16 |
 | Справочник | `/pnm/addressbook/users` | `/call_strings`, `/users`, `/groups`, `/references` | `02-addressbook.png`, t21 |
-| История | `/pnm/history` | `/call_history`, `/session_history`, export | `03-history.png`, t22 |
+| История | `/pnm/history` | `/api/v3/call_history`, `/api/v3/ui/session_history/{id}`, export | `03-history.png`, t22 |
 | Статистика | `/pnm/administration/statistics` | `/ui/system/status`, `/system/stats/*`, `/engine/diagnostics` | `04-statistics.png`, t24 |
 | Вызовы | `/pnm/administration/calls` | `/settings/calls`, `/settings/calls/sip|h323` | `05-calls.png`, t23 |
 | Сеть / интерфейсы | `/pnm/administration/network` | `/system/status/network`, `/system/network/interfaces` | `06-network.png`, t24 |
 | Лицензия | `/pnm/administration/license` | `/license`, `/features` | `07-license.png`, t24 |
-| Медиафайлы | `/pnm/administration/mediafiles` | `/videorecords` (read-only) | t24 |
-| Терминалы | `/pnm/administration/terminals` | `/system/terminals` | t24 |
+| Медиафайлы | `/pnm/administration/mediafiles` | `/api/v3/videorecords` (read-only) | t24 |
+| Терминалы | `/pnm/administration/terminals` | `/api/v3/terminals` | t24 |
 | Настройки конференции | `/pnm/administration/conference_settings` | `/settings/calls`, stop_rules | t23 |
 | Видео | `/pnm/administration/video` | `/settings/video`, `/settings/video_codecs` | t23 |
 | Калибровка | `/pnm/administration/calibration` | 308 → `/administration/statistics`; `/engine/calibration` = `null` | t24 |

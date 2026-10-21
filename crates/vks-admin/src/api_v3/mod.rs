@@ -137,7 +137,8 @@ pub fn router(state: SharedState) -> Router {
             "/api/v3/system/network/interfaces/{interface}",
             get(observability::network_interface_get).patch(observability::network_interface_patch),
         )
-        // Vendor-UI 2.2.1.66 для сохранения интерфейса ходит по короткому пути.
+        // Короткий алиас для совместимости: текущий vendor-UI сохраняет интерфейс
+        // по каноническому `/interfaces/{interface}`, старые сборки — по короткому.
         .route(
             "/api/v3/system/network/{interface}",
             get(observability::network_interface_get).patch(observability::network_interface_patch),
@@ -171,8 +172,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/videorecords/{id}", delete(observability::videorecords_delete))
         .route("/api/v3/conferences/{id}/videorecords/estimated_time", get(observability::videorecords_estimated_time))
         .route("/api/v3/sessions/{id}/videorecords/estimated_time", get(observability::videorecords_estimated_time))
-        .route("/api/v3/sessions/{id}/videorecords", get(observability::videorecords_list))
-        .route("/api/v3/conferences/{id}/videorecords", get(observability::videorecords_list))
+        .route("/api/v3/sessions/{id}/videorecords", get(observability::session_videorecords_list))
+        .route("/api/v3/conferences/{id}/videorecords", get(observability::session_videorecords_list))
         .route("/api/v3/system/status/network", get(shell::status_network))
         .route("/api/v3/license", get(shell::license))
         .route("/api/v3/features", get(shell::features))
