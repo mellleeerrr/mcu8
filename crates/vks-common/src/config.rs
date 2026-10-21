@@ -74,7 +74,7 @@ pub enum ConfigError {
     #[error("insecure defaults are disabled but admin_password is a known/weak/placeholder value (set a strong VKS_ADMIN_PASSWORD)")]
     InsecureAdminPassword,
     #[error(
-        "insecure defaults are disabled but no persistent database_url is configured (or storage_allow_fallback=true)"
+        "insecure defaults are disabled but database_url is empty, in-memory, a CHANGE_ME placeholder, or storage_allow_fallback=true"
     )]
     NoPersistentStorage,
 }

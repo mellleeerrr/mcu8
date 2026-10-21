@@ -29,6 +29,8 @@ cargo build --release -p vks-server
    ```bash
    export VKS_JWT_SECRET="$(openssl rand -base64 48)"
    export VKS_ADMIN_PASSWORD='<сильный пароль>'
+   # env VKS_* перекрывает TOML; в systemd-развёртывании DSN хранится
+   # в /etc/vks/server.toml (0600 + LoadCredential), здесь — для ручного запуска:
    export VKS_DATABASE_URL='postgres://vks:<пароль>@db.internal:5432/vks'
    VKS_CONFIG_PATH=/etc/vks/server.toml ./target/release/vks-server
    ```

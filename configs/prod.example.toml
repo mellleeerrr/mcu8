@@ -34,8 +34,8 @@ admin_login = "admin"
 # В production-раскладке: /opt/vks/frontend/pnm (см. deploy/README.md).
 frontend_dir = "/opt/vks/frontend/pnm"
 
-# Хранилище: PostgreSQL рекомендуется для production.
-#   VKS_DATABASE_URL="postgres://vks:password@db.internal:5432/vks"
+# Хранилище: PostgreSQL рекомендуется для production. Файл 0600/LoadCredential;
+# VKS_DATABASE_URL (если задан в env) перекрывает это значение.
 database_url = "postgres://vks:CHANGE_ME@db.internal:5432/vks"
 storage_allow_fallback = false
 

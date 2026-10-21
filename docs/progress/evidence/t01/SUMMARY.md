@@ -1,6 +1,6 @@
 # T01 — production fail-closed evidence
 
-Дата: 2026-10-21, HEAD 108df90 + рабочее дерево T01.
+Дата: 2026-10-21, коммиты T01 `64337d6` + deploy-fix `78ca9ed`.
 
 ## Gates
 ```
