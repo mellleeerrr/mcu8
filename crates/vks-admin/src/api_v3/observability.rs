@@ -32,7 +32,6 @@ use super::error_json;
 
 const PAGE_DEFAULT: usize = 20;
 const PAGE_MAX: usize = 200;
-const MAX_EXPORTS: usize = 8;
 
 fn forbid(auth: &AuthContext) -> Option<Response> {
     if auth.role < vks_core::Role::Operator {
@@ -247,15 +246,6 @@ pub async fn log_events_export(
     let name = format!("log_events_{}_{}.zip", chrono::Utc::now().format("%Y_%m_%d_%H%M%S"), token);
     let zip = zip_store(&name.replace(".zip", ".csv"), &csv);
     if let Ok(mut exports) = state.api_v3.log_exports.lock() {
-        while exports.len() >= MAX_EXPORTS {
-            let oldest = exports.keys().next().cloned();
-            match oldest {
-                Some(key) => {
-                    exports.remove(&key);
-                }
-                None => break,
-            }
-        }
         exports.insert(name.clone(), zip);
     }
     Json(json!({ "filename": name })).into_response()
@@ -287,9 +277,9 @@ fn log_events_csv(events: &[LogEvent], locale: &str) -> Vec<u8> {
 
 /// `GET /static/log_events/{filename}` — скачивание ранее выданного ZIP.
 pub async fn static_log_export(State(state): State<SharedState>, Path(filename): Path<String>) -> Response {
-    let bytes = state.api_v3.log_exports.lock().ok().and_then(|exports| exports.get(&filename).cloned());
+    let bytes = state.api_v3.log_exports.lock().ok().and_then(|mut exports| exports.get(&filename));
     match bytes {
-        Some(bytes) => ([(header::CONTENT_TYPE, "application/zip")], bytes).into_response(),
+        Some(bytes) => ([(header::CONTENT_TYPE, "application/zip")], bytes.as_ref().to_vec()).into_response(),
         None => error_json(404, "Log export not found").into_response(),
     }
 }
@@ -832,76 +822,10 @@ pub async fn engine_log(State(_state): State<SharedState>, Extension(auth): Exte
     .into_response()
 }
 
-// ---------- tcpdump-free ZIP writer (store) ----------
+// ---------- ZIP writer (shared with history) ----------
 
 fn zip_store(name: &str, data: &[u8]) -> Vec<u8> {
-    let name = name.as_bytes();
-    let crc = crc32(data);
-    let (dos_time, dos_date) = dos_timestamp(now_unix_ms() as i64 / 1000);
-    let mut out = Vec::with_capacity(data.len() + name.len() + 128);
-    out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&dos_time.to_le_bytes());
-    out.extend_from_slice(&dos_date.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(name);
-    out.extend_from_slice(data);
-    let central_offset = out.len() as u32;
-    out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&dos_time.to_le_bytes());
-    out.extend_from_slice(&dos_date.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(name);
-    let central_size = out.len() as u32 - central_offset;
-    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&central_size.to_le_bytes());
-    out.extend_from_slice(&central_offset.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for byte in data {
-        crc ^= *byte as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
-        }
-    }
-    !crc
-}
-
-fn dos_timestamp(secs: i64) -> (u16, u16) {
-    let datetime = chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default();
-    use chrono::Datelike;
-    use chrono::Timelike;
-    let year = datetime.year().clamp(1980, 2107) as u16;
-    let date = ((year - 1980) << 9) | ((datetime.month() as u16) << 5) | datetime.day() as u16;
-    let time = ((datetime.hour() as u16) << 11) | ((datetime.minute() as u16) << 5) | (datetime.second() as u16 / 2);
-    (time, date)
+    super::zip_store::zip_store(name, data, now_unix_ms() as i64 / 1000)
 }
 
 // Keep StatusCode import used in signatures through error_json; explicit helper

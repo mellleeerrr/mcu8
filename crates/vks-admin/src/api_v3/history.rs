@@ -11,6 +11,16 @@
 //!
 //! История пишется в configuration-document (`resources.history`), переживает
 //! рестарт; запись создаётся в момент остановки/удаления сессии.
+//!
+//! Формы ответов намеренно различаются (vendor-контракт):
+//! | endpoint | abonents | stopped_by |
+//! |---|---|---|
+//! | `GET /call_history` | счётчик `abonents` | id или null |
+//! | `GET /call_history/{id}` | счётчик `abonents_count` | id или null |
+//! | `GET /ui/session_history/{id}` | `abonents_count` | contact-объект |
+//!
+//! `HistoryFilter` (фильтры) и `PageSort` (страницы/сортировка) разделены:
+//! экспорт использует только фильтры, а списки вызовов — только сортировку.
 
 use axum::{
     body::Body,
@@ -28,6 +38,9 @@ use crate::handlers::SharedState;
 use crate::state::{now_unix_ms, AppState, RoomRecord};
 
 use super::sessions::{conference_payload_defaults, native_stop_reason};
+
+mod export;
+use export::{build_history_zip, contact_names, current_timezone, format_date_utc, sanitize_filename};
 
 /// Сессия истории (персистентная). `room_id` — внутренняя связка с комнатой
 /// (для дедупликации повторной остановки), в JSON не отдаётся.
@@ -110,19 +123,18 @@ impl HistoryState {
     }
 }
 
-/// Параметры списка/экспорта. Vendor-UI шлёт `page/page_size/sort_field/
-/// sort_order`; фильтры даты/названия — наши расширения для формы истории.
+/// Фильтры списка/экспорта истории (без пагинации и сортировки).
+///
+/// Три исторических написания диапазона дат пришли из vendor-UI и старых
+/// клиентов. Приоритет явно зафиксирован в [`HistoryFilter::date_range`]:
+/// `started_at` > `from` > `date_from` (и аналогично для конца), чтобы
+/// поведение не зависело от порядка `.or()`.
 #[derive(Debug, Default, Deserialize)]
-pub struct HistoryQuery {
-    pub page: Option<usize>,
-    pub page_size: Option<usize>,
-    pub sort_field: Option<String>,
-    pub sort_order: Option<String>,
+pub struct HistoryFilter {
     pub display_name: Option<String>,
     pub search: Option<String>,
     pub started_at: Option<i64>,
     pub stopped_at: Option<i64>,
-    /// Vendor-UI присылает `date_from`/`date_to` (см. api.bundle `f()`).
     #[serde(default, alias = "dateFrom")]
     pub date_from: Option<i64>,
     #[serde(default, alias = "dateTo")]
@@ -132,12 +144,15 @@ pub struct HistoryQuery {
     pub creator_id: Option<String>,
 }
 
-impl HistoryQuery {
-    fn filtered<'a>(&self, sessions: &'a [HistorySession]) -> Vec<&'a HistorySession> {
+impl HistoryFilter {
+    fn date_range(&self) -> (Option<i64>, Option<i64>) {
+        (self.started_at.or(self.from).or(self.date_from), self.stopped_at.or(self.to).or(self.date_to))
+    }
+
+    fn filter<'a>(&self, sessions: &'a [HistorySession]) -> Vec<&'a HistorySession> {
         let needle = self.display_name.as_deref().or(self.search.as_deref()).map(str::to_lowercase);
-        let from = self.started_at.or(self.from).or(self.date_from);
-        let to = self.stopped_at.or(self.to).or(self.date_to);
-        let mut rows: Vec<&HistorySession> = sessions
+        let (from, to) = self.date_range();
+        sessions
             .iter()
             .filter(|s| {
                 needle.as_deref().is_none_or(|needle| {
@@ -147,27 +162,53 @@ impl HistoryQuery {
             .filter(|s| from.is_none_or(|from| s.started_at >= from))
             .filter(|s| to.is_none_or(|to| s.stopped_at <= to))
             .filter(|s| self.creator_id.as_deref().is_none_or(|id| s.creator_id == id))
-            .collect();
-        let descending = matches!(self.sort_order.as_deref(), Some("1") | Some("desc"));
+            .collect()
+    }
+}
+
+/// Пагинация и сортировка vendor-списков (`page/page_size/sort_field/sort_order`).
+#[derive(Debug, Default, Deserialize)]
+pub struct PageSort {
+    pub page: Option<usize>,
+    pub page_size: Option<usize>,
+    pub sort_field: Option<String>,
+    pub sort_order: Option<String>,
+}
+
+impl PageSort {
+    fn pagination(&self) -> (usize, usize) {
+        let page = self.page.unwrap_or(1).max(1);
+        let size = self.page_size.unwrap_or(25).clamp(1, 200);
+        ((page - 1) * size, size)
+    }
+
+    fn descending(&self) -> bool {
+        matches!(self.sort_order.as_deref(), Some("1") | Some("desc"))
+    }
+
+    fn sort_sessions(&self, rows: &mut [&HistorySession], default_field: &str) {
         rows.sort_by(|left, right| {
-            let order = match self.sort_field.as_deref().unwrap_or("stopped_at") {
+            let order = match self.sort_field.as_deref().unwrap_or(default_field) {
                 "started_at" => (left.started_at, left.stopped_at).cmp(&(right.started_at, right.stopped_at)),
                 "display_name" => left.display_name.to_lowercase().cmp(&right.display_name.to_lowercase()),
                 _ => (left.stopped_at, left.started_at).cmp(&(right.stopped_at, right.started_at)),
             };
-            if descending {
+            if self.descending() {
                 order.reverse()
             } else {
                 order
             }
         });
-        rows
     }
 
-    fn pagination(&self) -> (usize, usize) {
-        let page = self.page.unwrap_or(1).max(1);
-        let size = self.page_size.unwrap_or(25).clamp(1, 200);
-        ((page - 1) * size, size)
+    fn sort_calls(&self, calls: &mut [HistoryCall]) {
+        match self.sort_field.as_deref().unwrap_or("started_at") {
+            "display_name" => calls.sort_by_key(|call| call.display_name.to_lowercase()),
+            _ => calls.sort_by_key(|call| (call.started_at, call.id.clone())),
+        }
+        if self.descending() {
+            calls.reverse();
+        }
     }
 }
 
@@ -313,8 +354,8 @@ fn session_calls(
 }
 
 /// Вызывается ДО очистки `call_attempts`/участников, чтобы снимок был полным.
-pub async fn record_stopped(state: &SharedState, room: &RoomRecord, stopped_by: &str, reason: &str) -> Option<String> {
-    record_stopped_with_settings(state, room, stopped_by, reason, None).await
+pub async fn record_stopped(state: &SharedState, room: &RoomRecord, stopped_by: &str, reason: &str) {
+    record_stopped_with_settings(state, room, stopped_by, reason, None).await;
 }
 
 /// Как [`record_stopped`], но с уже снятым снимком настроек: delete-путь
@@ -325,7 +366,7 @@ pub async fn record_stopped_with_settings(
     stopped_by: &str,
     reason: &str,
     settings_override: Option<Value>,
-) -> Option<String> {
+) {
     let started_at = room.created_ms as i64 / 1000;
     let stopped_at = (now_unix_ms() / 1000) as i64;
     let participants = state.room_hub.list_participants(&room.id);
@@ -370,7 +411,6 @@ pub async fn record_stopped_with_settings(
         route: setting_str(&settings, "route"),
         payload,
     };
-    let session_id = session.id.clone();
     let mut resources = state.api_v3.resources.lock().await;
     let previous = resources.clone();
     resources.history.record(session);
@@ -402,9 +442,7 @@ pub async fn record_stopped_with_settings(
             }
         }
         tracing::warn!(error = %error, "history: persist failed");
-        return None;
     }
-    Some(session_id)
 }
 
 fn nullable_id(id: &str) -> Value {
@@ -433,11 +471,18 @@ fn session_list_json(session: &HistorySession, creator: &Value, stopper: &Value)
     })
 }
 
+/// Клонирует сессию под коротким lock (404-ветка повторялась в 4 хендлерах).
+async fn load_session(state: &AppState, id: &str) -> Option<HistorySession> {
+    let resources = state.api_v3.resources.lock().await;
+    resources.history.find(id).cloned()
+}
+
 /// `GET /api/v3/call_history` → `{count, sessions:[…]}`.
 pub async fn list(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
-    Query(query): Query<HistoryQuery>,
+    Query(filter): Query<HistoryFilter>,
+    Query(page): Query<PageSort>,
 ) -> Response {
     super::track("call_history");
     if let Some(response) = require_read(&auth) {
@@ -445,8 +490,9 @@ pub async fn list(
     }
     let (count, page_rows) = {
         let resources = state.api_v3.resources.lock().await;
-        let rows = query.filtered(&resources.history.sessions);
-        let (offset, size) = query.pagination();
+        let mut rows = filter.filter(&resources.history.sessions);
+        page.sort_sessions(&mut rows, "stopped_at");
+        let (offset, size) = page.pagination();
         let count = rows.len();
         let page_rows: Vec<HistorySession> = rows.into_iter().skip(offset).take(size).cloned().collect();
         (count, page_rows)
@@ -470,8 +516,7 @@ pub async fn detail(
     if let Some(response) = require_read(&auth) {
         return response;
     }
-    let session = { state.api_v3.resources.lock().await.history.find(&id).cloned() };
-    let Some(session) = session else {
+    let Some(session) = load_session(&state, &id).await else {
         return super::error_json(404, "Session not found");
     };
     let creator = contact_json(&state, &session.creator_id).await;
@@ -508,8 +553,7 @@ pub async fn ui_session_history(
     if let Some(response) = require_read(&auth) {
         return response;
     }
-    let session = { state.api_v3.resources.lock().await.history.find(&id).cloned() };
-    let Some(session) = session else {
+    let Some(session) = load_session(&state, &id).await else {
         return super::error_json(404, "Session not found");
     };
     let started_by = contact_json(&state, &session.creator_id).await;
@@ -536,25 +580,17 @@ pub async fn ui_call_history(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
-    Query(query): Query<HistoryQuery>,
+    Query(query): Query<PageSort>,
 ) -> Response {
     super::track("ui/call_history/{id}");
     if let Some(response) = require_read(&auth) {
         return response;
     }
-    let session = { state.api_v3.resources.lock().await.history.find(&id).cloned() };
-    let Some(session) = session else {
+    let Some(session) = load_session(&state, &id).await else {
         return super::error_json(404, "Session not found");
     };
     let mut calls = session.calls;
-    let descending = matches!(query.sort_order.as_deref(), Some("1") | Some("desc"));
-    match query.sort_field.as_deref().unwrap_or("started_at") {
-        "display_name" => calls.sort_by_key(|c| c.display_name.to_lowercase()),
-        _ => calls.sort_by_key(|c| (c.started_at, c.id.clone())),
-    }
-    if descending {
-        calls.reverse();
-    }
+    query.sort_calls(&mut calls);
     let count = calls.len();
     let (offset, size) = query.pagination();
     let page: Vec<HistoryCall> = calls.into_iter().skip(offset).take(size).collect();
@@ -566,7 +602,7 @@ pub async fn ui_call_history(
 pub async fn export(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
-    Query(query): Query<HistoryQuery>,
+    Query(filter): Query<HistoryFilter>,
 ) -> Response {
     super::track("call_history/export");
     if let Some(response) = require_read(&auth) {
@@ -574,8 +610,10 @@ pub async fn export(
     }
     let sessions = {
         let resources = state.api_v3.resources.lock().await;
-        query.filtered(&resources.history.sessions).into_iter().cloned().collect::<Vec<_>>()
+        filter.filter(&resources.history.sessions).into_iter().cloned().collect::<Vec<_>>()
     };
+    let mut sessions = sessions;
+    sessions.sort_by_key(|session| (session.stopped_at, session.started_at));
     let names = contact_names(&state).await;
     let timezone = current_timezone(&state).await;
     // Случайный токен: имя файла нельзя угадать, даже если роут статики
@@ -601,8 +639,7 @@ pub async fn export_session(
     if let Some(response) = require_read(&auth) {
         return response;
     }
-    let session = { state.api_v3.resources.lock().await.history.find(&id).cloned() };
-    let Some(session) = session else {
+    let Some(session) = load_session(&state, &id).await else {
         return super::error_json(404, "Session not found");
     };
     let names = contact_names(&state).await;
@@ -635,30 +672,30 @@ pub async fn clean(State(state): State<SharedState>, Extension(auth): Extension<
         return Json(json!({ "filename": Value::Null })).into_response();
     }
     let previous = resources.clone();
-    resources.history.sessions.clear();
     let stamp = format_date_utc((now_unix_ms() / 1000) as i64).replace('-', "");
     let filename = format!("Conference_history_backup_{stamp}_{}.zip", uuid::Uuid::new_v4().simple());
+    // Архив строится ДО мутации карты выгрузок: неудачный persist не должен
+    // инвалидировать ранее выданные ссылки и оставлять «висячий» backup.
     let archive = build_history_zip(&filename.replace(".zip", ".csv"), &previous.history.sessions, &names, &timezone);
-    // Старые выгрузки больше не должны оставаться скачиваемыми после clean.
-    if let Ok(mut exports) = state.api_v3.history_exports.lock() {
-        exports.clear();
-        exports.insert(filename.clone(), archive);
-    }
+    resources.history.sessions.clear();
     if let Err(error) = super::resources::persist(&state, &resources).await {
         *resources = previous;
         drop(resources);
         return super::error_json(500, &format!("Storage error: {error}"));
     }
+    drop(resources);
+    // Старые выгрузки больше не должны оставаться скачиваемыми после clean.
+    if let Ok(mut exports) = state.api_v3.history_exports.lock() {
+        exports.clear();
+        exports.insert(filename.clone(), archive);
+    }
     Json(json!({ "filename": filename })).into_response()
 }
 
-/// Кладёт архив в bounded-карту: не более 32 файлов (старые вытесняются
-/// целиком при переполнении), чтобы память не росла с каждой выгрузкой.
+/// Кладёт архив в bounded TTL-хранилище (cap 32, 1 час), чтобы память не
+/// росла с каждой выгрузкой; вытесняется только самый старый файл.
 fn store_export(state: &AppState, filename: &str, archive: Vec<u8>) {
     if let Ok(mut exports) = state.api_v3.history_exports.lock() {
-        if exports.len() >= 32 {
-            exports.clear();
-        }
         exports.insert(filename.to_string(), archive);
     }
 }
@@ -669,11 +706,12 @@ pub async fn static_export(State(state): State<SharedState>, Path(filename): Pat
     if filename.contains('/') || filename.contains("..") {
         return super::error_json(400, "Invalid filename");
     }
-    let archive = state.api_v3.history_exports.lock().ok().and_then(|files| files.get(&filename).cloned());
+    let archive = state.api_v3.history_exports.lock().ok().and_then(|mut files| files.get(&filename));
     match archive {
         Some(bytes) => {
             let mut response =
-                (StatusCode::OK, [(header::CONTENT_TYPE, "application/zip")], Body::from(bytes)).into_response();
+                (StatusCode::OK, [(header::CONTENT_TYPE, "application/zip")], Body::from(bytes.as_ref().to_vec()))
+                    .into_response();
             if let Ok(value) = header::HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
                 response.headers_mut().insert(header::CONTENT_DISPOSITION, value);
             }
@@ -693,216 +731,6 @@ fn require_read(auth: &AuthContext) -> Option<Response> {
     None
 }
 
-// ── CSV/ZIP ────────────────────────────────────────────────────────────────
-
-/// Имя файла из display_name: только безопасные символы (без `/` и `..`).
-fn sanitize_filename(name: &str) -> String {
-    let mut result: String =
-        name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
-    result.truncate(64);
-    let result = result.trim_matches('_').to_string();
-    if result.is_empty() {
-        "session".to_string()
-    } else {
-        result
-    }
-}
-
-/// Имена контактов для CSV: профиль справочника → Users (bootstrap =
-/// Administrator) → id. Vendor пишет в колонках «Запуск/Остановка» имена, а не
-/// UUID; ID-колонка — DTMF (тот же ID, что в UI), fallback — id сессии.
-async fn contact_names(state: &AppState) -> std::collections::HashMap<String, String> {
-    let mut names = std::collections::HashMap::new();
-    if let Ok(users) = state.users.lock() {
-        for user in users.values() {
-            let name = if user.id == vks_core::UserId::bootstrap_operator() {
-                "Administrator".to_string()
-            } else {
-                user.username.clone()
-            };
-            names.insert(user.id.to_string(), name);
-        }
-    }
-    let resources = state.api_v3.resources.lock().await;
-    for (id, profile) in &resources.directory.users {
-        names.insert(id.clone(), profile.display_name.clone());
-    }
-    names
-}
-
-async fn current_timezone(state: &AppState) -> String {
-    let stored = state
-        .api_v3
-        .resources
-        .lock()
-        .await
-        .admin_settings
-        .get("timezone")
-        .and_then(|value| value.get("timezone"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    stored.unwrap_or_else(super::shell::system_timezone)
-}
-
-/// Дата в TZ администратора (vendor CSV показывает локальное время).
-fn format_datetime_tz(secs: i64, timezone: &str) -> String {
-    use chrono::TimeZone;
-    let zone: chrono_tz::Tz = timezone.parse().unwrap_or(chrono_tz::UTC);
-    zone.timestamp_opt(secs, 0)
-        .single()
-        .map(|datetime| datetime.format("%d.%m.%Y %H:%M:%S").to_string())
-        .unwrap_or_else(|| format_datetime(secs))
-}
-
-/// CSV как у vendor: разделитель `;`, русские заголовки, даты `ДД.ММ.ГГГГ ЧЧ:ММ:СС`
-/// в таймзоне администратора (как UI-список/карточка).
-fn build_history_csv(
-    sessions: &[HistorySession],
-    names: &std::collections::HashMap<String, String>,
-    timezone: &str,
-) -> Vec<u8> {
-    let mut text =
-        String::from("Название;ID;Маршрут;Время начала;Время окончания;Длительность;Участники;Запуск;Остановка\n");
-    for session in sessions {
-        let duration = (session.stopped_at - session.started_at).max(0);
-        let run = names.get(&session.creator_id).cloned().unwrap_or_else(|| session.creator_id.clone());
-        let stop = names.get(&session.stopped_by).cloned().unwrap_or_else(|| session.stopped_by.clone());
-        let id = session.dtmf.clone().unwrap_or_else(|| session.id.clone());
-        text.push_str(&format!(
-            "{};{};{};{};{};{};{};{};{}\n",
-            csv_escape(&session.display_name),
-            csv_escape(&id),
-            csv_escape(session.route.as_deref().unwrap_or("")),
-            format_datetime_tz(session.started_at, timezone),
-            format_datetime_tz(session.stopped_at, timezone),
-            format_duration(duration),
-            session.abonents_count,
-            csv_escape(&run),
-            csv_escape(&stop),
-        ));
-    }
-    text.into_bytes()
-}
-
-fn csv_escape(value: &str) -> String {
-    // CSV-инъекция: ведущие =/+/-/@/TAB/CR Excel выполняет как формулу.
-    let value =
-        if value.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{value}") } else { value.to_string() };
-    if value.contains([';', '"', '\n', '\r']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value
-    }
-}
-
-/// ZIP (method store, как у vendor) с единственным CSV внутри.
-fn build_history_zip(
-    csv_name: &str,
-    sessions: &[HistorySession],
-    names: &std::collections::HashMap<String, String>,
-    timezone: &str,
-) -> Vec<u8> {
-    let data = build_history_csv(sessions, names, timezone);
-    let name = csv_name.as_bytes();
-    let crc = crc32(&data);
-    let (dos_time, dos_date) = dos_timestamp((now_unix_ms() / 1000) as i64);
-    let mut out = Vec::with_capacity(data.len() + name.len() + 128);
-    out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes()); // store
-    out.extend_from_slice(&dos_time.to_le_bytes());
-    out.extend_from_slice(&dos_date.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(name);
-    out.extend_from_slice(&data);
-    let central_offset = out.len() as u32;
-    out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&20u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&dos_time.to_le_bytes());
-    out.extend_from_slice(&dos_date.to_le_bytes());
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    // Local header offset: единственная запись начинается с 0 (а не с позиции
-    // central directory — иначе unzip считает архивы «overlapped»).
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(name);
-    let central_size = out.len() as u32 - central_offset;
-    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&central_size.to_le_bytes());
-    out.extend_from_slice(&central_offset.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for byte in data {
-        crc ^= *byte as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
-        }
-    }
-    !crc
-}
-
-fn dos_timestamp(secs: i64) -> (u16, u16) {
-    let (year, month, day, hour, minute, second) = utc_parts(secs);
-    let year = year.clamp(1980, 2107) as u16;
-    let date = ((year - 1980) << 9) | ((month as u16) << 5) | day as u16;
-    let time = ((hour as u16) << 11) | ((minute as u16) << 5) | (second as u16 / 2);
-    (time, date)
-}
-
-fn format_datetime(secs: i64) -> String {
-    let (year, month, day, hour, minute, second) = utc_parts(secs);
-    format!("{day:02}.{month:02}.{year:04} {hour:02}:{minute:02}:{second:02}")
-}
-
-fn format_date_utc(secs: i64) -> String {
-    let (year, month, day, _, _, _) = utc_parts(secs);
-    format!("{year:04}-{month:02}-{day:02}")
-}
-
-fn format_duration(secs: i64) -> String {
-    format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
-}
-
-/// Гражданская дата из unix-секунд (UTC) — алгоритм Hinnant, без зависимостей.
-fn utc_parts(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400) as u32;
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { y + 1 } else { y };
-    (year, month as u32, day as u32, rem / 3600, (rem % 3600) / 60, rem % 60)
-}
-
 // ── Тесты ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -911,6 +739,7 @@ mod history_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::export::{build_history_csv, build_history_zip, format_date_utc, format_datetime, format_duration};
     use super::*;
 
     fn session(name: &str, started: i64, stopped: i64) -> HistorySession {
@@ -945,16 +774,20 @@ mod tests {
     #[test]
     fn filters_sorts_and_paginates() {
         let sessions = vec![session("Alpha", 1, 10), session("beta", 2, 20), session("Gamma", 3, 30)];
-        let query =
-            HistoryQuery { sort_field: Some("started_at".into()), sort_order: Some("1".into()), ..Default::default() };
-        let names: Vec<&str> = query.filtered(&sessions).iter().map(|s| s.display_name.as_str()).collect();
+        let page =
+            PageSort { sort_field: Some("started_at".into()), sort_order: Some("1".into()), ..Default::default() };
+        let mut rows = HistoryFilter::default().filter(&sessions);
+        page.sort_sessions(&mut rows, "stopped_at");
+        let names: Vec<&str> = rows.iter().map(|s| s.display_name.as_str()).collect();
         assert_eq!(names, ["Gamma", "beta", "Alpha"]);
-        let query = HistoryQuery { display_name: Some("BET".into()), ..Default::default() };
-        assert_eq!(query.filtered(&sessions).len(), 1);
-        let query = HistoryQuery { page: Some(2), page_size: Some(1), ..Default::default() };
-        assert_eq!(query.pagination(), (1, 1));
-        let query = HistoryQuery { from: Some(2), to: Some(30), ..Default::default() };
-        assert_eq!(query.filtered(&sessions).len(), 2);
+        let filter = HistoryFilter { display_name: Some("BET".into()), ..Default::default() };
+        assert_eq!(filter.filter(&sessions).len(), 1);
+        let page = PageSort { page: Some(2), page_size: Some(1), ..Default::default() };
+        assert_eq!(page.pagination(), (1, 1));
+        // Приоритет диапазонов зафиксирован: from/to перекрывают date_from/date_to.
+        let filter =
+            HistoryFilter { from: Some(2), to: Some(30), date_from: Some(1), date_to: Some(1), ..Default::default() };
+        assert_eq!(filter.filter(&sessions).len(), 2);
     }
 
     #[test]
@@ -1000,7 +833,7 @@ mod tests {
         let expected = build_history_csv(&[session("Alpha", 0, 5)], &names, "UTC");
         // Реальное извлечение: CRC и байты CSV совпадают с записанными.
         assert_eq!(&archive[data_start..data_start + data_len], expected.as_slice());
-        assert_eq!(local_crc, crc32(&expected));
+        assert_eq!(local_crc, crate::api_v3::zip_store::crc32(&expected));
         assert_eq!(u32::from_le_bytes(archive[22..26].try_into().unwrap()) as usize, expected.len());
     }
 
@@ -1012,6 +845,17 @@ mod tests {
         assert_eq!(history.sessions.len(), 1);
         history.record(session("Alpha", 2, 3));
         assert_eq!(history.sessions.len(), 2);
+    }
+
+    #[test]
+    fn history_is_truncated_at_max_sessions() {
+        let mut history = HistoryState::default();
+        for index in 0..(MAX_SESSIONS + 5) {
+            history.record(session(&format!("S{index}"), index as i64 + 1, index as i64 + 2));
+        }
+        assert_eq!(history.sessions.len(), MAX_SESSIONS);
+        // Новые записи в начале, старые вытеснены.
+        assert!(history.sessions[0].display_name.starts_with("S5"));
     }
 
     #[test]

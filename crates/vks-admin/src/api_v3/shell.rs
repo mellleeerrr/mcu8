@@ -377,8 +377,8 @@ pub async fn update_settings_video(
     Json(body): Json<Value>,
 ) -> Response {
     track("settings/video");
-    if auth.role < vks_core::Role::Operator {
-        return super::error_json(403, "Forbidden: Operator role required");
+    if let Some(response) = super::settings_admin::forbid(&auth) {
+        return response;
     }
     let patch = body.get("payload").cloned().unwrap_or_else(|| body.clone());
     let Some(patch) = patch.as_object() else {

@@ -15,6 +15,7 @@ pub mod auth;
 pub mod boot;
 pub mod call_strings;
 pub mod directory;
+pub mod export_store;
 pub mod history;
 pub mod observability;
 pub mod resources;
@@ -22,6 +23,7 @@ pub mod sessions;
 pub mod settings_admin;
 pub mod shell;
 pub mod ws;
+pub mod zip_store;
 
 #[cfg(test)]
 #[path = "observability_tests.rs"]
@@ -74,10 +76,10 @@ pub struct ApiV3State {
     /// `settings/video` (правится администратором; эталонные умолчания — ref-92).
     pub video_settings: std::sync::Mutex<serde_json::Value>,
     /// Сгенерированные ZIP-архивы истории (export/clean) для
-    /// `/static/call_history/{filename}`; bounded снизу — чистятся при перезаписи.
-    pub history_exports: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    /// `/static/call_history/{filename}`; cap 32, TTL 1 час.
+    pub history_exports: std::sync::Mutex<export_store::ExportStore>,
     /// Сгенерированные ZIP-экспорты журнала событий (`/static/log_events/{filename}`).
-    pub log_exports: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    pub log_exports: std::sync::Mutex<export_store::ExportStore>,
 }
 
 /// Состояние медиа-настроек абонента (громкость, mute).
@@ -126,6 +128,22 @@ pub fn router(state: SharedState) -> Router {
         // T2.4: наблюдаемость/сервис (read-only) + явные отказы на мутации.
         .route("/api/v3/log_events", get(observability::log_events))
         .route("/api/v3/log_events/export", get(observability::log_events_export))
+        .route(
+            "/api/v3/system/restart_services",
+            post(settings_admin::restart_services).get(settings_admin::restart_services),
+        )
+        .route(
+            "/api/v3/system/restart_engine",
+            post(settings_admin::restart_services).get(settings_admin::restart_services),
+        )
+        .route(
+            "/api/v3/system/restart_web_api",
+            post(settings_admin::restart_services).get(settings_admin::restart_services),
+        )
+        .route(
+            "/api/v3/system/restart_webproxy",
+            post(settings_admin::restart_services).get(settings_admin::restart_services),
+        )
         .route("/api/v3/system/network/interfaces", get(observability::network_interfaces_list))
         .route(
             "/api/v3/system/network/interfaces/{interface}",

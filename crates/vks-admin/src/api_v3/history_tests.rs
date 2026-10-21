@@ -1,7 +1,8 @@
 //! Тесты истории конференций (T2.2): запись при остановке/удалении, чтение
 //! vendor-эндпоинтов, CSV/ZIP-экспорт, clean и персистентность между рестартами.
 
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use serde_json::json;
 use tower::ServiceExt;
 use vks_core::{Role, RoomId};
@@ -622,4 +623,73 @@ async fn incoming_call_is_recorded_as_incoming_connection() {
     let call = &detail["session"]["call_strings"][0];
     assert_eq!(call["abonents"][0]["connection"]["type_id"], "INCOMING");
     assert_eq!(call["abonents"][0]["abonent_id"], "sip-in-1");
+}
+
+#[tokio::test]
+async fn static_export_rejects_unknown_and_traversal_and_clean_requires_operator() {
+    let (state, issuer) = test_state();
+    let app = app(state.clone());
+    let _token = login_token(&app, "admin", "s3cret").await;
+    let missing = app
+        .clone()
+        .oneshot(Request::builder().uri("/static/call_history/nope.zip").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let traversal = app
+        .clone()
+        .oneshot(Request::builder().uri("/static/call_history/..%2Fsecret.zip").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(traversal.status(), StatusCode::BAD_REQUEST);
+
+    let viewer = Users::create(&state, "t22-viewer", Role::Viewer);
+    let viewer_token = issuer.issue(&viewer.id.to_string(), None).unwrap();
+    let clean = send(&app, request("POST", "/api/v3/call_history/clean", Some(&viewer_token), json!({}))).await;
+    assert_eq!(clean.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn export_honours_date_filter_and_null_stopper() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let early = Rooms::create_async(&state, "EarlyExport").await.unwrap();
+    let late = Rooms::create_async(&state, "LateExport").await.unwrap();
+    record_stopped(&state, &early, "", "Manual").await;
+    // Сдвигаем раннюю сессию в прошлое, чтобы фильтр её отсекал (история в памяти).
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        if let Some(session) = resources.history.sessions.iter_mut().find(|s| s.room_id == early.id.to_string()) {
+            session.started_at = 1_000_000;
+            session.stopped_at = 1_000_100;
+        }
+    }
+    record_stopped(&state, &late, "", "Manual").await;
+    let detail = json_body(send(&app, request("GET", "/api/v3/call_history", Some(&token), json!({}))).await).await;
+    assert_eq!(detail["count"], 2, "{detail}");
+    let null_stopper =
+        detail["sessions"].as_array().unwrap().iter().find(|session| session["display_name"] == "LateExport").unwrap();
+    assert!(null_stopper["stopped_by"].is_null(), "{null_stopper}");
+
+    let export = json_body(
+        send(&app, request("GET", "/api/v3/call_history/export?date_from=1500000000", Some(&token), json!({}))).await,
+    )
+    .await;
+    let filename = export["filename"].as_str().unwrap().to_string();
+    let download = app
+        .clone()
+        .oneshot(Request::builder().uri(format!("/static/call_history/{filename}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(download.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(download.into_body(), usize::MAX).await.unwrap();
+    assert!(
+        bytes.windows(b"LateExport".len()).any(|window| window == b"LateExport"),
+        "filtered export keeps late session"
+    );
+    assert!(
+        !bytes.windows(b"EarlyExport".len()).any(|window| window == b"EarlyExport"),
+        "filtered export must not include early session"
+    );
 }

@@ -123,7 +123,19 @@ fn kind(value: &Value) -> &'static str {
 
 /// Строгая валидация PATCH по схеме дефолтов: неизвестные поля и смена типа
 /// запрещены (UI получает 422 с полем, а не «сохранено, но не применилось»).
-fn merge_known(base: &mut Value, incoming: &Value, path: &str) -> Result<(), String> {
+/// Поля, которые vendor-UI законно выключает через `null`, и их тип в
+/// включённом состоянии. Заменяет «дефолт = схема»: иначе после одного
+/// неверного PATCH поле невозможно вернуть (B4 ревью T2.3).
+fn nullable_kind(field: &str) -> Option<&'static str> {
+    match field {
+        "stop_rules.empty" | "stop_rules.quit_all" | "stop_rules.one_abonent" => Some("number"),
+        "ntp.server" => Some("string"),
+        "ntp.poll_interval_min" | "ntp.poll_interval_max" => Some("number"),
+        _ => None,
+    }
+}
+
+fn merge_known(base: &mut Value, incoming: &Value, path: &str, _original: &Value) -> Result<(), String> {
     let Some(source) = incoming.as_object() else {
         return Err(format!("{path}: expected object"));
     };
@@ -136,9 +148,27 @@ fn merge_known(base: &mut Value, incoming: &Value, path: &str) -> Result<(), Str
             return Err(format!("unknown field `{field}`"));
         }
         match (target.get_mut(key), value) {
-            (Some(Value::Null), value) => *target.get_mut(key).expect("checked") = value.clone(),
+            (Some(slot), Value::Null) => match nullable_kind(&field) {
+                Some(_) => *slot = Value::Null,
+                None => {
+                    return Err(format!(
+                        "{field}: unexpected type (expected {})",
+                        kind(target.get(key).expect("checked"))
+                    ))
+                }
+            },
+            (Some(Value::Null), value) => match nullable_kind(&field) {
+                Some(wanted) if kind(value) == wanted => *target.get_mut(key).expect("checked") = value.clone(),
+                Some(wanted) => return Err(format!("{field}: unexpected type (expected {wanted})")),
+                None => return Err(format!("{field}: unexpected type (expected null)")),
+            },
             (Some(Value::Object(_)), Value::Object(nested)) => {
-                merge_known(target.get_mut(key).expect("checked"), &Value::Object(nested.clone()), &field)?;
+                merge_known(
+                    target.get_mut(key).expect("checked"),
+                    &Value::Object(nested.clone()),
+                    &field,
+                    &Value::Null,
+                )?;
             }
             (Some(slot), value) if kind(slot) == kind(value) => *slot = value.clone(),
             (Some(_), _) => {
@@ -178,7 +208,7 @@ async fn save_payload(state: &SharedState, key: &str, payload: Value) -> Result<
     Ok(())
 }
 
-fn forbid(auth: &AuthContext) -> Option<Response> {
+pub(crate) fn forbid(auth: &AuthContext) -> Option<Response> {
     if auth.role < Role::Operator || auth.room_scope.is_some() {
         return Some(super::error_json(403, "Forbidden: Operator role required"));
     }
@@ -220,7 +250,7 @@ macro_rules! payload_endpoints {
             }
             let incoming = body.get("payload").unwrap_or(&body).clone();
             let mut payload = merged_payload(&state, $key).await;
-            if let Err(error) = merge_known(&mut payload, &incoming, "") {
+            if let Err(error) = merge_known(&mut payload, &incoming, "", &defaults($key)) {
                 return super::error_json(422, &error);
             }
             // Пароль, скрытый в GET, не затирается пустым значением из формы.
@@ -309,9 +339,6 @@ pub async fn calls_patch(
             legacy_changed = true;
         }
     }
-    if legacy_changed {
-        crate::settings::SettingsService::set_async(&state, current).await;
-    }
     let mut payload = merged_payload(&state, "calls").await;
     let mut vendor_part = source;
     if let Some(object) = vendor_part.as_object_mut() {
@@ -319,11 +346,16 @@ pub async fn calls_patch(
             object.remove(key);
         }
     }
-    if let Err(error) = merge_known(&mut payload, &vendor_part, "") {
+    if let Err(error) = merge_known(&mut payload, &vendor_part, "", &defaults("calls")) {
         return super::error_json(422, &error);
     }
     if let Err(response) = save_payload(&state, "calls", payload).await {
         return response;
+    }
+    // SettingsService меняем только после успешной валидации и persist:
+    // отклонённый PATCH (422/500) не должен частично применять codecs/limits/turn.
+    if legacy_changed {
+        crate::settings::SettingsService::set_async(&state, current).await;
     }
     state.record_audit_entry(&auth.subject, "settings.calls.updated", None, "");
     calls_get(State(state), Extension(auth)).await
@@ -393,9 +425,8 @@ pub async fn http_patch(
             _ => {}
         }
     }
-    if cert_uploaded.is_none() != key_uploaded.is_none() {
-        return super::error_json(422, "crt and key must be uploaded together");
-    }
+    // Допускаем загрузку одного слота: второй сохраняется из предыдущего
+    // состояния (vendor-UI шлёт оба при Save, но check — по одному).
     if let Some(filename) = cert_uploaded {
         if let Some(crt) = payload.get_mut("crt").and_then(Value::as_object_mut) {
             crt.insert("common_name".into(), json!(filename));
@@ -417,7 +448,12 @@ pub async fn http_patch(
     Json(payload).into_response()
 }
 
-/// `POST /api/v3/settings/http/check` — проверка пары cert/key перед сохранением.
+/// `POST /api/v3/settings/http/check` — проверка выбранного файла.
+///
+/// Vendor-UI вызывает check на КАЖДЫЙ выбранный файл отдельно (второй слот
+/// приходит из уже загруженного состояния либо null), поэтому требовать пару
+/// в одном запросе нельзя. Формат проверяем по PEM-маркерам, без X.509-парсинга
+/// (заявлено в ограничениях evidence).
 pub async fn http_check(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
@@ -427,27 +463,37 @@ pub async fn http_check(
     if let Some(response) = forbid(&auth) {
         return response;
     }
-    let mut has_cert = false;
-    let mut has_key = false;
+    let mut seen = Vec::new();
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or_default().to_string();
-        if name == "crt" || name == "key" {
-            let Ok(bytes) = field.bytes().await else { continue };
-            if bytes.is_empty() {
-                return super::error_json(422, &format!("{name}: empty file"));
-            }
-            if bytes.len() > 1024 * 1024 {
-                return super::error_json(422, &format!("{name}: file too large"));
-            }
-            if name == "crt" {
-                has_cert = true;
-            } else {
-                has_key = true;
-            }
+        if name != "crt" && name != "key" {
+            continue;
         }
+        let Ok(bytes) = field.bytes().await else { continue };
+        if bytes.is_empty() {
+            continue;
+        }
+        if bytes.len() > 100 * 1024 {
+            return super::error_json(400, &format!("{name}: file too large"));
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        let looks_pem = text.contains("-----BEGIN ");
+        let valid = match name.as_str() {
+            "crt" => text.contains("BEGIN CERTIFICATE") || (!looks_pem && bytes.first() == Some(&0x30)),
+            _ => {
+                text.contains("BEGIN PRIVATE KEY")
+                    || text.contains("BEGIN RSA PRIVATE KEY")
+                    || text.contains("BEGIN ENCRYPTED PRIVATE KEY")
+                    || (!looks_pem && bytes.first() == Some(&0x30))
+            }
+        };
+        if !valid {
+            return super::error_json(400, &format!("{name}: decode file error"));
+        }
+        seen.push(name);
     }
-    if !has_cert || !has_key {
-        return super::error_json(422, "certificate and private key are required");
+    if seen.is_empty() {
+        return super::error_json(422, "certificate or private key is required");
     }
     let _ = state;
     Json(json!({"valid": true})).into_response()
@@ -577,6 +623,25 @@ pub async fn smtp_reset(State(state): State<SharedState>, Extension(auth): Exten
     Json(json!({"payload": defaults("smtp")})).into_response()
 }
 
+/// `POST /api/v3/system/restart_services` — перечитать конфигурацию из БД.
+///
+/// Vendor-UI вызывает это после сохранения сетевых/SIP-настроек. Наш сервер
+/// читает настройки динамически, поэтому «рестарт» = hot-reload configuration
+/// document; процесс не перезапускается (иначе оборвались бы активные звонки).
+pub async fn restart_services(State(state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
+    super::track("system/restart_services");
+    if let Some(response) = forbid(&auth) {
+        return response;
+    }
+    let reload = state.sync_from_storage().await;
+    state.record_audit_entry(&auth.subject, "system.restart_services", None, "");
+    let applied = reload.is_ok();
+    if let Err(error) = reload {
+        tracing::warn!(%error, "restart_services: configuration reload failed");
+    }
+    Json(json!({"status": "ok", "applied": applied, "reloaded": "settings"})).into_response()
+}
+
 /// `GET /api/v3/system/ntp` → `{ntp:{server,fallback,poll_interval_min,max}}`.
 pub async fn ntp_get(State(state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
     super::track("system/ntp");
@@ -596,9 +661,21 @@ pub async fn ntp_patch(
     if let Some(response) = forbid(&auth) {
         return response;
     }
-    let incoming = body.get("payload").or_else(|| body.get("ntp")).unwrap_or(&body).clone();
+    // Vendor-UI сохраняет NTP как `{ntp:"pool.ntp.org", fallback:[...],
+    // poll_interval_min, poll_interval_max}` (server — строкой, не объектом).
+    let source = body.get("payload").unwrap_or(&body);
+    let incoming = match source.get("ntp") {
+        Some(Value::String(server)) => json!({
+            "server": server,
+            "fallback": source.get("fallback").cloned().unwrap_or_else(|| json!([])),
+            "poll_interval_min": source.get("poll_interval_min").cloned().unwrap_or(Value::Null),
+            "poll_interval_max": source.get("poll_interval_max").cloned().unwrap_or(Value::Null),
+        }),
+        Some(Value::Object(object)) => Value::Object(object.clone()),
+        _ => source.clone(),
+    };
     let mut payload = merged_payload(&state, "ntp").await;
-    if let Err(error) = merge_known(&mut payload, &incoming, "ntp") {
+    if let Err(error) = merge_known(&mut payload, &incoming, "ntp", &defaults("ntp")) {
         return super::error_json(422, &error);
     }
     if let Err(response) = save_payload(&state, "ntp", payload.clone()).await {
@@ -636,6 +713,18 @@ async fn ntp_toggle(state: SharedState, auth: AuthContext, enabled: bool) -> Res
 }
 
 /// `GET /api/v3/system/time` — время/таймзона/NTP-статус для vendor-UI.
+/// Реальная синхронизация часов ОС (systemd-timesyncd/chrony), а не флаг
+/// «NTP включён»: без клиента времени статус обязан быть false.
+fn system_ntp_synchronized() -> bool {
+    let output = std::process::Command::new("timedatectl").args(["show", "-p", "NTPSynchronized", "--value"]).output();
+    match output {
+        Ok(output) if output.status.success() => {
+            matches!(String::from_utf8_lossy(&output.stdout).trim(), "yes" | "true")
+        }
+        _ => std::path::Path::new("/run/systemd/timesync/synchronized").exists(),
+    }
+}
+
 pub async fn system_time(State(state): State<SharedState>) -> Response {
     super::track("system/time");
     let now = crate::state::now_unix_ms() / 1000;
@@ -647,19 +736,22 @@ pub async fn system_time(State(state): State<SharedState>) -> Response {
         .await
         .and_then(|value| value.get("enabled").and_then(Value::as_bool))
         .unwrap_or(false);
+    let ntp_name =
+        merged_payload(&state, "ntp").await.get("server").and_then(Value::as_str).unwrap_or_default().to_string();
+    let synchronized = system_ntp_synchronized();
     let time = json!({
         "time": (now as i64 + offset).max(0),
         "timezone": timezone,
         "ntp": ntp_enabled,
-        "ntp_name": "",
-        "ntp_synchronized": ntp_enabled,
+        "ntp_name": ntp_name,
+        "ntp_synchronized": synchronized,
     });
     Json(json!({
         "time": time,
         "timezone": timezone,
         "ntp": ntp_enabled,
-        "ntp_name": "",
-        "ntp_synchronized": ntp_enabled,
+        "ntp_name": ntp_name,
+        "ntp_synchronized": synchronized,
     }))
     .into_response()
 }
@@ -676,8 +768,36 @@ pub async fn system_time_patch(
     if let Some(response) = forbid(&auth) {
         return response;
     }
-    let Some(target) = body.get("time").and_then(Value::as_i64) else {
-        return super::error_json(422, "time: integer seconds required");
+    // Vendor-UI присылает локальное "YYYY-MM-DD HH:mm:ss", API-клиенты —
+    // unix-секунды. Поддерживаем оба (и RFC3339), иначе date_time не сохраняется.
+    let source = body.get("payload").unwrap_or(&body);
+    let target = match source.get("time") {
+        Some(Value::Number(number)) => number.as_i64(),
+        Some(Value::String(text)) => {
+            let timezone = merged_payload(&state, "timezone")
+                .await
+                .get("timezone")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(super::shell::system_timezone);
+            let zone: chrono_tz::Tz = timezone.parse().unwrap_or(chrono_tz::UTC);
+            let parsed =
+                chrono::DateTime::parse_from_rfc3339(text.trim()).map(|value| value.timestamp()).ok().or_else(|| {
+                    chrono::NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S").ok().and_then(|naive| {
+                        use chrono::TimeZone;
+                        zone.from_local_datetime(&naive).earliest().map(|value| value.timestamp())
+                    })
+                });
+            match parsed {
+                Some(seconds) => Some(seconds),
+                None => return super::error_json(422, "time: expected unix seconds, RFC3339 or 'YYYY-MM-DD HH:mm:ss'"),
+            }
+        }
+        Some(Value::Object(object)) => object.get("time").and_then(Value::as_i64),
+        _ => None,
+    };
+    let Some(target) = target else {
+        return super::error_json(422, "time: expected unix seconds, RFC3339 or 'YYYY-MM-DD HH:mm:ss'");
     };
     if target <= 0 {
         return super::error_json(422, "time: must be positive");

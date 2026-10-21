@@ -229,8 +229,8 @@ async fn http_settings_multipart_cert_upload_check_and_reset() {
     assert_eq!(body["has_password"], true);
     assert_eq!(body["crt"]["common_name"], "server.crt");
 
-    // check требует пару cert+key.
-    let missing_key = send(
+    // Vendor-UI проверяет каждый файл ОТДЕЛЬНО: одиночный crt валиден.
+    let single_cert = send(
         &app,
         Request::builder()
             .method("POST")
@@ -238,12 +238,27 @@ async fn http_settings_multipart_cert_upload_check_and_reset() {
             .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .header(header::CONTENT_TYPE, "multipart/form-data; boundary=B2")
             .body(Body::from(
-                "--B2\r\nContent-Disposition: form-data; name=\"crt\"; filename=\"a.crt\"\r\n\r\nCERT\r\n--B2--\r\n",
+                "--B2\r\nContent-Disposition: form-data; name=\"crt\"; filename=\"a.crt\"\r\n\r\n-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\r\n--B2--\r\n",
             ))
             .unwrap(),
     )
     .await;
-    assert_eq!(missing_key.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(single_cert.status(), StatusCode::OK, "{:?}", json_body(single_cert).await);
+    // Не-PEM мусор отклоняется, а не «valid:true».
+    let garbage = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/v3/settings/http/check")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=B4")
+            .body(Body::from(
+                "--B4\r\nContent-Disposition: form-data; name=\"crt\"; filename=\"a.crt\"\r\n\r\nnot a cert\r\n--B4--\r\n",
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(garbage.status(), StatusCode::BAD_REQUEST);
 
     let checked = send(
         &app,
@@ -253,7 +268,7 @@ async fn http_settings_multipart_cert_upload_check_and_reset() {
             .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .header(header::CONTENT_TYPE, "multipart/form-data; boundary=B3")
             .body(Body::from(
-                "--B3\r\nContent-Disposition: form-data; name=\"crt\"; filename=\"a.crt\"\r\n\r\nCERT\r\n--B3\r\nContent-Disposition: form-data; name=\"key\"; filename=\"a.key\"\r\n\r\nKEY\r\n--B3--\r\n",
+                "--B3\r\nContent-Disposition: form-data; name=\"crt\"; filename=\"a.crt\"\r\n\r\n-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\r\n--B3\r\nContent-Disposition: form-data; name=\"key\"; filename=\"a.key\"\r\n\r\n-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----\r\n--B3--\r\n",
             ))
             .unwrap(),
     )
@@ -340,4 +355,131 @@ async fn settings_survive_restart() {
     restarted.storage = Some(storage);
     restarted.sync_from_storage().await.expect("hydrate");
     assert_eq!(restarted.api_v3.resources.lock().await.admin_settings["rtp"]["mtu"], 1300);
+}
+
+#[tokio::test]
+async fn vendor_ui_shapes_for_ntp_time_and_stop_rules_are_accepted() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+
+    // 1) NTP: vendor шлёт сервер строкой и fallback/intervals соседними полями.
+    let response = send(
+        &app,
+        auth_request(
+            "PATCH",
+            "/api/v3/system/ntp",
+            &token,
+            json!({"ntp":"pool.ntp.org","fallback":["time.google.com"],"poll_interval_min":null,"poll_interval_max":null}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "{}", json_body(response).await);
+    let ntp = json_body(send(&app, auth_request("GET", "/api/v3/system/ntp", &token, json!({}))).await).await;
+    assert_eq!(ntp["ntp"]["server"], "pool.ntp.org");
+    assert_eq!(ntp["ntp"]["fallback"][0], "time.google.com");
+    // Неверный тип при null-дефолте больше не принимается.
+    let bad = send(&app, auth_request("PATCH", "/api/v3/system/ntp", &token, json!({"payload":{"server":123}}))).await;
+    assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    // И поле очищается обратно в null.
+    let cleared =
+        send(&app, auth_request("PATCH", "/api/v3/system/ntp", &token, json!({"payload":{"server":null}}))).await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    let ntp = json_body(send(&app, auth_request("GET", "/api/v3/system/ntp", &token, json!({}))).await).await;
+    assert!(ntp["ntp"]["server"].is_null());
+
+    // 2) date_time: локальная строка vendor "YYYY-MM-DD HH:mm:ss".
+    let target = "2026-10-22 03:49:48";
+    let response = send(&app, auth_request("PATCH", "/api/v3/system/time", &token, json!({"time": target}))).await;
+    assert_eq!(response.status(), StatusCode::OK, "{}", json_body(response).await);
+    let time = json_body(send(&app, auth_request("GET", "/api/v3/system/time", &token, json!({}))).await).await;
+    use chrono::TimeZone;
+    let zone: chrono_tz::Tz = time["time"]["timezone"].as_str().unwrap_or("UTC").parse().unwrap();
+    let expected = zone
+        .from_local_datetime(&chrono::NaiveDateTime::parse_from_str(target, "%Y-%m-%d %H:%M:%S").unwrap())
+        .earliest()
+        .unwrap()
+        .timestamp();
+    let actual = time["time"]["time"].as_i64().unwrap();
+    assert!((actual - expected).abs() <= 5, "{time}");
+    let _ = send(&app, auth_request("PATCH", "/api/v3/system/time", &token, json!({"time": 0}))).await;
+    let _ = send(&app, auth_request("PATCH", "/api/v3/system/time", &token, json!({"payload":{"seconds":0}}))).await;
+
+    // 3) stop_rules: null выключает любое правило, неверный тип отклоняется.
+    let response = send(
+        &app,
+        auth_request(
+            "PATCH",
+            "/api/v3/settings/calls",
+            &token,
+            json!({"payload":{"stop_rules":{"empty":null,"quit_all":null,"one_abonent":60}}}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "{}", json_body(response).await);
+    let calls = json_body(send(&app, auth_request("GET", "/api/v3/settings/calls", &token, json!({}))).await).await;
+    assert!(calls["payload"]["stop_rules"]["empty"].is_null());
+    assert!(calls["payload"]["stop_rules"]["quit_all"].is_null());
+    assert_eq!(calls["payload"]["stop_rules"]["one_abonent"], 60);
+    let bad = send(
+        &app,
+        auth_request(
+            "PATCH",
+            "/api/v3/settings/calls",
+            &token,
+            json!({"payload":{"stop_rules":{"one_abonent":"soon"}}}),
+        ),
+    )
+    .await;
+    assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let cleared = send(
+        &app,
+        auth_request(
+            "PATCH",
+            "/api/v3/settings/calls",
+            &token,
+            json!({"payload":{"stop_rules":{"empty":600,"quit_all":60,"one_abonent":null}}}),
+        ),
+    )
+    .await;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    let calls = json_body(send(&app, auth_request("GET", "/api/v3/settings/calls", &token, json!({}))).await).await;
+    assert!(calls["payload"]["stop_rules"]["one_abonent"].is_null());
+}
+
+#[tokio::test]
+async fn rejected_calls_patch_does_not_touch_media_codecs_and_restart_services_is_200() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let before = json_body(send(&app, auth_request("GET", "/api/v3/settings/calls", &token, json!({}))).await).await;
+    let response = send(
+        &app,
+        auth_request(
+            "PATCH",
+            "/api/v3/settings/calls",
+            &token,
+            json!({"payload":{"codecs":{"audio":["G722"],"video":["H264"]},"vendor_unknown":1}}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let after = json_body(send(&app, auth_request("GET", "/api/v3/settings/calls", &token, json!({}))).await).await;
+    assert_eq!(after["payload"]["codecs"], before["payload"]["codecs"], "422 must be atomic");
+    let restart = send(&app, auth_request("POST", "/api/v3/system/restart_services", &token, json!({}))).await;
+    assert_eq!(restart.status(), StatusCode::OK);
+    assert_eq!(json_body(restart).await["status"], "ok");
+}
+
+#[tokio::test]
+async fn room_scoped_operator_cannot_change_global_video_settings() {
+    let (state, issuer) = test_state();
+    let app = app(state.clone());
+    let token = issuer.issue(&uuid::Uuid::new_v4().to_string(), Some("room-scope")).unwrap();
+    let response = send(
+        &app,
+        auth_request("PATCH", "/api/v3/settings/video", &token, json!({"payload":{"rotate_timeout":21000}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
