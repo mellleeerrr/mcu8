@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
-use vks_gateway_h323::H323UacClient;
+use vks_gateway_h323::{H323UacClient, H323VideoProfile};
 
 #[tokio::test]
 #[ignore = "live H.323 call to a physical terminal; requires the sidecar venv and network access"]
@@ -25,8 +25,22 @@ async fn live_h323_connect() {
     let video = UdpSocket::bind("0.0.0.0:0").await.expect("bind H.323 video RTP");
     let video_port = video.local_addr().expect("video addr").port();
 
+    let profile = H323VideoProfile {
+        max_bitrate_kbps: std::env::var("VKS_LIVE_H323_BITRATE_KBPS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(512),
+        level_idc: std::env::var("VKS_LIVE_H323_LEVEL_IDC").ok().and_then(|value| value.parse().ok()).unwrap_or(31),
+    };
+    println!("H.323 requested H.241 video profile: {profile:?}");
     let session = H323UacClient::new(&local_ip)
-        .dial_with_media(&format!("h323:{target}"), audio_port, Some(video_port), Duration::from_secs(45))
+        .dial_with_media_profile(
+            &format!("h323:{target}"),
+            audio_port,
+            Some(video_port),
+            Duration::from_secs(45),
+            profile,
+        )
         .await
         .expect("H.323 CONNECT with H.245 media channels");
 

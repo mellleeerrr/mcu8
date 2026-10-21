@@ -1,0 +1,43 @@
+# T05b — H.323 H.241 и SFU b=AS (частично закрыто)
+
+**Статус:** H.323-часть и per-media `b=AS` реализованы и покрыты unit-тестами;
+live H.323 и per-contact override остаются за T07/T05b-2. Коммиты `7b05905`
+(H.323) и `68da633` (SFU).
+
+## H.323 H.241
+- `H323VideoProfile { max_bitrate_kbps, level_idc }` в `vks-gateway-h323`;
+  `dial_with_media_profile` кладёт `video_max_bitrate_100bps` (kbps*10) и
+  `video_h264_level` (level_idc+40) в JSON sidecar.
+- `gateways.rs` строит профиль из уже разрешённого `VideoProfile`
+  (битрейт 4096 → 40960, 1080p30 → level 4.0/80); `dial_with_media`/`dial`
+  остаются default 512 kbps/3.1 для обратной совместимости POC.
+- Sidecar `video_capability(config)` использует переданные значения в TCS и
+  OLC; невалидный H.241 level отклоняется до TCP.
+- Тесты: Rust 512→5120, 4096→40960, 30→70, 31→71, 40→80, 49→89? — таблица
+  `70/71/72/80/81/82/90/91`; Python 21 тест, включая custom profile и отказ
+  level=75; Polycom-захваты остаются на дефолтном 5120/71.
+- **Live-попытка 2026-10-22:** `remote_release` и для 4096/4.0, и для
+  дефолтного 512/3.1; это T07-поведение терминала, не регрессия профиля.
+  H.323 live-proof не получен, пока терминал не принимает вызов.
+
+## SFU b=AS
+- `SfuAnswerProfile.b_as/fmtp/rtcp_fb` теперь применяются только к video
+  m-line; audio их не получает.
+- `HandlerConfig.video_bitrate_kbps` (env `VKS_SFU_VIDEO_BITRATE_KBPS`,
+  default 2048, clamp 64..20000) и `with_video_bitrate`; answer объявляет
+  `b=AS` только на video.
+- Тест: audio `b_as=None/fmtp=[]`, video `b_as=Some(2048)/fmtp` есть.
+
+## Ограничения / следующие шаги
+- SFU: нет per-room инъекции (env глобальный), H.264 отсутствует в
+  `vks-media-sfu` RTP map; answer не фильтрует RTP maps по kind и не
+  пересекается с offer. Нельзя объявлять H.264/H.264-high/H.265, пока SFU
+  реально их не мостит (T06b/T08).
+- H.323: peer H.241-лимиты не читаются/не клампятся; `media_details` не
+  содержит H.241; packetization/profile захардкожены baseline; bearer 384
+  оставлен как POC-решение.
+- Call-string live proof: UI-сессия пишет контакт только в
+  `scheduled_calls`, а `find_call_string_override` читает `resources.contacts`;
+  нужен template-contact + PATCH + recall или product-fix персистентности.
+- Python sidecar-тесты пока не в CI; прогон вручную:
+  `/home/pro/.local/share/vks-mcu/h323-venv/bin/python3 -m unittest test_h323_sidecar`.
