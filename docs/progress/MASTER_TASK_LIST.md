@@ -18,9 +18,15 @@
 > `docs/progress/evidence/t02/`. F1-фикс сохранения canonical default — `ed24d02`.
 >
 > **T03 (применение раскладки в gateway/MCU) закрыт:** ревью 9.5/10
-> (`protocols-net`), 1006 passed / 0 failed / 6 ignored, pending layout +
-> auto по числу участников + geometry-only repair + z_order + монотонная версия,
-> evidence `docs/progress/evidence/t03/`. Следующая — T04a.
+> (`protocols-net`, `media-engine`, `layout-ui`), 1006 passed / 0 failed / 6 ignored,
+> pending layout + auto по числу участников + geometry-only repair + z_order +
+> монотонная версия, evidence `docs/progress/evidence/t03/`.
+>
+> **T04a (live-smoke раскладок) закрыт:** ревью 9.5/10 (`layout-ui`), 98 checks /
+> 0 failed / 109.9 s, pageerror 0, 5xx/501 0; 7 подвариантов 2×2 + UI-посадка
+> 1/N/2/N для 4/8/9/25 + calculate 4/8/9/25 + detach→визуальная «Общая»;
+> deploy нового бинаря и dedup 6→5; evidence `docs/progress/evidence/t04a/`.
+> Полная матрица 11 диапазонов/34 ячеек — T04b. Следующая — T05.
 >
 > Правило цикла: перед задачей — агент «подводные камни»; после реализации — параллельное
 > code-review (оценка /10, обязательные правки); цикл не закрывается, пока хотя бы один

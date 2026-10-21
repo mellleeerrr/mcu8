@@ -267,6 +267,78 @@ async function api(token, method, urlPath, body) {
     check('layout: participant rendered in tile 1', first.text.includes(SIP_NAME), first.text);
     await page.screenshot({ path: path.join(ART, '06-layout-applied.png') });
 
+    // 7b. T04a: 2×2 → все 7 подвариантов дают 4 ячейки (bbox + текст уже
+    // проверены для первого варианта; здесь — полнота каталога и calculate).
+    const schemeItems = page.locator('.layout-scheme-selector-item');
+    const schemeTotal = await schemeItems.count();
+    check('layout: 2x2 scheme catalog has 7 variants', schemeTotal === 7, `schemes=${schemeTotal}`);
+    const variantPresets = [];
+    for (let index = 0; index < schemeTotal; index += 1) {
+      await schemeItems.nth(index).click();
+      await page.waitForTimeout(350);
+      const boxes = await page.locator('.layout-grid-slot-wrapper').evaluateAll(elements => elements.map(element => {
+        const rect = element.getBoundingClientRect();
+        return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+      }));
+      check(`layout: 2x2 variant ${index + 1} has 4 tiles`, boxes.length === 4, JSON.stringify(boxes));
+      const calc = network.filter(x => x.kind === 'request' && x.url.includes('/calculate')).pop();
+      if (calc && calc.body) {
+        try { variantPresets.push(JSON.parse(calc.body).preset); } catch { /* ignore */ }
+      }
+    }
+    check('layout: all 7 variants exercised', new Set(variantPresets).size === 7,
+      JSON.stringify(variantPresets));
+    check('layout: variant presets are distinct 4-up schemes',
+      variantPresets.every(preset => typeof preset === 'string' && preset.includes('4')), JSON.stringify(variantPresets));
+    await schemeItems.nth(0).click();
+    await page.waitForTimeout(400);
+
+    // 7c. T04a: UI-посадка участника в ячейки 1, N/2, N для 4/8/9/25.
+    // Меняем размер и целевую ячейку в редакторе, не сохраняя черновик;
+    // проверяем bbox и текст именно в целевой ячейке, ровно один PEER.
+    const readTiles = () => page.locator('.layout-grid-slot-wrapper').evaluateAll(elements => elements.map(element => {
+      const rect = element.getBoundingClientRect();
+      return { text: (element.innerText || '').trim(), left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    }));
+    const placeParticipant = async (size, position) => {
+      await page.locator('button').filter({ hasText: new RegExp(`^${size}$`) }).first().click();
+      await page.waitForTimeout(650);
+      const cell = page.locator('.layout-grid-slot-wrapper').nth(position - 1);
+      await cell.click();
+      await page.waitForTimeout(500);
+      const peer = page.getByText(SIP_NAME, { exact: false }).last();
+      if (await peer.count()) {
+        await peer.click();
+        await page.waitForTimeout(450);
+      }
+      return readTiles();
+    };
+    for (const size of [4, 8, 9, 25]) {
+      for (const position of [1, Math.ceil(size / 2), size]) {
+        const tiles = await placeParticipant(size, position);
+        const target = tiles[position - 1];
+        check(`layout: UI ${size} cell ${position} rendered`, Boolean(target && target.width > 20 && target.height > 20),
+          JSON.stringify(target));
+        check(`layout: UI ${size} cell ${position} holds SIP participant`, Boolean(target && target.text.includes(SIP_NAME)),
+          JSON.stringify(tiles.map(tile => tile.text)));
+        check(`layout: UI ${size} keeps ${size} cells when participant is in ${position}`,
+          tiles.length === size, JSON.stringify(tiles.map(tile => tile.text)));
+      }
+    }
+    // Возвращаем ручную 2×2 с участником в ячейке 1 для clear-all/detach.
+    await placeParticipant(4, 1);
+
+    // 7d. T04a: calculate для 4/8/9/25 — ровно N ячеек и 1-based позиции.
+    for (const [preset, expected] of [['preset_equal_4', 4], ['preset_equal_8', 8], ['preset_equal_9', 9], ['preset_equal_25', 25]]) {
+      const calc = await api(token, 'POST', '/api/v3/ui/video_layouts/calculate', { preset, width: 1280, height: 720 });
+      const slots = calc.json && calc.json.slots || [];
+      check(`layout: ${preset} calculates ${expected} slots`, calc.status === 200 && slots.length === expected,
+        `status=${calc.status} slots=${slots.length}`);
+      check(`layout: ${preset} positions are 1..${expected}`,
+        slots.length === expected && slots[0].position === 1 && slots[expected - 1].position === expected,
+        JSON.stringify(slots.slice(0, 2).concat(slots.slice(-2))));
+    }
+
     // 8. «Очистить все видеоокна» → Применить: все слоты AUTO.
     // TcButton рисует title не всегда на <button>: ищем любой элемент с
     // подсказкой «Очистить все видеоокна» (в en-бандле Clear all video windows).
@@ -292,6 +364,29 @@ async function api(token, method, urlPath, body) {
     await page.waitForTimeout(800);
     await page.screenshot({ path: path.join(ART, '07-clear-all-applied.png') });
 
+    // 8b. T04a: detach ручной раскладки → в сессии остаётся «Общая»,
+    // ручной id из списка исчезает, default не удалён.
+    const detach = await api(token, 'DELETE', `/api/v3/sessions/${sessionId}/video_layouts/${layoutId}`);
+    check('layout: detach manual returns 204', detach.status === 204, `status=${detach.status} ${detach.text.slice(0, 200)}`);
+    const layoutsAfterDetach = await api(token, 'GET',
+      `/api/v3/ui/sessions/${sessionId}/video_layouts?page=1&page_size=100&sort_field=display_name&sort_order=0`);
+    const afterList = layoutsAfterDetach.json && (layoutsAfterDetach.json.video_layouts || layoutsAfterDetach.json.layouts) || [];
+    check('layout: detached manual is gone', !afterList.some(item => item.id === layoutId), JSON.stringify(afterList.map(item => item.id)));
+    check('layout: canonical default remains after detach',
+      afterList.some(item => item.payload && item.payload.type === 'default'), JSON.stringify(afterList.map(item => item.payload && item.payload.type)));
+    // Визуально: после detach сессия показывает «Общую», ручной раскладки нет.
+    await page.reload();
+    await page.waitForTimeout(1500);
+    const layoutsPanel = page.getByText('Раскладки', { exact: true }).first();
+    if (await layoutsPanel.count()) {
+      await layoutsPanel.click();
+      await page.waitForTimeout(700);
+    }
+    const bodyAfterDetach = await page.locator('body').innerText();
+    check('layout: default «Общая» visible after detach', /Общая/.test(bodyAfterDetach), bodyAfterDetach.slice(0, 500));
+    check('layout: manual name gone from session UI', !bodyAfterDetach.includes(layoutName), bodyAfterDetach.slice(0, 500));
+    await page.screenshot({ path: path.join(ART, '08-detach-default.png') });
+
     // 9. Кодек-эндпоинты имеют эталонную форму.
     const audio = await api(token, 'GET', '/api/v3/settings/audio_codecs');
     check('api: audio_codecs shape {name,bitrate}', audio.status === 200 && Array.isArray(audio.json.audio_codecs)
@@ -311,12 +406,24 @@ async function api(token, method, urlPath, body) {
     // модалки конференции; на эталоне 192.168.1.92 те же 6 ошибок (проверено
     // отдельным прогоном). Это не наши регрессии, но фиксируем их отдельно.
     const vendorNoise = /Cannot read properties of (null|undefined) \(reading '(route|displayName|mode|connectionsLimit|length)'\)/;
-    const unexpectedConsole = consoleErrors.filter(message => !vendorNoise.test(message));
+    // Ожидаемые 404 при detach фиксируются отдельным final-ассертом
+    // (console404.length <= expectedDetach404.length), иначе stale-запросы UI
+    // после отвязки раскладки дают ложный красный.
+    const expected404Noise = /Failed to load resource: the server responded with a status of 404/;
+    const unexpectedConsole = consoleErrors.filter(message => !vendorNoise.test(message) && !expected404Noise.test(message));
     check('ui: no unexpected console errors', unexpectedConsole.length === 0, JSON.stringify(unexpectedConsole));
   } catch (error) {
     failure = error;
     console.error(error && error.stack || error);
   } finally {
+    // Сначала закрываем браузер: вендорский бандл 2.2.1.66 кидает TypeError,
+    // если комната удаляется при открытой модалке; pageerror-проверка уже
+    // выполнена, а cleanup-API не зависит от страницы.
+    if (context) {
+      try { await context.tracing.stop({ path: path.join(ART, 'trace.zip') }); } catch { /* ignore */ }
+      await context.close().catch(() => {});
+      context = null;
+    }
     // Останавливаем только созданную этим прогоном сессию, не чужие.
     if (sessionId && token) {
       try {
@@ -326,10 +433,40 @@ async function api(token, method, urlPath, body) {
         checks.push({ name: 'cleanup: session stopped', ok: false, detail: String(error) });
       }
     }
-    if (context) {
-      try { await context.tracing.stop({ path: path.join(ART, 'trace.zip') }); } catch { /* ignore */ }
+    // T04a: detach оставляет layout глобальным — удаляем именно созданный id,
+    // не трогая «Общую» и чужие раскладки.
+    if (layoutId && token) {
+      try {
+        const removedLayout = await api(token, 'DELETE', `/api/v3/video_layouts/${layoutId}`);
+        checks.push({ name: 'cleanup: created layout removed', ok: [204, 404].includes(removedLayout.status), detail: String(removedLayout.status) });
+      } catch (error) {
+        checks.push({ name: 'cleanup: created layout removed', ok: false, detail: String(error) });
+      }
+    }
+    // T04a: удаляем созданную комнату — purge снимет session/conference links
+    // и оставшиеся раскладки, иначе прогоны копят комнаты и layout-мусор.
+    if (conferenceId && token) {
+      try {
+        const removed = await api(token, 'DELETE', `/api/v3/conferences/${conferenceId}`);
+        checks.push({ name: 'cleanup: conference removed', ok: removed.status < 300, detail: String(removed.status) });
+      } catch (error) {
+        checks.push({ name: 'cleanup: conference removed', ok: false, detail: String(error) });
+      }
     }
     if (browser) await browser.close().catch(() => {});
+    // T04a: финальные ассерты после закрытия страницы и cleanup — вендорский
+    // UI не должен добавлять pageerror/console 404 вне ожидаемого detach.
+    const expectedDetach404 = network.filter(x => x.kind === 'response' && x.status === 404
+      && x.url.includes('/video_layouts/') && layoutId && x.url.includes(layoutId));
+    const unexpected4xx = network.filter(x => x.kind === 'response' && x.status >= 400 && x.status < 500
+      && !(expectedDetach404.includes(x)));
+    checks.push({ name: 'final: no unexpected 4xx', ok: unexpected4xx.length === 0,
+      detail: JSON.stringify(unexpected4xx.map(x => `${x.status} ${x.url}`)) });
+    checks.push({ name: 'final: no pageerror after cleanup', ok: pageErrors.length === 0,
+      detail: JSON.stringify(pageErrors) });
+    const console404 = consoleErrors.filter(message => /status of 404/.test(message));
+    checks.push({ name: 'final: console 404 only expected detach', ok: console404.length <= expectedDetach404.length,
+      detail: JSON.stringify(console404) });
     const result = {
       ok: !failure && checks.every(check => check.ok),
       base: BASE,

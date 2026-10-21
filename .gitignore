@@ -46,3 +46,7 @@ tests/e2e/node_modules/
 test-results/
 playwright-report/
 blob-report/
+
+# Локальная SQLite/бэкапы (не удалять, не коммитить)
+vks_data.db
+vks_data.db.*

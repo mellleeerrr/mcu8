@@ -235,6 +235,14 @@ T08, T09, T11b), затем полная матрица раскладок (T04b
 
 ## T04a. Узкий P0-smoke раскладок (P0-доказательство)
 
+**Статус:** 🟢 E2E-прогон 2026-10-22: 98 checks / 0 failed / 109.9 s, pageerror 0,
+5xx/501 0, live SIP; deploy нового T03-бинаря и dedup 6→5; evidence
+`docs/progress/evidence/t04a/SUMMARY.md`.
+**Реализовано:** `tests/e2e/live.js`: 7 подвариантов 2×2; UI-посадка в ячейки
+1/N/2/N для 4/8/9/25 (bbox+текст); calculate 4/8/9/25 (1-based); clear-all→AUTO;
+detach→визуальная «Общая»; final pageerror/4xx/console после cleanup; удаление
+созданных layout/комнаты. Полная матрица 11 диапазонов/34 ячеек — T04b.
+
 **Проблема.** E2E 34/34 покрывает только manual 2×2 и ячейку 1. Нет
 detach/возврата к «Общей». Полная матрица 34 ячеек — отдельный T04b.
 
