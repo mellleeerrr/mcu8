@@ -18,7 +18,6 @@ vks-admin = { path = "../vks-admin" }
 vks-signaling = { path = "../vks-signaling" }
 vks-media-sfu = { path = "../vks-media-sfu" }
 vks-media-mcu = { path = "../vks-media-mcu" }
-vks-layout = { path = "../vks-layout" }
 vks-proto = { path = "../vks-proto" }
 vks-gateway-sip = { path = "../vks-gateway-sip" }
 vks-gateway-h323 = { path = "../vks-gateway-h323" }

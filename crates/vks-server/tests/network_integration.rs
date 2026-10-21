@@ -1261,18 +1261,40 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
     let cmd_json: serde_json::Value = serde_json::from_str(&body_cmd).unwrap();
     assert_eq!(cmd_json["status"], "ok");
 
-    // 5. Live SFU -> MCU Mode Switch Handover (M3.3, M3.8, M4.4)
+    // 5. Live SFU -> MCU Mode Switch Handover (M3.3, M3.8, M4.4).
+    // Vendor-контракт требует id раскладки, привязанной к сессии (UI всегда
+    // её шлёт). Создаём раскладку и привязываем, иначе сервер честно даёт 422.
+    let (code_create_layout, body_create_layout) = reqwest_like_request(
+        tcp_addr,
+        "POST",
+        "/api/v3/ui/video_layouts",
+        &token,
+        Some(r#"{"display_name":"PkgD Layout","payload":{"mode":"auto","preset":"preset_default_13","type":"default","size":13}}"#),
+    )
+    .await;
+    assert_eq!(code_create_layout, 201, "{body_create_layout}");
+    let layout_json: serde_json::Value = serde_json::from_str(&body_create_layout).unwrap();
+    let layout_id = layout_json["video_layout"]["id"].as_str().unwrap().to_string();
+    let (code_attach, body_attach) = reqwest_like_request(
+        tcp_addr,
+        "POST",
+        &format!("/api/v3/sessions/room-pkg-d/video_layouts/{layout_id}"),
+        &token,
+        Some("{}"),
+    )
+    .await;
+    assert!(matches!(code_attach, 200 | 204), "{code_attach}: {body_attach}");
     let (code_mode, body_mode) = reqwest_like_request(
         tcp_addr,
         "POST",
         "/api/v3/ui/video_layouts/mode",
         &token,
-        Some(r#"{"session_id":"room-pkg-d","mode":"mcu"}"#),
+        Some(&format!(r#"{{"session_id":"room-pkg-d","mode":"mcu","video_layout_id":"{layout_id}"}}"#)),
     )
     .await;
     assert_eq!(code_mode, 200);
     let mode_json: serde_json::Value = serde_json::from_str(&body_mode).unwrap();
-    assert_eq!(mode_json["payload"]["mode"], "mcu");
+    assert_eq!(mode_json["payload"]["mode"], "auto", "топология mcu не меняет режим раскладки");
 
     // Alice and Bob both receive RoomModeChanged(new_mode: Mcu, switch_epoch: 1) on their live WebSockets!
     let alice_mode_msg = read_alice.next().await.unwrap().unwrap();
@@ -1316,7 +1338,7 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
         "POST",
         "/api/v3/ui/video_layouts/mode",
         &token,
-        Some(r#"{"session_id":"room-pkg-d","mode":"auto"}"#),
+        Some(&format!(r#"{{"session_id":"room-pkg-d","mode":"auto","video_layout_id":"{layout_id}"}}"#)),
     )
     .await;
     assert_eq!(code_layout_preset, 200);

@@ -5250,7 +5250,6 @@ dependencies = [
  "tracing",
  "uuid",
  "vks-common",
- "vks-core",
 ]
 
 [[package]]
@@ -5264,7 +5263,6 @@ dependencies = [
  "tracing",
  "uuid",
  "vks-common",
- "vks-core",
 ]
 
 [[package]]
@@ -5352,7 +5350,6 @@ dependencies = [
  "vks-core",
  "vks-gateway-h323",
  "vks-gateway-sip",
- "vks-layout",
  "vks-media-mcu",
  "vks-media-sfu",
  "vks-proto",

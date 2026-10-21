@@ -22,7 +22,6 @@ tracing.workspace = true
 serde.workspace = true
 tokio.workspace = true
 uuid.workspace = true
-vks-core = { path = "../vks-core" }
 vks-common = { path = "../vks-common" }
 
 # Тяжёлая SIP-стек (опционально, ADR-0006).

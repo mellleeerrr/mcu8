@@ -631,25 +631,6 @@ pub async fn engine_command(
     Json(json!({ "status": "ok", "result": "ok" })).into_response()
 }
 
-/// `GET /api/v3/ui/records` & `GET /api/v3/records` (M5.5).
-pub async fn ui_records(State(state): State<SharedState>) -> Response {
-    track("ui/records");
-    let records: Vec<_> = if let Some(ref storage) = state.storage {
-        if let Ok(recs) = storage.list_records(None).await {
-            recs
-        } else {
-            state.records.lock().unwrap().values().cloned().collect()
-        }
-    } else {
-        state.records.lock().unwrap().values().cloned().collect()
-    };
-    Json(json!({
-        "count": records.len(),
-        "records": records,
-    }))
-    .into_response()
-}
-
 #[cfg(test)]
 mod tests {
     use super::role_to_permissions;

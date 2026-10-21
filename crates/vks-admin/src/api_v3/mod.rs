@@ -394,8 +394,6 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/ui/video_layouts/mode", post(shell::switch_video_layout_mode))
         .route("/api/v3/ui/sessions/quick", post(sessions::quick_session))
         .route("/api/v3/sessions/quick", post(sessions::quick_session))
-        .route("/api/v3/ui/records", get(shell::ui_records))
-        .route("/api/v3/records", get(shell::ui_records))
         .route("/api/v3/abonents", get(sessions::list_abonents))
         .route("/api/v3/abonents/previews", get(sessions::abonents_previews))
         .route("/api/v3/abonents/{id}", delete(sessions::remove_abonent).patch(sessions::edit_abonent))
