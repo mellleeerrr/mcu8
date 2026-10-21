@@ -1,8 +1,8 @@
 # T06a — честная матрица кодеков без транскодера
 
-**Статус:** реализовано и проверено live, коммит `T06a-коммит (git log --grep T06a)`.
+**Статус:** реализовано и проверено live, коммит ``b76b17a` (финальный docs-коммит — родитель)`.
 **Ветка:** master. **Гейты:** clippy `-D warnings` чисто; `cargo test
---workspace --all-targets --no-fail-fast` — **1021 passed / 0 failed / 6
+--workspace --all-targets --no-fail-fast` — **1022 passed / 0 failed / 6
 ignored**; оба E2E — **114/114 checks, 0 failed, page_errors 0**.
 
 ## Что было нечестно
@@ -56,15 +56,15 @@ ignored**; оба E2E — **114/114 checks, 0 failed, page_errors 0**.
 
 ## Live-доказательства
 
-`artifacts/e2e-t06a-high4/` (1920×1080/4096):
-- 114 checks / 0 failed / **page_errors 0**, 116.7 с;
-- audio TX **585** / RX **384** пакетов, rejected **0**;
-- video RTP tx **3 896 997 bps**, effective 1920×1080.
+`artifacts/e2e-t06a-final-high/` (1920×1080/4096):
+- 114 checks / 0 failed / **page_errors 0**, 115.6 с;
+- audio TX **561** / RX **359** пакетов, rejected **0**;
+- video RTP tx **4 308 938 bps**, effective 1920×1080.
 
-`artifacts/e2e-t06a-low/` (640×360/512):
-- 114 checks / 0 failed / **page_errors 0**, 116.5 с;
-- audio TX **571** / RX **380** пакетов, rejected **0**;
-- video RTP tx **542 058 bps**, effective 640×360.
+`artifacts/e2e-t06a-final-low/` (640×360/512):
+- 114 checks / 0 failed / **page_errors 0**, 116.9 с;
+- audio TX **569** / RX **370** пакетов, rejected **0**;
+- video RTP tx **557 379 bps**, effective 640×360.
 
 Терминал начинает слать аудио с задержкой ~5 с после 200 OK; проверка RX
 перенесена с 4 с на 12 с. Это свойство терминала, а не скрытая потеря:

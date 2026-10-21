@@ -56,15 +56,6 @@ fn find_call_string_override<'a>(
     {
         return Some(contact);
     }
-    if let Some(contact) = resources
-        .contacts
-        .values()
-        .flat_map(|contacts| contacts.iter())
-        .find(matches)
-        .and_then(|contact| protocol_options(contact, protocol))
-    {
-        return Some(contact);
-    }
     resources
         .addresses
         .values()
@@ -1642,6 +1633,35 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         // Глобальный адрес для другого SIP URI всё ещё читается как плоская карта.
         let global = find_call_string_override(&resources, Some(room), "sip:other@192.168.1.132");
         assert!(global.is_none());
+        // Чужой контакт с тем же URI не должен влиять на комнату: после
+        // удаления комнатного контакта остаётся глобальный адрес, иначе
+        // G722-only другого зала ложно отклонит вызов.
+        resources.contacts.remove(&room.to_string());
+        let foreign = RoomId::new();
+        resources.contacts.insert(
+            foreign.to_string(),
+            vec![serde_json::json!({
+                "uri": "sip:probe@192.168.1.132",
+                "payload": {"call_string": {"sip": {"audioCodecs": [{"name": "G722"}]}}}
+            })],
+        );
+        let selected = find_call_string_override(&resources, Some(room), "sip:probe@192.168.1.132")
+            .expect("global address after foreign contact ignored");
+        assert_eq!(selected["audioCodecs"][0]["name"], "G711");
+    }
+
+    #[test]
+    fn conference_intent_is_a_fallback_when_no_contact_or_address() {
+        let room = RoomId::new();
+        let resources = vks_admin::api_v3::resources::ResourceState::default();
+        let g722 = serde_json::json!({"payload": {"audio_codecs": [{"name": "G722"}]}});
+        let error = GatewayManager::bridgeable_codec_selection(&resources, room, Some(&g722), "sip:x@192.168.1.132")
+            .expect_err("conference G722-only must be refused");
+        assert!(error.contains("no common audio"), "{error}");
+        let native = serde_json::json!({"payload": {"audio_codecs": [{"name": "G711"}]}});
+        assert!(
+            GatewayManager::bridgeable_codec_selection(&resources, room, Some(&native), "sip:x@192.168.1.132").is_ok()
+        );
     }
 
     #[test]
