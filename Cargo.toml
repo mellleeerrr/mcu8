@@ -57,7 +57,7 @@ ulid = { version = "1", features = ["std", "serde"] }
 prost = "0.13"
 prost-build = "0.13"
 # веб / api
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 utoipa = { version = "5", features = ["axum_extras"] }
 # Статика фронтенда PNM: ServeDir/ServeFile (ADR-0027, FRONTEND_PORT_PLAN §4.2).
 # Мержит `fs`-фичу (без default, чтобы не тянуть trace/cors в бинарник).

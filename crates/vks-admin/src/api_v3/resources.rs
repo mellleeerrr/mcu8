@@ -37,6 +37,11 @@ pub struct ResourceState {
     /// История конференций (T2.2): переживает рестарт в том же документе.
     #[serde(default)]
     pub history: super::history::HistoryState,
+    /// Административные настройки (T2.3): vendor-совместимые payload'ы
+    /// `settings/*`, `system/ntp`, `system/time-zone`. Хранятся рядом с
+    /// ресурсами, чтобы переживать рестарт и попадать в один configuration-document.
+    #[serde(default)]
+    pub admin_settings: BTreeMap<String, Value>,
 }
 
 /// Толерантная загрузка адресной книги: битые/старые записи не роняют весь

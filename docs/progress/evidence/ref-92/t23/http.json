@@ -1,0 +1,1 @@
+{"crt":{"common_name":". ","version":3,"not_before":1792439992,"not_after":1823975992,"signature_algorithm":"SHA256-RSA","public_key_algorithm":"RSA","user_crt":false},"key":{"common_name":". "},"has_password":false,"auto_reset_cert":true,"port":443}

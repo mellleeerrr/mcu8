@@ -11,7 +11,6 @@ use axum::{
     Json,
 };
 use serde_json::{json, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use vks_auth::jwt::VerifiedJwt;
 
@@ -71,6 +70,17 @@ pub async fn profile(State(state): State<SharedState>, Extension(verified): Exte
     let role = crate::users::Users::resolve_role(&state, &verified.user_id).unwrap_or(vks_core::Role::Viewer);
 
     let permissions = role_to_permissions(role);
+    // Таймзона администратора (PATCH /system/timezone) важнее TZ хоста.
+    let timezone = {
+        let resources = state.api_v3.resources.lock().await;
+        resources
+            .admin_settings
+            .get("timezone")
+            .and_then(|value| value.get("timezone"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(system_timezone)
+    };
 
     Json(json!({
         "user": {
@@ -79,7 +89,7 @@ pub async fn profile(State(state): State<SharedState>, Extension(verified): Exte
             "role": role.as_str(),
             "permissions": permissions,
             "locale_id": "ru_RU",
-            "time_zone_id": system_timezone(),
+            "time_zone_id": timezone,
             "groups": [],
             "emails": [],
             "phones": [],
@@ -94,10 +104,43 @@ pub async fn profile(State(state): State<SharedState>, Extension(verified): Exte
     .into_response()
 }
 
-/// `GET /api/v3/time-zones` → `{time_zones:[{id}]}` (маппер `LW`).
+/// IANA-таймзона хоста: `TZ` → `/etc/timezone` → UTC.
+pub(crate) fn system_timezone() -> String {
+    if let Ok(tz) = std::env::var("TZ") {
+        let tz = tz.trim().trim_start_matches(':');
+        if !tz.is_empty() {
+            return tz.to_string();
+        }
+    }
+    std::fs::read_to_string("/etc/timezone")
+        .ok()
+        .map(|tz| tz.trim().to_string())
+        .filter(|tz| !tz.is_empty())
+        .unwrap_or_else(|| "UTC".to_string())
+}
+
+/// Все IANA-зоны vendor-списка (ref-92/time-zones, 428 записей).
+const TIME_ZONES: &str = include_str!("../../assets/time-zones.json");
+
+fn time_zone_list() -> Value {
+    serde_json::from_str(TIME_ZONES).unwrap_or_else(|_| json!({ "count": 0, "time_zones": [] }))
+}
+
+/// Идентификаторы зон для валидации `PATCH /system/timezone`.
+pub fn time_zone_ids() -> Vec<String> {
+    time_zone_list()
+        .get("time_zones")
+        .and_then(Value::as_array)
+        .map(|zones| {
+            zones.iter().filter_map(|zone| zone.get("id").and_then(Value::as_str).map(str::to_string)).collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `GET /api/v3/time-zones` → `{count,time_zones:[{id}]}` (маппер `LW`).
 pub async fn time_zones() -> Response {
     track("time-zones");
-    Json(json!({ "time_zones": [{ "id": "UTC" }] })).into_response()
+    Json(time_zone_list()).into_response()
 }
 
 /// `GET /api/v3/locales` → `{locales:[{id, description}]}` (маппер `xW`).
@@ -270,180 +313,6 @@ pub async fn engine_diagnostics() -> Response {
                 }
             },
             "scheduler": { "workers": 4 }
-        }
-    }))
-    .into_response()
-}
-
-/// `GET /api/v3/system/time` → `{time,timezone,ntp,ntp_name,ntp_synchronized}`.
-pub async fn system_time() -> Response {
-    track("system/time");
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    // Vendor-UI форматирует время списка по `time.timezone`; «UTC» при
-    // локальном браузере давал расхождение со страницей детали.
-    let timezone = system_timezone();
-    let time_obj = json!({
-        "time": now,
-        "timezone": timezone,
-        "ntp": false,
-        "ntp_name": "",
-        "ntp_synchronized": false
-    });
-    Json(json!({
-        "time": time_obj,
-        "timezone": timezone,
-        "ntp": false,
-        "ntp_name": "",
-        "ntp_synchronized": false
-    }))
-    .into_response()
-}
-
-/// IANA-таймзона хоста: `TZ` → `/etc/timezone` → UTC.
-fn system_timezone() -> String {
-    if let Ok(tz) = std::env::var("TZ") {
-        let tz = tz.trim().trim_start_matches(':');
-        if !tz.is_empty() {
-            return tz.to_string();
-        }
-    }
-    std::fs::read_to_string("/etc/timezone")
-        .ok()
-        .map(|tz| tz.trim().to_string())
-        .filter(|tz| !tz.is_empty())
-        .unwrap_or_else(|| "UTC".to_string())
-}
-
-/// `GET /api/v3/settings/calls` → кодеки/лимиты/TURN из наших `Settings` (§4.5).
-pub async fn settings_calls(State(state): State<SharedState>) -> Response {
-    track("settings/calls");
-    let s = SettingsService::get(&state);
-    let payload = json!({
-        "codecs": { "audio": s.codecs.audio, "video": s.codecs.video },
-        "limits": {
-            "max_participants_per_room": s.limits.max_participants_per_room,
-            "max_tracks_per_room": s.limits.max_tracks_per_room,
-            "max_tracks_per_participant": s.limits.max_tracks_per_participant,
-            "api_key_rate_limit_rpm": s.limits.api_key_rate_limit_rpm
-        },
-        "turn": { "uri": s.turn.uri, "credential_ttl_sec": s.turn.credential_ttl_sec },
-        "fecc": false,
-        "aspeaker": true,
-        "mcu_domain": "",
-        "mcu_display_name": s.name,
-        "protocol_preferences": "SIP",
-        "supported_protocols": ["webrtc", "sip", "h323"],
-        "enabled_protocol":"ALL",
-        "ui_autocall_on_session_start":"ON",
-        "ui_autocall_scope":"all",
-        "stop_rules": {}
-    });
-    Json(json!({
-        "payload": payload,
-        "codecs": { "audio": s.codecs.audio, "video": s.codecs.video },
-        "limits": {
-            "max_participants_per_room": s.limits.max_participants_per_room,
-            "max_tracks_per_room": s.limits.max_tracks_per_room,
-            "max_tracks_per_participant": s.limits.max_tracks_per_participant,
-            "api_key_rate_limit_rpm": s.limits.api_key_rate_limit_rpm
-        },
-        "turn": { "uri": s.turn.uri, "credential_ttl_sec": s.turn.credential_ttl_sec }
-    }))
-    .into_response()
-}
-
-/// `PATCH /api/v3/settings/calls` — обновление параметров вызовов.
-pub async fn update_settings_calls(
-    State(state): State<SharedState>,
-    Extension(auth::ClientIp(ip)): Extension<auth::ClientIp>,
-    Extension(auth): Extension<crate::auth_middleware::AuthContext>,
-    Json(body): Json<serde_json::Value>,
-) -> Response {
-    track("settings/calls");
-    if auth.role < vks_core::Role::Operator {
-        return super::error_json(403, "Forbidden: Operator role required");
-    }
-    let source = body.get("payload").unwrap_or(&body);
-    let mut current = SettingsService::get(&state);
-    if let Some(codecs) = source.get("codecs") {
-        if let Ok(c) = serde_json::from_value::<crate::settings::CodecConfig>(codecs.clone()) {
-            current.codecs = c;
-        }
-    }
-    if let Some(limits) = source.get("limits") {
-        if let Ok(l) = serde_json::from_value::<crate::settings::LimitsConfig>(limits.clone()) {
-            current.limits = l;
-        }
-    }
-    if let Some(turn) = source.get("turn") {
-        if let Ok(t) = serde_json::from_value::<crate::settings::TurnConfig>(turn.clone()) {
-            current.turn = t;
-        }
-    }
-    let updated = SettingsService::set_async(&state, current).await;
-    state.record_audit_entry(&auth.subject, "settings.calls.updated", None, &ip);
-
-    let payload = json!({
-        "codecs": { "audio": updated.codecs.audio, "video": updated.codecs.video },
-        "limits": {
-            "max_participants_per_room": updated.limits.max_participants_per_room,
-            "max_tracks_per_room": updated.limits.max_tracks_per_room,
-            "max_tracks_per_participant": updated.limits.max_tracks_per_participant,
-            "api_key_rate_limit_rpm": updated.limits.api_key_rate_limit_rpm
-        },
-        "turn": { "uri": updated.turn.uri, "credential_ttl_sec": updated.turn.credential_ttl_sec },
-        "fecc": false,
-        "aspeaker": true,
-        "mcu_domain": "",
-        "mcu_display_name": updated.name,
-        "protocol_preferences": "SIP",
-        "supported_protocols": ["webrtc", "sip", "h323"],
-        "enabled_protocol":"ALL",
-        "ui_autocall_on_session_start":"ON",
-        "ui_autocall_scope":"all",
-        "stop_rules": {}
-    });
-    Json(json!({
-        "payload": payload,
-        "codecs": { "audio": updated.codecs.audio, "video": updated.codecs.video },
-        "limits": {
-            "max_participants_per_room": updated.limits.max_participants_per_room,
-            "max_tracks_per_room": updated.limits.max_tracks_per_room,
-            "max_tracks_per_participant": updated.limits.max_tracks_per_participant,
-            "api_key_rate_limit_rpm": updated.limits.api_key_rate_limit_rpm
-        },
-        "turn": { "uri": updated.turn.uri, "credential_ttl_sec": updated.turn.credential_ttl_sec }
-    }))
-    .into_response()
-}
-
-/// `GET /api/v3/settings/security` → `{payload:{…}}` — форма экрана
-/// «Безопасность» (маппер `Ane` читает `data.payload`; без вложенного
-/// `payload` boot-цепочка падает на `settings.password` → TypeError в консоли).
-///
-/// Значения честные: парольная политика не enforced (`change_password`
-/// отклоняет только пустой пароль → минимум 1 символ, остальные требования 0);
-/// TTL паролей выключен; lockout логина — реальные константы `auth`
-/// (5 неудач / 900 с блок, §1.4); блокировок конференций нет (`conf_*`).
-/// `PATCH /api/v3/settings/security` — долг (keepalive настроек, §4.5).
-pub async fn settings_security() -> Response {
-    track("settings/security");
-    Json(json!({
-        "payload": {
-            "password_min_length": 1,
-            "password_min_lowercase": 0,
-            "password_min_uppercase": 0,
-            "password_min_digits": 0,
-            "password_min_special_characters": 0,
-            "password_no_login_match": false,
-            "password_ttl": 0,
-            "password_ttl_enabled": false,
-            "login_max_attempts_count": auth::USER_IP_MAX_FAILS,
-            "login_block_timeout": auth::BLOCK_SECS,
-            "login_block_enabled": true,
-            "conf_max_attempts_count": 0,
-            "conf_block_timeout": 0,
-            "conf_block_enabled": false
         }
     }))
     .into_response()

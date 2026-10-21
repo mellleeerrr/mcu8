@@ -662,11 +662,12 @@ async fn shell_security_settings_and_credentials_expire_match_ui_contract() {
     let body = json_body(response).await;
     let payload = &body["payload"];
     assert!(payload.is_object(), "payload обязателен: {body}");
-    assert_eq!(payload["password_ttl"], 0);
+    // Vendor-дефолты ref-92/t23 (настройки редактируются через PATCH).
+    assert_eq!(payload["password_ttl"], 90);
     assert_eq!(payload["password_ttl_enabled"], false);
-    assert_eq!(payload["login_max_attempts_count"], super::auth::USER_IP_MAX_FAILS);
-    assert_eq!(payload["login_block_timeout"], super::auth::BLOCK_SECS);
-    assert_eq!(payload["login_block_enabled"], true);
+    assert_eq!(payload["login_max_attempts_count"], 5);
+    assert_eq!(payload["login_block_timeout"], 60);
+    assert_eq!(payload["login_block_enabled"], false);
     for key in [
         "password_min_length",
         "password_min_lowercase",
@@ -883,8 +884,8 @@ async fn shell_monitoring_shapes_and_lifecycle_m4() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = json_body(resp).await;
     assert!(body["payload"].is_object(), "payload wrapper is required for Cne (C2)");
-    assert_eq!(body["payload"]["fecc"], false);
-    assert_eq!(body["payload"]["aspeaker"], true);
+    assert_eq!(body["payload"]["fecc"], true);
+    assert_eq!(body["payload"]["aspeaker"], "SELECTIVE");
 
     let patch_resp = send(
         &app,

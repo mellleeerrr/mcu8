@@ -1,0 +1,1 @@
+{"payload": {"ice": false, "bfcp": "UDP", "srtp": "DISABLED", "firewall": true, "sip_port": 5060, "sip_proxy": false, "turn_host": "", "sip_server": "", "sip_password": "", "sip_register": false, "sip_username": "", "bfcp_port_max": 52999, "bfcp_port_min": 52500, "sip_transport": "auto", "turn_password": "", "turn_username": ""}}

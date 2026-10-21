@@ -18,9 +18,13 @@ pub mod directory;
 pub mod history;
 pub mod resources;
 pub mod sessions;
+pub mod settings_admin;
 pub mod shell;
 pub mod ws;
 
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod settings_tests;
 #[cfg(test)]
 mod tests;
 
@@ -117,10 +121,23 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/features", get(shell::features))
         .route("/api/v3/engine/calibration", get(shell::engine_calibration))
         .route("/api/v3/engine/diagnostics", get(shell::engine_diagnostics))
-        .route("/api/v3/system/time", get(shell::system_time))
-        .route("/api/v3/settings/calls", get(shell::settings_calls).patch(shell::update_settings_calls))
-        .route("/api/v3/settings/security", get(shell::settings_security))
-        .route("/api/v3/settings/smtp", get(resources::smtp))
+        .route("/api/v3/system/time", get(settings_admin::system_time).patch(settings_admin::system_time_patch))
+        .route("/api/v3/system/timezone", axum::routing::patch(settings_admin::system_timezone_patch))
+        .route("/api/v3/system/ntp", get(settings_admin::ntp_get).patch(settings_admin::ntp_patch))
+        .route("/api/v3/system/ntp/enable", axum::routing::post(settings_admin::ntp_enable))
+        .route("/api/v3/system/ntp/disable", axum::routing::post(settings_admin::ntp_disable))
+        .route("/api/v3/settings/calls", get(settings_admin::calls_get).patch(settings_admin::calls_patch))
+        .route("/api/v3/settings/calls/sip", get(settings_admin::sip_get).patch(settings_admin::sip_patch))
+        .route("/api/v3/settings/calls/h323", get(settings_admin::h323_get).patch(settings_admin::h323_patch))
+        .route("/api/v3/settings/rtp", get(settings_admin::rtp_get).patch(settings_admin::rtp_patch))
+        .route("/api/v3/settings/http", get(settings_admin::http_get).patch(settings_admin::http_patch))
+        .route("/api/v3/settings/http/check", axum::routing::post(settings_admin::http_check))
+        .route("/api/v3/settings/http/reset", axum::routing::post(settings_admin::http_reset))
+        .route("/api/v3/settings/styles", get(settings_admin::styles_get).patch(settings_admin::styles_patch))
+        .route("/api/v3/settings/smtp", get(settings_admin::smtp_get).patch(settings_admin::smtp_patch))
+        .route("/api/v3/smtp/test", axum::routing::put(settings_admin::smtp_test))
+        .route("/api/v3/smtp/reset", axum::routing::post(settings_admin::smtp_reset))
+        .route("/api/v3/settings/security", get(settings_admin::security_get).patch(settings_admin::security_patch))
         .route("/api/v3/users", get(directory::list_users).post(directory::create_user))
         .route(
             "/api/v3/users/{id}",
@@ -248,8 +265,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/sessions/{id}/video_layouts/{resource_id}/templates", patch(resources::edit_linked))
         .route("/api/v3/settings/video", get(shell::settings_video).patch(shell::update_settings_video))
         .route("/api/v3/ui/video_layouts/calculate", post(shell::video_layouts_calculate))
-        .route("/api/v3/settings/audio_codecs", get(shell::settings_audio_codecs))
-        .route("/api/v3/settings/video_codecs", get(shell::settings_video_codecs))
+        .route("/api/v3/settings/audio_codecs", get(shell::settings_audio_codecs).patch(settings_admin::audio_codecs_patch))
+        .route("/api/v3/settings/video_codecs", get(shell::settings_video_codecs).patch(settings_admin::video_codecs_patch))
         .route("/api/v3/waitingroom", get(shell::waitingroom))
         .route("/api/v3/conferences/status", get(shell::conferences_status))
         // Фаза 3 — данные (наши комнаты).
