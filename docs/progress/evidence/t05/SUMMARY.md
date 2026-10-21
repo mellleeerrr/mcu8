@@ -82,7 +82,7 @@ FFmpeg: `-s 1920x1080 -r 30 -b:v 4096k`.
 SDP offer:
 ```
 b=AS:512
-a=fmtp:97 packetization-mode=1;profile-level-id=42c01e;max-mbps=13800;max-fs=920;max-br=512
+a=fmtp:97 packetization-mode=1;profile-level-id=42c01f;max-mbps=27600;max-fs=920;max-br=512
 ```
 Answer: `max-br=20010`, `max-mbps=49000`, `max-fs` нет → эффективный
 **640×360**. Фактический RTP tx: **605 027 bps ≈ 0.61 Mbps** (<1.5 Mbps),
