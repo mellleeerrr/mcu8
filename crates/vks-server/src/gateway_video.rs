@@ -86,9 +86,7 @@ impl VideoProfile {
             if self.max_fs() > max_fs {
                 // Стандартная лестница 16:9: терминалы ожидают один из этих
                 // размеров, а не произвольное деление пополам (480×270).
-                const LADDER: &[(u32, u32)] =
-                    &[(1920, 1080), (1280, 720), (960, 540), (640, 360), (480, 270), (320, 180)];
-                let (width, height) = LADDER
+                let (width, height) = SIZE_LADDER
                     .iter()
                     .copied()
                     .find(|(width, height)| macroblocks(*width, *height) <= max_fs)
@@ -101,8 +99,27 @@ impl VideoProfile {
             self.bitrate_kbps = self.bitrate_kbps.min(max_br);
         }
         if let Some(max_mbps) = max_mbps.filter(|value| *value > 0) {
-            let fps = max_mbps / self.max_fs().max(1);
-            self.fps = self.fps.min(fps).max(1);
+            if self.max_fs().saturating_mul(self.fps) > max_mbps {
+                // Сначала уменьшаем размер по лестнице, сохраняя разумный fps
+                // (>=15): 1080p при max-mbps=49000 → 960×540@24, а не 1080p@6.
+                let mut chosen = None;
+                for (width, height) in SIZE_LADDER.iter().copied() {
+                    let candidate_fps = max_mbps / macroblocks(width, height).max(1);
+                    if candidate_fps >= 15 {
+                        chosen = Some((width, height, candidate_fps));
+                        break;
+                    }
+                }
+                if let Some((width, height, candidate_fps)) = chosen {
+                    self.width = width;
+                    self.height = height;
+                    self.fps = self.fps.min(candidate_fps).max(1);
+                } else {
+                    self.width = 320;
+                    self.height = 180;
+                    self.fps = (max_mbps / macroblocks(320, 180)).max(1);
+                }
+            }
         }
         self.level = h264_level(self.width, self.height, self.fps).to_string();
     }
@@ -122,6 +139,8 @@ fn env_u32(key: &str) -> Option<u32> {
 
 /// Минимальный H.264 level, покрывающий `width×height@fps` (уровень нужен
 /// peer'у для декодера; занижать его нельзя).
+const SIZE_LADDER: &[(u32, u32)] = &[(1920, 1080), (1280, 720), (960, 540), (640, 360), (480, 270), (320, 180)];
+
 fn macroblocks(width: u32, height: u32) -> u32 {
     width.div_ceil(16).max(1) * height.div_ceil(16).max(1)
 }
@@ -920,6 +939,14 @@ mod tests {
         only_mbps.clamp_to_answer(None, None, Some(244_800));
         assert_eq!((only_mbps.width, only_mbps.height), (1920, 1080));
         assert_eq!(only_mbps.fps, 30);
+        let mut tight_mbps = base.clone();
+        tight_mbps.clamp_to_answer(None, None, Some(49_000));
+        assert_eq!((tight_mbps.width, tight_mbps.height), (960, 540), "сначала размер, затем fps");
+        assert_eq!(tight_mbps.fps, 24);
+        let mut tiny_mbps = base.clone();
+        tiny_mbps.clamp_to_answer(None, None, Some(1_000));
+        assert_eq!((tiny_mbps.width, tiny_mbps.height), (320, 180));
+        assert_eq!(tiny_mbps.fps, 4);
         let mut tiny = base;
         tiny.clamp_to_answer(Some(1), None, None);
         assert_eq!((tiny.width, tiny.height), (320, 180));

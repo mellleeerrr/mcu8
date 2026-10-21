@@ -451,12 +451,18 @@ fn push_video_attrs(sdp: &mut String, codecs: &[&OfferCodec], video: &VideoSdpPr
     for codec in codecs.iter().copied() {
         sdp.push_str(&format!("a=rtpmap:{} {}/{}\r\n", codec.payload, codec.name, codec.clock));
         if codec.name == "H264" {
-            let high = codec.payload == 98;
+            let high = is_h264_high(codec);
             sdp.push_str(&format!("a=fmtp:{} {}\r\n", codec.payload, video.fmtp(high)));
         } else if let Some(fmtp) = codec.fmtp {
             sdp.push_str(&format!("a=fmtp:{} {fmtp}\r\n", codec.payload));
         }
     }
+}
+
+/// H.264 High определяется по fmtp (`profile-level-id=6400…`), а не по
+/// магическому PT 98: нумерация payload type может измениться.
+fn is_h264_high(codec: &OfferCodec) -> bool {
+    codec.fmtp.is_some_and(|fmtp| fmtp.contains("profile-level-id=6400"))
 }
 
 fn payload_list(codecs: &[&OfferCodec]) -> String {
@@ -485,11 +491,30 @@ pub enum CodecProfile {
 
 impl CodecProfile {
     /// Reads `VKS_SDP_CODEC_MATRIX` (`full` enables the complete matrix).
+    ///
+    /// Полная матрица объявляет кодеки, которые без T06b-транскодера не
+    /// мостятся; поэтому она разрешена только при `VKS_TRANSCODER_ENABLED=1`
+    /// или явном lab-флаге `VKS_SDP_CODEC_MATRIX_LAB=1`. Иначе — Native.
     #[must_use]
     pub fn from_env() -> Self {
-        match std::env::var("VKS_SDP_CODEC_MATRIX").as_deref() {
-            Ok("full") => Self::Full,
-            _ => Self::Native,
+        let matrix = std::env::var("VKS_SDP_CODEC_MATRIX").ok();
+        let transcoder = std::env::var("VKS_TRANSCODER_ENABLED").ok();
+        let lab = std::env::var("VKS_SDP_CODEC_MATRIX_LAB").ok();
+        Self::from_config(matrix.as_deref(), transcoder.as_deref(), lab.as_deref())
+    }
+
+    /// Тестируемая версия [`Self::from_env`] без чтения процесса.
+    #[must_use]
+    pub fn from_config(matrix: Option<&str>, transcoder: Option<&str>, lab: Option<&str>) -> Self {
+        let requested_full = matrix.is_some_and(|value| value.trim().eq_ignore_ascii_case("full"));
+        let mode = vks_common::codec_capabilities::matrix_mode(matrix, transcoder, lab);
+        if requested_full && mode != "full" {
+            tracing::warn!("VKS_SDP_CODEC_MATRIX=full ignored: transcoder is unavailable (T06b); using Native");
+        }
+        if mode == "full" {
+            Self::Full
+        } else {
+            Self::Native
         }
     }
 
@@ -726,6 +751,30 @@ m=video 5006 RTP/AVP 96\r\n";
             "a=rtcp:41001",
         ] {
             assert!(sdp.contains(line), "offer misses `{line}`:\n{sdp}");
+        }
+    }
+
+    #[test]
+    fn full_matrix_is_gated_by_transcoder_or_lab_flag() {
+        assert_eq!(CodecProfile::from_config(Some("full"), None, None), CodecProfile::Native);
+        assert_eq!(CodecProfile::from_config(Some("full"), Some("0"), None), CodecProfile::Native);
+        assert_eq!(CodecProfile::from_config(Some("full"), Some("1"), None), CodecProfile::Full);
+        assert_eq!(CodecProfile::from_config(Some("FULL"), None, Some("1")), CodecProfile::Full);
+        assert_eq!(CodecProfile::from_config(Some("native"), Some("1"), Some("1")), CodecProfile::Native);
+    }
+
+    #[test]
+    fn offer_native_flags_match_shared_capabilities() {
+        use vks_common::codec_capabilities::{is_native_audio, is_native_video};
+        for codec in AUDIO_OFFER {
+            if codec.dtmf {
+                continue;
+            }
+            assert_eq!(codec.native, is_native_audio(codec.name), "audio native mismatch: {codec:?}");
+        }
+        for codec in VIDEO_OFFER {
+            let expected = is_native_video(codec.name) && !is_h264_high(codec);
+            assert_eq!(codec.native, expected, "video native mismatch: {codec:?}");
         }
     }
 

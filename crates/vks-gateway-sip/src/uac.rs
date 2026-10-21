@@ -23,6 +23,10 @@ pub enum SipDialError {
     Timeout(String, Duration),
     #[error("Invalid or unsupported SDP answer from remote terminal")]
     InvalidSdpAnswer,
+    /// Терминал выбрал кодек, который шлюз не мостит (нужен T06b-транскодер).
+    /// Явная причина вместо молчаливого «connected без медиа».
+    #[error("No mutually supported codec: {0}")]
+    NoCommonCodec(String),
 }
 
 #[derive(Debug, Clone)]
@@ -268,7 +272,7 @@ impl SipUacClient {
                             warn!(call_id=%c.call_id, ?failure, "SIP answer refused: no mutually bridged codec");
                             let bye = build_bye(contact, &c.ip, c.port, &c.call_id, &c.from_tag, to_tag, 2);
                             c.socket.send_to(bye.as_bytes(), c.target).await?;
-                            return Err(SipDialError::InvalidSdpAnswer);
+                            return Err(SipDialError::NoCommonCodec(format!("{failure:?}")));
                         }
                     };
                     let session = ActiveSipSession {
@@ -492,10 +496,12 @@ mod tests {
                 Duration::from_secs(2),
             )
             .await;
-        assert!(
-            matches!(result, Err(SipDialError::InvalidSdpAnswer)),
-            "An unsupported codec must not be shown as connected"
-        );
+        match result {
+            Err(SipDialError::NoCommonCodec(reason)) => {
+                assert!(reason.contains("UnsupportedAudio"), "причина должна быть типизированной: {reason}");
+            }
+            other => panic!("An unsupported codec must not be shown as connected: {other:?}"),
+        }
         peer.await.unwrap();
     }
 

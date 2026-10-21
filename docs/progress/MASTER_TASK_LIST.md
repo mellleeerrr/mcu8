@@ -35,7 +35,11 @@
 > фактический RTP tx **4.02 Mbps**, 640×360/512 — **0.61 Mbps**; оба E2E
 > 108/108, page_errors 0. Удалён жёсткий 640×360 в admin-статистике.
 > H.323 H.241 и SFU b=AS — T05b. Evidence `docs/progress/evidence/t05/`.
-> Следующая — T05b, затем T06a.
+> **T06a (честная матрица без транскодера) закрыт:** `T06a-коммит (git log --grep T06a)`, ревью — см.
+> `docs/progress/evidence/t06a/SUMMARY.md`. Единый capability-модуль, Full
+> только с транскодером/lab-флагом, явная ошибка `no common audio|video codec`
+> до дозвона, типизированный `NoCommonCodec`, `supported` в API, live
+> 114/114 checks ×2, audio TX/RX >0, rejected 0. Следующая — T05b, затем T06b.
 >
 > Правило цикла: перед задачей — агент «подводные камни»; после реализации — параллельное
 > code-review (оценка /10, обязательные правки); цикл не закрывается, пока хотя бы один

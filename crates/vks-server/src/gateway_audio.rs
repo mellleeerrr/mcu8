@@ -44,6 +44,7 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_rtcp = std::time::Instant::now();
     let mut recv_errors = 0u8;
+    let mut rejected_logs = 0u8;
     while !session.cancel_flag.load(Relaxed) {
         tokio::select! {
             Some(digits) = session.dtmf_rx.recv() => {
@@ -65,7 +66,19 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 };
                 recv_errors = 0;
                 let Some(packet) = validator.accept(source, &incoming[..count]) else {
-                    session.media_stats.rejected_packets.fetch_add(1, Relaxed); continue;
+                    session.media_stats.rejected_packets.fetch_add(1, Relaxed);
+                    if rejected_logs < 3 {
+                        rejected_logs += 1;
+                        let header = vks_gateway_sip::parse_rtp_header(&incoming[..count]);
+                        tracing::warn!(
+                            participant = %session.participant_id_str,
+                            expected_payload = session.audio_payload_type,
+                            received_payload = header.map(|(payload, _, _, _, _)| payload),
+                            source = %source,
+                            "audio RTP rejected by source validator (codec/PT mismatch)"
+                        );
+                    }
+                    continue;
                 };
                 if packet.payload.len() > 480 {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed); continue;

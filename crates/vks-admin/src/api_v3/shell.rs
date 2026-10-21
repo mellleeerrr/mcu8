@@ -234,7 +234,18 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
     let h323_status = if h323_healthy { "READY" } else { "FAILED" };
     let cluster_status = if cluster_healthy { "READY" } else { "FAILED" };
 
+    let matrix = std::env::var("VKS_SDP_CODEC_MATRIX").ok();
+    let transcoder = std::env::var("VKS_TRANSCODER_ENABLED").ok();
+    let lab = std::env::var("VKS_SDP_CODEC_MATRIX_LAB").ok();
+    let matrix_mode =
+        vks_common::codec_capabilities::matrix_mode(matrix.as_deref(), transcoder.as_deref(), lab.as_deref());
     Json(json!({
+        "codecs": {
+            "matrix": matrix_mode,
+            "transcoder": matrix_mode == "full",
+            "native_audio": vks_common::codec_capabilities::NATIVE_AUDIO,
+            "native_video": vks_common::codec_capabilities::NATIVE_VIDEO
+        },
         "engine": {
             "status": engine_status,
             "connected": readiness.media,
@@ -518,7 +529,11 @@ pub async fn settings_audio_codecs(State(state): State<SharedState>) -> Response
         .iter()
         .map(|spec| {
             let (name, bitrate) = crate::settings::CodecConfig::audio_parts(spec);
-            json!({ "name": name, "bitrate": bitrate })
+            json!({
+                "name": name,
+                "bitrate": bitrate,
+                "supported": vks_common::codec_capabilities::is_native_audio(&name)
+            })
         })
         .collect();
     // UI вендора опрашивает кодеки на каждую строку сессии (N+1). Кодеки —
@@ -533,7 +548,10 @@ pub async fn settings_audio_codecs(State(state): State<SharedState>) -> Response
 pub async fn settings_video_codecs(State(state): State<SharedState>) -> Response {
     track("settings/video_codecs");
     let s = SettingsService::get(&state);
-    let mut response = Json(json!({ "video_codecs": s.codecs.video })).into_response();
+    let supported_video: Vec<&String> =
+        s.codecs.video.iter().filter(|name| vks_common::codec_capabilities::is_native_video(name)).collect();
+    let mut response =
+        Json(json!({ "video_codecs": s.codecs.video, "supported_video_codecs": supported_video })).into_response();
     response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=30"));
     response
 }

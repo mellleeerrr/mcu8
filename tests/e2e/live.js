@@ -193,7 +193,7 @@ async function api(token, method, urlPath, body) {
       .every(name => sipPayload.includes(`"${name}"`)), sipPayload.slice(0, 500));
     check('sip: payload carries required video matrix', ['H261', 'H263', 'H264', 'H264-HIGH', 'H265']
       .every(name => sipPayload.includes(`"${name}"`)), sipPayload.slice(0, 800));
-    await page.waitForTimeout(4000);
+    await page.waitForTimeout(12000);
     const participantVisible = await page.getByText(SIP_NAME, { exact: false }).count();
     check('sip: participant visible in conference UI', participantVisible > 0, `matches=${participantVisible}`);
 
@@ -204,6 +204,17 @@ async function api(token, method, urlPath, body) {
     const sipRuntime = (runtimeAbonents.json && runtimeAbonents.json.abonents || [])
       .find(item => String(item.display_name || '').includes(SIP_NAME));
     const sipVideoTx = sipRuntime && sipRuntime.details && sipRuntime.details.video && sipRuntime.details.video.tx;
+    // T06a: терминал выбирает PCMU/PCMA fallback из Native-оффера; реальные
+    // пакеты в обе стороны и ноль отвергнутых по PT доказывают, что нет
+    // «connected, dead audio» из-за немостимого кодека.
+    const sipMedia = sipRuntime && sipRuntime.media || {};
+    const audioTxPackets = Number(sipMedia.audio_tx_packets || 0);
+    const audioRxPackets = Number(sipMedia.audio_rx_packets || 0);
+    const rejectedPackets = Number(sipMedia.rejected_packets || 0);
+    check('audio: two-way RTP packets (PCMU/PCMA fallback)',
+      audioTxPackets > 0 && audioRxPackets > 0, JSON.stringify({audioTxPackets, audioRxPackets}));
+    check('audio: no RTP packets rejected by payload type',
+      rejectedPackets === 0, String(rejectedPackets));
     check(`video: offer size ${VIDEO_WIDTH}x${VIDEO_HEIGHT}`,
       Boolean(sipVideoTx && sipVideoTx.offered_resolution === `${VIDEO_WIDTH}x${VIDEO_HEIGHT}`), JSON.stringify(sipVideoTx));
     check(`video: offer bitrate ${VIDEO_BITRATE} kbps`,
@@ -443,9 +454,24 @@ async function api(token, method, urlPath, body) {
     check('api: audio_codecs shape {name,bitrate}', audio.status === 200 && Array.isArray(audio.json.audio_codecs)
       && audio.json.audio_codecs[0].name && Object.prototype.hasOwnProperty.call(audio.json.audio_codecs[0], 'bitrate'),
       JSON.stringify(audio.json));
+    // T06a: честная матрица — полные списки остаются для T06b, но API
+    // помечает реально мостимые кодеки, а статус не обещает транскодер.
+    const status = await api(token, 'GET', '/api/v3/ui/system/status');
+    check('codecs: matrix native, transcoder false',
+      status.status === 200 && status.json.codecs && status.json.codecs.matrix === 'native'
+      && status.json.codecs.transcoder === false, JSON.stringify(status.json && status.json.codecs));
+    check('codecs: settings marks G711 (PCMU/PCMA) supported',
+      audio.status === 200 && audio.json.audio_codecs.some(codec => codec.name === 'G711' && codec.supported === true),
+      JSON.stringify(audio.json).slice(0, 800));
+    check('codecs: settings marks G722 unsupported (needs T06b)',
+      audio.status === 200 && audio.json.audio_codecs.some(codec => codec.name === 'G722' && codec.supported === false),
+      JSON.stringify(audio.json).slice(0, 800));
     const video = await api(token, 'GET', '/api/v3/settings/video_codecs');
     check('api: video_codecs shape [string]', video.status === 200 && Array.isArray(video.json.video_codecs)
       && video.json.video_codecs.every(codec => typeof codec === 'string'), JSON.stringify(video.json));
+    check('codecs: only H264 marked bridgeable video',
+      Array.isArray(video.json.supported_video_codecs) && video.json.supported_video_codecs.length === 1
+      && video.json.supported_video_codecs[0] === 'H264', JSON.stringify(video.json.supported_video_codecs));
 
     // 10. Нет необъяснённых 501/5xx в сценарии.
     const bad = network.filter(x => x.kind === 'response' && x.status >= 500);

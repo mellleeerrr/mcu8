@@ -34,6 +34,46 @@ fn find_call_string_override<'a>(
     record.payload.get("call_string").and_then(|value| value.get(protocol))
 }
 
+fn codec_name(item: &serde_json::Value) -> Option<String> {
+    item.as_str()
+        .or_else(|| item.get("name").and_then(serde_json::Value::as_str))
+        .map(|name| name.trim().to_uppercase().replace(['.', '-', '_'], ""))
+        .filter(|name| !name.is_empty())
+}
+
+/// Проверяет выбор кодеков комнаты/адреса до дозвона. Клиент, оставивший
+/// только несовместимые кодеки (G.722-only, H.265-only), должен получить
+/// явную причину, а не молчаливый PCMU/H.264 fallback и не «connected» без
+/// медиа. `None`/пустой список = выбор не задан, действует native-профиль.
+fn ensure_bridgeable_codec_selection(
+    audio: Option<&serde_json::Value>,
+    video: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    use vks_common::codec_capabilities::{is_native_audio, is_native_video, NATIVE_AUDIO, NATIVE_VIDEO};
+    for (kind, value, supported, native) in [
+        ("audio", audio, NATIVE_AUDIO, is_native_audio as fn(&str) -> bool),
+        ("video", video, NATIVE_VIDEO, is_native_video as fn(&str) -> bool),
+    ] {
+        let Some(items) = value.and_then(serde_json::Value::as_array) else { continue };
+        if items.is_empty() {
+            continue;
+        }
+        let names: Vec<String> = items.iter().filter_map(codec_name).collect();
+        if names.is_empty() {
+            continue;
+        }
+        if names.iter().any(|name| native(name)) {
+            continue;
+        }
+        return Err(format!(
+            "no common {kind} codec: configured {:?}, gateway bridges {:?}; \
+             enable transcoding (T06b) or select a bridgeable codec",
+            names, supported
+        ));
+    }
+    Ok(())
+}
+
 /// Observed packet/frame counters. Negotiated capabilities are not traffic statistics.
 #[derive(Default)]
 pub struct GatewayMediaStats {
@@ -229,6 +269,30 @@ impl GatewayManager {
         let state = self.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))?;
         let resources = state.api_v3.resources.lock().await;
         find_call_string_override(&resources.addresses, uri).cloned()
+    }
+
+    /// Проверяет, что выбранные для адреса/комнаты кодеки реально мостятся
+    /// native-профилем. Возвращает явную ошибку до SIP/H.323-дозвона.
+    async fn ensure_bridgeable_codecs(&self, room_id: RoomId, uri: &str) -> Result<(), String> {
+        let Some(state) = self.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
+        else {
+            return Ok(());
+        };
+        let call_string = {
+            let resources = state.api_v3.resources.lock().await;
+            find_call_string_override(&resources.addresses, uri).cloned()
+        };
+        let conference =
+            state.api_v3.conference_settings.lock().ok().and_then(|settings| settings.get(&room_id).cloned());
+        let payload = conference.as_ref().and_then(|value| value.get("payload")).or(conference.as_ref());
+        let pick = |call_key: &str| {
+            call_string
+                .as_ref()
+                .and_then(|value| value.get(call_key))
+                .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
+                .or_else(|| payload.and_then(|value| value.get(call_key)))
+        };
+        ensure_bridgeable_codec_selection(pick("audio_codecs"), pick("video_codecs"))
     }
 
     fn sdp_video_profile(profile: &video::VideoProfile) -> vks_gateway_sip::VideoSdpProfile {
@@ -820,6 +884,7 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
     async fn dial(&self, room_id: RoomId, uri: &str, display_name: Option<&str>) -> Result<String, String> {
         let trimmed = uri.trim();
         let is_h323 = trimmed.starts_with("h323:");
+        self.ensure_bridgeable_codecs(room_id, trimmed).await?;
         let is_sip = trimmed.starts_with("sip:")
             || (!trimmed.contains("://") && !trimmed.starts_with("webrtc:") && !trimmed.starts_with("recorder:"));
         if !is_sip && !is_h323 {
@@ -1442,6 +1507,27 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         let result = manager.dial(room, "sip:127.0.0.1:9", None).await;
         assert!(result.is_err(), "RTP port exhaustion must never produce a fake connected call");
         assert!(manager.registry.lock().unwrap().by_participant.is_empty());
+    }
+
+    #[test]
+    fn codec_selection_rejects_unbridgeable_only_lists() {
+        let g722_only = serde_json::json!([{"name": "G722", "bitrate": null}]);
+        let h265_only = serde_json::json!(["H265"]);
+        assert!(ensure_bridgeable_codec_selection(Some(&g722_only), Some(&h265_only)).is_err());
+        let error = ensure_bridgeable_codec_selection(Some(&g722_only), Some(&h265_only)).unwrap_err();
+        assert!(error.contains("no common audio"), "{error}");
+        let g711_g722 = serde_json::json!([{"name": "G722"}, {"name": "G711"}]);
+        assert!(
+            ensure_bridgeable_codec_selection(Some(&g711_g722), Some(&h265_only)).is_err(),
+            "H.265-only video всё ещё не мостится"
+        );
+        let native = serde_json::json!([{"name": "G711", "bitrate": null}]);
+        let h264 = serde_json::json!(["H264"]);
+        assert!(ensure_bridgeable_codec_selection(Some(&native), Some(&h264)).is_ok());
+        assert!(ensure_bridgeable_codec_selection(None, None).is_ok());
+        assert!(ensure_bridgeable_codec_selection(Some(&serde_json::json!([])), None).is_ok());
+        let high_only = serde_json::json!(["H264-HIGH"]);
+        assert!(ensure_bridgeable_codec_selection(Some(&native), Some(&high_only)).is_err());
     }
 
     #[test]
