@@ -35,7 +35,7 @@
 > фактический RTP tx **4.02 Mbps**, 640×360/512 — **0.61 Mbps**; оба E2E
 > 108/108, page_errors 0. Удалён жёсткий 640×360 в admin-статистике.
 > H.323 H.241 и SFU b=AS — T05b. Evidence `docs/progress/evidence/t05/`.
-> **T06a (честная матрица без транскодера) закрыт:** `T06a-коммит (git log --grep T06a)`, ревью — см.
+> **T06a (честная матрица без транскодера) закрыт:** `22c7003`, ревью — см.
 > `docs/progress/evidence/t06a/SUMMARY.md`. Единый capability-модуль, Full
 > только с транскодером/lab-флагом, явная ошибка `no common audio|video codec`
 > до дозвона, типизированный `NoCommonCodec`, `supported` в API, live
