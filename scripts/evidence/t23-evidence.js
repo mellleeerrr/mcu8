@@ -238,8 +238,8 @@ const summary = {
         method: 'PATCH',
         multipart: {
           port: '8443',
-          crt: { name: 'mcu.crt', mimeType: 'application/x-pem-file', buffer: Buffer.from('-----BEGIN CERTIFICATE-----\nT23\n-----END CERTIFICATE-----\n') },
-          key: { name: 'mcu.key', mimeType: 'application/x-pem-file', buffer: Buffer.from('-----BEGIN PRIVATE KEY-----\nT23\n-----END PRIVATE KEY-----\n') },
+          crt: { name: 'mcu.crt', mimeType: 'application/x-pem-file', buffer: Buffer.from('-----BEGIN CERTIFICATE-----\nTIIB\n-----END CERTIFICATE-----\n') },
+          key: { name: 'mcu.key', mimeType: 'application/x-pem-file', buffer: Buffer.from('-----BEGIN PRIVATE KEY-----\nTIIB\n-----END PRIVATE KEY-----\n') },
         },
       });
       const after = (await api('/api/v3/settings/http')).json;
@@ -550,6 +550,10 @@ const summary = {
     });
 
     // ---------- итог ----------
+    summary.acceptance.clean_build =
+      build.git_dirty === false && build.git_head.length === 40 && build.binary_sha256 !== null;
+    summary.acceptance.binary_built_after_head =
+      build.binary_mtime !== null && build.git_head_ct > 0 && build.binary_mtime >= build.git_head_ct;
     const failed = Object.entries(summary.acceptance).filter(([, value]) => value !== true).map(([key]) => key);
     summary.totals = {
       steps: steps.length,

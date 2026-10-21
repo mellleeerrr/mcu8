@@ -202,7 +202,7 @@ const isVendorError = (text) =>
       summary.acceptance.log_events_export_local_time_invoker =
         download.text.includes(expectedTime) && !!invoker && download.text.includes(String(invoker));
       summary.acceptance.log_events_static_404 = missing.status === 404 && [400, 404].includes(traversal.status);
-      fs.writeFileSync(path.join(OUT, 'log_events_export.json'), JSON.stringify({ ...exported.json, bytes: body.length }, null, 1) + '\n');
+      fs.writeFileSync(path.join(OUT, 'log_events_export.json'), JSON.stringify({ ...exported.json, bytes: download.buffer.length }, null, 1) + '\n');
     });
 
     // ---------- 3. сетевые интерфейсы ----------
