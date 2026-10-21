@@ -1,0 +1,75 @@
+{
+    "state": "VALID",
+    "type": "DAILY",
+    "demo": true,
+    "count": 1,
+    "serial_id": "MCU9TJ",
+    "first_expired": 1792281600,
+    "last_expired": 1823990400,
+    "last_update_failed": false,
+    "params": {
+        "audio": {
+            "codecs": {
+                "g711": true,
+                "g719": true,
+                "g722": true,
+                "g723": true,
+                "g726": true,
+                "g728": true,
+                "g729": true,
+                "ilbc": true,
+                "opus": true,
+                "aac-lc": true,
+                "g722.1": true,
+                "g722.1c": true
+            },
+            "active_speaker": true
+        },
+        "video": {
+            "fps": 60,
+            "fecc": true,
+            "codecs": {
+                "vp8": false,
+                "h261": true,
+                "h263": true,
+                "h264": true,
+                "h265": true,
+                "hd-4k": true,
+                "h264-svc": false,
+                "hd-1080p": true,
+                "h263_plus": true,
+                "h264-high": true,
+                "advanced-nal-packetization": true
+            },
+            "max_active": 100,
+            "presentation": {
+                "enable": true
+            },
+            "rate_adaption": true,
+            "custom_layouts": true
+        },
+        "protocol": {
+            "nat": true,
+            "sip": true,
+            "h323": true,
+            "ldap": null,
+            "rtmp": true,
+            "rtsp": true,
+            "snmp": true,
+            "srtp": true,
+            "webrtc": true,
+            "max_calls": 100,
+            "conference_control": "EXTERNAL"
+        },
+        "server": {
+            "numa": true,
+            "server": true,
+            "secrecy": false,
+            "unrestricted": false,
+            "max_conferences": 4
+        },
+        "storage": {
+            "recording": true
+        }
+    }
+}

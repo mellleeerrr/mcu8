@@ -1,0 +1,68 @@
+{
+    "count": 108,
+    "log_events": [
+        {
+            "id": 108,
+            "event_type": "login_success",
+            "object_type": "users",
+            "created_at": 1792542560,
+            "payload": {
+                "ip": "192.168.1.93",
+                "error": null,
+                "login": "admin",
+                "invoker_id": "610f0509-0f96-41b4-bc70-2b6800ccc5e2"
+            },
+            "invoker": {
+                "ip": "192.168.1.93",
+                "name": "Administrator",
+                "avatar": null
+            },
+            "event_object": {
+                "login": "admin"
+            },
+            "additional_info": null
+        },
+        {
+            "id": 107,
+            "event_type": "login_success",
+            "object_type": "users",
+            "created_at": 1792540342,
+            "payload": {
+                "ip": "192.168.1.93",
+                "error": null,
+                "login": "admin",
+                "invoker_id": "610f0509-0f96-41b4-bc70-2b6800ccc5e2"
+            },
+            "invoker": {
+                "ip": "192.168.1.93",
+                "name": "Administrator",
+                "avatar": null
+            },
+            "event_object": {
+                "login": "admin"
+            },
+            "additional_info": null
+        },
+        {
+            "id": 106,
+            "event_type": "login_success",
+            "object_type": "users",
+            "created_at": 1792538577,
+            "payload": {
+                "ip": "192.168.1.93",
+                "error": null,
+                "login": "admin",
+                "invoker_id": "610f0509-0f96-41b4-bc70-2b6800ccc5e2"
+            },
+            "invoker": {
+                "ip": "192.168.1.93",
+                "name": "Administrator",
+                "avatar": null
+            },
+            "event_object": {
+                "login": "admin"
+            },
+            "additional_info": null
+        }
+    ]
+}

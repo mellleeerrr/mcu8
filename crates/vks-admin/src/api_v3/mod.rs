@@ -16,12 +16,16 @@ pub mod boot;
 pub mod call_strings;
 pub mod directory;
 pub mod history;
+pub mod observability;
 pub mod resources;
 pub mod sessions;
 pub mod settings_admin;
 pub mod shell;
 pub mod ws;
 
+#[cfg(test)]
+#[path = "observability_tests.rs"]
+mod observability_tests;
 #[cfg(test)]
 #[path = "settings_tests.rs"]
 mod settings_tests;
@@ -72,6 +76,8 @@ pub struct ApiV3State {
     /// Сгенерированные ZIP-архивы истории (export/clean) для
     /// `/static/call_history/{filename}`; bounded снизу — чистятся при перезаписи.
     pub history_exports: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    /// Сгенерированные ZIP-экспорты журнала событий (`/static/log_events/{filename}`).
+    pub log_exports: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
 }
 
 /// Состояние медиа-настроек абонента (громкость, mute).
@@ -117,6 +123,42 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/abonents/count", get(shell::abonents_count))
         .route("/api/v3/users/credentials/expire", get(shell::users_credentials_expire))
         .route("/api/v3/ui/system/status", get(shell::ui_system_status))
+        // T2.4: наблюдаемость/сервис (read-only) + явные отказы на мутации.
+        .route("/api/v3/log_events", get(observability::log_events))
+        .route("/api/v3/log_events/export", get(observability::log_events_export))
+        .route("/api/v3/system/network/interfaces", get(observability::network_interfaces_list))
+        .route(
+            "/api/v3/system/network/interfaces/{interface}",
+            get(observability::network_interface_get).patch(observability::network_interface_patch),
+        )
+        .route("/api/v3/system/stats/memory", get(observability::stats_memory))
+        .route("/api/v3/system/stats/cpu", get(observability::stats_cpu))
+        .route("/api/v3/system/stats/disk", get(observability::stats_disk))
+        .route("/api/v3/system/stats/network", get(observability::stats_network))
+        .route("/api/v3/system/packages", get(observability::system_packages))
+        .route("/api/v3/engine/log", get(observability::engine_log))
+        .route("/api/v3/ui/terminals", get(observability::terminals_list))
+        .route("/api/v3/system/utils/ping", get(observability::utils_ping))
+        .route("/api/v3/system/utils/traceroute", get(observability::utils_traceroute))
+        .route("/api/v3/system/utils/tcpdumps/status", get(observability::tcpdumps_status))
+        .route(
+            "/api/v3/system/utils/tcpdumps",
+            get(observability::tcpdumps_list).post(observability::tcpdumps_start).delete(observability::tcpdumps_stop),
+        )
+        .route("/api/v3/system/utils/tcpdumps/{file}", delete(observability::tcpdumps_delete))
+        .route("/api/v3/terminals", get(observability::terminals_list).post(observability::terminals_unsupported))
+        .route("/api/v3/terminals/credentials", get(observability::terminals_credentials))
+        .route(
+            "/api/v3/terminals/credentials",
+            post(observability::terminals_unsupported)
+                .patch(observability::terminals_unsupported)
+                .delete(observability::terminals_unsupported),
+        )
+        .route("/api/v3/terminals/firmwares", get(observability::terminals_empty_list))
+        .route("/api/v3/terminals/configurations", get(observability::terminals_empty_list))
+        .route("/api/v3/videorecords", get(observability::videorecords_list))
+        .route("/api/v3/videorecords/{id}", delete(observability::videorecords_delete))
+        .route("/api/v3/conferences/{id}/videorecords/estimated_time", get(observability::videorecords_estimated_time))
         .route("/api/v3/license", get(shell::license))
         .route("/api/v3/features", get(shell::features))
         .route("/api/v3/engine/calibration", get(shell::engine_calibration))
@@ -265,8 +307,14 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/sessions/{id}/video_layouts/{resource_id}/templates", patch(resources::edit_linked))
         .route("/api/v3/settings/video", get(shell::settings_video).patch(shell::update_settings_video))
         .route("/api/v3/ui/video_layouts/calculate", post(shell::video_layouts_calculate))
-        .route("/api/v3/settings/audio_codecs", get(shell::settings_audio_codecs).patch(settings_admin::audio_codecs_patch))
-        .route("/api/v3/settings/video_codecs", get(shell::settings_video_codecs).patch(settings_admin::video_codecs_patch))
+        .route(
+            "/api/v3/settings/audio_codecs",
+            get(shell::settings_audio_codecs).patch(settings_admin::audio_codecs_patch),
+        )
+        .route(
+            "/api/v3/settings/video_codecs",
+            get(shell::settings_video_codecs).patch(settings_admin::video_codecs_patch),
+        )
         .route("/api/v3/waitingroom", get(shell::waitingroom))
         .route("/api/v3/conferences/status", get(shell::conferences_status))
         // Фаза 3 — данные (наши комнаты).
@@ -362,6 +410,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/ws", get(ws::ws_handler))
         // Vendor отдаёт готовые выгрузки истории как статику (без токена).
         .route("/static/call_history/{filename}", get(history::static_export))
+        .route("/static/log_events/{filename}", get(observability::static_log_export))
         .merge(protected)
         // Catch-all 501 на любой метод; `{*rest}` не матчит пустой rest (B3 ревью),
         // поэтому `/api/v3/` и `/api/v3` регистрируются явно (единый конверт).
