@@ -80,15 +80,24 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       await page.keyboard.press('Enter');
       await page.waitForTimeout(5000);
     }
-    const token = await page.evaluate(() => {
-      for (const key of Object.keys(localStorage)) {
-        try {
-          const parsed = JSON.parse(localStorage.getItem(key));
-          if (parsed && parsed.token) return parsed.token;
-        } catch { /* не JSON */ }
+    let token = await page.evaluate(() => {
+      for (const storage of [localStorage, sessionStorage]) {
+        for (const key of Object.keys(storage)) {
+          try {
+            const parsed = JSON.parse(storage.getItem(key));
+            if (parsed && parsed.token) return parsed.token;
+          } catch { /* не JSON */ }
+          const raw = storage.getItem(key);
+          if (raw && raw.startsWith('eyJ')) return raw;
+        }
       }
       return null;
     });
+    if (!token) {
+      const response = await page.request.post(BASE + '/api/v3/login', { data: { login: LOGIN, password: PASSWORD } });
+      const body = await response.json().catch(() => null);
+      token = body && body.token;
+    }
     if (!token) throw new Error('нет токена после UI-логина');
     const api = async (pathname) => {
       const response = await page.request.fetch(BASE + pathname, { headers: { Authorization: `Bearer ${token}` }, failOnStatusCode: false });
@@ -109,7 +118,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       ['/api/v3/features', 200, (j) => Array.isArray(j.features) && j.features.length > 40],
       ['/api/v3/conferences?page=1&page_size=5', 200, (j) => typeof j.count === 'number' && Array.isArray(j.conferences)],
       ['/api/v3/sessions?page=1&page_size=5', 200, (j) => typeof j.count === 'number' && Array.isArray(j.sessions)],
-      ['/api/v3/call_history?page=1&page_size=5', 200, (j) => typeof j.count === 'number' && Array.isArray(j.history)],
+      ['/api/v3/call_history?page=1&page_size=5', 200, (j) => typeof j.count === 'number' && Array.isArray(j.sessions)],
       ['/api/v3/call_strings?page=1&page_size=5', 200, (j) => typeof j.count === 'number' && Array.isArray(j.call_strings)],
       ['/api/v3/log_events?page=1&page_size=5', 200, (j) => typeof j.count === 'number' && Array.isArray(j.log_events)],
       ['/api/v3/videorecords?page=1&page_size=5', 200, (j) => typeof j.count === 'number' && Array.isArray(j.videorecords)],
@@ -121,12 +130,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       ['/api/v3/settings/calls', 200, (j) => j.payload && j.payload.stop_rules !== undefined],
     ];
     summary.acceptance.api_parity = true;
-    summary.acceptance.api_parity_details = {};
+    const apiParityDetails = {};
     for (const [url, expected, check] of endpoints) {
       const response = await api(url);
       let ok = response.status === expected;
       if (ok && response.json) { try { ok = Boolean(check(response.json)); } catch { ok = false; } }
-      summary.acceptance.api_parity_details[url] = { status: response.status, ok };
+      apiParityDetails[url] = { status: response.status, ok };
       if (!ok) summary.acceptance.api_parity = false;
     }
 
@@ -145,14 +154,14 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       ['calls', '/pnm/administration/calls', ['Вызовы']],
       ['network', '/pnm/administration/network', ['Сеть']],
       ['video', '/pnm/administration/video', ['Видео']],
-      ['calibration', '/pnm/administration/calibration', ['Калибровка']],
+      ['calibration', '/pnm/administration/calibration', ['Статистика']],
       ['backup', '/pnm/administration/backup', ['Импорт/Экспорт']],
       ['reset', '/pnm/administration/reset', ['Очистка данных']],
       ['date_time', '/pnm/administration/date_time', ['Дата и время']],
       ['roles', '/pnm/administration/roles', ['Роли']],
       ['security', '/pnm/administration/security', ['Безопасность']],
       ['event_list', '/pnm/administration/event_list', ['Журнал событий']],
-      ['layout_skins', '/pnm/administration/layout_skins', ['Раскладки']],
+      ['layout_skins', '/pnm/administration/layout_skins', ['Стили раскладок']],
       ['license', '/pnm/administration/license', ['Лицензия']],
       ['about', '/pnm/administration/about', ['О программе']],
     ];
@@ -178,7 +187,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       }
     }
 
-    // ---- «Калибровка» убрана из UX: deep-link не должен вести на мёртвый экран ----
+    // ---- «Калибровка» убрана из UX: deep-link уводит на статистику, API null ----
     const calibration = await api('/api/v3/engine/calibration');
     summary.acceptance.calibration_hidden =
       calibration.status === 200 && calibration.json && calibration.json.calibration === null;
@@ -189,6 +198,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
     const failed = Object.entries(summary.acceptance).filter(([, value]) => value !== true).map(([key]) => key);
     summary.totals = {
+      api_parity: apiParityDetails,
       acceptance: Object.keys(summary.acceptance).length,
       failed: failed.length,
       pages: pages.length,

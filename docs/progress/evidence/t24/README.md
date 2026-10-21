@@ -14,8 +14,9 @@ BASE_URL=http://127.0.0.1:8080 \
 node scripts/evidence/t24-evidence.js
 ```
 
-Скрипт логинится через vendor-UI, проходит **36 acceptance-гейтов** (API + обход
-10 страниц с переключением вкладки «Сетевые интерфейсы»), делает 5 PNG и всегда
+Скрипт логинится через vendor-UI, проходит **36 acceptance-гейтов** (API +
+обход 10 страниц; вкладка «Сетевые интерфейсы» открывается отдельным кликом),
+делает 5 PNG и всегда
 пишет `summary.json`; при провале — `ok:false`, exit 1. Мутации
 сети/tcpdump/терминалов/видеозаписей проверяются как явные 501 (read-only).
 
@@ -36,15 +37,15 @@ yAxes/xAxes/responsive/maintainAspectRatio`); он явно allowlisted и не 
 | `log_events_static_404` | неизвестный файл → 404, traversal (`..%2F`) → 400/404 |
 | `stats_disk` | значения — **MB**: `total` совпадает с `df -Pk /` / 1024 (UI делит на 1024 и пишет Gb); в UI `/run` = 11.3 Gb |
 | `stats_network` | **kbps**, а не накопительные байты: значения < 100 000 000; UI «Загрузка: 358 кбит/сек» |
-| `ui_network_interfaces_tab` | клик по вкладке «Сетевые интерфейсы» вызывает новый `/api/v3/system/status/network` и не даёт 4xx/console error |
+| `ui_network_interfaces_tab` | клик по вкладке «Сетевые интерфейсы» реально отрисовывает интерфейсы: вкладка найдена, запросы `/system/status/network` + `/system/network/interfaces` ушли, в DOM есть `.network-manager-card`/`ens18`, 0 новых 4xx |
 | `ui_license_not_expired` | страница лицензии не показывает «01.01.1970» и «Продлить лицензию» |
 | `license_permanent_shape` | `PERMANENT`, будущий `last_expired`, `last_update_failed:false`, `serial_id`, `params.{audio,video,protocol,server,storage}` |
-| `features_array` | `/features` — массив > 40 элементов (vendor-UI итерирует массив) |
-| `status_network_shape` | `{network:{editable:false}}` — UI не предлагает сохранять сеть (нет CAP_NET_ADMIN) |
+| `features_array` | `/features` — объект `{features:[...]}` с массивом > 40 элементов (vendor-UI читает `data.features`) |
+| `status_network_shape` | `{network:{editable:true}}` — без этого vendor-бандл рисует «Список пуст»; сохранение сети всё равно честно 501 (нет CAP_NET_ADMIN) |
 | `session_videorecords_alias` | `/sessions/{id}/videorecords[/estimated_time]` → 200 (раньше catch-all 501) |
 | `utils_traceroute_honest` | traceroute не установлен → честный **503** «not installed», а не 200 с OS-ошибкой |
 | `utils_ping_rejects_option` | `address=-V` → 422: опции не уходят в процесс |
-| `engine_log` | стартовая запись имеет стабильный timestamp (не «сейчас» на каждый запрос) |
+| `engine_log` | стартовая запись использует реальное время старта процесса (`btime + starttime/HZ`) и стабильна между запросами |
 
 Остальные гейты — контракты list/detail/patch-501, ping/tcpdump/терминалы/
 видеозаписи, memory/cpu/packages, 10 страниц без 4xx и vendor Chart.js
@@ -82,10 +83,12 @@ warnings.
 
 - Мутации T2.4 (сеть, tcpdump, терминалы, удаление записей, reboot/shutdown,
   backup) не выполняются: нет привилегий, UI получает 501 с описанием.
-- `/system/status/network` отдаёт `editable:false`: список интерфейсов
-  показывается, но сохранение сети не поддерживается (нет CAP_NET_ADMIN).
+- `/system/status/network` отдаёт `editable:true` только чтобы vendor-UI
+  отрисовал список интерфейсов; сохранение сети не поддерживается (нет
+  CAP_NET_ADMIN) — `PATCH /api/v3/system/network/{interface}` честно 501.
 - `traceroute` на этом хосте не установлен → 503; `ping` работает.
-- `engine/log` — одна стабильная запись о старте, не полный журнал демона.
+- `engine/log` — одна запись с реальным временем старта процесса, не полный
+  журнал демона.
 - `system/packages` — пустой список (инвентаризация ОС не ведётся).
 - CSV журнала содержит только 8 vendor-типов событий; внутренние CRUD-действия
   без vendor-шаблонов в журнал не попадают (остаются в audit API).

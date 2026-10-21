@@ -261,14 +261,16 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
 
 /// `GET /api/v3/system/status/network` — vendor-вкладка «Сетевые интерфейсы».
 ///
-/// Наш сервер не применяет сетевые настройки (нет CAP_NET_ADMIN), поэтому
-/// `editable:false`: UI рисует список/поля, но не предлагает сохранить.
+/// `editable:true` обязателен: vendor-бандл рисует список интерфейсов только
+/// для редактируемого менеджера (`ManagerContent`), при `false` показывает
+/// «Список пуст». Сохранение сети при этом честно не поддерживается —
+/// `PATCH /api/v3/system/network/{interface}` отвечает 501.
 pub async fn status_network(State(_state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
     track("system/status/network");
     if let Some(response) = super::settings_admin::forbid(&auth) {
         return response;
     }
-    Json(json!({"network": {"editable": false}})).into_response()
+    Json(json!({"network": {"editable": true}})).into_response()
 }
 
 /// `GET /api/v3/license` → постоянная лицензия в форме vendor-маппера `kk`.

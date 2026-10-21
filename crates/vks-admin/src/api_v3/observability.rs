@@ -492,6 +492,29 @@ async fn run_util(program: &str, args: &[&str]) -> Response {
     }
 }
 
+/// Unix-время старта текущего процесса из `/proc` (`btime + starttime/HZ`).
+///
+/// Fallback — текущий момент, если `/proc` недоступен (не Linux): тогда
+/// timestamp стабилен, но не является временем старта.
+fn process_start_unix() -> i64 {
+    let read = |path: &str| std::fs::read_to_string(path).ok();
+    let stat = read("/proc/self/stat");
+    let proc_stat = read("/proc/stat");
+    let start_ticks = stat
+        .as_deref()
+        .and_then(|text| text.rsplit_once(')'))
+        .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+        .and_then(|value| value.parse::<u64>().ok());
+    let btime = proc_stat.as_deref().and_then(|text| {
+        text.lines().find_map(|line| line.strip_prefix("btime ")).and_then(|value| value.trim().parse::<u64>().ok())
+    });
+    let hz = 100u64; // USER_HZ на Linux
+    match (btime, start_ticks) {
+        (Some(btime), Some(ticks)) => (btime + ticks / hz) as i64,
+        _ => now_unix_ms() as i64 / 1000,
+    }
+}
+
 fn binary_available(program: &str) -> bool {
     std::process::Command::new("sh")
         .args(["-c", &format!("command -v {program} >/dev/null 2>&1")])
@@ -882,10 +905,10 @@ pub async fn engine_log(State(_state): State<SharedState>, Extension(auth): Exte
     if let Some(response) = forbid(&auth) {
         return response;
     }
-    // Время старта процесса фиксируем один раз: иначе «журнал» каждый раз
-    // выглядит как новая запись (UI сортирует/дедуплицирует по timestamp).
+    // Реальное время старта процесса (btime + starttime/HZ), фиксируем один
+    // раз: иначе «журнал» каждый раз выглядит как новая запись.
     static STARTED: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-    let started = *STARTED.get_or_init(|| now_unix_ms() as i64 / 1000);
+    let started = *STARTED.get_or_init(process_start_unix);
     Json(json!({
         "language": "ru",
         "bounds": {"id": {"min": 1, "max": 1}, "timestamp": {"min": started, "max": started}},

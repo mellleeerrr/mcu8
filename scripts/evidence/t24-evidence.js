@@ -86,7 +86,11 @@ const isVendorError = (text) =>
   });
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1600, height: 1000 } });
   const page = await context.newPage();
+  let networkStatusSeen = false;
+  let networkInterfacesSeen = false;
   page.on('response', (response) => {
+    if (response.url().includes('/api/v3/system/status/network')) networkStatusSeen = true;
+    if (response.url().includes('/api/v3/system/network/interfaces')) networkInterfacesSeen = true;
     if (response.status() >= 400 && response.url().includes('/api/v3/')) {
       httpErrors.push(`${response.status()} ${response.request().method()} ${response.url().replace(BASE, '')}`);
     }
@@ -388,14 +392,23 @@ const isVendorError = (text) =>
       await page.goto(`${BASE}/pnm/administration/network`, { waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(3000);
       await shot('03-network.png');
-      // Вкладка «Сетевые интерфейсы» дергает /system/status/network — раньше 501.
+      // Вкладка «Сетевые интерфейсы» должна реально отрисовать ens18:
+      // проверяем и запрос /system/status/network, и карточки менеджера.
       const beforeTab = httpErrors.length;
       const tab = page.getByText('Сетевые интерфейсы', { exact: false }).first();
+      let tabFound = false;
       if (await tab.count()) {
+        tabFound = true;
         await tab.click({ force: true });
-        await page.waitForTimeout(2500);
+        await page.waitForTimeout(3000);
       }
-      summary.acceptance.ui_network_interfaces_tab = httpErrors.length === beforeTab;
+      const tabText = await page.locator('body').innerText();
+      const cards = await page.locator('.network-manager-card').count();
+      const rendered = (cards > 0 || tabText.includes('ens18')) && networkStatusSeen && networkInterfacesSeen;
+      summary.acceptance.ui_network_interfaces_tab =
+        httpErrors.length === beforeTab && tabFound && rendered;
+      summary.totals.network_tab =
+        { tabFound, statusSeen: networkStatusSeen, interfacesSeen: networkInterfacesSeen, cards, rendered };
       await shot('03b-network-interfaces.png');
       await page.goto(`${BASE}/pnm/administration/terminals`, { waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(3000);

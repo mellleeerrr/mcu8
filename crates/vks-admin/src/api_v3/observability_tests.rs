@@ -325,7 +325,8 @@ async fn license_features_status_network_and_videorecord_alias_shapes() {
     assert!(features["features"].as_array().is_some_and(|items| items.len() > 40), "{features}");
 
     let status = json_body(send(&app, auth_request("GET", "/api/v3/system/status/network", &token)).await).await;
-    assert_eq!(status["network"]["editable"], false);
+    // editable=true обязателен: иначе vendor-UI показывает пустой список.
+    assert_eq!(status["network"]["editable"], true);
 
     // Vendor-UI зовёт session-алиасы (оценка записи) — не 501.
     let estimated =
@@ -379,4 +380,9 @@ async fn engine_log_has_stable_startup_timestamp() {
     let second = json_body(send(&app, auth_request("GET", "/api/v3/engine/log", &token)).await).await;
     assert_eq!(first["log"][0]["timestamp"], second["log"][0]["timestamp"], "startup record must be stable");
     assert_eq!(first["bounds"]["timestamp"]["min"], first["log"][0]["timestamp"]);
+    // Это время старта процесса, а не первого запроса: не позже текущего и
+    // не старше 24 часов (в тесте процесс живёт секунды).
+    let now = crate::state::now_unix_ms() as i64 / 1000;
+    let started = first["log"][0]["timestamp"].as_i64().unwrap();
+    assert!(started <= now && started > now - 86_400, "started={started} now={now}");
 }
