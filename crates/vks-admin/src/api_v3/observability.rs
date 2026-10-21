@@ -104,10 +104,9 @@ fn event_type_for(action: &str) -> Option<(&'static str, &'static str)> {
         // Legacy v1-действия и реальные v3-действия UI: журнал должен
         // показывать и старые записи аудита, и то, что шлёт текущий фронтенд.
         "create_user" | "user.created" | "user.credentials.created" => ("creating_credentials_success", "users"),
-        "update_user" | "user.credentials.updated" | "profile.credentials.updated" => {
-            ("updating_password_success", "users")
-        }
-        "delete_user" | "user.credentials.deleted" => ("deleting_credentials_success", "users"),
+        "update_user" | "user.updated" => ("updating_login_success", "users"),
+        "user.credentials.updated" | "profile.credentials.updated" => ("updating_password_success", "users"),
+        "delete_user" | "user.deleted" | "user.credentials.deleted" => ("deleting_credentials_success", "users"),
         "set_settings" | "set_global_mode" | "set_room_mode" => ("updating_configuration_security_success", "nodes"),
         action if action.starts_with("settings.") => ("updating_configuration_security_success", "nodes"),
         _ => return None,

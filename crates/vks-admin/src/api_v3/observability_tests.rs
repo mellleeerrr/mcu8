@@ -205,6 +205,8 @@ async fn log_events_map_real_v3_directory_actions() {
     let token = login_token(&app, "admin", "s3cret").await;
     for action in [
         "user.created",
+        "user.updated",
+        "user.deleted",
         "user.credentials.created",
         "user.credentials.updated",
         "user.credentials.deleted",
@@ -217,7 +219,7 @@ async fn log_events_map_real_v3_directory_actions() {
             &app,
             auth_request(
                 "GET",
-                "/api/v3/log_events?event_types=creating_credentials_success,updating_password_success,deleting_credentials_success",
+                "/api/v3/log_events?event_types=creating_credentials_success,updating_password_success,updating_login_success,deleting_credentials_success",
                 &token,
             ),
         )
@@ -228,8 +230,9 @@ async fn log_events_map_real_v3_directory_actions() {
         body["log_events"].as_array().unwrap().iter().filter_map(|event| event["event_type"].as_str()).collect();
     assert!(types.contains(&"creating_credentials_success"), "{body}");
     assert!(types.contains(&"updating_password_success"), "{body}");
+    assert!(types.contains(&"updating_login_success"), "{body}");
     assert!(types.contains(&"deleting_credentials_success"), "{body}");
-    assert_eq!(types.len(), 5, "все пять v3-действий должны иметь шаблон: {body}");
+    assert_eq!(types.len(), 7, "все семь v3-действий должны иметь шаблон: {body}");
 }
 
 #[tokio::test]
