@@ -1,15 +1,15 @@
 {
  "task": "T2.4",
  "ok": true,
- "started_at": "2026-10-21T02:44:23.878Z",
+ "started_at": "2026-10-21T02:56:33.056Z",
  "build": {
-  "git_head": "657f7ae448996141ceae8b4350042e21190b72f2",
-  "git_head_ct": 1792550589,
+  "git_head": "ad214aec9a875e69bd9827e78bea633e59d486fd",
+  "git_head_ct": 1792551203,
   "git_dirty": false,
   "binary_sha256": "721eac186f87a162457da95e243603d464977eef538d85c4cc93d5ce51733fbb",
-  "binary_mtime": 1792550655,
-  "binary_path": "/proc/893828/exe",
-  "server_pid": 893828
+  "binary_mtime": 1792551272,
+  "binary_path": "/proc/897427/exe",
+  "server_pid": 897427
  },
  "acceptance": {
   "log_events_contract": true,
@@ -50,7 +50,7 @@
   "binary_built_after_head": true
  },
  "totals": {
-  "statistics_text": "PROSTOR\nПанель управления\nКонференции\nСправочник\nИстория\nАдминистрирование\n0\n0\n0\nnotifications\narrow_drop_down\narrow_back\nСтатистика\nИспользование памяти\n58 Gb\nshow_chart\n\n46.9\n\nСвободно (Gb)\n\n10.9\n\nИспользуется (Gb)\n\nИспользование жесткого диска\narrow_drop_down\n/run\n\n11.3\n\nСвободно (Gb)\n\n0.0\n\nИспользуется (Gb)\n\nСеть\nens18\nЗагрузка: 12 кбит/сек\nОтдача: 5 кбит/сек\nЗарезервированные вычислительные ресурсы\nЗагрузка вычислительных потоков\nЗагрузка процессоров",
+  "statistics_text": "PROSTOR\nПанель управления\nКонференции\nСправочник\nИстория\nАдминистрирование\n0\n0\n0\nnotifications\narrow_drop_down\narrow_back\nСтатистика\nИспользование памяти\n58 Gb\nshow_chart\n\n47.1\n\nСвободно (Gb)\n\n10.7\n\nИспользуется (Gb)\n\nИспользование жесткого диска\narrow_drop_down\n/run\n\n11.3\n\nСвободно (Gb)\n\n0.0\n\nИспользуется (Gb)\n\nСеть\nens18\nЗагрузка: 18 кбит/сек\nОтдача: 4 кбит/сек\nЗарезервированные вычислительные ресурсы\nЗагрузка вычислительных потоков\nЗагрузка процессоров",
   "ui_pages_seen": [
    {
     "slug": "statistics",
@@ -136,5 +136,5 @@
   "Invalid scale configuration for scale: xAxes"
  ],
  "http_errors": [],
- "finished_at": "2026-10-21T02:45:22.441Z"
+ "finished_at": "2026-10-21T02:57:31.552Z"
 }

@@ -5,8 +5,8 @@
    "min": 1
   },
   "timestamp": {
-   "max": 1792550657,
-   "min": 1792550657
+   "max": 1792551274,
+   "min": 1792551274
   }
  },
  "language": "ru",
@@ -16,7 +16,7 @@
    "id": 1,
    "msg": "media runtime ready (built-in engine)",
    "src": "MCU",
-   "timestamp": 1792550657
+   "timestamp": 1792551274
   }
  ]
 }

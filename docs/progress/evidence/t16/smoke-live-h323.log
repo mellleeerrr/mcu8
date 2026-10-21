@@ -1,26 +1,26 @@
 == smoke_v3: http://127.0.0.1:8080
   ok  healthz
   ok  login (admin)
-  ok  conference created (4efb4455-49b5-4a62-85dd-0017d6607f8e)
-  ok  session started (4efb4455-49b5-4a62-85dd-0017d6607f8e)
+  ok  conference created (4def539c-b144-446c-a673-84d004e4b960)
+  ok  session started (4def539c-b144-446c-a673-84d004e4b960)
   ok  session visible in ui/sessions
-  ok  address created (cs-fddc232f-5408-450d-80a5-7104d5730627)
+  ok  address created (cs-c3ec5a6f-7abd-4795-94e3-7f080a37f45a)
   ok  address searchable by uri substring
   ok  address included by protocols=sip filter
   ok  address excluded by protocols=h323 filter
   ok  address patched
   ok  address deleted (GET 404)
   ok  address absent from list after delete
-  ok  audiochannel created (61e89647-e3c0-4e0d-a642-4e851540146b)
+  ok  audiochannel created (f8887de2-78df-4efa-b14a-15d488351f0d)
   ok  audiochannel attached and visible
   ok  audiochannel detached
-  ok  layout created (4b7b479e-d61f-46fa-9d58-ba197990306c)
+  ok  layout created (293ea03e-0c1b-44de-9856-ecd7d25f74e5)
   ok  layout visible in session layouts
   ok  layout attached, slots empty until live call
   ok  layout detached from session
 == live call: h323:192.168.1.132 (timeout 90s)
-  ok  call connected (h323-3fc6f1d9-dab0-4778-be8a-01e2cb90b715@h323-gateway)
-  ok  RTP audio counters grow (rx 0->37, tx 18->221)
+  ok  call connected (h323-2ae7529f-c61e-480b-9b48-e4f4f7d48125@h323-gateway)
+  ok  RTP audio counters grow (rx 0->22, tx 4->210)
   ok  speaker muted (audio.tx.enabled=false)
   ok  microphone muted (audio.rx.enabled=false)
   ok  camera off (video.rx.enabled=false)

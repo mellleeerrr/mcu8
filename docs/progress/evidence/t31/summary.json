@@ -1,14 +1,14 @@
 {
  "task": "T3.1",
  "ok": true,
- "started_at": "2026-10-21T02:23:17.706Z",
+ "started_at": "2026-10-21T02:57:32.091Z",
  "build": {
-  "git_head": "045666b7725b16b2864c96c05f1c0c9dceb7ae2a",
-  "git_head_ct": 1792549148,
+  "git_head": "ad214aec9a875e69bd9827e78bea633e59d486fd",
+  "git_head_ct": 1792551203,
   "git_dirty": false,
-  "binary_sha256": "aa2614e9add57281275d220204d4f3c3dc097f830845da7c73f390cb303439a1",
-  "binary_mtime": 1792549213,
-  "server_pid": 870829
+  "binary_sha256": "721eac186f87a162457da95e243603d464977eef538d85c4cc93d5ce51733fbb",
+  "binary_mtime": 1792551272,
+  "server_pid": 897427
  },
  "acceptance": {
   "legacy_records_removed": true,
@@ -32,10 +32,10 @@
   "integration_tail": [
    "test test_package_d_mcu_pipeline_handover_and_pnm_control_events ... ok",
    "",
-   "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 1.71s"
+   "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 1.67s"
   ]
  },
  "error": null,
  "acceptance_failed": [],
- "finished_at": "2026-10-21T02:23:44.287Z"
+ "finished_at": "2026-10-21T02:57:58.823Z"
 }

@@ -1,8 +1,8 @@
 {
  "memory": {
-  "free": 46979,
+  "free": 47207,
   "total": 57858,
-  "used": 10879
+  "used": 10651
  },
  "cpu": {
   "count": 36,
@@ -63,9 +63,9 @@
     "user_mode": 0
    },
    {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
+    "idle": 83.3,
+    "kernel_mode": 8.3,
+    "user_mode": 8.3
    },
    {
     "idle": 100,
@@ -93,9 +93,9 @@
     "user_mode": 0
    },
    {
-    "idle": 100,
+    "idle": 91.7,
     "kernel_mode": 0,
-    "user_mode": 0
+    "user_mode": 8.3
    },
    {
     "idle": 100,
@@ -105,6 +105,21 @@
    {
     "idle": 100,
     "kernel_mode": 0,
+    "user_mode": 0
+   },
+   {
+    "idle": 91.7,
+    "kernel_mode": 0,
+    "user_mode": 8.3
+   },
+   {
+    "idle": 83.3,
+    "kernel_mode": 0,
+    "user_mode": 16.7
+   },
+   {
+    "idle": 91.7,
+    "kernel_mode": 8.3,
     "user_mode": 0
    },
    {
@@ -133,9 +148,14 @@
     "user_mode": 0
    },
    {
-    "idle": 100,
+    "idle": 66.7,
+    "kernel_mode": 8.3,
+    "user_mode": 25
+   },
+   {
+    "idle": 91.7,
     "kernel_mode": 0,
-    "user_mode": 0
+    "user_mode": 8.3
    },
    {
     "idle": 100,
@@ -148,9 +168,9 @@
     "user_mode": 0
    },
    {
-    "idle": 100,
+    "idle": 92.3,
     "kernel_mode": 0,
-    "user_mode": 0
+    "user_mode": 7.7
    },
    {
     "idle": 100,
@@ -158,28 +178,8 @@
     "user_mode": 0
    },
    {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
-    "user_mode": 0
-   },
-   {
-    "idle": 100,
-    "kernel_mode": 0,
+    "idle": 91.7,
+    "kernel_mode": 8.3,
     "user_mode": 0
    },
    {
@@ -199,10 +199,10 @@
     "used": 3
    },
    {
-    "free": 40038,
+    "free": 40065,
     "name": "/",
     "total": 120376,
-    "used": 74177
+    "used": 74151
    },
    {
     "free": 28879,
@@ -217,10 +217,10 @@
     "used": 0
    },
    {
-    "free": 27380,
+    "free": 27375,
     "name": "/tmp",
     "total": 28929,
-    "used": 1549
+    "used": 1554
    },
    {
     "free": 1,

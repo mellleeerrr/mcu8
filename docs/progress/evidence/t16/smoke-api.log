@@ -1,20 +1,20 @@
 == smoke_v3: http://127.0.0.1:8080
   ok  healthz
   ok  login (admin)
-  ok  conference created (03193567-d3bb-4b58-aace-c0471b1cb01d)
-  ok  session started (03193567-d3bb-4b58-aace-c0471b1cb01d)
+  ok  conference created (c2210c9a-46c1-445d-8182-c497857dfb3c)
+  ok  session started (c2210c9a-46c1-445d-8182-c497857dfb3c)
   ok  session visible in ui/sessions
-  ok  address created (cs-552473d2-3d22-4dc8-898d-a2a220bab688)
+  ok  address created (cs-a7933ae8-69a6-4b1b-953d-c0ca47e827ce)
   ok  address searchable by uri substring
   ok  address included by protocols=sip filter
   ok  address excluded by protocols=h323 filter
   ok  address patched
   ok  address deleted (GET 404)
   ok  address absent from list after delete
-  ok  audiochannel created (d73788de-ed25-4117-a415-e0bb3673e2ee)
+  ok  audiochannel created (4e6690a9-acae-43aa-9551-0c2674318fd7)
   ok  audiochannel attached and visible
   ok  audiochannel detached
-  ok  layout created (d0523d55-f32c-4000-a3c5-9474f9cdce63)
+  ok  layout created (660327d8-1a87-4ddf-bebf-0302028fde6d)
   ok  layout visible in session layouts
   ok  layout attached, slots empty until live call
   ok  layout detached from session

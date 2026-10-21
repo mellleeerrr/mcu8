@@ -2,7 +2,7 @@
 
 Read-only сквозной прогон vendor-UI по всем основным и административным
 страницам + проверка 18 контрактов `/api/v3`, которыми живёт UI. Ничего не
-создаёт, не меняет и не удаляет. Прогон на чистом дереве: HEAD `657f7ae`,
+создаёт, не меняет и не удаляет. Прогон на чистом дереве: HEAD `ad214ae`,
 бинарник собран после HEAD (`clean_build`, `binary_built_after_head` — в
 `summary.json`).
 
@@ -16,7 +16,7 @@ node scripts/evidence/t33-evidence.js
 
 ## Результат
 
-**ok=true, 9/9** acceptance-гейтов: 23 страницы без 4xx/console error,
+**ok=true, 5/5** acceptance-гейтов: 23 страницы без 4xx/console error,
 18/18 API-контрактов, 6 PNG, 0 HTTP ≥ 400, 0 наших console error,
 24 известных vendor Chart.js warning (allowlisted). «Калибровка» удалена:
 deep-link `/pnm/administration/calibration` уводит на статистику, API отдаёт
