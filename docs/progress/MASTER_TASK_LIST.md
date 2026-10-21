@@ -14,7 +14,7 @@
 > 970 passed / 6 ignored, evidence `docs/progress/evidence/t01/`. Детальный план — `MASTER_PLAN_2026-10-21.md`.
 >
 > **T02 (целостность БД/жизненный цикл раскладок) закрыт:** ревью 9.5/10 (`layout-ui`),
-> 995 passed / 0 failed / 6 ignored, dedup 30→22 layouts / 15→7 defaults, evidence
+> 996 passed / 0 failed / 6 ignored, dedup 30→22 layouts / 15→7 defaults, evidence
 > `docs/progress/evidence/t02/`. Следующая — T03.
 >
 > Правило цикла: перед задачей — агент «подводные камни»; после реализации — параллельное

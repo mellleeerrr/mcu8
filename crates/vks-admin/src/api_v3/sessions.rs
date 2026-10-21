@@ -403,6 +403,9 @@ async fn current_layout_json(state: &SharedState, room_id: &RoomId) -> Option<Va
     let room = room_id.to_string();
     // Явная active-карта: session → conference → fallback. Порядок links —
     // UI-контракт, active им не кодируется.
+    // Контракт: после старта сессии раскладку меняет только session-scope;
+    // правки conference-scope применяются к следующей сессии (UI живой
+    // комнаты ходит в session-эндпоинты).
     if let Some(id) = super::resources::active_id_for(&resources, &room) {
         if let Some(layout) = resources.layouts.get(&id) {
             return Some(layout.clone());

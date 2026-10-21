@@ -100,7 +100,7 @@ T08, T09, T11b), затем полная матрица раскладок (T04b
 
 ## T02. Целостность БД и жизненный цикл раскладок (P0)
 
-**Статус:** 🟢 закрыт 2026-10-21, ревью 9.5/10 (`layout-ui`), 995 passed / 0 failed / 6 ignored.
+**Статус:** 🟢 закрыт 2026-10-21, ревью 9.5/10 (`layout-ui`), 996 passed / 0 failed / 6 ignored.
 **Реализовано (отличия от исходного плана — осознанные):**
 - Явная `active_layouts: scope_key → layout_id` вместо «последний в links»: порядок
   `links` остался UI-контрактом и не пересортировывается; active восстанавливается
@@ -114,9 +114,12 @@ T08, T09, T11b), затем полная матрица раскладок (T04b
 - `create` canonical default переиспользует существующую запись (два POST → один id).
 - Per-room сериализация push в движок; advisory lock на `<db>.lock` у сервера и
   `vks-db-dedup --apply`; `VACUUM INTO` + `quick_check`; dedup remap active/aliases,
-  заполняет active для всех video-keys, предпочитает canonical auto/empty.
-- Тесты: 14 T02 API-сценариев, read-path/alias/mirror, dedup active/idempotent,
-  black-box отказ CLI при held lock.
+  заполняет active для всех video-keys по T01-effective (последняя non-default,
+  иначе canonical auto/empty); canonical-предикат совпадает с сервером.
+- Тесты: 20 T02 API-сценариев + 2 `current_layout_json`, read-path/alias/mirror, dedup active/idempotent,
+  black-box отказ CLI при held lock. Контракт cross-scope закреплён тестом:
+  после старта сессии раскладку меняет session-scope; conference-правки
+  применяются к следующей сессии (live-propagation — точка T03).
 
 **Проблемы (подтверждены кодом).**
 1. COW (`resources.rs:989–1021`) клонирует и переключает ссылку **до**

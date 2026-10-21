@@ -525,12 +525,13 @@ fn ensure_active_layouts(document: &mut Value) {
     }
 }
 
-/// Каноническая «Общая»: auto/empty default (а не legacy manual-default).
+/// Ровно тот payload, который сервер считает канонической «Общей»
+/// (`vks-admin::canonical_default_payload`). Должен совпадать с точностью до
+/// полей: иначе dedup и runtime выберут разные canonical.
 fn is_canonical_default(layout: &Value) -> bool {
-    let payload = &layout["payload"];
-    payload.get("type").and_then(Value::as_str) == Some("default")
-        && payload.get("mode").and_then(Value::as_str).unwrap_or("auto") == "auto"
-        && payload.get("slots").and_then(Value::as_array).is_none_or(Vec::is_empty)
+    layout["payload"]
+        == json!({"mode":"auto", "preset":"preset_default_13", "type":"default", "slots":[],
+            "size":13, "autoscroll":0})
 }
 
 /// Возвращает id канонической default-раскладки (для починки

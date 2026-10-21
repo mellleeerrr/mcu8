@@ -282,12 +282,7 @@ fn sanitize_layout_record(record: &mut Value) {
 }
 
 fn normalize_resource(kind: &str, body: &Value, creator: &str) -> Value {
-    let mut payload = if kind == "video_layouts" {
-        json!({"mode":"auto", "preset":"preset_default_13", "type":"default", "slots":[],
-            "size":13, "autoscroll":0})
-    } else {
-        default_audio_payload()
-    };
+    let mut payload = if kind == "video_layouts" { canonical_default_payload() } else { default_audio_payload() };
     if let Some(values) = body.get("payload").and_then(Value::as_object) {
         merge_json(&mut payload, &Value::Object(values.clone()));
     }
@@ -549,8 +544,24 @@ pub(crate) fn cow_replace(resources: &mut ResourceState, scope_key: &str, source
     new_id
 }
 
+/// Единственная каноническая «Общая» в документе; создаёт, если её нет.
+fn canonical_layout_id(resources: &mut ResourceState) -> String {
+    if let Some(id) = resources
+        .layouts
+        .values()
+        .find(|layout| is_canonical_default(layout))
+        .and_then(|layout| layout["id"].as_str().map(str::to_string))
+    {
+        return id;
+    }
+    let record = normalize_resource("video_layouts", &json!({"payload":canonical_default_payload()}), "system");
+    let id = record["id"].as_str().unwrap_or_default().to_string();
+    resources.layouts.insert(id.clone(), record);
+    id
+}
+
 /// Гарантирует, что scope имеет каноническую «Общую» раскладку. Возвращает id.
-fn ensure_canonical_default(resources: &mut ResourceState, scope_key: &str, room_id: &str) -> Option<String> {
+fn ensure_canonical_default(resources: &mut ResourceState, scope_key: &str, room_id: &str) -> String {
     if let Some(id) = scope_links(resources, scope_key, room_id)
         .into_iter()
         .find(|id| resources.layouts.get(id).is_some_and(is_canonical_default))
@@ -558,21 +569,25 @@ fn ensure_canonical_default(resources: &mut ResourceState, scope_key: &str, room
         if !resources.links.get(scope_key).is_some_and(|ids| ids.contains(&id)) {
             resources.links.entry(scope_key.to_string()).or_default().push(id.clone());
         }
-        return Some(id);
+        return id;
     }
-    let id = resources
-        .layouts
-        .values()
-        .find(|layout| is_canonical_default(layout))
-        .and_then(|layout| layout["id"].as_str().map(str::to_string))
-        .unwrap_or_else(|| {
-            let record = normalize_resource("video_layouts", &json!({"payload":{"type":"default"}}), "system");
-            let id = record["id"].as_str().unwrap_or_default().to_string();
-            resources.layouts.insert(id.clone(), record);
-            id
-        });
+    let id = canonical_layout_id(resources);
     resources.links.entry(scope_key.to_string()).or_default().push(id.clone());
-    Some(id)
+    id
+}
+
+/// Чинит active только если он отсутствует/невалиден. Единая точка вместо
+/// повторяющихся `if valid { ... }` в detach/remove_global.
+fn repair_active_layout(resources: &mut ResourceState, scope_key: &str, room_id: &str) {
+    let valid = resources.active_layouts.get(scope_key).is_some_and(|active| {
+        resources.layouts.contains_key(active) && resources.links.get(scope_key).is_some_and(|ids| ids.contains(active))
+    });
+    if valid {
+        return;
+    }
+    let active = fallback_layout_for_scope(resources, scope_key, room_id)
+        .unwrap_or_else(|| ensure_canonical_default(resources, scope_key, room_id));
+    set_active(resources, scope_key, &active);
 }
 
 /// «Общая» раскладка комнаты (canonical → legacy default → первый link).
@@ -925,7 +940,7 @@ pub async fn purge_room_resources(state: &SharedState, room_id: &str) {
 /// Сессия наследует ресурсы конференции, затем получает «Общую» (default),
 /// если её нет в итоговом списке: без неё UI падает на `…default.some(...)`.
 /// Idempotent, вызывать под локом.
-pub fn inherit_and_ensure_default_layout(resources: &mut ResourceState, room_id: &str, creator: &str) {
+pub fn inherit_and_ensure_default_layout(resources: &mut ResourceState, room_id: &str, _creator: &str) {
     let inherit_key = format!("conferences:{room_id}:video_layouts");
     let key = format!("sessions:{room_id}:video_layouts");
     let conference_ids = resources.links.get(&inherit_key).cloned().unwrap_or_default();
@@ -965,24 +980,9 @@ pub fn inherit_and_ensure_default_layout(resources: &mut ResourceState, room_id:
         }
         return;
     }
-    let record = normalize_resource("video_layouts", &json!({"payload":{"type":"default"}}), creator);
-    let id = record["id"].as_str().unwrap_or_default().to_string();
-    // Переиспользуем уже существующую каноническую «Общую» раскладку вместо
-    // создания новой на каждую комнату/сессию. Без этого БД плодит по
-    // default-раскладке на старт (в живом стенде было 147 layouts, после
-    // дедупа 29). Сравниваем только payload: id/created_at/display_name
-    // у копий различаются, а геометрия и режим — нет.
-    let canonical = record["payload"].clone();
-    let reusable = resources.layouts.values().find_map(|layout| {
-        (layout["payload"] == canonical).then(|| layout["id"].as_str().map(ToString::to_string)).flatten()
-    });
-    let id = match reusable {
-        Some(existing) => existing,
-        None => {
-            resources.layouts.insert(id.clone(), record);
-            id
-        }
-    };
+    // Переиспользуем единственную каноническую «Общую» вместо создания копии
+    // на каждую комнату/сессию.
+    let id = canonical_layout_id(resources);
     resources.links.entry(key.clone()).or_default().push(id.clone());
     let valid = resources
         .active_layouts
@@ -1102,7 +1102,8 @@ pub async fn create(
         && is_canonical_default(&record)
         && record["display_name"].as_str().unwrap_or_default().is_empty()
     {
-        if let Some(existing) = resources.layouts.values().find(|layout| is_canonical_default(layout)).cloned() {
+        let id = canonical_layout_id(&mut resources);
+        if let Some(existing) = resources.layouts.get(&id).cloned() {
             return (StatusCode::CREATED, Json(json!({singular(kind):existing}))).into_response();
         }
     }
@@ -1262,15 +1263,7 @@ pub async fn remove_global(
             continue;
         }
         let room = key.split(':').nth(1).unwrap_or_default().to_string();
-        let active = resources.active_layouts.get(key).cloned();
-        if active.as_deref() == Some(id.as_str()) || active.is_none() {
-            resources.active_layouts.remove(key);
-            let fallback = fallback_layout_for_scope(&resources, key, &room)
-                .or_else(|| ensure_canonical_default(&mut resources, key, &room));
-            if let Some(fallback) = fallback {
-                resources.active_layouts.insert(key.clone(), fallback);
-            }
-        }
+        repair_active_layout(&mut resources, key, &room);
     }
     resources.layout_aliases.retain(|_, target| target != &id);
     let rooms: Vec<String> = refs.iter().filter_map(|key| key.split(':').nth(1).map(str::to_string)).collect();
@@ -1639,18 +1632,7 @@ pub async fn detach(
     let alias_prefix = format!("{scope_key}|");
     resources.layout_aliases.retain(|key, target| !(key.starts_with(&alias_prefix) && target == &resource_id));
     if kind == "video_layouts" {
-        let valid = resources.active_layouts.get(&scope_key).is_some_and(|active| {
-            active != &resource_id && resources.links.get(&scope_key).is_some_and(|ids| ids.contains(active))
-        });
-        let active = if valid {
-            None
-        } else {
-            let fallback = fallback_layout_for_scope(&resources, &scope_key, &room.id.to_string());
-            fallback.or_else(|| ensure_canonical_default(&mut resources, &scope_key, &room.id.to_string()))
-        };
-        if let Some(active) = active {
-            set_active(&mut resources, &scope_key, &active);
-        }
+        repair_active_layout(&mut resources, &scope_key, &room.id.to_string());
     }
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;

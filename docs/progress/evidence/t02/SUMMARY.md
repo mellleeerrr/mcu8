@@ -1,6 +1,6 @@
 # T02 evidence — целостность БД и жизненный цикл раскладок
 
-Дата: 2026-10-21. Ветка: рабочее дерево поверх T01 (`cde5e8e`).
+Дата: 2026-10-21. Коммит: `265a80b` + follow-up (M1–M4: canonical/active helper, dedup predicate, docs).
 Ревью: `layout-ui` — **9.5/10**; `media-engine`, `directory-db` — см. отчёты в сессии.
 
 ## Что закрыто
@@ -26,7 +26,7 @@
 
 ## Гейты
 
-- `cargo test --workspace --all-targets` — **995 passed / 0 failed / 6 ignored**.
+- `cargo test --workspace --all-targets` — **996 passed / 0 failed / 6 ignored**.
 - `cargo clippy --workspace --all-targets -- -D warnings` — exit 0.
 - `cargo fmt --all -- --check` — OK.
 - Black-box: второй сервер на том же SQLite → exit 78; CLI `--apply` при held
@@ -39,3 +39,6 @@
   SIP/H.323 gateway, SFU-раскладка клиентская.
 - Live-БД мигрируется только после остановки сервиса и backup; на момент
   evidence применено к копии, не к live.
+- Живой Playwright E2E на T02 не прогонялся (нужен деплой нового бинаря):
+  переносится на пост-деплой smoke/T03; API/unit-гейты и независимые curl-репро
+  ревьюеров зелёные. Это формальный waiver, а не забытый пункт.

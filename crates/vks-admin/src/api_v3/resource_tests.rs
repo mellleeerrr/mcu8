@@ -1625,3 +1625,49 @@ async fn t02_start_session_pushes_conference_active_to_engine() {
         "на первый мост должна уйти active раскладка конференции, получено {applied:?}"
     );
 }
+
+#[tokio::test]
+async fn t02_conference_mutation_while_live_session_keeps_session_active() {
+    let dialer = Arc::new(RecordingLayoutDialer::default());
+    let mut app = AppState::new().with_dialer(dialer.clone());
+    app.storage = Some(Arc::new(vks_storage::memory::MemoryStorage::new()));
+    let state: SharedState = Arc::new(app);
+    let room = Rooms::create_async(&state, "cross scope contract").await.unwrap();
+    let first = create_layout(
+        &state,
+        "First",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &first).await, StatusCode::NO_CONTENT);
+    let started = crate::api_v3::sessions::start_session(
+        State(state.clone()),
+        Extension(operator()),
+        None,
+        Json(crate::api_v3::sessions::StartSessionRequest { conference_id: Some(room.id.to_string()) }),
+    )
+    .await;
+    assert_eq!(started.status(), StatusCode::OK);
+    let session_key = format!("sessions:{}:video_layouts", room.id);
+    assert_eq!(state.api_v3.resources.lock().await.active_layouts[&session_key], first);
+
+    let second = create_layout(
+        &state,
+        "Second",
+        json!({"type":"individual","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &second).await, StatusCode::NO_CONTENT);
+    let resources = state.api_v3.resources.lock().await;
+    assert_eq!(
+        resources.active_layouts[&session_key], first,
+        "контракт: conference attach при живой сессии не меняет session-active"
+    );
+    drop(resources);
+    let applied = dialer.layouts.lock().unwrap().clone();
+    assert_eq!(
+        applied.last().map(|(_, id)| id.as_str()),
+        Some(first.as_str()),
+        "push живой сессии должен применять session-раскладку, а не conference"
+    );
+}
