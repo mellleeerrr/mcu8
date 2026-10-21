@@ -313,13 +313,21 @@ const summary = {
 
       // Vendor-UI: PATCH /system/time присылает локальную строку. Фиксируем
       // UTC, чтобы ожидаемое значение не зависело от состояния прошлых прогонов.
-      await api('/api/v3/system/timezone', { method: 'PATCH', data: { timezone: 'UTC' } });
-      const uiTime = '22.10.2026 04:45:00';
+      const zoneUtc = await api('/api/v3/system/timezone', { method: 'PATCH', data: { timezone: 'UTC' } });
+      const uiTime = '2026-10-22 04:45:00';
       const timePatch = await api('/api/v3/system/time', { method: 'PATCH', data: { time: uiTime } });
       const expectedTime = Math.floor(Date.UTC(2026, 9, 22, 4, 45, 0) / 1000);
       summary.acceptance.system_time_patch_vendor_string =
         timePatch.status === 200 && timePatch.json.time.timezone === 'UTC' &&
         Math.abs(timePatch.json.time.time - expectedTime) <= 120;
+      summary.totals.vendor_time_patch = {
+        status: timePatch.status,
+        expected: expectedTime,
+        timezone: timePatch.json && timePatch.json.time && timePatch.json.time.timezone,
+        actual: timePatch.json && timePatch.json.time && timePatch.json.time.time,
+        body: timePatch.text,
+        zone_patch: zoneUtc && zoneUtc.status,
+      };
       await api('/api/v3/system/time', { method: 'PATCH', data: { payload: { seconds: 0 } } });
       await api('/api/v3/system/timezone', { method: 'PATCH', data: { timezone: 'Europe/Moscow' } });
 
@@ -352,24 +360,30 @@ const summary = {
       await api('/api/v3/system/ntp/disable', { method: 'POST' });
       await page.goto(`${BASE}/pnm/administration/date_time`, { waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(3000);
-      const switchOn = async () => page.evaluate(() => {
-        const el = [...document.querySelectorAll('input')].find((input) => String(input.id).includes('tc-switch'));
-        return el ? el.checked : null;
-      });
-      for (let attempt = 0; attempt < 3 && (await switchOn()) !== true; attempt += 1) {
+      // Раскрываем/включаем NTP через UI до появления четырёх активных
+      // текстовых полей: таймзона + 3 сервера (дата при NTP disabled).
+      const enabledTextCount = async () => page.evaluate(
+        () => document.querySelectorAll('input[type=text]:not([disabled])').length,
+      );
+      for (let attempt = 0; attempt < 4 && (await enabledTextCount()) < 4; attempt += 1) {
         const label = page.locator('label.tc-switch__text', { hasText: 'Синхронизировать' }).first();
         if (await label.count()) await label.click();
-        await page.waitForTimeout(1200);
+        await page.waitForTimeout(1500);
       }
-      await page.locator('[title="Частота синхронизации"]').waitFor({ state: 'visible', timeout: 10000 });
-      await page.waitForTimeout(600);
-      const freq = page.locator('.tc-context-menu-item[title="1 час"]');
-      if (await freq.count()) await freq.first().click({ force: true });
-      await page.waitForTimeout(600);
-      const textInputs = page.locator('.tc-text-field__input:visible');
-      const count = await textInputs.count();
-      const primary = textInputs.nth(count - 3);
+      if ((await enabledTextCount()) < 4) throw new Error('NTP-панель не активировалась через UI');
+      const freqSelect = page.locator('.main-form__select').last();
+      await freqSelect.click();
+      await page.waitForTimeout(700);
+      const freq = page.locator('.tc-context-menu-item:visible', { hasText: '1 час' }).first();
+      if (await freq.count()) await freq.click();
+      await page.waitForTimeout(1200);
+      const enabledText = await page.$$('input[type=text]:not([disabled])');
+      const visibleEnabled = [];
+      for (const handle of enabledText) if (await handle.isVisible()) visibleEnabled.push(handle);
+      if (visibleEnabled.length < 3) throw new Error(`NTP: ожидались 3 видимых сервера, найдено ${visibleEnabled.length}`);
+      const primary = visibleEnabled[0];
       await primary.click();
+      await page.keyboard.press('Control+A');
       await page.keyboard.type(`pool.${stamp}.ntp.org`, { delay: 25 });
       await page.waitForTimeout(400);
       await page.getByRole('button', { name: 'Сохранить', exact: true }).first().click();
@@ -414,7 +428,7 @@ const summary = {
       page.off('response', listener);
       summary.acceptance.conference_settings_ui_one_abonent =
         enabled === true && disabled === false && statuses.length >= 2 && statuses.every((status) => status === 200);
-      summary.acceptance.conference_settings_ui_patch_statuses = statuses;
+      summary.conference_settings_ui_patch_statuses = statuses;
       await shot('03-administration-conference-settings.png');
     });
 
