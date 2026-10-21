@@ -429,10 +429,10 @@ Mediа-ядро (SFU/MCU) не владеет сокетами. Транспор
 
 | Документ | Содержание | Статус |
 |---|---|---|
-| `docs/architecture/SIGNALING_PROTOCOL.md` | Детальный спецификация сигнального протокола, сообщения, состояния | TODO |
-| `docs/architecture/MEDIA_PIPELINE.md` | SFU forwarding, simulcast, MCU compositor pipeline | TODO |
-| `docs/architecture/LAYOUT_ENGINE.md` | Формат Layout, рендереры, пресеты | TODO |
-| `docs/architecture/CLUSTERING.md` | NATS, room ownership, graceful shutdown | TODO |
-| `docs/rules/BACKEND_RULES.md` | Правила бэкенда (детали) | TODO |
-| `docs/rules/FRONTEND_RULES.md` | Правила фронтенда (детали) | TODO |
-| `docs/rules/CODE_STYLE.md` | Стиль кода (детали) | TODO |
+| `docs/architecture/SIGNALING_PROTOCOL.md` | Детальный спецификация сигнального протокола, сообщения, состояния | v0.1 (черновик) |
+| `docs/architecture/MEDIA_PIPELINE.md` | SFU forwarding, simulcast, MCU compositor pipeline | v0.1 (черновик) |
+| `docs/architecture/LAYOUT_ENGINE.md` | Формат Layout, рендереры, пресеты | v0.1 (черновик) |
+| `docs/architecture/CLUSTERING.md` | NATS, room ownership, graceful shutdown | v0.1 (черновик) |
+| `docs/rules/BACKEND_RULES.md` | Правила бэкенда (детали) | v0.1 (черновик) |
+| `docs/rules/FRONTEND_RULES.md` | Правила фронтенда (детали) | v0.1 (черновик) |
+| `docs/rules/CODE_STYLE.md` | Стиль кода (детали) | v0.1 (черновик) |

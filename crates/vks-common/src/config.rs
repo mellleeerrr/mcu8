@@ -25,7 +25,7 @@ pub struct Config {
     /// Глобальный режим по умолчанию (ADR-0026, Q7): "sfu" | "mcu".
     pub default_room_mode: String,
     /// Каталог рантайма статики фронтенда PNM (`index.html` + assets;
-    /// ADR-0027, archive/FRONTEND_PORT_PLAN.md §4.2). Дефолт — относительно CWD процесса;
+    /// ADR-0027, docs/progress/archive/FRONTEND_PORT_PLAN.md §4.2). Дефолт — относительно CWD процесса;
     /// переопределение: `VKS_FRONTEND_DIR`.
     pub frontend_dir: String,
     /// Секрет HS256 для `/api/v3` (ADR-0027 §4.3; `VKS_JWT_SECRET`).

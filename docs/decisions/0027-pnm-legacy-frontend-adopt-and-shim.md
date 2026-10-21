@@ -74,7 +74,7 @@
   cache-bust словника — см. `client/pnm-frontend/NOTES.md` §«Ребренд PROSTOR»; юр. гейт R2 остаётся.
 - [x] `frontend.rs` + роуты/кэш/CSP + тесты (фаза 1).
 - [x] Удаление demo (`docs/progress/archive/demo-2026-10-16.rs`) + `build_app` в `lib.rs` (фаза 1).
-- [ ] `/api/v3` фаза 2 (boot/shell/ws/auth) + фаза 3 (sessions/conferences) — по `docs/progress/archive/FRONTEND_PORT_PLAN.md` §4.5/Приложение A.
+- [x] `/api/v3` фаза 2 (boot/shell/ws/auth) + фаза 3 (sessions/conferences) — по `docs/progress/archive/FRONTEND_PORT_PLAN.md` §4.5/Приложение A; доказательства: `docs/progress/evidence/t16/`, `t33/`.
 - [ ] Фаза 5: Dioxus-миграция; снятие отклонения (удаление `/api/v3` и legacy).
 - [ ] Юридический гейт R2: лицензия TrueConf-сборки (+ «PROSTOR») — до релиза (отметка в docs/progress/MASTER_TASK_LIST.md).
 

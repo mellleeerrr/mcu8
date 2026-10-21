@@ -366,7 +366,7 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 **Статус:** ⚪ (T4.3–T4.4)
 **Подводные камни:** архивный PROGRESS заявлял завершённость фаз, которой не было; REWORK_PLAN устарел;
 не коммитить ложные «527 tests».
-**Приёмка:** README/ARCHITECTURE/PROGRESS соответствуют коду; acceptance checklist.
+**Приёмка:** README/ARCHITECTURE/MASTER_TASK_LIST соответствуют коду; acceptance checklist.
 
 ### C4. Заглушки кластера/рекордера/TURN/NATS
 
