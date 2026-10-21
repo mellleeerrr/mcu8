@@ -1,6 +1,6 @@
 # T02 evidence — целостность БД и жизненный цикл раскладок
 
-Дата: 2026-10-21. Коммит: `265a80b` + follow-up (M1–M4: canonical/active helper, dedup predicate, docs).
+Дата: 2026-10-21. Коммит: `265a80b` + follow-up `8788c46` (M1–M4) + F1-фикс `ed24d02`.
 Ревью: `layout-ui` — **9.5/10**; `media-engine`, `directory-db` — см. отчёты в сессии.
 
 ## Что закрыто
@@ -10,7 +10,9 @@
 2. Явная карта `active_layouts`; attach не пересортировывает `links`;
    `A → B → «Применить A»` даёт A (`t02_attach_apply_sequence...`).
 3. Canonical default применяется после manual; generic POST переиспользует
-   «Общую» (два POST → один id).
+   «Общую» (два POST → один id). F1: reuse-ветка больше не вызывает мутирующий
+   `canonical_layout_id` до commit — запись сохраняется и находится после
+   рестарта (`t02_canonical_create_persists_after_reload`).
 4. `detach`/`remove_global` не удаляют shared/default: 404/409 с отсутствием
    мутаций; после удаления одиночной раскладки возвращается canonical default.
 5. COW alias резолвится на read-path (`get_linked`, `abonents`, `templates`,

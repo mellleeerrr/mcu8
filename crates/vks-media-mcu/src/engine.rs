@@ -140,7 +140,7 @@ impl RoomState {
             layout.version = desc.version;
             let mut cells = desc.geometry.clone();
             cells.sort_by_key(|cell| cell.slot);
-            for (index, cell) in cells.iter().enumerate() {
+            for cell in &cells {
                 let x = cell.x.min(canvas.width.saturating_sub(1));
                 let y = cell.y.min(canvas.height.saturating_sub(1));
                 let width = cell.width.max(1).min(canvas.width.saturating_sub(x));
@@ -150,18 +150,14 @@ impl RoomState {
                     cell.slot,
                     pid,
                     vks_layout::Rect::new(x, y, width, height),
-                    cell.z_order as i32 + index as i32,
+                    cell.z_order as i32,
                     false,
                     false,
                 ));
             }
-            // Участник, которого нет в geometry (добавлен позже), получает
-            // свободную ячейку в правом нижнем углу, а не пропадает.
-            for (&slot_id, &vpid) in &slot_to_pid {
-                if !cells.iter().any(|cell| cell.slot == slot_id) {
-                    layout.slots.push(vks_layout::Slot::new(slot_id, Some(vpid), canvas.as_rect()));
-                }
-            }
+            // Назначения вне geometry отбрасываются sanitize_assignments до
+            // построения Layout: иначе участник получил бы full-canvas поверх
+            // сетки (T03: никакого full-canvas для лишних паблишеров).
             return layout;
         }
 
@@ -344,6 +340,48 @@ pub struct McuEngine {
     frames: FrameSource,
     /// Pluggable audio source (mock).
     audio: AudioSource,
+    /// Раскладка, пришедшая до создания MCU-комнаты (сессия стартует раньше
+    /// первого шлюзового вызова). Применяется при создании комнаты/бридже,
+    /// не аллоцируя 2 МБ композита для пустой SFU-сессии.
+    pending_layouts: Arc<Mutex<BTreeMap<RoomId, LayoutDescriptor>>>,
+}
+
+fn layout_has_video(tracks: &[MediaTrack]) -> bool {
+    tracks
+        .iter()
+        .any(|track| matches!(track.kind, vks_core::track::TrackKind::Video | vks_core::track::TrackKind::Screen))
+}
+
+/// Свободный слот: только из geometry (T03), иначе legacy-скан u32.
+fn free_layout_slot(layout: &LayoutDescriptor) -> Option<u32> {
+    let used: std::collections::BTreeSet<u32> = layout.assignments.values().copied().collect();
+    if layout.geometry.is_empty() {
+        return (0..u32::MAX).find(|slot| !used.contains(slot));
+    }
+    layout.geometry.iter().map(|cell| cell.slot).filter(|slot| !used.contains(slot)).min()
+}
+
+fn seat_participant(layout: &mut LayoutDescriptor, pid: ParticipantId) -> bool {
+    if layout.assignments.contains_key(&pid) {
+        return false;
+    }
+    let Some(slot) = free_layout_slot(layout) else {
+        tracing::warn!(%pid, "layout has no free geometry slot; participant stays unassigned");
+        return false;
+    };
+    layout.assignments.insert(pid, slot);
+    true
+}
+
+/// Убирает назначения вне присланной geometry: иначе `layout_from_descriptor`
+/// нарисовал бы участника full-canvas поверх сетки. Дальше repair посадит его
+/// в свободный geometry-слот, если он есть.
+fn sanitize_assignments(layout: &mut LayoutDescriptor) {
+    if layout.geometry.is_empty() {
+        return;
+    }
+    let geometry: std::collections::BTreeSet<u32> = layout.geometry.iter().map(|cell| cell.slot).collect();
+    layout.assignments.retain(|_, slot| geometry.contains(slot));
 }
 
 impl McuEngine {
@@ -442,6 +480,15 @@ impl McuEngine {
         g.get(&room).map(|s| s.stats)
     }
 
+    /// Applied layout descriptor (test/inspector), including staged pending
+    /// layouts for rooms that do not exist yet.
+    pub fn layout_descriptor(&self, room: RoomId) -> Option<LayoutDescriptor> {
+        if let Some(layout) = self.rooms.lock().unwrap().get(&room).and_then(|state| state.layout.clone()) {
+            return Some(layout);
+        }
+        self.pending_layouts.lock().unwrap().get(&room).cloned()
+    }
+
     /// The current crossfaded slot rects of a room (test/inspector).
     pub fn slot_rects(&self, room: RoomId) -> Option<SlotRects> {
         self.rooms.lock().unwrap().get(&room).map(|s| s.slot_rects())
@@ -500,19 +547,49 @@ impl McuEngine {
 
     /// Ensures a room exists in the MCU engine.
     pub fn ensure_room(&self, room: RoomId) {
+        let mut pending = self.pending_layouts.lock().unwrap().remove(&room);
+        if let Some(layout) = pending.as_mut() {
+            sanitize_assignments(layout);
+        }
         let mut g = self.rooms.lock().unwrap();
-        g.entry(room).or_insert_with(|| RoomState::new(RoomMode::Mcu, RoomCaps::default()));
+        let state = g.entry(room).or_insert_with(|| RoomState::new(RoomMode::Mcu, RoomCaps::default()));
+        // Pending применяется только к пустой комнате: более новая раскладка
+        // не должна откатываться stale-значением.
+        if state.layout.is_none() {
+            if let Some(layout) = pending {
+                let new_layout = RoomState::layout_from_descriptor(&layout);
+                state.bridge.apply(&new_layout);
+                state.current_layout = new_layout;
+                state.layout = Some(layout);
+                state.elapsed_ms = 0;
+                state.layout_applied_at_ms = None;
+            }
+        }
     }
 
     /// Synchronously bridges a participant into the MCU room as both subscriber and publisher.
     pub fn bridge_participant(&self, room: RoomId, pid: ParticipantId, tracks: Vec<MediaTrack>) {
+        // Pending забираем до блокировки rooms, чтобы не было инверсии порядка
+        // с apply_layout (rooms → pending).
+        let pending = self.pending_layouts.lock().unwrap().remove(&room);
         let mut g = self.rooms.lock().unwrap();
         let state = g.entry(room).or_insert_with(|| RoomState::new(RoomMode::Mcu, RoomCaps::default()));
         state.subscribers.insert(pid);
+        // Pending применяем и к audio-only bridge: SIP/H.323 может прийти без
+        // видео (или видео деградировало), но выбранная до дозвона раскладка
+        // не должна теряться. Видео-участник затем сядет в её geometry-слот.
+        if state.layout.is_none() {
+            if let Some(layout) = pending {
+                let new_layout = RoomState::layout_from_descriptor(&layout);
+                state.bridge.apply(&new_layout);
+                state.current_layout = new_layout;
+                state.layout = Some(layout);
+                state.layout_applied_at_ms = None;
+                state.elapsed_ms = 0;
+            }
+        }
         if !tracks.is_empty() {
-            let has_video = tracks.iter().any(|track| {
-                matches!(track.kind, vks_core::track::TrackKind::Video | vks_core::track::TrackKind::Screen)
-            });
+            let has_video = layout_has_video(&tracks);
             state.publisher_tracks.insert(pid, tracks);
             if has_video {
                 let descriptor = state.layout.get_or_insert_with(|| LayoutDescriptor {
@@ -521,12 +598,8 @@ impl McuEngine {
                     assignments: BTreeMap::new(),
                     geometry: Vec::new(),
                 });
-                if !descriptor.assignments.contains_key(&pid) {
-                    let slot = (0..u32::MAX)
-                        .find(|slot| !descriptor.assignments.values().any(|existing| existing == slot))
-                        .unwrap_or(0);
-                    descriptor.assignments.insert(pid, slot);
-                    descriptor.version += 1;
+                if seat_participant(descriptor, pid) {
+                    descriptor.version = descriptor.version.saturating_add(1);
                     let layout = RoomState::layout_from_descriptor(descriptor);
                     state.bridge.apply(&layout);
                     state.current_layout = layout;
@@ -639,8 +712,14 @@ impl MediaEngine for McuEngine {
     }
 
     async fn destroy_room(&self, room: RoomId) -> Result<(), MediaEngineError> {
-        let mut g = self.rooms.lock().unwrap();
-        if g.remove(&room).is_none() {
+        let removed = {
+            let mut g = self.rooms.lock().unwrap();
+            g.remove(&room).is_some()
+        };
+        // Не держим rooms при взятии pending: единый порядок локов
+        // (rooms → pending) во всех путях.
+        self.pending_layouts.lock().unwrap().remove(&room);
+        if !removed {
             return Err(MediaEngineError::RoomNotFound(room));
         }
         self.frames.lock().unwrap().remove(&room);
@@ -731,8 +810,17 @@ impl MediaEngine for McuEngine {
     }
 
     async fn apply_layout(&self, room: RoomId, mut layout: LayoutDescriptor) -> Result<(), MediaEngineError> {
+        sanitize_assignments(&mut layout);
         let mut g = self.rooms.lock().unwrap();
-        let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
+        let Some(state) = g.get_mut(&room) else {
+            drop(g);
+            // SFU-сессия без шлюза не должна аллоцировать MCU-композит.
+            self.pending_layouts.lock().unwrap().insert(room, layout);
+            return Ok(());
+        };
+        // Комната уже есть: pending устарел, иначе он мог бы «оживить» старую
+        // раскладку на следующем bridge. Порядок локов rooms → pending.
+        self.pending_layouts.lock().unwrap().remove(&room);
         // Уже забридженные видео-паблишеры не должны потерять ячейку: раскладка
         // может прийти вообще без привязок («Очистить все видеоокна» → все окна
         // AUTO, auto-пресет, возврат к «Общей» после удаления ручной). Иначе
@@ -748,20 +836,16 @@ impl MediaEngine for McuEngine {
             })
             .map(|(pid, _)| *pid)
             .collect();
-        let mut repaired = false;
+        let version_floor = state.layout.as_ref().map_or(0, |old| old.version.saturating_add(1));
         for pid in bridged {
-            if layout.assignments.contains_key(&pid) {
-                continue;
+            if !layout.assignments.contains_key(&pid) {
+                seat_participant(&mut layout, pid);
             }
-            let slot =
-                (0..u32::MAX).find(|slot| !layout.assignments.values().any(|existing| existing == slot)).unwrap_or(0);
-            layout.assignments.insert(pid, slot);
-            repaired = true;
         }
-        if repaired {
-            // Раскладка изменилась на глазах клиентов и шлюза — новая версия.
-            layout.version = layout.version.saturating_add(1);
-        }
+        // Версия монотонна: даже auto/default без смены назначений должна
+        // перестроить композитор. Repair больше не бампает отдельно, поэтому
+        // двойного инкремента нет.
+        layout.version = layout.version.max(version_floor);
         let new_layout = RoomState::layout_from_descriptor(&layout);
         state.layout = Some(layout);
         // Begin the crossfade from the previous layout's rects to the new ones.
@@ -885,10 +969,10 @@ mod tests {
         let missing = RoomId::from_uuid("70000000-0000-0000-0000-000000000001".parse().unwrap());
         assert!(matches!(e.destroy_room(missing).await.unwrap_err(), MediaEngineError::RoomNotFound(_)));
         assert!(matches!(e.list_publishers(missing).await.unwrap_err(), MediaEngineError::RoomNotFound(_)));
-        assert!(matches!(
-            e.apply_layout(missing, LayoutDescriptor::default()).await.unwrap_err(),
-            MediaEngineError::RoomNotFound(_)
-        ));
+        // T03: раскладка до создания комнаты — pending, а не ошибка: сессия
+        // стартует раньше первого шлюзового вызова.
+        e.apply_layout(missing, LayoutDescriptor::default()).await.expect("pending layout is accepted");
+        assert!(e.layout_descriptor(missing).is_some());
     }
 
     #[tokio::test]
@@ -1261,7 +1345,155 @@ mod tests {
         }
         let rects = e.slot_rects(rid).expect("slot rects");
         assert_eq!(rects.len(), 4, "геометрия 2×2 сохранена, а не подменена авто-сеткой");
+        let descriptor = e.layout_descriptor(rid).expect("descriptor");
+        assert!(descriptor.version >= 2, "auto/repair монотонно увеличивает версию");
+        assert_eq!(descriptor.assignments.len(), 1, "забридженный паблишер назначен в geometry");
         let composite = e.tick(rid).expect("composite frame");
         assert_eq!(composite.data[270 * CANVAS_SIZE.0 as usize + 480], 99, "новый кадр виден в верхней левой ячейке");
+    }
+
+    /// T03: pending-раскладка не создаёт комнату, но применяется на первом
+    /// bridge; лишний паблишер не получает full-canvas вне geometry.
+    #[tokio::test]
+    async fn pending_layout_applies_on_first_bridge_without_extra_full_canvas() {
+        use vks_core::ports::media_engine::LayoutSlot;
+
+        let e = McuEngine::new();
+        let rid = room_id();
+        let geometry = (0..4)
+            .map(|slot| LayoutSlot {
+                slot,
+                x: (slot % 2) * 960,
+                y: (slot / 2) * 540,
+                width: 960,
+                height: 540,
+                z_order: slot,
+            })
+            .collect();
+        e.apply_layout(
+            rid,
+            LayoutDescriptor {
+                layout_id: "preset_equal_4".into(),
+                version: 1,
+                assignments: Default::default(),
+                geometry,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(e.slot_rects(rid).is_none(), "pending не аллоцирует комнату");
+        assert!(e.layout_descriptor(rid).is_some(), "pending сохранён");
+
+        let pids: Vec<_> = (1..=5).map(p).collect();
+        for pid in &pids {
+            e.bridge_participant(rid, *pid, vec![video_track(*pid)]);
+        }
+        for _ in 0..11 {
+            e.tick(rid);
+        }
+        let rects = e.slot_rects(rid).expect("room created on first bridge");
+        assert_eq!(rects.len(), 4, "ровно 4 geometry-ячейки, пятый не получает full-canvas");
+        let layout = e.layout_descriptor(rid).expect("layout");
+        assert_eq!(layout.assignments.len(), 4, "пятый паблишер остаётся без слота");
+        assert!(layout.assignments.values().all(|slot| *slot < 4));
+    }
+
+    /// T03: stale pending не должен перезаписывать уже применённую раскладку
+    /// через публичный `ensure_room`.
+    #[tokio::test]
+    async fn ensure_room_does_not_overwrite_existing_layout_with_stale_pending() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        e.apply_layout(
+            rid,
+            LayoutDescriptor {
+                layout_id: "current".into(),
+                version: 1,
+                assignments: BTreeMap::new(),
+                geometry: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        e.pending_layouts.lock().unwrap().insert(
+            rid,
+            LayoutDescriptor {
+                layout_id: "stale".into(),
+                version: 99,
+                assignments: BTreeMap::new(),
+                geometry: Vec::new(),
+            },
+        );
+        e.ensure_room(rid);
+        assert_eq!(e.layout_descriptor(rid).expect("layout").layout_id, "current");
+        assert!(e.pending_layouts.lock().unwrap().is_empty(), "stale pending удалён");
+    }
+
+    /// T03: audio-only первый bridge не должен съедать pending-раскладку.
+    #[tokio::test]
+    async fn pending_layout_survives_audio_only_first_bridge() {
+        use vks_core::ports::media_engine::LayoutSlot;
+
+        let e = McuEngine::new();
+        let rid = room_id();
+        let geometry = (0..4)
+            .map(|slot| LayoutSlot {
+                slot,
+                x: (slot % 2) * 960,
+                y: (slot / 2) * 540,
+                width: 960,
+                height: 540,
+                z_order: 0,
+            })
+            .collect();
+        e.apply_layout(
+            rid,
+            LayoutDescriptor {
+                layout_id: "preset_selected_b_4".into(),
+                version: 1,
+                assignments: Default::default(),
+                geometry,
+            },
+        )
+        .await
+        .unwrap();
+
+        let audio_only = p(21);
+        e.bridge_participant(rid, audio_only, vec![Track::new(audio_only, vks_core::track::TrackKind::Audio)]);
+        let layout = e.layout_descriptor(rid).expect("pending layout must survive audio-only bridge");
+        assert_eq!(layout.layout_id, "preset_selected_b_4", "выбранная раскладка сохранена");
+        assert_eq!(layout.geometry.len(), 4, "geometry не подменена пустой grid");
+
+        let video = p(22);
+        e.bridge_participant(rid, video, vec![video_track(video)]);
+        let layout = e.layout_descriptor(rid).expect("layout");
+        assert_eq!(layout.layout_id, "preset_selected_b_4");
+        assert!(layout.assignments.contains_key(&video), "видео-участник сел в geometry-слот");
+    }
+
+    /// T03: при готовой geometry новый участник занимает только свободный
+    /// geometry-слот, а не произвольный u32.
+    #[tokio::test]
+    async fn late_joiner_uses_only_free_geometry_slot() {
+        use vks_core::ports::media_engine::LayoutSlot;
+
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let first = p(10);
+        let mut assignments = std::collections::BTreeMap::new();
+        assignments.insert(first, 0);
+        let geometry = vec![
+            LayoutSlot { slot: 0, x: 0, y: 0, width: 960, height: 540, z_order: 0 },
+            LayoutSlot { slot: 1, x: 960, y: 0, width: 960, height: 540, z_order: 1 },
+        ];
+        e.apply_layout(rid, LayoutDescriptor { layout_id: "preset_equal_2".into(), version: 1, assignments, geometry })
+            .await
+            .unwrap();
+        let second = p(11);
+        e.bridge_participant(rid, second, vec![video_track(second)]);
+        let layout = e.layout_descriptor(rid).expect("layout");
+        assert_eq!(layout.assignments[&second], 1, "свободный geometry-слот 1");
     }
 }

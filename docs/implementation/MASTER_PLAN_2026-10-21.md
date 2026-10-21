@@ -175,6 +175,24 @@ T08, T09, T11b), затем полная матрица раскладок (T04b
 
 ## T03. Применение раскладки в gateway/MCU (P0)
 
+**Статус:** 🟢 закрыт 2026-10-21, ревью 9.5/10 (`protocols-net`, `media-engine`); 1005 passed / 0 failed / 6 ignored.
+**Реализовано (отличия от исходного плана — осознанные):**
+- Вместо «early-return только если комнаты нет» — **pending layout**: движок
+  хранит раскладку до первого bridge и не создаёт 2 МБ композита для пустой
+  SFU-сессии; audio-only первый bridge pending не теряет.
+- auto/«Общая» с пустыми slots не синтезирует фиксированную сетку 13:
+  gateway шлёт пустую geometry, MCU строит сетку по числу забридженных;
+  `manual` с пустыми slots остаётся preset-геометрией.
+- Repair: только свободные geometry-слоты, full-canvas удалён и для назначений
+  вне geometry (`sanitize_assignments`).
+- 1-based: явный `payload.position_base` (default 1, opt-in 0) вместо inference.
+- `z_order` end-to-end: `PixelRect.z` + сортировка compositor `(z,key)`;
+  gateway сохраняет вендорный `z_order` manual-пресетов.
+- Версия монотонна без двойного инкремента; pending чистится в `destroy_room`.
+- Тесты: pending/audio-only, 4 geometry + 5 паблишеров, sparse 0-based,
+  manual 2×2 → auto 2 ячейки, gateway z-order, reload F1 canonical default.
+- Подробности: `docs/progress/evidence/t03/SUMMARY.md`.
+
 **Проблемы.**
 1. `gateways.rs:760`: `assignments.is_empty() && mode != "manual"` → no-op
    даже при существующей MCU-комнате; detach/auto не доезжает.

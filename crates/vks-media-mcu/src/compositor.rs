@@ -31,7 +31,7 @@ impl Compositor {
     ///   rect stays black.
     /// - Slots with no frame are left black.
     /// - Rects are clamped to the canvas.
-    /// - Overlapping rects: later entries (by key) overdraw earlier ones
+    /// - Overlapping rects: higher `z` wins; equal `z` falls back to slot key
     ///   (deterministic order).
     pub fn compose(&self, frames: &BTreeMap<u32, Frame>, rects: &BTreeMap<u32, PixelRect>) -> CompositeFrame {
         let mut canvas = CompositeFrame::black(CANVAS_WIDTH, CANVAS_HEIGHT);
@@ -40,11 +40,30 @@ impl Compositor {
             canvas.data.fill(16);
             canvas.data.resize(pixels * 3 / 2, 128);
         }
-        for (key, rect) in rects {
-            let Some(frame) = frames.get(key) else {
-                continue; // slot has no frame yet → black
-            };
-            Self::blit(&mut canvas, frame, rect);
+        // Overlap/PiP: z_index задаёт порядок отрисовки, ключ — стабильный
+        // tie-break. BTreeMap сам по себе сортировал только по slot id.
+        // До 128 слотов сортируем на стеке: compose вызывается 30 раз/с и не
+        // должен аллоцировать на горячем пути.
+        let mut stack_keys = [0u32; 128];
+        if rects.len() <= stack_keys.len() {
+            let n = rects.len();
+            for (slot, key) in stack_keys.iter_mut().zip(rects.keys()) {
+                *slot = *key;
+            }
+            stack_keys[..n].sort_unstable_by_key(|key| (rects[key].z, *key));
+            for key in &stack_keys[..n] {
+                if let Some(frame) = frames.get(key) {
+                    Self::blit(&mut canvas, frame, &rects[key]);
+                }
+            }
+        } else {
+            let mut ordered: Vec<(&u32, &PixelRect)> = rects.iter().collect();
+            ordered.sort_unstable_by_key(|(key, rect)| (rect.z, **key));
+            for (key, rect) in ordered {
+                if let Some(frame) = frames.get(key) {
+                    Self::blit(&mut canvas, frame, rect);
+                }
+            }
         }
         canvas
     }
@@ -226,6 +245,18 @@ mod tests {
         assert_eq!(out.data[500 * 1920 + 960 + 100], 0);
         // slot 0 region is drawn.
         assert_eq!(out.data[100], 7);
+    }
+
+    #[test]
+    fn higher_z_index_is_drawn_on_top_for_overlap_pip() {
+        let frames = BTreeMap::from([(0, Frame::filled(320, 180, 10)), (1, Frame::filled(320, 180, 20))]);
+        let rects = BTreeMap::from([
+            (0, PixelRect::new(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT).with_z(0)),
+            (1, PixelRect::new(0, 0, 960, 540).with_z(1)),
+        ]);
+        let out = Compositor.compose(&frames, &rects);
+        assert_eq!(out.data[100], 20, "PiP window (z=1) paints over the large zone");
+        assert_eq!(out.data[600 * 1920 + 100], 10, "large zone (z=0) remains outside the PiP");
     }
 
     #[test]

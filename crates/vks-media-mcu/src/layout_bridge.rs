@@ -32,12 +32,21 @@ pub struct PixelRect {
     pub w: u32,
     /// Height (px).
     pub h: u32,
+    /// Stacking order: higher z is drawn later (on top).
+    pub z: i32,
 }
 
 impl PixelRect {
     /// Creates a pixel rect.
     pub fn new(x: u32, y: u32, w: u32, h: u32) -> Self {
-        Self { x, y, w, h }
+        Self { x, y, w, h, z: 0 }
+    }
+
+    /// Sets stacking order (builder style).
+    #[must_use]
+    pub fn with_z(mut self, z: i32) -> Self {
+        self.z = z;
+        self
     }
 
     /// Zero rect.
@@ -69,6 +78,7 @@ fn lerp(a: u32, b: u32, t: f64) -> u32 {
 
 fn lerp_rect(from: &PixelRect, to: &PixelRect, t: f64) -> PixelRect {
     PixelRect::new(lerp(from.x, to.x, t), lerp(from.y, to.y, t), lerp(from.w, to.w, t), lerp(from.h, to.h, t))
+        .with_z(to.z)
 }
 
 /// Layout bridge: produces per-slot pixel rects for the compositor.
@@ -108,7 +118,11 @@ impl LayoutBridge {
 
     /// The rects of a layout, keyed by slot id.
     fn rects_of(layout: &Layout) -> SlotRects {
-        layout.slots.iter().map(|s| (s.id.as_u32(), PixelRect::new(s.rect.x, s.rect.y, s.rect.w, s.rect.h))).collect()
+        layout
+            .slots
+            .iter()
+            .map(|s| (s.id.as_u32(), PixelRect::new(s.rect.x, s.rect.y, s.rect.w, s.rect.h).with_z(s.z_index)))
+            .collect()
     }
 
     /// Computes the effective rects at `elapsed_ms` since the last layout

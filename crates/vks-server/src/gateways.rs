@@ -675,14 +675,11 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             return Ok(());
         };
 
-        // PNM исторически смешивает 0-based (`calculate`) и 1-based
-        // (`attach_layout_abonent`: position = max+1) позиции. Приводим к
-        // 0-based: если нулевой позиции нет, вычитаем минимальную.
-        let raw_positions: Vec<u32> = slots
-            .iter()
-            .filter_map(|slot| slot["position"].as_u64().and_then(|value| u32::try_from(value).ok()))
-            .collect();
-        let shift = if raw_positions.contains(&0) { 0 } else { raw_positions.iter().copied().min().unwrap_or(0) };
+        // Явный контракт: `calculate` и `attach_abonent` отдают 1-based
+        // позиции, поэтому по умолчанию вычитаем 1. Для старых 0-based
+        // документов можно прислать `payload.position_base = 0`; inference
+        // по «есть ли ноль» больше нет (он ломал разреженные [2,3]).
+        let position_base = layout["payload"]["position_base"].as_u64().filter(|base| *base <= 1).unwrap_or(1) as u32;
 
         let mut assignments = std::collections::BTreeMap::new();
         let mut geometry = Vec::new();
@@ -690,7 +687,14 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             let Some(position) = slot["position"].as_u64().and_then(|value| u32::try_from(value).ok()) else {
                 continue;
             };
-            let position = position.saturating_sub(shift);
+            let Some(position) = position.checked_sub(position_base) else {
+                tracing::warn!(
+                    position,
+                    position_base,
+                    "layout slot position is below position_base; skipped (legacy 0-based layouts must send position_base=0)"
+                );
+                continue;
+            };
             let identifier = ["contact_id", "call_string_id", "abonent_id", "connection_id"]
                 .iter()
                 .filter_map(|key| slot[*key].as_str())
@@ -724,7 +728,12 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         // Реальные PNM-раскладки хранят только `position`/`role`; геометрия
         // задаётся `payload.preset` (`preset_equal_25`, `preset_selected_b_4_(2)`…).
         // Без этого MCU рисовал sqrt-сетку и выбранная схема терялась.
-        if geometry.is_empty() {
+        let mode = layout["payload"]["mode"].as_str().unwrap_or_default();
+        if geometry.is_empty() && mode == "auto" {
+            // «Общая»/AUTO: geometry остаётся пустой, движок сам строит сетку
+            // по числу забридженных паблишеров. Фиксированная 13-ячейковая
+            // сетка `preset_default_13` давала участнику плитку 480×270.
+        } else if geometry.is_empty() {
             let slot_count = assignments.values().copied().max().unwrap_or(0).saturating_add(1);
             let preset_name = layout["payload"]["preset"].as_str().unwrap_or_default();
             let preset_size = layout["payload"]["size"].as_u64().and_then(|value| u8::try_from(value).ok());
@@ -739,31 +748,32 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                 .filter(|value| value.is_finite() && *value > 0.0)
                 .unwrap_or(1.0);
             let pip = layout["payload"]["pip"].as_bool().unwrap_or(false);
-            for (index, rect) in
-                vks_layout::preset::geometry(&parsed, 1920.0, 1080.0, overlap_factor, pip).iter().enumerate()
-            {
+            // `geometry_for_manual` сохраняет вендорный z_order (overlap/PiP),
+            // generic `geometry` его не возвращает — для остальных схем z=0.
+            let calculated = vks_layout::preset::geometry_for_manual(&parsed.to_string(), 1920.0, 1080.0)
+                .unwrap_or_else(|| {
+                    vks_layout::preset::geometry(&parsed, 1920.0, 1080.0, overlap_factor, pip)
+                        .into_iter()
+                        .map(|rect| vks_layout::preset::CalculatedSlot { rect, z_order: 0 })
+                        .collect()
+                });
+            for (index, cell) in calculated.iter().enumerate() {
                 geometry.push(LayoutSlot {
                     slot: index as u32,
-                    x: rect.x.round().max(0.0) as u32,
-                    y: rect.y.round().max(0.0) as u32,
-                    width: rect.width.round().max(1.0) as u32,
-                    height: rect.height.round().max(1.0) as u32,
-                    z_order: index as u32,
+                    x: cell.rect.x.round().max(0.0) as u32,
+                    y: cell.rect.y.round().max(0.0) as u32,
+                    width: cell.rect.width.round().max(1.0) as u32,
+                    height: cell.rect.height.round().max(1.0) as u32,
+                    z_order: u32::from(cell.z_order),
                 });
             }
         }
-        if assignments.is_empty() && geometry.is_empty() {
-            return Ok(());
-        }
-        // Auto-раскладка без привязок — это режим «сетка по числу участников»;
-        // не создаём MCU-комнату (2 МБ композита) для каждой SFU-сессии.
-        if assignments.is_empty() && layout["payload"]["mode"].as_str() != Some("manual") {
+        if assignments.is_empty() && geometry.is_empty() && mode != "auto" {
             return Ok(());
         }
         geometry.sort_by_key(|cell| cell.slot);
-        // Комната может ещё не существовать в MCU: сессия стартует раньше,
-        // чем шлюз дозвонится и забриджит первого участника.
-        mcu.ensure_room(room_id);
+        // Если MCU-комнаты ещё нет, движок сохранит pending layout и применит
+        // его на первом bridge — пустая SFU-сессия не аллоцирует композит.
         mcu.apply_layout(room_id, LayoutDescriptor { layout_id, version, assignments, geometry })
             .await
             .map_err(|error| format!("MCU layout apply failed: {error}"))
@@ -1405,12 +1415,119 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             ]}
         });
         manager.apply_layout(room, layout).await.expect("chosen layout must reach the MCU");
+        assert!(mcu.layout_descriptor(room).is_some(), "pending layout must be stored");
+        assert!(mcu.slot_rects(room).is_none(), "pending must not allocate room");
 
         mcu.bridge_participant(room, pid, vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)]);
+        assert!(mcu.layout_descriptor(room).is_some(), "layout after bridge");
+        for _ in 0..11 {
+            mcu.tick(room);
+        }
         let rects = mcu.slot_rects(room).expect("MCU room must exist");
         assert_eq!(rects.len(), 1, "one real participant, no auto slot and no phantom slot 2");
         let cell = rects.get(&0).expect("1-based position 1 normalizes to slot 0");
         assert_eq!((cell.x, cell.y, cell.w, cell.h), (0, 0, 960, 540), "exact PNM geometry, not sqrt grid");
+    }
+
+    /// T03/B1: auto-«Общая» в существующей комнате строит сетку по числу
+    /// участников, а не рисует фиксированные 13 ячеек `preset_default_13`.
+    #[tokio::test]
+    async fn gateway_manager_auto_layout_uses_participant_count_not_preset_13() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        mcu.ensure_room(room);
+        for _ in 0..2 {
+            let pid = vks_core::ParticipantId::new();
+            mcu.bridge_participant(
+                room,
+                pid,
+                vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)],
+            );
+        }
+        let manual = serde_json::json!({
+            "id": "manual-2x2",
+            "payload": {
+                "mode": "manual", "preset": "preset_equal_4", "size": 4, "type": "individual",
+                "slots": [
+                    {"position": 1, "role": "AUTO"}, {"position": 2, "role": "AUTO"},
+                    {"position": 3, "role": "AUTO"}, {"position": 4, "role": "AUTO"}
+                ]
+            }
+        });
+        manager.apply_layout(room, manual).await.expect("manual 2x2");
+        for _ in 0..11 {
+            mcu.tick(room);
+        }
+        assert_eq!(mcu.slot_rects(room).expect("manual rects").len(), 4, "manual 2x2 applied");
+
+        let before = mcu.layout_descriptor(room).expect("manual layout").version;
+        let layout = serde_json::json!({
+            "id": "auto-default",
+            "payload": {"mode": "auto", "preset": "preset_default_13", "size": 13, "slots": [], "type": "default"}
+        });
+        manager.apply_layout(room, layout).await.expect("auto layout must reach existing MCU room");
+        for _ in 0..11 {
+            mcu.tick(room);
+        }
+        let rects = mcu.slot_rects(room).expect("MCU room");
+        assert_eq!(rects.len(), 2, "2 участника → 2 ячейки, не 13");
+        let layout = mcu.layout_descriptor(room).expect("layout");
+        assert!(layout.geometry.is_empty(), "auto не синтезирует preset-геометрию");
+        assert!(layout.version > before, "версия растёт при возврате к «Общей»");
+    }
+
+    /// T03: gateway не теряет вендорный z_order overlap/PiP-пресета.
+    #[tokio::test]
+    async fn gateway_manager_preserves_preset_z_order_for_overlap() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        mcu.ensure_room(room);
+        let layout = serde_json::json!({
+            "id": "overlap",
+            "payload": {
+                "mode": "manual", "preset": "preset_selected_b_overlap_4", "size": 4, "type": "individual",
+                "slots": [
+                    {"position": 1, "role": "AUTO"}, {"position": 2, "role": "AUTO"},
+                    {"position": 3, "role": "AUTO"}, {"position": 4, "role": "AUTO"}
+                ]
+            }
+        });
+        manager.apply_layout(room, layout).await.expect("overlap layout");
+        let descriptor = mcu.layout_descriptor(room).expect("layout");
+        assert!(descriptor.geometry.iter().any(|slot| slot.z_order > 0), "overlap windows must carry z_order>0");
+    }
+
+    /// T03: явный `position_base=0` сохраняет разреженные 0-based позиции
+    /// [2,3] как слоты 2/3, без inference по «есть ли ноль».
+    #[tokio::test]
+    async fn gateway_manager_honors_explicit_zero_position_base() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        let a = vks_core::ParticipantId::new();
+        let b = vks_core::ParticipantId::new();
+        let layout = serde_json::json!({
+            "id": "sparse-zero",
+            "payload": {
+                "position_base": 0,
+                "mode": "manual",
+                "preset": "preset_equal_4",
+                "slots": [
+                    {"position": 2, "abonent_id": a.as_uuid().to_string(), "x": 0, "y": 0, "width": 960, "height": 540},
+                    {"position": 3, "abonent_id": b.as_uuid().to_string(), "x": 960, "y": 0, "width": 960, "height": 540}
+                ]
+            }
+        });
+        manager.apply_layout(room, layout).await.expect("sparse 0-based layout");
+        let descriptor = mcu.layout_descriptor(room).expect("pending descriptor");
+        let mut slots: Vec<u32> = descriptor.assignments.values().copied().collect();
+        slots.sort_unstable();
+        assert_eq!(slots, vec![2, 3], "positions 2/3 остаются 2/3, а не превращаются в 0/1");
     }
 
     /// Реальные PNM-раскладки не хранят x/y: геометрия выводится из
@@ -1438,7 +1555,11 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             }
         });
         manager.apply_layout(room, layout).await.expect("preset geometry must reach the MCU");
+        assert!(mcu.layout_descriptor(room).is_some(), "pending preset layout must be stored");
         mcu.bridge_participant(room, pid, vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)]);
+        for _ in 0..11 {
+            mcu.tick(room);
+        }
         let rects = mcu.slot_rects(room).expect("MCU room");
         assert_eq!(rects.len(), 4, "4 preset cells, empty AUTO cells stay black");
         // Вендорная таблица `preset_selected_b_4` (3×3, блок 3×2): крупная зона
@@ -1477,6 +1598,8 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             }
         });
         manager.apply_layout(room, layout).await.expect("manual layout must reach the MCU");
+        assert!(mcu.layout_descriptor(room).is_some(), "раскладка сохранена как pending");
+        mcu.ensure_room(room);
 
         let rects = mcu.slot_rects(room).expect("MCU room must exist after a manual layout");
         assert_eq!(rects.len(), 4, "equal 2×2, not a sqrt grid by participant count");
