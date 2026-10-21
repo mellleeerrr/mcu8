@@ -22,6 +22,9 @@ pub const CANVAS_SIZE: (u32, u32) = (CANVAS_WIDTH, CANVAS_HEIGHT);
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Compositor;
 
+/// Максимальное число слотов, сортируемых на стеке без аллокации.
+const STACK_SORT_SLOTS: usize = 128;
+
 impl Compositor {
     /// Composes `frames` (slot key → frame) into a canvas using `rects`
     /// (slot key → target rect).
@@ -44,7 +47,7 @@ impl Compositor {
         // tie-break. BTreeMap сам по себе сортировал только по slot id.
         // До 128 слотов сортируем на стеке: compose вызывается 30 раз/с и не
         // должен аллоцировать на горячем пути.
-        let mut stack_keys = [0u32; 128];
+        let mut stack_keys = [0u32; STACK_SORT_SLOTS];
         if rects.len() <= stack_keys.len() {
             let n = rects.len();
             for (slot, key) in stack_keys.iter_mut().zip(rects.keys()) {

@@ -1,7 +1,7 @@
 # T03 evidence — применение раскладки в gateway/MCU
 
 Дата: 2026-10-21. Задача: T03 (P0), после T02 (`8788c46` + F1 `ed24d02`).
-Ревью: T02 F1 — `media-engine`; T03 — `media-engine` / `protocols-net`, см. отчёты сессии.
+Ревью: T02 F1 — `media-engine`, `directory-db`; T03 — `media-engine` / `protocols-net` (9.5), элегантность `layout-ui` — 9.5 после follow-up.
 
 ## Что закрыто
 
@@ -30,14 +30,18 @@
    manual-пресетов берёт `geometry_for_manual` (вендорный z_order), compositor
    сортирует `(z, key)`; PiP/overlap реально перекрывает крупную зону.
    Сортировка до 128 слотов на стеке — без аллокации на кадр.
-6. **Монотонная версия.** `apply_layout` ставит
+6. **Элегантность follow-up.** `RoomState::adopt_layout` — единая точка применения;
+   `layout_has_video` переиспользован; контракт позиций заякорен в
+   `LayoutDescriptor`; `STACK_SORT_SLOTS`; тесты version ровно `+1`, skip ниже
+   base, очистка pending в `destroy_room`, stale pending в `ensure_room`.
+7. **Монотонная версия.** `apply_layout` ставит
    `max(incoming, current+1)`, bridge бампает один раз при посадке; двойного
    инкремента нет, auto без изменения назначений всё равно перестраивает
    композитор.
 
 ## Гейты
 
-- `cargo test --workspace --all-targets` — **1005 passed / 0 failed / 6 ignored**.
+- `cargo test --workspace --all-targets` — **1006 passed / 0 failed / 6 ignored**.
 - `cargo clippy --workspace --all-targets -- -D warnings` — exit 0.
 - `cargo fmt --all -- --check` — OK.
 - F1 T02: `t02_canonical_create_persists_after_reload` — canonical «Общая»

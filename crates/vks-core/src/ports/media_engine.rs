@@ -157,6 +157,10 @@ pub struct LayoutSlot {
 /// В MCU: compositor использует это для pixel-rect.
 ///
 /// Поля упрощены для ядра: конкретная геометрия живёт в vks-layout.
+///
+/// **Контракт позиций:** `assignments` и `geometry[].slot` — всегда 0-based
+/// slot id. Админский API (`calculate`, `attach_abonent`) отдаёт 1-based
+/// `position`; gateway вычитает `position_base` (default 1) на границе.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutDescriptor {
     /// Идентикатор layout (versioned).

@@ -18,7 +18,7 @@
 > `docs/progress/evidence/t02/`. F1-фикс сохранения canonical default — `ed24d02`.
 >
 > **T03 (применение раскладки в gateway/MCU) закрыт:** ревью 9.5/10
-> (`protocols-net`), 1005 passed / 0 failed / 6 ignored, pending layout +
+> (`protocols-net`), 1006 passed / 0 failed / 6 ignored, pending layout +
 > auto по числу участников + geometry-only repair + z_order + монотонная версия,
 > evidence `docs/progress/evidence/t03/`. Следующая — T04a.
 >

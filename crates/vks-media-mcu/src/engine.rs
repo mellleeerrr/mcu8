@@ -216,6 +216,18 @@ impl RoomState {
         layout
     }
 
+    /// Применяет descriptor к комнате: crossfade, current layout, версия.
+    /// Одна точка для ensure_room/bridge/apply, чтобы не дублировать сброс
+    /// elapsed/applied_at.
+    fn adopt_layout(&mut self, layout: LayoutDescriptor) {
+        let new_layout = Self::layout_from_descriptor(&layout);
+        self.bridge.apply(&new_layout);
+        self.current_layout = new_layout;
+        self.layout = Some(layout);
+        self.layout_applied_at_ms = None;
+        self.elapsed_ms = 0;
+    }
+
     /// Recomputes the composite + mixed audio + per-participant mix-minus + VAD from the current
     /// frames and participant audio (deterministic logical step of 33ms).
     fn tick(&mut self, frames: &BTreeMap<u32, Frame>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
@@ -557,12 +569,7 @@ impl McuEngine {
         // не должна откатываться stale-значением.
         if state.layout.is_none() {
             if let Some(layout) = pending {
-                let new_layout = RoomState::layout_from_descriptor(&layout);
-                state.bridge.apply(&new_layout);
-                state.current_layout = new_layout;
-                state.layout = Some(layout);
-                state.elapsed_ms = 0;
-                state.layout_applied_at_ms = None;
+                state.adopt_layout(layout);
             }
         }
     }
@@ -580,12 +587,7 @@ impl McuEngine {
         // не должна теряться. Видео-участник затем сядет в её geometry-слот.
         if state.layout.is_none() {
             if let Some(layout) = pending {
-                let new_layout = RoomState::layout_from_descriptor(&layout);
-                state.bridge.apply(&new_layout);
-                state.current_layout = new_layout;
-                state.layout = Some(layout);
-                state.layout_applied_at_ms = None;
-                state.elapsed_ms = 0;
+                state.adopt_layout(layout);
             }
         }
         if !tracks.is_empty() {
@@ -826,16 +828,8 @@ impl MediaEngine for McuEngine {
         // AUTO, auto-пресет, возврат к «Общей» после удаления ручной). Иначе
         // `set_participant_frame` перестал бы писать кадры и живой SIP-терминал
         // увидел бы замерший последний снимок вместо новой сетки.
-        let bridged: Vec<ParticipantId> = state
-            .publisher_tracks
-            .iter()
-            .filter(|(_, tracks)| {
-                tracks.iter().any(|track| {
-                    matches!(track.kind, vks_core::track::TrackKind::Video | vks_core::track::TrackKind::Screen)
-                })
-            })
-            .map(|(pid, _)| *pid)
-            .collect();
+        let bridged: Vec<ParticipantId> =
+            state.publisher_tracks.iter().filter(|(_, tracks)| layout_has_video(tracks)).map(|(pid, _)| *pid).collect();
         let version_floor = state.layout.as_ref().map_or(0, |old| old.version.saturating_add(1));
         for pid in bridged {
             if !layout.assignments.contains_key(&pid) {
@@ -846,13 +840,7 @@ impl MediaEngine for McuEngine {
         // перестроить композитор. Repair больше не бампает отдельно, поэтому
         // двойного инкремента нет.
         layout.version = layout.version.max(version_floor);
-        let new_layout = RoomState::layout_from_descriptor(&layout);
-        state.layout = Some(layout);
-        // Begin the crossfade from the previous layout's rects to the new ones.
-        state.bridge.apply(&new_layout);
-        state.current_layout = new_layout;
-        state.elapsed_ms = 0;
-        state.layout_applied_at_ms = None;
+        state.adopt_layout(layout);
         Ok(())
     }
 
@@ -973,6 +961,8 @@ mod tests {
         // стартует раньше первого шлюзового вызова.
         e.apply_layout(missing, LayoutDescriptor::default()).await.expect("pending layout is accepted");
         assert!(e.layout_descriptor(missing).is_some());
+        assert!(matches!(e.destroy_room(missing).await.unwrap_err(), MediaEngineError::RoomNotFound(_)));
+        assert!(e.layout_descriptor(missing).is_none(), "destroy_room чистит pending");
     }
 
     #[tokio::test]

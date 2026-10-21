@@ -679,7 +679,14 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         // позиции, поэтому по умолчанию вычитаем 1. Для старых 0-based
         // документов можно прислать `payload.position_base = 0`; inference
         // по «есть ли ноль» больше нет (он ломал разреженные [2,3]).
-        let position_base = layout["payload"]["position_base"].as_u64().filter(|base| *base <= 1).unwrap_or(1) as u32;
+        let position_base = match layout["payload"]["position_base"].as_u64() {
+            Some(0) => 0,
+            Some(1) | None => 1,
+            Some(other) => {
+                tracing::warn!(position_base = other, "unsupported position_base; expected 0 or 1, using 1");
+                1
+            }
+        };
 
         let mut assignments = std::collections::BTreeMap::new();
         let mut geometry = Vec::new();
@@ -729,11 +736,11 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         // задаётся `payload.preset` (`preset_equal_25`, `preset_selected_b_4_(2)`…).
         // Без этого MCU рисовал sqrt-сетку и выбранная схема терялась.
         let mode = layout["payload"]["mode"].as_str().unwrap_or_default();
-        if geometry.is_empty() && mode == "auto" {
-            // «Общая»/AUTO: geometry остаётся пустой, движок сам строит сетку
-            // по числу забридженных паблишеров. Фиксированная 13-ячейковая
-            // сетка `preset_default_13` давала участнику плитку 480×270.
-        } else if geometry.is_empty() {
+        // AUTO (`mode=="auto"`) оставляет geometry пустой: движок строит сетку
+        // по числу забридженных паблишеров (фиксированные 13 ячеек
+        // `preset_default_13` давали участнику плитку 480×270). Для
+        // manual/dynamic геометрия берётся из `payload.preset`.
+        if geometry.is_empty() && mode != "auto" {
             let slot_count = assignments.values().copied().max().unwrap_or(0).saturating_add(1);
             let preset_name = layout["payload"]["preset"].as_str().unwrap_or_default();
             let preset_size = layout["payload"]["size"].as_u64().and_then(|value| u8::try_from(value).ok());
@@ -1475,7 +1482,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert_eq!(rects.len(), 2, "2 участника → 2 ячейки, не 13");
         let layout = mcu.layout_descriptor(room).expect("layout");
         assert!(layout.geometry.is_empty(), "auto не синтезирует preset-геометрию");
-        assert!(layout.version > before, "версия растёт при возврате к «Общей»");
+        assert_eq!(layout.version, before + 1, "ровно один инкремент версии при возврате к «Общей»");
     }
 
     /// T03: gateway не теряет вендорный z_order overlap/PiP-пресета.
@@ -1499,6 +1506,26 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         manager.apply_layout(room, layout).await.expect("overlap layout");
         let descriptor = mcu.layout_descriptor(room).expect("layout");
         assert!(descriptor.geometry.iter().any(|slot| slot.z_order > 0), "overlap windows must carry z_order>0");
+    }
+
+    /// T03: позиция ниже `position_base` пропускается с warn, без сдвига.
+    #[tokio::test]
+    async fn gateway_manager_skips_position_below_base() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        let pid = vks_core::ParticipantId::new();
+        let layout = serde_json::json!({
+            "id": "below-base",
+            "payload": {
+                "mode": "manual", "preset": "preset_equal_4",
+                "slots": [{"position": 0, "abonent_id": pid.as_uuid().to_string()}]
+            }
+        });
+        manager.apply_layout(room, layout).await.expect("layout accepted");
+        let descriptor = mcu.layout_descriptor(room).expect("pending descriptor");
+        assert!(descriptor.assignments.is_empty(), "position 0 при base=1 не должен стать слотом 0");
     }
 
     /// T03: явный `position_base=0` сохраняет разреженные 0-based позиции
