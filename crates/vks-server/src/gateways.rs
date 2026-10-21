@@ -989,13 +989,18 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             "outbound gateway video profile"
         );
         let (remote_ip, remote_audio_port, audio_payload_type, dtmf_payload_type, video_remote, call_id) = if is_h323 {
+            let h323_video = vks_gateway_h323::H323VideoProfile {
+                max_bitrate_kbps: video_profile.bitrate_kbps.max(64),
+                level_idc: video_profile.h323_level_idc(),
+            };
             let session = self
                 .h323_uac_client
-                .dial_with_media(
+                .dial_with_media_profile(
                     trimmed,
                     rtp_port,
                     video_pair.as_ref().map(|pair| pair.rtp_port),
                     std::time::Duration::from_secs(60),
+                    h323_video,
                 )
                 .await
                 .map_err(|error| format!("H.323 outbound dial failed: {error}"))?;

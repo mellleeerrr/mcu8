@@ -116,14 +116,18 @@ def endpoint(address, expected_ip: str):
     return ip, port
 
 
-def video_capability():
-    # H.241: baseline profile, Level 3.1; H264 RTP non-interleaved packetization.
+def video_capability(config=None):
+    # H.241 generic video capability: baseline profile (bit 6), negotiated
+    # H.264 level (generic parameter 42 packs level_idc as level_idc + 40),
+    # maxBitRate in 100 bit/s units. Defaults preserve the T05 POC value.
+    max_bitrate = 5120 if config is None else config.video_max_bitrate_100bps
+    level = 71 if config is None else config.video_h264_level
     return ("genericVideoCapability", {
         "capabilityIdentifier": ("standard", H264_OID),
-        "maxBitRate": 5120,  # units 100 bit/s
+        "maxBitRate": max_bitrate,
         "collapsing": [
             {"parameterIdentifier": ("standard", 41), "parameterValue": ("booleanArray", 64)},
-            {"parameterIdentifier": ("standard", 42), "parameterValue": ("unsignedMin", 71)},
+            {"parameterIdentifier": ("standard", 42), "parameterValue": ("unsignedMin", level)},
         ],
     })
 
@@ -155,6 +159,8 @@ class Configuration:
     call_id: str
     call_ref: int
     trace: bool = False
+    video_max_bitrate_100bps: int = 5120
+    video_h264_level: int = 71
 
     @classmethod
     def load(cls, value):
@@ -176,7 +182,13 @@ class Configuration:
         # call with Q.931 cause invalidCID before H.245 starts.
         if call_id.int == 0:
             raise ProtocolError("H.323 call_id must be a non-nil UUID")
-        return cls(target_ip, port, local_ip, audio, video, max(1, min(float(value["timeout_seconds"]), 180)), str(call_id), max(1, int(value["call_ref"]) & 0x7FFF), bool(value.get("trace", False)))
+        # H.241 maxBitRate is 100 bit/s; accept 0.1..19240 kbit/s. Level 71 is
+        # H.264 3.1 (31 + 40), 80 is 4.0, 91 is 5.1.
+        max_bitrate = max(1, min(int(value.get("video_max_bitrate_100bps", 5120)), 192400))
+        level = int(value.get("video_h264_level", 71))
+        if level not in (70, 71, 72, 80, 81, 82, 90, 91):
+            raise ProtocolError("Unsupported H.264 level for H.241 generic parameter 42")
+        return cls(target_ip, port, local_ip, audio, video, max(1, min(float(value["timeout_seconds"]), 180)), str(call_id), max(1, int(value["call_ref"]) & 0x7FFF), bool(value.get("trace", False)), max_bitrate, level)
 
 
 class Call:
@@ -250,7 +262,7 @@ class Call:
         entries = [{"capabilityTableEntryNumber": 1, "capability": ("receiveAndTransmitAudioCapability", ("g711Ulaw64k", 20))}]
         simultaneous = [[1]]
         if self.config.video_port is not None:
-            entries.append({"capabilityTableEntryNumber": 2, "capability": ("receiveAndTransmitVideoCapability", video_capability())})
+            entries.append({"capabilityTableEntryNumber": 2, "capability": ("receiveAndTransmitVideoCapability", video_capability(self.config))})
             simultaneous.append([2])
         distribution = {"centralizedControl": False, "distributedControl": False, "centralizedAudio": False, "distributedAudio": False, "centralizedVideo": False, "distributedVideo": False}
         multipoint = {"multicastCapability": False, "multiUniCastConference": False, "mediaDistributionCapability": [distribution]}
@@ -309,7 +321,7 @@ class Call:
             self.open_outgoing(2, "video", self.config.video_port)
 
     def open_outgoing(self, number, kind, local_port):
-        data_type = ("audioData", ("g711Ulaw64k", 20)) if kind == "audio" else ("videoData", video_capability())
+        data_type = ("audioData", ("g711Ulaw64k", 20)) if kind == "audio" else ("videoData", video_capability(self.config))
         params = {"sessionID": 1 if kind == "audio" else 2, "mediaControlChannel": h245_address(self.config.local_ip, local_port + 1)}
         if kind == "audio":
             params["silenceSuppression"] = False

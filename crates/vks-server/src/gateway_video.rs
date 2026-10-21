@@ -29,6 +29,37 @@ impl Default for VideoProfile {
 }
 
 impl VideoProfile {
+    /// H.241-совместимый уровень H.264: явный `level` важнее геометрии, иначе
+    /// выводим из pixels*fps (1080p30 → 4.0, 720p30 → 3.1, 640x360 → 3.0).
+    pub(super) fn h323_level_idc(&self) -> u8 {
+        match self.level.trim() {
+            "3.0" => 30,
+            "3.1" => 31,
+            "3.2" => 32,
+            "4.0" => 40,
+            "4.1" => 41,
+            "4.2" => 42,
+            "5.0" => 50,
+            "5.1" => 51,
+            _ => {
+                // H.264 Level limits are macroblocks/s, not pixels/s:
+                // 3.0 40 500, 3.1 108 000, 4.0 245 760, 4.2 522 240.
+                let mb = u64::from(self.width.div_ceil(16)) * u64::from(self.height.div_ceil(16)) * u64::from(self.fps);
+                if mb > 522_240 {
+                    51
+                } else if mb > 245_760 {
+                    42
+                } else if mb > 108_000 {
+                    40
+                } else if mb > 40_500 {
+                    31
+                } else {
+                    30
+                }
+            }
+        }
+    }
+
     /// Читает переопределения из env. Невалидные/нулевые значения игнорируются,
     /// чтобы опечатка в unit-файле не отключила видео.
     pub(super) fn from_env() -> Self {
@@ -835,6 +866,18 @@ fn frame_interval(profile: &VideoProfile) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn h323_level_follows_explicit_level_then_geometry() {
+        let explicit = VideoProfile { level: "4.0".into(), ..VideoProfile::default() };
+        assert_eq!(explicit.h323_level_idc(), 40);
+        let hd = VideoProfile { width: 1920, height: 1080, fps: 30, level: String::new(), ..VideoProfile::default() };
+        assert_eq!(hd.h323_level_idc(), 40);
+        let hd60 = VideoProfile { width: 1920, height: 1080, fps: 60, level: String::new(), ..VideoProfile::default() };
+        assert_eq!(hd60.h323_level_idc(), 42);
+        let sd = VideoProfile { width: 640, height: 360, fps: 30, level: String::new(), ..VideoProfile::default() };
+        assert_eq!(sd.h323_level_idc(), 30);
+    }
 
     #[tokio::test]
     #[ignore = "requires ffmpeg with libx264"]

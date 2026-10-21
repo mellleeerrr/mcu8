@@ -136,6 +136,31 @@ impl ConnectedMedia {
     }
 }
 
+/// H.241 video capability, derived from the live gateway VideoProfile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct H323VideoProfile {
+    /// H.241 `maxBitRate` source, kbit/s; wire value is `* 10` (100 bit/s).
+    pub max_bitrate_kbps: u32,
+    /// H.264 level_idc (31 = 3.1, 40 = 4.0); generic parameter 42 is +40.
+    pub level_idc: u8,
+}
+
+impl Default for H323VideoProfile {
+    fn default() -> Self {
+        Self { max_bitrate_kbps: 512, level_idc: 31 }
+    }
+}
+
+impl H323VideoProfile {
+    fn h241_level(self) -> u32 {
+        u32::from(self.level_idc.clamp(30, 51)) + 40
+    }
+
+    fn max_bitrate_100bps(self) -> u32 {
+        self.max_bitrate_kbps.saturating_mul(10).clamp(1, 192_400)
+    }
+}
+
 pub struct H323UacClient {
     pub local_ip: String,
 }
@@ -161,12 +186,30 @@ impl H323UacClient {
         local_video_port: Option<u16>,
         dial_timeout: Duration,
     ) -> CallResult<ActiveH323Session> {
+        self.dial_with_media_profile(
+            target_uri,
+            local_audio_port,
+            local_video_port,
+            dial_timeout,
+            H323VideoProfile::default(),
+        )
+        .await
+    }
+
+    pub async fn dial_with_media_profile(
+        &self,
+        target_uri: &str,
+        local_audio_port: u16,
+        local_video_port: Option<u16>,
+        dial_timeout: Duration,
+        video_profile: H323VideoProfile,
+    ) -> CallResult<ActiveH323Session> {
         let python = std::env::var_os("VKS_H323_PYTHON").map(PathBuf::from).unwrap_or_else(default_python);
         let helper = resolve_helper()?;
         info!(helper = %helper.display(), python = %python.display(), "H.323 sidecar resolved");
         let mut command = Command::new(python);
         command.arg("-u").arg(helper);
-        self.dial_command(target_uri, local_audio_port, local_video_port, dial_timeout, command).await
+        self.dial_command(target_uri, local_audio_port, local_video_port, dial_timeout, video_profile, command).await
     }
 
     async fn dial_command(
@@ -175,6 +218,7 @@ impl H323UacClient {
         audio_port: u16,
         video_port: Option<u16>,
         dial_timeout: Duration,
+        video_profile: H323VideoProfile,
         mut command: Command,
     ) -> CallResult<ActiveH323Session> {
         let target = parse_target(target_uri)?;
@@ -198,6 +242,8 @@ impl H323UacClient {
             "local_ip": local_ip.to_string(), "audio_port": audio_port,
             "video_port": video_port, "timeout_seconds": dial_timeout.as_secs_f64().min(180.0),
             "call_id": call_id, "call_ref": call_ref,
+            "video_max_bitrate_100bps": video_profile.max_bitrate_100bps(),
+            "video_h264_level": video_profile.h241_level(),
         });
         command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
         let mut child = command.spawn().map_err(|err| failure(format!("cannot start ASN.1 sidecar: {err}")))?;
@@ -466,6 +512,19 @@ impl Supervisor {
 mod tests {
     use super::*;
 
+    #[test]
+    fn h323_video_profile_maps_to_h241_limits() {
+        let profile = H323VideoProfile { max_bitrate_kbps: 4096, level_idc: 40 };
+        assert_eq!(profile.h241_level(), 80);
+        assert_eq!(profile.max_bitrate_100bps(), 40_960);
+        let default = H323VideoProfile::default();
+        assert_eq!(default.h241_level(), 71);
+        assert_eq!(default.max_bitrate_100bps(), 5120);
+        assert_eq!(H323VideoProfile { max_bitrate_kbps: 0, level_idc: 1 }.max_bitrate_100bps(), 1);
+        assert_eq!(H323VideoProfile { max_bitrate_kbps: 999_999, level_idc: 99 }.h241_level(), 91);
+        assert_eq!(H323VideoProfile { max_bitrate_kbps: 2048, level_idc: 30 }.h241_level(), 70);
+    }
+
     fn python(code: &str) -> Command {
         let mut command = Command::new(if cfg!(windows) { "python" } else { "python3" });
         command.arg("-u").arg("-c").arg(code);
@@ -482,6 +541,7 @@ mod tests {
                 41000,
                 None,
                 Duration::from_secs(1),
+                H323VideoProfile::default(),
                 python("import sys\nsys.stdin.readline()\nprint('{\"event\":\"ringing\"}',flush=True)\n"),
             )
             .await;
@@ -496,6 +556,7 @@ mod tests {
                 41000,
                 None,
                 Duration::from_secs(1),
+                H323VideoProfile::default(),
                 python("import sys\nsys.stdin.readline()\nprint('x'*40000,flush=True)\n"),
             )
             .await;
@@ -505,7 +566,14 @@ mod tests {
     #[tokio::test]
     async fn remote_process_exit_notifies_call_owner() {
         let session = H323UacClient::new("127.0.0.1")
-            .dial_command("h323:127.0.0.1", 41000, None, Duration::from_secs(2), python(CONNECTED))
+            .dial_command(
+                "h323:127.0.0.1",
+                41000,
+                None,
+                Duration::from_secs(2),
+                H323VideoProfile::default(),
+                python(CONNECTED),
+            )
             .await
             .expect("connected event");
         let mut notice = session.subscribe_disconnect();
@@ -524,7 +592,14 @@ mod tests {
     async fn hangup_sends_command_and_waits_for_process_shutdown() {
         let code = format!("{CONNECTED}c=json.loads(sys.stdin.readline())\nassert c['command']=='hangup'\nprint(json.dumps(dict(event='disconnected',reason='local_hangup')),flush=True)\n");
         let session = H323UacClient::new("127.0.0.1")
-            .dial_command("h323:127.0.0.1", 41000, None, Duration::from_secs(2), python(&code))
+            .dial_command(
+                "h323:127.0.0.1",
+                41000,
+                None,
+                Duration::from_secs(2),
+                H323VideoProfile::default(),
+                python(&code),
+            )
             .await
             .expect("connected");
         session.hangup().await.expect("graceful shutdown");
@@ -538,7 +613,14 @@ mod tests {
         let code = format!("import sys,json,pathlib\nc=json.loads(sys.stdin.readline())\nprint('{{\"event\":\"ringing\"}}',flush=True)\nx=json.loads(sys.stdin.readline())\nassert x['command']=='hangup'\npathlib.Path({:?}).write_text('stopped')\n", marker.to_string_lossy());
         let task = tokio::spawn(async move {
             H323UacClient::new("127.0.0.1")
-                .dial_command("h323:127.0.0.1", 41000, None, Duration::from_secs(10), python(&code))
+                .dial_command(
+                    "h323:127.0.0.1",
+                    41000,
+                    None,
+                    Duration::from_secs(10),
+                    H323VideoProfile::default(),
+                    python(&code),
+                )
                 .await
         });
         tokio::time::sleep(Duration::from_millis(300)).await;

@@ -228,4 +228,32 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(call.connected)
 
 
+    def test_invalid_h241_level_is_rejected_before_tcp(self):
+        with self.assertRaises(h.ProtocolError):
+            h.Configuration.load({
+                'target_ip': '192.168.1.132', 'local_ip': '192.168.1.93',
+                'audio_port': 41002, 'video_port': 41004, 'timeout_seconds': 30,
+                'call_id': '00010203-0405-0607-0809-0a0b0c0d0e0f', 'call_ref': 1,
+                'video_h264_level': 75,
+            })
+
+    def test_video_capability_uses_live_profile_limits(self):
+        config = h.Configuration.load({
+            'target_ip': '192.168.1.132', 'local_ip': '192.168.1.93',
+            'audio_port': 41002, 'video_port': 41004, 'timeout_seconds': 30,
+            'call_id': '00010203-0405-0607-0809-0a0b0c0d0e0f', 'call_ref': 1,
+            'video_max_bitrate_100bps': 40960, 'video_h264_level': 80,
+        })
+        capability = h.video_capability(config)
+        self.assertEqual(capability[1]['maxBitRate'], 40960)
+        params = {p['parameterIdentifier']: p['parameterValue'][1]
+                  for p in capability[1]['collapsing']}
+        self.assertEqual(params[('standard', 41)], 64)
+        self.assertEqual(params[('standard', 42)], 80)
+        # Defaults stay wire-compatible with the first live Polycom capture.
+        default = h.video_capability()
+        self.assertEqual(default[1]['maxBitRate'], 5120)
+        self.assertEqual(default[1]['collapsing'][1]['parameterValue'][1], 71)
+
+
 if __name__ == '__main__': unittest.main()

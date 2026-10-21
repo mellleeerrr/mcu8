@@ -38,4 +38,4 @@ pub use q931::{
     build_q931_release_complete, encode_tpkt, parse_q931_message, Q931Message, MSG_ALERTING, MSG_CALL_PROCEEDING,
     MSG_CONNECT, MSG_RELEASE_COMPLETE, MSG_SETUP,
 };
-pub use uac::{ActiveH323Session, H323UacClient};
+pub use uac::{ActiveH323Session, H323UacClient, H323VideoProfile};
