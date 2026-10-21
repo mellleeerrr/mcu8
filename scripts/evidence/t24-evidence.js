@@ -460,22 +460,32 @@ const isVendorError = (text) =>
     const acceptance = Object.entries(summary.acceptance);
     const failed = acceptance.filter(([, ok]) => ok !== true).map(([key]) => key);
     summary.acceptance_failed = failed;
-    summary.console_errors = consoleErrors;
+    // Намеренный 501 в гейте видимой ошибки сети: Chromium логирует любой
+    // failed resource и HTTP-ответ в общий счётчик. Исключаем ровно этот
+    // запрос/статус, всё остальное остаётся провалом.
+    const intentionalConsole = consoleErrors.filter((text) =>
+      text.includes('Failed to load resource: the server responded with a status of 501'));
+    const unexpectedConsole = consoleErrors.filter((text) => !intentionalConsole.includes(text));
+    const intentionalHttp = httpErrors.filter((text) => text.includes('/api/v3/system/network/ens18'));
+    const unexpectedHttp = httpErrors.filter((text) => !intentionalHttp.includes(text));
+    summary.console_errors = unexpectedConsole;
     summary.vendor_errors = vendorErrors;
-    summary.http_errors = httpErrors;
+    summary.http_errors = unexpectedHttp;
     summary.ok =
       build.git_dirty === false &&
       build.binary_mtime !== null &&
       build.binary_mtime >= build.git_head_ct &&
       failed.length === 0 &&
-      consoleErrors.length === 0 &&
-      httpErrors.length === 0;
+      unexpectedConsole.length === 0 &&
+      unexpectedHttp.length === 0;
     summary.totals = {
       ...summary.totals,
       gates: acceptance.length,
       gates_passed: acceptance.length - failed.length,
-      http_errors: httpErrors.length,
-      console_errors: consoleErrors.length,
+      http_errors: unexpectedHttp.length,
+      console_errors: unexpectedConsole.length,
+      intentional_console_501: intentionalConsole.length,
+      intentional_http_501: intentionalHttp.length,
       vendor_errors: vendorErrors.length,
       screenshots: screenshots.length,
       steps: steps.length,
