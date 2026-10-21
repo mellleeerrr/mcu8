@@ -231,25 +231,46 @@ fn session_calls(
         if room_id != room.id || !seen.insert(attempt.record.id.clone()) {
             continue;
         }
-        let finished = attempt.completed_at.map(|ts| ts as i64).unwrap_or(stopped_at);
-        let finish_reason = native_stop_reason(attempt.failure_reason.as_deref().unwrap_or("Ended By Remote"));
+        // Участник мог уйти (BYE/kick) до остановки сессии — это нормальный
+        // сценарий; состояние соединения берём из CallAttempt, а live-снимок
+        // используется только как более точный источник.
+        let live = attempt
+            .participant_id
+            .as_deref()
+            .and_then(|participant_id| participants.iter().find(|p| p.participant_id == participant_id));
+        let finished = live
+            .map(|_| attempt.completed_at.map(|ts| ts as i64).unwrap_or(stopped_at))
+            .or_else(|| attempt.stopped_at.map(|ts| ts as i64))
+            .or_else(|| attempt.completed_at.map(|ts| ts as i64))
+            .unwrap_or(stopped_at);
+        let finish_reason = native_stop_reason(
+            attempt.stop_reason.as_deref().or(attempt.failure_reason.as_deref()).unwrap_or("Ended By Remote"),
+        );
         // Время вызова — когда адрес создан/начат, а не старт всей сессии.
         let started_at = (attempt.record.created_at as i64).min(finished).max(0);
+        let connected_at = live
+            .map(|participant| participant.connected_at as i64)
+            .or(attempt.connected_at.map(|ts| ts as i64))
+            .or(attempt.participant_id.as_ref().map(|_| started_at));
+        let connection_type = if attempt.incoming { "INCOMING" } else { "OUTGOING" };
         // Vendor-UI (маппер H) читает abonents[].abonent_id/contact/connection/
         // started_at/stopped_at/stop_reason; без этой формы реальные
         // подключения классифицировались бы как MISSED.
+        let display_name = live
+            .map(|participant| participant.display_name.clone())
+            .unwrap_or_else(|| attempt.record.display_name.clone());
         let abonents: Vec<Value> = attempt
             .participant_id
             .as_deref()
-            .and_then(|participant_id| participants.iter().find(|p| p.participant_id == participant_id))
-            .map(|participant| {
+            .filter(|_| connected_at.is_some())
+            .map(|participant_id| {
                 vec![json!({
-                    "abonent_id": participant.participant_id,
+                    "abonent_id": participant_id,
                     "contact_id": attempt.record.id,
-                    "display_name": participant.display_name,
+                    "display_name": display_name,
                     "contact": {"contact_type": "call_strings", "id": attempt.record.id},
-                    "connection": {"type_id": "OUTGOING", "connection_url": uri},
-                    "started_at": participant.connected_at as i64,
+                    "connection": {"type_id": connection_type, "connection_url": uri},
+                    "started_at": connected_at.unwrap_or(started_at),
                     "stopped_at": finished,
                     "stop_reason": finish_reason,
                     "moved_to": Value::Null,
@@ -308,8 +329,20 @@ pub async fn record_stopped_with_settings(
     let started_at = room.created_ms as i64 / 1000;
     let stopped_at = (now_unix_ms() / 1000) as i64;
     let participants = state.room_hub.list_participants(&room.id);
-    let abonents_count = participants.len() as u32;
     let calls = session_calls(state, room, stopped_at, &participants);
+    // Считаем и тех, кто уже отключился до остановки: иначе сессия с
+    // завершившимися звонками показывает 0 участников. Участники, для которых
+    // нет CallAttempt (веб/локальные), учитываются отдельно — без двойного счёта.
+    let call_participants: std::collections::HashSet<&str> = calls
+        .iter()
+        .flat_map(|call| call.abonents.iter())
+        .filter_map(|abonent| abonent.get("abonent_id").and_then(Value::as_str))
+        .collect();
+    let local_participants = participants
+        .iter()
+        .filter(|participant| !call_participants.contains(participant.participant_id.as_str()))
+        .count();
+    let abonents_count = (call_participants.len() + local_participants).min(u32::MAX as usize) as u32;
     let settings = settings_override.or_else(|| conference_settings(state, &room.id));
     let payload = {
         let stored = settings.clone().unwrap_or_else(|| json!({}));
@@ -341,8 +374,33 @@ pub async fn record_stopped_with_settings(
     let mut resources = state.api_v3.resources.lock().await;
     let previous = resources.clone();
     resources.history.record(session);
+    // Durable-маркер на комнате: `clean` стирает историю, но не комнату, поэтому
+    // без него удаление старой остановленной конференции воскрешало бы запись.
+    let previous_marker = {
+        let mut settings = state.api_v3.conference_settings.lock().ok();
+        settings.as_mut().and_then(|settings| {
+            let entry = settings.entry(room.id).or_insert_with(|| json!({}));
+            let marker = entry.get("history_recorded_at").cloned();
+            if let Some(object) = entry.as_object_mut() {
+                object.insert("history_recorded_at".into(), json!(stopped_at));
+            }
+            marker
+        })
+    };
     if let Err(error) = super::resources::persist(state, &resources).await {
         *resources = previous;
+        if let Ok(mut settings) = state.api_v3.conference_settings.lock() {
+            if let Some(entry) = settings.get_mut(&room.id).and_then(Value::as_object_mut) {
+                match previous_marker {
+                    Some(marker) => {
+                        entry.insert("history_recorded_at".into(), marker);
+                    }
+                    None => {
+                        entry.remove("history_recorded_at");
+                    }
+                }
+            }
+        }
         tracing::warn!(error = %error, "history: persist failed");
         return None;
     }

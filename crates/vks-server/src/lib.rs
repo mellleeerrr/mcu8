@@ -381,6 +381,7 @@ async fn cleanup_active_membership(
         let _ = sfu_engine.remove_publisher(m.room_id, pid_val).await;
         let _ = mcu_engine.remove_subscriber(m.room_id, pid_val).await;
         let _ = mcu_engine.remove_publisher(m.room_id, pid_val).await;
+        vks_admin::api_v3::call_strings::note_participant_left(state, &m.room_id, &m.participant_id, "Ended By Remote");
         let rem_opt = state.room_hub.unregister_participant(&m.room_id, &m.participant_id);
         state.room_hub.unsubscribe(&m.room_id);
         let count = rem_opt.unwrap_or(0);

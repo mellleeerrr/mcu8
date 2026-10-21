@@ -466,7 +466,6 @@ pub async fn http_reset(State(state): State<SharedState>, Extension(auth): Exten
     Json(defaults("http")).into_response()
 }
 
-
 /// `PATCH /api/v3/settings/audio_codecs` — vendor-UI сохраняет порядок кодеков
 /// в конференции; применяем к media-настройкам и персистим через SettingsService.
 pub async fn audio_codecs_patch(
@@ -526,8 +525,7 @@ async fn codecs_patch(state: SharedState, auth: AuthContext, body: Value, kind: 
     }
     crate::settings::SettingsService::set_async(&state, settings).await;
     state.record_audit_entry(&auth.subject, "settings.codecs.updated", None, "");
-    let response: Vec<Value> =
-        codecs.into_iter().map(|id| json!({"id": id, "description": id})).collect();
+    let response: Vec<Value> = codecs.into_iter().map(|id| json!({"id": id, "description": id})).collect();
     Json(json!({ key: response })).into_response()
 }
 

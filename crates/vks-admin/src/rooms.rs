@@ -250,6 +250,7 @@ impl Rooms {
     /// Kicks a participant from a room: broadcasts ParticipantLeft with reason 2 (kicked),
     /// removes from RoomHub roster, updates participant count in storage, and notifies admin WS.
     pub fn kick_participant(state: &AppState, room_id: &RoomId, participant_id: &str) -> bool {
+        super::api_v3::call_strings::note_participant_left(state, room_id, participant_id, "Ended By Remote");
         let remaining = state.room_hub.unregister_participant(room_id, participant_id);
 
         if let Some(dialer) = state.outbound_dialer() {

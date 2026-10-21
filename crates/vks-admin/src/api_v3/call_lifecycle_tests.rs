@@ -176,6 +176,10 @@ fn recall_finds_standby_only_in_its_room_even_with_duplicate_contact_ids() {
             failure_reason: Some("Foreign failure".into()),
             completed_at: Some(100),
             abort_handle: None,
+            connected_at: None,
+            stopped_at: None,
+            stop_reason: None,
+            incoming: false,
         },
     );
     let found = lookup_session_record(&state, &room, Some("same-id")).unwrap();

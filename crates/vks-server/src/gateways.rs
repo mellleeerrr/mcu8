@@ -262,6 +262,13 @@ impl GatewayManager {
             has_video,
         );
 
+        vks_admin::api_v3::call_strings::record_incoming_call(
+            state.as_ref(),
+            *room_id,
+            &active_call.participant_id,
+            &format!("sip:{from}"),
+            &display_name,
+        );
         info!(call_id = %call_id, room_id = %room_id, "SIP participant landed in room");
         Ok(active_call)
     }
@@ -324,6 +331,13 @@ impl GatewayManager {
             has_video,
         );
 
+        vks_admin::api_v3::call_strings::record_incoming_call(
+            state.as_ref(),
+            *room_id,
+            &active_call.participant_id,
+            &format!("h323:{from}"),
+            &display_name,
+        );
         info!(call_id = %call_id, room_id = %room_id, "H.323 participant landed in room");
         Ok(active_call)
     }
@@ -562,6 +576,7 @@ pub fn terminate_gateway_participant_in_room(
         .list_participants(room_id)
         .iter()
         .any(|participant| participant.participant_id == participant_id);
+    vks_admin::api_v3::call_strings::note_participant_left(state.as_ref(), room_id, participant_id, "Ended By Remote");
     state.room_hub.unregister_participant(room_id, participant_id);
     if !was_registered {
         // A dial that failed before announce must not emit a phantom leave.

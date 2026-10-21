@@ -837,6 +837,12 @@ pub async fn delete_conference(
             // `started_at` ставится стартом/quick-start), и только если удаление
             // действительно состоялось.
             let started = settings_snapshot.as_ref().is_some_and(|settings| settings.get("started_at").is_some());
+            // `clean` стирает историю, но не комнаты: запись при удалении уже
+            // остановленной/удалённой сессии воскресила бы её. Маркер durable
+            // (пишется вместе с историей), stopped_sessions — для текущего процесса.
+            let already_recorded =
+                settings_snapshot.as_ref().is_some_and(|settings| settings.get("history_recorded_at").is_some())
+                    || state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
             let participant_ids: Vec<String> = state
                 .room_hub
                 .list_participants(&room.id)
@@ -845,7 +851,7 @@ pub async fn delete_conference(
                 .collect();
             match Rooms::delete_async(&state, &room.id).await {
                 Ok(true) => {
-                    if started {
+                    if started && !already_recorded {
                         super::history::record_stopped_with_settings(
                             &state,
                             &room,

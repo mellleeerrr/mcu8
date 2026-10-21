@@ -155,6 +155,10 @@ async fn pnm_engine_uses_dialed_address_and_native_contact_payload() {
             failure_reason: None,
             completed_at: None,
             abort_handle: None,
+            connected_at: Some(1),
+            stopped_at: None,
+            stop_reason: None,
+            incoming: false,
         },
     );
     let server = app(state);

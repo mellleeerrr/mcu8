@@ -27,7 +27,7 @@ use super::sessions::{check_permission, find_room, sanitize_id};
 use super::{error_json, track, ListParams};
 use crate::auth_middleware::AuthContext;
 use crate::settings::SettingsService;
-use crate::state::SharedState;
+use crate::state::{AppState, SharedState};
 
 /// Запись строки вызова в памяти (in-flight или standby).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +200,14 @@ pub struct CallAttempt {
     pub failure_reason: Option<String>,
     pub completed_at: Option<u64>,
     pub abort_handle: Option<tokio::task::AbortHandle>,
+    /// Когда соединение реально установилось (для истории: abonent.start).
+    pub connected_at: Option<u64>,
+    /// Когда участник ушёл из комнаты до остановки сессии (BYE/kick/leave).
+    pub stopped_at: Option<u64>,
+    /// Причина завершения, сохранённая при уходе участника.
+    pub stop_reason: Option<String>,
+    /// Входящий вызов (шлюз → MCU), а не исходящий из адресной книги.
+    pub incoming: bool,
 }
 
 struct InFlightCallGuard {
@@ -343,6 +351,10 @@ pub(super) fn queue_call(
             failure_reason: None,
             completed_at: None,
             abort_handle: None,
+            connected_at: None,
+            stopped_at: None,
+            stop_reason: None,
+            incoming: false,
         },
     );
     in_flight.insert(key, record.clone());
@@ -369,7 +381,10 @@ pub(super) fn queue_call(
                 }
                 if !obsolete {
                     match &result {
-                        Ok(pid) => attempt.participant_id = Some(pid.clone()),
+                        Ok(pid) => {
+                            attempt.participant_id = Some(pid.clone());
+                            attempt.connected_at = Some(now_unix_sec());
+                        }
                         Err(error) => {
                             attempt.failure_reason = Some(error.clone());
                             attempt.completed_at = Some(now_unix_sec());
@@ -418,6 +433,60 @@ pub(super) fn queue_call(
         abort_handle.abort();
     }
     Ok(())
+}
+
+/// Уход участника из комнаты (BYE, kick, leave) до остановки сессии.
+///
+/// Сохраняем `stopped_at`/`stop_reason` в [`CallAttempt`], иначе история
+/// теряет abonent и vendor-UI рисует состоявшийся вызов как MISSED.
+pub fn note_participant_left(state: &AppState, room_id: &vks_core::RoomId, participant_id: &str, reason: &str) {
+    let now = now_unix_sec();
+    if let Ok(mut attempts) = state.api_v3.call_attempts.lock() {
+        for attempt in attempts
+            .iter_mut()
+            .filter(|((attempt_room, _), _)| attempt_room == room_id)
+            .map(|(_, attempt)| attempt)
+            .filter(|attempt| attempt.participant_id.as_deref() == Some(participant_id))
+        {
+            attempt.stopped_at.get_or_insert(now);
+            attempt.stop_reason.get_or_insert_with(|| reason.to_string());
+            attempt.completed_at.get_or_insert(now);
+        }
+    }
+}
+
+/// Регистрирует входящий шлюзовой вызов в `call_attempts` (`INCOMING` в истории).
+pub fn record_incoming_call(
+    state: &AppState,
+    room_id: vks_core::RoomId,
+    participant_id: &str,
+    uri: &str,
+    display_name: &str,
+) {
+    let now = now_unix_sec();
+    let record = CallStringRecord {
+        id: format!("cs-{}", Uuid::new_v4()),
+        uri: uri.to_string(),
+        display_name: display_name.to_string(),
+        created_at: now,
+        payload: default_contact_payload(None),
+    };
+    let mut attempts = state.api_v3.call_attempts.lock().expect("call_attempts poisoned");
+    attempts.insert(
+        (room_id, format!("{}#{}", uri, record.id)),
+        CallAttempt {
+            record,
+            generation: Uuid::new_v4(),
+            participant_id: Some(participant_id.to_string()),
+            failure_reason: None,
+            completed_at: None,
+            abort_handle: None,
+            connected_at: Some(now),
+            stopped_at: None,
+            stop_reason: None,
+            incoming: true,
+        },
+    );
 }
 
 fn now_unix_sec() -> u64 {

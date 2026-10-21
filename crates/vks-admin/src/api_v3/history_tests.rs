@@ -29,6 +29,10 @@ fn seed_attempt(state: &crate::state::AppState, room: &RoomId) {
             failure_reason: Some("Ended By Remote".into()),
             completed_at: Some(1_800_000_000),
             abort_handle: None,
+            connected_at: Some(1_800_000_000),
+            stopped_at: None,
+            stop_reason: None,
+            incoming: false,
         },
     );
 }
@@ -49,7 +53,7 @@ async fn history_endpoints_list_detail_export_and_clean() {
     let session = &body["sessions"][0];
     assert_eq!(session["display_name"], "Историческая");
     assert_eq!(session["stop_reason"], "Manual");
-    assert_eq!(session["abonents"], 0);
+    assert_eq!(session["abonents"], 1);
     assert_eq!(session["creator"]["contact_type"], "users");
     assert_eq!(session["stopper"]["id"], "caller");
     assert!(session["payload"]["bitrate"].is_number());
@@ -519,4 +523,103 @@ async fn date_filter_and_clean_invalidate_exports() {
         .await
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND, "clean должен инвалидировать старые выгрузки");
+}
+
+#[tokio::test]
+async fn connected_call_that_hung_up_before_stop_keeps_vendor_abonent() {
+    let (state, issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let room = Rooms::create_async(&state, "Позвонили и положили").await.unwrap();
+    state.api_v3.conference_settings.lock().unwrap().insert(room.id, json!({"creator_id": "caller"}));
+    let record = CallStringRecord {
+        id: "cs-live".into(),
+        uri: "sip:192.168.1.132".into(),
+        display_name: "Polycom".into(),
+        created_at: 1_700_000_000,
+        payload: json!({"volume_rx": -60}),
+    };
+    state.api_v3.call_attempts.lock().unwrap().insert(
+        (room.id, "sip:192.168.1.132".to_string()),
+        CallAttempt {
+            record,
+            generation: uuid::Uuid::new_v4(),
+            participant_id: Some("sip-1@192.168.1.132".into()),
+            failure_reason: None,
+            completed_at: None,
+            abort_handle: None,
+            connected_at: Some(1_700_000_100),
+            stopped_at: None,
+            stop_reason: None,
+            incoming: false,
+        },
+    );
+    // SIP BYE: участник ушёл до остановки сессии, CallAttempt остаётся.
+    crate::api_v3::call_strings::note_participant_left(&state, &room.id, "sip-1@192.168.1.132", "Ended By Remote");
+    record_stopped(&state, &room, "caller", "Manual").await;
+
+    let list = json_body(send(&app, request("GET", "/api/v3/call_history", Some(&token), json!({}))).await).await;
+    assert_eq!(list["count"], 1, "{list}");
+    assert_eq!(list["sessions"][0]["abonents"], 1);
+
+    let id = list["sessions"][0]["id"].as_str().unwrap().to_string();
+    let detail =
+        json_body(send(&app, request("GET", &format!("/api/v3/call_history/{id}"), Some(&token), json!({}))).await)
+            .await;
+    let abonent = &detail["session"]["call_strings"][0]["abonents"][0];
+    assert_eq!(abonent["abonent_id"], "sip-1@192.168.1.132");
+    assert_eq!(abonent["connection"]["type_id"], "OUTGOING");
+    assert!(abonent["started_at"].as_i64().unwrap() >= 1_700_000_000);
+    assert!(abonent["stopped_at"].as_i64().unwrap() >= 1_700_000_100);
+    assert_eq!(abonent["stop_reason"], "Ended By Remote");
+    assert!(detail["session"]["call_strings"][0]["invitations"][0]["call_string_id"].is_string());
+    let _ = issuer;
+}
+
+#[tokio::test]
+async fn clean_is_durable_and_delete_does_not_resurrect_history() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let room = Rooms::create_async(&state, "После очистки").await.unwrap();
+    state
+        .api_v3
+        .conference_settings
+        .lock()
+        .unwrap()
+        .insert(room.id, json!({"creator_id": "caller", "started_at": 1_800_000_000_i64}));
+    record_stopped(&state, &room, "caller", "Manual").await;
+    let before = json_body(send(&app, request("GET", "/api/v3/call_history", Some(&token), json!({}))).await).await;
+    assert_eq!(before["count"], 1);
+
+    let cleaned = send(&app, request("POST", "/api/v3/call_history/clean", Some(&token), json!({}))).await;
+    assert_eq!(cleaned.status(), StatusCode::OK);
+    let after_clean =
+        json_body(send(&app, request("GET", "/api/v3/call_history", Some(&token), json!({}))).await).await;
+    assert_eq!(after_clean["count"], 0, "{after_clean}");
+
+    let deleted =
+        send(&app, request("DELETE", &format!("/api/v3/conferences/{}", room.id), Some(&token), json!({}))).await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let after_delete =
+        json_body(send(&app, request("GET", "/api/v3/call_history", Some(&token), json!({}))).await).await;
+    assert_eq!(after_delete["count"], 0, "clean must be durable: {after_delete}");
+}
+
+#[tokio::test]
+async fn incoming_call_is_recorded_as_incoming_connection() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let room = Rooms::create_async(&state, "Входящий").await.unwrap();
+    crate::api_v3::call_strings::record_incoming_call(&state, room.id, "sip-in-1", "sip:192.168.1.50", "Входящий SIP");
+    record_stopped(&state, &room, "caller", "Manual").await;
+    let list = json_body(send(&app, request("GET", "/api/v3/call_history", Some(&token), json!({}))).await).await;
+    let id = list["sessions"][0]["id"].as_str().unwrap().to_string();
+    let detail =
+        json_body(send(&app, request("GET", &format!("/api/v3/call_history/{id}"), Some(&token), json!({}))).await)
+            .await;
+    let call = &detail["session"]["call_strings"][0];
+    assert_eq!(call["abonents"][0]["connection"]["type_id"], "INCOMING");
+    assert_eq!(call["abonents"][0]["abonent_id"], "sip-in-1");
 }
