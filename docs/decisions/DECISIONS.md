@@ -31,6 +31,7 @@
 | 0024 | MSRV — Rust 1.94.0 (CI), 1.99.0 (dev/release) | accepted | 2026-10-13 | 0001, Q6 |
 | 0025 | WebRTC в WASM — web-sys + WebRTC API браузера (str0m — native only) | accepted | 2026-10-13 | 0003, 0010, Q8 |
 | 0026 | Режим MCU/SFU: глобальный дефолт + per-room override | accepted | 2026-10-13 | 0002, Q7 |
+| 0028 | Codec-воркер: убийство process group через `libc::kill` | accepted | 2026-10-23 | 0016, T06b |
 | 0027 | Фронтенд PNM (legacy TrueConf MCU UI) — adopt-and-shim → поэтапно Dioxus | accepted | 2026-10-16 | 0010, 0013, 0009, 0019, 0022, 0026 |
 
 ## Правила ведения

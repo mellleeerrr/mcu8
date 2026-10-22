@@ -20,7 +20,6 @@ pub use ffmpeg::{FfmpegCapabilities, FfmpegWorker, WorkerConfig, WorkerError, Wo
 /// Fixed PCM format used across the worker boundary.
 pub const WORKER_SAMPLE_RATE: u32 = 48_000;
 /// Mono, 16-bit little-endian PCM.
-pub const WORKER_CHANNELS: u16 = 1;
 /// 20 ms at 48 kHz.
 pub const AUDIO_FRAME_SAMPLES: usize = 960;
 /// Bytes of one 20 ms `s16le` frame.
@@ -69,17 +68,7 @@ impl AudioCodec {
         }
     }
 
-    /// PCM samples one decoded codec frame expands to at 48 kHz.
-    #[must_use]
-    pub const fn decoded_samples_48k(self) -> usize {
-        match self {
-            // AAC-LC: 1024 samples at its native rate; resampled to 48 kHz.
-            Self::Aac | Self::AacLatm => 1024,
-            // G.729: 80 samples / 10 ms at 8 kHz -> 480 at 48 kHz.
-            Self::G729 => 480,
-        }
-    }
-
+    
     /// FFmpeg encoder name, if the host can encode this codec.
     #[must_use]
     pub const fn ffmpeg_encoder(self) -> Option<&'static str> {
@@ -124,9 +113,13 @@ impl VideoCodec {
         }
     }
 
-    /// Allowed frame sizes for this codec (even dimensions only).
+    /// Picture formats accepted by the **FFmpeg encoder** for this codec.
     #[must_use]
-    pub fn supports_size(self, width: u16, height: u16) -> bool {
+    ///
+    /// This is an ENCODER constraint, not a decoder one: FFmpeg's `h263`
+    /// encoder accepts exactly 128x96/176x144/352x288/704x576/1408x1152,
+    /// while its `h263` decoder also handles H.263+ (320x240, 640x480).
+    pub const fn supports_encode_size(self, width: u16, height: u16) -> bool {
         if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
             return false;
         }
@@ -136,8 +129,18 @@ impl VideoCodec {
             // FFmpeg's H.263 encoder accepts exactly these picture formats.
             Self::H263 => matches!((width, height), (128, 96) | (176, 144) | (352, 288) | (704, 576) | (1408, 1152)),
             // HEVC/x265 requires at least 16x16 macroblock granularity.
-            Self::H265 => width >= 16 && height >= 16 && width <= 1920 && height <= 1080,
+            // x265 requires at least 16x16; a multiple of 16 is NOT required
+            // (x265 accepts 18x18, 100x100, 176x144). Even dimensions are
+            // required by the `rawvideo`/`yuv420p` framing, not by the codec.
+            Self::H265 => width >= 16 && height >= 16 && width <= 4096 && height <= 2160,
         }
+    }
+
+    /// Size sanity for the **decode** direction: even dimensions, non-zero and
+    /// within the MCU canvas. The decoder scales the incoming picture to the
+    /// slot resolution, so the source size is not constrained by the codec.
+    pub const fn supports_decode_size(self, width: u16, height: u16) -> bool {
+        width > 0 && height > 0 && width.is_multiple_of(2) && height.is_multiple_of(2)
     }
 }
 
@@ -178,24 +181,47 @@ impl SlotConfig {
         if self.max_queue == 0 {
             return Err(WorkerError::InvalidConfig("max_queue must be positive".into()));
         }
-        if !(6_000..=256_000).contains(&self.audio_bitrate_bps) {
-            return Err(WorkerError::InvalidConfig(format!(
-                "audio bitrate {} outside 6k..=256k",
-                self.audio_bitrate_bps
-            )));
-        }
         if self.width == 0 || self.height == 0 {
             return Err(WorkerError::InvalidConfig("width/height must be positive".into()));
         }
         Ok(())
     }
 
-    /// Validates this slot against a specific video codec.
+    /// Validates this slot for an **audio** worker.
+    ///
+    /// `audio_bitrate_bps` has meaning only here; for a video slot the field
+    /// is unused and must not be range-checked.
+    pub fn validate_audio(&self) -> Result<(), WorkerError> {
+        self.validate()?;
+        if !(6_000..=256_000).contains(&self.audio_bitrate_bps) {
+            return Err(WorkerError::InvalidConfig(format!(
+                "audio bitrate {} outside 6k..=256k",
+                self.audio_bitrate_bps
+            )));
+        }
+        Ok(())
+    }
+
+    /// Validates this slot for a **video encoder** worker.
     pub fn validate_for(&self, codec: VideoCodec) -> Result<(), WorkerError> {
         self.validate()?;
-        if !codec.supports_size(self.width, self.height) {
+        if !codec.supports_encode_size(self.width, self.height) {
             return Err(WorkerError::InvalidConfig(format!(
-                "{} does not support {}x{}",
+                "{} encoder does not support {}x{}",
+                codec.ffmpeg_name(),
+                self.width,
+                self.height
+            )));
+        }
+        Ok(())
+    }
+
+    /// Validates this slot for a **video decoder** worker.
+    pub fn validate_decode(&self, codec: VideoCodec) -> Result<(), WorkerError> {
+        self.validate()?;
+        if !codec.supports_decode_size(self.width, self.height) {
+            return Err(WorkerError::InvalidConfig(format!(
+                "{} decoder does not support {}x{}",
                 codec.ffmpeg_name(),
                 self.width,
                 self.height
@@ -239,7 +265,7 @@ mod tests {
         slot.width = 128;
         slot.height = 96;
         assert!(slot.validate_for(VideoCodec::H263).is_ok());
-        assert!(!VideoCodec::H265.supports_size(8, 8));
-        assert!(VideoCodec::H265.supports_size(16, 16));
+        assert!(!VideoCodec::H265.supports_encode_size(8, 8));
+        assert!(VideoCodec::H265.supports_encode_size(16, 16));
     }
 }

@@ -17,13 +17,16 @@
   (худший случай 15 с; повтор после 300 мс при холодном старте).
 - `WorkerPool` — host-wide лимит процессов (`VKS_CODEC_WORKER_POOL`,
   по умолчанию 8), `try_spawn` отказывает, а не ставит в очередь.
-- `SlotConfig` — per-slot bitrate/fps/width/height с валидацией под кодек
-  (H.261 только 176×144/352×288, H.263 128×96/176×144/352×288/704×576/1408×1152, H.265 ≥16×16 и до 1080p).
+- `SlotConfig` — per-slot bitrate/fps/width/height с раздельной валидацией:
+  энкодер H.261 только 176×144/352×288, H.263 128×96/176×144/352×288/704×576/
+  1408×1152, H.265 ≥16×16 и до 4096×2160; декодер принимает любое чётное
+  положительное разрешение (FFmpeg scales to slot).
 - Изоляция: `env_clear` (в дочерний процесс не попадают `VKS_*` секреты),
   минимальные `PATH/LANG/LC_ALL`, `current_dir("/")`, отдельная process group,
   `kill_on_drop` + killpg, непрерывный drain stderr с последней строкой для
-  диагностики. rlimits/`PR_SET_PDEATHSIG` не выставлены (нет `unsafe` в
-  проекте); это ограничение документально, не «сделано».
+  диагностики. rlimits/`PR_SET_PDEATHSIG` не выставлены; единственный
+  `unsafe` — `libc::kill(-pgid)` для group-kill (ADR-0028,
+  SAFETY-комментарий). Это ограничение документально, не «сделано».
 - Low-latency режим: `-probesize 32 -analyzeduration 0` (без них FFmpeg
   буферизует до ~1.6 КиБ/5 с перед первым кадром); H.265 дополнительно
   `-tune zerolatency -x265-params bframes=0:rc-lookahead=0:scenecut=0:
@@ -35,16 +38,17 @@
   использование — только через `restart()`.
 - Публичный `write_encoded` для decoder-направления; вызовы методов не того
   направления возвращают `InvalidConfig` до касания pipe.
-- `read_encoded_video` отдаёт один Annex-B NAL (с start code) для H.261/H.263/
-  H.265 энкодера; остальные видео-энкодеры до появления NAL-фреймера читаются
-  только `read_to_end` после `finish_input` (EOF-only).
+- `read_encoded_video` отдаёт один Annex-B NAL (с start code) только для
+  H.265; H.261/H.263 не Annex-B и читаются только `read_to_end` после
+  `finish_input` (EOF-only). Последний NAL AU приходит со следующим AU, поэтому
+  мосту нужен lookahead в один AU и `io_timeout` больше паузы потока.
 - Самодекодирующиеся аудио-пакеты: ADTS (7-байтовый заголовок, 13-битная
   длина) и LOAS/LATM (3-байтовый заголовок) читаются целиком, без догадок
   о размере.
 
 ## Проверено
 
-`TMPDIR=/var/tmp cargo test -p vks-media-mcu codec_worker` — 18 тестов:
+`TMPDIR=/var/tmp cargo test -p vks-media-mcu codec_worker` — 20 тестов:
 
 - probe видит AAC/G.729/H.261/H.263/H.265 на этом хосте;
 - AAC ADTS encode→decode и LATM encode→decode дают ненулевую энергию PCM;
@@ -57,7 +61,9 @@
 - таймаут чтения отравляет worker, restart восстанавливает поток;
 - все шесть методов при неверном направлении дают `InvalidConfig` без блокировки;
 - H.265 отдаёт Annex-B NAL до EOF; H.263 704×576 проходит roundtrip;
-- зависший probe убивает дочерний процесс за timeout (Linux-тест).
+- зависший probe убивает всю process group за timeout, включая forked sleep (Linux-тест);
+- смешанные 3-/4-байтовые start codes не оставляют лишний нуль в предыдущем NAL;
+- H.261 отклоняет потоковое NAL-чтение (нет Annex-B).
 
 Сервер при старте вызывает `transcoder_runtime::init()`: probe и пул
 инициализируются, capability логируются и публикуются в `/metrics` как

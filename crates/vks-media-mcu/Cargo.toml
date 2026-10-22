@@ -16,6 +16,8 @@ authors.workspace = true
 description = "VKS MCU engine: compositor, decoder, encoder, audio mixer, VAD (oxideav-scene)"
 
 [dependencies]
+# Один syscall для убийства группы процессов FFmpeg (без порождения `/usr/bin/kill`).
+libc.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true

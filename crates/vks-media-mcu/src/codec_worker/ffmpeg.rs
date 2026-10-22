@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,7 +33,8 @@ pub struct WorkerConfig {
 
 impl Default for WorkerConfig {
     fn default() -> Self {
-        Self { ffmpeg_path: PathBuf::from("ffmpeg"), io_timeout: Duration::from_secs(5), max_queue: 30, max_workers: 8 }
+        let ffmpeg_path = std::env::var_os("VKS_FFMPEG_BIN").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
+        Self { ffmpeg_path, io_timeout: Duration::from_secs(5), max_queue: 30, max_workers: 8 }
     }
 }
 
@@ -106,22 +107,15 @@ pub struct FfmpegCapabilities {
 impl FfmpegCapabilities {
     /// Probes the configured FFmpeg binary.
     pub async fn probe(ffmpeg_path: &std::path::Path) -> Result<Self, WorkerError> {
-        let version_out = tokio::time::timeout(
-            Duration::from_secs(5),
-            Command::new(ffmpeg_path)
-                .arg("-hide_banner")
-                .arg("-version")
-                .kill_on_drop(true)
-                .env_clear()
-                .env("LC_ALL", "C")
-                .env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into()))
-                .output(),
-        )
-        .await
-        .map_err(|_| WorkerError::Timeout(Duration::from_secs(5)))?
-        .map_err(WorkerError::Spawn)?;
+        let mut version_command = command(ffmpeg_path);
+        version_command.arg("-hide_banner").arg("-version");
+        let version_out = run_bounded(version_command).await?;
         if !version_out.status.success() {
-            return Err(WorkerError::Unavailable(format!("{} -version failed", ffmpeg_path.display())));
+            return Err(WorkerError::Unavailable(format!(
+                "{} -version failed: {}",
+                ffmpeg_path.display(),
+                String::from_utf8_lossy(&version_out.stderr).trim()
+            )));
         }
         let version = String::from_utf8_lossy(&version_out.stdout).lines().next().unwrap_or_default().to_string();
 
@@ -165,23 +159,94 @@ impl FfmpegCapabilities {
     }
 }
 
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Среда дочернего FFmpeg: пусто, кроме локали, `PATH` и (если задан)
+/// `LD_LIBRARY_PATH` — последний нужен для ffmpeg из приватного префикса
+/// (`VKS_FFMPEG_BIN`), который грузит свои `.so` не из `ld.so.conf`.
+/// Остальное окружение сервера (JWT-секреты, креды БД) наружу не уходит.
+fn scrubbed_env(command: &mut Command) -> &mut Command {
+    command
+        .env_clear()
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into()));
+    if let Some(loader) = std::env::var_os("LD_LIBRARY_PATH") {
+        command.env("LD_LIBRARY_PATH", loader);
+    }
+    command
+}
+
+fn command(ffmpeg: &std::path::Path) -> Command {
+    let mut command = Command::new(ffmpeg);
+    command.kill_on_drop(true);
+    scrubbed_env(&mut command);
+    #[cfg(unix)]
+    {
+        // Собственная группа процессов: таймаут и teardown убивают её целиком.
+        command.process_group(0);
+    }
+    command
+}
+
+/// Убивает всю группу процессов воркера (`kill(-pgid, SIGKILL)`).
+///
+/// Один syscall вместо порождения `/usr/bin/kill`: вызов неблокирующий, поэтому
+/// применим и в `Drop`, и в async-пути (PROJECT_RULES §1.2 — без блокирующих
+/// вызовов в сетевом/медиа-пути). Ошибка «группа уже мертва» игнорируется.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    // SAFETY: `pid` — идентификатор дочернего процесса этого воркера; отрицательный
+    // pid в `kill()` означает «вся группа процессов». `ESRCH` (группа уже мертва)
+    // и `EPERM` игнорируются — вызывающая сторона всё равно делает `start_kill()`.
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Runs one bounded probe command in its own process group. A timeout kills
+/// the whole group (not just the leader), so a shell/forked helper cannot be
+/// reparented and leak.
+async fn run_bounded(mut command: Command) -> Result<std::process::Output, WorkerError> {
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = command.spawn().map_err(WorkerError::Spawn)?;
+    let pid = child.id();
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let watchdog_flag = Arc::clone(&timed_out);
+    let watchdog = tokio::spawn(async move {
+        tokio::time::sleep(PROBE_TIMEOUT).await;
+        watchdog_flag.store(true, Ordering::SeqCst);
+        if let Some(pid) = pid {
+            kill_process_group(pid);
+        }
+    });
+    let output = child.wait_with_output().await.map_err(WorkerError::Spawn)?;
+    watchdog.abort();
+    if timed_out.load(Ordering::SeqCst) {
+        return Err(WorkerError::Timeout(PROBE_TIMEOUT));
+    }
+    Ok(output)
+}
+
 async fn list_codecs(ffmpeg: &std::path::Path, flag: &str) -> Result<BTreeSet<String>, WorkerError> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        Command::new(ffmpeg)
-            .arg("-hide_banner")
-            .arg(flag)
-            .kill_on_drop(true)
-            .env_clear()
-            .env("LC_ALL", "C")
-            .env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into()))
-            .output(),
-    )
-    .await
-    .map_err(|_| WorkerError::Timeout(Duration::from_secs(5)))?
-    .map_err(WorkerError::Spawn)?;
+    let mut command = command(ffmpeg);
+    command.arg("-hide_banner").arg(flag);
+    let output = run_bounded(command).await?;
     if !output.status.success() {
-        return Err(WorkerError::Unavailable(format!("{} {flag} failed", ffmpeg.display())));
+        return Err(WorkerError::Unavailable(format!(
+            "{} {flag} failed: {}",
+            ffmpeg.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
     }
     let text = String::from_utf8_lossy(&output.stdout);
     // Format:
@@ -194,6 +259,12 @@ async fn list_codecs(ffmpeg: &std::path::Path, flag: &str) -> Result<BTreeSet<St
         let Some(rest) = line.split_once(char::is_whitespace) else { continue };
         let (flags, rest) = rest;
         if flags.len() < 6 || rest.trim().is_empty() {
+            continue;
+        }
+        // Флаги FFmpeg — заглавные буквы и точки (`V....D`, `A....D`). Легенда
+        // в конце вывода (`D..... = Decoding supported`) такую строку не даёт,
+        // но если формат изменится — имя кодека вставится в набор мусором.
+        if !flags.chars().all(|symbol| symbol.is_ascii_uppercase() || symbol == '.') {
             continue;
         }
         if let Some(name) = rest.split_whitespace().next() {
@@ -244,10 +315,10 @@ impl FfmpegWorker {
         config: WorkerConfig,
         capabilities: Option<&FfmpegCapabilities>,
     ) -> Result<Self, WorkerError> {
-        if let WorkerMode::VideoEncode(codec) | WorkerMode::VideoDecode(codec) = mode {
-            slot.validate_for(codec)?;
-        } else {
-            slot.validate()?;
+        match mode {
+            WorkerMode::VideoEncode(codec) => slot.validate_for(codec)?,
+            WorkerMode::VideoDecode(codec) => slot.validate_decode(codec)?,
+            WorkerMode::AudioEncode(_) | WorkerMode::AudioDecode(_) => slot.validate_audio()?,
         }
         if matches!(mode, WorkerMode::AudioEncode(AudioCodec::G729)) {
             return Err(WorkerError::Unavailable("FFmpeg has no G.729 encoder".into()));
@@ -388,15 +459,21 @@ impl FfmpegWorker {
         self.write_all(bytes).await
     }
 
-    /// Reads one Annex-B NAL unit from an encoder worker (H.261/H.263/H.265).
+    /// Reads one Annex-B NAL unit from an H.265 encoder worker.
     ///
-    /// Returns the NAL **including** its start code. The call waits until the
-    /// next start code (or EOF after [`Self::finish_input`]) so the returned
-    /// buffer is complete. This is the streaming counterpart of
-    /// [`Self::read_to_end`] for video encoders; codec payloaders can then
-    /// split/aggregate NAL units per RFC 4587/4629/7798.
+    /// Returns the NAL **including** its start code. The last NAL of an access
+    /// unit is released only when the next access unit's start code arrives;
+    /// a reader must therefore keep one access unit of lookahead and use an
+    /// `io_timeout` longer than a paused-stream gap. H.261/H.263 raw FFmpeg
+    /// output is not Annex-B and is rejected here: those encoders are EOF-only
+    /// via [`Self::read_to_end`] after [`Self::finish_input`].
     pub async fn read_encoded_video(&mut self) -> Result<Vec<u8>, WorkerError> {
         self.require_video_encode()?;
+        if matches!(self.mode, WorkerMode::VideoEncode(codec) if codec != VideoCodec::H265) {
+            return Err(WorkerError::InvalidConfig(
+                "no Annex-B framer for this video codec; use read_to_end after finish_input".into(),
+            ));
+        }
         if self.poisoned {
             return Err(WorkerError::Exited("worker is poisoned; restart is required".into()));
         }
@@ -647,7 +724,7 @@ impl FfmpegWorker {
     /// future helper process cannot outlive the worker.
     pub fn kill(&mut self) {
         if let Some(pid) = self.child.id() {
-            let _ = std::process::Command::new("kill").arg("-KILL").arg("--").arg(format!("-{pid}")).status();
+            kill_process_group(pid);
         }
         let _ = self.child.start_kill();
     }
@@ -671,9 +748,9 @@ impl FfmpegWorker {
         self.stdin = None;
         self.encoded_pending.clear();
         self.encoded_eof = false;
-        if let Ok(mut stderr) = self.last_stderr.lock() {
-            stderr.clear();
-        }
+        // Новое поколение буфера: дренаж stderr уже умершего ребёнка пишет в
+        // свою строку и не может перемешать вывод со stderr нового процесса.
+        self.last_stderr = Arc::new(Mutex::new(String::new()));
         let (child, stdin) = spawn_child(self.mode, self.slot, &self.config, self.last_stderr.clone()).await?;
         self.child = child;
         self.stdin = Some(stdin);
@@ -957,23 +1034,39 @@ fn ffmpeg_args(mode: WorkerMode, slot: SlotConfig) -> Vec<String> {
 
 /// Extracts one Annex-B NAL unit from `buffer`, keeping the next start code.
 fn take_annexb_nal(buffer: &mut Vec<u8>, eof: bool) -> Option<Vec<u8>> {
-    let Some(start) = find_start_code(buffer, 0) else {
-        if eof {
-            buffer.clear();
+    loop {
+        let Some(start) = find_start_code(buffer, 0) else {
+            if eof {
+                buffer.clear();
+            }
+            return None;
+        };
+        // Keep the leading zero of a 4-byte start code (`00 00 00 01`):
+        // `find_start_code` reports it at index 1 because it matches the
+        // 3-byte sub-code first.
+        if start > 1 {
+            buffer.drain(..start);
         }
-        return None;
-    };
-    if start > 0 {
-        buffer.drain(..start);
-    }
-    match find_start_code(buffer, 4) {
-        Some(next) => Some(buffer.drain(..next).collect()),
-        None if eof && buffer.len() > 4 => Some(std::mem::take(buffer)),
-        None if eof => {
-            buffer.clear();
-            None
+        let code_len = if buffer.len() >= 4 && buffer[..4] == [0, 0, 0, 1] { 4 } else { 3 };
+        match find_start_code(buffer, code_len) {
+            Some(3) => {
+                // Empty NAL: drop the current start code and look at the next.
+                buffer.drain(..3);
+            }
+            Some(next) => {
+                // A 4-byte start code `00 00 00 01` is found at the 3-byte
+                // sub-code; move the split one byte left so the previous NAL
+                // does not keep the leading zero of the next prefix.
+                let split = if next >= 1 && buffer[next - 1] == 0 { next - 1 } else { next };
+                return Some(buffer.drain(..split).collect());
+            }
+            None if eof && buffer.len() > 4 => return Some(std::mem::take(buffer)),
+            None if eof => {
+                buffer.clear();
+                return None;
+            }
+            None => return None,
         }
-        None => None,
     }
 }
 
@@ -989,9 +1082,12 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    fn ffmpeg_bin() -> std::path::PathBuf {
+        std::env::var_os("VKS_FFMPEG_BIN").map_or_else(|| std::path::PathBuf::from("ffmpeg"), std::path::PathBuf::from)
+    }
+
     fn ffmpeg_available() -> bool {
-        let binary = std::env::var("VKS_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".into());
-        std::process::Command::new(binary).arg("-version").output().is_ok_and(|out| out.status.success())
+        std::process::Command::new(ffmpeg_bin()).arg("-version").output().is_ok_and(|out| out.status.success())
     }
 
     fn pcm_sine(frames: usize) -> Vec<i16> {
@@ -1022,7 +1118,7 @@ mod tests {
             eprintln!("ffmpeg missing; skip");
             return;
         }
-        let caps = FfmpegCapabilities::probe(std::path::Path::new("ffmpeg")).await.expect("probe");
+        let caps = FfmpegCapabilities::probe(&ffmpeg_bin()).await.expect("probe");
         assert!(caps.version.contains("ffmpeg"), "{}", caps.version);
         assert!(caps.has_audio_decoder(AudioCodec::Aac));
         assert!(caps.has_audio_decoder(AudioCodec::G729));
@@ -1293,6 +1389,37 @@ mod tests {
         assert!(matches!(audio_decoder.write_audio(&[0i16; 960]).await, Err(WorkerError::InvalidConfig(_))));
     }
 
+    #[test]
+    fn annexb_split_handles_mixed_start_codes() {
+        let mut buffer = vec![0, 0, 1, 0x42, 0, 0, 0, 1, 0x44, 0x55];
+        let first = take_annexb_nal(&mut buffer, false).expect("first nal");
+        assert_eq!(first, vec![0, 0, 1, 0x42], "4-byte prefix leaked into previous NAL");
+        assert_eq!(buffer, vec![0, 0, 0, 1, 0x44, 0x55]);
+        assert!(take_annexb_nal(&mut buffer, false).is_none());
+        let last = take_annexb_nal(&mut buffer, true).expect("last nal at EOF");
+        assert_eq!(last, vec![0, 0, 0, 1, 0x44, 0x55]);
+        assert!(buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn h261_has_no_annexb_stream_and_rejects_nal_read() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let slot = SlotConfig {
+            bitrate_bps: 200_000,
+            width: 176,
+            height: 144,
+            fps: 10,
+            audio_bitrate_bps: 64_000,
+            max_queue: 4,
+        };
+        let mut encoder = FfmpegWorker::spawn(WorkerMode::VideoEncode(VideoCodec::H261), slot, WorkerConfig::default())
+            .await
+            .expect("h261 encoder");
+        assert!(matches!(encoder.read_encoded_video().await, Err(WorkerError::InvalidConfig(_))));
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn hung_probe_times_out_and_kills_child() {
@@ -1300,18 +1427,41 @@ mod tests {
         let dir = std::env::temp_dir();
         let script = dir.join(format!("vks-hang-ffmpeg-{}.sh", std::process::id()));
         let pidfile = dir.join(format!("vks-hang-ffmpeg-{}.pid", std::process::id()));
-        std::fs::write(&script, format!("#!/bin/sh\necho $$ > {}\nsleep 30\n", pidfile.display())).expect("script");
+        std::fs::write(&script, format!("#!/bin/sh\nsleep 30 &\necho \"$$ $!\" > {}\nwait\n", pidfile.display()))
+            .expect("script");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         let started = Instant::now();
         let result = FfmpegCapabilities::probe(&script).await;
+        if let Err(WorkerError::Spawn(ref e)) = result {
+            if e.raw_os_error() == Some(26) {
+                eprintln!("DIAG: ETXTBSY on {script:?}");
+                for pid_dir in std::fs::read_dir("/proc").unwrap() {
+                    let pid_dir = pid_dir.unwrap();
+                    let Ok(fds) = std::fs::read_dir(pid_dir.path().join("fd")) else { continue };
+                    for fd in fds {
+                        let fd = fd.unwrap();
+                        if let Ok(link) = std::fs::read_link(fd.path()) {
+                            if link.to_string_lossy().contains("vks-hang") {
+                                eprintln!("DIAG: holder pid={} fd={} -> {}", pid_dir.path().display(), fd.path().display(), link.display());
+                            }
+                        }
+                    }
+                }
+                eprintln!("DIAG: stat={:?}", std::fs::metadata(&script).map(|m| m.len()));
+            }
+        }
         assert!(matches!(result, Err(WorkerError::Timeout(_))), "{result:?}");
         assert!(started.elapsed() < Duration::from_secs(8));
         tokio::time::sleep(Duration::from_millis(200)).await;
-        if let Ok(pid) = std::fs::read_to_string(&pidfile) {
-            let pid = pid.trim();
-            let alive =
-                std::process::Command::new("kill").arg("-0").arg(pid).status().is_ok_and(|status| status.success());
-            assert!(!alive, "timed-out probe left ffmpeg pid {pid} alive");
+        let pids = std::fs::read_to_string(&pidfile).expect("fake ffmpeg recorded its pids");
+        for pid in pids.split_whitespace() {
+            let alive = std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid)
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+            assert!(!alive, "timed-out probe left pid {pid} alive (process group not killed)");
         }
         let _ = std::fs::remove_file(&script);
         let _ = std::fs::remove_file(&pidfile);
