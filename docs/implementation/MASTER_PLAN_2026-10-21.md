@@ -368,7 +368,7 @@ Evidence: `docs/progress/evidence/t06b2b/`.
 `0 8 9 15 4 107 108 109 110 111 101` (без 20-мс ptime). H.323 G723 — T06b-4.
 Evidence: `docs/progress/evidence/t06b2c/`.
 
-**T06b-4a (H.323 G.722) — реализован 2026-10-22, ожидает ревью/коммита.**
+**T06b-4a (H.323 G.722) — закрыт `c08c4b7`, ревью 9.5/10 APPROVED (ref-engines); live H.323 ждёт свободный терминал.**
 H.245 TCS: `g722-64k` + `g711Ulaw64k` отдельными записями, видео запись 3;
 peer-direction пересечение, только симметричный кодек; OLC/ACK PT9 без
 dynamic PT; fallback G.711U; Rust принимает `(0,0)/(9,9)`, inbound PT9
