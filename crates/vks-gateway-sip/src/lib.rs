@@ -22,6 +22,7 @@
 //!
 //! Dependency tree: vks-core, vks-common (ARCHITECTURE §3).
 
+pub mod aac_latm;
 pub mod call;
 pub mod codec;
 pub mod g722;
