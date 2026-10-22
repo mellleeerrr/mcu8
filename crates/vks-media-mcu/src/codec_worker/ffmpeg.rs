@@ -1022,7 +1022,7 @@ fn ffmpeg_args(mode: WorkerMode, slot: SlotConfig) -> Vec<String> {
                         "-tune",
                         "zerolatency",
                         "-x265-params",
-                        "log-level=error:bframes=0:rc-lookahead=0:scenecut=0:frame-threads=1:pools=1",
+                        "log-level=error:bframes=0:rc-lookahead=0:scenecut=0:frame-threads=1:pools=1:aud=1:repeat-headers=1",
                     ]
                     .map(str::to_string),
                 );

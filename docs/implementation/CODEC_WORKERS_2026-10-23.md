@@ -31,7 +31,8 @@
 - Low-latency режим: `-probesize 32 -analyzeduration 0` (без них FFmpeg
   буферизует до ~1.6 КиБ/5 с перед первым кадром); H.265 дополнительно
   `-tune zerolatency -x265-params bframes=0:rc-lookahead=0:scenecut=0:
-  frame-threads=1:pools=1` (без `frame-threads=1:pools=1` x265 задерживает
+  frame-threads=1:pools=1:aud=1:repeat-headers=1` (AUD даёт мосту границу AU,
+  repeat-headers — VPS/SPS/PPS для поздних участников; без `frame-threads=1:pools=1` x265 задерживает
   первый кадр на ~4 кадра).
 - Частичное чтение/таймаут/ошибка разбора/превышение лимита «отравляют»
   worker: процесс убивается, последующий I/O возвращает

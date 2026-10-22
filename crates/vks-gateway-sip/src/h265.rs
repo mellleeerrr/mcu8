@@ -43,7 +43,8 @@ pub enum H265Error {
     TooShort,
     /// F bit set or TID+1 == 0.
     BadHeader,
-    /// NAL type 48/49 nested inside AP, or a reserved type (50/51).
+    /// NAL type 48/49 nested inside AP, or a NAL-unit-like type 50..=63 that
+    /// must never reach a decoder (RFC 7798 §6).
     BadType,
     /// FU start and end bits set together, empty fragment, or a gap in the
     /// fragment sequence/timestamp.
@@ -54,7 +55,8 @@ pub enum H265Error {
     TooLarge,
 }
 
-/// Returns the six-bit HEVC NAL type, or `None` for a shorter-than-2 payload.
+/// Returns the six-bit HEVC NAL type, or `None` for an empty payload (only the
+/// first header byte is needed).
 #[must_use]
 pub fn nal_type(nal: &[u8]) -> Option<u8> {
     nal.first().map(|header| (header >> 1) & 0x3f)
@@ -103,6 +105,89 @@ pub fn split_annexb(stream: &[u8]) -> Vec<&[u8]> {
     nals
 }
 
+/// Incremental Annex-B splitter for streaming pipe reads.
+///
+/// [`split_annexb`] needs a complete buffer; a bridge reading 16 KiB pipe
+/// chunks must use this instead, otherwise a NAL split across reads is lost.
+/// Incomplete trailing bytes stay buffered until the next push or [`Self::finish`].
+#[derive(Debug, Default)]
+pub struct AnnexBSplitter {
+    buffer: Vec<u8>,
+}
+
+impl AnnexBSplitter {
+    /// Consumes one pipe chunk and returns every NAL completed in it.
+    pub fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+        self.buffer.extend_from_slice(data);
+        let mut units = Vec::new();
+        loop {
+            let Some((first, prefix)) = find_start_code(&self.buffer, 0) else {
+                // Keep the last three bytes: a 3-/4-byte start code may span reads.
+                let keep = self.buffer.len().saturating_sub(3);
+                self.buffer.drain(..keep);
+                return units;
+            };
+            if first > 0 {
+                self.buffer.drain(..first);
+            }
+            let body = prefix;
+            let Some((next, _)) = find_start_code(&self.buffer, body) else {
+                // Current NAL is not complete yet; keep its start code in buffer.
+                return units;
+            };
+            if next > body {
+                units.push(self.buffer[body..next].to_vec());
+            }
+            self.buffer.drain(..next);
+        }
+    }
+
+    /// Flushes the buffered trailing NAL at EOF (empty if none).
+    pub fn finish(&mut self) -> Option<Vec<u8>> {
+        let (first, prefix) = find_start_code(&self.buffer, 0)?;
+        if first > 0 {
+            self.buffer.drain(..first);
+        }
+        let unit = self.buffer[prefix..].to_vec();
+        self.buffer.clear();
+        if unit.is_empty() {
+            None
+        } else {
+            Some(unit)
+        }
+    }
+}
+
+fn find_start_code(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut index = start;
+    while index + 3 <= bytes.len() {
+        if bytes[index..].starts_with(&[0, 0, 1]) {
+            return Some((index, 3));
+        }
+        if index + 4 <= bytes.len() && bytes[index..].starts_with(&[0, 0, 0, 1]) {
+            return Some((index, 4));
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Strips one leading 3- or 4-byte Annex-B start code, if present.
+///
+/// [`FfmpegWorker::read_encoded_video`](vks_media_mcu::codec_worker::FfmpegWorker::read_encoded_video)
+/// returns NALs *with* the start code, while [`packetize_h265`] expects the raw
+/// NAL beginning at its two-byte header.
+#[must_use]
+pub fn strip_start_code(nal: &[u8]) -> &[u8] {
+    if nal.starts_with(&[0, 0, 0, 1]) {
+        &nal[4..]
+    } else if nal.starts_with(&[0, 0, 1]) {
+        &nal[3..]
+    } else {
+        nal
+    }
+}
+
 /// Packetizes one access unit (ordered raw NALs, no start codes).
 ///
 /// `marker` is set only on the final packet of the final NAL. NALs larger than
@@ -122,12 +207,16 @@ pub fn packetize_h265(
     if nals.is_empty() {
         return Err(H265Error::TooShort);
     }
-    let mut packets = Vec::new();
-    for (index, nal) in nals.iter().enumerate() {
+    // Validate the whole AU first: a bad later NAL must not leave `sequence`
+    // advanced for packets that were never sent.
+    for nal in nals {
         validate_nal(nal)?;
         if nal.len() > H265_MAX_NAL_BYTES {
             return Err(H265Error::TooLarge);
         }
+    }
+    let mut packets = Vec::new();
+    for (index, nal) in nals.iter().enumerate() {
         let is_last_nal = index + 1 == nals.len();
         if nal.len() <= H265_MAX_SINGLE_NAL {
             let mut packet = vec![0; RTP_HEADER_BYTES];
@@ -165,7 +254,7 @@ fn validate_nal(nal: &[u8]) -> Result<(), H265Error> {
         return Err(H265Error::BadHeader);
     }
     match (nal[0] >> 1) & 0x3f {
-        NAL_AP | NAL_FU | 50 | 51 => Err(H265Error::BadType),
+        NAL_AP..=63 => Err(H265Error::BadType),
         _ => Ok(()),
     }
 }
@@ -207,7 +296,7 @@ impl H265Depacketizer {
         match nal_type {
             NAL_AP => self.push_ap(payload),
             NAL_FU => self.push_fu(sequence, timestamp, payload),
-            50 | 51 => {
+            50..=63 => {
                 self.fragment.clear();
                 Err(H265Error::BadType)
             }
@@ -238,27 +327,30 @@ impl H265Depacketizer {
             if unit[0] & 0x80 != 0 || unit[1] & 0x07 == 0 {
                 return Err(H265Error::BadHeader);
             }
-            if matches!((unit[0] >> 1) & 0x3f, NAL_AP | NAL_FU | 50 | 51) {
+            if ((unit[0] >> 1) & 0x3f) >= NAL_AP {
                 return Err(H265Error::BadType);
             }
             units.push(unit.to_vec());
             position += size;
         }
-        if units.is_empty() {
+        if units.len() < 2 {
+            // RFC 7798 §4.4.2: an AP aggregates at least two NAL units.
             return Err(H265Error::BadAggregation);
         }
         Ok(units)
     }
 
     fn push_fu(&mut self, sequence: u16, timestamp: u32, payload: &[u8]) -> Result<Vec<Vec<u8>>, H265Error> {
-        if payload.len() < 3 {
+        if payload.len() < 4 {
+            // 3 bytes is a FU header with an empty payload, forbidden by
+            // RFC 7798 §4.4.3.
             self.fragment.clear();
-            return Err(H265Error::TooShort);
+            return Err(if payload.len() < 3 { H265Error::TooShort } else { H265Error::BadFragment });
         }
         let start = payload[2] & 0x80 != 0;
         let end = payload[2] & 0x40 != 0;
         let fu_type = payload[2] & 0x3f;
-        if start && end || fu_type == 0 || fu_type >= NAL_AP {
+        if start && end || fu_type >= NAL_AP {
             self.fragment.clear();
             return Err(H265Error::BadFragment);
         }
@@ -443,5 +535,116 @@ mod tests {
         assert!(is_parameter_set(&nal([NAL_PPS << 1, 1], b"p")));
         assert!(!is_parameter_set(&vcl(1, b"slice")));
         assert_eq!(nal_type(&[]), None);
+    }
+
+    #[test]
+    fn roundtrips_fragmented_trail_n_type_zero() {
+        let large = vcl(0, &vec![0xab; 3000]);
+        let mut sequence = 0;
+        let packets = packetize_h265(&[&large], 99, 1, &mut sequence, 11).expect("packets");
+        assert!(packets.len() >= 3);
+        let mut receiver = H265Depacketizer::default();
+        let mut rebuilt = Vec::new();
+        for packet in &packets {
+            let (seq, ts, _, payload) = rtp_payload(packet);
+            if let Some(nal) = receiver.push(seq, ts, payload).expect("trail_n").into_iter().next() {
+                rebuilt = nal;
+            }
+        }
+        assert_eq!(rebuilt, large);
+    }
+
+    #[test]
+    fn rejects_reserved_nal_unit_like_types_everywhere() {
+        let reserved = [(52 << 1), 0x01];
+        assert_eq!(H265Depacketizer::default().push(1, 1, &reserved), Err(H265Error::BadType));
+        assert_eq!(packetize_h265(&[&reserved], 99, 1, &mut 0, 1), Err(H265Error::BadType));
+        let mut ap = vec![(NAL_AP << 1), 0x01];
+        let unit = [(55 << 1), 0x01];
+        ap.extend_from_slice(&(unit.len() as u16).to_be_bytes());
+        ap.extend_from_slice(&unit);
+        assert_eq!(H265Depacketizer::default().push(1, 1, &ap), Err(H265Error::BadType));
+    }
+
+    #[test]
+    fn rejects_empty_fu_payload_and_single_unit_ap() {
+        // Type 49, S bit set, FuType 1, but no payload bytes.
+        assert_eq!(H265Depacketizer::default().push(1, 1, &[0x62, 0x01, 0x80]), Err(H265Error::BadFragment));
+        let one = vcl(1, b"a");
+        let mut ap = vec![(NAL_AP << 1), 0x01];
+        ap.extend_from_slice(&(one.len() as u16).to_be_bytes());
+        ap.extend_from_slice(&one);
+        assert_eq!(H265Depacketizer::default().push(1, 1, &ap), Err(H265Error::BadAggregation));
+    }
+
+    #[test]
+    fn exact_mtu_boundary_and_large_cap() {
+        let edge = vcl(1, &vec![0; H265_MAX_SINGLE_NAL - 2]);
+        let mut sequence = 0;
+        let packets = packetize_h265(&[&edge], 99, 1, &mut sequence, 1).expect("edge");
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].len(), H265_RTP_MTU);
+        let over = vcl(1, &vec![0; H265_MAX_SINGLE_NAL - 1]);
+        let packets = packetize_h265(&[&over], 99, 1, &mut sequence, 1).expect("over");
+        assert_eq!(packets.len(), 2);
+        assert_eq!(packets[0].len(), H265_RTP_MTU);
+        let too_large = vcl(1, &vec![0; H265_MAX_NAL_BYTES]);
+        assert_eq!(packetize_h265(&[&too_large], 99, 1, &mut 0, 1), Err(H265Error::TooLarge));
+    }
+
+    #[test]
+    fn sequence_wraps_and_layer_id_tid_are_preserved() {
+        let mut sequence = u16::MAX;
+        let mut header = [0u8, 0u8];
+        header[0] = (19 << 1) | 0; // type 19, LayerId high bit 0
+        header[1] = (1 << 3) | 2; // LayerId low 5 bits = 1, TID+1 = 2
+        let large = nal(header, &vec![0x5a; 2400]);
+        let packets = packetize_h265(&[&large], 99, 1, &mut sequence, 5).expect("packets");
+        let sequences: Vec<u16> = packets.iter().map(|packet| rtp_payload(packet).0).collect();
+        assert_eq!(sequences.first(), Some(&u16::MAX));
+        assert_eq!(sequences.last(), Some(&1));
+        let mut receiver = H265Depacketizer::default();
+        let mut rebuilt = Vec::new();
+        for packet in &packets {
+            let (seq, ts, _, payload) = rtp_payload(packet);
+            if let Some(nal) = receiver.push(seq, ts, payload).expect("layer").into_iter().next() {
+                rebuilt = nal;
+            }
+        }
+        assert_eq!(rebuilt, large);
+        assert_eq!(rebuilt[1] & 0x07, 2);
+    }
+
+    #[test]
+    fn streaming_splitter_survives_read_boundaries_and_flushes_at_eof() {
+        let first = vcl(1, b"first-slice");
+        let second = nal([NAL_SPS << 1, 1], b"second");
+        let mut stream = vec![0, 0, 0, 1];
+        stream.extend_from_slice(&first);
+        stream.extend_from_slice(&[0, 0, 1]);
+        stream.extend_from_slice(&second);
+        let mut splitter = AnnexBSplitter::default();
+        let mut units = Vec::new();
+        for chunk in stream.chunks(4) {
+            units.extend(splitter.push(chunk));
+        }
+        units.extend(splitter.finish());
+        assert_eq!(units, vec![first, second]);
+    }
+
+    #[test]
+    fn start_code_and_reset_helpers() {
+        assert_eq!(strip_start_code(&[0, 0, 0, 1, 0x26, 1]), &[0x26, 1]);
+        assert_eq!(strip_start_code(&[0, 0, 1, 0x26, 1]), &[0x26, 1]);
+        assert_eq!(strip_start_code(&[0x26, 1]), &[0x26, 1]);
+        let mut receiver = H265Depacketizer::default();
+        let large = vcl(1, &vec![4; 2600]);
+        let mut sequence = 0;
+        let packets = packetize_h265(&[&large], 99, 1, &mut sequence, 2).expect("packets");
+        let (seq, ts, _, payload) = rtp_payload(&packets[0]);
+        assert!(receiver.push(seq, ts, payload).expect("start").is_empty());
+        receiver.reset();
+        let (seq, ts, _, payload) = rtp_payload(&packets[1]);
+        assert_eq!(receiver.push(seq, ts, payload), Err(H265Error::BadFragment));
     }
 }
