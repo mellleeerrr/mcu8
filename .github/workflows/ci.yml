@@ -46,6 +46,20 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - run: cargo test --workspace
 
+  sidecar:
+    name: h323 sidecar (python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install pinned Pycrate runtime
+        run: python -m pip install --require-hashes -r crates/vks-gateway-h323/python/requirements.lock
+      - name: Unit tests (ASN.1 / Q.931 / H.245 contracts)
+        working-directory: crates/vks-gateway-h323/python
+        run: python -m unittest -v test_h323_sidecar
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
