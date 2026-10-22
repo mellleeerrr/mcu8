@@ -56,6 +56,17 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > durable unique index `call_strings`, перенос addresses/directory из document,
 > миграция history `contact_id`, drop пустых legacy-таблиц.
 >
+> **T07b (кросс-MCU SIP, 20 вызовов) — живой прогон выполнен, interop-баг исправлен:**
+> HEAD `885371b`. 20 SIP call string на TrueConf `35a87982...@192.168.1.92`,
+> 17 одновременно с двусторонним audio+video (`audio_rx=27402`,
+> `video_rx=23001`, `rejected=50`, H.264 1280×720@30, PCMU/PCMA).
+> Найдено: TrueConf отвечает PCMU, но шлёт PCMA PT8; `RtpSource` отбрасывал
+> аудио. Исправлена взаимозаменяемость G.711 0↔8 с декодом по PT пакета;
+> видео-PT оставлен строгим, иначе ломался приём H.264. Тест
+> `accepts_alternate_g711_payload_and_reports_actual_pt`. Evidence
+> `docs/progress/evidence/t07b-cross-mcu/`. **Остаётся T07c:** наша MCU
+> UAC-only, нет listener 5060/1720, входящие вызовы с другой MCU не принимаются.
+>
 > **T12a (подписи без emoji/стикеров) закрыт:** `a4629a4`, ревью **9.5/10 APPROVED**
 > (`layout-ui`). Единый denylist-санитайзер `vks-common::text` (кириллица/combining/
 > типографика сохраняются, emoji/флаги/ZWJ/keycap/bidi/control удаляются,
