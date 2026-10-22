@@ -4,7 +4,7 @@
 
 /// Аудио, которое native-профиль шлюза принимает/отдаёт без транскодера.
 pub const NATIVE_AUDIO: &[&str] =
-    &["PCMU", "PCMA", "G711", "G711U", "G711A", "G722", "G72616", "G72624", "G72632", "G72640"];
+    &["PCMU", "PCMA", "G711", "G711U", "G711A", "G722", "G72616", "G72624", "G72632", "G72640", "G728", "OPUS"];
 /// Видео, которое native-профиль шлюза кодирует/декодирует (H.264 baseline mode=1).
 pub const NATIVE_VIDEO: &[&str] = &["H264"];
 
@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn native_names_match_gateway_offer() {
-        for name in ["PCMU", "PCMA", "G711", "g711u", "G.711-A", "G722", "g722"] {
+        for name in ["PCMU", "PCMA", "G711", "g711u", "G.711-A", "G722", "g722", "OPUS", "opus"] {
             assert!(is_native_audio(name), "{name} должен моститься");
         }
         for (name, bitrate) in [("G726", Some(16)), ("G726", Some(24)), ("G726", Some(32)), ("G726", Some(40))] {
@@ -80,7 +80,7 @@ mod tests {
             assert!(!is_native_audio_variant(name, bitrate), "{name}:{bitrate:?} не поддерживается");
         }
         assert!(is_native_audio_variant("G72616", None));
-        for name in ["G729", "OPUS", "AAC", "G7221C"] {
+        for name in ["G729", "AAC", "G7221C", "G719"] {
             assert!(!is_native_audio(name), "{name} требует T06b-транскодера");
         }
         assert!(is_native_video("H264"));

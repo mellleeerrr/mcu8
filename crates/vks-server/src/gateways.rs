@@ -677,10 +677,10 @@ impl GatewayManager {
 ///
 /// The value is advertised in media details; it is not an RTP clock.
 pub(super) fn audio_sample_rate(payload_type: u8) -> u32 {
-    if payload_type == 9 {
-        16_000
-    } else {
-        8_000
+    match payload_type {
+        9 => 16_000,
+        111 => 48_000,
+        _ => 8_000,
     }
 }
 
@@ -690,10 +690,12 @@ pub(super) fn audio_codec_name(payload_type: u8) -> &'static str {
         0 => "PCMU",
         8 => "PCMA",
         9 => "G722",
+        15 => "G728",
         107 => "G726-16",
         108 => "G726-24",
         109 => "G726-32",
         110 => "G726-40",
+        111 => "OPUS",
         _ => "unknown",
     }
 }
@@ -1123,8 +1125,8 @@ impl GatewayManager {
                 session.call_id.clone(),
             )
         };
-        if ![0, 8, 9, 107, 108, 109, 110].contains(&audio_payload_type) {
-            return Err("Only negotiated PCMU/PCMA/G722/G726 audio can be bridged".into());
+        if ![0, 8, 9, 15, 107, 108, 109, 110, 111].contains(&audio_payload_type) {
+            return Err("Only negotiated PCMU/PCMA/G722/G728/G726/Opus audio can be bridged".into());
         }
         let remote_audio_ip =
             remote_ip.parse::<std::net::IpAddr>().map_err(|_| "Invalid negotiated audio IP".to_string())?;
@@ -1138,7 +1140,8 @@ impl GatewayManager {
         let mut has_video = video_configuration.is_some();
         let media_details = serde_json::json!({
             "audio_codec": audio_codec_name(audio_payload_type),
-            "audio_payload_type": audio_payload_type, "audio_clock_rate": 8000,
+            "audio_payload_type": audio_payload_type,
+            "audio_clock_rate": if matches!(audio_payload_type, 111) { 48000 } else { 8000 },
             "audio_sample_rate": audio_sample_rate(audio_payload_type),
             "audio_tx_payload_type": audio_payload_type, "audio_rx_payload_type": audio_payload_type,
             "remote_audio_address": std::net::SocketAddr::new(remote_audio_ip, remote_audio_port).to_string(),
@@ -2336,8 +2339,12 @@ async fn serve_sip_uas_on(
                         "audio_payload_type": media.audio_payload_type,
                         "audio_rx_payload_type": media.audio_payload_type,
                         "audio_tx_payload_type": media.audio_payload_type,
-                        "audio_clock_rate": 8000,
-                        "audio_sample_rate": if media.audio_codec == "G722" { 16_000 } else { 8_000 },
+                        "audio_clock_rate": media.audio_clock_rate,
+                        "audio_sample_rate": match media.audio_codec {
+                            "G722" => 16_000,
+                            "OPUS" => 48_000,
+                            _ => 8_000,
+                        },
                         "video_codec": media.video_payload_type.map(|_| "H264"),
                         "video_payload_type": media.video_payload_type,
                         "video_clock_rate": media.video_payload_type.map(|_| 90000u32),
@@ -4105,7 +4112,9 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         vks_gateway_sip::encode_ulaw(&[0.4; 160], &mut packet[12..172]);
         vks_gateway_sip::encode_ulaw(&[-0.4; 160], &mut packet[172..]);
         terminal.send_to(&packet, target).await.unwrap();
-        let second_half = tokio::time::timeout(Duration::from_millis(150), async {
+        // Generous timeout: under a loaded CI host the 20 ms MCU ticks can be
+        // delayed, but the assertion is about consuming the second half at all.
+        let second_half = tokio::time::timeout(Duration::from_millis(1000), async {
             loop {
                 if mcu
                     .participant_audio(room, listener)
@@ -4117,7 +4126,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             }
         })
         .await;
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let after = mcu.participant_audio(room, listener).unwrap();
         cancel.store(true, Ordering::Relaxed);
         task.await.unwrap();
@@ -4261,6 +4270,11 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert!(answer.contains("m=audio "), "{answer}");
         assert!(answer.contains(" RTP/AVP 9\r\n"), "G722 must be selected, not PCMU fallback: {answer}");
         assert!(answer.contains("a=rtpmap:9 G722/8000"), "{answer}");
+        let g728 = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 15\r\na=rtpmap:15 G728/8000\r\n";
+        client.send(invite("cid-g728", g728).as_bytes()).await.unwrap();
+        let g728_answer = read_until(&client, "SIP/2.0 200").await;
+        assert!(g728_answer.contains(" RTP/AVP 15\r\n"), "G.728 must be answered: {g728_answer}");
+        assert!(g728_answer.contains("a=rtpmap:15 G728/8000"), "{g728_answer}");
         let g726 = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 109\r\na=rtpmap:109 G726-32/8000\r\n";
         client.send(invite("cid-g726", g726).as_bytes()).await.unwrap();
         let g726_answer = read_until(&client, "SIP/2.0 200").await;
@@ -4390,6 +4404,90 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             160,
             "40 ms input must not advance the RTP timestamp by 320"
         );
+        cancel.store(true, Ordering::Relaxed);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gateway_audio_bridges_opus_at_peer_dynamic_pt_with_48khz_clock() {
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let room = RoomId::new();
+        let source = vks_core::ParticipantId::new();
+        let listener = vks_core::ParticipantId::new();
+        for pid in [source, listener] {
+            mcu.bridge_participant(
+                room,
+                pid,
+                vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Audio)],
+            );
+        }
+        let terminal = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = socket.local_addr().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stats = Arc::new(GatewayMediaStats::default());
+        let (_tx, dtmf_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_rtp_media_bridge(RtpBridgeSession {
+            room_id: room,
+            participant_id_str: source.to_string(),
+            participant_id_val: source,
+            remote_media_ip: "127.0.0.1".into(),
+            remote_audio_port: terminal.local_addr().unwrap().port(),
+            audio_payload_type: 96,
+            audio_codec: Some("OPUS"),
+            source_latch: false,
+            dtmf_payload_type: None,
+            media_stats: stats.clone(),
+            rtp_socket: socket,
+            rtcp_socket: None,
+            rtp_port: target.port(),
+            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(49000, 49000)),
+            mcu_engine: mcu.clone(),
+            controls: GatewayMediaControls::default(),
+            cancel_flag: cancel.clone(),
+            dtmf_rx,
+        });
+        let mut codec = vks_gateway_sip::opus::OpusCodec::new().expect("opus");
+        let pcm: Vec<f32> = (0..vks_gateway_sip::opus::FRAME_SAMPLES)
+            .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 440.0 / 48_000.0).sin() * 0.25)
+            .collect();
+        let payload = codec.encode(&pcm).expect("encode Opus");
+        let mut packet = vec![0u8; 12 + payload.len()];
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 96, 1, 0, 42, false);
+        packet[12..].copy_from_slice(&payload);
+        terminal.send_to(&packet, target).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !mcu
+                .participant_audio(room, listener)
+                .is_some_and(|audio| audio.iter().any(|sample| sample.abs() > 0.02))
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("Opus PCM must reach the 48 kHz MCU mix");
+        let mut first = vec![0u8; 1400];
+        let (count, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut first))
+            .await
+            .expect("bridge must emit Opus RTP")
+            .unwrap();
+        assert_eq!(first[1] & 0x7F, 96, "peer-chosen dynamic Opus payload type");
+        assert!((13..=12 + vks_gateway_sip::opus::MAX_PAYLOAD).contains(&count), "{count}");
+        let first_ts = u32::from_be_bytes(first[4..8].try_into().unwrap());
+        let mut second = vec![0u8; 1400];
+        let (count2, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut second))
+            .await
+            .expect("bridge must emit a second Opus RTP packet")
+            .unwrap();
+        assert!((13..=12 + vks_gateway_sip::opus::MAX_PAYLOAD).contains(&count2));
+        assert_eq!(
+            u32::from_be_bytes(second[4..8].try_into().unwrap()).wrapping_sub(first_ts),
+            960,
+            "Opus RTP clock is 48 kHz"
+        );
+        let mut decoder = vks_gateway_sip::opus::OpusCodec::new().expect("opus decoder");
+        let decoded = decoder.decode(&first[12..count]).expect("outbound Opus decodes");
+        assert_eq!(decoded.len(), 960);
         cancel.store(true, Ordering::Relaxed);
         task.await.unwrap();
     }

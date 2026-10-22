@@ -245,8 +245,8 @@ mod header_regressions {
 //
 // * Native today (really decoded and re-encoded by this gateway):
 //   PCMU, PCMA (G.711), G.722 (PT9, Mode1 64k), G.726-16/24/32/40
-//   (PT107-110, RFC 3551 LSB-first) and H.264 Constrained Baseline,
-//   packetization-mode=1.
+//   (PT107-110, RFC 3551 LSB-first), G.728 (PT15), Opus (PT111, 48 kHz)
+//   and H.264 Constrained Baseline, packetization-mode=1.
 // * Everything else is offered for interoperability and **refused on answer**:
 //   [`negotiate_media_detailed`] returns [`NegotiationFailure::UnsupportedAudio`]
 //   instead of handing a codec we cannot bridge to the RTP bridge (that would
@@ -283,7 +283,7 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
     OfferCodec { payload: 0, name: "PCMU", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
     OfferCodec { payload: 8, name: "PCMA", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
     OfferCodec { payload: 9, name: "G722", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
-    OfferCodec { payload: 15, name: "G728", clock: 8000, channels: 1, fmtp: None, native: false, dtmf: false },
+    OfferCodec { payload: 15, name: "G728", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
     OfferCodec { payload: 4, name: "G723", clock: 8000, channels: 1, fmtp: None, native: false, dtmf: false },
     OfferCodec {
         payload: 18,
@@ -348,8 +348,10 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
         name: "opus",
         clock: 48000,
         channels: 2,
-        fmtp: Some("minptime=10;useinbandfec=1"),
-        native: false,
+        // `stereo=0`/`sprop-stereo=0`: the bridge mixes mono even though the
+        // rtpmap channel count is the codec's maximum (RFC 7587 §7.1).
+        fmtp: Some("useinbandfec=1;stereo=0;sprop-stereo=0"),
+        native: true,
         dtmf: false,
     },
     OfferCodec { payload: 112, name: "G719", clock: 48000, channels: 1, fmtp: None, native: false, dtmf: false },
@@ -499,7 +501,8 @@ fn payload_list(codecs: &[&OfferCodec]) -> String {
 /// Which codecs an outbound offer advertises.
 ///
 /// * [`CodecProfile::Native`] — only codecs the media bridge really
-///   decodes/encodes (G.711, G.722, H.264 baseline, plus `telephone-event`).
+///   decodes/encodes (G.711, G.722, G.726, G.728, Opus, H.264 baseline, plus
+///   `telephone-event`).
 ///   This is the production default: a terminal answers with a codec we can actually
 ///   bridge, and the RTP bridge's single-payload-type pinning stays valid.
 /// * [`CodecProfile::Full`] — the whole vendor matrix. Required for lab
@@ -584,6 +587,12 @@ m=audio {audio_port} RTP/AVP {}\r\n",
         payload_list(&audio)
     );
     push_codec_attrs(&mut sdp, &audio);
+    // G.723.1 uses 30 ms frames; do not contradict it in the full/lab offer.
+    // The native profile never contains G723, so hardware terminals still get
+    // an explicit 20 ms ptime.
+    if audio.iter().all(|codec| codec.name != "G723") {
+        sdp.push_str("a=ptime:20\r\na=maxptime:20\r\n");
+    }
     sdp.push_str(&format!("a=sendrecv\r\na=rtcp:{}\r\n", audio_port + 1));
 
     if let Some(vport) = video_port {
@@ -890,7 +899,11 @@ a=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1\r\n";
     fn native_profile_offers_only_bridgeable_codecs() {
         let sdp = build_offer(CodecProfile::Native, "192.168.1.93", 41000, Some(41002));
         for line in [
-            "m=audio 41000 RTP/AVP 0 8 9 107 108 109 110 101",
+            "m=audio 41000 RTP/AVP 0 8 9 15 107 108 109 110 111 101",
+            "a=rtpmap:111 opus/48000/2",
+            "a=fmtp:111 useinbandfec=1;stereo=0;sprop-stereo=0",
+            "a=ptime:20",
+            "a=maxptime:20",
             "a=rtpmap:0 PCMU/8000",
             "a=rtpmap:8 PCMA/8000",
             "a=rtpmap:101 telephone-event/8000",
@@ -899,7 +912,7 @@ a=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1\r\n";
         ] {
             assert!(sdp.contains(line), "native offer misses `{line}`:\n{sdp}");
         }
-        for absent in ["G7221", "G729", "opu", "H265", "H263", "MP4A-LATM", "G719"] {
+        for absent in ["G7221", "G729", "G719", "H265", "H263", "MP4A-LATM"] {
             assert!(!sdp.contains(absent), "native offer must not advertise unbridgeable `{absent}`:\n{sdp}");
         }
     }
@@ -1264,7 +1277,7 @@ mod g722_and_strict_first_regressions {
     #[test]
     fn native_offer_selects_g722_when_peer_lists_it_before_pcmu() {
         let offer = build_offer(CodecProfile::Native, "192.168.1.93", 41000, None);
-        assert!(offer.contains("m=audio 41000 RTP/AVP 0 8 9 107 108 109 110 101"), "{offer}");
+        assert!(offer.contains("m=audio 41000 RTP/AVP 0 8 9 15 107 108 109 110 111 101"), "{offer}");
         let answer = "v=0\r\nc=IN IP4 192.168.1.132\r\n\
 m=audio 3230 RTP/AVP 9 0 8 101\r\na=rtpmap:9 G722/8000\r\na=rtpmap:0 PCMU/8000\r\n\
 a=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\n";
@@ -1272,6 +1285,21 @@ a=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\n";
         assert_eq!(media.audio_payload_type, 9);
         assert_eq!(media.audio_codec, "G722");
         assert_eq!(media.dtmf_payload_type, Some(101));
+    }
+
+    #[test]
+    fn native_offer_selects_g728_and_opus_when_peer_answers_with_them() {
+        let offer = build_offer(CodecProfile::Native, "192.168.1.93", 41000, None);
+        for (payload, name, clock, channels) in [(15, "G728", 8000, 1), (111, "opus", 48000, 2)] {
+            // RFC 7587 requires two channels in the Opus rtpmap even for mono
+            // payloads; mono is signalled by `stereo=0`.
+            let answer = format!(
+                "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 3230 RTP/AVP {payload}\r\na=rtpmap:{payload} {name}/{clock}/{channels}\r\n"
+            );
+            let media = negotiate_media(&offer, &answer).expect("native codec must be accepted");
+            assert_eq!(media.audio_payload_type, payload);
+            assert_eq!(media.audio_codec.to_ascii_uppercase(), name.to_ascii_uppercase());
+        }
     }
 
     #[test]

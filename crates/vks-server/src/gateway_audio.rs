@@ -1,4 +1,5 @@
-//! G.711/G.722/G.726 payload conversion at the negotiated RTP boundary.
+//! G.711/G.722/G.726/G.728/Opus payload conversion at the negotiated RTP
+//! boundary.
 
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -16,8 +17,9 @@ fn gain(sample: f32, volume: u32) -> f32 {
     }
 }
 
-/// Selected RTP audio codec and its PCM domain.  G.711/G.726 are 8 kHz,
-/// G.722 is 16 kHz; all use a 20 ms tick and an 8 kHz RTP timestamp clock.
+/// Selected RTP audio codec and its PCM domain.  G.711/G.726/G.728 are 8 kHz,
+/// G.722 is 16 kHz, Opus is 48 kHz; all use a 20 ms MCU tick, while the RTP
+/// timestamp step is 160 (8 kHz family) or 960 (Opus).
 enum AudioBridgeCodec {
     G711 {
         /// G.711 law (0 = µ-law/PCMU, 8 = A-law/PCMA), independent of the RTP
@@ -29,6 +31,8 @@ enum AudioBridgeCodec {
     },
     G722(Box<vks_gateway_sip::g722::G722Codec>),
     G726(Box<vks_gateway_sip::g726::G726Codec>),
+    G728(Box<vks_gateway_sip::g728::G728Codec>),
+    Opus(Box<vks_gateway_sip::opus::OpusCodec>),
 }
 
 impl AudioBridgeCodec {
@@ -50,11 +54,15 @@ impl AudioBridgeCodec {
                 Some(Self::G726(Box::new(vks_gateway_sip::g726::G726Codec::new(vks_gateway_sip::g726::G726Rate::R40))))
             }
             Some("G722") => Some(Self::G722(Box::new(vks_gateway_sip::g722::G722Codec::new()))),
+            Some("OPUS") => Some(Self::Opus(Box::new(vks_gateway_sip::opus::OpusCodec::new()?))),
+            Some("G728") => Some(Self::G728(Box::new(vks_gateway_sip::g728::G728Codec::new()))),
             Some("PCMU") => Some(Self::G711 { law: 0, encode_payload_type: 0 }),
             Some("PCMA") => Some(Self::G711 { law: 8, encode_payload_type: 8 }),
             _ => match payload_type {
                 0 | 8 => Some(Self::G711 { law: payload_type, encode_payload_type: payload_type }),
                 9 => Some(Self::G722(Box::new(vks_gateway_sip::g722::G722Codec::new()))),
+                15 => Some(Self::G728(Box::new(vks_gateway_sip::g728::G728Codec::new()))),
+                111 => Some(Self::Opus(Box::new(vks_gateway_sip::opus::OpusCodec::new()?))),
                 107..=110 => {
                     let rate = vks_gateway_sip::g726::G726Rate::from_payload_type(payload_type)?;
                     Some(Self::G726(Box::new(vks_gateway_sip::g726::G726Codec::new(rate))))
@@ -67,6 +75,8 @@ impl AudioBridgeCodec {
     fn frame_samples(&self) -> usize {
         match self {
             Self::G722(_) => 320,
+            Self::G728(_) => vks_gateway_sip::g728::FRAME_SAMPLES,
+            Self::Opus(_) => vks_gateway_sip::opus::FRAME_SAMPLES,
             Self::G711 { .. } | Self::G726(_) => 160,
         }
     }
@@ -74,7 +84,38 @@ impl AudioBridgeCodec {
     fn max_payload(&self) -> usize {
         match self {
             Self::G726(codec) => 2 * codec.rate().bytes_20ms(),
+            Self::Opus(_) => vks_gateway_sip::opus::MAX_PAYLOAD,
+            Self::G728(_) => vks_gateway_sip::g728::PAYLOAD_BYTES,
             Self::G711 { .. } | Self::G722(_) => 480,
+        }
+    }
+
+    /// Packet-loss concealment for `missing` lost packets.  Opus can recover
+    /// the immediately preceding frame from the next packet's in-band FEC;
+    /// otherwise it runs up to three PLC frames (bounded so a long network
+    /// outage does not enqueue minutes of invented audio).
+    fn conceal(&mut self, missing: usize, next_payload: &[u8]) -> Vec<f32> {
+        let mut out = Vec::new();
+        let Self::Opus(codec) = self else { return out };
+        if missing == 1 {
+            if let Some(fec) = codec.decode_fec(next_payload) {
+                out.extend(fec);
+                return out;
+            }
+        }
+        for _ in 0..missing.min(3) {
+            let Some(plc) = codec.decode(&[]) else { break };
+            out.extend(plc);
+        }
+        out
+    }
+
+    /// RTP timestamp increment per 20 ms packet: 48 kHz for Opus, 8 kHz for
+    /// the narrowband/wideband codecs (G.722 keeps an 8 kHz RTP clock).
+    fn timestamp_step(&self) -> u32 {
+        match self {
+            Self::Opus(_) => vks_gateway_sip::opus::FRAME_SAMPLES as u32,
+            Self::G711 { .. } | Self::G722(_) | Self::G726(_) | Self::G728(_) => 160,
         }
     }
 
@@ -103,6 +144,8 @@ impl AudioBridgeCodec {
                 }
                 Some(codec.decode(payload).into_iter().map(|sample| f32::from(sample) / 32768.0).collect())
             }
+            Self::G728(codec) => codec.decode(payload),
+            Self::Opus(codec) => codec.decode(payload),
         }
     }
 
@@ -120,6 +163,8 @@ impl AudioBridgeCodec {
                     pcm.iter().map(|sample| (sample * 32768.0).round().clamp(-32768.0, 32767.0) as i16).collect();
                 codec.encode(&pcm)
             }
+            Self::G728(codec) => codec.encode(pcm).unwrap_or_default(),
+            Self::Opus(codec) => codec.encode(pcm).unwrap_or_default(),
         }
     }
 }
@@ -147,14 +192,24 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
     } else {
         RtpSource::new(target, session.audio_payload_type)
     };
+    if matches!(bridge_codec, AudioBridgeCodec::Opus(_)) {
+        validator.allow_empty_payloads();
+    }
     session.media_stats.audio_codec_running.store(true, Relaxed);
     let mut egress = target;
-    let mut queue = std::collections::VecDeque::<f32>::with_capacity(1920);
+    // Holds one maximum-duration Opus packet (120 ms) so a peer using
+    // 40/60/120 ms packetization is not truncated by the 20 ms consumer.
+    const AUDIO_QUEUE_LIMIT: usize = vks_gateway_sip::opus::MAX_FRAME_SAMPLES;
+    let mut queue = std::collections::VecDeque::<f32>::with_capacity(AUDIO_QUEUE_LIMIT);
     let mut dtmf = std::collections::VecDeque::<u8>::new();
     let mut dtmf_active: Option<(u8, usize, u32)> = None;
     let mut dtmf_gap = 0;
     let mut sequence = 1u16;
     let mut timestamp = 0u32;
+    // Telephone-event keeps the 8 kHz event clock even when Opus audio uses
+    // a 48 kHz RTP timestamp.
+    let mut dtmf_timestamp = 0u32;
+    let mut last_sequence: Option<u16> = None;
     let ssrc = (uuid::Uuid::new_v4().as_u128() as u32).max(1);
     let mut incoming = [0; 2048];
     let mut mixed = [0.0; 960];
@@ -206,6 +261,17 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 if packet.payload.len() > bridge_codec.max_payload() {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed); continue;
                 }
+                if let Some(last) = last_sequence {
+                    let missing = usize::from(packet.sequence.wrapping_sub(last).wrapping_sub(1));
+                    if missing > 0 {
+                        let concealed = bridge_codec.conceal(missing, packet.payload);
+                        if !concealed.is_empty() {
+                            while queue.len() + concealed.len() > AUDIO_QUEUE_LIMIT { queue.pop_front(); }
+                            queue.extend(concealed);
+                        }
+                    }
+                }
+                last_sequence = Some(packet.sequence);
                 let Some(decoded) = bridge_codec.decode(packet.payload_type, packet.payload) else {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed);
                     continue;
@@ -220,13 +286,13 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 );
                 session.media_stats.audio_rx_bytes.fetch_add(count as u64, Relaxed);
                 if session.controls.audio_tx_muted.load(Relaxed) { queue.clear(); continue; }
-                while queue.len() + decoded.len() > 1920 { queue.pop_front(); }
+                while queue.len() + decoded.len() > AUDIO_QUEUE_LIMIT { queue.pop_front(); }
                 queue.extend(decoded);
             }
             _ = ticker.tick() => {
                 let mut upsampled = [0.0; 960];
                 let frame_samples = bridge_codec.frame_samples();
-                let mut input = [0.0; 320];
+                let mut input = [0.0; 960];
                 if session.controls.audio_tx_muted.load(Relaxed) { queue.clear(); }
                 else {
                     let volume = session.controls.volume_tx.load(Relaxed);
@@ -234,24 +300,31 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                         *sample = gain(queue.pop_front().unwrap_or(0.0), volume);
                     }
                 }
-                if frame_samples == 320 {
-                    vks_gateway_sip::upsample_16k_to_48k(&input, &mut upsampled);
+                if frame_samples == vks_gateway_sip::opus::FRAME_SAMPLES {
+                    // Opus runs natively at the 48 kHz MCU mix rate.
+                } else if frame_samples == 320 {
+                    let mut wide = [0.0; 320];
+                    wide.copy_from_slice(&input[..320]);
+                    vks_gateway_sip::upsample_16k_to_48k(&wide, &mut upsampled);
                 } else {
                     let mut narrow = [0.0; 160];
                     narrow.copy_from_slice(&input[..160]);
                     vks_gateway_sip::upsample_8k_to_48k(&narrow, &mut upsampled);
                 }
-                session.mcu_engine.set_audio_slice(session.room_id, session.participant_id_val, &upsampled);
+                let mcu_input = if frame_samples == vks_gateway_sip::opus::FRAME_SAMPLES { &input } else { &upsampled };
+                session.mcu_engine.set_audio_slice(session.room_id, session.participant_id_val, mcu_input);
                 session.mcu_engine.tick_audio_at(session.room_id, media_clock_ms());
-                let mut packet = [0; 512];
+                let mut packet = [0; 12 + vks_gateway_sip::opus::MAX_PAYLOAD];
                 vks_gateway_sip::write_rtp_header(&mut packet[..12], session.audio_payload_type, sequence, timestamp, ssrc, false);
                 sequence = sequence.wrapping_add(1);
                 let volume = session.controls.volume_rx.load(Relaxed);
                 let frame_samples = bridge_codec.frame_samples();
-                let mut output = [0.0; 320];
+                let mut output = [0.0; 960];
                 if !session.controls.audio_rx_muted.load(Relaxed)
                     && session.mcu_engine.copy_participant_audio(session.room_id, session.participant_id_val, &mut mixed) {
-                    if frame_samples == 320 {
+                    if frame_samples == vks_gateway_sip::opus::FRAME_SAMPLES {
+                        output.copy_from_slice(&mixed);
+                    } else if frame_samples == 320 {
                         let mut wide = [0.0; 320];
                         vks_gateway_sip::downsample_48k_to_16k(&mixed, &mut wide);
                         output[..320].copy_from_slice(&wide);
@@ -265,15 +338,19 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                     *sample = gain(*sample, volume);
                 }
                 let encoded = bridge_codec.encode(&output[..frame_samples]);
-                let payload_len = encoded.len().min(packet.len() - 12);
-                packet[12..12 + payload_len].copy_from_slice(&encoded[..payload_len]);
-                if let Ok(count) = session.rtp_socket.send_to(&packet[..12 + payload_len], egress).await {
-                    session.media_stats.audio_tx_packets.fetch_add(1, Relaxed); session.media_stats.audio_tx_bytes.fetch_add(count as u64, Relaxed);
+                // A codec failure must not become a zero-length RTP packet:
+                // skip this frame and keep the timestamp advancing.
+                if !encoded.is_empty() {
+                    let payload_len = encoded.len().min(packet.len() - 12);
+                    packet[12..12 + payload_len].copy_from_slice(&encoded[..payload_len]);
+                    if let Ok(count) = session.rtp_socket.send_to(&packet[..12 + payload_len], egress).await {
+                        session.media_stats.audio_tx_packets.fetch_add(1, Relaxed); session.media_stats.audio_tx_bytes.fetch_add(count as u64, Relaxed);
+                    }
                 }
                 if let Some(payload_type) = session.dtmf_payload_type {
                     if dtmf_gap > 0 { dtmf_gap -= 1; }
                     else {
-                        if dtmf_active.is_none() { dtmf_active = dtmf.pop_front().map(|event| (event, 0, timestamp)); }
+                        if dtmf_active.is_none() { dtmf_active = dtmf.pop_front().map(|event| (event, 0, dtmf_timestamp)); }
                         if let Some((event, step, started)) = dtmf_active {
                             let duration = [160u16, 320, 480, 480, 480][step];
                             let mut event_packet = [0; 16];
@@ -285,7 +362,8 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                         }
                     }
                 } else { dtmf.clear(); }
-                timestamp = timestamp.wrapping_add(160);
+                timestamp = timestamp.wrapping_add(bridge_codec.timestamp_step());
+                dtmf_timestamp = dtmf_timestamp.wrapping_add(160);
                 if last_rtcp.elapsed() >= std::time::Duration::from_secs(5) {
                     if let Some(socket) = &session.rtcp_socket {
                         let report = rtcp_sender_report(ssrc, timestamp, session.media_stats.audio_tx_packets.load(Relaxed), session.media_stats.audio_tx_bytes.load(Relaxed));
@@ -380,6 +458,7 @@ pub(super) struct RtpSource {
     /// Входящий вызов: первый валидный RTP-latch с SDP-target разрешён,
     /// дальше источник фиксируется (NAT/перемаршрутизация порта).
     latch: bool,
+    allow_empty: bool,
 }
 
 pub(super) struct RtpPayload<'a> {
@@ -395,13 +474,19 @@ impl RtpSource {
         self.ssrc
     }
     pub(super) fn new(target: std::net::SocketAddr, payload_type: u8) -> Self {
-        Self { target, payload_type, ssrc: None, sequence: None, latch: false }
+        Self { target, payload_type, ssrc: None, sequence: None, latch: false, allow_empty: false }
     }
 
     /// UAS-вызов: разрешает первый валидный пакет с другого source и
     /// фиксирует его; последующие источники отбрасываются.
     pub(super) fn new_latched(target: std::net::SocketAddr, payload_type: u8) -> Self {
         Self { latch: true, ..Self::new(target, payload_type) }
+    }
+
+    /// Opus uses a zero-length payload as a lost/PLC indication (RFC 3550
+    /// permits empty payloads); other codecs must carry a complete frame.
+    pub(super) fn allow_empty_payloads(&mut self) {
+        self.allow_empty = true;
     }
 
     pub(super) fn accept<'a>(&mut self, source: std::net::SocketAddr, packet: &'a [u8]) -> Option<RtpPayload<'a>> {
@@ -429,7 +514,7 @@ impl RtpSource {
             0
         };
         let end = packet.len().checked_sub(padding)?;
-        if end <= offset || self.ssrc.is_some_and(|current| current != ssrc) {
+        if end < offset || (end == offset && !self.allow_empty) || self.ssrc.is_some_and(|current| current != ssrc) {
             return None;
         }
         if self.sequence.is_some_and(|last| {
@@ -488,6 +573,40 @@ mod tests {
     }
 
     #[test]
+    fn bridge_codecs_opus_and_g728_use_their_native_frame_sizes() {
+        let tone = |len: usize, rate: f32| -> Vec<f32> {
+            (0..len).map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 440.0 / rate).sin() * 0.2).collect()
+        };
+        let mut opus = AudioBridgeCodec::new(111, None).expect("Opus bridge codec");
+        assert_eq!(opus.frame_samples(), 960);
+        assert_eq!(opus.timestamp_step(), 960);
+        let packet = opus.encode(&tone(960, 48_000.0));
+        assert!(!packet.is_empty() && packet.len() <= 1275);
+        assert_eq!(opus.decode(111, &packet).expect("Opus decode").len(), 960);
+
+        let mut g728 = AudioBridgeCodec::new(15, None).expect("G.728 bridge codec");
+        assert_eq!(g728.frame_samples(), 160);
+        assert_eq!(g728.timestamp_step(), 160);
+        let packet = g728.encode(&tone(160, 8_000.0));
+        assert_eq!(packet.len(), 40);
+        assert_eq!(g728.decode(15, &packet).expect("G.728 decode").len(), 160);
+    }
+
+    #[test]
+    fn opus_conceal_produces_plc_frames_and_bounds_long_gaps() {
+        let mut codec = AudioBridgeCodec::new(111, None).expect("Opus bridge codec");
+        let pcm: Vec<f32> =
+            (0..960).map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 440.0 / 48_000.0).sin() * 0.2).collect();
+        let packet = codec.encode(&pcm);
+        assert!(!packet.is_empty());
+        assert_eq!(codec.conceal(1, &packet).len(), 960, "one lost packet = one Opus frame");
+        assert_eq!(codec.conceal(9, &packet).len(), 3 * 960, "long outages are capped at 3 PLC frames");
+        // G.711/G.728 have no loss-concealment path in this bridge.
+        let mut g711 = AudioBridgeCodec::new(0, None).expect("PCMU");
+        assert!(g711.conceal(1, &[0u8; 160]).is_empty());
+    }
+
+    #[test]
     fn dynamic_pcma_keeps_alaw_identity_independent_of_pt96() {
         let pcm = [0.25f32; 160];
         let mut pcma = AudioBridgeCodec::new(96, Some("PCMA")).expect("dynamic PCMA");
@@ -499,6 +618,21 @@ mod tests {
         let decoded = pcma.decode(96, &alaw).expect("decode dynamic PCMA");
         assert_eq!(decoded.len(), 160);
         assert!(decoded.iter().all(|sample| (sample - 0.25).abs() < 0.04), "{decoded:?}");
+    }
+
+    #[test]
+    fn empty_rtp_payload_is_accepted_only_for_opus() {
+        let target: std::net::SocketAddr = "192.0.2.1:40000".parse().unwrap();
+        let mut packet = [0u8; 12];
+        vks_gateway_sip::write_rtp_header(&mut packet, 111, 1, 0, 42, false);
+        let mut g711 = RtpSource::new(target, 0);
+        let mut g711_packet = [0u8; 12];
+        vks_gateway_sip::write_rtp_header(&mut g711_packet, 0, 1, 0, 42, false);
+        assert!(g711.accept(target, &g711_packet).is_none(), "G.711 needs a payload");
+        let mut opus = RtpSource::new(target, 111);
+        assert!(opus.accept(target, &packet).is_none(), "empty allowed only after opt-in");
+        opus.allow_empty_payloads();
+        assert!(opus.accept(target, &packet).is_some(), "Opus PLC payload");
     }
 
     #[test]

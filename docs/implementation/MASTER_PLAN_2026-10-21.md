@@ -353,6 +353,14 @@ UAS отвечает G726-only и принимает произвольный in
 233/233 (`.132` G726 не предлагает). H.323 динамические PT/TCS — T06b-4.
 Evidence: `docs/progress/evidence/t06b2a/`.
 
+**T06b-2b (Opus + G.728, остальное — явный 488) — реализован 2026-10-22, ожидает ревью/коммита.**
+`rusty-opus =1.0.2` (pure Rust, 960 сэмплов/+960, bridge-side FEC/PLC по
+sequence-gap, PT111, dynamic inbound PT, mono `stereo=0`, DTMF в отдельном
+8-кГц домене), `oxideav-g728 =0.0.8` (PT15, 40 B/20 мс, +160), native offer `0 8 9 15 107 108 109 110 111 101`. G723/G729/G722.1(C)/
+G719/AAC-LATM — 488 до 200 с явной причиной; G723 (30 мс) — T06b-2c.
+Live E2E 233/233 остаётся G722 (`.132`), settings `OPUS`/`G728` supported.
+Evidence: `docs/progress/evidence/t06b2b/`.
+
 ## T06b. Транскодирование полной матрицы (P1)
 
 **Проблема (состояние до T06b-1).** В настройках 18 audio/8 video, в

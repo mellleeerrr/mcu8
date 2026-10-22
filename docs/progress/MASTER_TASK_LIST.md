@@ -111,6 +111,14 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > 160 B/20 мс + timestamp 160, media details sample_rate 16000/clock 8000.
 > Live low-video E2E 233/233, audio TX545/RX361, rejected 0, G722/PT9/16000/8000
 > asserted; 72 SIP + 72 server тестов, workspace clippy/fmt clean. Evidence `docs/progress/evidence/t06b1/`.
+> **T06b-2b (Opus + G.728) реализован, ожидает ревью/коммита:** rusty-opus 1.0.2
+> (48 кГц, 960/+960, bridge-side FEC/PLC по sequence-gap, PT111, dynamic
+> inbound PT, mono stereo=0, DTMF на отдельном 8-кГц timestamp),
+> oxideav-g728 0.0.8 (PT15, 40 B/20 мс, +160); native offer
+> `0 8 9 15 107 108 109 110 111 101`; G723/G729/G722.1(C)/G719/AAC — явный 488,
+> G723 (30 мс) — T06b-2c. Gates 86 SIP (+1) / 78 server (+3) / 77 common;
+> live E2E 233/233 G722, API OPUS/G728 supported:true.
+>
 > **T06b-2a (G.726 all rates) закрыт `17b8660`, ревью 9.5/10 APPROVED:** oxideav-adpcm 0.0.7,
 > LSB-first, PT107–110, 20/30/40 мс, AudioBridgeCodec, dynamic inbound PT 96–127
 > с codec identity, UAS G726-only, variant-aware settings precheck, FFmpeg g726le
