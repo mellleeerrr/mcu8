@@ -157,6 +157,20 @@ impl RoomHub {
         None
     }
 
+    /// Заменяет список треков участника (например, при деградации до audio-only).
+    pub fn update_participant_tracks(
+        &self,
+        room_id: &RoomId,
+        participant_id: &str,
+        track_ids: Vec<String>,
+    ) -> Option<ParticipantSnapshot> {
+        let mut map = self.channels.write().expect("RoomHub lock poisoned");
+        let entry = map.get_mut(room_id)?;
+        let participant = entry.participants.get_mut(participant_id)?;
+        participant.track_ids = track_ids;
+        Some(participant.clone())
+    }
+
     /// Atomically updates a participant's media state (audio/video mute or display name) in the roster.
     pub fn update_participant_media(
         &self,

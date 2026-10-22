@@ -81,3 +81,20 @@ Q.931/H.245/RAS), per-m `c=`, симметричный RTP-latch для NAT (P2,
   `inbound_sip_uas_media_timeout_reaps_registry_and_sends_bye`, ~20 с).
 - Тест admin hangup проверяет **заголовки** BYE: From = локальная сторона с
   нашим tag, To = вызывающий с его tag.
+
+## Пятый проход (P2 из ревью `50b3822`)
+
+- `received`/`rport` в ответах берутся из фактического source peer; Via/Contact
+  и серверный BYE используют реальный bind-порт (`local_port`), а не 5060.
+- To-tag теперь выдаётся в начале обработки INVITE и входит во все ответы
+  >100 (404/420/488/501/503), а не только в 180/200.
+- re-INVITE с тем же dialog-key получает 501, а не кэшированный старый 200/SDP.
+- `invite_buckets` ограничен 1024 записями (eviction от spoofed source).
+- Невалидный/`0.0.0.0` video `c=` → 488 до 200; `remote_video_address` строится
+  из video IP.
+- Для входящего G.711/media-watchdog порог 90 с (не рвёт hold), вынесен
+  параметром в тесты; media-задачи (`audio_task`/`video_task`) дожидаются
+  остановки перед снятием participant/ответом.
+- Video downgrade удаляет video-трек из RoomHub snapshot и media_details.
+- Graceful shutdown UAS: listener получает notify, снимает registry и шлёт BYE
+  активным входящим диалогам.

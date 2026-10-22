@@ -423,8 +423,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     info!(addr = %config.listen_addr, "vks-server ready and listening for HTTP/WebSocket");
 
+    let uas_shutdown = gateway_manager.clone();
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            uas_shutdown.shutdown_sip_uas();
+            // Дать listener'у отправить BYE активным входящим диалогам.
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        })
         .await?;
 
     if let Some(loop_handle) = &udp_loop {
