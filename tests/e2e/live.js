@@ -362,8 +362,10 @@ async function api(token, method, urlPath, body) {
       const rect = element.getBoundingClientRect();
       return { text: (element.innerText || '').trim(), left: rect.left, top: rect.top, width: rect.width, height: rect.height };
     }));
+    const sizeLabel = size => ({ 5: '5 +', 10: '10 +', 34: '34 +' })[size] || String(size);
     const placeParticipant = async (size, position) => {
-      await page.locator('button').filter({ hasText: new RegExp(`^${size}$`) }).first().click();
+      const label = sizeLabel(size).replace('+', '\\+');
+      await page.locator('button').filter({ hasText: new RegExp(`^${label}$`) }).first().click();
       await page.waitForTimeout(650);
       const cell = page.locator('.layout-grid-slot-wrapper').nth(position - 1);
       await cell.click();
@@ -375,23 +377,33 @@ async function api(token, method, urlPath, body) {
       }
       return readTiles();
     };
-    for (const size of [4, 8, 9, 25]) {
-      for (const position of [1, Math.ceil(size / 2), size]) {
+    // T04b: полный ряд диапазонов 1/2/3/4/5+/8/9/10+/25/34+; для каждого —
+    // первая, средняя и последняя ячейка (уникальные), участник именно в ней.
+    for (const size of [1, 2, 3, 4, 5, 8, 9, 10, 25, 34]) {
+      for (const position of [...new Set([1, Math.ceil(size / 2), size])]) {
         const tiles = await placeParticipant(size, position);
         const target = tiles[position - 1];
         check(`layout: UI ${size} cell ${position} rendered`, Boolean(target && target.width > 20 && target.height > 20),
           JSON.stringify(target));
         check(`layout: UI ${size} cell ${position} holds SIP participant`, Boolean(target && target.text.includes(SIP_NAME)),
           JSON.stringify(tiles.map(tile => tile.text)));
-        check(`layout: UI ${size} keeps ${size} cells when participant is in ${position}`,
-          tiles.length === size, JSON.stringify(tiles.map(tile => tile.text)));
+        // Диапазоны «5+/10+/34+» дают схему с числом ячеек >= нижней границы.
+        const plusRange = size === 5 || size === 10 || size === 34;
+        const cellsOk = plusRange ? tiles.length >= size : tiles.length === size;
+        check(`layout: UI ${size} keeps ${plusRange ? 'at least ' : ''}${size} cells when participant is in ${position}`,
+          cellsOk, JSON.stringify(tiles.map(tile => tile.text)));
       }
     }
     // Возвращаем ручную 2×2 с участником в ячейке 1 для clear-all/detach.
     await placeParticipant(4, 1);
 
     // 7d. T04a: calculate для 4/8/9/25 — ровно N ячеек и 1-based позиции.
-    for (const [preset, expected] of [['preset_equal_4', 4], ['preset_equal_8', 8], ['preset_equal_9', 9], ['preset_equal_25', 25]]) {
+    for (const [preset, expected] of [
+      ['preset_equal_1', 1], ['preset_equal_2', 2], ['preset_equal_3', 3],
+      ['preset_equal_4', 4], ['preset_selected_r_5', 5], ['preset_equal_8', 8],
+      ['preset_equal_9', 9], ['preset_double_btb_10', 10], ['preset_equal_25', 25],
+      ['preset_double_b_34', 34], ['preset_equal_36', 36],
+    ]) {
       const calc = await api(token, 'POST', '/api/v3/ui/video_layouts/calculate', { preset, width: 1280, height: 720 });
       const slots = calc.json && calc.json.slots || [];
       check(`layout: ${preset} calculates ${expected} slots`, calc.status === 200 && slots.length === expected,

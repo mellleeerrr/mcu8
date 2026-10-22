@@ -481,3 +481,8 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 > от UAS, H.323 `READY` только по факту H.225 setup или реального Q.931-ответа
 > (до вызова — `DISABLED`), структурная классификация terminal/transport без
 > подстрочных эвристик, TTL-самолечения нет. Evidence `docs/progress/evidence/t11a/`.
+>
+> **T04b (полная матрица раскладок) закрыт по live-матрице:** E2E 173 checks /
+> 0 failed / 148.4 s, page_errors 0; все диапазоны 1/2/3/4/5+/8/9/10+/25/34+,
+> участник в первой/средней/последней ячейке, `calculate` для 11 пресетов,
+> 11-я icon-only кнопка режима схем. Evidence `docs/progress/evidence/t04b/`.
