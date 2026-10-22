@@ -94,7 +94,13 @@ async function api(token, method, urlPath, body) {
     const sessionsResponse = page.waitForResponse(r => r.url().includes('/api/v3/ui/sessions?') && r.status() === 200, { timeout: 20000 });
     await page.goto(`${BASE}/pnm/monitoring/sessions`, { waitUntil: 'networkidle' });
     await sessionsResponse;
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(1200);
+    // T12b: один in-flight/кэшированный запрос каждого codec-эндпоинта на
+    // документ, а не 2×N. Счётчик ставит /mcu/perf-overrides.js.
+    const codecStats = await page.evaluate(() => window.__vksCodecCacheStats || null);
+    check('perf: codec requests coalesced to 2 per page',
+      Boolean(codecStats && codecStats.network <= 2),
+      JSON.stringify(codecStats));
     await page.screenshot({ path: path.join(ART, '01-sessions.png') });
 
     // 3. Создание комнаты кнопкой «add» — UI сразу POST-ит конференцию.
@@ -196,6 +202,10 @@ async function api(token, method, urlPath, body) {
     await page.waitForTimeout(12000);
     const participantVisible = await page.getByText(SIP_NAME, { exact: false }).count();
     check('sip: participant visible in conference UI', participantVisible > 0, `matches=${participantVisible}`);
+    const previewToggle = page.locator('.session-abonents-table-config__checkbox--nested');
+    check('ui: dead preview toggle hidden',
+      (await previewToggle.count()) === 0 || await previewToggle.first().isHidden(),
+      `count=${await previewToggle.count()}`);
 
     // 4b. T05: runtime-профиль шлюза (намерение энкодера) соответствует
     // настройкам комнаты; SDP b=AS/max-fs проверяются unit-тестом, здесь —
@@ -203,7 +213,14 @@ async function api(token, method, urlPath, body) {
     const runtimeAbonents = await api(token, 'GET', `/api/v3/sessions/${sessionId}/abonents`);
     const sipRuntime = (runtimeAbonents.json && runtimeAbonents.json.abonents || [])
       .find(item => String(item.display_name || '').includes(SIP_NAME));
-    const sipVideoTx = sipRuntime && sipRuntime.details && sipRuntime.details.video && sipRuntime.details.video.tx;
+    let sipVideoTx = sipRuntime && sipRuntime.details && sipRuntime.details.video && sipRuntime.details.video.tx;
+    for (let attempt = 0; attempt < 4 && (!sipVideoTx || sipVideoTx.frame_rate < 20); attempt++) {
+      await page.waitForTimeout(1000);
+      const fresh = await api(token, 'GET', `/api/v3/sessions/${sessionId}/abonents`);
+      const participant = (fresh.json && fresh.json.abonents || [])
+        .find(item => String(item.display_name || '').includes(SIP_NAME));
+      sipVideoTx = participant && participant.details && participant.details.video && participant.details.video.tx;
+    }
     // T06a: терминал выбирает PCMU/PCMA fallback из Native-оффера; реальные
     // пакеты в обе стороны и ноль отвергнутых по PT доказывают, что нет
     // «connected, dead audio» из-за немостимого кодека.
@@ -405,6 +422,21 @@ async function api(token, method, urlPath, body) {
         await checkPlacement(`${size}${plusRange ? '+' : ''}`, tiles, position);
         check(`layout: UI ${size}${plusRange ? '+' : ''} keeps ${initial.length} cells when participant is in ${position}`,
           tiles.length === initial.length, JSON.stringify(tiles.map(tile => tile.text)));
+        {
+          const labelOffset = await page.locator('.layout-grid-slot-wrapper').nth(position - 1).evaluate(element => {
+            const text = element.querySelector('.layout-grid-slot-dn__text');
+            if (!text) return null;
+            const tile = element.getBoundingClientRect();
+            const label = text.getBoundingClientRect();
+            return {
+              dx: (label.left + label.width / 2) - (tile.left + tile.width / 2),
+              dy: (label.top + label.height / 2) - (tile.top + tile.height / 2),
+            };
+          });
+          check(`layout: UI ${size}${plusRange ? '+' : ''} label centered`,
+            Boolean(labelOffset && Math.abs(labelOffset.dx) <= 1.5 && Math.abs(labelOffset.dy) <= 3),
+            JSON.stringify(labelOffset));
+        }
       }
     }
 
@@ -587,6 +619,14 @@ async function api(token, method, urlPath, body) {
       && !(expectedDetach404.includes(x)));
     checks.push({ name: 'final: no unexpected 4xx', ok: unexpected4xx.length === 0,
       detail: JSON.stringify(unexpected4xx.map(x => `${x.status} ${x.url}`)) });
+    const codecGets = network.filter(x => x.kind === 'request' && x.method === 'GET'
+      && /\/api\/v3\/settings\/(audio|video)_codecs/.test(x.url));
+    checks.push({ name: 'perf: total codec GETs for whole journey <= 20 (2 per document)', ok: codecGets.length <= 20,
+      detail: String(codecGets.length) });
+    const previewGets = network.filter(x => x.kind === 'request' && x.method === 'GET'
+      && x.url.includes('/api/v3/abonents/previews'));
+    checks.push({ name: 'perf: dead previews polling suppressed', ok: previewGets.length === 0,
+      detail: String(previewGets.length) });
     checks.push({ name: 'final: no pageerror after cleanup', ok: pageErrors.length === 0,
       detail: JSON.stringify(pageErrors) });
     const console404 = consoleErrors.filter(message => /status of 404/.test(message));

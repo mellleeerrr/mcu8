@@ -7,7 +7,7 @@
 
 use axum::{
     extract::{Extension, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -556,7 +556,7 @@ pub async fn users_credentials_expire() -> Response {
 
 /// `GET /api/v3/settings/audio_codecs` → эталонный shape
 /// `{audio_codecs:[{name,bitrate}]}` (bitrate null для кодеков без вариантов).
-pub async fn settings_audio_codecs(State(state): State<SharedState>) -> Response {
+pub async fn settings_audio_codecs(State(state): State<SharedState>, headers: HeaderMap) -> Response {
     track("settings/audio_codecs");
     let s = SettingsService::get(&state);
     let codecs: Vec<serde_json::Value> = s
@@ -572,24 +572,50 @@ pub async fn settings_audio_codecs(State(state): State<SharedState>) -> Response
             })
         })
         .collect();
-    // UI вендора опрашивает кодеки на каждую строку сессии (N+1). Кодеки —
-    // глобальные и меняются только админом, поэтому разрешаем короткий
-    // приватный кэш: 109 сессий перестают генерировать 3k запросов за прогон.
-    let mut response = Json(json!({ "audio_codecs": codecs })).into_response();
-    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=30"));
-    response
+    codec_response(&headers, json!({ "audio_codecs": codecs }))
 }
 
 /// `GET /api/v3/settings/video_codecs` → эталонный shape `{video_codecs:[str]}`.
-pub async fn settings_video_codecs(State(state): State<SharedState>) -> Response {
+pub async fn settings_video_codecs(State(state): State<SharedState>, headers: HeaderMap) -> Response {
     track("settings/video_codecs");
     let s = SettingsService::get(&state);
     let supported_video: Vec<&String> =
         s.codecs.video.iter().filter(|name| vks_common::codec_capabilities::is_native_video(name)).collect();
-    let mut response =
-        Json(json!({ "video_codecs": s.codecs.video, "supported_video_codecs": supported_video })).into_response();
-    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=30"));
+    codec_response(&headers, json!({ "video_codecs": s.codecs.video, "supported_video_codecs": supported_video }))
+}
+
+/// Кодеки меняются только PATCH'ем, поэтому отдаём strong ETag и
+/// `no-cache`: браузер ревалидирует, а не показывает устаревший список
+/// до истечения max-age. Клиентский `/mcu/perf-overrides.js` при этом
+/// схлопывает N+1 до одного запроса на документ.
+fn codec_response(headers: &HeaderMap, body: Value) -> Response {
+    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+    let etag = format!("\"{:016x}\"", fnv1a64(&bytes));
+    let cache = HeaderValue::from_static("private, no-cache");
+    if headers.get_all(header::IF_NONE_MATCH).iter().filter_map(|value| value.to_str().ok()).any(|value| {
+        value.split(',').any(|candidate| {
+            let candidate = candidate.trim();
+            candidate == "*" || candidate == etag || candidate.strip_prefix("W/") == Some(etag.as_str())
+        })
+    }) {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        response.headers_mut().insert(header::ETAG, HeaderValue::from_str(&etag).unwrap_or(cache.clone()));
+        response.headers_mut().insert(header::CACHE_CONTROL, cache);
+        return response;
+    }
+    let mut response = Json(body).into_response();
+    response.headers_mut().insert(header::ETAG, HeaderValue::from_str(&etag).unwrap_or(cache.clone()));
+    response.headers_mut().insert(header::CACHE_CONTROL, cache);
     response
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// Эталонные умолчания видео-настроек (`ref-92/settings_video.json`), сразу payload.

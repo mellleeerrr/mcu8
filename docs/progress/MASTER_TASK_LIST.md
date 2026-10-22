@@ -93,8 +93,17 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > grapheme-safe лимит 128); санитизируется только явный `display_name` на
 > write-boundary, raw identity/URI/history/audit/slot не перезаписываются;
 > PATCH без имени сохраняет raw-имя; live POST с emoji → очищено, URI не изменён;
-> 1059/0, clippy/fmt чисто. **T12b** (CSS-центр подписи, previews, лишние
-> codec-запросы) — открыта.
+> 1059/0, clippy/fmt чисто.
+>
+> **T12b (CSS-центр подписи, previews, лишние codec-запросы) закрыт:** ревью
+> **9.5/10 APPROVED** (`stats-deps`; `protocols-net` — 9.2 без P1). Подписи
+> отцентрованы на всех 11 диапазонах (`|dx|,|dy|<0.01 px`); codec-GET схлопнуты
+> до 2 network/документ через pre-bundle XHR coalesce с двухфазной PATCH-
+> инвалидацией и cross-tab/focus revalidation; мёртвый previews-polling убран,
+> чекбокс скрыт; codec/calls PATCH атомарны, persist fallible (503+rollback),
+> ETag/304 для strong/weak/list/`*`. `e2e-t12b6`: 232/232; targeted race
+> `perf-cache.js` fresh=true; 281/0, clippy/fmt чисто, manifest OK.
+> Evidence: `docs/progress/evidence/t12b/`.
 >
 > Правило цикла: перед задачей — агент «подводные камни»; после реализации — параллельное
 > code-review (оценка /10, обязательные правки); цикл не закрывается, пока хотя бы один

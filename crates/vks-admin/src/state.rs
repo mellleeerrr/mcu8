@@ -232,6 +232,12 @@ pub struct AppState {
     pub audit: Mutex<crate::audit::AuditLog>,
     /// Настройки (hot-reload shape: set возвращает новое значение).
     pub settings: Mutex<crate::settings::Settings>,
+    /// Сериализует persist настроек: два параллельных PATCH не должны
+    /// перезаписать более новое состояние в хранилище.
+    pub settings_persist: tokio::sync::Mutex<()>,
+    /// Только для тестов: инъекция отказа persist настроек.
+    #[cfg(test)]
+    pub settings_persist_fail: std::sync::atomic::AtomicBool,
     /// Режим (global + per-room override + epoch).
     pub mode: Mutex<ModeState>,
     /// Очередь событий (production → NATS, ADR-0014).
@@ -317,6 +323,9 @@ impl AppState {
             records: Mutex::new(BTreeMap::new()),
             audit: Mutex::new(crate::audit::AuditLog::new()),
             settings: Mutex::new(crate::settings::Settings::default()),
+            settings_persist: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            settings_persist_fail: std::sync::atomic::AtomicBool::new(false),
             mode: Mutex::new(ModeState::new()),
             event_queue: crate::mode::ModeEventQueue::new(),
             room_hub: Arc::new(crate::hub::RoomHub::new()),
@@ -625,7 +634,10 @@ impl AppState {
                 }
             }
 
-            // M1.5: Hydrate server settings
+            // M1.5: Hydrate server settings. Lock сериализует hydration с
+            // codec/calls PATCH: иначе hot reload перезапишет свежую память
+            // старым документом из storage.
+            let _settings_persist = self.settings_persist.lock().await;
             if let Ok(Some(settings_json)) = storage.get_settings().await {
                 if let Ok(mut loaded) = serde_json::from_str::<crate::settings::Settings>(&settings_json) {
                     loaded.codecs.migrate_legacy();

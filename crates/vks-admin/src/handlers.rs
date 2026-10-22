@@ -563,7 +563,16 @@ pub async fn set_settings(
     headers: axum::http::HeaderMap,
     Json(body): Json<SetSettingsRequest>,
 ) -> Response {
-    let res = SettingsService::set_async(&state, body.settings.clone()).await;
+    let res = match SettingsService::try_set_async(&state, body.settings.clone()).await {
+        Ok(settings) => settings,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error_code": "storage_error", "error": error })),
+            )
+                .into_response();
+        }
+    };
     let actor = extract_actor(&auth);
     let ip = extract_client_ip(&headers, &auth);
     state.record_audit_entry(actor, "set_settings", None, ip);

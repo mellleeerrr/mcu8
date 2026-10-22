@@ -282,22 +282,124 @@ impl SettingsService {
     }
 
     /// Устанавливает новые настройки с сохранением в персистентное хранилище (M1.5).
-    pub async fn set_async(state: &crate::state::AppState, mut next: Settings) -> Settings {
-        let (merged, json_str) = {
-            let mut settings = state.settings.lock().expect("settings store poisoned");
-            next.merge_preserving_secrets(&settings);
-            *settings = next.clone();
-            state.mode.lock().expect("mode store poisoned").global_mode = next.default_mode;
-            let json = serde_json::to_string(&next).unwrap_or_default();
-            (next.clone(), json)
-        };
-        if let Some(storage) = &state.storage {
-            if let Err(e) = storage.upsert_settings(&json_str).await {
-                tracing::warn!(error = %e, "failed to persist settings to storage");
+    ///
+    /// Persist сериализуется `settings_persist`: два параллельных PATCH не
+    /// должны записать в хранилище более старое состояние после нового.
+    pub async fn set_async(state: &crate::state::AppState, next: Settings) -> Settings {
+        match Self::try_set_async(state, next).await {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::warn!(%error, "failed to persist settings to storage");
+                Self::get(state)
             }
         }
-        merged
     }
+
+    /// Полная замена настроек с fallible persist: `/api/v1/settings` должен
+    /// вернуть 503, если storage не сохранил документ, а память — откатиться.
+    pub async fn try_set_async(state: &crate::state::AppState, next: Settings) -> Result<Settings, String> {
+        let _persist = state.settings_persist.lock().await;
+        let (previous, previous_mode, next, json_str) = {
+            let mut settings = state.settings.lock().expect("settings store poisoned");
+            let previous = settings.clone();
+            let previous_mode = state.mode.lock().expect("mode store poisoned").global_mode;
+            let mut next = next;
+            next.merge_preserving_secrets(&settings);
+            *settings = next.clone();
+            if next.default_mode != previous.default_mode {
+                state.mode.lock().expect("mode store poisoned").global_mode = next.default_mode;
+            }
+            let json = match serde_json::to_string(&next) {
+                Ok(json) => json,
+                Err(error) => {
+                    *settings = previous.clone();
+                    state.mode.lock().expect("mode store poisoned").global_mode = previous_mode;
+                    return Err(error.to_string());
+                }
+            };
+            (previous, previous_mode, next, json)
+        };
+        match persist(state, &json_str).await {
+            Ok(()) => Ok(next),
+            Err(error) => {
+                *state.settings.lock().expect("settings store poisoned") = previous;
+                state.mode.lock().expect("mode store poisoned").global_mode = previous_mode;
+                Err(error)
+            }
+        }
+    }
+
+    /// Атомарно меняет одно поле настроек под lock'ом и сериализует persist.
+    ///
+    /// Нужен для codec-PATCH: вендорский UI шлёт audio и video двумя
+    /// параллельными запросами, поэтому get → mutate → set терял один из
+    /// списков. Замыкание выполняется под удерживаемым lock'ом настроек.
+    pub async fn update_async<F>(state: &crate::state::AppState, update: F) -> Settings
+    where
+        F: FnOnce(&mut Settings),
+    {
+        match Self::try_update_async(state, update).await {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::warn!(%error, "failed to persist settings to storage");
+                Self::get(state)
+            }
+        }
+    }
+
+    /// Как [`Self::update_async`], но ошибка persist возвращается вызывающему:
+    /// codec-PATCH не должен отвечать 200, если настройка не сохранена.
+    /// При ошибке память откатывается к предыдущему снимку.
+    pub async fn try_update_async<F>(state: &crate::state::AppState, update: F) -> Result<Settings, String>
+    where
+        F: FnOnce(&mut Settings),
+    {
+        let _persist = state.settings_persist.lock().await;
+        let (previous, previous_mode, mode_changed, next, json_str) = {
+            let mut settings = state.settings.lock().expect("settings store poisoned");
+            let previous = settings.clone();
+            let previous_mode = state.mode.lock().expect("mode store poisoned").global_mode;
+            update(&mut settings);
+            // Не перетираем mode, если PATCH не менял default_mode: `/api/v1/mode`
+            // управляет глобальным режимом отдельно от настроек.
+            let mode_changed = settings.default_mode != previous.default_mode;
+            if mode_changed {
+                state.mode.lock().expect("mode store poisoned").global_mode = settings.default_mode;
+            }
+            let json = match serde_json::to_string(&*settings) {
+                Ok(json) => json,
+                Err(error) => {
+                    *settings = previous.clone();
+                    if mode_changed {
+                        state.mode.lock().expect("mode store poisoned").global_mode = previous_mode;
+                    }
+                    return Err(error.to_string());
+                }
+            };
+            (previous, previous_mode, mode_changed, settings.clone(), json)
+        };
+        match persist(state, &json_str).await {
+            Ok(()) => Ok(next),
+            Err(error) => {
+                *state.settings.lock().expect("settings store poisoned") = previous;
+                if mode_changed {
+                    state.mode.lock().expect("mode store poisoned").global_mode = previous_mode;
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+async fn persist(state: &crate::state::AppState, json_str: &str) -> Result<(), String> {
+    #[cfg(test)]
+    if state.settings_persist_fail.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("injected settings persist failure".to_string());
+    }
+    if let Some(storage) = &state.storage {
+        storage.upsert_settings(json_str).await.map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -328,6 +430,23 @@ mod tests {
         assert_eq!(returned.name, "prod");
         assert_eq!(SettingsService::get(&state).name, "prod");
         assert_eq!(state.mode.lock().unwrap().global_mode, RoomMode::Mcu);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_codec_updates_are_atomic() {
+        use std::sync::Arc;
+        let state = Arc::new(AppState::new());
+        let a = state.clone();
+        let b = state.clone();
+        let (audio, video) = tokio::join!(
+            async move { SettingsService::update_async(&a, |settings| settings.codecs.audio = vec!["OPUS".into()]).await },
+            async move { SettingsService::update_async(&b, |settings| settings.codecs.video = vec!["H265".into()]).await },
+        );
+        assert_eq!(audio.codecs.audio, vec!["OPUS".to_string()]);
+        assert_eq!(video.codecs.video, vec!["H265".to_string()]);
+        let current = SettingsService::get(&state);
+        assert_eq!(current.codecs.audio, vec!["OPUS".to_string()]);
+        assert_eq!(current.codecs.video, vec!["H265".to_string()]);
     }
 
     #[test]

@@ -63,6 +63,7 @@ sudo install -m 0644 crates/vks-gateway-h323/python/h323_sidecar.py \
 sudo install -m 0644 crates/vks-gateway-h323/python/requirements.lock /opt/vks/share/vks-mcu/
 sudo install -m 0755 target/release/vks-server /opt/vks/bin/vks-server
 sudo cp -a client/pnm-frontend/deployed/pnm /opt/vks/frontend/
+sudo chmod -R a+rX /opt/vks/frontend
 sudo install -m 0600 configs/prod.example.toml /etc/vks/server.toml
 sudo install -m 0600 deploy/vks.env.example /etc/vks/vks.env
 sudoedit /etc/vks/server.toml      # absolute database_url, candidate_addr, frontend_dir

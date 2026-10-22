@@ -347,31 +347,27 @@ pub async fn calls_patch(
         return response;
     }
     let source = body.get("payload").unwrap_or(&body).clone();
-    let mut current = crate::settings::SettingsService::get(&state);
-    let mut legacy_changed = false;
+    let current = crate::settings::SettingsService::get(&state);
     // Legacy-объекты (`codecs/limits/turn`) допускают частичный PATCH: поля
     // накладываются на текущие значения. Неверный тип/поле → 422, а не
     // молчаливый 200 без изменений (иначе UI считает настройку сохранённой).
-    if let Some(codecs) = source.get("codecs") {
-        match merge_legacy(&current.codecs, codecs, "codecs") {
-            Ok(c) => current.codecs = c,
-            Err(error) => return super::error_json(422, &error),
+    let codecs_in = source.get("codecs").cloned();
+    let limits_in = source.get("limits").cloned();
+    let turn_in = source.get("turn").cloned();
+    if let Some(codecs) = &codecs_in {
+        if let Err(error) = merge_legacy(&current.codecs, codecs, "codecs") {
+            return super::error_json(422, &error);
         }
-        legacy_changed = true;
     }
-    if let Some(limits) = source.get("limits") {
-        match merge_legacy(&current.limits, limits, "limits") {
-            Ok(l) => current.limits = l,
-            Err(error) => return super::error_json(422, &error),
+    if let Some(limits) = &limits_in {
+        if let Err(error) = merge_legacy(&current.limits, limits, "limits") {
+            return super::error_json(422, &error);
         }
-        legacy_changed = true;
     }
-    if let Some(turn) = source.get("turn") {
-        match merge_legacy(&current.turn, turn, "turn") {
-            Ok(t) => current.turn = t,
-            Err(error) => return super::error_json(422, &error),
+    if let Some(turn) = &turn_in {
+        if let Err(error) = merge_legacy(&current.turn, turn, "turn") {
+            return super::error_json(422, &error);
         }
-        legacy_changed = true;
     }
     let mut payload = merged_payload(&state, "calls").await;
     let mut vendor_part = source;
@@ -388,8 +384,30 @@ pub async fn calls_patch(
     }
     // SettingsService меняем только после успешной валидации и persist:
     // отклонённый PATCH (422/500) не должен частично применять codecs/limits/turn.
-    if legacy_changed {
-        crate::settings::SettingsService::set_async(&state, current).await;
+    if codecs_in.is_some() || limits_in.is_some() || turn_in.is_some() {
+        // Патч применяем к АКТУАЛЬНЫМ полям под lock'ом, а не к снапшоту:
+        // иначе параллельный codec-PATCH потеряется между get и записью.
+        let result = crate::settings::SettingsService::try_update_async(&state, |settings| {
+            if let Some(codecs) = &codecs_in {
+                if let Ok(value) = merge_legacy(&settings.codecs, codecs, "codecs") {
+                    settings.codecs = value;
+                }
+            }
+            if let Some(limits) = &limits_in {
+                if let Ok(value) = merge_legacy(&settings.limits, limits, "limits") {
+                    settings.limits = value;
+                }
+            }
+            if let Some(turn) = &turn_in {
+                if let Ok(value) = merge_legacy(&settings.turn, turn, "turn") {
+                    settings.turn = value;
+                }
+            }
+        })
+        .await;
+        if let Err(error) = result {
+            return super::error_json(503, &format!("settings persist failed: {error}"));
+        }
     }
     state.record_audit_entry(&auth.subject, "settings.calls.updated", None, "");
     calls_get(State(state), Extension(auth)).await
@@ -652,12 +670,14 @@ async fn codecs_patch(state: SharedState, auth: AuthContext, body: Value, kind: 
             codecs.push(spec);
         }
     }
-    let mut settings = crate::settings::SettingsService::get(&state);
-    match kind {
+    if let Err(error) = crate::settings::SettingsService::try_update_async(&state, |settings| match kind {
         CodecKind::Audio => settings.codecs.audio = codecs.clone(),
         CodecKind::Video => settings.codecs.video = codecs.clone(),
+    })
+    .await
+    {
+        return super::error_json(503, &format!("settings persist failed: {error}"));
     }
-    crate::settings::SettingsService::set_async(&state, settings).await;
     state.record_audit_entry(&auth.subject, "settings.codecs.updated", None, "");
     let response: Vec<Value> = match kind {
         CodecKind::Audio => codecs

@@ -347,6 +347,130 @@ async fn pnm_card_resources_roundtrip_regression() {
     assert_eq!(json_body(response).await["audiochannels"][0]["id"], aid);
 }
 
+#[tokio::test]
+async fn codec_settings_etag_304_and_concurrent_patch() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+
+    let first = send(&server, request("GET", "/api/v3/settings/audio_codecs", Some(&token), json!({}))).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let etag = first.headers().get(header::ETAG).expect("ETag").to_str().unwrap().to_string();
+    assert_eq!(first.headers().get(header::CACHE_CONTROL).unwrap(), "private, no-cache");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v3/settings/audio_codecs")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::IF_NONE_MATCH, &etag)
+        .body(Body::empty())
+        .unwrap();
+    let second = send(&server, req).await;
+    assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+    assert!(second.headers().get(header::ETAG).is_some());
+    for validator in [format!("W/{etag}"), format!("\"other\", {etag}"), "*".to_string()] {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v3/settings/audio_codecs")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::IF_NONE_MATCH, &validator)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(send(&server, req).await.status(), StatusCode::NOT_MODIFIED, "{validator}");
+    }
+
+    let (audio, video) = tokio::join!(
+        send(
+            &server,
+            request("PATCH", "/api/v3/settings/audio_codecs", Some(&token), json!({"audio_codecs":["OPUS"]}),),
+        ),
+        send(
+            &server,
+            request("PATCH", "/api/v3/settings/video_codecs", Some(&token), json!({"video_codecs":["H265"]}),),
+        ),
+    );
+    assert!(audio.status().is_success(), "audio PATCH: {}", audio.status());
+    assert!(video.status().is_success(), "video PATCH: {}", video.status());
+
+    let current = send(&server, request("GET", "/api/v3/settings/audio_codecs", Some(&token), json!({}))).await;
+    let current = json_body(current).await;
+    assert!(current["audio_codecs"].as_array().unwrap().iter().any(|codec| codec["name"] == "OPUS"));
+    let current_video = send(&server, request("GET", "/api/v3/settings/video_codecs", Some(&token), json!({}))).await;
+    let current_video = json_body(current_video).await;
+    assert!(current_video["video_codecs"].as_array().unwrap().iter().any(|codec| codec == "H265"));
+}
+
+#[tokio::test]
+async fn codec_patch_returns_503_and_rolls_back_on_persist_failure() {
+    let (state, _) = test_state();
+    let server = app(state.clone());
+    let token = login_token(&server, "admin", "s3cret").await;
+    let before =
+        json_body(send(&server, request("GET", "/api/v3/settings/audio_codecs", Some(&token), json!({}))).await).await;
+    state.settings_persist_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let patch = send(
+        &server,
+        request("PATCH", "/api/v3/settings/audio_codecs", Some(&token), json!({"audio_codecs":["G729"]})),
+    )
+    .await;
+    assert_eq!(patch.status(), 503);
+    state.settings_persist_fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    let after =
+        json_body(send(&server, request("GET", "/api/v3/settings/audio_codecs", Some(&token), json!({}))).await).await;
+    assert_eq!(before, after, "persist failure must roll settings back");
+}
+
+#[tokio::test]
+async fn codec_patch_persists_and_keeps_independent_global_mode() {
+    let (state, _) = test_state();
+    let mut inner = std::sync::Arc::try_unwrap(state).expect("single owner");
+    inner.storage = Some(std::sync::Arc::new(vks_storage::MemoryStorage::new()));
+    inner.mode.lock().expect("mode").global_mode = vks_core::RoomMode::Mcu;
+    let state = std::sync::Arc::new(inner);
+    let server = app(state.clone());
+    let token = login_token(&server, "admin", "s3cret").await;
+    let patch = send(
+        &server,
+        request("PATCH", "/api/v3/settings/audio_codecs", Some(&token), json!({"audio_codecs":["OPUS"]})),
+    )
+    .await;
+    assert_eq!(patch.status(), 200);
+    let stored =
+        state.storage.as_ref().unwrap().get_settings().await.unwrap().expect("settings persisted into storage");
+    assert!(stored.contains("OPUS"), "{stored}");
+    assert_eq!(state.mode.lock().expect("mode").global_mode, vks_core::RoomMode::Mcu);
+}
+
+#[tokio::test]
+async fn calls_patch_and_codec_patch_do_not_lose_each_other() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let (calls, codecs) = tokio::join!(
+        send(
+            &server,
+            request(
+                "PATCH",
+                "/api/v3/settings/calls",
+                Some(&token),
+                json!({"limits":{"max_participants_per_room":77}}),
+            ),
+        ),
+        send(
+            &server,
+            request("PATCH", "/api/v3/settings/audio_codecs", Some(&token), json!({"audio_codecs":["OPUS"]}),),
+        ),
+    );
+    assert!(calls.status().is_success(), "calls: {}", calls.status());
+    assert!(codecs.status().is_success(), "codecs: {}", codecs.status());
+    let calls = json_body(send(&server, request("GET", "/api/v3/settings/calls", Some(&token), json!({}))).await).await;
+    assert_eq!(calls["payload"]["limits"]["max_participants_per_room"], 77);
+    assert!(calls["payload"]["codecs"]["audio"].as_array().unwrap().iter().any(|codec| codec == "OPUS"));
+    let codecs =
+        json_body(send(&server, request("GET", "/api/v3/settings/audio_codecs", Some(&token), json!({}))).await).await;
+    assert!(codecs["audio_codecs"].as_array().unwrap().iter().any(|codec| codec["name"] == "OPUS"));
+}
+
 /// Состояние с issuer + LocalDb(`admin`/`s3cret`), как бутстрап `main.rs`.
 pub(crate) fn test_state() -> (SharedState, Arc<JwtIssuer>) {
     let issuer = Arc::new(JwtIssuer::new(JwtConfig {
