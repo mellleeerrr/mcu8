@@ -3012,6 +3012,75 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
     }
 
     #[tokio::test]
+    async fn inbound_sip_uas_handles_twenty_concurrent_calls() {
+        use vks_admin::state::AppState;
+        let state = Arc::new(AppState::new());
+        let room = Rooms::create(&state, "uas-20");
+        let manager = Arc::new(
+            GatewayManager::new().with_mcu(Arc::new(vks_media_mcu::McuEngine::new())).with_candidate_ip("127.0.0.1"),
+        );
+        manager.bind_state(Arc::downgrade(&state));
+        let server = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let server_port = server.local_addr().unwrap().port();
+        let listener = tokio::spawn(serve_sip_uas_on(manager.clone(), server, "127.0.0.1".into()));
+        let mut clients = Vec::new();
+        let mut tags = Vec::new();
+        for i in 0..20u16 {
+            let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            client.connect(("127.0.0.1", server_port)).await.unwrap();
+            let port = client.local_addr().unwrap().port();
+            let sdp = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+            let invite = format!(
+                "INVITE sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:{port};branch=z9hG4bK{i}\r\nFrom: \"C{i}\" <sip:c{i}@127.0.0.1>;tag=t{i}\r\nTo: <sip:{}@127.0.0.1>\r\nCall-ID: cid-{i}\r\nCSeq: 1 INVITE\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+                room.id, room.id, sdp.len(), sdp
+            );
+            client.send(invite.as_bytes()).await.unwrap();
+            let mut tag = String::new();
+            for _ in 0..4 {
+                let mut buf = [0u8; 8192];
+                let len = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv(&mut buf))
+                    .await
+                    .expect("200 timeout")
+                    .unwrap();
+                let text = String::from_utf8_lossy(&buf[..len]);
+                if text.starts_with("SIP/2.0 200") {
+                    tag = text
+                        .lines()
+                        .find_map(|line| line.strip_prefix("To:"))
+                        .and_then(|line| line.split(";tag=").nth(1))
+                        .map(|tag| tag.trim().to_string())
+                        .expect("To tag");
+                    break;
+                }
+            }
+            assert!(!tag.is_empty(), "call {i} must be answered");
+            tags.push(tag);
+            clients.push(client);
+        }
+        for (i, (client, tag)) in clients.iter().zip(tags.iter()).enumerate() {
+            let port = client.local_addr().unwrap().port();
+            let ack = format!(
+                "ACK sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:{port};branch=z9hG4bKa{i}\r\nFrom: \"C{i}\" <sip:c{i}@127.0.0.1>;tag=t{i}\r\nTo: <sip:{}@127.0.0.1>;tag={tag}\r\nCall-ID: cid-{i}\r\nCSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n",
+                room.id, room.id
+            );
+            client.send(ack.as_bytes()).await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(manager.registry.lock().unwrap().by_participant.len(), 20, "20 calls must be active");
+        for (i, (client, tag)) in clients.iter().zip(tags.iter()).enumerate() {
+            let port = client.local_addr().unwrap().port();
+            let bye = format!(
+                "BYE sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:{port};branch=z9hG4bKb{i}\r\nFrom: \"C{i}\" <sip:c{i}@127.0.0.1>;tag=t{i}\r\nTo: <sip:{}@127.0.0.1>;tag={tag}\r\nCall-ID: cid-{i}\r\nCSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n",
+                room.id, room.id
+            );
+            client.send(bye.as_bytes()).await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(manager.registry.lock().unwrap().by_participant.is_empty(), "all 20 calls must be cleaned up");
+        listener.abort();
+    }
+
+    #[tokio::test]
     async fn inbound_sip_uas_admin_hangup_sends_bye_and_reaps_call() {
         use vks_admin::state::AppState;
         let state = Arc::new(AppState::new());
