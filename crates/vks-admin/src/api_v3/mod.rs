@@ -204,6 +204,13 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/smtp/reset", axum::routing::post(settings_admin::smtp_reset))
         .route("/api/v3/settings/security", get(settings_admin::security_get).patch(settings_admin::security_patch))
         .route("/api/v3/users", get(directory::list_users).post(directory::create_user))
+        // Vendor-оболочка 2.2.1.66 местами запрашивает коллекцию с trailing
+        // slash и через /ui/алиасы. Без них shell-fallback отдавал 501.
+        .route("/api/v3/users/", get(directory::list_users).post(directory::create_user))
+        .route("/api/v3/ui/users", get(directory::list_users).post(directory::create_user))
+        .route("/api/v3/ui/users/", get(directory::list_users).post(directory::create_user))
+        .route("/api/v3/ui/directory/users", get(directory::list_users))
+        .route("/api/v3/ui/directory/users/", get(directory::list_users))
         .route(
             "/api/v3/users/{id}",
             get(directory::get_user).patch(directory::update_user).delete(directory::delete_user),
@@ -379,7 +386,9 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/v3/sessions/{id}/invite/call_strings/list", post(call_strings::invite_session_call_strings_list))
         .route("/api/v3/call_strings", get(call_strings::list_call_strings).post(call_strings::create_call_string))
+        .route("/api/v3/call_strings/", get(call_strings::list_call_strings).post(call_strings::create_call_string))
         .route("/api/v3/ui/call_strings", get(call_strings::list_call_strings).post(call_strings::create_call_string))
+        .route("/api/v3/ui/call_strings/", get(call_strings::list_call_strings).post(call_strings::create_call_string))
         .route(
             "/api/v3/call_strings/{id}",
             get(call_strings::get_call_string)

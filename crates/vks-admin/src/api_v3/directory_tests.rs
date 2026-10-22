@@ -1263,3 +1263,24 @@ async fn credential_login_cannot_alias_another_user_without_credentials() {
     .await;
     assert_eq!(login.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn vendor_directory_collection_aliases_return_same_users() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let canonical = send(&app, request("GET", "/api/v3/users", Some(&token), json!({}))).await;
+    assert_eq!(canonical.status(), StatusCode::OK);
+    let canonical = json_body(canonical).await;
+    for uri in [
+        "/api/v3/users/",
+        "/api/v3/ui/users",
+        "/api/v3/ui/users/",
+        "/api/v3/ui/directory/users",
+        "/api/v3/ui/directory/users/",
+    ] {
+        let response = send(&app, request("GET", uri, Some(&token), json!({}))).await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        assert_eq!(json_body(response).await, canonical, "{uri}");
+    }
+}
