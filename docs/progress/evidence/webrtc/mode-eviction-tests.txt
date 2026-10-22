@@ -1,16 +1,15 @@
 # Mode/eviction regression tests
-# tree: e420b9e (+docs), command: TMPDIR=/var/tmp cargo test -p vks-admin evict -- --nocapture
-# binary: target/debug/deps/vks_admin-*
+# commit: 44abf92; command: TMPDIR=/var/tmp cargo test -p vks-admin evict -- --nocapture
 
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.59s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.46s
      Running unittests src/lib.rs (target/debug/deps/vks_admin-ebfdbcddfe847054)
 
 running 5 tests
-test api_v3::export_store::tests::replace_same_name_does_not_evict_other ... ok
 test api_v3::export_store::tests::evicts_only_oldest_when_cap_exceeded ... ok
-test mode::tests::mode_switch_evicts_only_actually_mcu_rooms ... ok
+test api_v3::export_store::tests::replace_same_name_does_not_evict_other ... ok
 test settings::tests::set_default_mode_mcu_evicts_real_peers ... ok
+test mode::tests::mode_switch_evicts_only_actually_mcu_rooms ... ok
 test rooms::tests::update_mode_calls_eviction_without_holding_rooms_lock ... ok
 
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 284 filtered out; finished in 1.51s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 284 filtered out; finished in 1.50s
 
