@@ -38,7 +38,18 @@ pub enum AudioCodec {
 }
 
 impl AudioCodec {
-    /// FFmpeg demuxer/decoder name for raw RTP payload concatenation.
+    /// FFmpeg decoder name (LATM bitstreams are decoded by `aac_latm`, while
+    /// their container is parsed by the `loas` demuxer).
+    #[must_use]
+    pub const fn decoder_name(self) -> &'static str {
+        match self {
+            Self::Aac => "aac",
+            Self::AacLatm => "aac_latm",
+            Self::G729 => "g729",
+        }
+    }
+
+    /// FFmpeg demuxer name for raw RTP payload concatenation.
     #[must_use]
     pub const fn ffmpeg_name(self) -> &'static str {
         match self {

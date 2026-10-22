@@ -107,7 +107,7 @@ impl FfmpegCapabilities {
     /// Probes the configured FFmpeg binary.
     pub async fn probe(ffmpeg_path: &std::path::Path) -> Result<Self, WorkerError> {
         let version_out = tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             Command::new(ffmpeg_path)
                 .arg("-hide_banner")
                 .arg("-version")
@@ -117,7 +117,7 @@ impl FfmpegCapabilities {
                 .output(),
         )
         .await
-        .map_err(|_| WorkerError::Timeout(Duration::from_secs(2)))?
+        .map_err(|_| WorkerError::Timeout(Duration::from_secs(5)))?
         .map_err(WorkerError::Spawn)?;
         if !version_out.status.success() {
             return Err(WorkerError::Unavailable(format!("{} -version failed", ffmpeg_path.display())));
@@ -132,7 +132,7 @@ impl FfmpegCapabilities {
     /// Whether the host can decode this audio codec.
     #[must_use]
     pub fn has_audio_decoder(&self, codec: AudioCodec) -> bool {
-        self.decoders.contains(codec.ffmpeg_name())
+        self.decoders.contains(codec.decoder_name())
     }
 
     /// Whether the host can encode this audio codec.
@@ -166,7 +166,7 @@ impl FfmpegCapabilities {
 
 async fn list_codecs(ffmpeg: &std::path::Path, flag: &str) -> Result<BTreeSet<String>, WorkerError> {
     let output = tokio::time::timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(5),
         Command::new(ffmpeg)
             .arg("-hide_banner")
             .arg(flag)
@@ -176,7 +176,7 @@ async fn list_codecs(ffmpeg: &std::path::Path, flag: &str) -> Result<BTreeSet<St
             .output(),
     )
     .await
-    .map_err(|_| WorkerError::Timeout(Duration::from_secs(2)))?
+    .map_err(|_| WorkerError::Timeout(Duration::from_secs(5)))?
     .map_err(WorkerError::Spawn)?;
     if !output.status.success() {
         return Err(WorkerError::Unavailable(format!("{} {flag} failed", ffmpeg.display())));
@@ -592,7 +592,7 @@ impl FfmpegWorker {
     /// Restarts a dead or poisoned child with the same mode and slot settings.
     pub async fn restart(&mut self) -> Result<(), WorkerError> {
         self.kill();
-        if tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await.is_err() {
+        if tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await.is_err() {
             let _ = self.child.start_kill();
         }
         self.stdin = None;
@@ -921,6 +921,7 @@ mod tests {
         assert!(caps.version.contains("ffmpeg"), "{}", caps.version);
         assert!(caps.has_audio_decoder(AudioCodec::Aac));
         assert!(caps.has_audio_decoder(AudioCodec::G729));
+        assert!(caps.has_audio_decoder(AudioCodec::AacLatm), "LATM uses the aac_latm decoder");
         assert!(caps.has_audio_encoder(AudioCodec::Aac));
         assert!(!caps.has_audio_encoder(AudioCodec::G729));
         assert!(caps.has_video_decoder(VideoCodec::H261));

@@ -33,7 +33,15 @@ pub async fn init() -> Result<(), String> {
         .unwrap_or(8);
     let required = truthy(std::env::var("VKS_TRANSCODER_REQUIRED").ok().as_deref());
 
-    let capabilities = match FfmpegCapabilities::probe(&ffmpeg).await {
+    // One retry: the first FFmpeg exec during a cold systemd start can lose
+    // the race against a saturated CPU even though the binary is fine.
+    let capabilities = match match FfmpegCapabilities::probe(&ffmpeg).await {
+        Err(_) => {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            FfmpegCapabilities::probe(&ffmpeg).await
+        }
+        first => first,
+    } {
         Ok(capabilities) => {
             info!(
                 binary = %ffmpeg.display(),
