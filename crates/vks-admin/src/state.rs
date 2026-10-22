@@ -259,6 +259,9 @@ pub struct AppState {
     pub database_file: std::sync::OnceLock<String>,
     /// Последний фактический результат SIP/H.323-дозвона (T11a).
     pub gateway_health: Mutex<std::collections::HashMap<String, GatewayHealth>>,
+    /// Server hook: evict real WebRTC peers when a room/global mode becomes MCU
+    /// (vks-admin cannot depend on the media crate). `None` = all rooms.
+    pub webrtc_evict: Option<Arc<dyn Fn(Option<RoomId>) + Send + Sync>>,
 }
 
 /// Последний наблюдаемый результат шлюза: READY/FAILED + причина.
@@ -336,6 +339,7 @@ impl AppState {
             server_addr: std::sync::OnceLock::new(),
             database_file: std::sync::OnceLock::new(),
             gateway_health: Mutex::new(std::collections::HashMap::new()),
+            webrtc_evict: None,
         }
     }
 

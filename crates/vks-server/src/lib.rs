@@ -756,6 +756,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                 "Real WebRTC is not bridged into MCU-mode rooms".to_string(),
                                             ));
                                         } else if gateway_room {
+                                            real_webrtc_attempted = true;
                                             warn!(
                                                 room = %membership.room_id,
                                                 participant = %pid,

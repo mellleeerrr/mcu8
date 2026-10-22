@@ -63,6 +63,10 @@ VKS_WEBRTC_PORT_MAX=43100
 VKS_WEBRTC_MAX_PEERS=256
 ```
 
+The effective concurrency is `min(VKS_WEBRTC_MAX_PEERS, size of the UDP
+range)` because every peer owns one UDP socket; size the range for the peer
+count you need (43000–43100 holds 101 peers).
+
 `candidate_addr` must be the address browsers can reach; startup preflight
 fails with exit 78 if it is empty/loopback (unless
 `VKS_ALLOW_LOOPBACK_MEDIA=1`) or if the port pair is invalid/unbindable. Open

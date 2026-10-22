@@ -261,6 +261,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         admin_state.mode.lock().unwrap().global_mode
     };
+    admin_state.webrtc_evict = Some(Arc::new(vks_server::webrtc_runtime::evict_rooms));
     let admin_state = Arc::new(admin_state);
 
     // 6. Загрузка статики фронтенда PNM (fail-fast диагностика, но сервер не падает)

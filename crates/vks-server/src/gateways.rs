@@ -1006,6 +1006,11 @@ impl GatewayManager {
         if !is_sip && !is_h323 {
             return Err(format!("Unsupported outbound protocol scheme: {uri}"));
         }
+        // A real WebRTC room has no plaintext<->SRTP bridge: refuse before
+        // dialing/announcing instead of answering the phone into silence.
+        if crate::webrtc_runtime::room_has_peer(room_id) {
+            return Err("room has a real WebRTC participant; SIP/H.323 bridge is not supported".into());
+        }
         self.ensure_bridgeable_codecs(room_id, trimmed).await?;
 
         let pid_str = if is_h323 {
@@ -1235,6 +1240,9 @@ impl GatewayManager {
             );
         }
         setup.registered = Some((self.clone(), pid_str.clone()));
+        if crate::webrtc_runtime::room_has_peer(room_id) {
+            return Err("room gained a real WebRTC participant during outbound dial".into());
+        }
         let state = self.state.read().ok().and_then(|value| value.as_ref().and_then(|weak| weak.upgrade()));
         if state.is_some() {
             bridge_gateway_participant_media(Some(&mcu), &room_id, &pid_str, has_video);
@@ -2281,6 +2289,8 @@ async fn serve_sip_uas_on(
                         has_video,
                     ) {
                         tracing::warn!(room = %room_id, "inbound SIP participant not landed: real WebRTC peer present");
+                        let bye = build_uas_bye(&request, &to_tag, peer, &advertised_ip, local_port);
+                        sip_send(&socket, peer, &bye);
                         continue;
                     }
                     let from_uri = request

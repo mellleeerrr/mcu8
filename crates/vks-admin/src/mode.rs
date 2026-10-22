@@ -95,6 +95,13 @@ impl ModeService {
         if old != new_mode {
             m.switch_epoch += 1;
             state.event_queue.publish(ModeChangedEvent { room_id: None, new_mode, switch_epoch: m.switch_epoch });
+            if new_mode == RoomMode::Mcu {
+                drop(m);
+                if let Some(evict) = &state.webrtc_evict {
+                    // Real SRTP peers cannot be mixed by the MCU engine.
+                    evict(None);
+                }
+            }
         }
         (old, new_mode)
     }

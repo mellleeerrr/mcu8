@@ -22,14 +22,14 @@ audio but zero video payload.
 
 Key stats (from `result.json`):
 
-- alice: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 631 pkts,
-  inbound video 478 pkts / 189 frames, 320x240.
-- bob: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 637 pkts,
-  inbound video 343 pkts / 191 frames, 320x240.
+- alice: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 619 pkts,
+  inbound video 454 pkts / 185 frames, 320x240.
+- bob: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 625 pkts,
+  inbound video 333 pkts / 187 frames, 320x240.
 - Third browser peer: explicitly rejected with `room_full` (`retryable=true`);
   a same-socket retry reaches `room_full` again, not `bad_state`, and the
   existing peers stay connected.
-- `audio_only` subscriber: 130 audio packets, 0 video bytes / 0 decoded frames.
+- `audio_only` subscriber: 131 audio packets, 0 video bytes / 0 decoded frames.
 - Both answers: `a=ice-lite`, real 32-byte SHA-256 fingerprint (not
   `FF:00:11`), host candidate on 192.168.1.93:43000/43001, opus+VP8 only.
 

@@ -335,6 +335,21 @@ impl WebRtcRoomRegistry {
         }
     }
 
+    /// Removes real peers, either one room or all rooms (mode switch to MCU).
+    pub fn evict(&self, room: Option<RoomId>) {
+        let victims: Vec<(RoomId, ParticipantId)> = {
+            let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            rooms
+                .iter()
+                .filter(|(id, _)| room.is_none_or(|wanted| **id == wanted))
+                .flat_map(|(id, peers)| peers.keys().map(|participant| (*id, *participant)).collect::<Vec<_>>())
+                .collect()
+        };
+        for (room, participant) in victims {
+            self.remove(room, participant);
+        }
+    }
+
     /// Whether at least one real peer is registered in the room.
     pub fn room_has_peer(&self, room: RoomId) -> bool {
         self.rooms

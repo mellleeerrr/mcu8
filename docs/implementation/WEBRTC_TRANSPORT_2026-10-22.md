@@ -81,7 +81,10 @@
 - Кандидат берётся из `HandlerConfig.candidate_addr` (`192.168.1.93` на
   стенде); IPv6-кандидат биндит `::`. Браузерный вход в signalling — `/ws`
   с `Authorization: Bearer` или `?token=<JWT>` (браузерный WebSocket не умеет
-  заголовки); UI пока не подключён, единственный клиент — `tests/e2e/webrtc.js`.
+  заголовки); query-token проверяется по `Origin`/`Host`, исключение —
+  `VKS_WS_ORIGIN_ALLOW`; JWT в URL попадает в логи прокси, поэтому нужен TLS,
+  короткий TTL и запрет логирования query. UI пока не подключён, единственный
+  клиент — `tests/e2e/webrtc.js`.
 - `/readyz` проверяет БД/media/шлюзы; WebRTC-транспорт валидируется
   стартовым preflight (exit 78), а не отдельным полем readiness.
 - Для внешнего развёртывания нужен открытый UDP-диапазон и
@@ -96,7 +99,7 @@ signalling по `/ws` (Node `ws` с Bearer; media — в Chromium), реальн
 offer → реальный str0m answer → ICE/DTLS/SRTP → взаимные аудио/видео.
 Итог: **29/29 проверок**, оба пира `connected`,
 `dtlsState=connected`, `srtpCipher=SRTP_AEAD_AES_256_GCM`, входящие
-audio/video `bytesReceived > 0`, `framesDecoded` 189/191,
+audio/video `bytesReceived > 0`, `framesDecoded` 185/187,
 `frameWidth=320`, `frameHeight=240`; третий пир получает `room_full`;
 браузерный WebSocket с `?token=<JWT>` проходит ClientHello; page errors 0.
 В `result.json` пишутся commit, sha256 бинаря, env,

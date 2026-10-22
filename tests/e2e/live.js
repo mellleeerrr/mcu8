@@ -14,6 +14,8 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
+const { execFileSync } = require('node:child_process');
 const { chromium } = require('playwright');
 
 const BASE = process.env.VKS_BASE_URL || 'http://127.0.0.1:8080';
@@ -648,8 +650,18 @@ async function api(token, method, urlPath, body) {
     const console404 = consoleErrors.filter(message => /status of 404/.test(message));
     checks.push({ name: 'final: console 404 only expected detach', ok: console404.length <= expectedDetach404.length,
       detail: JSON.stringify(console404) });
+    let commit = '';
+    try { commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(); } catch { /* not a git checkout */ }
+    let binarySha256 = '';
+    try {
+      binarySha256 = crypto.createHash('sha256')
+        .update(fs.readFileSync(process.env.VKS_BINARY || '/home/pro/mcu/target/release/vks-server')).digest('hex');
+    } catch { /* optional */ }
     const result = {
       ok: !failure && checks.every(check => check.ok),
+      generated_at: new Date().toISOString(),
+      commit,
+      binary_sha256: binarySha256,
       base: BASE,
       conference_id: conferenceId,
       session_id: sessionId,

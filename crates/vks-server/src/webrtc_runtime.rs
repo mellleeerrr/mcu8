@@ -65,6 +65,13 @@ pub fn preflight(config: &HandlerConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Evicts real peers from one room (or all rooms) on an MCU mode switch.
+pub fn evict_rooms(room: Option<vks_core::RoomId>) {
+    if let Some(registry) = REGISTRY.get().and_then(|registry| registry.as_ref()) {
+        registry.evict(room);
+    }
+}
+
 /// Whether any participant in this room has a real str0m transport.
 pub fn room_has_peer(room: vks_core::RoomId) -> bool {
     REGISTRY.get().and_then(|registry| registry.as_ref()).is_some_and(|registry| registry.room_has_peer(room))

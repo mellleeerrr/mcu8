@@ -117,6 +117,15 @@ impl Rooms {
                 let payload_bytes = mode_msg.encode_to_vec();
                 state.room_hub.broadcast(id, None, payload_bytes.into());
 
+                if m == RoomMode::Mcu {
+                    if let Some(evict) = &state.webrtc_evict {
+                        // WebRTC media cannot enter the MCU mixer; drop real
+                        // peers rather than leave them streaming silently.
+                        drop(mode_state);
+                        evict(Some(*id));
+                    }
+                }
+
                 true
             } else {
                 false
