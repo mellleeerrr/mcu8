@@ -852,6 +852,21 @@ pub(super) fn apply_call_string_settings(profile: &mut VideoProfile, value: &ser
     normalize_profile(profile);
 }
 
+/// H.264 level_idc → имя для FFmpeg (`-level`), только валидные уровни.
+pub(super) fn h264_level_name(level_idc: u8) -> Option<&'static str> {
+    Some(match level_idc {
+        30 => "3.0",
+        31 => "3.1",
+        32 => "3.2",
+        40 => "4.0",
+        41 => "4.1",
+        42 => "4.2",
+        50 => "5.0",
+        51 => "5.1",
+        _ => return None,
+    })
+}
+
 fn normalize_profile(profile: &mut VideoProfile) {
     profile.width = (profile.width.clamp(160, 1920) / 2) * 2;
     profile.height = (profile.height.clamp(120, 1080) / 2) * 2;
@@ -866,6 +881,18 @@ fn frame_interval(profile: &VideoProfile) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn h241_level_names_are_whitelisted() {
+        for (idc, name) in
+            [(30, "3.0"), (31, "3.1"), (32, "3.2"), (40, "4.0"), (41, "4.1"), (42, "4.2"), (50, "5.0"), (51, "5.1")]
+        {
+            assert_eq!(h264_level_name(idc), Some(name));
+        }
+        for invalid in [0, 35, 64, 75, 99] {
+            assert_eq!(h264_level_name(invalid), None);
+        }
+    }
 
     #[test]
     fn h323_level_follows_explicit_level_then_geometry() {

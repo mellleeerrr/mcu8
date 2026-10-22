@@ -1019,6 +1019,14 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                 .await
                 .map_err(|error| format!("H.323 outbound dial failed: {error}"))?;
             setup.h323 = Some(session.clone());
+            // H.241 peer limits are authoritative for the encoder: never send
+            // above the peer's maxBitRate/level even if the room asks for more.
+            if let Some(max_bitrate_100bps) = session.remote_video_max_bitrate_100bps {
+                video_profile.bitrate_kbps = video_profile.bitrate_kbps.min((max_bitrate_100bps / 10).max(64));
+            }
+            if let Some(level) = session.remote_video_h264_level.and_then(video::h264_level_name) {
+                video_profile.level = level.to_string();
+            }
             let audio_port = session
                 .remote_audio_port
                 .filter(|port| *port > 0)

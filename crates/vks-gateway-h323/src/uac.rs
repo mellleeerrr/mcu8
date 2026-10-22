@@ -56,6 +56,10 @@ pub struct ActiveH323Session {
     pub remote_video_port: Option<u16>,
     pub remote_video_payload_type: Option<u8>,
     pub local_video_payload_type: Option<u8>,
+    /// Peer H.241: maxBitRate in 100 bit/s units, H.264 level_idc and profile bits.
+    pub remote_video_max_bitrate_100bps: Option<u32>,
+    pub remote_video_h264_level: Option<u8>,
+    pub remote_video_h264_profile_bits: Option<u8>,
     control: Arc<SessionControl>,
 }
 
@@ -102,6 +106,12 @@ struct ConnectedMedia {
     remote_video_port: Option<u16>,
     remote_video_payload_type: Option<u8>,
     local_video_payload_type: Option<u8>,
+    #[serde(default)]
+    remote_video_max_bitrate_100bps: Option<u32>,
+    #[serde(default)]
+    remote_video_h264_level: Option<u8>,
+    #[serde(default)]
+    remote_video_h264_profile_bits: Option<u8>,
 }
 
 impl ConnectedMedia {
@@ -322,6 +332,9 @@ impl H323UacClient {
             remote_video_port: negotiated.remote_video_port,
             remote_video_payload_type: negotiated.remote_video_payload_type,
             local_video_payload_type: negotiated.local_video_payload_type,
+            remote_video_max_bitrate_100bps: negotiated.remote_video_max_bitrate_100bps,
+            remote_video_h264_level: negotiated.remote_video_h264_level,
+            remote_video_h264_profile_bits: negotiated.remote_video_h264_profile_bits,
             control,
         })
     }

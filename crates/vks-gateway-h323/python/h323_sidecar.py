@@ -132,6 +132,32 @@ def video_capability(config=None):
     })
 
 
+def h241_video_parameters(capability):
+    """H.241 generic parameters from a peer H.264 capability.
+
+    Returns ``{max_bitrate_100bps, level_idc, profile_bits}`` for the fields
+    the peer actually advertised; unknown/missing parameters are omitted so
+    the gateway can clamp only what the terminal really declared.
+    """
+    if not capability or capability[0] not in ("genericVideoCapability",):
+        return {}
+    body = capability[1]
+    if body.get("capabilityIdentifier") != ("standard", H264_OID):
+        return {}
+    result = {}
+    max_bitrate = body.get("maxBitRate")
+    if isinstance(max_bitrate, int) and 0 < max_bitrate <= 192400:
+        result["max_bitrate_100bps"] = max_bitrate
+    for parameter in body.get("collapsing", []):
+        identifier = parameter.get("parameterIdentifier")
+        value = parameter.get("parameterValue")
+        if identifier == ("standard", 42) and value and value[0] == "unsignedMin":
+            result["level_idc"] = int(value[1])
+        elif identifier == ("standard", 41) and value and value[0] == "booleanArray":
+            result["profile_bits"] = int(value[1])
+    return result
+
+
 def codec_kind(data_type):
     kind, codec = data_type
     if kind == "audioData" and codec[0] == "g711Ulaw64k":
@@ -217,6 +243,7 @@ class Call:
         self.incoming_audio = False
         self.incoming_video = False
         self.remote_h264 = False
+        self.remote_h241 = {}
         self.remote_video_known = False
         self.requested_channels = {}
         self.requested_video_rejected = False
@@ -422,10 +449,16 @@ class Call:
             if name == "terminalCapabilitySet":
                 capabilities = [entry.get("capability") for entry in params.get("capabilityTable", [])]
                 self.remote_h264 = any(cap and cap[0] in ("receiveVideoCapability", "receiveAndTransmitVideoCapability") and codec_kind(("videoData", cap[1]))[0] == "video" for cap in capabilities)
+                for cap in capabilities:
+                    if cap and cap[0] in ("receiveVideoCapability", "receiveAndTransmitVideoCapability"):
+                        parameters = h241_video_parameters(cap[1])
+                        if parameters:
+                            self.remote_h241 = parameters
+                            break
                 self.remote_tcs_seen = True
                 self.remote_video_known = True
                 self.send_control(("response", ("terminalCapabilitySetAck", {"sequenceNumber": params["sequenceNumber"]})))
-                emit("capabilities", h264=self.remote_h264, entries=len(capabilities))
+                emit("capabilities", h264=self.remote_h264, entries=len(capabilities), **self.remote_h241)
             elif name == "masterSlaveDetermination":
                 remote_type, number = params["terminalType"], params["statusDeterminationNumber"]
                 if remote_type == 240:
@@ -489,6 +522,9 @@ class Call:
              remote_video_ip=self.remote_video[0] if self.remote_video else None,
              remote_video_port=self.remote_video[1] if self.remote_video else None,
              remote_video_payload_type=self.video_tx_pt, local_video_payload_type=self.video_rx_pt,
+             remote_video_max_bitrate_100bps=self.remote_h241.get("max_bitrate_100bps"),
+             remote_video_h264_level=self.remote_h241.get("level_idc"),
+             remote_video_h264_profile_bits=self.remote_h241.get("profile_bits"),
              video_status="connected" if self.remote_video and self.incoming_video else "unsupported" if video_requested else "not_requested")
 
     def frames(self, sock):

@@ -276,3 +276,22 @@ class ContractTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+
+class H241PeerParametersTest(unittest.TestCase):
+    def test_peer_parameters_are_extracted_and_clamped_by_gateway(self):
+        capability = ("genericVideoCapability", {
+            "capabilityIdentifier": ("standard", h.H264_OID),
+            "maxBitRate": 40960,
+            "collapsing": [
+                {"parameterIdentifier": ("standard", 41), "parameterValue": ("booleanArray", 64)},
+                {"parameterIdentifier": ("standard", 42), "parameterValue": ("unsignedMin", 80)},
+            ],
+        })
+        self.assertEqual(
+            h.h241_video_parameters(capability),
+            {"max_bitrate_100bps": 40960, "level_idc": 80, "profile_bits": 64},
+        )
+        self.assertEqual(h.h241_video_parameters(("genericVideoCapability", {
+            "capabilityIdentifier": ("standard", ("oid", b"other")), "maxBitRate": 5120})), {})
+        self.assertEqual(h.h241_video_parameters(None), {})
