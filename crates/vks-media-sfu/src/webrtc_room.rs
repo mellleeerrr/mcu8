@@ -41,6 +41,8 @@ pub struct PeerHandle {
     tx: mpsc::Sender<PeerCommand>,
     audio: Arc<AtomicBool>,
     video: Arc<AtomicBool>,
+    /// Operator/client cap for BWE, 0 = unlimited.
+    max_bitrate_bps: Arc<AtomicU64>,
     generation: u64,
 }
 
@@ -76,6 +78,7 @@ pub struct WebRtcRoomRegistry {
     /// Subscription may arrive before the SDP offer; remember it across that
     /// ordering and across re-offers.
     subscriptions: Mutex<HashMap<(RoomId, ParticipantId), (bool, bool)>>,
+    bitrate_caps: Mutex<HashMap<(RoomId, ParticipantId), u64>>,
 }
 
 impl std::fmt::Debug for WebRtcRoomRegistry {
@@ -106,6 +109,7 @@ impl WebRtcRoomRegistry {
             next_generation: AtomicU64::new(1),
             port_range,
             subscriptions: Mutex::new(HashMap::new()),
+            bitrate_caps: Mutex::new(HashMap::new()),
         })
     }
 
@@ -173,12 +177,21 @@ impl WebRtcRoomRegistry {
             .get(&(room, participant))
             .copied()
             .unwrap_or((false, false));
+        let max_bitrate_bps = self
+            .bitrate_caps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(room, participant))
+            .copied()
+            .unwrap_or(0);
         let (tx, rx) = mpsc::channel(PEER_COMMAND_QUEUE);
+        let max_bitrate_bps = Arc::new(AtomicU64::new(max_bitrate_bps));
         let handle = PeerHandle {
             participant,
             tx,
             audio: Arc::new(AtomicBool::new(audio)),
             video: Arc::new(AtomicBool::new(video)),
+            max_bitrate_bps: Arc::clone(&max_bitrate_bps),
             generation,
         };
         {
@@ -208,7 +221,7 @@ impl WebRtcRoomRegistry {
         }
 
         let registry = Arc::clone(self);
-        self.runtime.spawn(run_peer(registry, room, participant, generation, socket, peer, rx));
+        self.runtime.spawn(run_peer(registry, room, participant, generation, socket, peer, rx, max_bitrate_bps));
         Ok(AcceptedPeer { answer_sdp, rtp_maps, handle })
     }
 
@@ -216,6 +229,7 @@ impl WebRtcRoomRegistry {
     /// flushing its last datagrams and dropping its `Rtc` (DTLS close).
     pub fn remove(&self, room: RoomId, participant: ParticipantId) {
         self.subscriptions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(room, participant));
+        self.bitrate_caps.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(room, participant));
         let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(peers) = rooms.get_mut(&room) {
             peers.remove(&participant);
@@ -268,6 +282,18 @@ impl WebRtcRoomRegistry {
         handle.audio.store(audio, Ordering::Relaxed);
         handle.video.store(video, Ordering::Relaxed);
         let _ = handle.tx.try_send(PeerCommand::SetSubscription { audio, video });
+    }
+
+    /// Maximum egress bitrate requested by the subscriber (0 = unlimited).
+    pub fn set_max_bitrate(&self, room: RoomId, participant: ParticipantId, bps: u64) {
+        self.bitrate_caps.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert((room, participant), bps);
+        let handle = {
+            let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            rooms.get(&room).and_then(|peers| peers.get(&participant)).cloned()
+        };
+        if let Some(handle) = handle {
+            handle.max_bitrate_bps.store(bps, Ordering::Relaxed);
+        }
     }
 
     fn targets_for(&self, room: RoomId, from: ParticipantId, audio: bool) -> Vec<PeerHandle> {
@@ -353,6 +379,7 @@ async fn run_peer(
     socket: UdpSocket,
     mut peer: WebRtcPeer,
     mut rx: mpsc::Receiver<PeerCommand>,
+    max_bitrate_bps: Arc<AtomicU64>,
 ) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     let created_at = Instant::now();
@@ -398,7 +425,7 @@ async fn run_peer(
                         break;
                     }
                 };
-                if !dispatch(&registry, room, participant, &socket, &mut peer, actions).await {
+                if !dispatch(&registry, room, participant, &socket, &mut peer, &max_bitrate_bps, actions).await {
                     break;
                 }
             }
@@ -440,7 +467,7 @@ async fn run_peer(
                         break;
                     }
                 };
-                if !dispatch(&registry, room, participant, &socket, &mut peer, actions).await {
+                if !dispatch(&registry, room, participant, &socket, &mut peer, &max_bitrate_bps, actions).await {
                     break;
                 }
             }
@@ -452,7 +479,7 @@ async fn run_peer(
                         break;
                     }
                 };
-                if !dispatch(&registry, room, participant, &socket, &mut peer, actions).await {
+                if !dispatch(&registry, room, participant, &socket, &mut peer, &max_bitrate_bps, actions).await {
                     break;
                 }
             }
@@ -469,6 +496,7 @@ async fn dispatch(
     participant: ParticipantId,
     socket: &UdpSocket,
     peer: &mut WebRtcPeer,
+    max_bitrate_bps: &AtomicU64,
     mut actions: Vec<WebRtcAction>,
 ) -> bool {
     // Apply local-only actions before fanout. BWE must actually steer the
@@ -476,7 +504,11 @@ async fn dispatch(
     let mut extra = Vec::new();
     for action in &actions {
         match action {
-            WebRtcAction::Bitrate(bps) => peer.set_desired_bitrate(*bps),
+            WebRtcAction::Bitrate(bps) => {
+                let cap = max_bitrate_bps.load(Ordering::Relaxed);
+                let applied = if cap == 0 { *bps } else { (*bps).min(cap) };
+                peer.set_desired_bitrate(applied);
+            }
             WebRtcAction::Connected => {
                 tracing::info!(?participant, "WebRTC peer connected (ICE+DTLS+SRTP)");
                 if let Some(mid) = peer.mid_for_kind(false) {
@@ -530,6 +562,7 @@ mod tests {
                 tx,
                 audio: Arc::new(AtomicBool::new(true)),
                 video: Arc::new(AtomicBool::new(true)),
+                max_bitrate_bps: Arc::new(AtomicU64::new(0)),
                 generation: 1,
             },
             rx,
@@ -607,6 +640,20 @@ mod tests {
             registry.accept_offer(room, ParticipantId::new(), "v=0\r\n").expect_err("third peer must be rejected");
         assert!(matches!(error, WebRtcError::RoomFull));
         assert_eq!(registry.peer_count(room), MAX_PEERS_PER_ROOM);
+    }
+
+    #[tokio::test]
+    async fn subscription_and_bitrate_caps_are_remembered_before_offer() {
+        let registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+        let room = RoomId::new();
+        let participant = ParticipantId::new();
+        registry.set_subscription(room, participant, true, false);
+        registry.set_max_bitrate(room, participant, 512_000);
+        assert_eq!(registry.subscriptions.lock().unwrap().get(&(room, participant)), Some(&(true, false)));
+        assert_eq!(registry.bitrate_caps.lock().unwrap().get(&(room, participant)), Some(&512_000));
+        registry.remove(room, participant);
+        assert!(registry.subscriptions.lock().unwrap().get(&(room, participant)).is_none());
+        assert!(registry.bitrate_caps.lock().unwrap().get(&(room, participant)).is_none());
     }
 
     #[tokio::test]

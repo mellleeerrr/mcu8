@@ -869,6 +869,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                         }).await;
                                         if let Some(registry) = crate::webrtc_runtime::registry(&handler_config) {
                                             registry.set_subscription(m.room_id, pid, true, !s.audio_only);
+                                            registry.set_max_bitrate(m.room_id, pid, u64::from(s.max_bitrate_bps));
                                         }
                                         let _ = ctx.mcu_engine.add_subscriber(m.room_id, pid, vks_core::ports::media_engine::SubscribeRequest {
                                             track_ids,

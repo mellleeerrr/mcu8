@@ -33,8 +33,8 @@
    с plaintext-путём.
 4. Подписка обязательна: `SubscribeRequest` (в proto добавлено
    `bool audio_only = 5`) сохраняется даже до SDP-оффера и задаёт
-   `(audio, video)`; audio-only пир не получает видео. `Unsubscribe`
-   отключает оба потока. `Join`/`Connected` и переполнение очереди
+   `(audio, video)`; audio-only пир не получает видео. `max_bitrate_bps`
+   ограничивает BWE-потолок подписчика. `Unsubscribe` отключает оба потока. `Join`/`Connected` и переполнение очереди
    запрашивают keyframe у публишера; `Event::KeyframeRequest` от
    подписчика уходит публишеру через `Writer::request_keyframe`.
 5. PT на выходе выбирается `Writer::match_params` по параметрам входящего
