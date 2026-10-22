@@ -111,9 +111,10 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > 160 B/20 мс + timestamp 160, media details sample_rate 16000/clock 8000.
 > Live low-video E2E 233/233, audio TX545/RX361, rejected 0, G722/PT9/16000/8000
 > asserted; 72 SIP + 72 server тестов, workspace clippy/fmt clean. Evidence `docs/progress/evidence/t06b1/`.
-> **T06b-2a (G.726 all rates) реализован, ожидает ревью/коммита:** oxideav-adpcm 0.0.7,
-> LSB-first, PT107–110, 20/30/40 мс, AudioBridgeCodec, UAS G726-only, variant-aware
-> settings precheck, FFmpeg g726le probe; live E2E остаётся G722 233/233.
+> **T06b-2a (G.726 all rates) закрыт `17b8660`, ревью 9.5/10 APPROVED:** oxideav-adpcm 0.0.7,
+> LSB-first, PT107–110, 20/30/40 мс, AudioBridgeCodec, dynamic inbound PT 96–127
+> с codec identity, UAS G726-only, variant-aware settings precheck, FFmpeg g726le
+> probe; live E2E остаётся G722 233/233. 78 SIP (+1 ignored) / 74 server (+3).
 > Inbound произвольный dynamic PT 96–127 с `a=rtpmap` поддержан (кодек отдельно от PT).
 > Полный T06b (G723/G728/G729/Opus/AAC/H265/H323-матрица) остаётся открытым: T06b-2..5.
 >

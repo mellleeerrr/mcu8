@@ -344,7 +344,7 @@ audio TX 545/RX 361, rejected 0, G722/PT9/16000/8000 asserted; unit 72 SIP +
 Evidence: `docs/progress/evidence/t06b1/`. Остальные кодеки/видео — T06b-2..5,
 H.323 — T06b-4; полный T06b не закрыт. В T06b-2a добавлен G726 all-rates.
 
-**T06b-2a (G.726 16/24/32/40 SIP) — реализован 2026-10-22, ожидает ревью/коммита.**
+**T06b-2a (G.726 16/24/32/40 SIP) — закрыт `17b8660`, ревью 9.5/10 (media-engine, ref-engines) APPROVED.**
 `oxideav-adpcm =0.0.7`, LSB-first для всех четырёх rate, PT107–110 в
 native-оффере, 20/30/40 мс frame lengths, `AudioBridgeCodec` в мосте,
 UAS отвечает G726-only и принимает произвольный inbound PT 96–127 с
