@@ -106,14 +106,45 @@ impl ModeService {
         if old == new_mode {
             return;
         }
-        {
+        let (epoch, overrides): (u64, std::collections::BTreeMap<RoomId, RoomMode>) = {
             let mut m = state.mode.lock().expect("mode store poisoned");
             m.switch_epoch += 1;
-            state.event_queue.publish(ModeChangedEvent { room_id: None, new_mode, switch_epoch: m.switch_epoch });
+            let epoch = m.switch_epoch;
+            state.event_queue.publish(ModeChangedEvent { room_id: None, new_mode, switch_epoch: epoch });
+            // Snapshot overrides; never take rooms while holding mode.
+            (epoch, m.room_mode_overrides.clone())
+        };
+        let affected: Vec<RoomId> = {
+            let rooms = state.rooms.lock().expect("rooms store poisoned");
+            rooms.keys().filter(|id| !overrides.contains_key(id)).copied().collect()
+        };
+        for id in &affected {
+            Self::broadcast_room_mode(state, id, new_mode, epoch);
         }
         if new_mode == RoomMode::Mcu {
             Self::evict_mcu_rooms(state);
         }
+    }
+
+    pub(crate) fn broadcast_room_mode(state: &AppState, room_id: &RoomId, mode: RoomMode, epoch: u64) {
+        let proto_mode = match mode {
+            RoomMode::Sfu => vks_proto::media::RoomMode::Sfu,
+            RoomMode::Mcu => vks_proto::media::RoomMode::Mcu,
+        };
+        let msg = vks_proto::signaling::SignalingMessage {
+            msg_id: 0,
+            reply_to: 0,
+            payload: Some(vks_proto::signaling::signaling_message::Payload::RoomModeChanged(
+                vks_proto::signaling::RoomModeChanged {
+                    new_mode: proto_mode as i32,
+                    caps: None,
+                    switch_epoch: epoch,
+                    graceful: true,
+                },
+            )),
+        };
+        let payload = prost::Message::encode_to_vec(&msg);
+        state.room_hub.broadcast(room_id, None, payload.into());
     }
 
     pub(crate) fn evict_mcu_rooms(state: &AppState) {
@@ -161,24 +192,7 @@ impl ModeService {
                     "switch_epoch": m.switch_epoch,
                 }),
             );
-            let proto_mode = match new_mode {
-                RoomMode::Sfu => vks_proto::media::RoomMode::Sfu,
-                RoomMode::Mcu => vks_proto::media::RoomMode::Mcu,
-            };
-            let mode_msg = vks_proto::signaling::SignalingMessage {
-                msg_id: 0,
-                reply_to: 0,
-                payload: Some(vks_proto::signaling::signaling_message::Payload::RoomModeChanged(
-                    vks_proto::signaling::RoomModeChanged {
-                        new_mode: proto_mode as i32,
-                        caps: None,
-                        switch_epoch: m.switch_epoch,
-                        graceful: true,
-                    },
-                )),
-            };
-            let payload_bytes = prost::Message::encode_to_vec(&mode_msg);
-            state.room_hub.broadcast(room_id, None, payload_bytes.into());
+            Self::broadcast_room_mode(state, room_id, new_mode, m.switch_epoch);
             if new_mode == RoomMode::Mcu {
                 drop(m);
                 if let Some(evict) = &state.webrtc_evict {

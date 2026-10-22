@@ -70,77 +70,62 @@ impl Rooms {
         participants: Option<usize>,
         bitrate_kbps: Option<u32>,
     ) -> Option<RoomRecord> {
-        let mut rooms = state.rooms.lock().expect("rooms store poisoned");
-        let record = rooms.get_mut(id)?;
-        if let Some(n) = name {
-            record.name = n;
-        }
-        let _mode_changed = if let Some(m) = mode {
-            let old_effective = Self::resolve_effective_mode(state, record.mode);
-            record.mode = Some(m);
-            let mut mode_state = state.mode.lock().expect("mode store poisoned");
-            mode_state.room_mode_overrides.insert(*id, m);
-            if old_effective != m {
-                mode_state.switch_epoch += 1;
-                state.event_queue.publish(crate::mode::ModeChangedEvent {
-                    room_id: Some(*id),
-                    new_mode: m,
-                    switch_epoch: mode_state.switch_epoch,
-                });
+        let (updated, mode) = {
+            let mut rooms = state.rooms.lock().expect("rooms store poisoned");
+            let record = rooms.get_mut(id)?;
+            if let Some(n) = name {
+                record.name = n;
+            }
+            if let Some(m) = mode {
+                record.mode = Some(m);
+            }
+            if let Some(p) = participants {
+                record.participants = p;
+            }
+            if let Some(b) = bitrate_kbps {
+                record.bitrate_kbps = b;
+            }
+            (record.clone(), mode)
+        };
+        // Never hold the rooms lock across the admission/eviction hook: gateway
+        // announce takes admission then reads rooms, so the reverse order would
+        // deadlock and also let an offer slip between the override and eviction.
+        if let Some(m) = mode {
+            let old_effective = state.mode.lock().expect("mode store poisoned").effective_mode(id);
+            let epoch = {
+                let mut mode_state = state.mode.lock().expect("mode store poisoned");
+                mode_state.room_mode_overrides.insert(*id, m);
+                if old_effective == m {
+                    None
+                } else {
+                    mode_state.switch_epoch += 1;
+                    state.event_queue.publish(crate::mode::ModeChangedEvent {
+                        room_id: Some(*id),
+                        new_mode: m,
+                        switch_epoch: mode_state.switch_epoch,
+                    });
+                    Some(mode_state.switch_epoch)
+                }
+            };
+            if let Some(epoch) = epoch {
                 state.notify_admin(
                     "room:mode_changed",
                     serde_json::json!({
                         "room_id": id.to_string(),
                         "mode": m,
-                        "switch_epoch": mode_state.switch_epoch,
+                        "switch_epoch": epoch,
                     }),
                 );
-
-                // Рассылаем RoomModeChanged всем WebRTC signaling сессиям в комнате через RoomHub
-                let proto_mode = match m {
-                    RoomMode::Sfu => vks_proto::media::RoomMode::Sfu,
-                    RoomMode::Mcu => vks_proto::media::RoomMode::Mcu,
-                };
-                let mode_msg = vks_proto::signaling::SignalingMessage {
-                    msg_id: 0,
-                    reply_to: 0,
-                    payload: Some(vks_proto::signaling::signaling_message::Payload::RoomModeChanged(
-                        vks_proto::signaling::RoomModeChanged {
-                            new_mode: proto_mode as i32,
-                            caps: None,
-                            switch_epoch: mode_state.switch_epoch,
-                            graceful: true,
-                        },
-                    )),
-                };
-                use prost::Message;
-                let payload_bytes = mode_msg.encode_to_vec();
-                state.room_hub.broadcast(id, None, payload_bytes.into());
-
+                crate::mode::ModeService::broadcast_room_mode(state, id, m, epoch);
                 if m == RoomMode::Mcu {
                     if let Some(evict) = &state.webrtc_evict {
                         // WebRTC media cannot enter the MCU mixer; drop real
                         // peers rather than leave them streaming silently.
-                        drop(mode_state);
                         evict(Some(*id));
                     }
                 }
-
-                true
-            } else {
-                false
             }
-        } else {
-            false
-        };
-
-        if let Some(p) = participants {
-            record.participants = p;
         }
-        if let Some(b) = bitrate_kbps {
-            record.bitrate_kbps = b;
-        }
-        let updated = record.clone();
         Some(updated)
     }
 
@@ -167,22 +152,19 @@ impl Rooms {
         participants: Option<usize>,
         bitrate_kbps: Option<u32>,
     ) -> Result<Option<RoomRecord>, vks_core::ports::storage::StorageError> {
-        let (current_name, current_created_ms, effective_mode, mode_changed, opt_override) = {
+        // Snapshot the record under rooms, then resolve modes after releasing it:
+        // lock order is always rooms -> (released) -> mode, never nested.
+        let rec = {
             let rooms = state.rooms.lock().expect("rooms store poisoned");
-            let rec = match rooms.get(id) {
-                Some(r) => r.clone(),
+            match rooms.get(id) {
+                Some(record) => record.clone(),
                 None => return Ok(None),
-            };
-            let new_name = name.clone().unwrap_or(rec.name);
-            let mode_changed = if let Some(m) = mode {
-                let old_effective = Self::resolve_effective_mode(state, rec.mode);
-                old_effective != m
-            } else {
-                false
-            };
-            let effective_mode = Self::resolve_effective_mode(state, mode.or(rec.mode));
-            (new_name, rec.created_ms, effective_mode, mode_changed, mode.or(rec.mode))
+            }
         };
+        let new_name = name.clone().unwrap_or(rec.name);
+        let mode_changed = mode.is_some_and(|m| Self::resolve_effective_mode(state, rec.mode) != m);
+        let effective_mode = Self::resolve_effective_mode(state, mode.or(rec.mode));
+        let (current_name, current_created_ms, opt_override) = (new_name, rec.created_ms, mode.or(rec.mode));
 
         if let Some(storage) = &state.storage {
             let mut cr = vks_core::Room::new(current_name, effective_mode);
@@ -512,5 +494,35 @@ mod tests {
             }
             other => panic!("expected RoomModeChanged, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn update_mode_calls_eviction_without_holding_rooms_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        let mut state = AppState::new();
+        let created = Rooms::create(&state, "evict-lock-room");
+        let started = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = started.clone();
+        state.webrtc_evict = Some(std::sync::Arc::new(move |_: Option<vks_core::RoomId>| {
+            flag.store(true, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }));
+        let state = std::sync::Arc::new(state);
+        let writer = state.clone();
+        let id = created.id;
+        let update = std::thread::spawn(move || Rooms::update(&writer, &id, None, Some(RoomMode::Mcu), None, None));
+        while !started.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // While the eviction hook sleeps, the rooms lock must already be free.
+        let (get_tx, get_rx) = mpsc::channel();
+        let reader = state.clone();
+        std::thread::spawn(move || get_tx.send(Rooms::get(&reader, &id).is_some()).unwrap());
+        assert!(
+            get_rx.recv_timeout(std::time::Duration::from_millis(500)).expect("rooms lock held during eviction"),
+            "room must still exist"
+        );
+        update.join().unwrap().expect("updated");
     }
 }

@@ -301,29 +301,32 @@ impl SettingsService {
     /// вернуть 503, если storage не сохранил документ, а память — откатиться.
     pub async fn try_set_async(state: &crate::state::AppState, next: Settings) -> Result<Settings, String> {
         let _persist = state.settings_persist.lock().await;
-        let (previous, previous_mode, next, json_str) = {
+        let (previous, previous_mode, mode_changed, next, json_str) = {
             let mut settings = state.settings.lock().expect("settings store poisoned");
             let previous = settings.clone();
             let previous_mode = state.mode.lock().expect("mode store poisoned").global_mode;
             let mut next = next;
             next.merge_preserving_secrets(&settings);
             *settings = next.clone();
-            if next.default_mode != previous.default_mode {
+            let mode_changed = next.default_mode != previous.default_mode;
+            if mode_changed {
                 state.mode.lock().expect("mode store poisoned").global_mode = next.default_mode;
             }
             let json = match serde_json::to_string(&next) {
                 Ok(json) => json,
                 Err(error) => {
                     *settings = previous.clone();
-                    state.mode.lock().expect("mode store poisoned").global_mode = previous_mode;
+                    if mode_changed {
+                        state.mode.lock().expect("mode store poisoned").global_mode = previous_mode;
+                    }
                     return Err(error.to_string());
                 }
             };
-            (previous, previous_mode, next, json)
+            (previous, previous_mode, mode_changed, next, json)
         };
         match persist(state, &json_str).await {
             Ok(()) => {
-                if next.default_mode != previous_mode {
+                if mode_changed {
                     crate::mode::ModeService::announce_global_mode(state, previous_mode, next.default_mode);
                 }
                 Ok(next)
@@ -331,6 +334,11 @@ impl SettingsService {
             Err(error) => {
                 *state.settings.lock().expect("settings store poisoned") = previous;
                 state.mode.lock().expect("mode store poisoned").global_mode = previous_mode;
+                // Offers admitted during the persist window saw the transient
+                // mode; re-evict if the committed mode is MCU again.
+                if mode_changed && previous_mode == RoomMode::Mcu {
+                    crate::mode::ModeService::announce_global_mode(state, next.default_mode, previous_mode);
+                }
                 Err(error)
             }
         }
@@ -396,6 +404,9 @@ impl SettingsService {
                 *state.settings.lock().expect("settings store poisoned") = previous;
                 if mode_changed {
                     state.mode.lock().expect("mode store poisoned").global_mode = previous_mode;
+                    if previous_mode == RoomMode::Mcu {
+                        crate::mode::ModeService::announce_global_mode(state, next.default_mode, previous_mode);
+                    }
                 }
                 Err(error)
             }
@@ -442,6 +453,19 @@ mod tests {
         assert_eq!(returned.name, "prod");
         assert_eq!(SettingsService::get(&state).name, "prod");
         assert_eq!(state.mode.lock().unwrap().global_mode, RoomMode::Mcu);
+    }
+
+    #[test]
+    fn set_default_mode_mcu_evicts_real_peers() {
+        use std::sync::{Arc, Mutex};
+        let mut state = AppState::new();
+        let room = vks_core::RoomId::new();
+        state.rooms.lock().unwrap().insert(room, crate::state::RoomRecord::new(room, "conf", None));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        state.webrtc_evict = Some(Arc::new(move |target| sink.lock().unwrap().push(target)));
+        SettingsService::set(&state, Settings { default_mode: RoomMode::Mcu, ..Default::default() });
+        assert_eq!(*seen.lock().unwrap(), vec![Some(room)]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
