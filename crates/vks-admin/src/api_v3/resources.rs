@@ -108,6 +108,135 @@ pub struct AddressRecord {
     pub payload: Value,
 }
 
+/// Протокол контакта комнаты: по `contact_type` и схеме URI.
+///
+/// Вендорный UI (PNM 2.2.1.66) считает контакты конференции по протоколам:
+/// «Участники (SIP/H.323)» = `contacts.users + contacts.h323 + contacts.sip`,
+/// «Устройства (VNC/RTSP) и медиафайлы» = `contacts.rtsp + contacts.vnc +
+/// contacts.media + contacts.file`. Это ПРИГЛАШЁННЫЕ контакты комнаты
+/// (шаблон `resources.contacts[room]`), а не живые участники — живые лежат
+/// отдельно в `abonents`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactProtocol {
+    /// Контакт из справочника пользователей (`contact_type == "users"`).
+    Users,
+    /// `sip:`/`sips:` (`auto:` канонизация приводит к `sip:`).
+    Sip,
+    /// `h323:`
+    H323,
+    /// `alias:` — алиас конференции.
+    Alias,
+    /// `rtsp:`
+    Rtsp,
+    /// `vnc:`
+    Vnc,
+    /// `media:`
+    Media,
+    /// `file:`
+    File,
+    /// Прочие схемы (`webrtc:`, `http:`…) — вендорские счётчики их не показывают.
+    Other,
+}
+
+/// Классификация контакта комнаты: `contact_type` важнее схемы URI.
+///
+/// Контакт — запись `resources.contacts[room]`: `{id, contact_id, contact_type,
+/// display_name, uri, connection_url, call_string:{id,uri,display_name}, payload}`.
+pub fn contact_protocol(contact: &Value) -> ContactProtocol {
+    let contact_type = contact["contact_type"].as_str().unwrap_or_default().trim().to_ascii_lowercase();
+    match contact_type.as_str() {
+        "users" | "user" | "directory" | "directory_users" => return ContactProtocol::Users,
+        "alias" | "aliases" => return ContactProtocol::Alias,
+        _ => {}
+    }
+    // Адрес контакта: `uri`, затем вложенная строка вызова, затем `connection_url`.
+    let uri = contact["uri"]
+        .as_str()
+        .or_else(|| contact["call_string"]["uri"].as_str())
+        .or_else(|| contact["connection_url"].as_str())
+        .unwrap_or_default();
+    uri_protocol(uri)
+}
+
+/// Протокол по схеме URI.
+///
+/// Схема нормализуется `canonical_uri` (регистр, default-порты, `auto:` → `sip:`),
+/// поэтому `SIP:`, `sip:` и бесхостовые `192.168.1.132:5060` дают один счётчик.
+pub fn uri_protocol(uri: &str) -> ContactProtocol {
+    let uri = uri.trim();
+    if uri.is_empty() {
+        return ContactProtocol::Other;
+    }
+    let canonical = vks_common::uri::canonical_uri(uri);
+    let scheme = canonical.split_once(':').map_or("", |(scheme, _)| scheme).to_ascii_lowercase();
+    match scheme.as_str() {
+        "sip" | "sips" => ContactProtocol::Sip,
+        "h323" => ContactProtocol::H323,
+        "alias" => ContactProtocol::Alias,
+        "rtsp" => ContactProtocol::Rtsp,
+        "vnc" => ContactProtocol::Vnc,
+        "media" => ContactProtocol::Media,
+        "file" => ContactProtocol::File,
+        _ => ContactProtocol::Other,
+    }
+}
+
+/// Счётчики контактов комнаты — форма, которую ждёт UI (эталон ref-92):
+/// `{users, sip, h323, alias, rtsp, vnc, media, file}`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContactCounts {
+    pub users: u64,
+    pub sip: u64,
+    pub h323: u64,
+    pub alias: u64,
+    pub rtsp: u64,
+    pub vnc: u64,
+    pub media: u64,
+    pub file: u64,
+}
+
+impl ContactCounts {
+    /// JSON-форма счётчиков — значение поля `contacts` у конференции/сессии.
+    pub fn to_json(self) -> Value {
+        json!({
+            "users": self.users,
+            "sip": self.sip,
+            "h323": self.h323,
+            "alias": self.alias,
+            "rtsp": self.rtsp,
+            "vnc": self.vnc,
+            "media": self.media,
+            "file": self.file,
+        })
+    }
+
+    fn bump(&mut self, protocol: ContactProtocol) {
+        match protocol {
+            ContactProtocol::Users => self.users += 1,
+            ContactProtocol::Sip => self.sip += 1,
+            ContactProtocol::H323 => self.h323 += 1,
+            ContactProtocol::Alias => self.alias += 1,
+            ContactProtocol::Rtsp => self.rtsp += 1,
+            ContactProtocol::Vnc => self.vnc += 1,
+            ContactProtocol::Media => self.media += 1,
+            ContactProtocol::File => self.file += 1,
+            ContactProtocol::Other => {}
+        }
+    }
+}
+
+/// Счётчики контактов комнаты по её списку контактов (`resources.contacts[room]`).
+///
+/// Список — шаблон комнаты, поэтому результат одинаков для неактивированной и
+/// активированной комнаты: запуск сессии не добавляет и не убирает контакты.
+pub fn contact_counts(contacts: &[Value]) -> ContactCounts {
+    let mut counts = ContactCounts::default();
+    for contact in contacts {
+        counts.bump(contact_protocol(contact));
+    }
+    counts
+}
+
 pub const CONFIGURATION_KEY: &str = "pnm-definitions-v1";
 
 /// Caller holds the async resources lock, serializing mutations and durable commits.

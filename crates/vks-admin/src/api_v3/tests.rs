@@ -2475,3 +2475,262 @@ async fn pnm_video_layouts_calculate_parses_preset_suffix() {
             .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ---------------------------------------------------------------------------
+// Счётчики контактов комнаты (`contacts` в карточке/списке конференций).
+// ---------------------------------------------------------------------------
+
+/// «Участники (SIP/H.323)» — ровно как считает вендорный UI (PNM 2.2.1.66):
+/// `contacts.users + contacts.h323 + contacts.sip`.
+fn ui_participants_count(contacts: &Value) -> u64 {
+    ["users", "h323", "sip"].iter().map(|key| contacts[*key].as_u64().unwrap_or(0)).sum()
+}
+
+/// «Устройства (VNC/RTSP) и медиафайлы» — `rtsp + vnc + media + file`.
+fn ui_devices_count(contacts: &Value) -> u64 {
+    ["rtsp", "vnc", "media", "file"].iter().map(|key| contacts[*key].as_u64().unwrap_or(0)).sum()
+}
+
+/// Контакт комнаты в виде, в котором его кладёт `resources.contacts`.
+fn contact_record(id: &str, contact_type: &str, uri: &str) -> Value {
+    json!({
+        "id": id, "contact_id": id, "call_string_id": id, "contact_type": contact_type,
+        "display_name": id, "uri": uri, "connection_url": uri,
+        "call_string": {"id": id, "uri": uri, "display_name": id},
+        "payload": {"auto_call": false},
+    })
+}
+
+#[test]
+fn contact_counts_classify_contact_type_and_uri_scheme() {
+    use super::resources::{contact_counts, contact_protocol, ContactProtocol};
+    let contacts = vec![
+        contact_record("cs-1", "call_strings", "sip:alice@example.invalid"),
+        contact_record("cs-2", "call_strings", "SIP:Bob@Example.COM:5060"),
+        contact_record("cs-3", "call_strings", "h323:192.168.1.132:1720"),
+        contact_record("cs-4", "call_strings", "192.168.1.133:5060"),
+        contact_record("cs-5", "users", "sip:carol@example.invalid"),
+        contact_record("cs-6", "call_strings", "rtsp://192.168.1.134/stream"),
+        contact_record("cs-7", "call_strings", "vnc:192.168.1.135:5900"),
+        contact_record("cs-8", "call_strings", "media:192.168.1.136"),
+        contact_record("cs-9", "call_strings", "file:/var/lib/record.mp4"),
+        contact_record("cs-10", "alias", "alias:room@example.invalid"),
+        contact_record("cs-11", "call_strings", "webrtc:room-1"),
+    ];
+    let counts = contact_counts(&contacts);
+    assert_eq!(counts.sip, 3, "sip + SIP: + бесхостовый host:port");
+    assert_eq!(counts.h323, 1);
+    assert_eq!(counts.users, 1, "contact_type=users важнее схемы uri");
+    assert_eq!(counts.rtsp, 1);
+    assert_eq!(counts.vnc, 1);
+    assert_eq!(counts.media, 1);
+    assert_eq!(counts.file, 1);
+    assert_eq!(counts.alias, 1);
+    assert_eq!(contact_protocol(&contact_record("cs-12", "call_strings", "sips:a@b.invalid")), ContactProtocol::Sip);
+    assert_eq!(contact_protocol(&contact_record("cs-13", "call_strings", "auto:host")), ContactProtocol::Sip);
+    assert_eq!(contact_protocol(&contact_record("cs-14", "call_strings", "webrtc:x")), ContactProtocol::Other);
+    // Пустая/неизвестная схема не попадает ни в один счётчик вендора.
+    assert_eq!(contact_protocol(&contact_record("cs-15", "call_strings", "")), ContactProtocol::Other);
+
+    // `payload.call_string` перечисляет ВСЕ опции протоколов (`sip/h323/rtsp/…`
+    // с `primary: true`) — протокол контакта определяется только схемой `uri`.
+    let mut live_shape = contact_record("cs-16", "call_strings", "sip:t12b-label-probe@example.invalid");
+    live_shape["payload"]["call_string"] = json!({
+        "sip": {"primary": true}, "h323": {"primary": true}, "rtsp": {"primary": true},
+        "vnc": {"primary": true}, "media": {"primary": true}, "file": {"primary": true},
+    });
+    let live_counts = contact_counts(std::slice::from_ref(&live_shape));
+    assert_eq!(live_counts.sip, 1, "боевой контакт комнаты — SIP");
+    assert_eq!(live_counts.h323, 0);
+    assert_eq!(live_counts.rtsp, 0, "опции протоколов не превращают контакт в устройство");
+    assert_eq!(live_counts.vnc, 0);
+    assert_eq!(live_counts.media, 0);
+    assert_eq!(live_counts.file, 0);
+    assert_eq!(live_counts.users, 0);
+}
+
+#[tokio::test]
+async fn conference_contacts_counters_count_room_contacts() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response = send(
+        &server,
+        request("POST", "/api/v3/conferences", Some(&token), json!({"display_name":"Contacts counters"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let id = json_body(response).await["conference"]["id"].as_str().expect("conference id").to_string();
+
+    // Комната без контактов: все счётчики нулевые.
+    let body = json_body(
+        send(&server, request("GET", &format!("/api/v3/ui/conferences/{id}"), Some(&token), json!({}))).await,
+    )
+    .await;
+    assert_eq!(body["conference"]["contacts"]["sip"], 0);
+    assert_eq!(body["conference"]["contacts"]["users"], 0);
+
+    // SIP- и H.323-контакты комнаты.
+    for (uri, label) in [("sip:t12b-label-probe@example.invalid", "SIP probe"), ("h323:192.168.1.132", "H323 probe")] {
+        let response = send(
+            &server,
+            request(
+                "POST",
+                &format!("/api/v3/ui/conferences/{id}/call_strings"),
+                Some(&token),
+                json!({"uri": uri, "display_name": label}),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED, "contact {uri} must be created");
+    }
+
+    // (а) sip=1, h323=1, users=0 — и одинаково в списке и в карточке.
+    let card =
+        json_body(send(&server, request("GET", &format!("/api/v3/conferences/{id}"), Some(&token), json!({}))).await)
+            .await;
+    let contacts = &card["conference"]["contacts"];
+    assert_eq!(contacts["sip"], 1, "card contacts: {contacts}");
+    assert_eq!(contacts["h323"], 1, "card contacts: {contacts}");
+    assert_eq!(contacts["users"], 0, "card contacts: {contacts}");
+    assert_eq!(ui_participants_count(contacts), 2, "UI «Участники (SIP/H.323)»: {contacts}");
+    assert_eq!(ui_devices_count(contacts), 0);
+
+    for (path, field) in [
+        ("/api/v3/ui/conferences".to_string(), "conferences"),
+        ("/api/v3/conferences".to_string(), "conferences"),
+        ("/api/v3/ui/sessions".to_string(), "sessions"),
+        ("/api/v3/sessions".to_string(), "sessions"),
+    ] {
+        let body = json_body(send(&server, request("GET", &path, Some(&token), json!({}))).await).await;
+        let item = body[field]
+            .as_array()
+            .expect("list array")
+            .iter()
+            .find(|item| item["id"] == id.as_str())
+            .unwrap_or_else(|| panic!("{path} must contain {id}: {body}"));
+        assert_eq!(item["contacts"]["sip"], 1, "{path} contacts.sip: {}", item["contacts"]);
+        assert_eq!(item["contacts"]["h323"], 1, "{path} contacts.h323: {}", item["contacts"]);
+        assert_eq!(item["contacts"]["users"], 0, "{path} contacts.users: {}", item["contacts"]);
+    }
+}
+
+#[tokio::test]
+async fn conference_contacts_users_type_is_counted_as_user() {
+    let (state, _) = test_state();
+    let server = app(state.clone());
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response =
+        send(&server, request("POST", "/api/v3/conferences", Some(&token), json!({"display_name":"Users counter"})))
+            .await;
+    let id = json_body(response).await["conference"]["id"].as_str().expect("conference id").to_string();
+
+    // (б) Контакт из справочника пользователей (`contact_type == "users"`).
+    state
+        .api_v3
+        .resources
+        .lock()
+        .await
+        .contacts
+        .insert(id.clone(), vec![contact_record("u-ivan", "users", "sip:ivan@example.invalid")]);
+
+    let body = json_body(
+        send(&server, request("GET", &format!("/api/v3/ui/conferences/{id}"), Some(&token), json!({}))).await,
+    )
+    .await;
+    let contacts = &body["conference"]["contacts"];
+    assert_eq!(contacts["users"], 1, "contacts.users: {contacts}");
+    assert_eq!(contacts["sip"], 0, "контакт users не считается sip: {contacts}");
+    assert_eq!(ui_participants_count(contacts), 1, "UI «Участники (SIP/H.323)»: {contacts}");
+}
+
+#[tokio::test]
+async fn conference_contacts_devices_are_counted_separately_from_participants() {
+    let (state, _) = test_state();
+    let server = app(state.clone());
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response =
+        send(&server, request("POST", "/api/v3/conferences", Some(&token), json!({"display_name":"Devices counter"})))
+            .await;
+    let id = json_body(response).await["conference"]["id"].as_str().expect("conference id").to_string();
+
+    // (в) Устройства и медиафайлы — отдельная вкладка UI.
+    let devices = vec![
+        contact_record("cs-vnc", "call_strings", "vnc:192.168.1.135:5900"),
+        contact_record("cs-rtsp", "call_strings", "rtsp://192.168.1.134/stream"),
+        contact_record("cs-media", "call_strings", "media:192.168.1.136"),
+        contact_record("cs-file", "call_strings", "file:/var/lib/record.mp4"),
+    ];
+    state.api_v3.resources.lock().await.contacts.insert(id.clone(), devices);
+
+    let body = json_body(
+        send(&server, request("GET", &format!("/api/v3/ui/conferences/{id}"), Some(&token), json!({}))).await,
+    )
+    .await;
+    let conference = &body["conference"];
+    let contacts = &conference["contacts"];
+    assert_eq!(contacts["vnc"], 1, "contacts.vnc: {contacts}");
+    assert_eq!(contacts["rtsp"], 1, "contacts.rtsp: {contacts}");
+    assert_eq!(contacts["media"], 1, "contacts.media: {contacts}");
+    assert_eq!(contacts["file"], 1, "contacts.file: {contacts}");
+    assert_eq!(ui_devices_count(contacts), 4, "UI «Устройства (VNC/RTSP) и медиафайлы»: {contacts}");
+    assert_eq!(ui_participants_count(contacts), 0, "устройства не попадают в «Участники»: {contacts}");
+    // Участники комнаты (живые) и абоненты не меняются от контактов-устройств.
+    assert_eq!(conference["participants"], 0, "устройства не подключены: {conference}");
+    assert_eq!(conference["abonents"]["sip"], 0, "живых SIP-абонентов нет: {}", conference["abonents"]);
+}
+
+#[tokio::test]
+async fn conference_contacts_counters_do_not_depend_on_session_state() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response = send(
+        &server,
+        request("POST", "/api/v3/conferences", Some(&token), json!({"display_name":"State independent"})),
+    )
+    .await;
+    let id = json_body(response).await["conference"]["id"].as_str().expect("conference id").to_string();
+    let response = send(
+        &server,
+        request(
+            "POST",
+            &format!("/api/v3/ui/conferences/{id}/call_strings"),
+            Some(&token),
+            json!({"uri":"sip:state-probe@example.invalid","display_name":"Probe"}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // (г) Неактивированная комната.
+    let body = json_body(
+        send(&server, request("GET", &format!("/api/v3/ui/conferences/{id}"), Some(&token), json!({}))).await,
+    )
+    .await;
+    let inactive = body["conference"]["contacts"].clone();
+    assert_eq!(inactive["sip"], 1, "неактивированная комната: {inactive}");
+    assert_eq!(body["conference"]["has_stopped"], true, "комната ещё не запущена");
+
+    // Активированная комната: те же счётчики (живые — отдельно в abonents).
+    let response = send(&server, request("POST", "/api/v3/sessions", Some(&token), json!({"conference_id": id}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(
+        send(&server, request("GET", &format!("/api/v3/ui/conferences/{id}"), Some(&token), json!({}))).await,
+    )
+    .await;
+    let active = body["conference"]["contacts"].clone();
+    assert_eq!(active, inactive, "счётчики контактов не зависят от активности комнаты");
+    assert_eq!(active["sip"], 1, "активированная комната: {active}");
+    assert_eq!(body["conference"]["has_stopped"], false, "комната запущена");
+
+    // Остановленная комната: счётчики те же.
+    let response = send(&server, request("DELETE", &format!("/api/v3/sessions/{id}"), Some(&token), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let body = json_body(
+        send(&server, request("GET", &format!("/api/v3/ui/conferences/{id}"), Some(&token), json!({}))).await,
+    )
+    .await;
+    assert_eq!(body["conference"]["contacts"], inactive, "после остановки счётчики те же");
+    assert_eq!(body["conference"]["has_stopped"], true, "комната остановлена");
+}

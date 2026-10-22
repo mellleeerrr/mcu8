@@ -139,12 +139,23 @@ pub(crate) fn conference_payload_defaults() -> serde_json::Map<String, Value> {
 }
 
 /// JSON сессии/конференции (мапперы `Fv`/`dy`/`zZ` мягкие).
-fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_stopped: bool) -> Value {
+///
+/// `contacts` — счётчики ПРИГЛАШЁННЫХ контактов комнаты (`resources.contacts`),
+/// одинаковые для неактивированной и активированной комнаты. Живые участники
+/// считаются отдельно в `abonents` (вендор для сессии читает именно `abonents`).
+fn session_json(
+    state: &AppState,
+    r: &RoomRecord,
+    connections_limit: u32,
+    is_stopped: bool,
+    contacts: &[Value],
+) -> Value {
     let (state_str, has_stopped) = if is_stopped { ("STOPPED", true) } else { ("ACTIVE", false) };
     let participants = state.room_hub.list_participants(&r.id);
     let sip_count = participants.iter().filter(|p| p.participant_id.contains("@sip-gateway")).count();
     let h323_count = participants.iter().filter(|p| p.participant_id.contains("@h323-gateway")).count();
     let is_recording = participants.iter().any(|p| p.is_recorder);
+    let contact_counts = super::resources::contact_counts(contacts);
 
     // Извлекаем сохраненные настройки 8 вкладок для комнаты
     let stored_settings =
@@ -226,7 +237,7 @@ fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_sto
             "sip": sip_count, "h323": h323_count, "rtsp": 0, "vnc": 0, "media": 0, "file": 0,
             "alias": 0, "confloop": 0
         },
-        "contacts": { "users": 0, "sip": sip_count, "h323": h323_count, "alias": 0, "rtsp": 0, "vnc": 0, "media": 0, "file": 0 },
+        "contacts": contact_counts.to_json(),
         "payload": payload_map
     });
 
@@ -241,6 +252,21 @@ fn session_json(state: &AppState, r: &RoomRecord, connections_limit: u32, is_sto
     }
 
     base_obj
+}
+
+/// Снимок контактов всех комнат (копия под lock) — источник счётчиков
+/// `contacts` в карточке и списке конференций/сессий.
+///
+/// Снимок снимается один раз на запрос: список и карточка обязаны отдавать
+/// одинаковые счётчики, а блокировка ресурсов не должна браться на каждый
+/// контакт комнаты.
+async fn contacts_snapshot(state: &AppState) -> std::collections::BTreeMap<String, Vec<Value>> {
+    state.api_v3.resources.lock().await.contacts.clone()
+}
+
+/// Контакты комнаты из снимка (пусто, если у комнаты контактов нет).
+fn room_contacts<'a>(snapshot: &'a std::collections::BTreeMap<String, Vec<Value>>, room: &RoomId) -> &'a [Value] {
+    snapshot.get(&room.to_string()).map_or(&[][..], Vec::as_slice)
 }
 
 /// Лимит подключений комнаты (`payload.connections_limit`, из наших настроек).
@@ -300,12 +326,13 @@ fn audit_room(state: &AppState, user: &str, action: &str, room_id: &str, client_
     state.record_audit_entry(user, action, Some(room_id.to_string()), ip);
 }
 
-fn sessions_payload(state: &AppState, query: &SessionsQuery) -> Value {
+async fn sessions_payload(state: &AppState, query: &SessionsQuery) -> Value {
     let (items, count) = select_rooms(state, query);
     let limit = connections_limit(state);
+    let contacts = contacts_snapshot(state).await;
     let stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned");
     json!({
-        "sessions": items.iter().map(|r| session_json(state, r, limit, stopped.contains(&r.id))).collect::<Vec<_>>(),
+        "sessions": items.iter().map(|r| session_json(state, r, limit, stopped.contains(&r.id), room_contacts(&contacts, &r.id))).collect::<Vec<_>>(),
         "count": count
     })
 }
@@ -325,12 +352,13 @@ fn filter_sessions_scope(mut payload: Value, auth: &AuthContext) -> Value {
     payload
 }
 
-fn conferences_payload(state: &AppState, query: &SessionsQuery) -> Value {
+async fn conferences_payload(state: &AppState, query: &SessionsQuery) -> Value {
     let (items, count) = select_rooms(state, query);
     let limit = connections_limit(state);
+    let contacts = contacts_snapshot(state).await;
     let stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned");
     json!({
-        "conferences": items.iter().map(|r| session_json(state, r, limit, stopped.contains(&r.id))).collect::<Vec<_>>(),
+        "conferences": items.iter().map(|r| session_json(state, r, limit, stopped.contains(&r.id), room_contacts(&contacts, &r.id))).collect::<Vec<_>>(),
         "count": count
     })
 }
@@ -342,7 +370,7 @@ pub async fn ui_sessions(
     Query(query): Query<SessionsQuery>,
 ) -> Response {
     track("ui/sessions");
-    Json(filter_sessions_scope(sessions_payload(&state, &query), &auth)).into_response()
+    Json(filter_sessions_scope(sessions_payload(&state, &query).await, &auth)).into_response()
 }
 
 /// `GET /api/v3/ui/sessions/{id}` или `GET /api/v3/sessions/{id}` → `{session:{…}}` (404 JSON если нет).
@@ -359,7 +387,8 @@ pub async fn session(
             }
             let is_stopped =
                 state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
-            Json(json!({ "session": session_json(&state, &room, connections_limit(&state), is_stopped) }))
+            let contacts = contacts_snapshot(&state).await;
+            Json(json!({ "session": session_json(&state, &room, connections_limit(&state), is_stopped, room_contacts(&contacts, &room.id)) }))
                 .into_response()
         }
         None => error_json(404, "Session not found"),
@@ -373,7 +402,7 @@ pub async fn sessions(
     Query(query): Query<SessionsQuery>,
 ) -> Response {
     track("sessions");
-    Json(filter_sessions_scope(sessions_payload(&state, &query), &auth)).into_response()
+    Json(filter_sessions_scope(sessions_payload(&state, &query).await, &auth)).into_response()
 }
 
 /// `POST /api/v3/sessions` — старт сессии конференции (или создание быстрой сессии).
@@ -507,7 +536,7 @@ pub async fn start_session(
         .and_then(|v| v.get("ui_autocall_on_session_start"))
         .and_then(Value::as_str)
         .is_none_or(|v| v != "OFF");
-    for contact in contacts {
+    for contact in &contacts {
         let record = super::call_strings::CallStringRecord {
             id: contact["id"].as_str().unwrap_or_default().to_string(),
             uri: contact["uri"].as_str().unwrap_or_default().to_string(),
@@ -541,7 +570,7 @@ pub async fn start_session(
                 .push(record);
         }
     }
-    state.notify_admin("sessions:started", json!({"id":room.id.to_string(),"conference":{"id":room.id.to_string()},"session":session_json(&state,&room,connections_limit(&state),false)}));
+    state.notify_admin("sessions:started", json!({"id":room.id.to_string(),"conference":{"id":room.id.to_string()},"session":session_json(&state,&room,connections_limit(&state),false,&contacts)}));
     state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
     audit_room(
         &state,
@@ -550,7 +579,7 @@ pub async fn start_session(
         &room.id.to_string(),
         client_ip.as_ref().map(|c| c.0 .0.as_str()),
     );
-    Json(json!({ "session": session_json(&state, &room, connections_limit(&state), false) })).into_response()
+    Json(json!({ "session": session_json(&state, &room, connections_limit(&state), false, &contacts) })).into_response()
 }
 
 /// `POST /api/v3/sessions/quick` (или `/ui/sessions/quick`) — быстрый старт сессии.
@@ -583,7 +612,7 @@ pub async fn quick_session(
     if let Err(response) = prepare_session_resources(&state, &room.id.to_string(), &auth.subject).await {
         return response;
     }
-    state.notify_admin("sessions:started", json!({"id":room.id.to_string(),"conference":{"id":room.id.to_string()},"session":session_json(&state,&room,connections_limit(&state),false)}));
+    state.notify_admin("sessions:started", json!({"id":room.id.to_string(),"conference":{"id":room.id.to_string()},"session":session_json(&state,&room,connections_limit(&state),false,&[])}));
     state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
     state.notify_admin("conferences:created", json!({ "id": room.id.to_string() }));
     state.notify_admin("conferences", json!({ "action": "created", "id": room.id.to_string() }));
@@ -594,7 +623,8 @@ pub async fn quick_session(
         &room.id.to_string(),
         client_ip.as_ref().map(|c| c.0 .0.as_str()),
     );
-    Json(json!({ "session": session_json(&state, &room, connections_limit(&state), false) })).into_response()
+    // У только что созданной комнаты контактов нет — счётчики нулевые.
+    Json(json!({ "session": session_json(&state, &room, connections_limit(&state), false, &[]) })).into_response()
 }
 
 /// `DELETE /api/v3/sessions/{id}` (или `/ui/sessions/{id}`) — завершение сессии БЕЗ удаления конференции.
@@ -685,7 +715,7 @@ pub async fn conferences(
     Query(query): Query<SessionsQuery>,
 ) -> Response {
     track("conferences");
-    Json(filter_sessions_scope(conferences_payload(&state, &query), &auth)).into_response()
+    Json(filter_sessions_scope(conferences_payload(&state, &query).await, &auth)).into_response()
 }
 
 /// `GET /api/v3/ui/conferences` — тот же список для мапперов `dy/zZ`.
@@ -695,7 +725,7 @@ pub async fn ui_conferences(
     Query(query): Query<SessionsQuery>,
 ) -> Response {
     track("ui/conferences");
-    Json(filter_sessions_scope(conferences_payload(&state, &query), &auth)).into_response()
+    Json(filter_sessions_scope(conferences_payload(&state, &query).await, &auth)).into_response()
 }
 
 /// `POST /api/v3/conferences` — создание комнаты тем же внутренним путём,
@@ -803,7 +833,8 @@ pub async fn create_conference(
         &record.id.to_string(),
         client_ip.as_ref().map(|c| c.0 .0.as_str()),
     );
-    Json(json!({ "conference": session_json(&state, &record, connections_limit(&state), true) })).into_response()
+    // Только что созданная комната: контактов ещё нет — счётчики нулевые.
+    Json(json!({ "conference": session_json(&state, &record, connections_limit(&state), true, &[]) })).into_response()
 }
 
 /// `GET /api/v3/conferences/{id}` → `{conference:{…}}` (404 JSON если нет).
@@ -813,7 +844,8 @@ pub async fn conference(State(state): State<SharedState>, Path(id): Path<String>
         Some(room) => {
             let is_stopped =
                 state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
-            Json(json!({ "conference": session_json(&state, &room, connections_limit(&state), is_stopped) }))
+            let contacts = contacts_snapshot(&state).await;
+            Json(json!({ "conference": session_json(&state, &room, connections_limit(&state), is_stopped, room_contacts(&contacts, &room.id)) }))
                 .into_response()
         }
         None => error_json(404, "Conference not found"),
@@ -888,7 +920,8 @@ pub async fn update_conference(
     state.notify_admin("conferences:updated", json!({ "id": updated.id.to_string(), "display_name": updated.name }));
     state.notify_admin("conferences", json!({ "action": "updated", "id": updated.id.to_string() }));
     let is_stopped = state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&updated.id);
-    Json(json!({ "conference": session_json(&state, &updated, connections_limit(&state), is_stopped) })).into_response()
+    let contacts = contacts_snapshot(&state).await;
+    Json(json!({ "conference": session_json(&state, &updated, connections_limit(&state), is_stopped, room_contacts(&contacts, &updated.id)) })).into_response()
 }
 
 /// `DELETE /api/v3/conferences/{id}` → 204 | 404 (аудит §4.5).
@@ -2100,7 +2133,7 @@ mod boot_reconcile_tests {
             let stopped = state.api_v3.stopped_sessions.lock().unwrap();
             assert!(stopped.contains(&id_a) && stopped.contains(&id_b), "обе комнаты после boot — STOPPED");
         }
-        let payload = sessions_payload(&state, &SessionsQuery::default());
+        let payload = sessions_payload(&state, &SessionsQuery::default()).await;
         assert_eq!(payload["count"], 2);
         for session in payload["sessions"].as_array().unwrap() {
             assert_eq!(session["state"], "STOPPED", "persisted-сессии после рестарта остановлены: {session}");
@@ -2116,7 +2149,7 @@ mod boot_reconcile_tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let after = sessions_payload(&state, &SessionsQuery::default());
+        let after = sessions_payload(&state, &SessionsQuery::default()).await;
         assert_eq!(after["count"], 2, "после старта обе комнаты остаются в выдаче");
         let sessions = after["sessions"].as_array().unwrap();
         let active: Vec<_> = sessions.iter().filter(|s| s["state"] == "ACTIVE").collect();
@@ -2131,7 +2164,7 @@ mod boot_reconcile_tests {
         // Имитация второго рестарта: тот же storage, новое состояние.
         let restarted = Arc::new(AppState::with_storage(storage));
         restarted.sync_from_storage().await.unwrap();
-        let payload = sessions_payload(&restarted, &SessionsQuery::default());
+        let payload = sessions_payload(&restarted, &SessionsQuery::default()).await;
         assert_eq!(payload["count"], 2);
         {
             let stopped = restarted.api_v3.stopped_sessions.lock().unwrap();
