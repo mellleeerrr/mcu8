@@ -394,11 +394,10 @@ impl FfmpegWorker {
         let len = buffer.len();
         let mut filled = 0;
         while filled < len {
-            let read = tokio::time::timeout(
-                self.config.io_timeout,
-                self.child.stdout.as_mut().unwrap().read(&mut buffer[filled..]),
-            )
-            .await;
+            let Some(stdout) = self.child.stdout.as_mut() else {
+                return Err(WorkerError::Exited("stdout already taken".into()));
+            };
+            let read = tokio::time::timeout(self.config.io_timeout, stdout.read(&mut buffer[filled..])).await;
             match read {
                 Ok(Ok(0)) => {
                     return Err(WorkerError::Exited(self.exited_reason()));
