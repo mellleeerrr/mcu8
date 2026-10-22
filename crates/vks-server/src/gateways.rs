@@ -242,6 +242,7 @@ pub struct GatewayManager {
     sip_uas_shutdown: Arc<tokio::sync::Notify>,
     sip_uas_stopping: Arc<std::sync::atomic::AtomicBool>,
     sip_uas_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    sip_uas_reaper_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 /// SIP-ответ терминала (4xx/6xx/488/606, невалидный SDP) — шлюз жив.
@@ -289,6 +290,7 @@ impl GatewayManager {
             sip_uas_shutdown: Arc::new(tokio::sync::Notify::new()),
             sip_uas_stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sip_uas_task: Arc::new(std::sync::Mutex::new(None)),
+            sip_uas_reaper_task: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -318,10 +320,14 @@ impl GatewayManager {
     /// Останавливает SIP UAS listener, дожидается его завершения и BYE активным диалогам.
     pub async fn shutdown_sip_uas(&self) {
         self.sip_uas_stopping.store(true, std::sync::atomic::Ordering::SeqCst);
-        self.sip_uas_shutdown.notify_waiters();
+        self.sip_uas_shutdown.notify_one();
         let handle = { self.sip_uas_task.lock().expect("sip uas task poisoned").take() };
         if let Some(handle) = handle {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(8), handle).await;
+        }
+        let reaper = { self.sip_uas_reaper_task.lock().expect("sip uas reaper poisoned").take() };
+        if let Some(reaper) = reaper {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(6), reaper).await;
         }
     }
 
@@ -1527,10 +1533,10 @@ fn inbound_media_dead(
 /// освободились до снятия participant и ответа BYE.
 async fn wait_inbound_bridges(call: &mut InboundUasCall) {
     if let Some(task) = call.audio_task.take() {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
     }
     if let Some(task) = call.video_task.take() {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
     }
 }
 
@@ -1627,6 +1633,45 @@ fn build_uas_bye(
     )
 }
 
+/// Завершает все входящие диалоги: BYE уходит сразу всем, а media-задачи
+/// дожидаются параллельно под общим дедлайном (не 4 с на каждый вызов).
+async fn stop_inbound_calls(
+    manager: &Arc<GatewayManager>,
+    socket: &Arc<tokio::net::UdpSocket>,
+    calls: &Arc<Mutex<std::collections::HashMap<String, InboundUasCall>>>,
+) {
+    let active = {
+        let mut guard = calls.lock().expect("inbound calls poisoned");
+        std::mem::take(&mut *guard)
+    };
+    let mut waiters = Vec::with_capacity(active.len());
+    for (_, mut call) in active {
+        call.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut registry) = manager.registry.lock() {
+            if let Some(session) = registry.by_participant.remove(&call.participant_id) {
+                registry.by_call.remove(&session.call_id);
+            }
+        }
+        if let Some(state) =
+            manager.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
+        {
+            terminate_gateway_participant_in_room(
+                &state,
+                manager.mcu_engine.as_ref(),
+                &call.room_id,
+                &call.participant_id,
+            );
+        }
+        for _ in 0..2 {
+            sip_send(socket, call.peer, &call.bye);
+        }
+        waiters.push(async move {
+            wait_inbound_bridges(&mut call).await;
+        });
+    }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(4), futures_util::future::join_all(waiters)).await;
+}
+
 /// UDP SIP UAS: принимает `INVITE sip:<room-id>@<advertised-ip>` и поднимает
 /// существующий RTP-мост. Транспорт минимален (UDP + plain RTP), потому что
 /// именно так вызывают терминалы/TrueConf в этом стенде; SRTP/TLS/100rel
@@ -1666,7 +1711,7 @@ async fn serve_sip_uas_on(
     let reaper_calls = calls.clone();
     let reaper_socket = socket.clone();
     let manager_reaper = manager.clone();
-    tokio::spawn(async move {
+    let reaper_task = tokio::spawn(async move {
         loop {
             if manager_reaper.sip_uas_stopping.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
@@ -1730,69 +1775,17 @@ async fn serve_sip_uas_on(
             }
         }
     });
+    *manager.sip_uas_reaper_task.lock().expect("sip uas reaper poisoned") = Some(reaper_task);
     let mut buf = [0u8; 65535];
     loop {
         if manager.sip_uas_stopping.load(std::sync::atomic::Ordering::SeqCst) {
-            let active = {
-                let mut guard = calls.lock().expect("inbound calls poisoned");
-                std::mem::take(&mut *guard)
-            };
-            for (_, mut call) in active {
-                call.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                wait_inbound_bridges(&mut call).await;
-                if let Ok(mut registry) = manager.registry.lock() {
-                    if let Some(session) = registry.by_participant.remove(&call.participant_id) {
-                        registry.by_call.remove(&session.call_id);
-                    }
-                }
-                if let Some(state) =
-                    manager.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
-                {
-                    terminate_gateway_participant_in_room(
-                        &state,
-                        manager.mcu_engine.as_ref(),
-                        &call.room_id,
-                        &call.participant_id,
-                    );
-                }
-                for _ in 0..2 {
-                    sip_send(&socket, call.peer, &call.bye);
-                }
-            }
+            stop_inbound_calls(&manager, &socket, &calls).await;
             info!("SIP UAS shutdown: active inbound dialogs terminated");
             return Ok(());
         }
         let received = tokio::select! {
             _ = manager.sip_uas_shutdown.notified() => {
-                let active = {
-                    let mut guard = calls.lock().expect("inbound calls poisoned");
-                    std::mem::take(&mut *guard)
-                };
-                for (_, mut call) in active {
-                    call.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                    wait_inbound_bridges(&mut call).await;
-                    if let Ok(mut registry) = manager.registry.lock() {
-                        if let Some(session) = registry.by_participant.remove(&call.participant_id) {
-                            registry.by_call.remove(&session.call_id);
-                        }
-                    }
-                    if let Some(state) = manager
-                        .state
-                        .read()
-                        .ok()
-                        .and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
-                    {
-                        terminate_gateway_participant_in_room(
-                            &state,
-                            manager.mcu_engine.as_ref(),
-                            &call.room_id,
-                            &call.participant_id,
-                        );
-                    }
-                    for _ in 0..2 {
-                        sip_send(&socket, call.peer, &call.bye);
-                    }
-                }
+                stop_inbound_calls(&manager, &socket, &calls).await;
                 info!("SIP UAS shutdown: active inbound dialogs terminated");
                 return Ok(());
             }
@@ -2213,6 +2206,8 @@ async fn serve_sip_uas_on(
                                                     serde_json::Value::Bool(false);
                                                 session.media_details["video_downgraded"] =
                                                     serde_json::Value::Bool(true);
+                                                session.media_details["video_payload_type"] = serde_json::Value::Null;
+                                                session.media_details["answer_video_port"] = serde_json::Value::Null;
                                             }
                                         }
                                     }
