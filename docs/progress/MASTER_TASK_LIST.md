@@ -146,6 +146,16 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > Inbound произвольный dynamic PT 96–127 с `a=rtpmap` поддержан (кодек отдельно от PT).
 > Полный T06b (G723/G728/G729/Opus/AAC/H265/H323-матрица) остаётся открытым: T06b-2..5.
 >
+> **T06b-6 (H.265 RFC 7798 + AAC-LATM RTP-пейлоадеры) закрыт `ac56c0c`, ревью 9.5/10 APPROVED (h265 и aac_latm независимо):**
+> `h265.rs` — 2-байтовый NAL header, single NAL, FU type 49 (S/E/FuType, 1200-байтовый MTU, marker
+> только на последнем пакете AU), AP type 48, stateful `AnnexBSplitter` с лимитом 4 МиБ, `strip_start_code`,
+> IRAP/parameter-set helpers; типы 0–47 принимаются, 48–63 (включая PACI) отвергаются, FuType 0 (TRAIL_N)
+> поддержан. `aac_latm.rs` — LOAS strip/re-add (13-бит длина), `cpresent=1` SMC-детектор, точный
+> 90 кГц `LatmRtpClock` (1920 тика/кадр @48k, дробный аккумулятор @44.1k). В x265 добавлены
+> `aud=1:repeat-headers=1`. 24 h265 + 7 aac тестов, crate **119 passed**, fmt/clippy/doc чисто.
+> Модули ещё **не подключены** к SDP/мосту; PT113/H265 по-прежнему не объявляются в native-профиле.
+> Следующий этап — worker-actor + H.265 видео-мост, затем AAC-LATM аудио-мост и SDP-гейт по probe.
+>
 > **T06b-5 (изолированные FFmpeg-воркеры: фундамент) закрыт `212649b`, ревью 9.5/10 APPROVED (r6, независимый):**
 > `codec_worker` — один долгоживущий FFmpeg на кодек/направление, `FfmpegCapabilities` probe
 > (`aac`/`aac_latm`/`g729` decode, H.261/H.263/H.265), bounded `WorkerPool`, per-slot
