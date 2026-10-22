@@ -1,59 +1,44 @@
 # HELP vks_api_v3_requests_total Total API v3 adapter requests
 # TYPE vks_api_v3_requests_total counter
-vks_api_v3_requests_total{endpoint="abonents/count"} 63
-vks_api_v3_requests_total{endpoint="abonents/stop_reasons"} 4
-vks_api_v3_requests_total{endpoint="call_strings"} 1
-vks_api_v3_requests_total{endpoint="conferences"} 5
-vks_api_v3_requests_total{endpoint="conferences/{id}"} 44
-vks_api_v3_requests_total{endpoint="conferences/{id}/contacts"} 80
-vks_api_v3_requests_total{endpoint="engine/abonents"} 47
-vks_api_v3_requests_total{endpoint="engine/calibration"} 10
-vks_api_v3_requests_total{endpoint="engine/diagnostics"} 35
-vks_api_v3_requests_total{endpoint="features"} 10
-vks_api_v3_requests_total{endpoint="license"} 10
-vks_api_v3_requests_total{endpoint="locales"} 4
-vks_api_v3_requests_total{endpoint="login"} 3
-vks_api_v3_requests_total{endpoint="login/status"} 13
-vks_api_v3_requests_total{endpoint="profile"} 4
-vks_api_v3_requests_total{endpoint="references"} 16
-vks_api_v3_requests_total{endpoint="sessions"} 1
-vks_api_v3_requests_total{endpoint="sessions/{id}"} 28
-vks_api_v3_requests_total{endpoint="sessions/{id}/abonents"} 50
-vks_api_v3_requests_total{endpoint="settings/audio_codecs"} 15
-vks_api_v3_requests_total{endpoint="settings/calls"} 8
-vks_api_v3_requests_total{endpoint="settings/security"} 35
-vks_api_v3_requests_total{endpoint="settings/smtp"} 1
-vks_api_v3_requests_total{endpoint="settings/video"} 3
-vks_api_v3_requests_total{endpoint="settings/video_codecs"} 15
-vks_api_v3_requests_total{endpoint="system/about"} 51
-vks_api_v3_requests_total{endpoint="system/time"} 4
-vks_api_v3_requests_total{endpoint="time-zones"} 4
-vks_api_v3_requests_total{endpoint="ui/conferences"} 43
-vks_api_v3_requests_total{endpoint="ui/sessions"} 104
-vks_api_v3_requests_total{endpoint="ui/sessions/{id}/call_strings"} 1
-vks_api_v3_requests_total{endpoint="ui/system/status"} 36
-vks_api_v3_requests_total{endpoint="ui/video_layouts/calculate"} 37
-vks_api_v3_requests_total{endpoint="waitingroom"} 63
-vks_api_v3_requests_total{endpoint="ws"} 5
+vks_api_v3_requests_total{endpoint="abonents/count"} 6
+vks_api_v3_requests_total{endpoint="conferences"} 2
+vks_api_v3_requests_total{endpoint="conferences/{id}"} 6
+vks_api_v3_requests_total{endpoint="conferences/{id}/contacts"} 12
+vks_api_v3_requests_total{endpoint="engine/calibration"} 1
+vks_api_v3_requests_total{endpoint="engine/diagnostics"} 2
+vks_api_v3_requests_total{endpoint="features"} 1
+vks_api_v3_requests_total{endpoint="license"} 1
+vks_api_v3_requests_total{endpoint="login"} 1
+vks_api_v3_requests_total{endpoint="login/status"} 6
+vks_api_v3_requests_total{endpoint="references"} 6
+vks_api_v3_requests_total{endpoint="settings/audio_codecs"} 1
+vks_api_v3_requests_total{endpoint="settings/security"} 3
+vks_api_v3_requests_total{endpoint="settings/video_codecs"} 1
+vks_api_v3_requests_total{endpoint="system/about"} 10
+vks_api_v3_requests_total{endpoint="ui/conferences"} 3
+vks_api_v3_requests_total{endpoint="ui/sessions"} 9
+vks_api_v3_requests_total{endpoint="ui/system/status"} 2
+vks_api_v3_requests_total{endpoint="waitingroom"} 5
+vks_api_v3_requests_total{endpoint="ws"} 1
 # HELP vks_build_info Build information
 # TYPE vks_build_info gauge
 vks_build_info{version="0.1.0"} 1
 # HELP vks_http_request_duration_seconds HTTP request duration in seconds
 # TYPE vks_http_request_duration_seconds histogram
-vks_http_request_duration_seconds_bucket{class="api_v3",le="0.005"} 905
-vks_http_request_duration_seconds_bucket{class="api_v3",le="0.01"} 957
-vks_http_request_duration_seconds_bucket{class="api_v3",le="0.025"} 962
-vks_http_request_duration_seconds_bucket{class="api_v3",le="0.05"} 964
-vks_http_request_duration_seconds_bucket{class="api_v3",le="0.1"} 973
-vks_http_request_duration_seconds_bucket{class="api_v3",le="0.25"} 989
-vks_http_request_duration_seconds_bucket{class="api_v3",le="0.5"} 989
-vks_http_request_duration_seconds_bucket{class="api_v3",le="1"} 989
-vks_http_request_duration_seconds_bucket{class="api_v3",le="2.5"} 989
-vks_http_request_duration_seconds_bucket{class="api_v3",le="5"} 989
-vks_http_request_duration_seconds_bucket{class="api_v3",le="10"} 989
-vks_http_request_duration_seconds_bucket{class="api_v3",le="+Inf"} 989
-vks_http_request_duration_seconds_sum{class="api_v3"} 4.0513820399999965
-vks_http_request_duration_seconds_count{class="api_v3"} 989
+vks_http_request_duration_seconds_bucket{class="api_v3",le="0.005"} 68
+vks_http_request_duration_seconds_bucket{class="api_v3",le="0.01"} 73
+vks_http_request_duration_seconds_bucket{class="api_v3",le="0.025"} 73
+vks_http_request_duration_seconds_bucket{class="api_v3",le="0.05"} 73
+vks_http_request_duration_seconds_bucket{class="api_v3",le="0.1"} 77
+vks_http_request_duration_seconds_bucket{class="api_v3",le="0.25"} 79
+vks_http_request_duration_seconds_bucket{class="api_v3",le="0.5"} 79
+vks_http_request_duration_seconds_bucket{class="api_v3",le="1"} 79
+vks_http_request_duration_seconds_bucket{class="api_v3",le="2.5"} 79
+vks_http_request_duration_seconds_bucket{class="api_v3",le="5"} 79
+vks_http_request_duration_seconds_bucket{class="api_v3",le="10"} 79
+vks_http_request_duration_seconds_bucket{class="api_v3",le="+Inf"} 79
+vks_http_request_duration_seconds_sum{class="api_v3"} 0.6496367390000003
+vks_http_request_duration_seconds_count{class="api_v3"} 79
 vks_http_request_duration_seconds_bucket{class="health",le="0.005"} 1
 vks_http_request_duration_seconds_bucket{class="health",le="0.01"} 1
 vks_http_request_duration_seconds_bucket{class="health",le="0.025"} 1
@@ -66,102 +51,81 @@ vks_http_request_duration_seconds_bucket{class="health",le="2.5"} 1
 vks_http_request_duration_seconds_bucket{class="health",le="5"} 1
 vks_http_request_duration_seconds_bucket{class="health",le="10"} 1
 vks_http_request_duration_seconds_bucket{class="health",le="+Inf"} 1
-vks_http_request_duration_seconds_sum{class="health"} 0.000595351
+vks_http_request_duration_seconds_sum{class="health"} 0.000667801
 vks_http_request_duration_seconds_count{class="health"} 1
-vks_http_request_duration_seconds_bucket{class="metrics",le="0.005"} 1
-vks_http_request_duration_seconds_bucket{class="metrics",le="0.01"} 1
-vks_http_request_duration_seconds_bucket{class="metrics",le="0.025"} 1
-vks_http_request_duration_seconds_bucket{class="metrics",le="0.05"} 1
-vks_http_request_duration_seconds_bucket{class="metrics",le="0.1"} 1
-vks_http_request_duration_seconds_bucket{class="metrics",le="0.25"} 1
-vks_http_request_duration_seconds_bucket{class="metrics",le="0.5"} 1
-vks_http_request_duration_seconds_bucket{class="metrics",le="1"} 1
-vks_http_request_duration_seconds_bucket{class="metrics",le="2.5"} 1
-vks_http_request_duration_seconds_bucket{class="metrics",le="5"} 1
-vks_http_request_duration_seconds_bucket{class="metrics",le="10"} 1
-vks_http_request_duration_seconds_bucket{class="metrics",le="+Inf"} 1
-vks_http_request_duration_seconds_sum{class="metrics"} 0.000407285
-vks_http_request_duration_seconds_count{class="metrics"} 1
-vks_http_request_duration_seconds_bucket{class="spa",le="0.005"} 16
-vks_http_request_duration_seconds_bucket{class="spa",le="0.01"} 16
-vks_http_request_duration_seconds_bucket{class="spa",le="0.025"} 16
-vks_http_request_duration_seconds_bucket{class="spa",le="0.05"} 16
-vks_http_request_duration_seconds_bucket{class="spa",le="0.1"} 16
-vks_http_request_duration_seconds_bucket{class="spa",le="0.25"} 16
-vks_http_request_duration_seconds_bucket{class="spa",le="0.5"} 16
-vks_http_request_duration_seconds_bucket{class="spa",le="1"} 16
-vks_http_request_duration_seconds_bucket{class="spa",le="2.5"} 16
-vks_http_request_duration_seconds_bucket{class="spa",le="5"} 16
-vks_http_request_duration_seconds_bucket{class="spa",le="10"} 16
-vks_http_request_duration_seconds_bucket{class="spa",le="+Inf"} 16
-vks_http_request_duration_seconds_sum{class="spa"} 0.020158141999999997
-vks_http_request_duration_seconds_count{class="spa"} 16
-vks_http_request_duration_seconds_bucket{class="static",le="0.005"} 284
-vks_http_request_duration_seconds_bucket{class="static",le="0.01"} 284
-vks_http_request_duration_seconds_bucket{class="static",le="0.025"} 284
-vks_http_request_duration_seconds_bucket{class="static",le="0.05"} 284
-vks_http_request_duration_seconds_bucket{class="static",le="0.1"} 284
-vks_http_request_duration_seconds_bucket{class="static",le="0.25"} 284
-vks_http_request_duration_seconds_bucket{class="static",le="0.5"} 284
-vks_http_request_duration_seconds_bucket{class="static",le="1"} 284
-vks_http_request_duration_seconds_bucket{class="static",le="2.5"} 284
-vks_http_request_duration_seconds_bucket{class="static",le="5"} 284
-vks_http_request_duration_seconds_bucket{class="static",le="10"} 284
-vks_http_request_duration_seconds_bucket{class="static",le="+Inf"} 284
-vks_http_request_duration_seconds_sum{class="static"} 0.20157417900000008
-vks_http_request_duration_seconds_count{class="static"} 284
-vks_http_request_duration_seconds_bucket{class="ws",le="0.005"} 12
-vks_http_request_duration_seconds_bucket{class="ws",le="0.01"} 12
-vks_http_request_duration_seconds_bucket{class="ws",le="0.025"} 12
-vks_http_request_duration_seconds_bucket{class="ws",le="0.05"} 12
-vks_http_request_duration_seconds_bucket{class="ws",le="0.1"} 12
-vks_http_request_duration_seconds_bucket{class="ws",le="0.25"} 12
-vks_http_request_duration_seconds_bucket{class="ws",le="0.5"} 12
-vks_http_request_duration_seconds_bucket{class="ws",le="1"} 12
-vks_http_request_duration_seconds_bucket{class="ws",le="2.5"} 12
-vks_http_request_duration_seconds_bucket{class="ws",le="5"} 12
-vks_http_request_duration_seconds_bucket{class="ws",le="10"} 12
-vks_http_request_duration_seconds_bucket{class="ws",le="+Inf"} 12
-vks_http_request_duration_seconds_sum{class="ws"} 0.002116709
-vks_http_request_duration_seconds_count{class="ws"} 12
+vks_http_request_duration_seconds_bucket{class="spa",le="0.005"} 6
+vks_http_request_duration_seconds_bucket{class="spa",le="0.01"} 6
+vks_http_request_duration_seconds_bucket{class="spa",le="0.025"} 6
+vks_http_request_duration_seconds_bucket{class="spa",le="0.05"} 6
+vks_http_request_duration_seconds_bucket{class="spa",le="0.1"} 6
+vks_http_request_duration_seconds_bucket{class="spa",le="0.25"} 6
+vks_http_request_duration_seconds_bucket{class="spa",le="0.5"} 6
+vks_http_request_duration_seconds_bucket{class="spa",le="1"} 6
+vks_http_request_duration_seconds_bucket{class="spa",le="2.5"} 6
+vks_http_request_duration_seconds_bucket{class="spa",le="5"} 6
+vks_http_request_duration_seconds_bucket{class="spa",le="10"} 6
+vks_http_request_duration_seconds_bucket{class="spa",le="+Inf"} 6
+vks_http_request_duration_seconds_sum{class="spa"} 0.007470716
+vks_http_request_duration_seconds_count{class="spa"} 6
+vks_http_request_duration_seconds_bucket{class="static",le="0.005"} 81
+vks_http_request_duration_seconds_bucket{class="static",le="0.01"} 81
+vks_http_request_duration_seconds_bucket{class="static",le="0.025"} 81
+vks_http_request_duration_seconds_bucket{class="static",le="0.05"} 81
+vks_http_request_duration_seconds_bucket{class="static",le="0.1"} 81
+vks_http_request_duration_seconds_bucket{class="static",le="0.25"} 81
+vks_http_request_duration_seconds_bucket{class="static",le="0.5"} 81
+vks_http_request_duration_seconds_bucket{class="static",le="1"} 81
+vks_http_request_duration_seconds_bucket{class="static",le="2.5"} 81
+vks_http_request_duration_seconds_bucket{class="static",le="5"} 81
+vks_http_request_duration_seconds_bucket{class="static",le="10"} 81
+vks_http_request_duration_seconds_bucket{class="static",le="+Inf"} 81
+vks_http_request_duration_seconds_sum{class="static"} 0.06061606899999999
+vks_http_request_duration_seconds_count{class="static"} 81
+vks_http_request_duration_seconds_bucket{class="ws",le="0.005"} 6
+vks_http_request_duration_seconds_bucket{class="ws",le="0.01"} 6
+vks_http_request_duration_seconds_bucket{class="ws",le="0.025"} 6
+vks_http_request_duration_seconds_bucket{class="ws",le="0.05"} 6
+vks_http_request_duration_seconds_bucket{class="ws",le="0.1"} 6
+vks_http_request_duration_seconds_bucket{class="ws",le="0.25"} 6
+vks_http_request_duration_seconds_bucket{class="ws",le="0.5"} 6
+vks_http_request_duration_seconds_bucket{class="ws",le="1"} 6
+vks_http_request_duration_seconds_bucket{class="ws",le="2.5"} 6
+vks_http_request_duration_seconds_bucket{class="ws",le="5"} 6
+vks_http_request_duration_seconds_bucket{class="ws",le="10"} 6
+vks_http_request_duration_seconds_bucket{class="ws",le="+Inf"} 6
+vks_http_request_duration_seconds_sum{class="ws"} 0.001095289
+vks_http_request_duration_seconds_count{class="ws"} 6
 # HELP vks_http_requests_total Total HTTP requests
 # TYPE vks_http_requests_total counter
-vks_http_requests_total{class="api_v3",method="DELETE",status="204"} 5
-vks_http_requests_total{class="api_v3",method="GET",status="101"} 5
-vks_http_requests_total{class="api_v3",method="GET",status="200"} 894
-vks_http_requests_total{class="api_v3",method="GET",status="304"} 26
-vks_http_requests_total{class="api_v3",method="GET",status="404"} 2
-vks_http_requests_total{class="api_v3",method="PATCH",status="200"} 3
-vks_http_requests_total{class="api_v3",method="POST",status="200"} 47
-vks_http_requests_total{class="api_v3",method="POST",status="201"} 4
-vks_http_requests_total{class="api_v3",method="POST",status="204"} 3
+vks_http_requests_total{class="api_v3",method="GET",status="101"} 1
+vks_http_requests_total{class="api_v3",method="GET",status="200"} 73
+vks_http_requests_total{class="api_v3",method="GET",status="304"} 2
+vks_http_requests_total{class="api_v3",method="POST",status="200"} 3
 vks_http_requests_total{class="health",method="GET",status="200"} 1
-vks_http_requests_total{class="metrics",method="GET",status="200"} 1
-vks_http_requests_total{class="spa",method="GET",status="200"} 6
-vks_http_requests_total{class="spa",method="GET",status="304"} 10
-vks_http_requests_total{class="static",method="GET",status="200"} 73
-vks_http_requests_total{class="static",method="GET",status="206"} 1
-vks_http_requests_total{class="static",method="GET",status="304"} 210
-vks_http_requests_total{class="ws",method="GET",status="101"} 12
+vks_http_requests_total{class="spa",method="GET",status="200"} 1
+vks_http_requests_total{class="spa",method="GET",status="304"} 5
+vks_http_requests_total{class="static",method="GET",status="200"} 16
+vks_http_requests_total{class="static",method="GET",status="304"} 65
+vks_http_requests_total{class="ws",method="GET",status="101"} 6
 # HELP vks_http_response_bytes_total Total HTTP response body bytes
 # TYPE vks_http_response_bytes_total counter
-vks_http_response_bytes_total{class="spa"} 95754
-vks_http_response_bytes_total{class="static"} 12044309
+vks_http_response_bytes_total{class="spa"} 15959
+vks_http_response_bytes_total{class="static"} 3020425
 # HELP vks_login_attempts_total Total login attempts
 # TYPE vks_login_attempts_total counter
-vks_login_attempts_total{result="ok"} 3
+vks_login_attempts_total{result="ok"} 1
 # HELP vks_media_bytes_total Total media bytes transferred
 # TYPE vks_media_bytes_total counter
-vks_media_bytes_total{codec="opus",direction="downlink"} 80873
-vks_media_bytes_total{codec="vp8",direction="downlink"} 1065342
+vks_media_bytes_total{codec="opus",direction="downlink"} 34742
+vks_media_bytes_total{codec="vp8",direction="downlink"} 525998
 # HELP vks_signaling_messages_total Total signaling messages processed
 # TYPE vks_signaling_messages_total counter
-vks_signaling_messages_total{direction="downlink"} 59
-vks_signaling_messages_total{direction="uplink"} 44
+vks_signaling_messages_total{direction="downlink"} 29
+vks_signaling_messages_total{direction="uplink"} 22
 # HELP vks_webrtc_fallback_total WebRTC fallback events
 # TYPE vks_webrtc_fallback_total counter
 vks_webrtc_fallback_total{reason="disabled"} 0
-vks_webrtc_fallback_total{reason="offer_rejected"} 4
+vks_webrtc_fallback_total{reason="offer_rejected"} 2
 # HELP vks_webrtc_frames_dropped_total WebRTC fanout frames dropped
 # TYPE vks_webrtc_frames_dropped_total counter
 vks_webrtc_frames_dropped_total{reason="queue_full"} 0
@@ -172,11 +136,11 @@ vks_webrtc_ice_failures_total{reason="connect_deadline"} 0
 vks_webrtc_ice_failures_total{reason="idle_timeout"} 0
 # HELP vks_webrtc_offers_total WebRTC offers by result
 # TYPE vks_webrtc_offers_total counter
-vks_webrtc_offers_total{result="accepted"} 8
+vks_webrtc_offers_total{result="accepted"} 4
 vks_webrtc_offers_total{result="capacity_exceeded"} 0
 vks_webrtc_offers_total{result="port_range_exhausted"} 0
 vks_webrtc_offers_total{result="rejected"} 0
-vks_webrtc_offers_total{result="room_full"} 4
+vks_webrtc_offers_total{result="room_full"} 2
 # HELP vks_webrtc_peers Real WebRTC peer tasks
 # TYPE vks_webrtc_peers gauge
 vks_webrtc_peers 2
