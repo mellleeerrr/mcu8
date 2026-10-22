@@ -188,6 +188,7 @@ class Configuration:
     video_max_bitrate_100bps: int = 5120
     video_h264_level: int = 71
     video_h264_profile_bits: int = 64
+    target_alias: str = ""
 
     @classmethod
     def load(cls, value):
@@ -218,7 +219,7 @@ class Configuration:
         profile_bits = int(value.get("video_h264_profile_bits", 64))
         if profile_bits != 64:
             raise ProtocolError("Only H.264 baseline profile (bit 6) is supported by the native bridge")
-        return cls(target_ip, port, local_ip, audio, video, max(1, min(float(value["timeout_seconds"]), 180)), str(call_id), max(1, int(value["call_ref"]) & 0x7FFF), bool(value.get("trace", False)), max_bitrate, level, profile_bits)
+        return cls(target_ip, port, local_ip, audio, video, max(1, min(float(value["timeout_seconds"]), 180)), str(call_id), max(1, int(value["call_ref"]) & 0x7FFF), bool(value.get("trace", False)), max_bitrate, level, profile_bits, str(value.get("target_alias") or ""))
 
 
 class Call:
@@ -281,6 +282,10 @@ class Call:
             "callIdentifier": {"guid": guid}, "mediaWaitForConnect": False,
             "canOverlapSend": False, "multipleCalls": False, "maintainConnection": False,
         }
+        if c.target_alias:
+            # Без alias пир (TrueConf/шлюз) попадает в автоответчик, а не в
+            # конференцию; alias берётся из h323:<alias>@<ip>.
+            setup["destinationAddress"] = [("h323-ID", c.target_alias)]
         body = encode(asn.H323_MESSAGES.H323_UserInformation, {"h323-uu-pdu": {"h323-message-body": ("setup", setup), "h245Tunneling": False}})
         # H323Plus uses 384 kbit/s unrestricted digital bearer for video; 64
         # kbit/s bearer makes Polycom negotiate an audio-only call.

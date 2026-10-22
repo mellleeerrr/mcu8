@@ -278,7 +278,7 @@ impl H323UacClient {
         let call_id = guid.to_string();
         let call_ref = ((guid.as_u128() & 0x7fff) as u16).max(1);
         let mut config = json!({
-            "target_ip": target.ip().to_string(), "target_port": target.port(),
+            "target_ip": target.ip().to_string(), "target_port": target.port(), "target_alias": parse_alias(target_uri),
             "local_ip": local_ip.to_string(), "audio_port": audio_port,
             "video_port": video_port, "timeout_seconds": dial_timeout.as_secs_f64().min(180.0),
             "call_id": call_id, "call_ref": call_ref,
@@ -435,6 +435,11 @@ fn resolve_helper_from(
         searched.push(candidate.display().to_string());
     }
     Err(failure(format!("H.323 sidecar not found; set VKS_H323_HELPER. Searched: {}", searched.join(", "))))
+}
+
+fn parse_alias(uri: &str) -> String {
+    let address = uri.strip_prefix("h323://").or_else(|| uri.strip_prefix("h323:")).unwrap_or(uri);
+    address.rsplit_once('@').map(|(alias, _)| alias.trim().to_string()).unwrap_or_default()
 }
 
 fn parse_target(uri: &str) -> CallResult<SocketAddrV4> {
