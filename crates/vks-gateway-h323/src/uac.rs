@@ -17,12 +17,26 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{timeout, Instant};
 use tracing::{debug, info};
-use vks_common::Error;
+use vks_common::{terminal_failure, Error};
 
 const MAX_EVENT_BYTES: usize = 32 * 1024;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 type CallResult<T> = Result<T, Error>;
+
+/// Терминальный отказ терминала (Q.931 RELEASE/причина busy) отделяется от
+/// транспортных сбоев точным токеном sidecar, а не поиском подстрок.
+fn classify_dial_reason(reason: String) -> String {
+    let terminal = reason == "remote_release"
+        || reason.starts_with("remote_release:")
+        || reason == "adaptiveBusy"
+        || reason == "remote_reject";
+    if terminal {
+        terminal_failure(reason)
+    } else {
+        reason
+    }
+}
 
 fn failure(message: impl std::fmt::Display) -> Error {
     Error::Internal(anyhow::anyhow!("H.323: {message}"))
@@ -504,13 +518,13 @@ impl Supervisor {
                         }
                         Some("connected") => { break "duplicate/late connected event".into(); }
                         Some("failed") => {
-                            let error = event.get("reason").and_then(Value::as_str).unwrap_or("sidecar negotiation failed").to_string();
+                            let error = classify_dial_reason(event.get("reason").and_then(Value::as_str).unwrap_or("sidecar negotiation failed").to_string());
                             if let Some(result) = self.result.take() { let _ = result.send(Err(error.clone())); }
                             failure_reason = Some(error);
                             closing_deadline = Some(Instant::now() + SHUTDOWN_GRACE);
                         }
                         Some("disconnected") => {
-                            break event.get("reason").and_then(Value::as_str).unwrap_or("remote disconnected").to_string();
+                            break classify_dial_reason(event.get("reason").and_then(Value::as_str).unwrap_or("remote disconnected").to_string());
                         }
                         Some("ringing" | "negotiating" | "channel" | "capabilities" | "video_unavailable" | "wire") => {}
                         _ => { break "unknown sidecar event".into(); }
@@ -552,6 +566,19 @@ mod tests {
         assert_eq!(fields["video_max_bitrate_100bps"], 40_960);
         assert_eq!(fields["video_h264_level"], 80);
         assert_eq!(fields["video_h264_profile_bits"], 64);
+    }
+
+    #[test]
+    fn dial_reason_classification_uses_exact_tokens() {
+        assert!(vks_common::is_terminal_failure(&classify_dial_reason("remote_release:cause=17".into())));
+        assert!(vks_common::is_terminal_failure(&classify_dial_reason("remote_release".into())));
+        for transport in [
+            "H.323 sidecar not found; set VKS_H323_HELPER. Searched: /opt/4040",
+            "RuntimeError: sidecar failed with 404",
+            "remote_channel_closed",
+        ] {
+            assert!(!vks_common::is_terminal_failure(&classify_dial_reason(transport.into())), "{transport}");
+        }
     }
 
     #[test]

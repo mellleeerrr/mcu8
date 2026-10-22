@@ -13,7 +13,7 @@ use vks_admin::state::{AppState, OutboundDialer as _};
 use vks_common::Error;
 use vks_core::RoomId;
 use vks_gateway_h323::{H323Call, H323Codec, H323Gateway};
-use vks_gateway_sip::{SipCall, SipCodec, SipGateway};
+use vks_gateway_sip::{SipCall, SipCodec, SipDialError, SipGateway};
 use vks_proto::signaling::signaling_message::Payload;
 use vks_proto::signaling::{ParticipantJoined, ParticipantLeft, SignalingMessage};
 use vks_signaling::Envelope;
@@ -236,12 +236,19 @@ pub struct GatewayManager {
     candidate_ip: String,
 }
 
-/// Отказ терминала (занят/отклонил) — не отказ шлюза: статус не гасим.
+/// SIP-ответ терминала (4xx/6xx/488/606, невалидный SDP) — шлюз жив.
+/// Таймаут/IO/URI — транспортный отказ.
+fn sip_dial_error_is_terminal(error: &SipDialError) -> bool {
+    match error {
+        SipDialError::Rejected(..) | SipDialError::InvalidSdpAnswer => true,
+        SipDialError::NoCommonCodec { peer_status, .. } => peer_status.is_some(),
+        SipDialError::InvalidUri(_) | SipDialError::Io(_) | SipDialError::Timeout(..) => false,
+    }
+}
+
+/// Отказ терминала помечается точным префиксом на границе протокола.
 fn terminal_gateway_error(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    ["busy here", "486", "603", "decline", "remote_release", "adaptivebusy", "not found", "404"]
-        .iter()
-        .any(|marker| message.contains(marker))
+    vks_common::is_terminal_failure(message)
 }
 
 impl Default for GatewayManager {
@@ -956,11 +963,13 @@ impl GatewayManager {
                 rtp_port,
                 video_pair.as_ref().map(|pair| pair.rtp_port),
             );
-            let session = self
-                .uac_client
-                .dial(trimmed, &offer, std::time::Duration::from_secs(60))
-                .await
-                .map_err(|error| format!("SIP outbound dial failed: {error}"))?;
+            let session = match self.uac_client.dial(trimmed, &offer, std::time::Duration::from_secs(60)).await {
+                Ok(session) => session,
+                Err(error) if sip_dial_error_is_terminal(&error) => {
+                    return Err(vks_common::terminal_failure(format!("SIP outbound dial failed: {error}")));
+                }
+                Err(error) => return Err(format!("SIP outbound dial failed: {error}")),
+            };
             setup.sip = Some(session.clone());
             answer_limits =
                 vks_gateway_sip::video_answer_limits(&session.answer_sdp, session.remote_video_payload_type);
@@ -1326,8 +1335,9 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         let protocol = if uri.trim().starts_with("h323:") { "h323" } else { "sip" };
         let result = self.dial_with_contact_inner(room_id, uri, display_name, contact).await;
         let terminal = result.as_ref().err().is_some_and(|error| terminal_gateway_error(error));
-        self.note_gateway_health(protocol, result.is_ok(), terminal, result.as_ref().err().cloned());
-        result
+        let error = result.as_ref().err().map(|error| vks_common::strip_terminal_failure(error).to_string());
+        self.note_gateway_health(protocol, result.is_ok(), terminal, error);
+        result.map_err(|error| vks_common::strip_terminal_failure(&error).to_string())
     }
 
     fn gateway_registration(&self, protocol: &str) -> Option<bool> {
@@ -1482,12 +1492,32 @@ mod media_runtime_tests {
 
     #[test]
     fn terminal_and_transport_gateway_errors_are_classified() {
-        assert!(terminal_gateway_error("SIP outbound dial failed: Call rejected by remote terminal: 486 Busy Here"));
-        assert!(terminal_gateway_error("H.323 outbound dial failed: internal error: H.323: remote_release"));
-        assert!(terminal_gateway_error("603 Decline"));
-        assert!(!terminal_gateway_error("SIP outbound dial failed: connect timeout"));
-        assert!(!terminal_gateway_error("H.323 outbound dial failed: sidecar exited"));
-        assert!(!terminal_gateway_error("No RTP/RTCP port pair is available"));
+        // Терминальный отказ — только точный маркер, а не подстроки в тексте.
+        assert!(terminal_gateway_error(&vks_common::terminal_failure("486 Busy Here")));
+        assert!(terminal_gateway_error(&vks_common::terminal_failure("remote_release:cause=17")));
+        for transport in [
+            "H.323 sidecar not found; set VKS_H323_HELPER. Searched: /opt/4040",
+            "SIP outbound dial failed: Dial timeout (no answer from sip:4861234@host within 60s)",
+            "SIP outbound dial failed: Socket IO error: connection refused :4040",
+            "No RTP/RTCP port pair is available",
+        ] {
+            assert!(!terminal_gateway_error(transport), "{transport}");
+        }
+        // SIP-ответы 4xx/6xx — терминальные; таймаут/IO — транспортные.
+        assert!(sip_dial_error_is_terminal(&SipDialError::Rejected(480, "Temporarily Unavailable".into())));
+        assert!(sip_dial_error_is_terminal(&SipDialError::Rejected(408, "Request Timeout".into())));
+        assert!(sip_dial_error_is_terminal(&SipDialError::Rejected(600, "Busy Everywhere".into())));
+        assert!(sip_dial_error_is_terminal(&SipDialError::InvalidSdpAnswer));
+        assert!(!sip_dial_error_is_terminal(&SipDialError::Timeout(
+            "sip:4861234@host".into(),
+            std::time::Duration::from_secs(60)
+        )));
+        assert!(!sip_dial_error_is_terminal(&SipDialError::Io(std::io::Error::other("bind :4040"))));
+        assert!(!sip_dial_error_is_terminal(&SipDialError::NoCommonCodec {
+            codec: Some("G722".into()),
+            payload: Some(9),
+            peer_status: None,
+        }));
     }
 
     #[test]

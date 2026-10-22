@@ -320,7 +320,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // нормализованный candidate IP (trim/fallback/bind-fail уже учтены выше).
     let _ = admin_state.server_addr.set(candidate_addr.clone());
     if let Some(path) = vks_storage::db_lock::sqlite_path_from_url(&config.database_url) {
-        let _ = admin_state.database_file.set(path.to_string_lossy().into_owned());
+        // Абсолютный путь: systemd может стартовать из другого cwd, а статус
+        // обязан показывать тот же файл, что открыл storage.
+        let absolute = std::fs::canonicalize(&path)
+            .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(&path)))
+            .unwrap_or(path);
+        let _ = admin_state.database_file.set(absolute.to_string_lossy().into_owned());
     }
 
     // 8. Конфигурация обработчика сигналинга с реальными ICE/кодек атрибутами

@@ -70,9 +70,17 @@ pub async fn get_user_credentials(
     let Some(user) = find_user(&state, &id) else {
         return error_json(404, "User not found");
     };
+    // Вендорский UI при открытии карточки пользователя безусловно грузит
+    // credentials; 404 превращается в красный тост «Не удалось применить
+    // изменения». Для пользователя без логина отдаём пустую форму (200).
     match local_login(&state, &user) {
         Some(login) => Json(credential_json(&login)).into_response(),
-        None => error_json(404, "Credentials not found"),
+        None => Json(serde_json::json!({
+            "login": serde_json::Value::Null,
+            "expire_at": serde_json::Value::Null,
+            "block_at": serde_json::Value::Null
+        }))
+        .into_response(),
     }
 }
 

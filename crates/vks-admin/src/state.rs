@@ -263,6 +263,8 @@ pub struct GatewayHealth {
     pub terminal: bool,
     pub error: Option<String>,
     pub checked_at: i64,
+    /// Время последнего успешного H.225/H.245 setup; сохраняется при отказах.
+    pub last_success_at: Option<i64>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -368,9 +370,17 @@ impl AppState {
     /// Записывает фактический результат дозвона SIP/H.323 (T11a).
     pub fn record_gateway_health(&self, protocol: &str, ok: bool, terminal: bool, error: Option<String>) {
         if let Ok(mut health) = self.gateway_health.lock() {
+            let now = crate::state::now_unix_ms() as i64 / 1000;
+            let previous_success = health.get(protocol).and_then(|entry| entry.last_success_at);
             health.insert(
                 protocol.to_string(),
-                GatewayHealth { ok, terminal, error, checked_at: crate::state::now_unix_ms() as i64 / 1000 },
+                GatewayHealth {
+                    ok,
+                    terminal,
+                    error,
+                    checked_at: now,
+                    last_success_at: if ok { Some(now) } else { previous_success },
+                },
             );
         }
     }

@@ -206,7 +206,8 @@ async fn users_crud_groups_roles_and_credentials() {
     assert_eq!(response.status(), StatusCode::OK);
     let response =
         send(&app, request("GET", &format!("/api/v3/users/{id}/credentials"), Some(&token), json!({}))).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(json_body(response).await["login"].is_null(), "пустая форма вместо 404-тоста");
 
     // --- удаление пользователя ---
     let response = send(&app, request("DELETE", &format!("/api/v3/users/{id}"), Some(&token), json!({}))).await;
@@ -1217,7 +1218,8 @@ async fn credential_login_cannot_alias_another_user_without_credentials() {
 
     let response =
         send(&app, request("GET", &format!("/api/v3/users/{owner}/credentials"), Some(&admin), json!({}))).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND, "учётки owner ещё нет");
+    assert_eq!(response.status(), StatusCode::OK, "учётки owner ещё нет — пустая форма");
+    assert!(json_body(response).await["login"].is_null());
 
     // other пытается зарегистрировать логин, равный внутреннему username owner.
     let response = send(
@@ -1251,7 +1253,8 @@ async fn credential_login_cannot_alias_another_user_without_credentials() {
 
     let response =
         send(&app, request("GET", &format!("/api/v3/users/{other}/credentials"), Some(&admin), json!({}))).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND, "чужой логин не должен просачиваться");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(json_body(response).await["login"].is_null(), "чужой логин не должен просачиваться");
 
     let login = send(
         &app,

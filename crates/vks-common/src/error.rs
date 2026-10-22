@@ -99,6 +99,35 @@ impl ErrorCode {
     }
 }
 
+/// Маркер терминального отказа удалённого терминала (busy/decline/release).
+///
+/// Живёт в строке ошибки только до границы шлюза: `GatewayManager` снимает
+/// префикс перед записью `last_error` и возвратом наружу. Классификация по
+/// точному префиксу, а не по подстрокам, исключает ложный `READY` для
+/// `sidecar not found`, таймаута на `sip:486...` или IO-ошибки с портом 4040.
+pub const TERMINAL_FAILURE_PREFIX: &str = "terminal-reject: ";
+
+/// Помечает сообщение как терминальный отказ терминала.
+#[must_use]
+pub fn terminal_failure(message: impl std::fmt::Display) -> String {
+    format!("{TERMINAL_FAILURE_PREFIX}{message}")
+}
+
+/// Является ли сообщение терминальным отказом (точный префикс).
+#[must_use]
+pub fn is_terminal_failure(message: &str) -> bool {
+    // Точный служебный sentinel может оказаться после контекста
+    // (`internal error: H.323: ...`), поэтому ищем только его, а не
+    // протокольные подстроки вроде `486`/`404`/`not found`.
+    message.contains(TERMINAL_FAILURE_PREFIX)
+}
+
+/// Снимает служебный префикс для `last_error`/UI.
+#[must_use]
+pub fn strip_terminal_failure(message: &str) -> &str {
+    message.find(TERMINAL_FAILURE_PREFIX).map_or(message, |index| &message[index + TERMINAL_FAILURE_PREFIX.len()..])
+}
+
 /// Единый `Error` для backend-крейтов VKS.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -230,6 +259,21 @@ mod tests {
         assert_eq!(e.code(), ErrorCode::NotFound);
         assert_eq!(e.status(), HttpStatus::NotFound);
         assert_eq!(e.status().as_u16(), 404);
+    }
+
+    #[test]
+    fn terminal_marker_is_exact_and_stripped_even_after_context() {
+        let marked = terminal_failure("remote_release:cause=17");
+        assert!(is_terminal_failure(&marked));
+        assert!(is_terminal_failure(&format!("internal error: H.323: {marked}")));
+        assert_eq!(strip_terminal_failure(&marked), "remote_release:cause=17");
+        for transport in [
+            "H.323 sidecar not found; port 4040",
+            "Dial timeout from sip:4861234@host",
+            "internal error: H.323: remote_release",
+        ] {
+            assert!(!is_terminal_failure(transport), "{transport}");
+        }
     }
 
     #[test]

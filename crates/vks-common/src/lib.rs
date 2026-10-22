@@ -20,7 +20,7 @@ pub mod tracing;
 
 // Удобные переэкспорты (часто используемые).
 pub use config::Config;
-pub use error::{Error, ErrorCode, HttpStatus};
+pub use error::{is_terminal_failure, strip_terminal_failure, terminal_failure, Error, ErrorCode, HttpStatus};
 pub use qoe::{QoeAggregator, QoeReport, MOS_THRESHOLD, QOE_SLO_PCT, RTT_P95_MAX_MS};
 pub use ratelimit::{RateLimiter, ADMIN_PER_MIN, WS_FRAME_MAX_BYTES};
 pub use slo::{SloEvaluator, SloResult, SloTarget};

@@ -891,16 +891,32 @@ async fn system_status_uses_real_ip_db_size_and_last_gateway_dial() {
     std::fs::write(&db, vec![0u8; 4096]).expect("write fake db");
     let _ = state.database_file.set(db.to_string_lossy().into_owned());
 
-    // Терминальный отказ не красит живой зарегистрированный шлюз.
-    state.record_gateway_health("h323", false, true, Some("H.323 outbound dial failed: remote_release".into()));
+    // H.323 direct mode без факта H.225 setup — DISABLED, не ложный READY.
     let resp = send(&app, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = json_body(resp).await;
     assert_eq!(body["network"]["ip"], expected_ip);
     assert_eq!(body["sip"]["local_address"], expected_ip);
     assert_eq!(body["database"]["size_bytes"], 4096);
+    assert_eq!(body["sip"]["status"], "READY");
+    assert_eq!(body["sip"]["registration"], true);
+    assert_eq!(body["h323"]["status"], "DISABLED");
+    assert_eq!(body["h323"]["registration"], false);
+    assert_eq!(body["h323"]["enable"], true);
+
+    // Реальный успешный setup — единственный источник READY для H.323.
+    state.record_gateway_health("h323", true, false, None);
+    let resp = send(&app, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    let body = json_body(resp).await;
     assert_eq!(body["h323"]["status"], "READY");
     assert_eq!(body["h323"]["registration"], true);
+
+    // Терминальный отказ не гасит живой шлюз и не стирает last_success_at.
+    state.record_gateway_health("h323", false, true, Some("remote_release:cause=17".into()));
+    let resp = send(&app, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    let body = json_body(resp).await;
+    assert_eq!(body["h323"]["status"], "READY");
+    assert_eq!(body["h323"]["connected"], true);
     assert!(body["h323"]["last_error"].as_str().unwrap_or_default().contains("remote_release"));
 
     // Транспортный отказ — FAILED до следующего фактического успеха.
@@ -909,7 +925,6 @@ async fn system_status_uses_real_ip_db_size_and_last_gateway_dial() {
     let body = json_body(resp).await;
     assert_eq!(body["h323"]["status"], "FAILED");
     assert_eq!(body["h323"]["connected"], false);
-    assert_eq!(body["h323"]["registration"], true, "transport down must not fake unregistration");
 
     state.record_gateway_health("h323", true, false, None);
     let resp = send(&app, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;

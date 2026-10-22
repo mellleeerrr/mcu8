@@ -233,28 +233,38 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
     let registered =
         |protocol: &str| dialer.as_ref().and_then(|dialer| dialer.gateway_registration(protocol)).unwrap_or(false);
     let health = |protocol: &str| {
-        let registered = registered(protocol);
+        let enabled = registered(protocol);
         let probe = state.gateway_health(protocol);
+        // SIP UAS регистрируется по-настоящему, поэтому его регистрация —
+        // факт. H.323 — direct mode без регистрации: READY только после
+        // реального H.225/H.245 setup, `last_success_at` переживает отказы.
+        let ready_fact =
+            if protocol == "sip" { enabled } else { probe.as_ref().and_then(|entry| entry.last_success_at).is_some() };
+        let registration = if protocol == "sip" { enabled } else { ready_fact };
         if state.has_fault(protocol) || state.has_fault("gateway") {
-            return ("FAILED".to_string(), false, probe.and_then(|probe| probe.error));
+            return ("FAILED".to_string(), false, registration, probe.and_then(|probe| probe.error));
         }
         match probe {
-            Some(probe) if probe.ok => ("READY".to_string(), true, probe.error),
-            Some(probe) if !probe.terminal => ("FAILED".to_string(), false, probe.error),
-            // Терминальный отказ: шлюз жив, ошибка видна, но статус не FAILED.
-            Some(probe) => (if registered { "READY" } else { "DISABLED" }.to_string(), registered, probe.error),
-            None => (if registered { "READY" } else { "DISABLED" }.to_string(), registered, None),
+            Some(probe) if probe.ok => ("READY".to_string(), true, true, probe.error),
+            Some(probe) if !probe.terminal => ("FAILED".to_string(), false, registration, probe.error),
+            // Терминальный отказ = реальный Q.931 ответ терминала: транспорт
+            // шлюза жив, поэтому READY + last_error, а не FAILED/DISABLED.
+            Some(probe) => ("READY".to_string(), true, true, probe.error),
+            None => (if ready_fact { "READY" } else { "DISABLED" }.to_string(), ready_fact, registration, None),
         }
     };
-    let (sip_status, sip_connected, sip_error) = health("sip");
-    let (h323_status, h323_connected, h323_error) = health("h323");
-    let sip_registered = registered("sip");
-    let h323_registered = registered("h323");
+    let (sip_status, sip_connected, sip_registered, sip_error) = health("sip");
+    let (h323_status, h323_connected, h323_registered, h323_error) = health("h323");
     let cluster_healthy = readiness.cluster;
     let cluster_status = if cluster_healthy { "READY" } else { "FAILED" };
     let ip = state.server_addr.get().cloned().unwrap_or_else(|| settings.ip.clone());
-    let db_size =
-        state.database_file.get().and_then(|path| std::fs::metadata(path).ok()).map_or(0, |metadata| metadata.len());
+    // Размер физического SQLite: main + WAL (иначе после checkpoint цифры
+    // скачут). Для in-memory/PG файла нет — null, а не ложный 0 при READY.
+    let db_size = state.database_file.get().and_then(|path| {
+        let main = std::fs::metadata(path).ok()?.len();
+        let wal = std::fs::metadata(format!("{path}-wal")).ok().map_or(0, |metadata| metadata.len());
+        Some(main.saturating_add(wal))
+    });
 
     let matrix = std::env::var("VKS_SDP_CODEC_MATRIX").ok();
     let transcoder = std::env::var("VKS_TRANSCODER_ENABLED").ok();
@@ -299,7 +309,7 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
         "h323": {
             "status": h323_status,
             "connected": h323_connected,
-            "enable": dialer.is_some(),
+            "enable": dialer.as_ref().is_some_and(|dialer| dialer.gateway_registration("h323") == Some(true)),
             "registration": h323_registered,
             "account": h323_connected,
             "local_address": ip,
