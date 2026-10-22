@@ -16,7 +16,7 @@ vks-storage = { path = "../vks-storage" }
 vks-auth = { path = "../vks-auth" }
 vks-admin = { path = "../vks-admin" }
 vks-signaling = { path = "../vks-signaling" }
-vks-media-sfu = { path = "../vks-media-sfu" }
+vks-media-sfu = { path = "../vks-media-sfu", features = ["str0m"] }
 vks-media-mcu = { path = "../vks-media-mcu" }
 vks-layout = { path = "../vks-layout" }
 vks-proto = { path = "../vks-proto" }

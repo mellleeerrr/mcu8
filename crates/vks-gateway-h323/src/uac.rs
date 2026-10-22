@@ -585,9 +585,7 @@ mod tests {
     fn dial_reason_classification_uses_exact_tokens() {
         assert!(vks_common::is_terminal_failure(&classify_dial_reason("remote_release:cause=17".into())));
         assert!(vks_common::is_terminal_failure(&classify_dial_reason("remote_release:adaptiveBusy".into())));
-        assert!(vks_common::is_terminal_failure(&classify_dial_reason(
-            "remote_release:adaptiveBusy:cause=16".into()
-        )));
+        assert!(vks_common::is_terminal_failure(&classify_dial_reason("remote_release:adaptiveBusy:cause=16".into())));
         assert!(vks_common::is_terminal_failure(&classify_dial_reason("remote_release".into())));
         for transport in [
             "H.323 sidecar not found; set VKS_H323_HELPER. Searched: /opt/4040",

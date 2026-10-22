@@ -29,7 +29,7 @@ tracing.workspace = true
 uuid.workspace = true
 async-trait = "0.1"
 bytes.workspace = true
-tokio = { workspace = true, features = ["net", "rt", "sync", "macros"] }
+tokio = { workspace = true, features = ["net", "rt", "sync", "macros", "time"] }
 str0m = { version = "0.24", optional = true, default-features = false }
 
 [dev-dependencies]

@@ -41,6 +41,8 @@ use vks_signaling::handler::{HandlerConfig, SignalingHandler};
 
 use crate::frontend::{statics_rel_path, Frontend};
 
+pub mod webrtc_runtime;
+
 /// Контекст для WebSocket-сигналинга (состояние приложения + конфигурация сессии + медиа-движки SFU/MCU + UDP-луп + сервисы M5).
 #[derive(Clone)]
 pub struct WsContext {
@@ -378,6 +380,7 @@ async fn cleanup_active_membership(
 ) {
     if let Some(m) = membership.take() {
         let pid_val = parse_participant_id(&m.participant_id);
+        crate::webrtc_runtime::remove(m.room_id, pid_val);
         let _ = sfu_engine.remove_subscriber(m.room_id, pid_val).await;
         let _ = sfu_engine.remove_publisher(m.room_id, pid_val).await;
         let _ = mcu_engine.remove_subscriber(m.room_id, pid_val).await;
@@ -448,7 +451,8 @@ fn room_video_bitrate(state: &Arc<AppState>, room: &vks_core::RoomId) -> Option<
 /// отклонённый JoinRoom (например, до ClientHello) ничего не создаёт и не считает.
 async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJwt, role: Role) {
     let (mut sender, mut receiver) = socket.split();
-    let mut handler = SignalingHandler::new(ctx.handler_config);
+    let handler_config = ctx.handler_config.clone();
+    let mut handler = SignalingHandler::new(handler_config.clone());
     let state = ctx.state;
     let mut current_membership: Option<ActiveMembership> = None;
     let mut room_rx: Option<tokio::sync::broadcast::Receiver<vks_admin::hub::RoomBroadcastEvent>> = None;
@@ -651,6 +655,50 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                 }
                                 // Запрос исполняет FSM; сайд-эффекты — только по успешному результату.
                                 let mut replies = handler.handle(env);
+
+                                // Real WebRTC transport: replace the legacy hand-built
+                                // answer before it is sent. Failure keeps the legacy
+                                // answer as a deliberate fallback until the browser E2E
+                                // proves the str0m path on this deployment.
+                                if let (Some(Payload::SdpOffer(ref offer)), Some(ref membership)) =
+                                    (&payload_opt, &current_membership)
+                                {
+                                    if replies.iter().any(|r| matches!(r.payload(), Some(Payload::SdpAnswer(_)))) {
+                                        let pid = parse_participant_id(&membership.participant_id);
+                                        match crate::webrtc_runtime::accept_offer(
+                                            &handler_config,
+                                            membership.room_id,
+                                            pid,
+                                            &offer.sdp,
+                                        ) {
+                                            Some(Ok(accepted)) => {
+                                                if let Some(answer) = replies.iter_mut().find_map(|reply| {
+                                                    match reply.payload_mut() {
+                                                        Some(Payload::SdpAnswer(answer)) => Some(answer),
+                                                        _ => None,
+                                                    }
+                                                }) {
+                                                    answer.sdp = accepted.answer_sdp;
+                                                }
+                                                info!(
+                                                    room = %membership.room_id,
+                                                    participant = %pid,
+                                                    "WebRTC: real str0m transport accepted"
+                                                );
+                                            }
+                                            Some(Err(error)) => {
+                                                warn!(
+                                                    room = %membership.room_id,
+                                                    participant = %pid,
+                                                    %error,
+                                                    "WebRTC: real transport rejected offer; keeping legacy SDP answer"
+                                                );
+                                            }
+                                            None => {}
+                                        }
+                                    }
+                                }
+
                                 let joined_ok = replies.iter().any(|r| matches!(r.payload(), Some(Payload::JoinRoomResult(_))));
                                 let left_ok = was_leave && replies.iter().any(|r| matches!(r.payload(), Some(Payload::Ack(_))));
 

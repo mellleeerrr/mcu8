@@ -14,11 +14,12 @@
 //! that mutates the inner [`Rtc`] drains `poll_output()` before returning.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use str0m::change::SdpOffer;
-use str0m::media::{MediaData, MediaTime, Mid, Pt};
+use str0m::format::{Codec, PayloadParams};
+use str0m::media::{KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig, RtcError};
 
@@ -31,11 +32,27 @@ pub struct WebRtcConfig {
     pub bwe: bool,
     /// Initial BWE estimate in bit/s (default 1 Mbit/s).
     pub bwe_initial_bps: u64,
+    /// Video reordering jitter before declaring loss (default 200 ms).
+    pub video_jitter_ms: u64,
+    /// Video reordering buffer packets (default 30).
+    pub video_reorder_size: usize,
+    /// Bounded audio send buffer packets.
+    pub send_buffer_audio: usize,
+    /// Bounded video send buffer packets.
+    pub send_buffer_video: usize,
 }
 
 impl Default for WebRtcConfig {
     fn default() -> Self {
-        Self { ice_lite: true, bwe: true, bwe_initial_bps: 1_000_000 }
+        Self {
+            ice_lite: true,
+            bwe: true,
+            bwe_initial_bps: 1_000_000,
+            video_jitter_ms: 200,
+            video_reorder_size: 30,
+            send_buffer_audio: 100,
+            send_buffer_video: 200,
+        }
     }
 }
 
@@ -48,6 +65,8 @@ pub enum WebRtcError {
     Sdp(String),
     #[error("network: {0}")]
     Net(String),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
     #[error("no UDP host candidate for {0}")]
     Candidate(SocketAddr),
     #[error("unknown media mid")]
@@ -69,6 +88,8 @@ pub enum WebRtcAction {
     Bitrate(u64),
     /// Remote closed DTLS or the whole session.
     Closed,
+    /// A browser asked for a video keyframe; forward it to the publisher.
+    KeyframeRequest { audio: bool },
 }
 
 /// One passive WebRTC peer (browser → SFU).
@@ -78,6 +99,9 @@ pub struct WebRtcPeer {
     local_addr: SocketAddr,
     connected: bool,
     mids: Vec<Mid>,
+    /// Parallel to `mids`; true for `m=audio`.
+    mid_audio: Vec<bool>,
+    next_timeout: Option<Instant>,
 }
 
 impl std::fmt::Debug for WebRtcPeer {
@@ -93,9 +117,23 @@ impl WebRtcPeer {
     /// Accepts a browser SDP offer and returns a real str0m answer
     /// (with a real ICE ufrag/pwd and a real DTLS certificate fingerprint).
     pub fn accept_offer(offer_sdp: &str, local_addr: SocketAddr, config: &WebRtcConfig) -> Result<Self, WebRtcError> {
-        let mut builder = RtcConfig::new().set_ice_lite(config.ice_lite);
+        let mut builder = RtcConfig::new()
+            .set_ice_lite(config.ice_lite)
+            // VKS SFU pipeline is Opus + VP8 only. Never let str0m's default
+            // H264/VP9/AV1/H265 set leak into an answer the rest of the
+            // server cannot forward or record.
+            .clear_codecs()
+            .enable_opus(true, false)
+            .enable_vp8(true)
+            .set_reordering_timeout_video(Some(std::time::Duration::from_millis(config.video_jitter_ms)))
+            .set_reordering_size_video(config.video_reorder_size)
+            .set_send_buffer_audio(config.send_buffer_audio)
+            .set_send_buffer_video(config.send_buffer_video);
         if config.bwe {
             builder = builder.enable_bwe(Some(str0m::bwe::Bitrate::bps(config.bwe_initial_bps)));
+        }
+        if let Some(cert) = shared_dtls_cert() {
+            builder = builder.set_dtls_cert(cert);
         }
         let mut rtc = builder.build(Instant::now());
 
@@ -105,9 +143,26 @@ impl WebRtcPeer {
         let offer = SdpOffer::from_sdp_string(offer_sdp).map_err(|e| WebRtcError::Sdp(e.to_string()))?;
         let answer = rtc.sdp_api().accept_offer(offer)?;
         let answer_sdp = answer.to_sdp_string();
-        let mids = answer_sdp.lines().filter_map(|line| line.strip_prefix("a=mid:")).map(Mid::from).collect();
+        let mut mids = Vec::new();
+        let mut mid_audio = Vec::new();
+        let mut current_audio = None;
+        for line in answer_sdp.lines() {
+            if line.starts_with("m=audio") {
+                current_audio = Some(true);
+            } else if line.starts_with("m=video") {
+                current_audio = Some(false);
+            } else if let Some(mid) = line.strip_prefix("a=mid:") {
+                mids.push(Mid::from(mid));
+                mid_audio.push(current_audio.unwrap_or(false));
+            }
+        }
 
-        Ok(Self { rtc, answer_sdp, local_addr, connected: false, mids })
+        let mut peer = Self { rtc, answer_sdp, local_addr, connected: false, mids, mid_audio, next_timeout: None };
+        // accept_offer mutates the session; drain the invariant before the
+        // first datagram arrives. No remote input exists yet, so any output
+        // here is a local ICE/DTLS action we must not silently keep queued.
+        let _ = peer.drain()?;
+        Ok(peer)
     }
 
     /// The SDP answer to send back to the browser.
@@ -130,6 +185,49 @@ impl WebRtcPeer {
         self.rtc.writer(mid)?.payload_params().next().map(|p| p.pt())
     }
 
+    /// The negotiated mid for an audio/video frame from the browser.
+    pub fn mid_for_kind(&self, audio: bool) -> Option<Mid> {
+        self.mids.iter().zip(&self.mid_audio).find(|(_, is_audio)| **is_audio == audio).map(|(mid, _)| *mid)
+    }
+
+    fn is_audio_mid(&self, mid: Mid) -> bool {
+        self.mids.iter().zip(&self.mid_audio).find(|(candidate, _)| **candidate == mid).is_some_and(|(_, audio)| *audio)
+    }
+
+    /// Write a depayloaded frame from another peer: match its codec parameters
+    /// to this peer's own negotiated payload type (PTs differ per browser).
+    pub fn write_media_matched(
+        &mut self,
+        mid: Mid,
+        params: PayloadParams,
+        wallclock: Instant,
+        rtp_time: MediaTime,
+        data: impl Into<Arc<[u8]>>,
+    ) -> Result<Vec<WebRtcAction>, WebRtcError> {
+        let pt = {
+            let writer = self.rtc.writer(mid).ok_or(WebRtcError::UnknownMid)?;
+            writer.match_params(params).ok_or(WebRtcError::UnknownMid)?
+        };
+        self.write_media(mid, pt, wallclock, rtp_time, data)
+    }
+
+    /// Ask the browser for a keyframe on this receiving media.
+    pub fn request_keyframe(&mut self, mid: Mid) -> Result<Vec<WebRtcAction>, WebRtcError> {
+        let mut writer = self.rtc.writer(mid).ok_or(WebRtcError::UnknownMid)?;
+        writer.request_keyframe(None, KeyframeRequestKind::Pli)?;
+        self.drain()
+    }
+
+    /// Negotiated payload type for a specific codec on a mid.
+    pub fn payload_type_for_codec(&mut self, mid: Mid, codec: Codec) -> Option<Pt> {
+        self.rtc.writer(mid)?.payload_params().find(|p| p.spec().codec == codec).map(|p| p.pt())
+    }
+
+    /// Earliest instant the caller should drive [`Self::handle_timeout`].
+    pub fn next_timeout(&self) -> Option<Instant> {
+        self.next_timeout
+    }
+
     /// True after ICE and DTLS completed.
     pub fn is_connected(&self) -> bool {
         self.connected
@@ -143,9 +241,20 @@ impl WebRtcPeer {
         destination: SocketAddr,
         contents: &[u8],
     ) -> Result<Vec<WebRtcAction>, WebRtcError> {
-        let receive =
-            Receive::new(Protocol::Udp, source, destination, contents).map_err(|e| WebRtcError::Net(e.to_string()))?;
-        self.rtc.handle_input(Input::Receive(now, receive))?;
+        let receive = match Receive::new(Protocol::Udp, source, destination, contents) {
+            Ok(receive) => receive,
+            // Unknown/truncated datagrams are data-plane noise, never a
+            // reason to tear down an established peer.
+            Err(_) => return Ok(Vec::new()),
+        };
+        let input = Input::Receive(now, receive);
+        // Caller-side demux/security gate: str0m's handle_input does not
+        // validate the source address for RTP/RTCP. A datagram from a
+        // different peer must never reach this session.
+        if !self.rtc.accepts(&input) {
+            return Ok(Vec::new());
+        }
+        self.rtc.handle_input(input)?;
         self.drain()
     }
 
@@ -190,7 +299,10 @@ impl WebRtcPeer {
         let mut actions = Vec::new();
         loop {
             match self.rtc.poll_output()? {
-                Output::Timeout(_) => break,
+                Output::Timeout(next) => {
+                    self.next_timeout = Some(next);
+                    break;
+                }
                 Output::Transmit(t) => actions.push(WebRtcAction::Send {
                     source: t.source,
                     destination: t.destination,
@@ -202,6 +314,11 @@ impl WebRtcPeer {
                         actions.push(WebRtcAction::Connected);
                     }
                     Event::IceConnectionStateChange(state) => actions.push(WebRtcAction::IceState(state)),
+                    Event::MediaAdded(added) => {
+                        if let Some(index) = self.mids.iter().position(|mid| *mid == added.mid) {
+                            self.mid_audio[index] = matches!(added.kind, MediaKind::Audio);
+                        }
+                    }
                     Event::MediaData(data) => actions.push(WebRtcAction::Media(Box::new(data))),
                     Event::EgressBitrateEstimate(kind) => {
                         let estimate = match kind {
@@ -216,12 +333,20 @@ impl WebRtcPeer {
                         self.connected = false;
                         actions.push(WebRtcAction::Closed);
                     }
+                    Event::KeyframeRequest(request) => {
+                        actions.push(WebRtcAction::KeyframeRequest { audio: self.is_audio_mid(request.mid) });
+                    }
                     _ => {}
                 },
             }
         }
         Ok(actions)
     }
+}
+
+fn shared_dtls_cert() -> Option<str0m::crypto::dtls::DtlsCert> {
+    static CERT: OnceLock<Option<str0m::crypto::dtls::DtlsCert>> = OnceLock::new();
+    CERT.get_or_init(|| str0m::crypto::from_feature_flags().dtls_provider.generate_certificate()).clone()
 }
 
 #[cfg(test)]
@@ -293,6 +418,11 @@ mod tests {
         assert!(peer.answer_sdp().contains("a=candidate:"), "host candidate missing: {}", peer.answer_sdp());
         assert!(peer.answer_sdp().contains("a=setup:passive"), "DTLS role missing");
         assert!(peer.answer_sdp().contains("a=rtcp-mux"), "rtcp-mux missing");
+        for forbidden in ["H264/90000", "VP9/90000", "AV1/90000", "H265/90000"] {
+            assert!(!peer.answer_sdp().contains(forbidden), "unexpected codec {forbidden} in answer");
+        }
+        assert!(peer.answer_sdp().contains("opus/48000/2"), "opus missing from answer");
+        assert!(peer.answer_sdp().contains("VP8/90000"), "vp8 missing from answer");
         let answer = SdpAnswer::from_sdp_string(peer.answer_sdp()).expect("answer parses");
         client.sdp_api().accept_answer(pending, answer).expect("accept answer");
 
@@ -338,12 +468,25 @@ mod tests {
         assert!(connected, "DTLS/SRTP handshake did not complete");
         assert!(client.is_connected(), "client ICE/DTLS did not connect");
         assert!(peer.is_connected(), "server transport did not become connected");
+        assert!(peer.next_timeout().is_some(), "pacer/ICE deadline was not recorded");
+        let first_mid = peer.mids()[0];
+        assert!(peer.payload_type_for_codec(first_mid, Codec::Opus).is_some(), "Opus PT not negotiated");
+        let video_mid_answer = peer.mids()[1];
+        assert!(peer.payload_type_for_codec(video_mid_answer, Codec::Vp8).is_some(), "VP8 PT not negotiated");
+
+        // Malformed datagrams must be dropped, not turn into a fatal transport error.
+        // Use the nominated 5-tuple (client source, server destination) so
+        // `accepts()` lets the datagram through and the malformed-datagram
+        // path itself is exercised.
+        let bogus = peer.handle_receive(now, A, B, &[0xff; 17]).expect("malformed datagram is not fatal");
+        assert!(bogus.is_empty(), "malformed datagram produced actions");
 
         // A real Opus RTP frame from browser to SFU, through SRTP.
         let pt =
             client.writer(audio_mid).expect("audio writer").payload_params().next().expect("negotiated payload").pt();
         let mut writes = 0;
         let mut received = 0usize;
+        let mut received_params: Option<PayloadParams> = None;
         for i in 0..20 {
             client
                 .writer(audio_mid)
@@ -354,13 +497,19 @@ mod tests {
             now += std::time::Duration::from_millis(20);
             client.handle_input(Input::Timeout(now)).expect("client tick");
             let queued = drain(&mut client);
-            received += deliver(&mut peer, queued, now).iter().filter(|a| matches!(a, WebRtcAction::Media(_))).count();
-            received += peer
-                .handle_timeout(now)
-                .expect("server tick")
-                .iter()
-                .filter(|a| matches!(a, WebRtcAction::Media(_)))
-                .count();
+            for action in deliver(&mut peer, queued, now) {
+                if let WebRtcAction::Media(m) = action {
+                    assert_eq!(&*m.data, &[0x55u8; 40], "depayloaded Opus data mismatch");
+                    received_params = Some(m.params);
+                    received += 1;
+                }
+            }
+            for action in peer.handle_timeout(now).expect("server tick") {
+                if let WebRtcAction::Media(m) = action {
+                    received_params = Some(m.params);
+                    received += 1;
+                }
+            }
         }
         assert_eq!(writes, 20);
 
@@ -381,10 +530,18 @@ mod tests {
         let audio_id = peer.mids()[0];
         let mut back = 0usize;
         let mut sent_total = 0usize;
+        let audio_params = received_params.expect("no Opus frame params captured");
+        assert_eq!(peer.mid_for_kind(true), Some(audio_id));
         for i in 0..10 {
             now += std::time::Duration::from_millis(20);
             let mut out = peer
-                .write_media_auto(audio_id, now, MediaTime::from_millis((i as u64) * 20), vec![0x66u8; 40])
+                .write_media_matched(
+                    audio_id,
+                    audio_params,
+                    now,
+                    MediaTime::from_millis((i as u64) * 20),
+                    vec![0x66u8; 40],
+                )
                 .expect("write to client");
             out.extend(peer.handle_timeout(now).expect("server tick"));
             sent_total += out.iter().filter(|a| matches!(a, WebRtcAction::Send { .. })).count();

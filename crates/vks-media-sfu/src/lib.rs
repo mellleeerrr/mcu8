@@ -32,6 +32,8 @@ pub mod simulcast;
 pub mod udp_loop;
 #[cfg(feature = "str0m")]
 pub mod webrtc;
+#[cfg(feature = "str0m")]
+pub mod webrtc_room;
 
 // Re-exports (flat API).
 pub use bwe::{BweConfig, BweEstimator, BweResult, TwccReportedPacket};
@@ -48,6 +50,8 @@ pub use simulcast::{Selection, SimulcastConfig, SimulcastLayer, SimulcastSelecto
 pub use udp_loop::{UdpMediaLoop, UdpMediaStats};
 #[cfg(feature = "str0m")]
 pub use webrtc::{WebRtcAction, WebRtcConfig, WebRtcError, WebRtcPeer};
+#[cfg(feature = "str0m")]
+pub use webrtc_room::{AcceptedPeer, PeerHandle, WebRtcRoomRegistry};
 
 /// str0m (optional, feature `str0m`) — re-export для фаз3 (реальный
 /// DTLS handshake + SRTP). Без feature крейт компилируется.
