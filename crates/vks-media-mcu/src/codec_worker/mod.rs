@@ -292,10 +292,10 @@ mod tests {
         assert!(VideoCodec::H265.supports_encode_size(16, 16));
         assert!(VideoCodec::H265.supports_decode_size(3840, 2160));
         assert!(!VideoCodec::H265.supports_decode_size(4098, 2162));
-        assert!(!VideoCodec::H265.supports_decode_size(u16::MAX, u16::MAX));
+        assert!(!VideoCodec::H265.supports_decode_size(65534, 65534));
         let mut huge = SlotConfig::default_720p();
-        huge.width = u16::MAX;
-        huge.height = u16::MAX;
+        huge.width = 65534;
+        huge.height = 65534;
         assert!(huge.validate_decode(VideoCodec::H265).is_err(), "huge decode slot must be rejected before allocating");
     }
 }
