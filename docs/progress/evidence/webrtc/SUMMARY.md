@@ -9,7 +9,7 @@ VKS_CHROMIUM=/home/pro/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome 
 node tests/e2e/webrtc.js
 ```
 
-Result: 29/29 checks passed, 0 fatal; commit `30aef22`, binary SHA-256 pinned
+Result: 29/29 checks passed, 0 fatal; commit `15bb9d0`, binary SHA-256 `eeba6e48f49c…` pinned
 in `result.json`, effective server env (`VKS_WEBRTC_TRANSPORT=1`, ports
 43000–43100) recorded there too. Two real Chromium peers through the
 authenticated /ws, real str0m answers, ICE-lite host candidates on

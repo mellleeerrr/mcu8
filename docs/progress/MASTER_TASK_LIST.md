@@ -593,3 +593,4 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 |---|---|---|---|
 | W1 | Реальный str0m-транспорт: ICE-lite, DTLS-SRTP, BWE, sub/audio_only, 2-peer cap, fail-closed | 🟢 | `0cb50f2` + `98aa292`; evidence `docs/progress/evidence/webrtc/` (24/24) |
 | W2 | Закрытие P0/P1 ревью: FSM rollback, preflight exit 78, keyframe non-fatal, gateway-гард в обе стороны, нет legacy-endpoint после отвергнутого оффера, reverse-map cleanup, global cap, metrics, query-token, docs/rollback | 🟢 | `30aef22`; live E2E 28/28 на 43000/43001, legacy UI 233/233; evidence `docs/progress/evidence/webrtc/` (commit/sha256/env/metrics/log) |
+> **W2 review loop:** 30aef22 code review **8.0/10**, ops **8.5/10**; blockers fixed in `15bb9d0` (global cap fresh room, MCU runtime mode, ICE rollback, gateway pre-checks, non-ICE fail-closed, Origin check, metric labels). Final live E2E 29/29 on 43000/43001 pinned to `15bb9d0`; legacy UI 233/233. Re-review pending for ≥9.5.

@@ -1,11 +1,11 @@
 {
   "ok": true,
   "base": "http://127.0.0.1:8080",
-  "conference_id": "a8cdcd0f-d507-424e-b592-845432e206b4",
-  "session_id": "a8cdcd0f-d507-424e-b592-845432e206b4",
-  "layout_id": "38a2885b-84fd-456f-9e07-6bd20fbb3188",
+  "conference_id": "a336cbf4-0002-4a41-b4ba-122659958353",
+  "session_id": "a336cbf4-0002-4a41-b4ba-122659958353",
+  "layout_id": "5511da28-fdeb-4c2c-9dad-4e275b79d59d",
   "sip_uri": "sip:probe-e2e@192.168.1.132",
-  "duration_ms": 149441,
+  "duration_ms": 148748,
   "checks": [
     {
       "name": "login: token in localStorage",
@@ -18,12 +18,12 @@
     {
       "name": "perf: codec requests coalesced to 2 per page",
       "ok": true,
-      "detail": "{\"logical\":24,\"network\":2,\"cacheHits\":20,\"coalesced\":2,\"previewsSuppressed\":0,\"patches\":0}"
+      "detail": "{\"logical\":28,\"network\":2,\"cacheHits\":24,\"coalesced\":2,\"previewsSuppressed\":0,\"patches\":0}"
     },
     {
       "name": "conference: POST returned id",
       "ok": true,
-      "detail": "{\"conference\":{\"abonents\":{\"abonents\":[],\"alias\":0,\"confloop\":0,\"count\":0,\"file\":0,\"h323\":0,\"media\":0,\"records\":[],\"rtmp\":[],\"rtsp\":0,\"sip\":0,\"vnc\":0,\"youtube\":[]},\"addresses\":{\"h323\":\"h323:Conf_884837114@192.168.1.93\",\"sip\":\"sip:Conf_884837114@192.168.1.93\",\"webrtc\":\"sip:Conf_884837114@127.0.0.1\"},"
+      "detail": "{\"conference\":{\"abonents\":{\"abonents\":[],\"alias\":0,\"confloop\":0,\"count\":0,\"file\":0,\"h323\":0,\"media\":0,\"records\":[],\"rtmp\":[],\"rtsp\":0,\"sip\":0,\"vnc\":0,\"youtube\":[]},\"addresses\":{\"h323\":\"h323:Conf_898388549@192.168.1.93\",\"sip\":\"sip:Conf_898388549@192.168.1.93\",\"webrtc\":\"sip:Conf_898388549@127.0.0.1\"},"
     },
     {
       "name": "conference: audio codec matrix sent",
@@ -38,12 +38,12 @@
     {
       "name": "session: started with id",
       "ok": true,
-      "detail": "{\"session\":{\"abonents\":{\"abonents\":[],\"alias\":0,\"confloop\":0,\"count\":0,\"file\":0,\"h323\":0,\"media\":0,\"records\":[],\"rtmp\":[],\"rtsp\":0,\"sip\":0,\"vnc\":0,\"youtube\":[]},\"addresses\":{\"h323\":\"h323:Conf_884837114@192.168.1.93\",\"sip\":\"sip:Conf_884837114@192.168.1.93\",\"webrtc\":\"sip:Conf_884837114@127.0.0.1\"},\"al"
+      "detail": "{\"session\":{\"abonents\":{\"abonents\":[],\"alias\":0,\"confloop\":0,\"count\":0,\"file\":0,\"h323\":0,\"media\":0,\"records\":[],\"rtmp\":[],\"rtsp\":0,\"sip\":0,\"vnc\":0,\"youtube\":[]},\"addresses\":{\"h323\":\"h323:Conf_898388549@192.168.1.93\",\"sip\":\"sip:Conf_898388549@192.168.1.93\",\"webrtc\":\"sip:Conf_898388549@127.0.0.1\"},\"al"
     },
     {
       "name": "settings: conference profile 640x360/512 patched",
       "ok": true,
-      "detail": "status=200 {\"conference\":{\"abonents\":{\"abonents\":[],\"alias\":0,\"confloop\":0,\"count\":0,\"file\":0,\"h323\":0,\"media\":0,\"records\":[],\"rtmp\":[],\"rtsp\":0,\"sip\":0,\"vnc\":0,\"youtube\":[]},\"addresses\":{\"h323\":\"h323:Conf_884837114@192.168.1.93\",\"sip\":\"sip:Conf_884837114@192.168.1.93\",\"webrtc\":\"sip:Conf_884837114@127.0.0.1\"},"
+      "detail": "status=200 {\"conference\":{\"abonents\":{\"abonents\":[],\"alias\":0,\"confloop\":0,\"count\":0,\"file\":0,\"h323\":0,\"media\":0,\"records\":[],\"rtmp\":[],\"rtsp\":0,\"sip\":0,\"vnc\":0,\"youtube\":[]},\"addresses\":{\"h323\":\"h323:Conf_898388549@192.168.1.93\",\"sip\":\"sip:Conf_898388549@192.168.1.93\",\"webrtc\":\"sip:Conf_898388549@127.0.0.1\"},"
     },
     {
       "name": "participant: add-address button present",
@@ -66,12 +66,12 @@
     {
       "name": "sip: payload carries full audio matrix",
       "ok": true,
-      "detail": "{\"call_string\":{\"addressId\":\"cs-752cf656-6fd0-42f5-a1ff-ea752b727743\",\"created_at\":1792691857,\"display_name\":\"E2E SIP Probe\",\"id\":\"cs-752cf656-6fd0-42f5-a1ff-ea752b727743\",\"payload\":{\"audio_rx_enabled\":true,\"audio_tx_enabled\":true,\"auto_call\":true,\"auto_gain_control\":\"DEFAULT\",\"call_string\":{\"file\":{\"primary\":true,\"zoom\":\"fit\"},\"h323\":{\"audioCodecs\":[],\"bitrate\":null,\"cascadeMode\":\"none\",\"isSelfViewEnabled\":true,\"resolution\":null,\"videoCodecs\":[]},\"media\":{\"loop\":true,\"primary\":true},\"rtsp\":{\"pr"
+      "detail": "{\"call_string\":{\"addressId\":\"cs-1a2145a8-eb0f-4679-9cdc-6b30fb83eb7d\",\"created_at\":1792692967,\"display_name\":\"E2E SIP Probe\",\"id\":\"cs-1a2145a8-eb0f-4679-9cdc-6b30fb83eb7d\",\"payload\":{\"audio_rx_enabled\":true,\"audio_tx_enabled\":true,\"auto_call\":true,\"auto_gain_control\":\"DEFAULT\",\"call_string\":{\"file\":{\"primary\":true,\"zoom\":\"fit\"},\"h323\":{\"audioCodecs\":[],\"bitrate\":null,\"cascadeMode\":\"none\",\"isSelfViewEnabled\":true,\"resolution\":null,\"videoCodecs\":[]},\"media\":{\"loop\":true,\"primary\":true},\"rtsp\":{\"pr"
     },
     {
       "name": "sip: payload carries required video matrix",
       "ok": true,
-      "detail": "{\"call_string\":{\"addressId\":\"cs-752cf656-6fd0-42f5-a1ff-ea752b727743\",\"created_at\":1792691857,\"display_name\":\"E2E SIP Probe\",\"id\":\"cs-752cf656-6fd0-42f5-a1ff-ea752b727743\",\"payload\":{\"audio_rx_enabled\":true,\"audio_tx_enabled\":true,\"auto_call\":true,\"auto_gain_control\":\"DEFAULT\",\"call_string\":{\"file\":{\"primary\":true,\"zoom\":\"fit\"},\"h323\":{\"audioCodecs\":[],\"bitrate\":null,\"cascadeMode\":\"none\",\"isSelfViewEnabled\":true,\"resolution\":null,\"videoCodecs\":[]},\"media\":{\"loop\":true,\"primary\":true},\"rtsp\":{\"primary\":true},\"sip\":{\"audioCodecs\":[{\"bitrate\":null,\"name\":\"AAC\"},{\"bitrate\":null,\"name\":\"G711\"},{\"bitrate\":null,\"name\":\"G719\"},{\"bitrate\":null,\"name\":\"G722\"},{\"bitrate\":24,\"name\":\"G7221\"},{\"bitrate\":32,\"name\":\"G7221\"},{\"bitrate\":24,\"name\":\"G7221C\"},{\"bitrate\":32,\"name\":\"G7221C\"},{\"bitrate\":48,\"name\""
+      "detail": "{\"call_string\":{\"addressId\":\"cs-1a2145a8-eb0f-4679-9cdc-6b30fb83eb7d\",\"created_at\":1792692967,\"display_name\":\"E2E SIP Probe\",\"id\":\"cs-1a2145a8-eb0f-4679-9cdc-6b30fb83eb7d\",\"payload\":{\"audio_rx_enabled\":true,\"audio_tx_enabled\":true,\"auto_call\":true,\"auto_gain_control\":\"DEFAULT\",\"call_string\":{\"file\":{\"primary\":true,\"zoom\":\"fit\"},\"h323\":{\"audioCodecs\":[],\"bitrate\":null,\"cascadeMode\":\"none\",\"isSelfViewEnabled\":true,\"resolution\":null,\"videoCodecs\":[]},\"media\":{\"loop\":true,\"primary\":true},\"rtsp\":{\"primary\":true},\"sip\":{\"audioCodecs\":[{\"bitrate\":null,\"name\":\"AAC\"},{\"bitrate\":null,\"name\":\"G711\"},{\"bitrate\":null,\"name\":\"G719\"},{\"bitrate\":null,\"name\":\"G722\"},{\"bitrate\":24,\"name\":\"G7221\"},{\"bitrate\":32,\"name\":\"G7221\"},{\"bitrate\":24,\"name\":\"G7221C\"},{\"bitrate\":32,\"name\":\"G7221C\"},{\"bitrate\":48,\"name\""
     },
     {
       "name": "sip: participant visible in conference UI",
@@ -86,7 +86,7 @@
     {
       "name": "audio: two-way RTP packets (native codec)",
       "ok": true,
-      "detail": "{\"audioTxPackets\":545,\"audioRxPackets\":355}"
+      "detail": "{\"audioTxPackets\":553,\"audioRxPackets\":367}"
     },
     {
       "name": "audio: G722 wideband negotiated (PT9, 16 kHz samples, 8 kHz clock)",
@@ -101,47 +101,47 @@
     {
       "name": "video: offer size 640x360",
       "ok": true,
-      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":531583,\"bytes\":733253,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.907846088682376,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1165,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":536218,\"bytes\":753320,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.559504971747835,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1164,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
     },
     {
       "name": "video: offer bitrate 512 kbps",
       "ok": true,
-      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":531583,\"bytes\":733253,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.907846088682376,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1165,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":536218,\"bytes\":753320,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.559504971747835,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1164,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
     },
     {
       "name": "video: SDP max-fs matches profile",
       "ok": true,
-      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":531583,\"bytes\":733253,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.907846088682376,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1165,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":536218,\"bytes\":753320,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.559504971747835,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1164,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
     },
     {
       "name": "video: answer max-br captured from terminal",
       "ok": true,
-      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":531583,\"bytes\":733253,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.907846088682376,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1165,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":536218,\"bytes\":753320,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.559504971747835,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1164,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
     },
     {
       "name": "video: encoder requested 512 kbps",
       "ok": true,
-      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":531583,\"bytes\":733253,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.907846088682376,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1165,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":536218,\"bytes\":753320,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.559504971747835,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1164,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
     },
     {
       "name": "video: encoder profile fps 30",
       "ok": true,
-      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":531583,\"bytes\":733253,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.907846088682376,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1165,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":536218,\"bytes\":753320,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.559504971747835,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1164,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
     },
     {
       "name": "video: encoded fps >= 20 (live render cadence)",
       "ok": true,
-      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":531583,\"bytes\":733253,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.907846088682376,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1165,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":536218,\"bytes\":753320,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.559504971747835,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1164,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
     },
     {
       "name": "video: measured RTP tx < 1.5 Mbps",
       "ok": true,
-      "detail": "531583"
+      "detail": "536218"
     },
     {
       "name": "video: effective size 640x360 after answer-clamp",
       "ok": true,
-      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":531583,\"bytes\":733253,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.907846088682376,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1165,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":49000,\"bitrate\":536218,\"bytes\":753320,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":28.559504971747835,\"height\":360,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":512,\"offered_bitrate\":512000,\"offered_max_fs\":920,\"offered_max_mbps\":27600,\"offered_resolution\":\"640x360\",\"packets\":1164,\"present\":true,\"requested_bitrate\":512000,\"resolution\":\"640x360\",\"volume\":0,\"width\":640}"
     },
     {
       "name": "layout: 4 → 7 scheme variants",
@@ -159,12 +159,12 @@
     {
       "name": "layout: created",
       "ok": true,
-      "detail": "{\"video_layout\":{\"abonents\":{\"abonents\":{\"abonents\":[],\"count\":0},\"records\":[],\"rtmp\":[]},\"contacts\":{\"contacts\":[],\"count\":0},\"created_at\":1792691879,\"creator_id\":\"00000000-0000-0000-0000-000000000001\",\"defaults\":{\"deletable\":true,\"editable\":true},\"display_name\":\"E2E Manual 4 74276\",\"id\":\"38a2885b-"
+      "detail": "{\"video_layout\":{\"abonents\":{\"abonents\":{\"abonents\":[],\"count\":0},\"records\":[],\"rtmp\":[]},\"contacts\":{\"contacts\":[],\"count\":0},\"created_at\":1792692990,\"creator_id\":\"00000000-0000-0000-0000-000000000001\",\"defaults\":{\"deletable\":true,\"editable\":true},\"display_name\":\"E2E Manual 4 84403\",\"id\":\"5511da28-"
     },
     {
       "name": "layout: participant in position 1",
       "ok": true,
-      "detail": "[{\"abonent_id\":\"sip-d045577c-9fe3-407a-ba81-f84d6bfd54da@sip-gateway\",\"call_string_id\":\"cs-752cf656-6fd0-42f5-a1ff-ea752b727743\",\"connection_id\":\"sip-d045577c-9fe3-407a-ba81-f84d6bfd54da@sip-gateway\",\"contact_id\":\"cs-752cf656-6fd0-42f5-a1ff-ea752b727743\",\"position\":1,\"role\":\"PEER\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"}]"
+      "detail": "[{\"abonent_id\":\"sip-df268c9e-2592-4fea-a003-8520181c6d77@sip-gateway\",\"call_string_id\":\"cs-1a2145a8-eb0f-4679-9cdc-6b30fb83eb7d\",\"connection_id\":\"sip-df268c9e-2592-4fea-a003-8520181c6d77@sip-gateway\",\"contact_id\":\"cs-1a2145a8-eb0f-4679-9cdc-6b30fb83eb7d\",\"position\":1,\"role\":\"PEER\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"}]"
     },
     {
       "name": "layout: listed in session",
@@ -1067,12 +1067,12 @@
     {
       "name": "layout: default «Общая» visible after detach",
       "ok": true,
-      "detail": "PROSTOR\nПанель управления\nКонференции\nСправочник\nИстория\nАдминистрирование\n1\n0\n0\nnotifications\narrow_drop_down\nexpand_more\n\nКонференции\n\nsearch\ntune\nadd\n\nАктивные конференции (1)\n\nConf_884837114\n\ngroup\n1\n0\nID: 251823427\ntimelapse\n00:01:35\n\n22.10.2026 20:57\n\nНеактивные конференции (10)\n\nAcc_Full_UI\n\ngroup\n1\n0\n\nAddr Inspect\n\ngroup\n0\n0\nID: 417709149\n\nConf_47588334911\n\ngroup\n0\n0\nID: 473881087\n\nConf_975468132\n\ngroup\n0\n0\nID: 759230241\n\nh323-g722-test 1792675030\n\ngroup\n0\n0\nID: 363184873\n\nWebRTC audio-o"
+      "detail": "PROSTOR\nПанель управления\nКонференции\nСправочник\nИстория\nАдминистрирование\n1\n0\n0\nnotifications\narrow_drop_down\nexpand_more\n\nКонференции\n\nsearch\ntune\nadd\n\nАктивные конференции (1)\n\nConf_898388549\n\ngroup\n1\n0\nID: 691850554\ntimelapse\n00:01:35\n\n22.10.2026 21:16\n\nНеактивные конференции (12)\n\nAcc_Full_UI\n\ngroup\n1\n0\n\nAddr Inspect\n\ngroup\n0\n0\nID: 417709149\n\nConf_47588334911\n\ngroup\n0\n0\nID: 473881087\n\nConf_975468132\n\ngroup\n0\n0\nID: 759230241\n\nh323-g722-test 1792675030\n\ngroup\n0\n0\nID: 363184873\n\nWebRTC audio-o"
     },
     {
       "name": "layout: manual name gone from session UI",
       "ok": true,
-      "detail": "PROSTOR\nПанель управления\nКонференции\nСправочник\nИстория\nАдминистрирование\n1\n0\n0\nnotifications\narrow_drop_down\nexpand_more\n\nКонференции\n\nsearch\ntune\nadd\n\nАктивные конференции (1)\n\nConf_884837114\n\ngroup\n1\n0\nID: 251823427\ntimelapse\n00:01:35\n\n22.10.2026 20:57\n\nНеактивные конференции (10)\n\nAcc_Full_UI\n\ngroup\n1\n0\n\nAddr Inspect\n\ngroup\n0\n0\nID: 417709149\n\nConf_47588334911\n\ngroup\n0\n0\nID: 473881087\n\nConf_975468132\n\ngroup\n0\n0\nID: 759230241\n\nh323-g722-test 1792675030\n\ngroup\n0\n0\nID: 363184873\n\nWebRTC audio-o"
+      "detail": "PROSTOR\nПанель управления\nКонференции\nСправочник\nИстория\nАдминистрирование\n1\n0\n0\nnotifications\narrow_drop_down\nexpand_more\n\nКонференции\n\nsearch\ntune\nadd\n\nАктивные конференции (1)\n\nConf_898388549\n\ngroup\n1\n0\nID: 691850554\ntimelapse\n00:01:35\n\n22.10.2026 21:16\n\nНеактивные конференции (12)\n\nAcc_Full_UI\n\ngroup\n1\n0\n\nAddr Inspect\n\ngroup\n0\n0\nID: 417709149\n\nConf_47588334911\n\ngroup\n0\n0\nID: 473881087\n\nConf_975468132\n\ngroup\n0\n0\nID: 759230241\n\nh323-g722-test 1792675030\n\ngroup\n0\n0\nID: 363184873\n\nWebRTC audio-o"
     },
     {
       "name": "api: audio_codecs shape {name,bitrate}",
