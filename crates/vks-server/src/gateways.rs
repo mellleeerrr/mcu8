@@ -95,12 +95,16 @@ fn codec_name(item: &serde_json::Value) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    if name == "G726" {
+    if let Some(suffix) = name.strip_prefix("G726") {
         // Keep the bitrate in the token so the variant-aware capability check
-        // cannot accept unsupported G726:48 / G726:null selections.
-        let bitrate =
-            item.get("bitrate").and_then(serde_json::Value::as_u64).map(|value| value as u32).or(inline_bitrate);
-        return Some(bitrate.map_or_else(|| name.clone(), |bitrate| format!("{name}{bitrate}")));
+        // cannot accept unsupported G726:48 / G726:null selections.  An
+        // explicit name (`G72616`) is also overridden by a conflicting
+        // `bitrate` field, otherwise `{"name":"G72616","bitrate":48}` would
+        // slip through the `None` variant check.
+        let explicit = item.get("bitrate").and_then(serde_json::Value::as_u64).map(|value| value as u32);
+        let suffix_bits = suffix.parse::<u32>().ok();
+        let bitrate = explicit.or(inline_bitrate).or(suffix_bits);
+        return Some(bitrate.map_or_else(|| "G726".to_string(), |bitrate| format!("G726{bitrate}")));
     }
     Some(name)
 }

@@ -352,7 +352,7 @@ fn bridgeable_audio(section: &str, payload: u8) -> Option<&'static str> {
         108 => "G726-24",
         109 => "G726-32",
         110 => "G726-40",
-        _ => {
+        96..=127 => {
             let (name, clock) = declared_codec(section, payload)?;
             if clock != 8000 {
                 return None;
@@ -369,6 +369,7 @@ fn bridgeable_audio(section: &str, payload: u8) -> Option<&'static str> {
                 _ => None,
             };
         }
+        _ => return None,
     };
     // Dynamic G.726 must be explicitly mapped; static G.711/G.722 may rely on
     // the RFC 3551 default map, but a present rtpmap must still agree.

@@ -201,8 +201,8 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 if session.source_latch {
                     egress = source;
                 }
-                // 40 ms G.711/G.722 ptime and 20/40 ms G.726 ptime are legal
-                // per RFC 4566/3551; never truncate the second half of a packet.
+                // 40 ms G.711/G.722 ptime and 20/30/40 ms G.726 ptime are
+                // legal per RFC 4566/3551; never truncate the second half.
                 if packet.payload.len() > bridge_codec.max_payload() {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed); continue;
                 }
