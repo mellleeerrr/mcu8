@@ -483,10 +483,25 @@ impl Sdp {
                     answer_maps.push(map.clone());
                 }
             }
+            // Rejected m-line must still carry at least one fmt token
+            // (RFC 8866 §5.14): keep the offered formats with port 0 instead
+            // of serializing `m=... 0 UDP/TLS/RTP/SAVPF` without a format.
+            let rejected = selected.is_empty();
+            let payload_types =
+                if rejected { media.payload_types.clone() } else { selected.iter().map(|r| r.payload).collect() };
+            let selected_video_pt =
+                selected.iter().find(|map| map.codec.eq_ignore_ascii_case("vp8")).map(|map| map.payload);
+            let selected_h264 = selected.iter().any(|map| map.codec.eq_ignore_ascii_case("h264"));
+            let rewrite_fb = |feedback: &str| match selected_video_pt {
+                Some(payload) => feedback
+                    .split_once(' ')
+                    .map_or_else(|| format!("{payload} {feedback}"), |(_, rest)| format!("{payload} {rest}")),
+                None => feedback.to_string(),
+            };
             let m = Media {
                 kind: media.kind,
                 port,
-                payload_types: selected.iter().map(|r| r.payload).collect(),
+                payload_types,
                 mid: media.mid.clone().or_else(|| Some(i.to_string())),
                 msid: Some(format!("sfu-out {i}")),
                 ssrcs: vec![format!("ssrc-sfu-{i}")],
@@ -500,8 +515,16 @@ impl Sdp {
                 // b=AS/fmtp/rtcp-fb are codec-specific: announce them only on
                 // the video m-line, so an audio section never claims 96/fmtp.
                 b_as: if media.kind == MediaKind::Video { profile.b_as } else { None },
-                fmtp: if media.kind == MediaKind::Video { profile.fmtp.clone() } else { Vec::new() },
-                rtcp_fb: if media.kind == MediaKind::Video { profile.rtcp_fb.clone() } else { Vec::new() },
+                fmtp: if media.kind == MediaKind::Video && !rejected && selected_h264 {
+                    profile.fmtp.iter().map(|line| rewrite_fb(line)).collect()
+                } else {
+                    Vec::new()
+                },
+                rtcp_fb: if media.kind == MediaKind::Video && !rejected {
+                    profile.rtcp_fb.iter().map(|feedback| rewrite_fb(feedback)).collect()
+                } else {
+                    Vec::new()
+                },
                 extmap: profile.extmap.clone(),
                 rid: Vec::new(),
                 simulcast: None,
@@ -648,7 +671,8 @@ mod tests {
         assert_eq!(answer.media[0].b_as, None);
         assert!(answer.media[0].fmtp.is_empty());
         assert_eq!(answer.media[1].b_as, Some(2048));
-        assert!(answer.media[1].fmtp.iter().any(|v| v.starts_with("96 ")));
+        // H.264 fmtp не приклеивается к VP8: SFU объявляет только VP8.
+        assert!(answer.media[1].fmtp.is_empty());
     }
 
     #[test]
@@ -666,6 +690,46 @@ mod tests {
         assert_eq!(maps.len(), 2);
         assert!(maps.iter().any(|m| m.payload == 120 && m.codec == "opus"));
         assert!(maps.iter().any(|m| m.payload == 100 && m.codec == "vp8"));
+    }
+
+    #[test]
+    fn sfu_answer_rejects_missing_codec_with_valid_fmt_and_no_dangling_attrs() {
+        let mut offer = two_line_offer();
+        // Browser offers only PCMA and H.264; SFU profile is opus/video-vp8.
+        offer.media[0].payload_types = vec![8];
+        offer.media[0].rtp_maps = vec![RtpMap { payload: 8, codec: "pcma".into(), clock: 8000, channels: 1 }];
+        offer.media[1].payload_types = vec![102];
+        offer.media[1].rtp_maps = vec![RtpMap { payload: 102, codec: "h264".into(), clock: 90000, channels: 0 }];
+
+        let (answer, maps) = offer.sfu_answer(&sfu_profile());
+        assert!(maps.is_empty());
+        for media in &answer.media {
+            assert_eq!(media.port, 0);
+            assert!(!media.payload_types.is_empty(), "RFC 8866 requires at least one fmt token");
+            assert!(media.fmtp.is_empty(), "no dangling fmtp on rejected m-line");
+            assert!(media.rtcp_fb.is_empty(), "no dangling rtcp-fb on rejected m-line");
+        }
+        let text = answer.to_sdp_text();
+        let parsed = Sdp::parse(&text).expect("rejected answer must still parse");
+        assert_eq!(parsed.media.len(), 2);
+        assert!(parsed.media.iter().all(|media| media.port == 0));
+        assert!(text.contains("m=audio 0"));
+        assert!(text.contains("m=video 0"));
+    }
+
+    #[test]
+    fn sfu_answer_rewrites_rtcp_fb_to_selected_pt() {
+        let mut offer = two_line_offer();
+        offer.media[1].payload_types = vec![100];
+        offer.media[1].rtp_maps = vec![RtpMap { payload: 100, codec: "vp8".into(), clock: 90000, channels: 0 }];
+        let (answer, _maps) = offer.sfu_answer(&sfu_profile());
+        let video = &answer.media[1];
+        assert_eq!(video.payload_types, vec![100]);
+        assert!(video.rtcp_fb.iter().all(|line| line.starts_with("100 ")), "{:?}", video.rtcp_fb);
+        assert!(video.fmtp.is_empty(), "H.264 fmtp must not be attached to VP8");
+        let text = answer.to_sdp_text();
+        assert!(!text.contains("a=rtcp-fb:96"));
+        assert!(text.contains("a=rtcp-fb:100 nack"));
     }
 
     #[test]

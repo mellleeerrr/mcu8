@@ -46,6 +46,11 @@ struct RoomState {
     endpoints: BTreeMap<ParticipantId, SocketAddr>,
     /// Маппинг SSRC -> (паблишер, трек).
     ssrc_to_track: BTreeMap<u32, (ParticipantId, TrackId)>,
+    /// Согласованный в SDP answer payload type подписчика по kind.
+    /// Паблишер и подписчик могут выбрать разные PT одного VP8/Opus;
+    /// SFU обязан переписать байт PT на egress, иначе браузер отбросит пакет.
+    subscriber_payload_types:
+        std::collections::HashMap<ParticipantId, std::collections::HashMap<vks_core::MediaKind, u8>>,
 }
 
 /// Per-subscriber media state (downlink BWE).
@@ -100,6 +105,20 @@ impl SfuEngine {
     /// Codec registry (immutable).
     pub fn codecs(&self) -> &CodecRegistry {
         &self.codecs
+    }
+
+    /// Запоминает PT из SDP answer подписчика; вызывается после успешного
+    /// `SdpOffer` до первых RTP-пакетов.
+    pub fn set_subscriber_payload_type(
+        &self,
+        room: RoomId,
+        subscriber: ParticipantId,
+        kind: vks_core::MediaKind,
+        payload_type: u8,
+    ) {
+        if let Some(state) = self.rooms.lock().unwrap().get_mut(&room) {
+            state.subscriber_payload_types.entry(subscriber).or_default().insert(kind, payload_type & 0x7f);
+        }
     }
 
     /// Текущий spatial layer для подписчика (None если нет).
@@ -296,10 +315,19 @@ impl SfuEngine {
 
         if let Some(r) = self.rooms.lock().unwrap().get(&room_id) {
             let subscribers = r.forwarder.subscribers_of(&track_id);
+            let kind = r.tracks.get(&track_id).map(|track| track.media_kind);
             for sub_id in subscribers {
                 if sub_id != &pub_id {
                     if let Some(&sub_addr) = r.endpoints.get(sub_id) {
-                        out.push((sub_addr, payload.clone()));
+                        let payload = match (kind, r.subscriber_payload_types.get(sub_id).and_then(|m| m.get(&kind?))) {
+                            (Some(_), Some(&pt)) if payload.len() > 1 && payload[1] & 0x7f != pt => {
+                                let mut rewritten = payload.to_vec();
+                                rewritten[1] = (rewritten[1] & 0x80) | (pt & 0x7f);
+                                Bytes::from(rewritten)
+                            }
+                            _ => payload.clone(),
+                        };
+                        out.push((sub_addr, payload));
                     }
                 }
             }
@@ -348,6 +376,7 @@ impl MediaEngine for SfuEngine {
             subscribers: BTreeMap::new(),
             endpoints: BTreeMap::new(),
             ssrc_to_track: BTreeMap::new(),
+            subscriber_payload_types: std::collections::HashMap::new(),
         };
         g.insert(cfg.room_id, state);
         Ok(RoomMediaHandle { room: cfg.room_id, mode: cfg.mode })
@@ -905,6 +934,42 @@ mod tests {
         assert_eq!(plis.len(), 1);
         assert_eq!(plis[0].0, pub_src);
         assert_eq!(plis[0].1.len(), 12);
+    }
+
+    #[tokio::test]
+    async fn route_rewrites_payload_type_per_subscriber_sdp_answer() {
+        let e = SfuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+
+        let publisher = p(1);
+        let native = p(2);
+        let custom = p(3);
+        let vt = video_track(publisher);
+        let track_id = vt.id;
+        e.add_publisher(rid, publisher, vec![vt]).await.unwrap();
+        let native_addr: SocketAddr = "127.0.0.1:40002".parse().unwrap();
+        let custom_addr: SocketAddr = "127.0.0.1:40003".parse().unwrap();
+        e.add_subscriber(rid, native, sub_req()).await.unwrap();
+        e.register_endpoint(rid, native, native_addr);
+        e.add_subscriber(rid, custom, sub_req()).await.unwrap();
+        e.register_endpoint(rid, custom, custom_addr);
+        e.set_subscriber_payload_type(rid, native, vks_core::MediaKind::Video, 96);
+        e.set_subscriber_payload_type(rid, custom, vks_core::MediaKind::Video, 100);
+
+        let ssrc = 0x11223344u32;
+        e.register_ssrc(rid, publisher, track_id, ssrc);
+        let mut rtp = vec![0x80, 96, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00];
+        rtp.extend_from_slice(&ssrc.to_be_bytes());
+        rtp.extend_from_slice(&[9, 8, 7]);
+        let routed = e.route_udp_packet("192.168.1.60:50002".parse().unwrap(), Bytes::from(rtp));
+        assert_eq!(routed.len(), 2);
+        for (_, packet) in &routed {
+            let expected = if packet[1] == 100 { 100 } else { 96 };
+            assert_eq!(packet[1] & 0x7f, expected, "PT must match per-subscriber answer");
+        }
+        assert!(routed.iter().any(|(addr, packet)| *addr == native_addr && packet[1] == 96));
+        assert!(routed.iter().any(|(addr, packet)| *addr == custom_addr && packet[1] == 100));
     }
 
     #[tokio::test]

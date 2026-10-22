@@ -645,6 +645,23 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                         if let Ok(sdp) = vks_signaling::sdp::Sdp::parse(&o.sdp) {
                                             if let Some(ref m) = current_membership {
                                                 let pid = parse_participant_id(&m.participant_id);
+                                                if let Some(answer) = replies.iter().find_map(|reply| match reply.payload() {
+                                                    Some(Payload::SdpAnswer(answer)) => Some(answer),
+                                                    _ => None,
+                                                }) {
+                                                    for map in &answer.rtp_map {
+                                                        let kind = match map.codec.to_ascii_lowercase().as_str() {
+                                                            "opus" | "pcmu" | "pcma" | "g722" => vks_core::MediaKind::Audio,
+                                                            "vp8" | "h264" => vks_core::MediaKind::Video,
+                                                            _ => continue,
+                                                        };
+                                                        if let Ok(payload_type) = u8::try_from(map.payload) {
+                                                            ctx.sfu_engine.set_subscriber_payload_type(
+                                                                m.room_id, pid, kind, payload_type,
+                                                            );
+                                                        }
+                                                    }
+                                                }
                                                 let mut tracks = Vec::new();
                                                 for media in &sdp.media {
                                                     let track_kind = match media.kind {
