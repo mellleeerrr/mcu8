@@ -31,3 +31,16 @@
 SRTP/TLS/digest/100rel/Prack, TCP-транспорт, H.323 inbound (отдельный эпик
 Q.931/H.245/RAS), per-m `c=`, симметричный RTP-latch для NAT (P2, следующий шаг).
 Пока UAS рассчитан на доверенный LAN; auth/allowlist — до выставления 5060 наружу.
+
+## Догоняющие исправления после ревью
+
+- 180 Ringing теперь с To-tag; 200/BYE/CANCEL/ACK валидируются по
+  `Call-ID + From-tag + To-tag + CSeq` (spooffed BYE → 481, диалог жив).
+- CANCEL после финального 200 только подтверждается, диалог не рвётся.
+- Admin hangup: `cancel_flag` из реестра подхватывается reaper'ом (5 с) —
+  запись `calls` и слот cap освобождаются, повторный INVITE получает новый To-tag/порты.
+- Per-IP token bucket на INVITE (20 burst / 10 rps); `VKS_SIP_UAS_MAX_CALLS`.
+- Невалидный `c=` → 488 до 200; audio ingress latch первого NAT-пакета
+  с фиксацией; video-failure → unbridge + audio-only downgrade.
+- Добавлен автоматический сетевой тест `inbound_sip_uas_answers_with_to_tag_and_cleans_up_on_bye`
+  (180 tag, 200, spoofed BYE 481, CANCEL-after-200, BYE cleanup).

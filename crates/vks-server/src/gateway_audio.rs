@@ -30,7 +30,11 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
         session.media_stats.audio_codec_running.store(false, Relaxed);
         return;
     }
-    let mut validator = RtpSource::new(target, session.audio_payload_type);
+    let mut validator = if session.source_latch {
+        RtpSource::new_latched(target, session.audio_payload_type)
+    } else {
+        RtpSource::new(target, session.audio_payload_type)
+    };
     let mut queue = std::collections::VecDeque::<f32>::with_capacity(960);
     let mut dtmf = std::collections::VecDeque::<u8>::new();
     let mut dtmf_active: Option<(u8, usize, u32)> = None;
@@ -220,6 +224,9 @@ pub(super) struct RtpSource {
     payload_type: u8,
     ssrc: Option<u32>,
     sequence: Option<u16>,
+    /// Входящий вызов: первый валидный RTP-latch с SDP-target разрешён,
+    /// дальше источник фиксируется (NAT/перемаршрутизация порта).
+    latch: bool,
 }
 
 pub(super) struct RtpPayload<'a> {
@@ -235,12 +242,21 @@ impl RtpSource {
         self.ssrc
     }
     pub(super) fn new(target: std::net::SocketAddr, payload_type: u8) -> Self {
-        Self { target, payload_type, ssrc: None, sequence: None }
+        Self { target, payload_type, ssrc: None, sequence: None, latch: false }
+    }
+
+    /// UAS-вызов: разрешает первый валидный пакет с другого source и
+    /// фиксирует его; последующие источники отбрасываются.
+    pub(super) fn new_latched(target: std::net::SocketAddr, payload_type: u8) -> Self {
+        Self { latch: true, ..Self::new(target, payload_type) }
     }
 
     pub(super) fn accept<'a>(&mut self, source: std::net::SocketAddr, packet: &'a [u8]) -> Option<RtpPayload<'a>> {
         if source != self.target {
-            return None;
+            if !self.latch || self.ssrc.is_some() {
+                return None;
+            }
+            self.target = source;
         }
         let (pt, seq, ts, ssrc, offset) = vks_gateway_sip::parse_rtp_header(packet)?;
         // G.711 PCMU/PCMA may be sent with either static PT after SDP answer:
@@ -301,6 +317,21 @@ mod tests {
         packet[0] |= 0x20;
         packet[171] = 0;
         assert!(source.accept(target, &packet).is_none(), "zero padding size is malformed");
+    }
+
+    #[test]
+    fn latched_inbound_source_accepts_one_nat_port_then_pins_it() {
+        let advertised: std::net::SocketAddr = "192.0.2.1:40000".parse().unwrap();
+        let nat: std::net::SocketAddr = "198.51.100.7:62000".parse().unwrap();
+        let attacker: std::net::SocketAddr = "203.0.113.9:5000".parse().unwrap();
+        let mut source = RtpSource::new_latched(advertised, 0);
+        let mut packet = [0u8; 172];
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 1, 0, 42, false);
+        assert!(source.accept(nat, &packet).is_some(), "first NAT packet latches");
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 2, 160, 42, false);
+        assert!(source.accept(attacker, &packet).is_none(), "source is pinned after latch");
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 3, 320, 42, false);
+        assert!(source.accept(nat, &packet).is_some(), "latched source keeps flowing");
     }
 
     #[test]

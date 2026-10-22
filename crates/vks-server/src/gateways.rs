@@ -583,6 +583,8 @@ pub struct RtpBridgeSession {
     pub remote_media_ip: String,
     pub remote_audio_port: u16,
     pub audio_payload_type: u8,
+    /// Первый входящий RTP-пакет может прийти с другого source (NAT).
+    pub source_latch: bool,
     pub dtmf_payload_type: Option<u8>,
     pub media_stats: Arc<GatewayMediaStats>,
     pub rtp_socket: tokio::net::UdpSocket,
@@ -1074,6 +1076,7 @@ impl GatewayManager {
             remote_media_ip: remote_ip,
             remote_audio_port,
             audio_payload_type,
+            source_latch: false,
             dtmf_payload_type,
             media_stats: media_stats.clone(),
             rtp_socket: port_pair.rtp_socket,
@@ -1499,6 +1502,7 @@ struct InboundUasCall {
     ack: Arc<std::sync::atomic::AtomicBool>,
     sdp: String,
     to_tag: String,
+    invite_cseq: u32,
 }
 
 fn sip_from_display_name(from: &str) -> String {
@@ -1529,16 +1533,65 @@ fn sip_send(socket: &tokio::net::UdpSocket, peer: std::net::SocketAddr, text: &s
 /// возвращают 488/420, а не изображают поддержку.
 pub async fn serve_sip_uas(manager: Arc<GatewayManager>, bind: String, advertised_ip: String) -> std::io::Result<()> {
     let socket = Arc::new(tokio::net::UdpSocket::bind(&bind).await?);
+    serve_sip_uas_on(manager, socket, advertised_ip).await
+}
+
+async fn serve_sip_uas_on(
+    manager: Arc<GatewayManager>,
+    socket: Arc<tokio::net::UdpSocket>,
+    advertised_ip: String,
+) -> std::io::Result<()> {
+    let bind = socket.local_addr().map(|addr| addr.to_string()).unwrap_or_default();
     info!(bind = %bind, advertised_ip = %advertised_ip, "SIP UAS listening");
     let max_calls =
         std::env::var("VKS_SIP_UAS_MAX_CALLS").ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(64);
     let calls: Arc<Mutex<std::collections::HashMap<String, InboundUasCall>>> =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
+    // Простой token bucket per source IP для INVITE: 20 burst, 10 в секунду.
+    // Не заменяет auth/allowlist, но не даёт одному хосту занять все слоты.
+    let mut invite_buckets: std::collections::HashMap<std::net::IpAddr, (f64, std::time::Instant)> =
+        std::collections::HashMap::new();
+    // Админский hangup выставляет cancel_flag в реестре, но не имеет доступа
+    // к этой map. Периодический reaper освобождает запись и ёмкость cap,
+    // не дожидаясь BYE, которого при admin hangup может не быть.
+    let reaper_calls = calls.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            if let Ok(mut guard) = reaper_calls.lock() {
+                guard.retain(|_, call| !call.cancel.load(std::sync::atomic::Ordering::Relaxed));
+            }
+        }
+    });
     let mut buf = [0u8; 65535];
     loop {
         let Ok((count, peer)) = socket.recv_from(&mut buf).await else { continue };
         let text = String::from_utf8_lossy(&buf[..count]);
         let Some(request) = vks_gateway_sip::UasRequest::parse(&text) else { continue };
+        if request.method == "INVITE" {
+            let now = std::time::Instant::now();
+            let bucket = invite_buckets.entry(peer.ip()).or_insert((20.0, now));
+            let elapsed = now.duration_since(bucket.1).as_secs_f64();
+            bucket.0 = (bucket.0 + elapsed * 10.0).min(20.0);
+            bucket.1 = now;
+            if bucket.0 < 1.0 {
+                sip_send(
+                    &socket,
+                    peer,
+                    &vks_gateway_sip::build_response(
+                        503,
+                        "Service Unavailable",
+                        &request,
+                        &advertised_ip,
+                        5060,
+                        None,
+                        "",
+                    ),
+                );
+                continue;
+            }
+            bucket.0 -= 1.0;
+        }
         match request.method.as_str() {
             "INVITE" => {
                 if let Some(require) = &request.require {
@@ -1648,6 +1701,22 @@ pub async fn serve_sip_uas(manager: Arc<GatewayManager>, bind: String, advertise
                     );
                     continue;
                 };
+                if media.remote_ip.parse::<std::net::IpAddr>().is_err() {
+                    sip_send(
+                        &socket,
+                        peer,
+                        &vks_gateway_sip::build_response(
+                            488,
+                            "Not Acceptable Here",
+                            &request,
+                            &advertised_ip,
+                            5060,
+                            None,
+                            "",
+                        ),
+                    );
+                    continue;
+                }
                 let Some(mcu) = manager.mcu_engine.clone() else {
                     sip_send(
                         &socket,
@@ -1706,7 +1775,7 @@ pub async fn serve_sip_uas(manager: Arc<GatewayManager>, bind: String, advertise
                 sip_send(
                     &socket,
                     peer,
-                    &vks_gateway_sip::build_response(180, "Ringing", &request, &advertised_ip, 5060, None, ""),
+                    &vks_gateway_sip::build_response(180, "Ringing", &request, &advertised_ip, 5060, Some(&to_tag), ""),
                 );
                 let response =
                     vks_gateway_sip::build_response(200, "OK", &request, &advertised_ip, 5060, Some(&to_tag), &sdp);
@@ -1736,6 +1805,7 @@ pub async fn serve_sip_uas(manager: Arc<GatewayManager>, bind: String, advertise
                         remote_media_ip: media.remote_ip.clone(),
                         remote_audio_port: media.remote_audio_port,
                         audio_payload_type: media.audio_payload_type,
+                        source_latch: true,
                         dtmf_payload_type: None,
                         media_stats: stats.clone(),
                         rtp_socket: audio_pair.rtp_socket,
@@ -1752,6 +1822,8 @@ pub async fn serve_sip_uas(manager: Arc<GatewayManager>, bind: String, advertise
                         (video_pair, media.remote_video_port, media.video_payload_type)
                     {
                         if let Ok(remote_ip) = media.remote_ip.parse::<std::net::IpAddr>() {
+                            let mcu_downgrade = mcu.clone();
+                            let participant_downgrade = participant;
                             let session = video::VideoBridgeSession {
                                 room_id,
                                 participant_id: participant,
@@ -1775,7 +1847,18 @@ pub async fn serve_sip_uas(manager: Arc<GatewayManager>, bind: String, advertise
                                             lease.disarm();
                                         }
                                     }
-                                    Err(error) => warn!(%error, "inbound SIP video bridge unavailable; audio-only"),
+                                    Err(error) => {
+                                        warn!(%error, "inbound SIP video bridge unavailable; audio-only");
+                                        mcu_downgrade.unbridge_participant(room_id, participant_downgrade);
+                                        mcu_downgrade.bridge_participant(
+                                            room_id,
+                                            participant_downgrade,
+                                            vec![vks_core::track::Track::new(
+                                                participant_downgrade,
+                                                vks_core::track::TrackKind::Audio,
+                                            )],
+                                        );
+                                    }
                                 }
                             });
                         }
@@ -1827,6 +1910,7 @@ pub async fn serve_sip_uas(manager: Arc<GatewayManager>, bind: String, advertise
                             ack: ack.clone(),
                             sdp: sdp.clone(),
                             to_tag: to_tag.clone(),
+                            invite_cseq: request.cseq,
                         },
                     );
                     tokio::spawn(async move {
@@ -1872,17 +1956,44 @@ pub async fn serve_sip_uas(manager: Arc<GatewayManager>, bind: String, advertise
                 }
             }
             "ACK" => {
-                if let Some(call) = calls.lock().expect("inbound calls poisoned").get(&sip_dialog_key(&request)) {
-                    call.ack.store(true, std::sync::atomic::Ordering::Relaxed);
+                let guard = calls.lock().expect("inbound calls poisoned");
+                if let Some(call) = guard.get(&sip_dialog_key(&request)) {
+                    let to_matches = request.to_tag.as_deref() == Some(call.to_tag.as_str());
+                    if to_matches && request.cseq == call.invite_cseq {
+                        call.ack.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
             }
             "BYE" => {
+                let key = sip_dialog_key(&request);
+                let valid = {
+                    let guard = calls.lock().expect("inbound calls poisoned");
+                    guard.get(&key).is_some_and(|call| {
+                        request.to_tag.as_deref() == Some(call.to_tag.as_str()) && request.cseq > call.invite_cseq
+                    })
+                };
+                if !valid {
+                    sip_send(
+                        &socket,
+                        peer,
+                        &vks_gateway_sip::build_response(
+                            481,
+                            "Call/Transaction Does Not Exist",
+                            &request,
+                            &advertised_ip,
+                            5060,
+                            None,
+                            "",
+                        ),
+                    );
+                    continue;
+                }
                 sip_send(
                     &socket,
                     peer,
                     &vks_gateway_sip::build_response(200, "OK", &request, &advertised_ip, 5060, None, ""),
                 );
-                if let Some(call) = calls.lock().expect("inbound calls poisoned").remove(&sip_dialog_key(&request)) {
+                if let Some(call) = calls.lock().expect("inbound calls poisoned").remove(&key) {
                     call.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                     if let Ok(mut registry) = manager.registry.lock() {
                         if let Some(session) = registry.by_participant.remove(&call.participant_id) {
@@ -1908,39 +2019,11 @@ pub async fn serve_sip_uas(manager: Arc<GatewayManager>, bind: String, advertise
                     peer,
                     &vks_gateway_sip::build_response(200, "OK", &request, &advertised_ip, 5060, None, ""),
                 );
-                if let Some(call) = calls.lock().expect("inbound calls poisoned").remove(&sip_dialog_key(&request)) {
-                    call.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                    if let Ok(mut registry) = manager.registry.lock() {
-                        if let Some(session) = registry.by_participant.remove(&call.participant_id) {
-                            registry.by_call.remove(&session.call_id);
-                        }
-                    }
-                    let mut invite = request.clone();
-                    invite.method = "INVITE".into();
-                    sip_send(
-                        &socket,
-                        peer,
-                        &vks_gateway_sip::build_response(
-                            487,
-                            "Request Terminated",
-                            &invite,
-                            &advertised_ip,
-                            5060,
-                            None,
-                            "",
-                        ),
-                    );
-                    if let Some(state) =
-                        manager.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
-                    {
-                        terminate_gateway_participant_in_room(
-                            &state,
-                            manager.mcu_engine.as_ref(),
-                            &call.room_id,
-                            &call.participant_id,
-                        );
-                    }
-                }
+                // 200 OK отправляется синхронно до вставки в `calls`, поэтому
+                // любой известный CANCEL относится уже к финальному ответу:
+                // RFC 3261 §9.2 — только 200 на CANCEL, диалог не рвём.
+                // Неизвестный CANCEL (транзакция не найдена) тоже 200: 481
+                // здесь только размножает ретрансмиссии.
             }
             "OPTIONS" => {
                 let mut response = vks_gateway_sip::build_response(200, "OK", &request, &advertised_ip, 5060, None, "");
@@ -2611,6 +2694,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             remote_media_ip: "127.0.0.1".into(),
             remote_audio_port: terminal.local_addr().unwrap().port(),
             audio_payload_type: 0,
+            source_latch: false,
             dtmf_payload_type: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
             rtp_socket: bridge,
@@ -2663,6 +2747,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             remote_media_ip: "127.0.0.1".into(),
             remote_audio_port: terminal.local_addr().unwrap().port(),
             audio_payload_type: 0,
+            source_latch: false,
             dtmf_payload_type: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
             rtp_socket: socket,
@@ -2711,6 +2796,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             remote_media_ip: "127.0.0.1".into(),
             remote_audio_port: terminal.local_addr().unwrap().port(),
             audio_payload_type: 8,
+            source_latch: false,
             dtmf_payload_type: None,
             rtp_socket: socket,
             rtcp_socket: None,
@@ -2758,6 +2844,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             remote_media_ip: "127.0.0.1".into(),
             remote_audio_port: terminal.local_addr().unwrap().port(),
             audio_payload_type: 0,
+            source_latch: false,
             dtmf_payload_type: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
             rtp_socket: socket,
@@ -2801,6 +2888,125 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert!(media_bridge_dead(Duration::from_secs(16), 0, 0, true));
         assert!(!media_bridge_dead(Duration::from_secs(10), 9_000, 10_000, true));
         assert!(media_bridge_dead(Duration::from_secs(20), 1_000, 20_000, true));
+    }
+
+    #[tokio::test]
+    async fn inbound_sip_uas_answers_with_to_tag_and_cleans_up_on_bye() {
+        use vks_admin::state::AppState;
+        let state = Arc::new(AppState::new());
+        let room = Rooms::create(&state, "uas-inbound");
+        let manager = Arc::new(
+            GatewayManager::new().with_mcu(Arc::new(vks_media_mcu::McuEngine::new())).with_candidate_ip("127.0.0.1"),
+        );
+        manager.bind_state(Arc::downgrade(&state));
+        let server = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let server_port = server.local_addr().unwrap().port();
+        let listener = tokio::spawn(serve_sip_uas_on(manager.clone(), server, "127.0.0.1".into()));
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(("127.0.0.1", server_port)).await.unwrap();
+        let sdp = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+        let invite = format!(
+            "INVITE sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:40000;branch=z9hG4bKt\r\nFrom: \"T\" <sip:t@127.0.0.1>;tag=ft\r\nTo: <sip:{}@127.0.0.1>\r\nCall-ID: cid-test\r\nCSeq: 1 INVITE\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+            room.id, room.id, sdp.len(), sdp
+        );
+        client.send(invite.as_bytes()).await.unwrap();
+        let mut to_tag = String::new();
+        let mut saw_ringing_with_tag = false;
+        let mut saw_ok = false;
+        for _ in 0..4 {
+            let mut buf = [0u8; 8192];
+            let len = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv(&mut buf))
+                .await
+                .expect("UAS response timeout")
+                .unwrap();
+            let text = String::from_utf8_lossy(&buf[..len]);
+            if text.starts_with("SIP/2.0 180") {
+                saw_ringing_with_tag = text.contains(";tag=");
+            }
+            if text.starts_with("SIP/2.0 200") {
+                saw_ok = true;
+                to_tag = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("To:"))
+                    .and_then(|line| line.split(";tag=").nth(1))
+                    .map(|tag| tag.trim().to_string())
+                    .expect("200 OK must carry To tag");
+                break;
+            }
+        }
+        assert!(saw_ok, "UAS must answer INVITE with 200");
+        assert!(saw_ringing_with_tag, "180 Ringing must carry To tag");
+        let ack = format!(
+            "ACK sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:40000;branch=z9hG4bKa\r\nFrom: \"T\" <sip:t@127.0.0.1>;tag=ft\r\nTo: <sip:{}@127.0.0.1>;tag={}\r\nCall-ID: cid-test\r\nCSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n",
+            room.id, room.id, to_tag
+        );
+        client.send(ack.as_bytes()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(manager.registry.lock().unwrap().by_participant.len(), 1, "ACK must keep the call registered");
+        let spoofed_bye = format!(
+            "BYE sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:40000;branch=z9hG4bKs\r\nFrom: \"T\" <sip:t@127.0.0.1>;tag=ft\r\nTo: <sip:{}@127.0.0.1>;tag=WRONG\r\nCall-ID: cid-test\r\nCSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n",
+            room.id, room.id
+        );
+        client.send(spoofed_bye.as_bytes()).await.unwrap();
+        let mut spoof_status = String::new();
+        for _ in 0..10 {
+            let mut buf = [0u8; 8192];
+            let Ok(Ok(len)) = tokio::time::timeout(std::time::Duration::from_secs(1), client.recv(&mut buf)).await
+            else {
+                break;
+            };
+            let text = String::from_utf8_lossy(&buf[..len]);
+            if text.starts_with("SIP/2.0") {
+                spoof_status = text.lines().next().unwrap_or_default().to_string();
+                break;
+            }
+        }
+        assert!(spoof_status.starts_with("SIP/2.0 481"), "spoofed To-tag BYE must be 481, got {spoof_status}");
+        assert_eq!(manager.registry.lock().unwrap().by_participant.len(), 1, "spoofed BYE must not kill the dialog");
+        let cancel = format!(
+            "CANCEL sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:40000;branch=z9hG4bKc\r\nFrom: \"T\" <sip:t@127.0.0.1>;tag=ft\r\nTo: <sip:{}@127.0.0.1>;tag={}\r\nCall-ID: cid-test\r\nCSeq: 1 CANCEL\r\nContent-Length: 0\r\n\r\n",
+            room.id, room.id, to_tag
+        );
+        client.send(cancel.as_bytes()).await.unwrap();
+        let mut cancel_ok = false;
+        for _ in 0..10 {
+            let mut buf = [0u8; 8192];
+            let Ok(Ok(len)) = tokio::time::timeout(std::time::Duration::from_secs(1), client.recv(&mut buf)).await
+            else {
+                break;
+            };
+            if String::from_utf8_lossy(&buf[..len]).starts_with("SIP/2.0 200") {
+                cancel_ok = true;
+                break;
+            }
+        }
+        assert!(cancel_ok, "CANCEL after final 200 must be acknowledged");
+        assert_eq!(
+            manager.registry.lock().unwrap().by_participant.len(),
+            1,
+            "CANCEL after 200 must not end the dialog"
+        );
+        let bye = format!(
+            "BYE sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:40000;branch=z9hG4bKb\r\nFrom: \"T\" <sip:t@127.0.0.1>;tag=ft\r\nTo: <sip:{}@127.0.0.1>;tag={}\r\nCall-ID: cid-test\r\nCSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n",
+            room.id, room.id, to_tag
+        );
+        client.send(bye.as_bytes()).await.unwrap();
+        let mut bye_ok = false;
+        for _ in 0..10 {
+            let mut buf = [0u8; 8192];
+            let Ok(Ok(len)) = tokio::time::timeout(std::time::Duration::from_secs(1), client.recv(&mut buf)).await
+            else {
+                break;
+            };
+            if String::from_utf8_lossy(&buf[..len]).starts_with("SIP/2.0 200") {
+                bye_ok = true;
+                break;
+            }
+        }
+        assert!(bye_ok, "BYE must be acknowledged");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(manager.registry.lock().unwrap().by_participant.is_empty(), "BYE must remove registry state");
+        listener.abort();
     }
 
     #[test]
