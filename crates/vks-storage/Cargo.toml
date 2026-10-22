@@ -18,6 +18,7 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 vks-core = { path = "../vks-core" }
+vks-common = { path = "../vks-common" }
 async-trait = "0.1"
 tokio.workspace = true
 libc.workspace = true

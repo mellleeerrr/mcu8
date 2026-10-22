@@ -93,7 +93,7 @@ fn native_contact_payload_uses_tenths_db_and_address_options() {
         "Address payload is protocol options, not the session controls envelope"
     );
     assert_eq!(canonical_uri("H323:192.168.1.132"), "h323:192.168.1.132");
-    assert_eq!(canonical_uri("192.168.1.132:5060"), "sip:192.168.1.132:5060");
+    assert_eq!(canonical_uri("192.168.1.132:5060"), "sip:192.168.1.132");
     assert_eq!(canonical_uri("rtsp://192.168.1.132/stream"), "rtsp://192.168.1.132/stream");
     let patched = merged_contact_payload(
         Some(&json!({"volume_rx":-60,"audio_rx_enabled":false})),

@@ -54,21 +54,12 @@ pub struct Alias {
     pub to: String,
 }
 
-/// Нормализация адреса: `protocol:rest` (lower), `auto:` трактуется как `sip:`.
-/// Схема валидируется так же, как в `call_strings::canonical_uri`.
+/// Нормализация адреса для дедупликации. T10: единая политика с API —
+/// нижний регистр только схемы/host, userinfo и параметры сохраняются,
+/// default-порты `sip:5060`/`h323:1720` убираются.
 #[must_use]
 pub fn normalize_uri(uri: &str) -> String {
-    let trimmed = uri.trim();
-    if let Some((scheme, rest)) = trimmed.split_once(':') {
-        let mut characters = scheme.chars();
-        let valid = characters.next().is_some_and(|c| c.is_ascii_alphabetic())
-            && characters.all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c));
-        if valid && !scheme.is_empty() {
-            let scheme = if scheme.eq_ignore_ascii_case("auto") { "sip" } else { scheme };
-            return format!("{}:{}", scheme.to_ascii_lowercase(), rest.trim().to_lowercase());
-        }
-    }
-    format!("sip:{}", trimmed.to_lowercase())
+    vks_common::uri::canonical_uri(uri)
 }
 
 /// Канонический JSON (ключи отсортированы) — fingerprint раскладки.
@@ -705,6 +696,16 @@ mod tests {
         assert!(doc["resources"]["addresses"].get("cs-one").is_some());
         assert_eq!(report.room_contacts_after, 0);
         assert_eq!(report.addresses_after, 1);
+    }
+
+    #[test]
+    fn normalize_uri_matches_api_canonical_policy() {
+        assert_eq!(normalize_uri("SIP:Host:5060"), "sip:host");
+        assert_eq!(normalize_uri("sip:Host"), normalize_uri("SIP:Host"));
+        assert_eq!(normalize_uri("h323:Host:1720"), "h323:host");
+        assert_eq!(normalize_uri("Example.COM"), "sip:example.com");
+        // userinfo регистр сохраняется: SIP user-part case-sensitive.
+        assert_ne!(normalize_uri("sip:Alice@Host"), normalize_uri("sip:alice@Host"));
     }
 
     #[test]

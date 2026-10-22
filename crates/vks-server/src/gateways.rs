@@ -52,15 +52,20 @@ fn explicit_video_options(contact: Option<&serde_json::Value>, protocol: &str) -
 }
 
 /// Ищет intent конкретного адреса: сначала контакт этой комнаты, затем
-/// глобальную адресную книгу. `uri` сравнивается без учёта регистра.
+/// глобальную адресную книгу. Сравнение — по единой canonical-форме T10,
+/// иначе `SIP:HOST:5060` не найдёт сохранённый `sip:host`.
 fn find_call_string_override<'a>(
     resources: &'a vks_admin::api_v3::resources::ResourceState,
     room_id: Option<RoomId>,
     uri: &str,
 ) -> Option<&'a serde_json::Value> {
-    let protocol = if uri.starts_with("h323:") { "h323" } else { "sip" };
+    let wanted = vks_common::uri::canonical_uri(uri);
+    let protocol = if wanted.starts_with("h323:") { "h323" } else { "sip" };
     let matches = |contact: &&serde_json::Value| {
-        contact.get("uri").and_then(serde_json::Value::as_str).is_some_and(|value| value.eq_ignore_ascii_case(uri))
+        contact
+            .get("uri")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| vks_common::uri::canonical_uri(value) == wanted)
     };
     if let Some(contact) = room_id
         .and_then(|id| resources.contacts.get(&id.to_string()))
@@ -72,7 +77,7 @@ fn find_call_string_override<'a>(
     resources
         .addresses
         .values()
-        .find(|record| record.uri.eq_ignore_ascii_case(uri))
+        .find(|record| vks_common::uri::canonical_uri(&record.uri) == wanted)
         .and_then(|record| protocol_options(&record.payload, protocol))
 }
 
@@ -1712,7 +1717,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
     }
 
     #[test]
-    fn call_string_lookup_matches_uri_case_insensitively_and_picks_protocol() {
+    fn call_string_lookup_uses_canonical_host_case_and_picks_protocol() {
         let mut resources = vks_admin::api_v3::resources::ResourceState::default();
         resources.addresses.insert(
             "addr-1".to_string(),
@@ -1727,7 +1732,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
                 }),
             },
         );
-        let sip = find_call_string_override(&resources, None, "sip:probe@192.168.1.132").expect("sip override");
+        let sip = find_call_string_override(&resources, None, "sip:Probe@192.168.1.132:5060").expect("sip override");
         assert_eq!(sip["bitrate"], 256);
         assert_eq!(sip["resolution"]["width"], 320);
         resources.addresses.insert(

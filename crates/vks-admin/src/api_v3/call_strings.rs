@@ -177,18 +177,9 @@ pub fn conflict_error(description: &str) -> Response {
 }
 
 /// Канонизирует адрес абонента, гарантируя наличие схемы протокола (`sip:` по умолчанию).
+/// T10: политика живёт в `vks_common::uri`, чтобы API и дедупликация не расходились.
 pub fn canonical_uri(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if let Some((scheme, address)) = trimmed.split_once(':') {
-        let mut characters = scheme.chars();
-        if characters.next().is_some_and(|character| character.is_ascii_alphabetic())
-            && characters.all(|character| character.is_ascii_alphanumeric() || "+.-".contains(character))
-        {
-            let scheme = scheme.to_ascii_lowercase();
-            return format!("{}:{address}", if scheme == "auto" { "sip" } else { scheme.as_str() });
-        }
-    }
-    format!("sip:{trimmed}")
+    vks_common::uri::canonical_uri(raw)
 }
 
 /// One call intent can have several attempts; stale completions cannot replace a retry.
@@ -1020,12 +1011,19 @@ pub async fn list_call_strings(
     Json(json!({"count":count,"call_strings":call_strings})).into_response()
 }
 
+/// Старые/внешние writer'ы могли сохранить payload в конверте
+/// `{"call_string": {...}}`; для merge и хранения нормализуем к protocol-map.
+fn normalize_address_payload(payload: &Value) -> Value {
+    payload.get("call_string").filter(|value| value.is_object()).cloned().unwrap_or_else(|| payload.clone())
+}
+
 fn address_payload(previous: Option<&Value>, patch: Option<&Value>) -> Value {
     let mut payload = previous.cloned().unwrap_or_else(|| json!({}));
     if !payload.is_object() {
         payload = json!({});
     }
-    if let Some(protocols) = patch.and_then(Value::as_object) {
+    let patch = patch.map(normalize_address_payload);
+    if let Some(protocols) = patch.as_ref().and_then(Value::as_object) {
         for (protocol, options) in protocols {
             super::resources::merge_json(&mut payload[protocol], options);
         }
@@ -1084,21 +1082,40 @@ pub async fn create_call_string(
     if !body.is_object() {
         return validation_error("body must be an object", "body");
     }
-    let (uri, display_name, patch) = match address_fields(&body) {
+    let explicit_display_name =
+        body["display_name"].as_str().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
+    let (uri, fallback_display_name, patch) = match address_fields(&body) {
         Ok(values) => values,
         Err((reason, position)) => return validation_error(reason, position),
     };
-    let id = format!("cs-{}", Uuid::new_v4());
-    let record = AddressRecord {
-        id: id.clone(),
-        uri,
-        display_name,
-        created_at: now_unix_sec(),
-        payload: address_payload(None, patch.as_ref()),
-    };
     let mut resources = state.api_v3.resources.lock().await;
     let previous = resources.clone();
-    resources.addresses.insert(id, record.clone());
+    let existing_id =
+        resources.addresses.iter().find_map(|(id, address)| (canonical_uri(&address.uri) == uri).then(|| id.clone()));
+    let record = if let Some(id) = existing_id {
+        let Some(current) = resources.addresses.get(&id).cloned() else {
+            return error_json(500, "Address book state changed during update");
+        };
+        // T10: повторный POST того же canonical URI идемпотентен. Сохраняем
+        // стабильный id и created_at; display_name обновляем только если он
+        // явно передан, payload — патчем поверх текущего.
+        AddressRecord {
+            id,
+            uri,
+            display_name: explicit_display_name.unwrap_or(current.display_name),
+            created_at: current.created_at,
+            payload: address_payload(Some(&normalize_address_payload(&current.payload)), patch.as_ref()),
+        }
+    } else {
+        AddressRecord {
+            id: format!("cs-{}", Uuid::new_v4()),
+            uri,
+            display_name: explicit_display_name.unwrap_or(fallback_display_name),
+            created_at: now_unix_sec(),
+            payload: address_payload(None, patch.as_ref()),
+        }
+    };
+    resources.addresses.insert(record.id.clone(), record.clone());
     if let Err(response) = super::resources::commit(&state, &mut resources, previous).await {
         return response;
     }
@@ -1307,3 +1324,125 @@ pub async fn get_call_string(
 #[cfg(test)]
 #[path = "call_lifecycle_tests.rs"]
 mod call_lifecycle_tests;
+
+#[cfg(test)]
+mod t10_canonical_create_tests {
+    use super::*;
+    use crate::api_v3::tests::json_body;
+    use crate::auth_middleware::AuthType;
+    use std::sync::Arc;
+
+    fn auth() -> AuthContext {
+        AuthContext {
+            subject: "operator".into(),
+            role: Role::Operator,
+            auth_type: AuthType::Jwt,
+            scopes: Vec::new(),
+            room_scope: None,
+            generation: 0,
+            client_ip: "127.0.0.1".into(),
+        }
+    }
+
+    fn state() -> SharedState {
+        let mut state = AppState::new();
+        state.storage = Some(Arc::new(vks_storage::memory::MemoryStorage::new()));
+        let state = Arc::new(state);
+        crate::users::Users::bootstrap_operator(&state, "operator");
+        state
+    }
+
+    async fn create(state: &SharedState, body: Value) -> Value {
+        let response = create_call_string(State(state.clone()), Extension(auth()), Json(body)).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        json_body(response).await["call_string"].clone()
+    }
+
+    #[tokio::test]
+    async fn repeated_global_address_is_idempotent_by_canonical_uri() {
+        let state = state();
+        let first = create(
+            &state,
+            json!({"uri": "SIP:Alice@Example.COM:5060", "display_name": "First",
+                   "payload": {"sip": {"bitrate": 2048}}}),
+        )
+        .await;
+        let id = first["id"].as_str().unwrap().to_string();
+        assert_eq!(first["uri"], "sip:Alice@example.com");
+        assert_eq!(first["display_name"], "First");
+
+        let second = create(
+            &state,
+            json!({"uri": "sip:Alice@example.com", "display_name": "Second",
+                   "payload": {"sip": {"video_codecs": ["H264"]}}}),
+        )
+        .await;
+        assert_eq!(second["id"], id, "same canonical URI must keep the same global id");
+        assert_eq!(second["display_name"], "Second");
+        assert_eq!(second["payload"]["sip"]["bitrate"], 2048);
+        assert_eq!(second["payload"]["sip"]["video_codecs"][0], "H264");
+        assert_eq!(state.api_v3.resources.lock().await.addresses.len(), 1);
+
+        // Отсутствие display_name в повторном POST не должно затирать имя.
+        let third = create(&state, json!({"uri": "auto:Alice@Example.COM:5060"})).await;
+        assert_eq!(third["id"], id);
+        assert_eq!(third["display_name"], "Second");
+        assert_eq!(state.api_v3.resources.lock().await.addresses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn scheme_less_and_enveloped_payload_are_idempotent() {
+        let state = state();
+        let first = create(&state, json!({"uri": "Example.COM", "display_name": "No scheme"})).await;
+        assert_eq!(first["uri"], "sip:example.com");
+        let id = first["id"].as_str().unwrap().to_string();
+        let again = create(&state, json!({"uri": "sip:Example.COM:5060", "display_name": "Still one"})).await;
+        assert_eq!(again["id"], id, "scheme-less and explicit forms must share canonical id");
+        assert_eq!(state.api_v3.resources.lock().await.addresses.len(), 1);
+
+        // Старый payload-конверт не должен приводить к потере patch.
+        {
+            let mut resources = state.api_v3.resources.lock().await;
+            let record = resources.addresses.get_mut(&id).unwrap();
+            record.payload = json!({"call_string": {"sip": {"bitrate": 512}}});
+        }
+        let envelope_first = create(
+            &state,
+            json!({"uri": "sip:envelope@example.com", "payload": {"call_string": {"sip": {"bitrate": 777}}}}),
+        )
+        .await;
+        assert_eq!(envelope_first["payload"]["sip"]["bitrate"], 777, "первый POST с конвертом нормализуется");
+
+        let updated =
+            create(&state, json!({"uri": "sip:example.com", "payload": {"sip": {"video_codecs": ["H264"]}}})).await;
+        assert_eq!(updated["id"], id);
+        assert_eq!(updated["payload"]["sip"]["bitrate"], 512);
+        assert_eq!(updated["payload"]["sip"]["video_codecs"][0], "H264");
+        assert_eq!(state.api_v3.resources.lock().await.addresses.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn different_protocols_of_same_host_stay_separate_but_room_copy_survives() {
+        let state = state();
+        let sip = create(&state, json!({"uri": "SIP:Alice@Example.COM:5060", "display_name": "SIP"})).await;
+        let h323 = create(&state, json!({"uri": "h323:Alice@Example.COM:1720", "display_name": "H323"})).await;
+        assert_ne!(sip["id"], h323["id"]);
+        assert_eq!(state.api_v3.resources.lock().await.addresses.len(), 2);
+
+        let room_contact = json!({
+            "id": "cs-room-copy", "contact_id": "cs-room-copy", "call_string_id": "cs-room-copy",
+            "contact_type": "call_strings", "uri": "SIP:Alice@Example.COM:5060",
+            "connection_url": "SIP:Alice@Example.COM:5060", "display_name": "Room copy",
+            "created_at": 1, "payload": {"call_string": {"sip": {"bitrate": 64}}}
+        });
+        state.api_v3.resources.lock().await.contacts.insert("room-a".into(), vec![room_contact]);
+
+        let updated = create(&state, json!({"uri": "sip:Alice@example.com", "display_name": "Global"})).await;
+        assert_eq!(updated["id"], sip["id"]);
+        assert_eq!(updated["display_name"], "Global");
+        let resources = state.api_v3.resources.lock().await;
+        assert_eq!(resources.addresses.len(), 2, "room copy must not become a global address");
+        assert_eq!(resources.contacts["room-a"][0]["id"], "cs-room-copy", "T10a must not collapse scope copies");
+        assert_eq!(resources.contacts["room-a"][0]["uri"], "SIP:Alice@Example.COM:5060");
+    }
+}
