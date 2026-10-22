@@ -111,7 +111,6 @@ fn codec_name(item: &serde_json::Value) -> Option<String> {
 
 /// Audio codecs the H.323 sidecar actually opens an OLC for: symmetric
 /// G.722 (PT9) or G.711U (PT0).
-
 const H323_AUDIO: &[&str] = &["PCMU", "G711U", "G711", "G722"];
 
 fn h323_audio_native(name: &str) -> bool {

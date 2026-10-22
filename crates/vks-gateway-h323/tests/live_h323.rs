@@ -80,7 +80,12 @@ async fn live_h323_connect() {
                 if let Ok((len, source)) = result {
                     audio_packets += 1;
                     if audio_packets == 1 {
-                        println!("first H.323 audio RTP from {source}: {len} bytes, pt={}", audio_buffer[1] & 0x7f);
+                        let pt = audio_buffer[1] & 0x7f;
+                        println!("first H.323 audio RTP from {source}: {len} bytes, pt={pt}");
+                        if std::env::var("VKS_LIVE_EXPECT_G722").is_ok_and(|value| value == "1") {
+                            assert_eq!(pt, 9, "expected G.722 RTP PT9");
+                            assert_eq!(len, 12 + 160, "expected one 20 ms G.722 frame");
+                        }
                     }
                 }
             }
