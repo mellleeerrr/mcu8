@@ -1,6 +1,6 @@
 //! Raw-frame placeholder types and codec abstractions.
 //!
-//! Фаза 3 (DEVELOPMENT_PLAN.md): `Frame` / `CompositeFrame` — placeholder
+//! Фаза 3 (DEVELOPMENT_PLAN.md): `Frame` — placeholder
 //! raw-frame types (width, height, opaque byte payload) that stand in for
 //! real decoded pixel frames. `VideoEncoder` / `VideoDecoder` — codec
 //! abstractions with deterministic mock impls; the real codecs
@@ -58,34 +58,6 @@ impl Frame {
     /// Zero-size frame with an empty payload.
     pub fn empty() -> Self {
         Self { width: 0, height: 0, data: Vec::new() }
-    }
-}
-
-/// The composed canvas frame produced by the [`crate::compositor::Compositor`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompositeFrame {
-    /// Canvas width (px).
-    pub width: u32,
-    /// Canvas height (px).
-    pub height: u32,
-    /// Canvas pixel buffer.
-    pub data: Vec<u8>,
-}
-
-impl CompositeFrame {
-    /// Creates a composite frame.
-    pub fn new(width: u32, height: u32, data: Vec<u8>) -> Self {
-        Self { width, height, data }
-    }
-
-    /// A black (zeroed) canvas of the given size.
-    pub fn black(width: u32, height: u32) -> Self {
-        Self { width, height, data: vec![0u8; width as usize * height as usize] }
-    }
-
-    /// Converts the composite frame into a plain [`Frame`].
-    pub fn into_frame(self) -> Frame {
-        Frame { width: self.width, height: self.height, data: self.data }
     }
 }
 

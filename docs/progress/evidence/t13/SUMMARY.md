@@ -1,6 +1,6 @@
 # T13 — подпись участника в плитке ×2 и счётчики комнаты
 
-Дата: 2026-10-22. Артефакты: `artifacts/e2e-label-zoom/`, харнесс `tests/e2e/label-zoom.js`.
+Дата: 2026-10-22. Артефакты: `docs/progress/evidence/e2e-label-zoom/`, харнесс `tests/e2e/label-zoom.js`.
 
 ## Что было
 
@@ -48,7 +48,7 @@
 
 ## Доказательства
 
-`artifacts/e2e-label-zoom/result.json` — `ok=true`, **102 проверки, 0 провалов**,
+`docs/progress/evidence/e2e-label-zoom/result.json` — `ok=true`, **102 проверки, 0 провалов**,
 `failedFatalChecks: []`, `knownIssues: []`.
 
 | размер | плитка | slot font | label font | подпись | dx | dy | внутри плитки | overflow |

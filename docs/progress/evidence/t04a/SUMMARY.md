@@ -1,7 +1,7 @@
 # T04a evidence — узкий P0-smoke раскладок (live Playwright)
 
 Дата: 2026-10-22. Задача: T04a, после T03 (`d8aecc3`).
-Итоговый прогон: `VKS_ARTIFACTS=artifacts/e2e-t04a-6 node tests/e2e/live.js`
+Итоговый прогон: `VKS_ARTIFACTS=docs/progress/evidence/t04a/result.json node tests/e2e/live.js`
 (артефакты `result.json`, `network.json`, `trace.zip`, PNG; в git не коммитятся,
 `/artifacts/` в `.gitignore`). Промежуточные прогоны t04a-1..5 сохранены.
 

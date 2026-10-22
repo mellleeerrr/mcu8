@@ -13,8 +13,9 @@
 //! - [`rect`] — [`Rect`], [`Canvas`] (пиксельная геометрия).
 //! - [`grid`] — [`GridLayout`]: N тайлов в балансированную сетку.
 //! - [`focus`] — [`FocusLayout`]: крупный фокус + полоса мелких.
-//! - [`renderer`] — [`Renderer`]: Layout + frame-meta → `Vec<DrawCommand>`.
 //! - [`preset`] — вендорные пресеты PNM: id, схемы и геометрия слотов.
+//! - [`codian`] — 52 раскладки Codian MCU 4200 + 2 кастомные.
+//! - [`roles`] — роли окон (default/fixed/active/rolling) и назначение участников.
 //!
 //! ## Инварианты
 //! - Все rect в пикселях на canvas (общая валюта MCU/клиента).
@@ -26,13 +27,15 @@
 //! Дерево: vks-core (концептуально); по типам-идентификаторам крейт
 //! самодостаточен (dep-light: только serde + thiserror).
 
+pub mod codian;
 mod core;
 mod focus;
 mod grid;
 pub mod preset;
 mod rect;
-mod renderer;
+pub mod roles;
 
+pub use codian::{CodianScheme, Pip, Region};
 pub use core::{Layout, LayoutError, LayoutKind, NormalizedLayout, NormalizedSlot, ParticipantId, Slot, SlotId};
 pub use focus::FocusLayout;
 pub use grid::GridLayout;
@@ -40,4 +43,4 @@ pub use preset::{
     CalculatedSlot, GridDefaults, GridInfo, GridPayload, GridSlot, Position, PresetId, PresetScheme, SlotRect,
 };
 pub use rect::{Canvas, NormalizedRect, Rect};
-pub use renderer::{DrawCommand, FrameMeta, Renderer};
+pub use roles::{assign_by_role, RotationState, SlotRole};

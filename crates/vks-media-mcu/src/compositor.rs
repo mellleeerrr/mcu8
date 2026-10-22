@@ -1,5 +1,5 @@
 //! Compositor: N input frames + per-slot [`PixelRect`]s → a single
-//! 1920×1080 [`CompositeFrame`].
+//! 1920×1080 [`Frame`].
 //!
 //! Фаза 3 (DEVELOPMENT_PLAN.md): N видео → canvas 1920×1080. The default
 //! implementation is a deterministic nearest-neighbour scaler with
@@ -11,8 +11,9 @@
 //! No `unsafe`.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use crate::frame::{CompositeFrame, Frame, CANVAS_HEIGHT, CANVAS_WIDTH};
+use crate::frame::{Frame, CANVAS_HEIGHT, CANVAS_WIDTH};
 use crate::layout_bridge::PixelRect;
 
 /// Canvas size (1920×1080) the MCU composites onto.
@@ -36,8 +37,8 @@ impl Compositor {
     /// - Rects are clamped to the canvas.
     /// - Overlapping rects: higher `z` wins; equal `z` falls back to slot key
     ///   (deterministic order).
-    pub fn compose(&self, frames: &BTreeMap<u32, Frame>, rects: &BTreeMap<u32, PixelRect>) -> CompositeFrame {
-        let mut canvas = CompositeFrame::black(CANVAS_WIDTH, CANVAS_HEIGHT);
+    pub fn compose(&self, frames: &BTreeMap<u32, Arc<Frame>>, rects: &BTreeMap<u32, PixelRect>) -> Frame {
+        let mut canvas = Frame::filled(CANVAS_WIDTH, CANVAS_HEIGHT, 0);
         let pixels = CANVAS_WIDTH as usize * CANVAS_HEIGHT as usize;
         if frames.values().any(|frame| frame.is_yuv420p()) {
             canvas.data.fill(16);
@@ -72,7 +73,7 @@ impl Compositor {
     }
 
     /// Scales `frame` into `rect` (uniform fit, centered) in the canvas.
-    fn blit(canvas: &mut CompositeFrame, frame: &Frame, rect: &PixelRect) {
+    fn blit(canvas: &mut Frame, frame: &Frame, rect: &PixelRect) {
         let (cw, ch) = (CANVAS_WIDTH as usize, CANVAS_HEIGHT as usize);
         // Visible region = intersection of `rect` with the canvas [0..W]×[0..H].
         let rx = rect.x as usize;
@@ -167,7 +168,7 @@ mod tests {
         let mut red = vec![76; pixels];
         red.extend(vec![85; pixels / 4]);
         red.extend(vec![255; pixels / 4]);
-        let frames = BTreeMap::from([(0, Frame::new(320, 180, red))]);
+        let frames = BTreeMap::from([(0, Arc::new(Frame::new(320, 180, red)))]);
         let rects = BTreeMap::from([(0, PixelRect::new(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT))]);
         let result = Compositor.compose(&frames, &rects);
         let output_pixels = CANVAS_WIDTH as usize * CANVAS_HEIGHT as usize;
@@ -177,14 +178,14 @@ mod tests {
         assert!(result.data[output_pixels * 5 / 4..].iter().all(|v| *v == 255));
     }
 
-    fn slot_rects(n: u32) -> (BTreeMap<u32, Frame>, BTreeMap<u32, PixelRect>) {
+    fn slot_rects(n: u32) -> (BTreeMap<u32, Arc<Frame>>, BTreeMap<u32, PixelRect>) {
         // n distinct frames + n distinct 960×540 tiles in a 2×2 grid.
         let tiles = [(0u32, 0u32), (960, 0), (0, 540), (960, 540)];
         let mut frames = BTreeMap::new();
         let mut rects = BTreeMap::new();
         for i in 0..n.min(4) {
             let (x, y) = tiles[i as usize];
-            frames.insert(i, Frame::filled(320, 180, (10 * (i + 1)) as u8));
+            frames.insert(i, Arc::new(Frame::filled(320, 180, (10 * (i + 1)) as u8)));
             rects.insert(i, PixelRect::new(x, y, 960, 540));
         }
         (frames, rects)
@@ -222,7 +223,7 @@ mod tests {
     #[test]
     fn single_frame_fills_full_canvas() {
         let mut frames = BTreeMap::new();
-        frames.insert(0u32, Frame::filled(1920, 1080, 42));
+        frames.insert(0u32, Arc::new(Frame::filled(1920, 1080, 42)));
         let mut rects = BTreeMap::new();
         rects.insert(0, PixelRect::new(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT));
         let out = Compositor.compose(&frames, &rects);
@@ -238,7 +239,7 @@ mod tests {
     #[test]
     fn missing_frame_slot_stays_black() {
         let mut frames = BTreeMap::new();
-        frames.insert(0u32, Frame::filled(320, 180, 7));
+        frames.insert(0u32, Arc::new(Frame::filled(320, 180, 7)));
         let mut rects = BTreeMap::new();
         rects.insert(0, PixelRect::new(0, 0, 960, 540));
         rects.insert(1, PixelRect::new(960, 0, 960, 540)); // no frame
@@ -252,7 +253,8 @@ mod tests {
 
     #[test]
     fn higher_z_index_is_drawn_on_top_for_overlap_pip() {
-        let frames = BTreeMap::from([(0, Frame::filled(320, 180, 10)), (1, Frame::filled(320, 180, 20))]);
+        let frames =
+            BTreeMap::from([(0, Arc::new(Frame::filled(320, 180, 10))), (1, Arc::new(Frame::filled(320, 180, 20)))]);
         let rects = BTreeMap::from([
             (0, PixelRect::new(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT).with_z(0)),
             (1, PixelRect::new(0, 0, 960, 540).with_z(1)),
@@ -268,7 +270,7 @@ mod tests {
         // sx = 960/320 = 3.0, sy = 540/240 = 2.25 → s = 2.25 →
         // dw = 720, dh = 540 → centered horizontally: ox = 120.
         let mut frames = BTreeMap::new();
-        frames.insert(0u32, Frame::filled(320, 240, 5));
+        frames.insert(0u32, Arc::new(Frame::filled(320, 240, 5)));
         let mut rects = BTreeMap::new();
         rects.insert(0, PixelRect::new(0, 0, 960, 540));
         let out = Compositor.compose(&frames, &rects);

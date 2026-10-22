@@ -128,13 +128,13 @@
 | Область | Состояние | Доказательство |
 |---|---|---|
 | Живой стенд | `vks-mcu.service`, `/healthz` 200, UI `http://127.0.0.1:8080/pnm/monitoring/sessions` | systemd, curl |
-| E2E сценарий | 34/34 checks, pageerror 0, console — 6 вендорных TypeError | `artifacts/e2e/result.json` |
-| Раскладки | 65 manual-пресетов, сверка 1:1 с эталоном 1280×720 (879 слотов, 0 расхождений); 6 custom-схем; `calculate` 1-based | `crates/vks-layout/tests/fixtures/` |
-| UI-матрица | 11 диапазонов: 1/1/5/7/7/3/6/14/3/9/9 схем; 2×2=7; плейсмент 4/8/9/25; clear-all AUTO | `artifacts/e2e-layouts/result.json` |
+| E2E сценарий | 34/34 checks, pageerror 0, console — 6 вендорных TypeError | `docs/progress/evidence/e2e/result.json` |
+| Раскладки | 65 manual-пресетов, сверка 1:1 с эталоном 1280×720 (879 слотов, 0 расхождений); 6 custom-схем; `calculate` 1-based. **С 2026-10-23 добавлено 54 раскладки Codian MCU 4200** (52 пресета + 2 кастомные) с ролями слотов | `crates/vks-layout/tests/fixtures/`, `crates/vks-layout/tests/codian_layouts.rs` |
+| UI-матрица | 11 диапазонов: 1/1/5/7/7/3/6/14/3/9/9 схем; 2×2=7; плейсмент 4/8/9/25; clear-all AUTO | `docs/progress/evidence/e2e-layouts/result.json` |
 | SIP | PCMU + H.264, двустороннее медиа на `192.168.1.132` | RTP-счётчики, live E2E |
 | H.323 | терминал отвечает `RELEASE COMPLETE adaptiveBusy` (внешний занятый ресурс), не регрессия кода | лог терминала |
 | Media | RTCP демукс RFC 7983; 1-based слоты; P1 «замерший кадр» после clear-all исправлен | 51+78 тестов, `engine.rs:733` |
-| Статистика | 4/6 виджетов реальные; диск KiB/`df -PkT`; workers теперь массив | `artifacts/e2e/08-statistics.*` |
+| Статистика | 4/6 виджетов реальные; диск KiB/`df -PkT`; workers теперь массив | `docs/progress/evidence/e2e/08-statistics.*` |
 | Данные | layout 147→29, call_strings 5→3, 0 dangling; default-раскладка переиспользуется, PATCH — copy-on-write | `/tmp/dedup_live.json` |
 
 Осознанные ограничения (не выдаём за готовое):
@@ -144,8 +144,10 @@
    мостуемые), иначе терминал выбирает кодек без транскодера и медиа теряется.
 2. H.323 не доказан живым вызовом: терминал `192.168.1.132` занят/отвечает
    `adaptiveBusy`. SIP на том же терминале работает.
-3. Нет NACK/RTX/FEC/джиттер-буфера на SFU-пути; композитор игнорирует
-   `z_order`.
+3. Нет NACK/RTX/FEC/джиттер-буфера на SFU-пути. **Утверждение «композитор
+   игнорирует `z_order`» неверно** (проверено 2026-10-23): `compositor.rs`
+   сортирует слоты по `(z, slot_id)`; мёртвый модуль `vks-layout/src/renderer.rs`,
+   который действительно игнорировал `z_index`, удалён.
 4. `jsonwebtoken 9.3.1` → минимум 10.3.0: CVE-2026-25537 (medium, type
    confusion nbf/exp); в RustSec БД отсутствует, `cargo-deny` не поймает.
    `rustls-webpki`/`webpki-roots` — только optional TLS-граф.
@@ -155,7 +157,7 @@
 
 ### Этап 0. Инвентаризация и заморозка (0.5 дня)
 - `cargo metadata`, `cargo tree --workspace --depth 1`, `cargo deny check`.
-- Зафиксировать baseline: `artifacts/e2e/result.json`, скриншоты, версии.
+- Зафиксировать baseline: `docs/progress/evidence/e2e/result.json`, скриншоты, версии.
 - Бэкап `vks_data.db` → `/tmp/vks_data_before_cleanup.db`.
 
 ### Этап 1. Домен и storage (1 день)

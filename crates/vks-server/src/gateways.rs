@@ -1484,11 +1484,10 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             let preset_name = layout["payload"]["preset"].as_str().unwrap_or_default();
             let preset_size = layout["payload"]["size"].as_u64().and_then(|value| u8::try_from(value).ok());
             let preset_name = vks_layout::preset::resolve(preset_name, preset_size);
-            let parsed = vks_layout::preset::PresetId::parse(&preset_name)
-                .filter(|preset| u32::from(preset.size) >= slot_count)
-                .unwrap_or_else(|| {
-                    vks_layout::preset::PresetId::equal(u8::try_from(slot_count.clamp(1, 64)).unwrap_or(1))
-                });
+            // Пресеты Codian (`codian_01`…`codian_52`, `codian_custom_*`) имеют
+            // собственную геометрию по спецификации 4200: их id не разбирается
+            // `PresetId`, поэтому таблица раскладок проверяется напрямую.
+            let codian = vks_layout::codian::geometry(&preset_name, 1920.0, 1080.0);
             let overlap_factor = layout["payload"]["overlap_factor"]
                 .as_f64()
                 .filter(|value| value.is_finite() && *value > 0.0)
@@ -1496,13 +1495,19 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             let pip = layout["payload"]["pip"].as_bool().unwrap_or(false);
             // `geometry_for_manual` сохраняет вендорный z_order (overlap/PiP),
             // generic `geometry` его не возвращает — для остальных схем z=0.
-            let calculated = vks_layout::preset::geometry_for_manual(&parsed.to_string(), 1920.0, 1080.0)
-                .unwrap_or_else(|| {
+            let calculated = codian.unwrap_or_else(|| {
+                let parsed = vks_layout::preset::PresetId::parse(&preset_name)
+                    .filter(|preset| u32::from(preset.size) >= slot_count)
+                    .unwrap_or_else(|| {
+                        vks_layout::preset::PresetId::equal(u8::try_from(slot_count.clamp(1, 64)).unwrap_or(1))
+                    });
+                vks_layout::preset::geometry_for_manual(&parsed.to_string(), 1920.0, 1080.0).unwrap_or_else(|| {
                     vks_layout::preset::geometry(&parsed, 1920.0, 1080.0, overlap_factor, pip)
                         .into_iter()
                         .map(|rect| vks_layout::preset::CalculatedSlot { rect, z_order: 0 })
                         .collect()
-                });
+                })
+            });
             for (index, cell) in calculated.iter().enumerate() {
                 geometry.push(LayoutSlot {
                     slot: index as u32,

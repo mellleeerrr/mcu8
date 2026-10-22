@@ -1,171 +1,206 @@
-# LAYOUT ENGINE — спецификация движка раскладок
+# LAYOUT ENGINE — движок раскладок
 
-> Статус: **v0.1 (черновик)**. Заполняется в фазе 4.
-> ADR-0012 (Taffy/hadrone-core) — proposed (Q4).
+> Статус: **v0.2 — приведено в соответствие с кодом (2026-10-23)**.
+> Документ описывает **фактическую** реализацию. Нереализованные части явно
+> помечены как «План» и не выдаются за работающие.
+>
+> Источник правок: ревью `dead-code-scout` / `elegance-reviewer` /
+> `layout-spec-audit` (2026-10-22…23) и сверка с `crates/vks-layout/src/**`.
+
+---
+
+## 0. Карта модулей
+
+| Файл | Что в нём |
+|---|---|
+| `crates/vks-layout/src/core.rs` | `Layout`, `Slot`, `SlotId`, `ParticipantId`, `LayoutKind`, `NormalizedLayout`/`NormalizedSlot` |
+| `crates/vks-layout/src/rect.rs` | `Rect` (пиксели), `Canvas`, `NormalizedRect` |
+| `crates/vks-layout/src/grid.rs` | `GridLayout::compute` — равномерная сетка N тайлов |
+| `crates/vks-layout/src/focus.rs` | `FocusLayout` — крупный тайл + полоса мелких |
+| `crates/vks-layout/src/preset.rs` | 65 вендорных пресетов (`MANUAL_SCHEMES`), `cell_rect` — единая арифметика пикселей |
+| `crates/vks-layout/src/codian.rs` | 54 раскладки Codian MCU 4200 (52 пресета + 2 кастомные) |
+| `crates/vks-layout/src/roles.rs` | `SlotRole`, `assign_by_role`, `RotationState` — роли слотов (§2 спецификации Codian) |
+| `crates/vks-media-mcu/src/layout_bridge.rs` | `PixelRect`, `LayoutBridge` — кроссфейд 300 мс |
+| `crates/vks-media-mcu/src/compositor.rs` | `Compositor` — блит в канвас 1920×1080 |
 
 ---
 
 ## 1. Формат
 
 ```rust
-// vks-layout/src/layout.rs
-#[derive(Clone, Serialize, Deserialize)]
+// crates/vks-layout/src/core.rs
 pub struct Layout {
-    pub version: u32,          // increment на каждое изменение
-    pub kind: LayoutKind,      // Grid | Focus | Speaker | Custom
-    pub slots: Vec<Slot>,
+    pub version: u32,             // инкремент на изменение
+    pub kind: LayoutKind,         // Grid | Focus | Speaker | Custom
+    pub slots: Vec<Slot>,         // порядок = z-порядок отрисовки (первый — снизу)
 }
 
-#[derive(Clone, Serialize, Deserialize)]
 pub struct Slot {
-    pub id: u32,
-    pub rect: Rect,            // normalized (0..1)
-    pub z: u32,                // z-index (layering)
-    pub assignment: SlotAssignment,
+    pub id: SlotId,                          // стабильный в рамках раскладки
+    pub participant_id: Option<ParticipantId>, // None — слот свободен
+    pub rect: Rect,                          // ПИКСЕЛИ канваса (не 0..1)
+    pub z_index: i32,                        // больше — поверх
+    pub pinned: bool,                        // «закреплён»
+    pub is_focus: bool,                      // фокусный (крупный) слот
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Rect {
-    pub x: f32,  // 0..1
-    pub y: f32,  // 0..1
-    pub w: f32,  // 0..1
-    pub h: f32,  // 0..1
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub enum SlotAssignment {
-    Auto,                      // не привязан, round-robin
-    Fixed(ParticipantId),      // привязан к конкретному участнику
-    Pinned,                    // как Fixed, но sticky (не перемещается при re-layout)
-}
+pub struct Rect { pub x: u32, pub y: u32, pub width: u32, pub height: u32 }
 ```
 
-## 2. Сериализация
+**Изменения относительно прежней версии документа (v0.1):**
 
-- **БД**: JSON (`jsonb` в PostgreSQL). Serde.
-- **Signaling**: protobuf `Layout` (см. SIGNALING_PROTOCOL.md §9).
-- `vks-layout/storage.rs`: `Layout ↔ JSON` + `Layout ↔ protobuf` (field-by-field).
+1. `Rect` — **пиксельные** координаты, а не нормализованные `f32 0..1`.
+   Нормализация — отдельный тип `NormalizedRect`/`NormalizedLayout`
+   (`Layout::to_normalized(&Canvas)`), используемый на границе с клиентом.
+2. `Slot.assignment: SlotAssignment` **не существует**. Привязка участника —
+   это `Option<ParticipantId>` в слоте; «закреплённость» — флаг `pinned`.
+   Роли (`Fixed`/`Active`/`Rolling`) живут отдельно, в `roles.rs`, и приходят
+   из раскладки Codian, а не из общего `Layout`.
+3. Тип идентификатора слота — `SlotId` (newtype над `u32`), не «голый `u32`».
+4. Внешний `id` в API — **1-based** (`calculate` возвращает `position` 1..N),
+   внутренний — **0-based**. Расхождение нормализуется в `vks-admin`
+   (`base`-смещение), в `vks-layout` слоты всегда 0-based.
 
-## 3. Versioning
+---
 
-- `Layout.version: u32`, increment на каждое изменение.
-- Новые поля — `optional`/default → backward compat.
-- Breaking → новый major + ADR.
+## 2. Роли слотов (Codian §2)
 
-## 4. БД-схема (migrations)
+```rust
+// crates/vks-layout/src/roles.rs
+pub enum SlotRole { Default, Fixed, Active, Rolling }
 
-```sql
-CREATE TABLE layouts (
-    id          UUID PRIMARY KEY,              -- UUIDv7
-    name        VARCHAR(255) NOT NULL,
-    kind        VARCHAR(50) NOT NULL,          -- grid|focus|speaker|custom
-    version     INT NOT NULL DEFAULT 1,
-    slots       JSONB NOT NULL,                -- [{id, rect:{x,y,w,h}, z, assignment}]
-    is_default  BOOLEAN DEFAULT FALSE,
-    created_at  TIMESTAMPTZ DEFAULT now(),
-    updated_at  TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE TABLE room_layouts (
-    room_id    UUID REFERENCES rooms(id),
-    layout_id  UUID REFERENCES layouts(id),
-    is_default BOOLEAN DEFAULT FALSE,
-    PRIMARY KEY (room_id, layout_id)
-);
-
-CREATE UNIQUE INDEX idx_room_active_layout ON room_layouts(room_id) WHERE is_default;
+pub fn assign_by_role(
+    roles: &[SlotRole],
+    fixed: &BTreeMap<usize, ParticipantId>,
+    active: Option<ParticipantId>,
+    participants: &[ParticipantId],
+) -> Vec<Option<ParticipantId>>
 ```
+
+Приоритет: `fixed` → `active` → `rolling` (порядок прихода) → `default`
+(порядок прихода). Покрыта 5 юнит-тестами.
+
+> **План:** движок MCU пока не применяет роли при авто-назначении — там
+> `publisher_tracks: BTreeMap<ParticipantId, _>` (сортировка по UUID, а не по
+> порядку прихода) и нет триггера переназначения. См. `ARCHITECTURE_PLAN_2026-10-23.md`, шаг 7.
+
+---
+
+## 3. Сериализация и хранение
+
+* **Хранилище — SQLite** (`sqlx 0.8.6`), таблица `core_layouts`
+  (`id, name, version, assigned_rooms, is_default`). PostgreSQL/`jsonb`,
+  упомянутые в v0.1, в проекте **не используются**.
+* **Сигналинг** — protobuf (`prost 0.13.5`), схема `vks-proto`.
+  Сообщение `LayoutChanged` **объявлено, но не отправляется** — это разрыв
+  цепочки Ц7 (см. `ARCHITECTURE_PLAN_2026-10-23.md`, шаг 3).
+* Файл `vks-layout/src/storage.rs` **не существует**: преобразования
+  `Layout ↔ JSON` и `Layout ↔ protobuf` живут в `vks-admin` и `vks-server`.
+
+---
+
+## 4. Версионирование
+
+* `Layout.version: u32`, инкремент на каждое изменение (монотонная
+  гарантия — в `vks-media-mcu::apply_layout` через `version_floor`).
+* Новые поля — `#[serde(default)]` ⇒ обратная совместимость.
+* Ломающие изменения — новый major + ADR.
+
+---
 
 ## 5. MCU apply (server-side)
 
-```rust
-// vks-layout/src/mcu_renderer.rs
-pub fn to_pixel_rects(layout: &Layout, width: u32, height: u32) -> HashMap<SlotId, PixelRect> {
-    layout.slots.iter().map(|s| {
-        (s.id, PixelRect {
-            x: (s.rect.x * width as f32) as u32,
-            y: (s.rect.y * height as f32) as u32,
-            w: (s.rect.w * width as f32) as u32,
-            h: (s.rect.h * height as f32) as u32,
-        })
-    }).collect()
-}
-```
-
-**Transitions**: layout change → **crossfade 300ms** (old rects α-blend → new rects). Participant join/leave → auto-assign / remove → grid re-flow → crossfade.
-
-## 6. Client apply (SFU, browser)
-
-**v1: CSS absolute % positioning**
-```css
-/* vks-layout/src/client_renderer.rs → CSS */
-.tile-1 { position: absolute; left: 0%;   top: 0%;   width: 50%; height: 50%; }
-.tile-2 { position: absolute; left: 50%;  top: 0%;   width: 50%; height: 50%; }
-/* ... */
-```
-- `<video>` elements positioned by CSS.
-- Transition: `transition: all 200ms ease`.
-
-**v2: Taffy** (complex layouts, flexbox/grid).
-**WebGL**: не v1 (только effects, future).
-
-## 7. Assignment semantics
+Фактический путь: `vks-media-mcu/src/layout_bridge.rs` + `compositor.rs`.
 
 ```rust
-pub fn assign_participants(layout: &mut Layout, participants: &[ParticipantId]) {
-    // 1. Fixed slots: match participant_id
-    // 2. Pinned slots: keep previous assignment (sticky)
-    // 3. Auto slots: fill with remaining participants (round-robin)
-    // 4. Unfilled auto slots: empty
-}
+// layout_bridge.rs
+pub struct PixelRect { pub x: u32, pub y: u32, pub w: u32, pub h: u32, pub z: i32 }
+
+// compositor.rs — сортировка по (z, slot_id): больше z — поверх
+stack_keys.sort_unstable_by_key(|key| (rects[key].z, *key));
 ```
 
-| Assignment | Behavior |
+* `PixelRect` дублирует `vks_layout::Rect` (+ поле `z`). Планируется свести
+  к `vks_layout::Rect` с отдельной картой z-порядков.
+* **Кроссфейд 300 мс** (`CROSSFADE_MS`) реализован в `LayoutBridge`.
+* **Устаревший кадр** (участник переставлен в другой слот) устранён:
+  `McuEngine::rekey_frames` переносит кадр за участником.
+* Файл `vks-layout/src/mcu_renderer.rs` **не существует**.
+
+---
+
+## 6. Клиент
+
+* Клиентский рендер — собственный `DrawCommand` в `client/vks-client-sdk`,
+  а **не** CSS-позиционирование (v1 из старого документа не реализован).
+* Раскладка на клиент **не доходит**: событие `LayoutChanged` не отправляется,
+  клиент рисует авто-сетку. Разрыв Ц7.
+
+---
+
+## 7. Пресеты
+
+* **65 вендорных пресетов** (`MANUAL_SCHEMES` в `preset.rs`) — геометрия
+  пересчитывается через `cell_rect` (целочисленная арифметика по модульной
+  сетке, `floor`), без плавающей точки.
+* **54 раскладки Codian** (`codian.rs`) — те же 65 + 54 доступны через
+  `is_known_preset`; геометрия Codian разворачивается **тем же** `cell_rect`.
+  Формат: области `Region{x0,y0,x1,y1,cols,rows}` на модульной сетке `den`
+  + список PIP-окон. Подробно — `ARCHITECTURE_PLAN_2026-10-23.md` §3.
+* Функций вида `grid_2x2()` / `focus_layout(n)` **нет**: есть
+  `GridLayout::compute(&Canvas, n)` и `FocusLayout` (в `focus.rs`).
+* `catalog()` и модуль `renderer.rs` **удалены** в 2026-10-23 (мёртвый код;
+  `renderer.rs` дополнительно игнорировал `z_index`, т.е. был заведомо неверен).
+
+---
+
+## 8. Назначение участников
+
+Фактическая семантика:
+
+1. `pinned`/`is_focus` — флаги слота; автоназначение по ним **не реализовано**
+   (в `vks-media-mcu` `pinned` и `is_focus` жёстко `false`).
+2. `assign_by_role` (§2) — чистая функция, используется для кастомных
+   раскладок Codian; движок пока не вызывает её автоматически.
+3. `seat_participant` (`vks-media-mcu`) сажает участника в первый свободный
+   слот раскладки; назначения вне `geometry` отбрасываются
+   (`sanitize_assignments`), чтобы участник не получил «поверх сетки весь канвас».
+
+---
+
+## 9. Редактор (admin UI)
+
+* Редактор раскладок — **вендорный UI TrueConf PNM 2.2.1.66**
+  (`client/pnm-frontend/deployed/pnm/`), а не собственный.
+* Операции API: `POST /api/v3/ui/video_layouts/calculate` (1-based `position`),
+  `GET /api/v3/ui/video_layouts/presets` (справочник 119 пресетов).
+* Hadron-core / Taffy / WebGL — **план**, не реализовано.
+
+---
+
+## 10. Синхронизация
+
+| Слой | Состояние |
 |---|---|
-| `Auto` | Не привязан. New participant → next free auto-slot (round-robin). Leave → free slot. |
-| `Fixed(pid)` | Привязан. Pid не в room → пустой slot. |
-| `Pinned` | Как Fixed, но sticky (не перемещается при re-layout). |
+| Admin → storage (SQLite) | работает |
+| Storage → signaling (NATS broadcast) | NATAS — заглушка (`vks-cluster`) |
+| `LayoutChanged` → клиенты | **не отправляется** (разрыв Ц7) |
+| Snapshot при входе в комнату | работает на уровне `JoinRoom` |
 
-## 8. Presets
+Полная карта разрывов — `ARCHITECTURE_PLAN_2026-10-23.md`, шаг 3.
 
-```rust
-// vks-layout/src/presets.rs
-pub fn grid_2x2() -> Layout { ... }     // 4 equal slots
-pub fn grid_3x3() -> Layout { ... }     // 9 equal slots
-pub fn focus_layout(n: usize) -> Layout { ... }  // 1 large (80%) + n thumbnails (bottom)
-pub fn speaker_layout() -> Layout { ... }        // 1 large (center) + n thumbnails
-```
+---
 
-## 9. Editor (admin UI)
+## 11. Инварианты (фактические)
 
-**Оператор перетаскивает SLOTS (не participants)**:
-- Drag slot → update `rect.x/y/w/h`.
-- Resize edge → update `w/h`.
-- Drag to top/bottom → update `z`.
-- Participant avatar onto slot → `assignment = Fixed(pid)`.
-- Save → `PUT /api/layouts/{id}`.
-
-**Библиотека**: hadrone-core (Q4) — drag-and-drop.
-
-## 10. Sync (server ↔ clients)
-
-**Push (primary)**:
-```
-Admin save → vks-admin → storage (БД) → NATS "vks.cluster.room.layout_changed"
-  → ALL vks-signaling for room → LayoutChanged broadcast → clients < 1s
-```
-
-**Pull (fallback)**: `JoinRoomResult.layout` snapshot (if missed mid-change).
-
-**NOT**: client fetches from admin API (admin = operators only).
-
-**Runtime change**: push via §10. MCU: crossfade 300ms. SFU: CSS transition 200ms. **Total < 2s**. Push-only, no polling.
-
-## 11. Invariants
-
-1. Все rects — normalized (0..1).
-2. Rects НЕ пересекаются (для grid-раскладок).
-3. Sum of areas ≤ 1.0 (canvas).
-4. `z` определяет порядок отрисовки (больше z = поверх).
-5. Один participant — один slot (в grid-раскладках).
-6. Focus/Speaker: 1 large + N thumbnails (large z > thumbnails z).
+1. Слоты раскладки не пересекаются — гарантируется построителем
+   (`GridLayout`, `cell_rect`, области Codian); проверяется тестом
+   `crates/vks-layout/tests/codian_layouts.rs`.
+2. Сумма площадей слотов основной сетки = площадь канваса (без дыр и
+   перекрытий); PIP-окна накладываются поверх с `z_order = 1`.
+3. `z` определяет порядок отрисовки: больше — поверх; при равенстве —
+   по `slot_id` (детерминированно).
+4. Один участник — один слот в сетке.
+5. `Layout.version` монотонно растёт.
+6. `LayoutDescriptor.assignments` и `geometry[].slot` — всегда **0-based**
+   (в `vks-admin` наружу отдаётся 1-based `position`).

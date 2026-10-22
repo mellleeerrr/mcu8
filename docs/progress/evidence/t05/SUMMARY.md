@@ -61,7 +61,7 @@ Env `VKS_GATEWAY_VIDEO_PROFILE` вне baseline теперь игнорируе�
 
 ### Профиль 1920×1080 / 4096 kbps
 
-`artifacts/e2e-t05-final3`: **108 checks, 0 failed, 110.3 s, page_errors 0**.
+`docs/progress/evidence/t05/result.json`: **108 checks, 0 failed, 110.3 s, page_errors 0**.
 Журнал: `outbound gateway video profile width=1920 height=1080 fps=30 bitrate_kbps=4096`.
 
 SDP offer (единый unit-тест + runtime-поля):
@@ -78,7 +78,7 @@ FFmpeg: `-s 1920x1080 -r 30 -b:v 4096k`.
 
 ### Профиль 640×360 / 512 kbps
 
-`artifacts/e2e-t05-low-final2`: **108 checks, 0 failed, 110.4 s, page_errors 0**.
+`docs/progress/evidence/t05-low/result.json`: **108 checks, 0 failed, 110.4 s, page_errors 0**.
 SDP offer:
 ```
 b=AS:512

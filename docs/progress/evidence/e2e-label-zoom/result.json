@@ -1,0 +1,3608 @@
+{
+  "ok": true,
+  "base": "http://127.0.0.1:8080",
+  "conference_id": "49b599d7-b5cd-45a7-8999-47a28c453a92",
+  "participant": "T12b Label Probe",
+  "duration_ms": 57949,
+  "criteria": {
+    "centerDx": 1.5,
+    "centerDy": 3,
+    "labelFontRatio": 2,
+    "fontRatioTolerance": 0.15,
+    "contentHeadroomEm": 0.5,
+    "strictCounts": false
+  },
+  "modes": {
+    "revertCheck": false,
+    "applyCandidate": false
+  },
+  "summary": {
+    "sizesMeasured": 10,
+    "sizesWithLabel": 10,
+    "labelChecksOk": true,
+    "counterChecksOk": true,
+    "countersMatchContactsEndpoint": true,
+    "avatarHiddenEverywhere": true,
+    "failedFatalChecks": [],
+    "knownIssues": [],
+    "fontRatios": [
+      {
+        "size": "1",
+        "slotFontSizePx": 12,
+        "labelFontSizePx": 24,
+        "ratio": 2
+      },
+      {
+        "size": "2",
+        "slotFontSizePx": 12,
+        "labelFontSizePx": 24,
+        "ratio": 2
+      },
+      {
+        "size": "3",
+        "slotFontSizePx": 12,
+        "labelFontSizePx": 24,
+        "ratio": 2
+      },
+      {
+        "size": "4",
+        "slotFontSizePx": 12,
+        "labelFontSizePx": 24,
+        "ratio": 2
+      },
+      {
+        "size": "5+",
+        "slotFontSizePx": 12,
+        "labelFontSizePx": 24,
+        "ratio": 2
+      },
+      {
+        "size": "8",
+        "slotFontSizePx": 12,
+        "labelFontSizePx": 24,
+        "ratio": 2
+      },
+      {
+        "size": "9",
+        "slotFontSizePx": 8,
+        "labelFontSizePx": 16,
+        "ratio": 2
+      },
+      {
+        "size": "10+",
+        "slotFontSizePx": 8,
+        "labelFontSizePx": 16,
+        "ratio": 2
+      },
+      {
+        "size": "25",
+        "slotFontSizePx": 8,
+        "labelFontSizePx": 16,
+        "ratio": 2
+      },
+      {
+        "size": "34+",
+        "slotFontSizePx": 8,
+        "labelFontSizePx": 16,
+        "ratio": 2
+      }
+    ]
+  },
+  "sizes": [
+    {
+      "size": 1,
+      "plus": false,
+      "label": "1",
+      "tiles": 1,
+      "panelClosed": true,
+      "placement": "placed",
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 24,
+      "labelLineHeight": "26.4px",
+      "labelTextOverflow": "ellipsis",
+      "slotFontSizePx": 12,
+      "tileW": 887,
+      "tileH": 498.9375,
+      "labelW": 189.21875,
+      "labelH": 26.390625,
+      "dx": 0,
+      "dy": -0.0078125,
+      "labelTopVsTileTop": 236.265625,
+      "labelBottomVsTileBottom": -236.28125,
+      "labelLeftVsTileLeft": 348.890625,
+      "labelRightVsTileRight": -348.890625,
+      "overflowX": false,
+      "overflowY": false,
+      "scrollWidth": 189,
+      "clientWidth": 189,
+      "scrollHeight": 27,
+      "clientHeight": 26,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "hasAvatar": true,
+      "avatarW": 0,
+      "avatarH": 0,
+      "labelVsContent": {
+        "dx": 0,
+        "dy": -0.008,
+        "dyEm": -0.001
+      },
+      "identity": [
+        {
+          "cls": "tc-avatar-container layout-grid-slot__avatar",
+          "isPreview": false,
+          "display": "none",
+          "visibility": "visible",
+          "opacity": "1",
+          "boxW": 0,
+          "boxH": 0,
+          "visible": false,
+          "reason": "display:none",
+          "paintedDescendants": 0
+        }
+      ],
+      "anyIdentityVisible": false,
+      "avatarBlockFound": true,
+      "avatarVisible": false,
+      "previewBlockFound": false,
+      "withPanel": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 24,
+        "labelLineHeight": "26.4px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 12,
+        "tileW": 797,
+        "tileH": 448.3125,
+        "labelW": 189.21875,
+        "labelH": 26.390625,
+        "dx": 0,
+        "dy": -0.0078125,
+        "labelTopVsTileTop": 210.953125,
+        "labelBottomVsTileBottom": -210.96875,
+        "labelLeftVsTileLeft": 303.890625,
+        "labelRightVsTileRight": -303.890625,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 189,
+        "clientWidth": 189,
+        "scrollHeight": 27,
+        "clientHeight": 26,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": 0,
+          "dy": -0.008,
+          "dyEm": -0.001
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "resting": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 24,
+        "labelLineHeight": "26.4px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 12,
+        "tileW": 887,
+        "tileH": 498.9375,
+        "labelW": 189.21875,
+        "labelH": 26.390625,
+        "dx": 0,
+        "dy": -0.0078125,
+        "labelTopVsTileTop": 236.265625,
+        "labelBottomVsTileBottom": -236.28125,
+        "labelLeftVsTileLeft": 348.890625,
+        "labelRightVsTileRight": -348.890625,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 189,
+        "clientWidth": 189,
+        "scrollHeight": 27,
+        "clientHeight": 26,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": 0,
+          "dy": -0.008,
+          "dyEm": -0.001
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "outsideWithPanel": {
+        "total": 4,
+        "visible": 4,
+        "inSlotPanelVisible": 2,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar-container grid-slot-contact-item__avatar",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          }
+        ]
+      },
+      "outsideResting": {
+        "total": 2,
+        "visible": 2,
+        "inSlotPanelVisible": 0,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          }
+        ]
+      }
+    },
+    {
+      "size": 2,
+      "plus": false,
+      "label": "2",
+      "tiles": 2,
+      "panelClosed": true,
+      "placement": "placed",
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 24,
+      "labelLineHeight": "26.4px",
+      "labelTextOverflow": "ellipsis",
+      "slotFontSizePx": 12,
+      "tileW": 443,
+      "tileH": 249.953125,
+      "labelW": 189.21875,
+      "labelH": 26.390625,
+      "dx": 0,
+      "dy": 0,
+      "labelTopVsTileTop": 111.78125,
+      "labelBottomVsTileBottom": -111.78125,
+      "labelLeftVsTileLeft": 126.890625,
+      "labelRightVsTileRight": -126.890625,
+      "overflowX": false,
+      "overflowY": false,
+      "scrollWidth": 189,
+      "clientWidth": 189,
+      "scrollHeight": 27,
+      "clientHeight": 26,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "hasAvatar": true,
+      "avatarW": 0,
+      "avatarH": 0,
+      "labelVsContent": {
+        "dx": 0,
+        "dy": 0,
+        "dyEm": 0
+      },
+      "identity": [
+        {
+          "cls": "tc-avatar-container layout-grid-slot__avatar",
+          "isPreview": false,
+          "display": "none",
+          "visibility": "visible",
+          "opacity": "1",
+          "boxW": 0,
+          "boxH": 0,
+          "visible": false,
+          "reason": "display:none",
+          "paintedDescendants": 0
+        }
+      ],
+      "anyIdentityVisible": false,
+      "avatarBlockFound": true,
+      "avatarVisible": false,
+      "previewBlockFound": false,
+      "withPanel": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 24,
+        "labelLineHeight": "26.4px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 12,
+        "tileW": 398.046875,
+        "tileH": 224.59375,
+        "labelW": 189.21875,
+        "labelH": 26.390625,
+        "dx": -0.0078125,
+        "dy": -0.0078125,
+        "labelTopVsTileTop": 99.09375,
+        "labelBottomVsTileBottom": -99.109375,
+        "labelLeftVsTileLeft": 104.40625,
+        "labelRightVsTileRight": -104.421875,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 189,
+        "clientWidth": 189,
+        "scrollHeight": 27,
+        "clientHeight": 26,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": -0.008,
+          "dy": -0.008,
+          "dyEm": -0.001
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "resting": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 24,
+        "labelLineHeight": "26.4px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 12,
+        "tileW": 443,
+        "tileH": 249.953125,
+        "labelW": 189.21875,
+        "labelH": 26.390625,
+        "dx": 0,
+        "dy": 0,
+        "labelTopVsTileTop": 111.78125,
+        "labelBottomVsTileBottom": -111.78125,
+        "labelLeftVsTileLeft": 126.890625,
+        "labelRightVsTileRight": -126.890625,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 189,
+        "clientWidth": 189,
+        "scrollHeight": 27,
+        "clientHeight": 26,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": 0,
+          "dy": 0,
+          "dyEm": 0
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "outsideWithPanel": {
+        "total": 4,
+        "visible": 4,
+        "inSlotPanelVisible": 2,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar-container grid-slot-contact-item__avatar",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          }
+        ]
+      },
+      "outsideResting": {
+        "total": 2,
+        "visible": 2,
+        "inSlotPanelVisible": 0,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          }
+        ]
+      }
+    },
+    {
+      "size": 3,
+      "plus": false,
+      "label": "3",
+      "tiles": 3,
+      "panelClosed": true,
+      "placement": "placed",
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 24,
+      "labelLineHeight": "26.4px",
+      "labelTextOverflow": "ellipsis",
+      "slotFontSizePx": 12,
+      "tileW": 443,
+      "tileH": 248.96875,
+      "labelW": 189.21875,
+      "labelH": 26.390625,
+      "dx": 0,
+      "dy": -0.0078125,
+      "labelTopVsTileTop": 111.28125,
+      "labelBottomVsTileBottom": -111.296875,
+      "labelLeftVsTileLeft": 126.890625,
+      "labelRightVsTileRight": -126.890625,
+      "overflowX": false,
+      "overflowY": false,
+      "scrollWidth": 189,
+      "clientWidth": 189,
+      "scrollHeight": 27,
+      "clientHeight": 26,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "hasAvatar": true,
+      "avatarW": 0,
+      "avatarH": 0,
+      "labelVsContent": {
+        "dx": 0,
+        "dy": -0.008,
+        "dyEm": -0.001
+      },
+      "identity": [
+        {
+          "cls": "tc-avatar-container layout-grid-slot__avatar",
+          "isPreview": false,
+          "display": "none",
+          "visibility": "visible",
+          "opacity": "1",
+          "boxW": 0,
+          "boxH": 0,
+          "visible": false,
+          "reason": "display:none",
+          "paintedDescendants": 0
+        }
+      ],
+      "anyIdentityVisible": false,
+      "avatarBlockFound": true,
+      "avatarVisible": false,
+      "previewBlockFound": false,
+      "withPanel": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 24,
+        "labelLineHeight": "26.4px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 12,
+        "tileW": 398.046875,
+        "tileH": 223.703125,
+        "labelW": 189.21875,
+        "labelH": 26.390625,
+        "dx": -0.0078125,
+        "dy": 0,
+        "labelTopVsTileTop": 98.65625,
+        "labelBottomVsTileBottom": -98.65625,
+        "labelLeftVsTileLeft": 104.40625,
+        "labelRightVsTileRight": -104.421875,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 189,
+        "clientWidth": 189,
+        "scrollHeight": 27,
+        "clientHeight": 26,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": -0.008,
+          "dy": 0,
+          "dyEm": 0
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "resting": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 24,
+        "labelLineHeight": "26.4px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 12,
+        "tileW": 443,
+        "tileH": 248.96875,
+        "labelW": 189.21875,
+        "labelH": 26.390625,
+        "dx": 0,
+        "dy": -0.0078125,
+        "labelTopVsTileTop": 111.28125,
+        "labelBottomVsTileBottom": -111.296875,
+        "labelLeftVsTileLeft": 126.890625,
+        "labelRightVsTileRight": -126.890625,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 189,
+        "clientWidth": 189,
+        "scrollHeight": 27,
+        "clientHeight": 26,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": 0,
+          "dy": -0.008,
+          "dyEm": -0.001
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "outsideWithPanel": {
+        "total": 4,
+        "visible": 4,
+        "inSlotPanelVisible": 2,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar-container grid-slot-contact-item__avatar",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          }
+        ]
+      },
+      "outsideResting": {
+        "total": 2,
+        "visible": 2,
+        "inSlotPanelVisible": 0,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          }
+        ]
+      }
+    },
+    {
+      "size": 4,
+      "plus": false,
+      "label": "4",
+      "tiles": 4,
+      "panelClosed": true,
+      "placement": "placed",
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 24,
+      "labelLineHeight": "26.4px",
+      "labelTextOverflow": "ellipsis",
+      "slotFontSizePx": 12,
+      "tileW": 443,
+      "tileH": 248.96875,
+      "labelW": 189.21875,
+      "labelH": 26.390625,
+      "dx": 0,
+      "dy": -0.0078125,
+      "labelTopVsTileTop": 111.28125,
+      "labelBottomVsTileBottom": -111.296875,
+      "labelLeftVsTileLeft": 126.890625,
+      "labelRightVsTileRight": -126.890625,
+      "overflowX": false,
+      "overflowY": false,
+      "scrollWidth": 189,
+      "clientWidth": 189,
+      "scrollHeight": 27,
+      "clientHeight": 26,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "hasAvatar": true,
+      "avatarW": 0,
+      "avatarH": 0,
+      "labelVsContent": {
+        "dx": 0,
+        "dy": -0.008,
+        "dyEm": -0.001
+      },
+      "identity": [
+        {
+          "cls": "tc-avatar-container layout-grid-slot__avatar",
+          "isPreview": false,
+          "display": "none",
+          "visibility": "visible",
+          "opacity": "1",
+          "boxW": 0,
+          "boxH": 0,
+          "visible": false,
+          "reason": "display:none",
+          "paintedDescendants": 0
+        }
+      ],
+      "anyIdentityVisible": false,
+      "avatarBlockFound": true,
+      "avatarVisible": false,
+      "previewBlockFound": false,
+      "withPanel": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 24,
+        "labelLineHeight": "26.4px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 12,
+        "tileW": 398.046875,
+        "tileH": 223.703125,
+        "labelW": 189.21875,
+        "labelH": 26.390625,
+        "dx": -0.0078125,
+        "dy": 0,
+        "labelTopVsTileTop": 98.65625,
+        "labelBottomVsTileBottom": -98.65625,
+        "labelLeftVsTileLeft": 104.40625,
+        "labelRightVsTileRight": -104.421875,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 189,
+        "clientWidth": 189,
+        "scrollHeight": 27,
+        "clientHeight": 26,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": -0.008,
+          "dy": 0,
+          "dyEm": 0
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "resting": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 24,
+        "labelLineHeight": "26.4px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 12,
+        "tileW": 443,
+        "tileH": 248.96875,
+        "labelW": 189.21875,
+        "labelH": 26.390625,
+        "dx": 0,
+        "dy": -0.0078125,
+        "labelTopVsTileTop": 111.28125,
+        "labelBottomVsTileBottom": -111.296875,
+        "labelLeftVsTileLeft": 126.890625,
+        "labelRightVsTileRight": -126.890625,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 189,
+        "clientWidth": 189,
+        "scrollHeight": 27,
+        "clientHeight": 26,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": 0,
+          "dy": -0.008,
+          "dyEm": -0.001
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "outsideWithPanel": {
+        "total": 4,
+        "visible": 4,
+        "inSlotPanelVisible": 2,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar-container grid-slot-contact-item__avatar",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          }
+        ]
+      },
+      "outsideResting": {
+        "total": 2,
+        "visible": 2,
+        "inSlotPanelVisible": 0,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          }
+        ]
+      }
+    },
+    {
+      "size": 5,
+      "plus": true,
+      "label": "5 +",
+      "tiles": 6,
+      "panelClosed": true,
+      "placement": "placed",
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 24,
+      "labelLineHeight": "26.4px",
+      "labelTextOverflow": "ellipsis",
+      "slotFontSizePx": 12,
+      "tileW": 295,
+      "tileH": 248.96875,
+      "labelW": 189.21875,
+      "labelH": 26.390625,
+      "dx": 0,
+      "dy": -0.0078125,
+      "labelTopVsTileTop": 111.28125,
+      "labelBottomVsTileBottom": -111.296875,
+      "labelLeftVsTileLeft": 52.890625,
+      "labelRightVsTileRight": -52.890625,
+      "overflowX": false,
+      "overflowY": false,
+      "scrollWidth": 189,
+      "clientWidth": 189,
+      "scrollHeight": 27,
+      "clientHeight": 26,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "hasAvatar": true,
+      "avatarW": 0,
+      "avatarH": 0,
+      "labelVsContent": {
+        "dx": 0,
+        "dy": -0.008,
+        "dyEm": -0.001
+      },
+      "identity": [
+        {
+          "cls": "tc-avatar-container layout-grid-slot__avatar",
+          "isPreview": false,
+          "display": "none",
+          "visibility": "visible",
+          "opacity": "1",
+          "boxW": 0,
+          "boxH": 0,
+          "visible": false,
+          "reason": "display:none",
+          "paintedDescendants": 0
+        }
+      ],
+      "anyIdentityVisible": false,
+      "avatarBlockFound": true,
+      "avatarVisible": false,
+      "previewBlockFound": false,
+      "withPanel": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 24,
+        "labelLineHeight": "26.4px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 12,
+        "tileW": 265.0625,
+        "tileH": 223.703125,
+        "labelW": 189.21875,
+        "labelH": 26.390625,
+        "dx": 0,
+        "dy": 0,
+        "labelTopVsTileTop": 98.65625,
+        "labelBottomVsTileBottom": -98.65625,
+        "labelLeftVsTileLeft": 37.921875,
+        "labelRightVsTileRight": -37.921875,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 189,
+        "clientWidth": 189,
+        "scrollHeight": 27,
+        "clientHeight": 26,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": 0,
+          "dy": 0,
+          "dyEm": 0
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "resting": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 24,
+        "labelLineHeight": "26.4px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 12,
+        "tileW": 295,
+        "tileH": 248.96875,
+        "labelW": 189.21875,
+        "labelH": 26.390625,
+        "dx": 0,
+        "dy": -0.0078125,
+        "labelTopVsTileTop": 111.28125,
+        "labelBottomVsTileBottom": -111.296875,
+        "labelLeftVsTileLeft": 52.890625,
+        "labelRightVsTileRight": -52.890625,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 189,
+        "clientWidth": 189,
+        "scrollHeight": 27,
+        "clientHeight": 26,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": 0,
+          "dy": -0.008,
+          "dyEm": -0.001
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "outsideWithPanel": {
+        "total": 4,
+        "visible": 4,
+        "inSlotPanelVisible": 2,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar-container grid-slot-contact-item__avatar",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          }
+        ]
+      },
+      "outsideResting": {
+        "total": 2,
+        "visible": 2,
+        "inSlotPanelVisible": 0,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          }
+        ]
+      }
+    },
+    {
+      "size": 8,
+      "plus": false,
+      "label": "8",
+      "tiles": 8,
+      "panelClosed": true,
+      "placement": "placed",
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 24,
+      "labelLineHeight": "26.4px",
+      "labelTextOverflow": "ellipsis",
+      "slotFontSizePx": 12,
+      "tileW": 221,
+      "tileH": 248.96875,
+      "labelW": 189.21875,
+      "labelH": 26.390625,
+      "dx": 0,
+      "dy": -0.0078125,
+      "labelTopVsTileTop": 111.28125,
+      "labelBottomVsTileBottom": -111.296875,
+      "labelLeftVsTileLeft": 15.890625,
+      "labelRightVsTileRight": -15.890625,
+      "overflowX": false,
+      "overflowY": false,
+      "scrollWidth": 189,
+      "clientWidth": 189,
+      "scrollHeight": 27,
+      "clientHeight": 26,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "hasAvatar": true,
+      "avatarW": 0,
+      "avatarH": 0,
+      "labelVsContent": {
+        "dx": 0,
+        "dy": -0.008,
+        "dyEm": -0.001
+      },
+      "identity": [
+        {
+          "cls": "tc-avatar-container layout-grid-slot__avatar",
+          "isPreview": false,
+          "display": "none",
+          "visibility": "visible",
+          "opacity": "1",
+          "boxW": 0,
+          "boxH": 0,
+          "visible": false,
+          "reason": "display:none",
+          "paintedDescendants": 0
+        }
+      ],
+      "anyIdentityVisible": false,
+      "avatarBlockFound": true,
+      "avatarVisible": false,
+      "previewBlockFound": false,
+      "withPanel": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 24,
+        "labelLineHeight": "26.4px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 12,
+        "tileW": 198.5625,
+        "tileH": 223.703125,
+        "labelW": 189.21875,
+        "labelH": 26.390625,
+        "dx": 0,
+        "dy": 0,
+        "labelTopVsTileTop": 98.65625,
+        "labelBottomVsTileBottom": -98.65625,
+        "labelLeftVsTileLeft": 4.671875,
+        "labelRightVsTileRight": -4.671875,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 189,
+        "clientWidth": 189,
+        "scrollHeight": 27,
+        "clientHeight": 26,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": 0,
+          "dy": 0,
+          "dyEm": 0
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "resting": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 24,
+        "labelLineHeight": "26.4px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 12,
+        "tileW": 221,
+        "tileH": 248.96875,
+        "labelW": 189.21875,
+        "labelH": 26.390625,
+        "dx": 0,
+        "dy": -0.0078125,
+        "labelTopVsTileTop": 111.28125,
+        "labelBottomVsTileBottom": -111.296875,
+        "labelLeftVsTileLeft": 15.890625,
+        "labelRightVsTileRight": -15.890625,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 189,
+        "clientWidth": 189,
+        "scrollHeight": 27,
+        "clientHeight": 26,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": 0,
+          "dy": -0.008,
+          "dyEm": -0.001
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "outsideWithPanel": {
+        "total": 4,
+        "visible": 4,
+        "inSlotPanelVisible": 2,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar-container grid-slot-contact-item__avatar",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          }
+        ]
+      },
+      "outsideResting": {
+        "total": 2,
+        "visible": 2,
+        "inSlotPanelVisible": 0,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          }
+        ]
+      }
+    },
+    {
+      "size": 9,
+      "plus": false,
+      "label": "9",
+      "tiles": 9,
+      "panelClosed": true,
+      "placement": "placed",
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 16,
+      "labelLineHeight": "17.6px",
+      "labelTextOverflow": "ellipsis",
+      "slotFontSizePx": 8,
+      "tileW": 295,
+      "tileH": 165.96875,
+      "labelW": 126.140625,
+      "labelH": 17.59375,
+      "dx": -0.0078125,
+      "dy": 0,
+      "labelTopVsTileTop": 74.1875,
+      "labelBottomVsTileBottom": -74.1875,
+      "labelLeftVsTileLeft": 84.421875,
+      "labelRightVsTileRight": -84.4375,
+      "overflowX": false,
+      "overflowY": false,
+      "scrollWidth": 126,
+      "clientWidth": 126,
+      "scrollHeight": 18,
+      "clientHeight": 18,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "hasAvatar": true,
+      "avatarW": 0,
+      "avatarH": 0,
+      "labelVsContent": {
+        "dx": -0.008,
+        "dy": 0,
+        "dyEm": 0
+      },
+      "identity": [
+        {
+          "cls": "tc-avatar-container layout-grid-slot__avatar",
+          "isPreview": false,
+          "display": "none",
+          "visibility": "visible",
+          "opacity": "1",
+          "boxW": 0,
+          "boxH": 0,
+          "visible": false,
+          "reason": "display:none",
+          "paintedDescendants": 0
+        }
+      ],
+      "anyIdentityVisible": false,
+      "avatarBlockFound": true,
+      "avatarVisible": false,
+      "previewBlockFound": false,
+      "withPanel": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 16,
+        "labelLineHeight": "17.6px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 8,
+        "tileW": 265.0625,
+        "tileH": 149.125,
+        "labelW": 126.140625,
+        "labelH": 17.59375,
+        "dx": -0.0078125,
+        "dy": 0,
+        "labelTopVsTileTop": 65.765625,
+        "labelBottomVsTileBottom": -65.765625,
+        "labelLeftVsTileLeft": 69.453125,
+        "labelRightVsTileRight": -69.46875,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 126,
+        "clientWidth": 126,
+        "scrollHeight": 18,
+        "clientHeight": 18,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": -0.008,
+          "dy": 0,
+          "dyEm": 0
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "resting": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 16,
+        "labelLineHeight": "17.6px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 8,
+        "tileW": 295,
+        "tileH": 165.96875,
+        "labelW": 126.140625,
+        "labelH": 17.59375,
+        "dx": -0.0078125,
+        "dy": 0,
+        "labelTopVsTileTop": 74.1875,
+        "labelBottomVsTileBottom": -74.1875,
+        "labelLeftVsTileLeft": 84.421875,
+        "labelRightVsTileRight": -84.4375,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 126,
+        "clientWidth": 126,
+        "scrollHeight": 18,
+        "clientHeight": 18,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": -0.008,
+          "dy": 0,
+          "dyEm": 0
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "outsideWithPanel": {
+        "total": 4,
+        "visible": 4,
+        "inSlotPanelVisible": 2,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar-container grid-slot-contact-item__avatar",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          }
+        ]
+      },
+      "outsideResting": {
+        "total": 2,
+        "visible": 2,
+        "inSlotPanelVisible": 0,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          }
+        ]
+      }
+    },
+    {
+      "size": 10,
+      "plus": true,
+      "label": "10 +",
+      "tiles": 16,
+      "panelClosed": true,
+      "placement": "placed",
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 16,
+      "labelLineHeight": "17.6px",
+      "labelTextOverflow": "ellipsis",
+      "slotFontSizePx": 8,
+      "tileW": 221,
+      "tileH": 123.984375,
+      "labelW": 126.140625,
+      "labelH": 17.59375,
+      "dx": -0.0078125,
+      "dy": -0.0078125,
+      "labelTopVsTileTop": 53.1875,
+      "labelBottomVsTileBottom": -53.203125,
+      "labelLeftVsTileLeft": 47.421875,
+      "labelRightVsTileRight": -47.4375,
+      "overflowX": false,
+      "overflowY": false,
+      "scrollWidth": 126,
+      "clientWidth": 126,
+      "scrollHeight": 18,
+      "clientHeight": 18,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "hasAvatar": true,
+      "avatarW": 0,
+      "avatarH": 0,
+      "labelVsContent": {
+        "dx": -0.008,
+        "dy": -0.008,
+        "dyEm": -0.001
+      },
+      "identity": [
+        {
+          "cls": "tc-avatar-container layout-grid-slot__avatar",
+          "isPreview": false,
+          "display": "none",
+          "visibility": "visible",
+          "opacity": "1",
+          "boxW": 0,
+          "boxH": 0,
+          "visible": false,
+          "reason": "display:none",
+          "paintedDescendants": 0
+        }
+      ],
+      "anyIdentityVisible": false,
+      "avatarBlockFound": true,
+      "avatarVisible": false,
+      "previewBlockFound": false,
+      "withPanel": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 16,
+        "labelLineHeight": "17.6px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 8,
+        "tileW": 198.5625,
+        "tileH": 111.390625,
+        "labelW": 126.140625,
+        "labelH": 17.59375,
+        "dx": -0.0078125,
+        "dy": -0.0078125,
+        "labelTopVsTileTop": 46.890625,
+        "labelBottomVsTileBottom": -46.90625,
+        "labelLeftVsTileLeft": 36.203125,
+        "labelRightVsTileRight": -36.21875,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 126,
+        "clientWidth": 126,
+        "scrollHeight": 18,
+        "clientHeight": 18,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": -0.008,
+          "dy": -0.008,
+          "dyEm": -0.001
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "resting": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 16,
+        "labelLineHeight": "17.6px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 8,
+        "tileW": 221,
+        "tileH": 123.984375,
+        "labelW": 126.140625,
+        "labelH": 17.59375,
+        "dx": -0.0078125,
+        "dy": -0.0078125,
+        "labelTopVsTileTop": 53.1875,
+        "labelBottomVsTileBottom": -53.203125,
+        "labelLeftVsTileLeft": 47.421875,
+        "labelRightVsTileRight": -47.4375,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 126,
+        "clientWidth": 126,
+        "scrollHeight": 18,
+        "clientHeight": 18,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": -0.008,
+          "dy": -0.008,
+          "dyEm": -0.001
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "outsideWithPanel": {
+        "total": 4,
+        "visible": 4,
+        "inSlotPanelVisible": 2,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar-container grid-slot-contact-item__avatar",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          }
+        ]
+      },
+      "outsideResting": {
+        "total": 2,
+        "visible": 2,
+        "inSlotPanelVisible": 0,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          }
+        ]
+      }
+    },
+    {
+      "size": 25,
+      "plus": false,
+      "label": "25",
+      "tiles": 25,
+      "panelClosed": true,
+      "placement": "placed",
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 16,
+      "labelLineHeight": "17.6px",
+      "labelTextOverflow": "ellipsis",
+      "slotFontSizePx": 8,
+      "tileW": 177,
+      "tileH": 98.984375,
+      "labelW": 126.140625,
+      "labelH": 17.59375,
+      "dx": -0.0078125,
+      "dy": -0.0078125,
+      "labelTopVsTileTop": 40.6875,
+      "labelBottomVsTileBottom": -40.703125,
+      "labelLeftVsTileLeft": 25.421875,
+      "labelRightVsTileRight": -25.4375,
+      "overflowX": false,
+      "overflowY": false,
+      "scrollWidth": 126,
+      "clientWidth": 126,
+      "scrollHeight": 18,
+      "clientHeight": 18,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "hasAvatar": true,
+      "avatarW": 0,
+      "avatarH": 0,
+      "labelVsContent": {
+        "dx": -0.008,
+        "dy": -0.008,
+        "dyEm": -0.001
+      },
+      "identity": [
+        {
+          "cls": "tc-avatar-container layout-grid-slot__avatar",
+          "isPreview": false,
+          "display": "none",
+          "visibility": "visible",
+          "opacity": "1",
+          "boxW": 0,
+          "boxH": 0,
+          "visible": false,
+          "reason": "display:none",
+          "paintedDescendants": 0
+        }
+      ],
+      "anyIdentityVisible": false,
+      "avatarBlockFound": true,
+      "avatarVisible": false,
+      "previewBlockFound": false,
+      "withPanel": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 16,
+        "labelLineHeight": "17.6px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 8,
+        "tileW": 159.03125,
+        "tileH": 88.9375,
+        "labelW": 126.140625,
+        "labelH": 17.59375,
+        "dx": -0.0078125,
+        "dy": 0,
+        "labelTopVsTileTop": 35.671875,
+        "labelBottomVsTileBottom": -35.671875,
+        "labelLeftVsTileLeft": 16.4375,
+        "labelRightVsTileRight": -16.453125,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 126,
+        "clientWidth": 126,
+        "scrollHeight": 18,
+        "clientHeight": 18,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": -0.008,
+          "dy": 0,
+          "dyEm": 0
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "resting": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 16,
+        "labelLineHeight": "17.6px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 8,
+        "tileW": 177,
+        "tileH": 98.984375,
+        "labelW": 126.140625,
+        "labelH": 17.59375,
+        "dx": -0.0078125,
+        "dy": -0.0078125,
+        "labelTopVsTileTop": 40.6875,
+        "labelBottomVsTileBottom": -40.703125,
+        "labelLeftVsTileLeft": 25.421875,
+        "labelRightVsTileRight": -25.4375,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 126,
+        "clientWidth": 126,
+        "scrollHeight": 18,
+        "clientHeight": 18,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": -0.008,
+          "dy": -0.008,
+          "dyEm": -0.001
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "outsideWithPanel": {
+        "total": 4,
+        "visible": 4,
+        "inSlotPanelVisible": 2,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar-container grid-slot-contact-item__avatar",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          }
+        ]
+      },
+      "outsideResting": {
+        "total": 2,
+        "visible": 2,
+        "inSlotPanelVisible": 0,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          }
+        ]
+      }
+    },
+    {
+      "size": 34,
+      "plus": true,
+      "label": "34 +",
+      "tiles": 36,
+      "panelClosed": true,
+      "placement": "placed",
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 16,
+      "labelLineHeight": "17.6px",
+      "labelTextOverflow": "ellipsis",
+      "slotFontSizePx": 8,
+      "tileW": 147,
+      "tileH": 82.984375,
+      "labelW": 126.140625,
+      "labelH": 17.59375,
+      "dx": -0.0078125,
+      "dy": -0.0078125,
+      "labelTopVsTileTop": 32.6875,
+      "labelBottomVsTileBottom": -32.703125,
+      "labelLeftVsTileLeft": 10.421875,
+      "labelRightVsTileRight": -10.4375,
+      "overflowX": false,
+      "overflowY": false,
+      "scrollWidth": 126,
+      "clientWidth": 126,
+      "scrollHeight": 18,
+      "clientHeight": 18,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "hasAvatar": true,
+      "avatarW": 0,
+      "avatarH": 0,
+      "labelVsContent": {
+        "dx": -0.008,
+        "dy": -0.008,
+        "dyEm": -0.001
+      },
+      "identity": [
+        {
+          "cls": "tc-avatar-container layout-grid-slot__avatar",
+          "isPreview": false,
+          "display": "none",
+          "visibility": "visible",
+          "opacity": "1",
+          "boxW": 0,
+          "boxH": 0,
+          "visible": false,
+          "reason": "display:none",
+          "paintedDescendants": 0
+        }
+      ],
+      "anyIdentityVisible": false,
+      "avatarBlockFound": true,
+      "avatarVisible": false,
+      "previewBlockFound": false,
+      "withPanel": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 16,
+        "labelLineHeight": "17.6px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 8,
+        "tileW": 132.078125,
+        "tileH": 74.5625,
+        "labelW": 126.078125,
+        "labelH": 17.59375,
+        "dx": 0,
+        "dy": 0,
+        "labelTopVsTileTop": 28.484375,
+        "labelBottomVsTileBottom": -28.484375,
+        "labelLeftVsTileLeft": 3,
+        "labelRightVsTileRight": -3,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 126,
+        "clientWidth": 126,
+        "scrollHeight": 18,
+        "clientHeight": 18,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": 0,
+          "dy": 0,
+          "dyEm": 0
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "resting": {
+        "labelFound": true,
+        "labelText": "T12b Label Probe",
+        "labelFontSizePx": 16,
+        "labelLineHeight": "17.6px",
+        "labelTextOverflow": "ellipsis",
+        "slotFontSizePx": 8,
+        "tileW": 147,
+        "tileH": 82.984375,
+        "labelW": 126.140625,
+        "labelH": 17.59375,
+        "dx": -0.0078125,
+        "dy": -0.0078125,
+        "labelTopVsTileTop": 32.6875,
+        "labelBottomVsTileBottom": -32.703125,
+        "labelLeftVsTileLeft": 10.421875,
+        "labelRightVsTileRight": -10.4375,
+        "overflowX": false,
+        "overflowY": false,
+        "scrollWidth": 126,
+        "clientWidth": 126,
+        "scrollHeight": 18,
+        "clientHeight": 18,
+        "labelInsideTile": true,
+        "labelInsideTileX": true,
+        "hasAvatar": true,
+        "avatarW": 0,
+        "avatarH": 0,
+        "labelVsContent": {
+          "dx": -0.008,
+          "dy": -0.008,
+          "dyEm": -0.001
+        },
+        "identity": [
+          {
+            "cls": "tc-avatar-container layout-grid-slot__avatar",
+            "isPreview": false,
+            "display": "none",
+            "visibility": "visible",
+            "opacity": "1",
+            "boxW": 0,
+            "boxH": 0,
+            "visible": false,
+            "reason": "display:none",
+            "paintedDescendants": 0
+          }
+        ],
+        "anyIdentityVisible": false,
+        "avatarBlockFound": true,
+        "avatarVisible": false,
+        "previewBlockFound": false
+      },
+      "outsideWithPanel": {
+        "total": 4,
+        "visible": 4,
+        "inSlotPanelVisible": 2,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar-container grid-slot-contact-item__avatar",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 36,
+            "boxH": 36,
+            "visible": true,
+            "inSlotPanel": true,
+            "inRecipients": false,
+            "inHeader": false
+          }
+        ]
+      },
+      "outsideResting": {
+        "total": 2,
+        "visible": 2,
+        "inSlotPanelVisible": 0,
+        "inRecipientsVisible": 0,
+        "inHeaderVisible": 2,
+        "items": [
+          {
+            "cls": "tc-avatar-container header-profile__avatar",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          },
+          {
+            "cls": "tc-avatar tc-avatar-status--null",
+            "boxW": 24,
+            "boxH": 24,
+            "visible": true,
+            "inSlotPanel": false,
+            "inRecipients": false,
+            "inHeader": true
+          }
+        ]
+      }
+    }
+  ],
+  "counters": {
+    "uiCounts": {
+      "participants": 1,
+      "devices": 0
+    },
+    "apiCounts": {
+      "participants": 1,
+      "devices": 0,
+      "raw": {
+        "alias": 0,
+        "file": 0,
+        "h323": 0,
+        "media": 0,
+        "rtsp": 0,
+        "sip": 1,
+        "users": 0,
+        "vnc": 0
+      }
+    },
+    "contactsEndpoint": {
+      "count": 1,
+      "byType": {
+        "call_strings": 1
+      },
+      "byProtocol": {
+        "sip": 1
+      },
+      "names": [
+        "T12b Label Probe"
+      ]
+    },
+    "headerCounts": {
+      "participants": 1,
+      "devices": 0
+    },
+    "match": true,
+    "matchDefinition": "uiCounts == apiCounts == headerCounts && uiCounts.participants == contactsEndpoint.count",
+    "matchDetail": {
+      "uiVsApi": true,
+      "uiVsHeader": true,
+      "uiVsContacts": true
+    }
+  },
+  "emptyTile": {
+    "baseline": [
+      {
+        "iconVsTileDyPx": 7.99,
+        "iconVsTileDyEm": 0.999,
+        "iconVsContentDyPx": -0.01,
+        "contentTransform": "none",
+        "iconBox": {
+          "w": 24,
+          "h": 24
+        }
+      },
+      {
+        "iconVsTileDyPx": 7.99,
+        "iconVsTileDyEm": 0.999,
+        "iconVsContentDyPx": -0.01,
+        "contentTransform": "none",
+        "iconBox": {
+          "w": 24,
+          "h": 24
+        }
+      },
+      {
+        "iconVsTileDyPx": 7.99,
+        "iconVsTileDyEm": 0.999,
+        "iconVsContentDyPx": -0.01,
+        "contentTransform": "none",
+        "iconBox": {
+          "w": 24,
+          "h": 24
+        }
+      }
+    ],
+    "final": [
+      {
+        "iconVsTileDyPx": 7.99,
+        "iconVsTileDyEm": 0.999,
+        "iconVsContentDyPx": -0.01,
+        "contentTransform": "none",
+        "iconBox": {
+          "w": 24,
+          "h": 24
+        }
+      },
+      {
+        "iconVsTileDyPx": 7.99,
+        "iconVsTileDyEm": 0.999,
+        "iconVsContentDyPx": -0.01,
+        "contentTransform": "none",
+        "iconBox": {
+          "w": 24,
+          "h": 24
+        }
+      },
+      {
+        "iconVsTileDyPx": 7.99,
+        "iconVsTileDyEm": 0.999,
+        "iconVsContentDyPx": -0.01,
+        "contentTransform": "none",
+        "iconBox": {
+          "w": 24,
+          "h": 24
+        }
+      }
+    ]
+  },
+  "outsideAvatars": {
+    "baseline": {
+      "total": 2,
+      "visible": 2,
+      "inSlotPanelVisible": 0,
+      "inRecipientsVisible": 0,
+      "inHeaderVisible": 2,
+      "items": [
+        {
+          "cls": "tc-avatar-container header-profile__avatar",
+          "boxW": 24,
+          "boxH": 24,
+          "visible": true,
+          "inSlotPanel": false,
+          "inRecipients": false,
+          "inHeader": true
+        },
+        {
+          "cls": "tc-avatar tc-avatar-status--null",
+          "boxW": 24,
+          "boxH": 24,
+          "visible": true,
+          "inSlotPanel": false,
+          "inRecipients": false,
+          "inHeader": true
+        }
+      ]
+    }
+  },
+  "previewSimulation": {
+    "simulated": true,
+    "hadAvatarElement": true,
+    "dy": 0,
+    "dx": -0.008,
+    "labelVsContentDy": 14.68,
+    "contentTransform": "matrix(1, 0, 0, 1, 0, -22.68)",
+    "normalTransform": "matrix(1, 0, 0, 1, 0, -8)",
+    "slotFontSizePx": 8
+  },
+  "revertCheck": null,
+  "checks": [
+    {
+      "name": "login: token in localStorage",
+      "ok": true,
+      "severity": "fatal",
+      "detail": null
+    },
+    {
+      "name": "login: token is JWT",
+      "ok": true,
+      "severity": "fatal",
+      "detail": null
+    },
+    {
+      "name": "precondition: participant contact present in the conference",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "contacts=[\"T12b Label Probe\"]"
+    },
+    {
+      "name": "layout: size range selector visible",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "[\"1\",\"2\",\"3\",\"4\",\"5 +\",\"8\",\"9\",\"10 +\",\"25\",\"34 +\",\"\"]"
+    },
+    {
+      "name": "layout: contact added to layout recipients",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "control: recipients-table avatars stay visible",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "visible=4/4 (recipients=2, header=2)"
+    },
+    {
+      "name": "size 1: range button present",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "1"
+    },
+    {
+      "name": "size 1: tiles rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tiles=1"
+    },
+    {
+      "name": "size 1: participant placed in cell 1",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 1: participant label found",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 1: label font-size is 2x slot font-size (CSS 2em fix)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=24px slot=12px ratio=2.00"
+    },
+    {
+      "name": "size 1: label centered in tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=0.00 dy=-0.01"
+    },
+    {
+      "name": "size 1: label fully inside tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "top+=236.3 bottom+=-236.3"
+    },
+    {
+      "name": "size 1: label does not stick out horizontally",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "left+=348.9 right+=-348.9"
+    },
+    {
+      "name": "size 1: label does not overflow vertically",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollHeight=27 clientHeight=26 (label \"T12b Label Probe\")"
+    },
+    {
+      "name": "size 1: horizontal clipping uses the vendor ellipsis",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "overflowX=false scrollWidth=189 clientWidth=189 textOverflow=ellipsis"
+    },
+    {
+      "name": "size 1: tile avatar hidden",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tc-avatar-container layout-grid-slot__avatar[display:none]"
+    },
+    {
+      "name": "size 1: tile avatar takes no space in the flow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "avatarBox=0x0 (ожидается 0x0)"
+    },
+    {
+      "name": "size 1: nothing pushes the label down inside the tile content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "labelVsContent.dy=-0.008px = -0.001em (limit 0.5em)"
+    },
+    {
+      "name": "size 1: avatars outside the layout tile stay visible",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "visible=4/4 (panel=2, recipients=0, header=2)"
+    },
+    {
+      "name": "size 2: range button present",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "2"
+    },
+    {
+      "name": "size 2: tiles rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tiles=2"
+    },
+    {
+      "name": "size 2: participant placed in cell 1",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 2: participant label found",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 2: label font-size is 2x slot font-size (CSS 2em fix)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=24px slot=12px ratio=2.00"
+    },
+    {
+      "name": "size 2: label centered in tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=0.00 dy=0.00"
+    },
+    {
+      "name": "size 2: label fully inside tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "top+=111.8 bottom+=-111.8"
+    },
+    {
+      "name": "size 2: label does not stick out horizontally",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "left+=126.9 right+=-126.9"
+    },
+    {
+      "name": "size 2: label does not overflow vertically",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollHeight=27 clientHeight=26 (label \"T12b Label Probe\")"
+    },
+    {
+      "name": "size 2: horizontal clipping uses the vendor ellipsis",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "overflowX=false scrollWidth=189 clientWidth=189 textOverflow=ellipsis"
+    },
+    {
+      "name": "size 2: tile avatar hidden",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tc-avatar-container layout-grid-slot__avatar[display:none]"
+    },
+    {
+      "name": "size 2: tile avatar takes no space in the flow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "avatarBox=0x0 (ожидается 0x0)"
+    },
+    {
+      "name": "size 2: nothing pushes the label down inside the tile content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "labelVsContent.dy=0px = 0em (limit 0.5em)"
+    },
+    {
+      "name": "size 2: avatars outside the layout tile stay visible",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "visible=4/4 (panel=2, recipients=0, header=2)"
+    },
+    {
+      "name": "size 3: range button present",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "3"
+    },
+    {
+      "name": "size 3: tiles rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tiles=3"
+    },
+    {
+      "name": "size 3: participant placed in cell 1",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 3: participant label found",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 3: label font-size is 2x slot font-size (CSS 2em fix)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=24px slot=12px ratio=2.00"
+    },
+    {
+      "name": "size 3: label centered in tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=0.00 dy=-0.01"
+    },
+    {
+      "name": "size 3: label fully inside tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "top+=111.3 bottom+=-111.3"
+    },
+    {
+      "name": "size 3: label does not stick out horizontally",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "left+=126.9 right+=-126.9"
+    },
+    {
+      "name": "size 3: label does not overflow vertically",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollHeight=27 clientHeight=26 (label \"T12b Label Probe\")"
+    },
+    {
+      "name": "size 3: horizontal clipping uses the vendor ellipsis",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "overflowX=false scrollWidth=189 clientWidth=189 textOverflow=ellipsis"
+    },
+    {
+      "name": "size 3: tile avatar hidden",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tc-avatar-container layout-grid-slot__avatar[display:none]"
+    },
+    {
+      "name": "size 3: tile avatar takes no space in the flow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "avatarBox=0x0 (ожидается 0x0)"
+    },
+    {
+      "name": "size 3: nothing pushes the label down inside the tile content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "labelVsContent.dy=-0.008px = -0.001em (limit 0.5em)"
+    },
+    {
+      "name": "size 3: avatars outside the layout tile stay visible",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "visible=4/4 (panel=2, recipients=0, header=2)"
+    },
+    {
+      "name": "size 4: range button present",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "4"
+    },
+    {
+      "name": "size 4: tiles rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tiles=4"
+    },
+    {
+      "name": "size 4: participant placed in cell 1",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 4: participant label found",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 4: label font-size is 2x slot font-size (CSS 2em fix)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=24px slot=12px ratio=2.00"
+    },
+    {
+      "name": "size 4: label centered in tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=0.00 dy=-0.01"
+    },
+    {
+      "name": "size 4: label fully inside tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "top+=111.3 bottom+=-111.3"
+    },
+    {
+      "name": "size 4: label does not stick out horizontally",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "left+=126.9 right+=-126.9"
+    },
+    {
+      "name": "size 4: label does not overflow vertically",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollHeight=27 clientHeight=26 (label \"T12b Label Probe\")"
+    },
+    {
+      "name": "size 4: horizontal clipping uses the vendor ellipsis",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "overflowX=false scrollWidth=189 clientWidth=189 textOverflow=ellipsis"
+    },
+    {
+      "name": "size 4: tile avatar hidden",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tc-avatar-container layout-grid-slot__avatar[display:none]"
+    },
+    {
+      "name": "size 4: tile avatar takes no space in the flow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "avatarBox=0x0 (ожидается 0x0)"
+    },
+    {
+      "name": "size 4: nothing pushes the label down inside the tile content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "labelVsContent.dy=-0.008px = -0.001em (limit 0.5em)"
+    },
+    {
+      "name": "size 4: avatars outside the layout tile stay visible",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "visible=4/4 (panel=2, recipients=0, header=2)"
+    },
+    {
+      "name": "size 5+: range button present",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "5 +"
+    },
+    {
+      "name": "size 5+: tiles rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tiles=6"
+    },
+    {
+      "name": "size 5+: participant placed in cell 1",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 5+: participant label found",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 5+: label font-size is 2x slot font-size (CSS 2em fix)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=24px slot=12px ratio=2.00"
+    },
+    {
+      "name": "size 5+: label centered in tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=0.00 dy=-0.01"
+    },
+    {
+      "name": "size 5+: label fully inside tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "top+=111.3 bottom+=-111.3"
+    },
+    {
+      "name": "size 5+: label does not stick out horizontally",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "left+=52.9 right+=-52.9"
+    },
+    {
+      "name": "size 5+: label does not overflow vertically",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollHeight=27 clientHeight=26 (label \"T12b Label Probe\")"
+    },
+    {
+      "name": "size 5+: horizontal clipping uses the vendor ellipsis",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "overflowX=false scrollWidth=189 clientWidth=189 textOverflow=ellipsis"
+    },
+    {
+      "name": "size 5+: tile avatar hidden",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tc-avatar-container layout-grid-slot__avatar[display:none]"
+    },
+    {
+      "name": "size 5+: tile avatar takes no space in the flow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "avatarBox=0x0 (ожидается 0x0)"
+    },
+    {
+      "name": "size 5+: nothing pushes the label down inside the tile content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "labelVsContent.dy=-0.008px = -0.001em (limit 0.5em)"
+    },
+    {
+      "name": "size 5+: avatars outside the layout tile stay visible",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "visible=4/4 (panel=2, recipients=0, header=2)"
+    },
+    {
+      "name": "size 8: range button present",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "8"
+    },
+    {
+      "name": "size 8: tiles rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tiles=8"
+    },
+    {
+      "name": "size 8: participant placed in cell 1",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 8: participant label found",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 8: label font-size is 2x slot font-size (CSS 2em fix)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=24px slot=12px ratio=2.00"
+    },
+    {
+      "name": "size 8: label centered in tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=0.00 dy=-0.01"
+    },
+    {
+      "name": "size 8: label fully inside tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "top+=111.3 bottom+=-111.3"
+    },
+    {
+      "name": "size 8: label does not stick out horizontally",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "left+=15.9 right+=-15.9"
+    },
+    {
+      "name": "size 8: label does not overflow vertically",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollHeight=27 clientHeight=26 (label \"T12b Label Probe\")"
+    },
+    {
+      "name": "size 8: horizontal clipping uses the vendor ellipsis",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "overflowX=false scrollWidth=189 clientWidth=189 textOverflow=ellipsis"
+    },
+    {
+      "name": "size 8: tile avatar hidden",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tc-avatar-container layout-grid-slot__avatar[display:none]"
+    },
+    {
+      "name": "size 8: tile avatar takes no space in the flow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "avatarBox=0x0 (ожидается 0x0)"
+    },
+    {
+      "name": "size 8: nothing pushes the label down inside the tile content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "labelVsContent.dy=-0.008px = -0.001em (limit 0.5em)"
+    },
+    {
+      "name": "size 8: avatars outside the layout tile stay visible",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "visible=4/4 (panel=2, recipients=0, header=2)"
+    },
+    {
+      "name": "size 9: range button present",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "9"
+    },
+    {
+      "name": "size 9: tiles rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tiles=9"
+    },
+    {
+      "name": "size 9: participant placed in cell 1",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 9: participant label found",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 9: label font-size is 2x slot font-size (CSS 2em fix)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=16px slot=8px ratio=2.00"
+    },
+    {
+      "name": "size 9: label centered in tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=-0.01 dy=0.00"
+    },
+    {
+      "name": "size 9: label fully inside tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "top+=74.2 bottom+=-74.2"
+    },
+    {
+      "name": "size 9: label does not stick out horizontally",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "left+=84.4 right+=-84.4"
+    },
+    {
+      "name": "size 9: label does not overflow vertically",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollHeight=18 clientHeight=18 (label \"T12b Label Probe\")"
+    },
+    {
+      "name": "size 9: horizontal clipping uses the vendor ellipsis",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "overflowX=false scrollWidth=126 clientWidth=126 textOverflow=ellipsis"
+    },
+    {
+      "name": "size 9: tile avatar hidden",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tc-avatar-container layout-grid-slot__avatar[display:none]"
+    },
+    {
+      "name": "size 9: tile avatar takes no space in the flow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "avatarBox=0x0 (ожидается 0x0)"
+    },
+    {
+      "name": "size 9: nothing pushes the label down inside the tile content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "labelVsContent.dy=0px = 0em (limit 0.5em)"
+    },
+    {
+      "name": "size 9: avatars outside the layout tile stay visible",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "visible=4/4 (panel=2, recipients=0, header=2)"
+    },
+    {
+      "name": "size 10+: range button present",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "10 +"
+    },
+    {
+      "name": "size 10+: tiles rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tiles=16"
+    },
+    {
+      "name": "size 10+: participant placed in cell 1",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 10+: participant label found",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 10+: label font-size is 2x slot font-size (CSS 2em fix)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=16px slot=8px ratio=2.00"
+    },
+    {
+      "name": "size 10+: label centered in tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=-0.01 dy=-0.01"
+    },
+    {
+      "name": "size 10+: label fully inside tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "top+=53.2 bottom+=-53.2"
+    },
+    {
+      "name": "size 10+: label does not stick out horizontally",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "left+=47.4 right+=-47.4"
+    },
+    {
+      "name": "size 10+: label does not overflow vertically",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollHeight=18 clientHeight=18 (label \"T12b Label Probe\")"
+    },
+    {
+      "name": "size 10+: horizontal clipping uses the vendor ellipsis",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "overflowX=false scrollWidth=126 clientWidth=126 textOverflow=ellipsis"
+    },
+    {
+      "name": "size 10+: tile avatar hidden",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tc-avatar-container layout-grid-slot__avatar[display:none]"
+    },
+    {
+      "name": "size 10+: tile avatar takes no space in the flow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "avatarBox=0x0 (ожидается 0x0)"
+    },
+    {
+      "name": "size 10+: nothing pushes the label down inside the tile content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "labelVsContent.dy=-0.008px = -0.001em (limit 0.5em)"
+    },
+    {
+      "name": "size 10+: avatars outside the layout tile stay visible",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "visible=4/4 (panel=2, recipients=0, header=2)"
+    },
+    {
+      "name": "size 25: range button present",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "25"
+    },
+    {
+      "name": "size 25: tiles rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tiles=25"
+    },
+    {
+      "name": "size 25: participant placed in cell 1",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 25: participant label found",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 25: label font-size is 2x slot font-size (CSS 2em fix)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=16px slot=8px ratio=2.00"
+    },
+    {
+      "name": "size 25: label centered in tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=-0.01 dy=-0.01"
+    },
+    {
+      "name": "size 25: label fully inside tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "top+=40.7 bottom+=-40.7"
+    },
+    {
+      "name": "size 25: label does not stick out horizontally",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "left+=25.4 right+=-25.4"
+    },
+    {
+      "name": "size 25: label does not overflow vertically",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollHeight=18 clientHeight=18 (label \"T12b Label Probe\")"
+    },
+    {
+      "name": "size 25: horizontal clipping uses the vendor ellipsis",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "overflowX=false scrollWidth=126 clientWidth=126 textOverflow=ellipsis"
+    },
+    {
+      "name": "size 25: tile avatar hidden",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tc-avatar-container layout-grid-slot__avatar[display:none]"
+    },
+    {
+      "name": "size 25: tile avatar takes no space in the flow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "avatarBox=0x0 (ожидается 0x0)"
+    },
+    {
+      "name": "size 25: nothing pushes the label down inside the tile content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "labelVsContent.dy=-0.008px = -0.001em (limit 0.5em)"
+    },
+    {
+      "name": "size 25: avatars outside the layout tile stay visible",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "visible=4/4 (panel=2, recipients=0, header=2)"
+    },
+    {
+      "name": "size 34+: range button present",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "34 +"
+    },
+    {
+      "name": "size 34+: tiles rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tiles=36"
+    },
+    {
+      "name": "size 34+: participant placed in cell 1",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 34+: participant label found",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 34+: label font-size is 2x slot font-size (CSS 2em fix)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=16px slot=8px ratio=2.00"
+    },
+    {
+      "name": "size 34+: label centered in tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=-0.01 dy=-0.01"
+    },
+    {
+      "name": "size 34+: label fully inside tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "top+=32.7 bottom+=-32.7"
+    },
+    {
+      "name": "size 34+: label does not stick out horizontally",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "left+=10.4 right+=-10.4"
+    },
+    {
+      "name": "size 34+: label does not overflow vertically",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollHeight=18 clientHeight=18 (label \"T12b Label Probe\")"
+    },
+    {
+      "name": "size 34+: horizontal clipping uses the vendor ellipsis",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "overflowX=false scrollWidth=126 clientWidth=126 textOverflow=ellipsis"
+    },
+    {
+      "name": "size 34+: tile avatar hidden",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tc-avatar-container layout-grid-slot__avatar[display:none]"
+    },
+    {
+      "name": "size 34+: tile avatar takes no space in the flow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "avatarBox=0x0 (ожидается 0x0)"
+    },
+    {
+      "name": "size 34+: nothing pushes the label down inside the tile content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "labelVsContent.dy=-0.008px = -0.001em (limit 0.5em)"
+    },
+    {
+      "name": "size 34+: avatars outside the layout tile stay visible",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "visible=4/4 (panel=2, recipients=0, header=2)"
+    },
+    {
+      "name": "avatars outside the layout tile are unaffected by the fix (before/after)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "before visible=2/2 panel=0 header=2; after visible=2/2 panel=0 header=2"
+    },
+    {
+      "name": "empty tile: role icon not shifted by the fix",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "iconVsTileDyEm before=0.999 after=0.999 shift=0em contentTransform=none"
+    },
+    {
+      "name": "empty tile: role icon stays centered inside the tile content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "iconVsContentDy=-0.01px box=24x24"
+    },
+    {
+      "name": "preview tile: label stays centered when the tile shows a frame preview",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dy=0 dx=-0.008 labelVsContentDy=14.68 transform=matrix(1, 0, 0, 1, 0, -22.68) hadAvatarElement=true"
+    },
+    {
+      "name": "preview tile: the preview guard shifts the preview tile separately",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "normalTransform=matrix(1, 0, 0, 1, 0, -8) (ty=-8) previewTransform=matrix(1, 0, 0, 1, 0, -22.68) (ty=-22.68) |delta|=14.68px expected=14.68px font=8px"
+    },
+    {
+      "name": "counters: conference present in /api/v3/ui/conferences",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "status=200"
+    },
+    {
+      "name": "counters: conference row found in monitoring list",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "Acc_Full_UI"
+    },
+    {
+      "name": "counters: conference card header counters found",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "[{\"title\":\"Участники (SIP/H.323)\",\"texts\":[\"group\",\"1\"]},{\"title\":\"Устройства (VNC/RTSP) и медиафайлы\",\"texts\":[\"0\"]}]"
+    },
+    {
+      "name": "counters: UI list == API /ui/conferences",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "ui={\"participants\":1,\"devices\":0} api={\"participants\":1,\"devices\":0}"
+    },
+    {
+      "name": "counters: UI list == conference card header",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "ui={\"participants\":1,\"devices\":0} header={\"participants\":1,\"devices\":0}"
+    },
+    {
+      "name": "counters: UI participants == contacts endpoint count",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "ui=1 contacts=1 ([\"T12b Label Probe\"])"
+    },
+    {
+      "name": "ui: no pageerror",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "[]"
+    },
+    {
+      "name": "db: no writes to the live stand (draft only)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "[]"
+    }
+  ],
+  "page_errors": [],
+  "console_errors": [],
+  "non_get_requests": [
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/login",
+      "body": "<redacted>"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_25\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_25\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_1\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_2\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_3\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_4\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_6\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_8\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_9\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_16\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_25\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_36\",\"width\":887,\"height\":499}"
+    }
+  ],
+  "failure": null
+}

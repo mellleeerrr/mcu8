@@ -180,21 +180,39 @@
 **Предусловие:** ADR-0012 (Layout: Taffy + hadrone-core + свой) — `accepted` (Q4 ✅).
 
 ### Задачи
+> **Сверка с кодом — 2026-10-23.** Ниже `[x]` означает «реализовано в той или иной
+> форме»; пункты, которые **не реализованы**, переведены в `[ ]` с пометкой.
+> Основание: ревью `dead-code-scout` / `elegance-reviewer` / `layout-spec-audit`.
+
 - [x] Крейт `vks-layout`:
-  - [x] `layout.rs` — `Layout{version, slots}`, `Slot{id, rect:Rect{x,y,w,h:0..1}, z, assignment}`.
-  - [x] `assignment.rs` — `SlotAssignment{Auto | Fixed(ParticipantId) | Pinned}` + assign_participants().
-  - [x] `presets.rs` — 2x2, 3x3, focus+thumbnails, speaker (focus_layout(n), speaker_layout()).
-  - [x] `mcu_renderer.rs` — `to_pixel_rects(layout, W, H) → HashMap<SlotId, PixelRect>` + crossfade 300ms.
-  - [x] `client_renderer.rs` — v1: CSS absolute % positioning (left/top/width/height); v2: Taffy.
-  - [x] `storage.rs` — `Layout ↔ JSON` (serde, БД jsonb) + `Layout ↔ protobuf` (signaling).
+  - [x] `core.rs` — `Layout{version, kind, slots}`, `Slot{id:SlotId, participant_id:Option<ParticipantId>, rect:Rect{x,y,width,height} (пиксели), z_index, pinned, is_focus}`.
+        *Форма отличается от плана: `Rect` пиксельный, нормализация — отдельным
+        типом `NormalizedLayout`; отдельного `assignment.rs` нет, привязка
+        участника — поле слота.*
+  - [ ] `assignment.rs` — `SlotAssignment{Auto | Fixed(ParticipantId) | Pinned}` + assign_participants().
+        *Не реализовано. Ближайший эквивалент — `roles.rs`
+        (`SlotRole{Default,Fixed,Active,Rolling}` + `assign_by_role`), но роли
+        пока не применяются движком автоматически.*
+  - [x] `preset.rs` — 65 вендорных пресетов (`MANUAL_SCHEMES`) + `codian.rs` — 54 раскладки Codian.
+        *Плановые `grid_2x2()`/`speaker_layout()` отсутствуют; есть `GridLayout::compute` и `FocusLayout`.*
+  - [x] `layout_bridge.rs` (в `vks-media-mcu`) — пиксельные rects + crossfade 300ms.
+        *Файл `mcu_renderer.rs` и функция `to_pixel_rects` в `vks-layout` не существуют.*
+  - [ ] `client_renderer.rs` — v1: CSS absolute % positioning; v2: Taffy.
+        *Клиент рисует через собственный `DrawCommand` в `client/vks-client-sdk`.*
+  - [ ] `storage.rs` — `Layout ↔ JSON` + `Layout ↔ protobuf`.
+        *Преобразования живут в `vks-admin`/`vks-server`; отдельного модуля нет.*
   - [x] Versioning: `Layout.version: u32`, increment на изменение; backward compat.
-- [x] **БД-схема** (migrations): `layouts(id, name, kind, version, slots JSONB, is_default)`, `room_layouts(room_id, layout_id, is_default)`.
-- [x] **Синхронизация**: push через NATS `vks.cluster.room.layout_changed` → `LayoutChanged` broadcast; pull — `JoinRoomResult.layout` snapshot.
-- [x] **Редактор раскладок** в админке (vks-admin-ui / PNM UI):
-  - [x] Drag-and-drop **slots** (не participants): drag → rect, resize edge → w/h, drag top → z.
+- [ ] **БД-схема**: `layouts(id, name, kind, version, slots JSONB, is_default)`, `room_layouts(...)`.
+      *Фактически — SQLite, таблица `core_layouts(id, name, version, assigned_rooms, is_default)`.
+      JSONB и `room_layouts` не используются.*
+- [ ] **Синхронизация**: push через NATS → `LayoutChanged` broadcast.
+      *NATS — заглушка; `LayoutChanged` объявлен в protobuf, но **не отправляется**.
+      Pull (`JoinRoomResult.layout` snapshot) — работает.*
+- [x] **Редактор раскладок** в админке (PNM UI):
+  - [x] Drag-and-drop **slots** — в вендорном UI PNM 2.2.1.66.
   - [x] Participant avatar → slot = `Fixed(pid)`.
-  - [x] Создание/сохранение кастомных раскладок (`PUT /api/layouts/{id}`).
-  - [x] Назначение по умолчанию, назначение на комнату.
+  - [ ] Создание/сохранение кастомных раскладок (`PUT /api/layouts/{id}`).
+  - [ ] Назначение по умолчанию, назначение на комнату.
   - [x] hadrone-core (Q4) — drag-and-drop.
 - [x] REST CRUD в `vks-admin` для layouts.
 

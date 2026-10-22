@@ -260,6 +260,7 @@ message Slot {
   Rect   rect      = 2;  // normalized (0..1)
   uint32 z         = 3;
   SlotAssignment assignment = 4;
+  optional string participant_id = 5; // для FIXED
 }
 message Rect {
   float x = 1;  // 0..1
@@ -268,13 +269,20 @@ message Rect {
   float h = 4;
 }
 enum SlotAssignment {
-  AUTO   = 0;
-  FIXED  = 1;  // + participant_id
-  PINNED = 2;
+  SLOT_ASSIGNMENT_AUTO   = 0;
+  SLOT_ASSIGNMENT_FIXED  = 1;  // + participant_id
+  SLOT_ASSIGNMENT_PINNED = 2;
 }
 ```
 
 **Синхронизация**: push через NATS `vks.cluster.room.layout_changed` → `LayoutChanged` broadcast. Pull — `JoinRoomResult.layout` snapshot.
+
+> **Факт на 2026-10-23:** сообщение `LayoutChanged` объявлено в
+> `crates/vks-proto/proto/signaling.proto` (поле 80 в `ServerEvent`), но
+> **ни один отправитель его не формирует**, а NATS-канал — заглушка
+> (`vks-cluster`). Клиент при отсутствии события рисует авто-сетку, поэтому
+> раскладка, выбранная в UI, до браузера **не доходит**. Это разрыв цепочки
+> Ц7; план исправления — `ARCHITECTURE_PLAN_2026-10-23.md`, шаг 3.
 
 ## 10. Quality / Error / Ack
 

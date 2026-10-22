@@ -87,7 +87,11 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
-panic = "abort"
+# `unwind`, а не `abort`: паника в задаче рендера (30 fps) или в обработчике
+# запроса не должна ронять весь сервер. `catch_unwind` в `vks-gateway-h323`
+# (FFI-мост) и в `vks-media-mcu` без unwinding просто не работали бы.
+# Цена — таблица раскрутки в бинарнике (~1 % к размеру).
+panic = "unwind"
 
 # Прочий (benches) — без оптимизаций, быстро.
 [profile.bench]

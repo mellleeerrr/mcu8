@@ -1,0 +1,585 @@
+{
+  "ok": true,
+  "base": "http://127.0.0.1:8080",
+  "conference_id": "9f66c92d-cbaf-4974-9cfe-99b6ad3f0bb6",
+  "session_id": "9f66c92d-cbaf-4974-9cfe-99b6ad3f0bb6",
+  "layout_id": "a62fdad3-1f63-45db-9c11-eba87ebd3803",
+  "sip_uri": "sip:probe-e2e@192.168.1.132",
+  "duration_ms": 116413,
+  "checks": [
+    {
+      "name": "login: token in localStorage",
+      "ok": true
+    },
+    {
+      "name": "login: token is JWT",
+      "ok": true
+    },
+    {
+      "name": "conference: POST returned id",
+      "ok": true,
+      "detail": "{\"conference\":{\"abonents\":{\"abonents\":[],\"alias\":0,\"confloop\":0,\"count\":0,\"file\":0,\"h323\":0,\"media\":0,\"records\":[],\"rtmp\":[],\"rtsp\":0,\"sip\":0,\"vnc\":0,\"youtube\":[]},\"addresses\":{\"h323\":\"h323:Conf_655283142@192.168.1.93\",\"sip\":\"sip:Conf_655283142@192.168.1.93\",\"webrtc\":\"sip:Conf_655283142@127.0.0.1\"},"
+    },
+    {
+      "name": "conference: audio codec matrix sent",
+      "ok": true,
+      "detail": "send [{\"bitrate\":null,\"name\":\"AAC\"},{\"bitrate\":null,\"name\":\"G711\"},{\"bitrate\":null,\"name\":\"G719\"},{\"bitrate\":null,\"name\":\"G722\"},{\"bitrate\":24,\"name\":\"G7221\"},{\"bitrate\":32,\"name\":\"G7221\"},{\"bitrate\":24,\"name\":\"G7221C\"},{\"bitrate\":32,\"name\":\"G7221C\"},{\"bitrate\":48,\"name\":\"G7221C\"},{\"bitrate\":null,\"name\":\"G723\"},{\"bitrate\":16,\"name\":\"G726\"},{\"bitrate\":24,\"name\":\"G726\"},{\"bitrate\":32,\"name\":\"G726\"},{\"bitrate\":40,\"name\":\"G726\"},{\"bitrate\":null,\"name\":\"G728\"},{\"bitrate\":null,\"name\":\"G729\"},{\"bitrate\":null,\"name\":\"OPUS\"}]"
+    },
+    {
+      "name": "conference: G722.1C 48 in payload",
+      "ok": true,
+      "detail": "[{\"bitrate\":null,\"name\":\"AAC\"},{\"bitrate\":null,\"name\":\"G711\"},{\"bitrate\":null,\"name\":\"G719\"},{\"bitrate\":null,\"name\":\"G722\"},{\"bitrate\":24,\"name\":\"G7221\"},{\"bitrate\":32,\"name\":\"G7221\"},{\"bitrate\":24,\"name\":\"G7221C\"},{\"bitrate\":32,\"name\":\"G7221C\"},{\"bitrate\":48,\"name\":\"G7221C\"},{\"bitrate\":null,\"name\":\"G723\"},{\"bitrate\":16,\"name\":\"G726\"},{\"bitrate\":24,\"name\":\"G726\"},{\"bitrate\":32,\"name\":\"G726\"},{\"bitrate\":40,\"name\":\"G726\"},{\"bitrate\":null,\"name\":\"G728\"},{\"bitrate\":null,\"name\":\"G729\"},{\"bitrate\":null,\"name\":\"OPUS\"}]"
+    },
+    {
+      "name": "session: started with id",
+      "ok": true,
+      "detail": "{\"session\":{\"abonents\":{\"abonents\":[],\"alias\":0,\"confloop\":0,\"count\":0,\"file\":0,\"h323\":0,\"media\":0,\"records\":[],\"rtmp\":[],\"rtsp\":0,\"sip\":0,\"vnc\":0,\"youtube\":[]},\"addresses\":{\"h323\":\"h323:Conf_655283142@192.168.1.93\",\"sip\":\"sip:Conf_655283142@192.168.1.93\",\"webrtc\":\"sip:Conf_655283142@127.0.0.1\"},\"al"
+    },
+    {
+      "name": "settings: conference profile 1920x1080/4096 patched",
+      "ok": true,
+      "detail": "status=200 {\"conference\":{\"abonents\":{\"abonents\":[],\"alias\":0,\"confloop\":0,\"count\":0,\"file\":0,\"h323\":0,\"media\":0,\"records\":[],\"rtmp\":[],\"rtsp\":0,\"sip\":0,\"vnc\":0,\"youtube\":[]},\"addresses\":{\"h323\":\"h323:Conf_655283142@192.168.1.93\",\"sip\":\"sip:Conf_655283142@192.168.1.93\",\"webrtc\":\"sip:Conf_655283142@127.0.0.1\"},"
+    },
+    {
+      "name": "participant: add-address button present",
+      "ok": true
+    },
+    {
+      "name": "participant: address modal opened",
+      "ok": true
+    },
+    {
+      "name": "participant: address+name fields visible",
+      "ok": true,
+      "detail": "fields=2"
+    },
+    {
+      "name": "sip: call_strings POST status",
+      "ok": true,
+      "detail": "201"
+    },
+    {
+      "name": "sip: payload carries full audio matrix",
+      "ok": true,
+      "detail": "{\"call_string\":{\"addressId\":\"cs-29284e76-5687-42d2-9210-31fa38c83c94\",\"created_at\":1792626186,\"display_name\":\"E2E SIP Probe\",\"id\":\"cs-29284e76-5687-42d2-9210-31fa38c83c94\",\"payload\":{\"audio_rx_enabled\":true,\"audio_tx_enabled\":true,\"auto_call\":true,\"auto_gain_control\":\"DEFAULT\",\"call_string\":{\"file\":{\"primary\":true,\"zoom\":\"fit\"},\"h323\":{\"audioCodecs\":[],\"bitrate\":null,\"cascadeMode\":\"none\",\"isSelfViewEnabled\":true,\"resolution\":null,\"videoCodecs\":[]},\"media\":{\"loop\":true,\"primary\":true},\"rtsp\":{\"pr"
+    },
+    {
+      "name": "sip: payload carries required video matrix",
+      "ok": true,
+      "detail": "{\"call_string\":{\"addressId\":\"cs-29284e76-5687-42d2-9210-31fa38c83c94\",\"created_at\":1792626186,\"display_name\":\"E2E SIP Probe\",\"id\":\"cs-29284e76-5687-42d2-9210-31fa38c83c94\",\"payload\":{\"audio_rx_enabled\":true,\"audio_tx_enabled\":true,\"auto_call\":true,\"auto_gain_control\":\"DEFAULT\",\"call_string\":{\"file\":{\"primary\":true,\"zoom\":\"fit\"},\"h323\":{\"audioCodecs\":[],\"bitrate\":null,\"cascadeMode\":\"none\",\"isSelfViewEnabled\":true,\"resolution\":null,\"videoCodecs\":[]},\"media\":{\"loop\":true,\"primary\":true},\"rtsp\":{\"primary\":true},\"sip\":{\"audioCodecs\":[{\"bitrate\":null,\"name\":\"AAC\"},{\"bitrate\":null,\"name\":\"G711\"},{\"bitrate\":null,\"name\":\"G719\"},{\"bitrate\":null,\"name\":\"G722\"},{\"bitrate\":24,\"name\":\"G7221\"},{\"bitrate\":32,\"name\":\"G7221\"},{\"bitrate\":24,\"name\":\"G7221C\"},{\"bitrate\":32,\"name\":\"G7221C\"},{\"bitrate\":48,\"name\""
+    },
+    {
+      "name": "sip: participant visible in conference UI",
+      "ok": true,
+      "detail": "matches=1"
+    },
+    {
+      "name": "audio: two-way RTP packets (PCMU/PCMA fallback)",
+      "ok": true,
+      "detail": "{\"audioTxPackets\":562,\"audioRxPackets\":367}"
+    },
+    {
+      "name": "audio: no RTP packets rejected by payload type",
+      "ok": true,
+      "detail": "0"
+    },
+    {
+      "name": "video: offer size 1920x1080",
+      "ok": true,
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":null,\"bitrate\":3545517,\"bytes\":5039067,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":23.74602906787055,\"height\":1080,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":4096,\"offered_bitrate\":4096000,\"offered_max_fs\":8160,\"offered_max_mbps\":244800,\"offered_resolution\":\"1920x1080\",\"packets\":4630,\"present\":true,\"requested_bitrate\":4096000,\"resolution\":\"1920x1080\",\"volume\":0,\"width\":1920}"
+    },
+    {
+      "name": "video: offer bitrate 4096 kbps",
+      "ok": true,
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":null,\"bitrate\":3545517,\"bytes\":5039067,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":23.74602906787055,\"height\":1080,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":4096,\"offered_bitrate\":4096000,\"offered_max_fs\":8160,\"offered_max_mbps\":244800,\"offered_resolution\":\"1920x1080\",\"packets\":4630,\"present\":true,\"requested_bitrate\":4096000,\"resolution\":\"1920x1080\",\"volume\":0,\"width\":1920}"
+    },
+    {
+      "name": "video: SDP max-fs matches profile",
+      "ok": true,
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":null,\"bitrate\":3545517,\"bytes\":5039067,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":23.74602906787055,\"height\":1080,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":4096,\"offered_bitrate\":4096000,\"offered_max_fs\":8160,\"offered_max_mbps\":244800,\"offered_resolution\":\"1920x1080\",\"packets\":4630,\"present\":true,\"requested_bitrate\":4096000,\"resolution\":\"1920x1080\",\"volume\":0,\"width\":1920}"
+    },
+    {
+      "name": "video: answer max-br captured from terminal",
+      "ok": true,
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":null,\"bitrate\":3545517,\"bytes\":5039067,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":23.74602906787055,\"height\":1080,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":4096,\"offered_bitrate\":4096000,\"offered_max_fs\":8160,\"offered_max_mbps\":244800,\"offered_resolution\":\"1920x1080\",\"packets\":4630,\"present\":true,\"requested_bitrate\":4096000,\"resolution\":\"1920x1080\",\"volume\":0,\"width\":1920}"
+    },
+    {
+      "name": "video: encoder requested 4096 kbps",
+      "ok": true,
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":null,\"bitrate\":3545517,\"bytes\":5039067,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":23.74602906787055,\"height\":1080,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":4096,\"offered_bitrate\":4096000,\"offered_max_fs\":8160,\"offered_max_mbps\":244800,\"offered_resolution\":\"1920x1080\",\"packets\":4630,\"present\":true,\"requested_bitrate\":4096000,\"resolution\":\"1920x1080\",\"volume\":0,\"width\":1920}"
+    },
+    {
+      "name": "video: encoder profile fps 30",
+      "ok": true,
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":null,\"bitrate\":3545517,\"bytes\":5039067,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":23.74602906787055,\"height\":1080,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":4096,\"offered_bitrate\":4096000,\"offered_max_fs\":8160,\"offered_max_mbps\":244800,\"offered_resolution\":\"1920x1080\",\"packets\":4630,\"present\":true,\"requested_bitrate\":4096000,\"resolution\":\"1920x1080\",\"volume\":0,\"width\":1920}"
+    },
+    {
+      "name": "video: encoded fps >= 20 (live render cadence)",
+      "ok": true,
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":null,\"bitrate\":3545517,\"bytes\":5039067,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":23.74602906787055,\"height\":1080,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":4096,\"offered_bitrate\":4096000,\"offered_max_fs\":8160,\"offered_max_mbps\":244800,\"offered_resolution\":\"1920x1080\",\"packets\":4630,\"present\":true,\"requested_bitrate\":4096000,\"resolution\":\"1920x1080\",\"volume\":0,\"width\":1920}"
+    },
+    {
+      "name": "video: measured RTP tx ~4 Mbps",
+      "ok": true,
+      "detail": "3545517"
+    },
+    {
+      "name": "video: effective size 1920x1080 after answer-clamp",
+      "ok": true,
+      "detail": "{\"active\":true,\"answer_b_as\":null,\"answer_max_br\":20010,\"answer_max_fs\":null,\"answer_max_mbps\":null,\"bitrate\":3545517,\"bytes\":5039067,\"codec\":\"H264\",\"enabled\":true,\"fps\":30,\"frame_rate\":23.74602906787055,\"height\":1080,\"jitter\":0,\"loss\":0,\"lossrate\":0,\"lost_packets\":0,\"offered_b_as\":4096,\"offered_bitrate\":4096000,\"offered_max_fs\":8160,\"offered_max_mbps\":244800,\"offered_resolution\":\"1920x1080\",\"packets\":4630,\"present\":true,\"requested_bitrate\":4096000,\"resolution\":\"1920x1080\",\"volume\":0,\"width\":1920}"
+    },
+    {
+      "name": "layout: 4 → 7 scheme variants",
+      "ok": true,
+      "detail": "schemes=7"
+    },
+    {
+      "name": "layout: recipient listed",
+      "ok": true
+    },
+    {
+      "name": "layout: slot 1 fixed-participant list",
+      "ok": true
+    },
+    {
+      "name": "layout: created",
+      "ok": true,
+      "detail": "{\"video_layout\":{\"abonents\":{\"abonents\":{\"abonents\":[],\"count\":0},\"records\":[],\"rtmp\":[]},\"contacts\":{\"contacts\":[],\"count\":0},\"created_at\":1792626207,\"creator_id\":\"00000000-0000-0000-0000-000000000001\",\"defaults\":{\"deletable\":true,\"editable\":true},\"display_name\":\"E2E Manual 4 2404\",\"id\":\"a62fdad3-1"
+    },
+    {
+      "name": "layout: participant in position 1",
+      "ok": true,
+      "detail": "[{\"abonent_id\":\"sip-7a42c118-b61e-4d4f-a5c0-9103004d60b1@sip-gateway\",\"call_string_id\":\"cs-29284e76-5687-42d2-9210-31fa38c83c94\",\"connection_id\":\"sip-7a42c118-b61e-4d4f-a5c0-9103004d60b1@sip-gateway\",\"contact_id\":\"cs-29284e76-5687-42d2-9210-31fa38c83c94\",\"position\":1,\"role\":\"PEER\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"}]"
+    },
+    {
+      "name": "layout: listed in session",
+      "ok": true
+    },
+    {
+      "name": "layout: calculate positions are 1-based",
+      "ok": true,
+      "detail": "[{\"height\":249,\"position\":1,\"width\":443,\"x\":0,\"y\":0,\"z_order\":0},{\"height\":249,\"position\":2,\"width\":444,\"x\":443,\"y\":0,\"z_order\":0}]"
+    },
+    {
+      "name": "layout: 4 tiles rendered",
+      "ok": true,
+      "detail": "[{\"text\":\"1\\n\\nE2E SIP Probe\\n\\nE2E SIP Probe\",\"left\":327,\"top\":473.5,\"width\":398.046875,\"height\":223.703125},{\"text\":\"2\",\"left\":725.046875,\"top\":473.5,\"width\":398.9375,\"height\":223.703125},{\"text\":\"3\",\"left\":327,\"top\":697.203125,\"width\":398.046875,\"height\":224.59375},{\"text\":\"4\",\"left\":725.046875,\"top\":697.203125,\"width\":398.9375,\"height\":224.59375}]"
+    },
+    {
+      "name": "layout: equal cells (no off-by-one tiny tile)",
+      "ok": true,
+      "detail": "[{\"text\":\"1\\n\\nE2E SIP Probe\\n\\nE2E SIP Probe\",\"left\":327,\"top\":473.5,\"width\":398.046875,\"height\":223.703125},{\"text\":\"2\",\"left\":725.046875,\"top\":473.5,\"width\":398.9375,\"height\":223.703125},{\"text\":\"3\",\"left\":327,\"top\":697.203125,\"width\":398.046875,\"height\":224.59375},{\"text\":\"4\",\"left\":725.046875,\"top\":697.203125,\"width\":398.9375,\"height\":224.59375}]"
+    },
+    {
+      "name": "layout: participant cell is top-left tile 1",
+      "ok": true,
+      "detail": "[{\"text\":\"1\\n\\nE2E SIP Probe\\n\\nE2E SIP Probe\",\"left\":327,\"top\":473.5,\"width\":398.046875,\"height\":223.703125},{\"text\":\"2\",\"left\":725.046875,\"top\":473.5,\"width\":398.9375,\"height\":223.703125},{\"text\":\"3\",\"left\":327,\"top\":697.203125,\"width\":398.046875,\"height\":224.59375},{\"text\":\"4\",\"left\":725.046875,\"top\":697.203125,\"width\":398.9375,\"height\":224.59375}]"
+    },
+    {
+      "name": "layout: participant rendered in tile 1",
+      "ok": true,
+      "detail": "1\n\nE2E SIP Probe\n\nE2E SIP Probe"
+    },
+    {
+      "name": "layout: 2x2 scheme catalog has 7 variants",
+      "ok": true,
+      "detail": "schemes=7"
+    },
+    {
+      "name": "layout: 2x2 variant 1 has 4 tiles",
+      "ok": true,
+      "detail": "[{\"left\":327,\"top\":473.5,\"width\":398.046875,\"height\":223.703125},{\"left\":725.046875,\"top\":473.5,\"width\":398.9375,\"height\":223.703125},{\"left\":327,\"top\":697.203125,\"width\":398.046875,\"height\":224.59375},{\"left\":725.046875,\"top\":697.203125,\"width\":398.9375,\"height\":224.59375}]"
+    },
+    {
+      "name": "layout: 2x2 variant 2 has 4 tiles",
+      "ok": true,
+      "detail": "[{\"left\":327,\"top\":473.5,\"width\":797,\"height\":298.203125},{\"left\":327,\"top\":771.703125,\"width\":265,\"height\":150.09375},{\"left\":592,\"top\":771.703125,\"width\":266,\"height\":150.09375},{\"left\":857.984375,\"top\":771.703125,\"width\":266,\"height\":150.09375}]"
+    },
+    {
+      "name": "layout: 2x2 variant 3 has 4 tiles",
+      "ok": true,
+      "detail": "[{\"left\":327,\"top\":622.59375,\"width\":797,\"height\":299.203125},{\"left\":327,\"top\":473.5,\"width\":265,\"height\":149.09375},{\"left\":592,\"top\":473.5,\"width\":266,\"height\":149.09375},{\"left\":857.984375,\"top\":473.5,\"width\":266,\"height\":149.09375}]"
+    },
+    {
+      "name": "layout: 2x2 variant 4 has 4 tiles",
+      "ok": true,
+      "detail": "[{\"left\":327,\"top\":473.5,\"width\":530.984375,\"height\":448.3125},{\"left\":857.984375,\"top\":473.5,\"width\":266,\"height\":149.09375},{\"left\":857.984375,\"top\":622.59375,\"width\":266,\"height\":149.09375},{\"left\":857.984375,\"top\":771.703125,\"width\":266,\"height\":150.09375}]"
+    },
+    {
+      "name": "layout: 2x2 variant 5 has 4 tiles",
+      "ok": true,
+      "detail": "[{\"left\":592,\"top\":473.5,\"width\":532,\"height\":448.3125},{\"left\":327,\"top\":473.5,\"width\":265,\"height\":149.09375},{\"left\":327,\"top\":622.59375,\"width\":265,\"height\":149.09375},{\"left\":327,\"top\":771.703125,\"width\":265,\"height\":150.09375}]"
+    },
+    {
+      "name": "layout: 2x2 variant 6 has 4 tiles",
+      "ok": true,
+      "detail": "[{\"left\":327,\"top\":473.5,\"width\":797,\"height\":248.171875},{\"left\":327,\"top\":721.671875,\"width\":265,\"height\":200.125},{\"left\":592,\"top\":721.671875,\"width\":266,\"height\":200.125},{\"left\":857.984375,\"top\":721.671875,\"width\":266,\"height\":200.125}]"
+    },
+    {
+      "name": "layout: 2x2 variant 7 has 4 tiles",
+      "ok": true,
+      "detail": "[{\"left\":327,\"top\":473.5,\"width\":265,\"height\":199.125},{\"left\":592,\"top\":473.5,\"width\":266,\"height\":199.125},{\"left\":857.984375,\"top\":473.5,\"width\":266,\"height\":199.125},{\"left\":327,\"top\":672.625,\"width\":797,\"height\":249.171875}]"
+    },
+    {
+      "name": "layout: all 7 variants exercised",
+      "ok": true,
+      "detail": "[\"preset_equal_4\",\"preset_selected_b_4\",\"preset_selected_t_4\",\"preset_selected_r_4\",\"preset_selected_l_4\",\"preset_selected_b_4_(2)\",\"preset_selected_t_4_(2)\"]"
+    },
+    {
+      "name": "layout: variant presets are distinct 4-up schemes",
+      "ok": true,
+      "detail": "[\"preset_equal_4\",\"preset_selected_b_4\",\"preset_selected_t_4\",\"preset_selected_r_4\",\"preset_selected_l_4\",\"preset_selected_b_4_(2)\",\"preset_selected_t_4_(2)\"]"
+    },
+    {
+      "name": "layout: UI 4 cell 1 rendered",
+      "ok": true,
+      "detail": "{\"text\":\"1\\n\\nE2E SIP Probe\\n\\nE2E SIP Probe\",\"left\":327,\"top\":473.5,\"width\":398,\"height\":224.15625}"
+    },
+    {
+      "name": "layout: UI 4 cell 1 holds SIP participant",
+      "ok": true,
+      "detail": "[\"1\\n\\nE2E SIP Probe\\n\\nE2E SIP Probe\",\"2\",\"3\",\"4\"]"
+    },
+    {
+      "name": "layout: UI 4 keeps 4 cells when participant is in 1",
+      "ok": true,
+      "detail": "[\"1\\n\\nE2E SIP Probe\\n\\nE2E SIP Probe\",\"2\",\"3\",\"4\"]"
+    },
+    {
+      "name": "layout: UI 4 cell 2 rendered",
+      "ok": true,
+      "detail": "{\"text\":\"2\\n\\nE2E SIP Probe\",\"left\":725,\"top\":473.5,\"width\":399,\"height\":224.15625}"
+    },
+    {
+      "name": "layout: UI 4 cell 2 holds SIP participant",
+      "ok": true,
+      "detail": "[\"1\\n\\nE2E SIP Probe\",\"2\\n\\nE2E SIP Probe\",\"3\",\"4\"]"
+    },
+    {
+      "name": "layout: UI 4 keeps 4 cells when participant is in 2",
+      "ok": true,
+      "detail": "[\"1\\n\\nE2E SIP Probe\",\"2\\n\\nE2E SIP Probe\",\"3\",\"4\"]"
+    },
+    {
+      "name": "layout: UI 4 cell 4 rendered",
+      "ok": true,
+      "detail": "{\"text\":\"4\\n\\nE2E SIP Probe\",\"left\":725,\"top\":697.65625,\"width\":399,\"height\":224.15625}"
+    },
+    {
+      "name": "layout: UI 4 cell 4 holds SIP participant",
+      "ok": true,
+      "detail": "[\"1\\n\\nE2E SIP Probe\",\"2\",\"3\",\"4\\n\\nE2E SIP Probe\"]"
+    },
+    {
+      "name": "layout: UI 4 keeps 4 cells when participant is in 4",
+      "ok": true,
+      "detail": "[\"1\\n\\nE2E SIP Probe\",\"2\",\"3\",\"4\\n\\nE2E SIP Probe\"]"
+    },
+    {
+      "name": "layout: UI 8 cell 1 rendered",
+      "ok": true,
+      "detail": "{\"text\":\"1\\n\\nE2E SIP Probe\",\"left\":327,\"top\":473.5,\"width\":199,\"height\":224.15625}"
+    },
+    {
+      "name": "layout: UI 8 cell 1 holds SIP participant",
+      "ok": true,
+      "detail": "[\"1\\n\\nE2E SIP Probe\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\"]"
+    },
+    {
+      "name": "layout: UI 8 keeps 8 cells when participant is in 1",
+      "ok": true,
+      "detail": "[\"1\\n\\nE2E SIP Probe\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\"]"
+    },
+    {
+      "name": "layout: UI 8 cell 4 rendered",
+      "ok": true,
+      "detail": "{\"text\":\"4\\n\\nE2E SIP Probe\",\"left\":924,\"top\":473.5,\"width\":200,\"height\":224.15625}"
+    },
+    {
+      "name": "layout: UI 8 cell 4 holds SIP participant",
+      "ok": true,
+      "detail": "[\"1\",\"2\",\"3\",\"4\\n\\nE2E SIP Probe\",\"5\",\"6\",\"7\",\"8\"]"
+    },
+    {
+      "name": "layout: UI 8 keeps 8 cells when participant is in 4",
+      "ok": true,
+      "detail": "[\"1\",\"2\",\"3\",\"4\\n\\nE2E SIP Probe\",\"5\",\"6\",\"7\",\"8\"]"
+    },
+    {
+      "name": "layout: UI 8 cell 8 rendered",
+      "ok": true,
+      "detail": "{\"text\":\"8\\n\\nE2E SIP Probe\",\"left\":924,\"top\":697.65625,\"width\":200,\"height\":224.15625}"
+    },
+    {
+      "name": "layout: UI 8 cell 8 holds SIP participant",
+      "ok": true,
+      "detail": "[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\\n\\nE2E SIP Probe\"]"
+    },
+    {
+      "name": "layout: UI 8 keeps 8 cells when participant is in 8",
+      "ok": true,
+      "detail": "[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\\n\\nE2E SIP Probe\"]"
+    },
+    {
+      "name": "layout: UI 9 cell 1 rendered",
+      "ok": true,
+      "detail": "{\"text\":\"1\\n\\nE2E SIP Probe\",\"left\":327,\"top\":473.5,\"width\":265,\"height\":149.09375}"
+    },
+    {
+      "name": "layout: UI 9 cell 1 holds SIP participant",
+      "ok": true,
+      "detail": "[\"1\\n\\nE2E SIP Probe\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\"]"
+    },
+    {
+      "name": "layout: UI 9 keeps 9 cells when participant is in 1",
+      "ok": true,
+      "detail": "[\"1\\n\\nE2E SIP Probe\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\"]"
+    },
+    {
+      "name": "layout: UI 9 cell 5 rendered",
+      "ok": true,
+      "detail": "{\"text\":\"5\\n\\nE2E SIP Probe\",\"left\":592,\"top\":622.59375,\"width\":266,\"height\":149.09375}"
+    },
+    {
+      "name": "layout: UI 9 cell 5 holds SIP participant",
+      "ok": true,
+      "detail": "[\"1\",\"2\",\"3\",\"4\",\"5\\n\\nE2E SIP Probe\",\"6\",\"7\",\"8\",\"9\"]"
+    },
+    {
+      "name": "layout: UI 9 keeps 9 cells when participant is in 5",
+      "ok": true,
+      "detail": "[\"1\",\"2\",\"3\",\"4\",\"5\\n\\nE2E SIP Probe\",\"6\",\"7\",\"8\",\"9\"]"
+    },
+    {
+      "name": "layout: UI 9 cell 9 rendered",
+      "ok": true,
+      "detail": "{\"text\":\"9\\n\\nE2E SIP Probe\",\"left\":857.984375,\"top\":771.703125,\"width\":266,\"height\":150.09375}"
+    },
+    {
+      "name": "layout: UI 9 cell 9 holds SIP participant",
+      "ok": true,
+      "detail": "[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\\n\\nE2E SIP Probe\"]"
+    },
+    {
+      "name": "layout: UI 9 keeps 9 cells when participant is in 9",
+      "ok": true,
+      "detail": "[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\\n\\nE2E SIP Probe\"]"
+    },
+    {
+      "name": "layout: UI 25 cell 1 rendered",
+      "ok": true,
+      "detail": "{\"text\":\"1\\n\\nE2E SIP Probe\",\"left\":327,\"top\":473.5,\"width\":159,\"height\":89.046875}"
+    },
+    {
+      "name": "layout: UI 25 cell 1 holds SIP participant",
+      "ok": true,
+      "detail": "[\"1\\n\\nE2E SIP Probe\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\",\"10\",\"11\",\"12\",\"13\",\"14\",\"15\",\"16\",\"17\",\"18\",\"19\",\"20\",\"21\",\"22\",\"23\",\"24\",\"25\"]"
+    },
+    {
+      "name": "layout: UI 25 keeps 25 cells when participant is in 1",
+      "ok": true,
+      "detail": "[\"1\\n\\nE2E SIP Probe\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\",\"10\",\"11\",\"12\",\"13\",\"14\",\"15\",\"16\",\"17\",\"18\",\"19\",\"20\",\"21\",\"22\",\"23\",\"24\",\"25\"]"
+    },
+    {
+      "name": "layout: UI 25 cell 13 rendered",
+      "ok": true,
+      "detail": "{\"text\":\"13\\n\\nE2E SIP Probe\",\"left\":645,\"top\":652.609375,\"width\":160,\"height\":89.046875}"
+    },
+    {
+      "name": "layout: UI 25 cell 13 holds SIP participant",
+      "ok": true,
+      "detail": "[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\",\"10\",\"11\",\"12\",\"13\\n\\nE2E SIP Probe\",\"14\",\"15\",\"16\",\"17\",\"18\",\"19\",\"20\",\"21\",\"22\",\"23\",\"24\",\"25\"]"
+    },
+    {
+      "name": "layout: UI 25 keeps 25 cells when participant is in 13",
+      "ok": true,
+      "detail": "[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\",\"10\",\"11\",\"12\",\"13\\n\\nE2E SIP Probe\",\"14\",\"15\",\"16\",\"17\",\"18\",\"19\",\"20\",\"21\",\"22\",\"23\",\"24\",\"25\"]"
+    },
+    {
+      "name": "layout: UI 25 cell 25 rendered",
+      "ok": true,
+      "detail": "{\"text\":\"25\\n\\nE2E SIP Probe\",\"left\":964,\"top\":831.734375,\"width\":160,\"height\":90.0625}"
+    },
+    {
+      "name": "layout: UI 25 cell 25 holds SIP participant",
+      "ok": true,
+      "detail": "[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\",\"10\",\"11\",\"12\",\"13\",\"14\",\"15\",\"16\",\"17\",\"18\",\"19\",\"20\",\"21\",\"22\",\"23\",\"24\",\"25\\n\\nE2E SIP Probe\"]"
+    },
+    {
+      "name": "layout: UI 25 keeps 25 cells when participant is in 25",
+      "ok": true,
+      "detail": "[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\",\"10\",\"11\",\"12\",\"13\",\"14\",\"15\",\"16\",\"17\",\"18\",\"19\",\"20\",\"21\",\"22\",\"23\",\"24\",\"25\\n\\nE2E SIP Probe\"]"
+    },
+    {
+      "name": "layout: preset_equal_4 calculates 4 slots",
+      "ok": true,
+      "detail": "status=200 slots=4"
+    },
+    {
+      "name": "layout: preset_equal_4 positions are 1..4",
+      "ok": true,
+      "detail": "[{\"height\":360,\"position\":1,\"width\":640,\"x\":0,\"y\":0,\"z_order\":0},{\"height\":360,\"position\":2,\"width\":640,\"x\":640,\"y\":0,\"z_order\":0},{\"height\":360,\"position\":3,\"width\":640,\"x\":0,\"y\":360,\"z_order\":0},{\"height\":360,\"position\":4,\"width\":640,\"x\":640,\"y\":360,\"z_order\":0}]"
+    },
+    {
+      "name": "layout: preset_equal_8 calculates 8 slots",
+      "ok": true,
+      "detail": "status=200 slots=8"
+    },
+    {
+      "name": "layout: preset_equal_8 positions are 1..8",
+      "ok": true,
+      "detail": "[{\"height\":360,\"position\":1,\"width\":320,\"x\":0,\"y\":0,\"z_order\":0},{\"height\":360,\"position\":2,\"width\":320,\"x\":320,\"y\":0,\"z_order\":0},{\"height\":360,\"position\":7,\"width\":320,\"x\":640,\"y\":360,\"z_order\":0},{\"height\":360,\"position\":8,\"width\":320,\"x\":960,\"y\":360,\"z_order\":0}]"
+    },
+    {
+      "name": "layout: preset_equal_9 calculates 9 slots",
+      "ok": true,
+      "detail": "status=200 slots=9"
+    },
+    {
+      "name": "layout: preset_equal_9 positions are 1..9",
+      "ok": true,
+      "detail": "[{\"height\":240,\"position\":1,\"width\":426,\"x\":0,\"y\":0,\"z_order\":0},{\"height\":240,\"position\":2,\"width\":427,\"x\":426,\"y\":0,\"z_order\":0},{\"height\":240,\"position\":8,\"width\":427,\"x\":426,\"y\":480,\"z_order\":0},{\"height\":240,\"position\":9,\"width\":427,\"x\":853,\"y\":480,\"z_order\":0}]"
+    },
+    {
+      "name": "layout: preset_equal_25 calculates 25 slots",
+      "ok": true,
+      "detail": "status=200 slots=25"
+    },
+    {
+      "name": "layout: preset_equal_25 positions are 1..25",
+      "ok": true,
+      "detail": "[{\"height\":144,\"position\":1,\"width\":256,\"x\":0,\"y\":0,\"z_order\":0},{\"height\":144,\"position\":2,\"width\":256,\"x\":256,\"y\":0,\"z_order\":0},{\"height\":144,\"position\":24,\"width\":256,\"x\":768,\"y\":576,\"z_order\":0},{\"height\":144,\"position\":25,\"width\":256,\"x\":1024,\"y\":576,\"z_order\":0}]"
+    },
+    {
+      "name": "layout: clear-all button present",
+      "ok": true
+    },
+    {
+      "name": "layout: clear-all PATCH slots present",
+      "ok": true,
+      "detail": "[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"}]"
+    },
+    {
+      "name": "layout: clear-all sets all AUTO",
+      "ok": true,
+      "detail": "[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"}]"
+    },
+    {
+      "name": "layout: detach manual returns 204",
+      "ok": true,
+      "detail": "status=204 "
+    },
+    {
+      "name": "layout: detached manual is gone",
+      "ok": true,
+      "detail": "[\"ec5a0a14-3855-4b83-b763-74ac4e2f5752\"]"
+    },
+    {
+      "name": "layout: canonical default remains after detach",
+      "ok": true,
+      "detail": "[\"default\"]"
+    },
+    {
+      "name": "layout: default «Общая» visible after detach",
+      "ok": true,
+      "detail": "PROSTOR\nПанель управления\nКонференции\nСправочник\nИстория\nАдминистрирование\n1\n0\n0\nnotifications\narrow_drop_down\nexpand_more\n\nКонференции\n\nsearch\ntune\nadd\n\nАктивные конференции (1)\n\nConf_655283142\n\ngroup\n1\n0\nID: 417094598\ntimelapse\n00:01:05\n\n22.10.2026 02:42\n\nНеактивные конференции (3)\n\nAcc_Full_UI\n\ngroup\n0\n0\n\nAddr Inspect\n\ngroup\n0\n0\nID: 417709149\n\nConf_975468132\n\ngroup\n0\n0\nID: 759230241\n\nConf_655283142\n\nConf_655283142\n\ngroup\n1\n0\nlock_open\nmore_horiz\nЗавершить конференцию\nПанель управления\nОсновно"
+    },
+    {
+      "name": "layout: manual name gone from session UI",
+      "ok": true,
+      "detail": "PROSTOR\nПанель управления\nКонференции\nСправочник\nИстория\nАдминистрирование\n1\n0\n0\nnotifications\narrow_drop_down\nexpand_more\n\nКонференции\n\nsearch\ntune\nadd\n\nАктивные конференции (1)\n\nConf_655283142\n\ngroup\n1\n0\nID: 417094598\ntimelapse\n00:01:05\n\n22.10.2026 02:42\n\nНеактивные конференции (3)\n\nAcc_Full_UI\n\ngroup\n0\n0\n\nAddr Inspect\n\ngroup\n0\n0\nID: 417709149\n\nConf_975468132\n\ngroup\n0\n0\nID: 759230241\n\nConf_655283142\n\nConf_655283142\n\ngroup\n1\n0\nlock_open\nmore_horiz\nЗавершить конференцию\nПанель управления\nОсновно"
+    },
+    {
+      "name": "api: audio_codecs shape {name,bitrate}",
+      "ok": true,
+      "detail": "{\"audio_codecs\":[{\"bitrate\":null,\"name\":\"AAC\",\"supported\":false},{\"bitrate\":null,\"name\":\"G711\",\"supported\":true},{\"bitrate\":null,\"name\":\"G719\",\"supported\":false},{\"bitrate\":null,\"name\":\"G722\",\"supported\":false},{\"bitrate\":24,\"name\":\"G7221\",\"supported\":false},{\"bitrate\":32,\"name\":\"G7221\",\"supported\":false},{\"bitrate\":24,\"name\":\"G7221C\",\"supported\":false},{\"bitrate\":32,\"name\":\"G7221C\",\"supported\":false},{\"bitrate\":48,\"name\":\"G7221C\",\"supported\":false},{\"bitrate\":null,\"name\":\"G723\",\"supported\":false},{\"bitrate\":16,\"name\":\"G726\",\"supported\":false},{\"bitrate\":24,\"name\":\"G726\",\"supported\":false},{\"bitrate\":32,\"name\":\"G726\",\"supported\":false},{\"bitrate\":40,\"name\":\"G726\",\"supported\":false},{\"bitrate\":null,\"name\":\"G728\",\"supported\":false},{\"bitrate\":null,\"name\":\"G729\",\"supported\":false},{\"bitrate\":null,\"name\":\"OPUS\",\"supported\":false},{\"bitrate\":null,\"name\":\"ILBC\",\"supported\":false}]}"
+    },
+    {
+      "name": "codecs: matrix native, transcoder false",
+      "ok": true,
+      "detail": "{\"matrix\":\"native\",\"native_audio\":[\"PCMU\",\"PCMA\",\"G711\",\"G711U\",\"G711A\"],\"native_video\":[\"H264\"],\"transcoder\":false}"
+    },
+    {
+      "name": "codecs: settings marks G711 (PCMU/PCMA) supported",
+      "ok": true,
+      "detail": "{\"audio_codecs\":[{\"bitrate\":null,\"name\":\"AAC\",\"supported\":false},{\"bitrate\":null,\"name\":\"G711\",\"supported\":true},{\"bitrate\":null,\"name\":\"G719\",\"supported\":false},{\"bitrate\":null,\"name\":\"G722\",\"supported\":false},{\"bitrate\":24,\"name\":\"G7221\",\"supported\":false},{\"bitrate\":32,\"name\":\"G7221\",\"supported\":false},{\"bitrate\":24,\"name\":\"G7221C\",\"supported\":false},{\"bitrate\":32,\"name\":\"G7221C\",\"supported\":false},{\"bitrate\":48,\"name\":\"G7221C\",\"supported\":false},{\"bitrate\":null,\"name\":\"G723\",\"supported\":false},{\"bitrate\":16,\"name\":\"G726\",\"supported\":false},{\"bitrate\":24,\"name\":\"G726\",\"supported\":false},{\"bitrate\":32,\"name\":\"G726\",\"supported\":false},{\"bitrate\":40,\"name\":\"G726\",\"supported\":false},{\"bitrate\":null,\"name\":\"G728\",\"supported\":false},{\"bitrate\":null,\"name\":\"G729\",\"supported\":false},{\"bitrate\":"
+    },
+    {
+      "name": "codecs: settings marks G722 unsupported (needs T06b)",
+      "ok": true,
+      "detail": "{\"audio_codecs\":[{\"bitrate\":null,\"name\":\"AAC\",\"supported\":false},{\"bitrate\":null,\"name\":\"G711\",\"supported\":true},{\"bitrate\":null,\"name\":\"G719\",\"supported\":false},{\"bitrate\":null,\"name\":\"G722\",\"supported\":false},{\"bitrate\":24,\"name\":\"G7221\",\"supported\":false},{\"bitrate\":32,\"name\":\"G7221\",\"supported\":false},{\"bitrate\":24,\"name\":\"G7221C\",\"supported\":false},{\"bitrate\":32,\"name\":\"G7221C\",\"supported\":false},{\"bitrate\":48,\"name\":\"G7221C\",\"supported\":false},{\"bitrate\":null,\"name\":\"G723\",\"supported\":false},{\"bitrate\":16,\"name\":\"G726\",\"supported\":false},{\"bitrate\":24,\"name\":\"G726\",\"supported\":false},{\"bitrate\":32,\"name\":\"G726\",\"supported\":false},{\"bitrate\":40,\"name\":\"G726\",\"supported\":false},{\"bitrate\":null,\"name\":\"G728\",\"supported\":false},{\"bitrate\":null,\"name\":\"G729\",\"supported\":false},{\"bitrate\":"
+    },
+    {
+      "name": "api: video_codecs shape [string]",
+      "ok": true,
+      "detail": "{\"supported_video_codecs\":[\"H264\"],\"video_codecs\":[\"H261\",\"H263\",\"H263+\",\"H264\",\"H264-HIGH\",\"H264-SVC\",\"H265\",\"VP8\"]}"
+    },
+    {
+      "name": "codecs: only H264 marked bridgeable video",
+      "ok": true,
+      "detail": "[\"H264\"]"
+    },
+    {
+      "name": "network: no 5xx",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "network: no 501",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "ui: no pageerror",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "ui: no unexpected console errors",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "cleanup: session stopped",
+      "ok": true,
+      "detail": "204"
+    },
+    {
+      "name": "cleanup: created layout removed",
+      "ok": true,
+      "detail": "204"
+    },
+    {
+      "name": "cleanup: conference removed",
+      "ok": true,
+      "detail": "204"
+    },
+    {
+      "name": "final: no unexpected 4xx",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "final: no pageerror after cleanup",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "final: console 404 only expected detach",
+      "ok": true,
+      "detail": "[\"Failed to load resource: the server responded with a status of 404 (Not Found)\",\"Failed to load resource: the server responded with a status of 404 (Not Found)\"]"
+    }
+  ],
+  "page_errors": [],
+  "console_errors": [
+    "TypeError: Cannot read properties of null (reading 'route')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422697)\n    at $A (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:28177)\n    at get value (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:40308)\n    at Object.get [as route] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:60966)\n    at Object.get (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:59272)\n    at CL.i (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:61965)\n    at Wl (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42210)\n    at ui (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42273)\n    at Gf.c.call (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:45698)\n    at PA.h [as fn] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:40951)",
+    "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422436)\n    at $A (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:28177)\n    at get value (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:40308)\n    at Object.get [as displayName] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:60966)\n    at Object.get (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:59272)\n    at CL.i (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:61965)\n    at Wl (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42210)\n    at ui (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42273)\n    at Gf.c.call (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:45698)\n    at PA.h [as fn] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:40951)",
+    "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.updateChainValue (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:421729)\n    at Proxy.created (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:421593)\n    at Wl (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42210)\n    at ui (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42273)\n    at ui (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42383)\n    at fS (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:61853)\n    at I8 (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:61116)\n    at qL (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:88516)\n    at oM (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:88309)\n    at sM (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:87928)",
+    "TypeError: Cannot read properties of undefined (reading 'length')\n    at Proxy.Qv (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:424056)\n    at mS (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:66691)\n    at PA.P [as fn] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:76744)\n    at PA.run (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:26764)\n    at z (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:77149)\n    at q (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:75741)\n    at K (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:75494)\n    at b (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:71911)\n    at C (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:73657)\n    at I (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:72877)",
+    "TypeError: Cannot read properties of null (reading 'mode')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:438450)\n    at $A (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:28177)\n    at get value (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:40308)\n    at Object.get [as mode] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:60966)\n    at Object.get (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:59272)\n    at Proxy.x0 (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:439061)\n    at mS (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:66691)\n    at PA.P [as fn] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:76744)\n    at PA.run (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:26764)\n    at z (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:77149)",
+    "TypeError: Cannot read properties of null (reading 'connectionsLimit')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:439639)\n    at $A (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:28177)\n    at get value (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:40308)\n    at Object.get [as connectionsLimit] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:60966)\n    at Object.get (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:59272)\n    at Proxy.Q0 (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:447321)\n    at mS (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:66691)\n    at PA.P [as fn] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:76744)\n    at PA.run (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:26764)\n    at z (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:77149)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ],
+  "failure": null
+}

@@ -55,7 +55,7 @@ call_string live proof.
 - `clippy --workspace --all-targets -D warnings` и `fmt --check` — чисто.
 - Python sidecar — **24/24 OK**; CI job с pinned Pycrate добавлен (`0a4dd89`).
 - Живой SIP E2E на финальном бинарнике:
-  `artifacts/e2e-t05b2-final-high/` — 114/114, `final-low/` — 114/114,
+  `docs/progress/evidence/t05b/result-high.json` — 114/114, `final-low/` — 114/114,
   page_errors 0, failed 0.
 
 ## Живой call_string proof (2026-10-22)

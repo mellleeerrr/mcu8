@@ -1,7 +1,7 @@
 # T14 — аватар участника убран из плитки раскладки, подпись ×2 сохранена
 
 Дата: 2026-10-22. Прод: `client/pnm-frontend/deployed/pnm/index.html` (блок `<style id="prostor-pnm-overrides">`).
-Харнесс: `tests/e2e/label-zoom.js`. Артефакты: `artifacts/e2e-label-zoom/`.
+Харнесс: `tests/e2e/label-zoom.js`. Артефакты: `docs/progress/evidence/e2e-label-zoom/`.
 
 ## Задача (дословно)
 

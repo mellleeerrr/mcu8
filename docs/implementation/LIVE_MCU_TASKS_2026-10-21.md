@@ -6,7 +6,7 @@
 ## Текущий статус (2026-10-21, вечер)
 
 - T0 — DONE: release собран, сервис `vks-mcu.service` перезапущен, `/healthz` 200.
-- T1 — DONE: `tests/e2e/live.js`, 34/34 checks, `artifacts/e2e/result.json`.
+- T1 — DONE: `tests/e2e/live.js`, 34/34 checks, `docs/progress/evidence/e2e/result.json`.
 - T2 — DONE: 23/23 сетевых вызова эталона совпадают; P1-расхождения geometry/лицензии/единицы зафиксированы.
 - T3 — SIP DONE (PCMU+H.264, двустороннее медиа); H.323 заблокирован терминалом (`adaptiveBusy`), не нашим кодом.
 - T4 — DONE: 11 диапазонов (1/1/5/7/7/3/6/14/3/9/9 схем), 2×2=7, плейсмент 4/8/9/25, clear-all AUTO.
@@ -58,7 +58,7 @@
 2. Сценарий login → `/pnm/monitoring/sessions` → создать комнату → открыть
    комнату → «Добавить участника» → модалка с SIP/H323 адресом.
 3. Снять network-лог запросов, которые UI делает на каждом шаге.
-4. Скриншоты и HTML-отчёт в `artifacts/e2e/`.
+4. Скриншоты и HTML-отчёт в `docs/progress/evidence/e2e/`.
 
 **Подводные камни:** CSP и inline-скрипты; JWT в localStorage; SPA-роутинг;
 base path `/pnm/`; модалка рендерится в portal; таймауты на 111 сессиях.

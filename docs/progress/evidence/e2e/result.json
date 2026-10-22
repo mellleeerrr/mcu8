@@ -1,0 +1,183 @@
+{
+  "ok": true,
+  "base": "http://127.0.0.1:8080",
+  "conference_id": "27730a34-28f0-40ba-b2d9-d161e0381137",
+  "session_id": "27730a34-28f0-40ba-b2d9-d161e0381137",
+  "layout_id": "5f398b92-e61d-4d92-9986-a0f98780113a",
+  "sip_uri": "sip:probe-e2e@192.168.1.132",
+  "duration_ms": 79135,
+  "checks": [
+    {
+      "name": "login: token in localStorage",
+      "ok": true
+    },
+    {
+      "name": "login: token is JWT",
+      "ok": true
+    },
+    {
+      "name": "conference: POST returned id",
+      "ok": true,
+      "detail": "{\"conference\":{\"abonents\":{\"abonents\":[],\"alias\":0,\"confloop\":0,\"count\":0,\"file\":0,\"h323\":0,\"media\":0,\"records\":[],\"rtmp\":[],\"rtsp\":0,\"sip\":0,\"vnc\":0,\"youtube\":[]},\"addresses\":{\"h323\":\"h323:Conf_554179675@192.168.1.93\",\"sip\":\"sip:Conf_554179675@192.168.1.93\",\"webrtc\":\"sip:Conf_554179675@127.0.0.1\"},"
+    },
+    {
+      "name": "conference: audio codec matrix sent",
+      "ok": true,
+      "detail": "send [{\"bitrate\":null,\"name\":\"AAC\"},{\"bitrate\":null,\"name\":\"G711\"},{\"bitrate\":null,\"name\":\"G719\"},{\"bitrate\":null,\"name\":\"G722\"},{\"bitrate\":24,\"name\":\"G7221\"},{\"bitrate\":32,\"name\":\"G7221\"},{\"bitrate\":24,\"name\":\"G7221C\"},{\"bitrate\":32,\"name\":\"G7221C\"},{\"bitrate\":48,\"name\":\"G7221C\"},{\"bitrate\":null,\"name\":\"G723\"},{\"bitrate\":16,\"name\":\"G726\"},{\"bitrate\":24,\"name\":\"G726\"},{\"bitrate\":32,\"name\":\"G726\"},{\"bitrate\":40,\"name\":\"G726\"},{\"bitrate\":null,\"name\":\"G728\"},{\"bitrate\":null,\"name\":\"G729\"},{\"bitrate\":null,\"name\":\"OPUS\"}]"
+    },
+    {
+      "name": "conference: G722.1C 48 in payload",
+      "ok": true,
+      "detail": "[{\"bitrate\":null,\"name\":\"AAC\"},{\"bitrate\":null,\"name\":\"G711\"},{\"bitrate\":null,\"name\":\"G719\"},{\"bitrate\":null,\"name\":\"G722\"},{\"bitrate\":24,\"name\":\"G7221\"},{\"bitrate\":32,\"name\":\"G7221\"},{\"bitrate\":24,\"name\":\"G7221C\"},{\"bitrate\":32,\"name\":\"G7221C\"},{\"bitrate\":48,\"name\":\"G7221C\"},{\"bitrate\":null,\"name\":\"G723\"},{\"bitrate\":16,\"name\":\"G726\"},{\"bitrate\":24,\"name\":\"G726\"},{\"bitrate\":32,\"name\":\"G726\"},{\"bitrate\":40,\"name\":\"G726\"},{\"bitrate\":null,\"name\":\"G728\"},{\"bitrate\":null,\"name\":\"G729\"},{\"bitrate\":null,\"name\":\"OPUS\"}]"
+    },
+    {
+      "name": "session: started with id",
+      "ok": true,
+      "detail": "{\"session\":{\"abonents\":{\"abonents\":[],\"alias\":0,\"confloop\":0,\"count\":0,\"file\":0,\"h323\":0,\"media\":0,\"records\":[],\"rtmp\":[],\"rtsp\":0,\"sip\":0,\"vnc\":0,\"youtube\":[]},\"addresses\":{\"h323\":\"h323:Conf_554179675@192.168.1.93\",\"sip\":\"sip:Conf_554179675@192.168.1.93\",\"webrtc\":\"sip:Conf_554179675@127.0.0.1\"},\"al"
+    },
+    {
+      "name": "participant: add-address button present",
+      "ok": true
+    },
+    {
+      "name": "participant: address modal opened",
+      "ok": true
+    },
+    {
+      "name": "participant: address+name fields visible",
+      "ok": true,
+      "detail": "fields=2"
+    },
+    {
+      "name": "sip: call_strings POST status",
+      "ok": true,
+      "detail": "201"
+    },
+    {
+      "name": "sip: payload carries full audio matrix",
+      "ok": true,
+      "detail": "{\"call_string\":{\"addressId\":\"cs-a18ef889-7826-48e3-9112-2c5e6b8a1537\",\"created_at\":1792606540,\"display_name\":\"E2E SIP Probe\",\"id\":\"cs-a18ef889-7826-48e3-9112-2c5e6b8a1537\",\"payload\":{\"audio_rx_enabled\":true,\"audio_tx_enabled\":true,\"auto_call\":true,\"auto_gain_control\":\"DEFAULT\",\"call_string\":{\"file\":{\"primary\":true,\"zoom\":\"fit\"},\"h323\":{\"audioCodecs\":[],\"bitrate\":null,\"cascadeMode\":\"none\",\"isSelfViewEnabled\":true,\"resolution\":null,\"videoCodecs\":[]},\"media\":{\"loop\":true,\"primary\":true},\"rtsp\":{\"pr"
+    },
+    {
+      "name": "sip: payload carries required video matrix",
+      "ok": true,
+      "detail": "{\"call_string\":{\"addressId\":\"cs-a18ef889-7826-48e3-9112-2c5e6b8a1537\",\"created_at\":1792606540,\"display_name\":\"E2E SIP Probe\",\"id\":\"cs-a18ef889-7826-48e3-9112-2c5e6b8a1537\",\"payload\":{\"audio_rx_enabled\":true,\"audio_tx_enabled\":true,\"auto_call\":true,\"auto_gain_control\":\"DEFAULT\",\"call_string\":{\"file\":{\"primary\":true,\"zoom\":\"fit\"},\"h323\":{\"audioCodecs\":[],\"bitrate\":null,\"cascadeMode\":\"none\",\"isSelfViewEnabled\":true,\"resolution\":null,\"videoCodecs\":[]},\"media\":{\"loop\":true,\"primary\":true},\"rtsp\":{\"primary\":true},\"sip\":{\"audioCodecs\":[{\"bitrate\":null,\"name\":\"AAC\"},{\"bitrate\":null,\"name\":\"G711\"},{\"bitrate\":null,\"name\":\"G719\"},{\"bitrate\":null,\"name\":\"G722\"},{\"bitrate\":24,\"name\":\"G7221\"},{\"bitrate\":32,\"name\":\"G7221\"},{\"bitrate\":24,\"name\":\"G7221C\"},{\"bitrate\":32,\"name\":\"G7221C\"},{\"bitrate\":48,\"name\""
+    },
+    {
+      "name": "sip: participant visible in conference UI",
+      "ok": true,
+      "detail": "matches=1"
+    },
+    {
+      "name": "layout: 4 → 7 scheme variants",
+      "ok": true,
+      "detail": "schemes=7"
+    },
+    {
+      "name": "layout: recipient listed",
+      "ok": true
+    },
+    {
+      "name": "layout: slot 1 fixed-participant list",
+      "ok": true
+    },
+    {
+      "name": "layout: created",
+      "ok": true,
+      "detail": "{\"video_layout\":{\"abonents\":{\"abonents\":{\"abonents\":[],\"count\":0},\"records\":[],\"rtmp\":[]},\"contacts\":{\"contacts\":[],\"count\":0},\"created_at\":1792606554,\"creator_id\":\"00000000-0000-0000-0000-000000000001\",\"defaults\":{\"deletable\":true,\"editable\":true},\"display_name\":\"E2E Manual 4 48973\",\"id\":\"5f398b92-"
+    },
+    {
+      "name": "layout: participant in position 1",
+      "ok": true,
+      "detail": "[{\"abonent_id\":\"sip-670b345b-c95a-4c18-8130-4c41b709aa5a@sip-gateway\",\"call_string_id\":\"cs-a18ef889-7826-48e3-9112-2c5e6b8a1537\",\"connection_id\":\"sip-670b345b-c95a-4c18-8130-4c41b709aa5a@sip-gateway\",\"contact_id\":\"cs-a18ef889-7826-48e3-9112-2c5e6b8a1537\",\"position\":1,\"role\":\"PEER\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"}]"
+    },
+    {
+      "name": "layout: listed in session",
+      "ok": true
+    },
+    {
+      "name": "layout: calculate positions are 1-based",
+      "ok": true,
+      "detail": "[{\"height\":249,\"position\":1,\"width\":443,\"x\":0,\"y\":0,\"z_order\":0},{\"height\":249,\"position\":2,\"width\":444,\"x\":443,\"y\":0,\"z_order\":0}]"
+    },
+    {
+      "name": "layout: 4 tiles rendered",
+      "ok": true,
+      "detail": "[{\"text\":\"1\\n\\nE2E SIP Probe\\n\\nE2E SIP Probe\",\"left\":327,\"top\":473.5,\"width\":398.046875,\"height\":223.703125},{\"text\":\"2\",\"left\":725.046875,\"top\":473.5,\"width\":398.9375,\"height\":223.703125},{\"text\":\"3\",\"left\":327,\"top\":697.203125,\"width\":398.046875,\"height\":224.59375},{\"text\":\"4\",\"left\":725.046875,\"top\":697.203125,\"width\":398.9375,\"height\":224.59375}]"
+    },
+    {
+      "name": "layout: equal cells (no off-by-one tiny tile)",
+      "ok": true,
+      "detail": "[{\"text\":\"1\\n\\nE2E SIP Probe\\n\\nE2E SIP Probe\",\"left\":327,\"top\":473.5,\"width\":398.046875,\"height\":223.703125},{\"text\":\"2\",\"left\":725.046875,\"top\":473.5,\"width\":398.9375,\"height\":223.703125},{\"text\":\"3\",\"left\":327,\"top\":697.203125,\"width\":398.046875,\"height\":224.59375},{\"text\":\"4\",\"left\":725.046875,\"top\":697.203125,\"width\":398.9375,\"height\":224.59375}]"
+    },
+    {
+      "name": "layout: participant cell is top-left tile 1",
+      "ok": true,
+      "detail": "[{\"text\":\"1\\n\\nE2E SIP Probe\\n\\nE2E SIP Probe\",\"left\":327,\"top\":473.5,\"width\":398.046875,\"height\":223.703125},{\"text\":\"2\",\"left\":725.046875,\"top\":473.5,\"width\":398.9375,\"height\":223.703125},{\"text\":\"3\",\"left\":327,\"top\":697.203125,\"width\":398.046875,\"height\":224.59375},{\"text\":\"4\",\"left\":725.046875,\"top\":697.203125,\"width\":398.9375,\"height\":224.59375}]"
+    },
+    {
+      "name": "layout: participant rendered in tile 1",
+      "ok": true,
+      "detail": "1\n\nE2E SIP Probe\n\nE2E SIP Probe"
+    },
+    {
+      "name": "layout: clear-all button present",
+      "ok": true
+    },
+    {
+      "name": "layout: clear-all PATCH slots present",
+      "ok": true,
+      "detail": "[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"}]"
+    },
+    {
+      "name": "layout: clear-all sets all AUTO",
+      "ok": true,
+      "detail": "[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"}]"
+    },
+    {
+      "name": "api: audio_codecs shape {name,bitrate}",
+      "ok": true,
+      "detail": "{\"audio_codecs\":[{\"bitrate\":null,\"name\":\"AAC\"},{\"bitrate\":null,\"name\":\"G711\"},{\"bitrate\":null,\"name\":\"G719\"},{\"bitrate\":null,\"name\":\"G722\"},{\"bitrate\":24,\"name\":\"G7221\"},{\"bitrate\":32,\"name\":\"G7221\"},{\"bitrate\":24,\"name\":\"G7221C\"},{\"bitrate\":32,\"name\":\"G7221C\"},{\"bitrate\":48,\"name\":\"G7221C\"},{\"bitrate\":null,\"name\":\"G723\"},{\"bitrate\":16,\"name\":\"G726\"},{\"bitrate\":24,\"name\":\"G726\"},{\"bitrate\":32,\"name\":\"G726\"},{\"bitrate\":40,\"name\":\"G726\"},{\"bitrate\":null,\"name\":\"G728\"},{\"bitrate\":null,\"name\":\"G729\"},{\"bitrate\":null,\"name\":\"OPUS\"},{\"bitrate\":null,\"name\":\"ILBC\"}]}"
+    },
+    {
+      "name": "api: video_codecs shape [string]",
+      "ok": true,
+      "detail": "{\"video_codecs\":[\"H261\",\"H263\",\"H263+\",\"H264\",\"H264-HIGH\",\"H264-SVC\",\"H265\",\"VP8\"]}"
+    },
+    {
+      "name": "network: no 5xx",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "network: no 501",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "ui: no pageerror",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "ui: no unexpected console errors",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "cleanup: session stopped",
+      "ok": true,
+      "detail": "204"
+    }
+  ],
+  "page_errors": [],
+  "console_errors": [
+    "TypeError: Cannot read properties of null (reading 'route')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422697)\n    at $A (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:28177)\n    at get value (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:40308)\n    at Object.get [as route] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:60966)\n    at Object.get (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:59272)\n    at CL.i (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:61965)\n    at Wl (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42210)\n    at ui (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42273)\n    at Gf.c.call (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:45698)\n    at PA.h [as fn] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:40951)",
+    "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:422436)\n    at $A (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:28177)\n    at get value (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:40308)\n    at Object.get [as displayName] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:60966)\n    at Object.get (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:59272)\n    at CL.i (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:61965)\n    at Wl (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42210)\n    at ui (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42273)\n    at Gf.c.call (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:45698)\n    at PA.h [as fn] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:40951)",
+    "TypeError: Cannot read properties of null (reading 'displayName')\n    at Proxy.updateChainValue (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:421729)\n    at Proxy.created (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:421593)\n    at Wl (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42210)\n    at ui (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42273)\n    at ui (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:42383)\n    at fS (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:61853)\n    at I8 (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:61116)\n    at qL (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:88516)\n    at oM (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:88309)\n    at sM (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:87928)",
+    "TypeError: Cannot read properties of undefined (reading 'length')\n    at Proxy.Qv (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:424056)\n    at mS (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:66691)\n    at PA.P [as fn] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:76744)\n    at PA.run (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:26764)\n    at z (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:77149)\n    at q (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:75741)\n    at K (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:75494)\n    at b (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:71911)\n    at C (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:73657)\n    at I (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:72877)",
+    "TypeError: Cannot read properties of null (reading 'mode')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:438450)\n    at $A (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:28177)\n    at get value (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:40308)\n    at Object.get [as mode] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:60966)\n    at Object.get (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:59272)\n    at Proxy.x0 (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:439061)\n    at mS (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:66691)\n    at PA.P [as fn] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:76744)\n    at PA.run (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:26764)\n    at z (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:77149)",
+    "TypeError: Cannot read properties of null (reading 'connectionsLimit')\n    at Proxy.get (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:439639)\n    at $A (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:28177)\n    at get value (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:40308)\n    at Object.get [as connectionsLimit] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:60966)\n    at Object.get (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:59272)\n    at Proxy.Q0 (http://127.0.0.1:8080/mcu/chunks/index6.bundle-2.2.1.66.js:1:447321)\n    at mS (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:66691)\n    at PA.P [as fn] (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:76744)\n    at PA.run (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:26764)\n    at z (http://127.0.0.1:8080/mcu/chunks/index.bundle-2.2.1.66.js:2:77149)"
+  ],
+  "failure": null
+}

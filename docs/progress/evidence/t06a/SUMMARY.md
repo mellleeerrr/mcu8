@@ -56,12 +56,12 @@ ignored**; оба E2E — **114/114 checks, 0 failed, page_errors 0**.
 
 ## Live-доказательства
 
-`artifacts/e2e-t06a-rerun-high/` (1920×1080/4096, бинарник с чистого HEAD):
+`docs/progress/evidence/t06a/result-high.json` (1920×1080/4096, бинарник с чистого HEAD):
 - 114 checks / 0 failed / **page_errors 0**, 116.4 с;
 - audio TX **562** / RX **367** пакетов, rejected **0**;
 - video RTP tx **3 545 517 bps**, effective 1920×1080.
 
-`artifacts/e2e-t06a-rerun-low/` (640×360/512):
+`docs/progress/evidence/t06a/result-low.json` (640×360/512):
 - 114 checks / 0 failed / **page_errors 0**, 116.9 с;
 - audio TX **542** / RX **348** пакетов, rejected **0**;
 - video RTP tx **545 685 bps**, effective 640×360.

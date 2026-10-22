@@ -1,6 +1,6 @@
 # T12b — настройки кодеков без N+1, preview-мусор, центровка подписей
 
-Дата: 2026-10-22. Артефакты: `artifacts/e2e-t12b6/`, `tests/e2e/perf-cache.js`.
+Дата: 2026-10-22. Артефакты: `docs/progress/evidence/t12b/`, `tests/e2e/perf-cache.js`.
 
 ## Что было
 - Вендорский UI на каждую строку/резолв делал GET `/api/v3/settings/audio_codecs` и
@@ -33,7 +33,7 @@
    `deploy/README.md` — `chmod -R a+rX` после `cp -a`.
 
 ## Доказательства
-- `artifacts/e2e-t12b6/result.json`: `ok=true`, **232/232** проверок, 147 с.
+- `docs/progress/evidence/t12b/result.json`: `ok=true`, **232/232** проверок, 147 с.
   - label centered для всех диапазонов 1/2/3/4/5+/8/9/10+/25/34+, `|dx|,|dy| < 0.01 px`;
   - codec network = 2 на документ, всего 16 GET за journey, previews polling = 0;
   - preview toggle hidden; реальный SIP-вызов, two-way audio/video.

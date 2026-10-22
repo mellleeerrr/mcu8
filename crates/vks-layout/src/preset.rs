@@ -7,7 +7,7 @@
 //!
 //! - [`PresetId::parse`] — разбор id (схема + размер + суффиксы);
 //! - [`geometry`] — пиксельные [`SlotRect`] на канвасе;
-//! - [`catalog`] — каталог пресетов для `GET /api/v3/video_layout_grids`;
+//! - [`builtin_grids`] — 6 встроенных custom-схем для `GET /api/v3/video_layout_grids`;
 //! - [`builtin_grids`] — фиксированные (custom) геометрии редактора.
 //!
 //! Схемы (`PresetScheme`): `equal` (равномерная сетка), `selected`
@@ -98,18 +98,6 @@ pub enum PresetScheme {
     Double(Position),
     /// Вендорная «общая» раскладка (`preset_default_13`).
     Default,
-}
-
-impl PresetScheme {
-    /// Канонический префикс схемы (без `preset_`).
-    pub const fn family(self) -> &'static str {
-        match self {
-            Self::Equal => "equal",
-            Self::Selected(_) => "selected",
-            Self::Double(_) => "double",
-            Self::Default => "default",
-        }
-    }
 }
 
 /// Разобранный идентификатор пресета.
@@ -632,6 +620,11 @@ pub fn is_manual_preset(id: &str) -> bool {
     MANUAL_SCHEMES.iter().any(|(preset, _)| *preset == id)
 }
 
+/// true, если id — известный пресет геометрии: 65 вендорных + 54 Codian.
+pub fn is_known_preset(id: &str) -> bool {
+    is_manual_preset(id) || crate::codian::is_codian_preset(id)
+}
+
 fn safe_dimension(value: f64, fallback: f64) -> f64 {
     if value.is_finite() && value > 0.0 {
         value
@@ -642,7 +635,7 @@ fn safe_dimension(value: f64, fallback: f64) -> f64 {
 
 /// Пиксельный rect ячейки/блока сетки `cols × rows` по эталонной формуле
 /// (`x = floor(coord * canvas / grid)` — так эталон распределяет остаток).
-fn cell_rect(cell: (u16, u16, u16, u16), cols: u16, rows: u16, canvas: (f64, f64)) -> SlotRect {
+pub(crate) fn cell_rect(cell: (u16, u16, u16, u16), cols: u16, rows: u16, canvas: (f64, f64)) -> SlotRect {
     let (x, y, w, h) = cell;
     let (width, height) = canvas;
     let left = (width * f64::from(x) / f64::from(cols)).floor();
@@ -701,73 +694,13 @@ pub fn geometry_for_manual(id: &str, width: f64, height: f64) -> Option<Vec<Calc
 
 /// Вендорные manual-пресеты (`preset_types._` + `preset_schemes._` эталона 2.2.1.66).
 /// Порядок совпадает с эталонным списком `preset_types._`.
-pub const MANUAL_PRESETS: [&str; 65] = [
-    "preset_equal_1",
-    "preset_equal_2",
-    "preset_selected_b_3",
-    "preset_selected_t_3",
-    "preset_selected_r_3",
-    "preset_selected_l_3",
-    "preset_equal_3",
-    "preset_equal_4",
-    "preset_selected_r_4",
-    "preset_selected_l_4",
-    "preset_selected_b_4",
-    "preset_selected_t_4",
-    "preset_selected_b_4_(2)",
-    "preset_selected_t_4_(2)",
-    "preset_equal_6",
-    "preset_selected_rb_6",
-    "preset_selected_rt_6",
-    "preset_selected_r_5",
-    "preset_selected_l_5",
-    "preset_selected_b_5",
-    "preset_selected_t_5",
-    "preset_selected_rb_8",
-    "preset_selected_rt_8",
-    "preset_equal_8",
-    "preset_equal_9",
-    "preset_selected_b_9",
-    "preset_selected_btb_9",
-    "preset_selected_rlr_9",
-    "preset_selected_rb_9",
-    "preset_selected_rt_9",
-    "preset_equal_16",
-    "preset_selected_rb_13",
-    "preset_selected_rt_13",
-    "preset_double_btb_10",
-    "preset_double_b_10",
-    "preset_double_rlr_10",
-    "preset_double_r_10",
-    "preset_selected_btb_11",
-    "preset_selected_rlr_11",
-    "preset_double_triple_11",
-    "preset_selected_c_13",
-    "preset_selected_rbl_13",
-    "preset_equal_20",
-    "preset_square_24",
-    "preset_equal_25",
-    "preset_selected_rb_25",
-    "preset_selected_rt_25",
-    "preset_equal_36",
-    "preset_selected_rb_37",
-    "preset_selected_rb_57",
-    "preset_selected_rb_61",
-    "preset_selected_rb_77",
-    "preset_double_b_34",
-    "preset_double_b_42",
-    "preset_double_btb_34",
-    "preset_double_rlr_34",
-    "preset_selected_rb_overlap_2",
-    "preset_selected_rt_overlap_2",
-    "preset_selected_r_overlap_6",
-    "preset_selected_l_overlap_6",
-    "preset_selected_b_overlap_4",
-    "preset_selected_t_overlap_4",
-    "preset_double_b_overlap_5",
-    "preset_double_t_overlap_5",
-    "preset_selected_rlr_overlap_11",
-];
+/// Все id вендорных manual-пресетов эталона 2.2.1.66 (65 шт.), в порядке эталона.
+///
+/// Единственный источник правды — таблица `MANUAL_SCHEMES`: отдельный список
+/// id был её побайтовой копией и расходился с ней при каждой правке.
+pub fn manual_preset_ids() -> impl Iterator<Item = &'static str> {
+    MANUAL_SCHEMES.iter().map(|(preset, _)| *preset)
+}
 
 /// Эталонная схема manual-пресета: явная сетка (`Grid`/`Explicit`) или
 /// оверлейные окна (`Overlay`, доли канваса 0..1).
@@ -960,77 +893,6 @@ static MANUAL_SCHEMES: &[(&str, ManualScheme)] = &[
     ),
 ];
 
-/// Эталонное число окон manual-пресета (live `calculate`, 1280×720).
-pub fn expected_slot_count(id: &str) -> Option<usize> {
-    Some(match id {
-        "preset_equal_1" => 1,
-        "preset_equal_2" => 2,
-        "preset_selected_b_3" => 3,
-        "preset_selected_t_3" => 3,
-        "preset_selected_r_3" => 3,
-        "preset_selected_l_3" => 3,
-        "preset_equal_3" => 3,
-        "preset_equal_4" => 4,
-        "preset_selected_r_4" => 4,
-        "preset_selected_l_4" => 4,
-        "preset_selected_b_4" => 4,
-        "preset_selected_t_4" => 4,
-        "preset_selected_b_4_(2)" => 4,
-        "preset_selected_t_4_(2)" => 4,
-        "preset_equal_6" => 6,
-        "preset_selected_rb_6" => 6,
-        "preset_selected_rt_6" => 6,
-        "preset_selected_r_5" => 5,
-        "preset_selected_l_5" => 5,
-        "preset_selected_b_5" => 5,
-        "preset_selected_t_5" => 5,
-        "preset_selected_rb_8" => 8,
-        "preset_selected_rt_8" => 8,
-        "preset_equal_8" => 8,
-        "preset_equal_9" => 9,
-        "preset_selected_b_9" => 9,
-        "preset_selected_btb_9" => 9,
-        "preset_selected_rlr_9" => 9,
-        "preset_selected_rb_9" => 9,
-        "preset_selected_rt_9" => 9,
-        "preset_equal_16" => 16,
-        "preset_selected_rb_13" => 13,
-        "preset_selected_rt_13" => 13,
-        "preset_double_btb_10" => 10,
-        "preset_double_b_10" => 10,
-        "preset_double_rlr_10" => 10,
-        "preset_double_r_10" => 10,
-        "preset_selected_btb_11" => 11,
-        "preset_selected_rlr_11" => 11,
-        "preset_double_triple_11" => 11,
-        "preset_selected_c_13" => 13,
-        "preset_selected_rbl_13" => 13,
-        "preset_equal_20" => 20,
-        "preset_square_24" => 24,
-        "preset_equal_25" => 25,
-        "preset_selected_rb_25" => 25,
-        "preset_selected_rt_25" => 25,
-        "preset_equal_36" => 36,
-        "preset_selected_rb_37" => 37,
-        "preset_selected_rb_57" => 57,
-        "preset_selected_rb_61" => 61,
-        "preset_selected_rb_77" => 77,
-        "preset_double_b_34" => 34,
-        "preset_double_b_42" => 42,
-        "preset_double_btb_34" => 34,
-        "preset_double_rlr_34" => 34,
-        "preset_selected_rb_overlap_2" => 2,
-        "preset_selected_rt_overlap_2" => 2,
-        "preset_selected_r_overlap_6" => 6,
-        "preset_selected_l_overlap_6" => 6,
-        "preset_selected_b_overlap_4" => 4,
-        "preset_selected_t_overlap_4" => 4,
-        "preset_double_b_overlap_5" => 5,
-        "preset_double_t_overlap_5" => 5,
-        "preset_selected_rlr_overlap_11" => 11,
-        _ => return None,
-    })
-}
 /// Слот встроенной custom-геометрии (эталонный payload `video_layout_grids._`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GridSlot {
@@ -1117,174 +979,6 @@ pub fn builtin_grids() -> Vec<GridInfo> {
                 slots: slots.iter().map(|&(x, y, width, height)| GridSlot { x, y, width, height }).collect(),
             },
             defaults: GridDefaults::builtin(),
-        })
-        .collect()
-}
-
-// --- Совместимость с текущим admin-каталогом (preset-схемы в `/video_layout_grids`) ---
-// Эталонный TrueConf 2.2.1.66 отдаёт в `video_layout_grids` только 6 custom-схем,
-// но admin до перехода на live-контракт строит каталог из `catalog()`; символы
-// сохраняются публичными, чтобы не ломать `api_v3/resources.rs`.
-
-/// Масштаб координат grid-payload (0..=10000).
-pub const GRID_SCALE: u32 = 10_000;
-
-/// Элемент каталога пресетов (совместимость с admin-каталогом).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PresetInfo {
-    /// Вендорный id (`preset_selected_b_4`).
-    pub id: String,
-    /// Схема раскладки.
-    pub scheme: PresetScheme,
-    /// Число окон.
-    pub size: u8,
-    /// Признак `_overlap`.
-    pub overlap: bool,
-    /// PiP-режим.
-    pub pip: bool,
-    /// Человекочитаемое имя для списков/поиска.
-    pub display_name: String,
-}
-
-const SELECTED_POSITIONS: [Position; 9] = [
-    Position::B,
-    Position::T,
-    Position::R,
-    Position::L,
-    Position::Rb,
-    Position::Rt,
-    Position::C,
-    Position::Rlr,
-    Position::Btb,
-];
-const SELECTED_SIZES: [u8; 8] = [2, 3, 4, 6, 9, 12, 16, 25];
-const OVERLAP_POSITIONS: [Position; 6] =
-    [Position::B, Position::T, Position::R, Position::L, Position::Rb, Position::Rt];
-const VARIANT_POSITIONS: [Position; 2] = [Position::B, Position::T];
-const VARIANT_SIZES: [u8; 6] = [4, 6, 9, 12, 16, 25];
-const DOUBLE_POSITIONS: [Position; 3] = [Position::B, Position::T, Position::Rlr];
-const DOUBLE_SIZES: [u8; 5] = [2, 4, 6, 9, 12];
-
-fn position_display(position: Position) -> &'static str {
-    match position {
-        Position::B => "снизу",
-        Position::T => "сверху",
-        Position::R => "справа",
-        Position::L => "слева",
-        Position::Rb => "правый нижний",
-        Position::Rt => "правый верхний",
-        Position::C => "центр",
-        Position::Rlr => "боковые",
-        Position::Btb => "верх/низ",
-    }
-}
-
-fn preset_display_name(preset: &PresetId) -> String {
-    let mut name = match preset.scheme {
-        PresetScheme::Equal => format!("Сетка {}", preset.size),
-        PresetScheme::Default => format!("По умолчанию ({})", preset.size),
-        PresetScheme::Selected(position) => {
-            format!("Выделенный ({}) {}", position_display(position), preset.size)
-        }
-        PresetScheme::Double(position) => format!("Двойной ({}) {}", position_display(position), preset.size),
-    };
-    if preset.overlap {
-        name.push_str(" (перекрытие)");
-    }
-    if let Some(variant) = preset.variant {
-        name.push_str(&format!(" ({variant})"));
-    }
-    name
-}
-
-fn preset_info(preset: PresetId) -> PresetInfo {
-    PresetInfo {
-        id: preset.to_string(),
-        scheme: preset.scheme,
-        size: preset.size,
-        overlap: preset.overlap,
-        pip: preset.pip,
-        display_name: preset_display_name(&preset),
-    }
-}
-
-/// Каталог вендорных пресетов для admin (`/api/v3/video_layout_grids`).
-pub fn catalog() -> Vec<PresetInfo> {
-    let mut items = Vec::new();
-    items.push(preset_info(PresetId {
-        scheme: PresetScheme::Default,
-        size: 13,
-        variant: None,
-        overlap: false,
-        pip: false,
-    }));
-    for size in 1..=25u8 {
-        items.push(preset_info(PresetId::equal(size)));
-    }
-    for position in SELECTED_POSITIONS {
-        for size in SELECTED_SIZES {
-            items.push(preset_info(PresetId {
-                scheme: PresetScheme::Selected(position),
-                size,
-                variant: None,
-                overlap: false,
-                pip: false,
-            }));
-        }
-    }
-    for position in OVERLAP_POSITIONS {
-        for size in SELECTED_SIZES {
-            items.push(preset_info(PresetId {
-                scheme: PresetScheme::Selected(position),
-                size,
-                variant: None,
-                overlap: true,
-                pip: true,
-            }));
-        }
-    }
-    for position in VARIANT_POSITIONS {
-        for size in VARIANT_SIZES {
-            items.push(preset_info(PresetId {
-                scheme: PresetScheme::Selected(position),
-                size,
-                variant: Some(2),
-                overlap: false,
-                pip: false,
-            }));
-        }
-    }
-    for position in DOUBLE_POSITIONS {
-        for size in DOUBLE_SIZES {
-            items.push(preset_info(PresetId {
-                scheme: PresetScheme::Double(position),
-                size,
-                variant: None,
-                overlap: false,
-                pip: false,
-            }));
-        }
-    }
-    items
-}
-
-fn grid_coord(value: f64) -> u32 {
-    value.round().clamp(0.0, f64::from(GRID_SCALE)) as u32
-}
-
-/// Переводит пиксельные rect в слоты `0..=GRID_SCALE` (совместимость с admin).
-pub fn slots_to_grid(rects: &[SlotRect]) -> Vec<GridSlot> {
-    rects
-        .iter()
-        .map(|rect| {
-            let x = grid_coord(rect.x);
-            let y = grid_coord(rect.y);
-            GridSlot {
-                x,
-                y,
-                width: grid_coord(rect.width).min(GRID_SCALE - x),
-                height: grid_coord(rect.height).min(GRID_SCALE - y),
-            }
         })
         .collect()
 }
@@ -1376,12 +1070,12 @@ mod tests {
     /// принимаются `calculate` и не должны попадать в список.
     #[test]
     fn manual_presets_match_reference() {
-        assert_eq!(MANUAL_PRESETS.len(), 65);
-        let unique: HashSet<&str> = MANUAL_PRESETS.iter().copied().collect();
-        assert_eq!(unique.len(), MANUAL_PRESETS.len(), "дубли id в списке manual-пресетов");
-        for id in MANUAL_PRESETS {
+        let ids: Vec<&str> = manual_preset_ids().collect();
+        assert_eq!(ids.len(), 65);
+        let unique: HashSet<&str> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "дубли id в списке manual-пресетов");
+        for id in ids {
             assert!(is_manual_preset(id), "{id} отсутствует в MANUAL_SCHEMES");
-            assert!(expected_slot_count(id).is_some(), "{id}: нет эталонного числа окон");
             assert!(geometry_for_manual(id, 1280.0, 720.0).is_some(), "{id}: нет эталонной геометрии");
         }
         for dynamic in [
@@ -1404,8 +1098,8 @@ mod tests {
         let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/reference_calculate_1280x720.json"))
             .expect("fixture эталонной геометрии");
         let expected = fixture.as_object().expect("объект id → slots");
-        assert_eq!(expected.len(), MANUAL_PRESETS.len());
-        for id in MANUAL_PRESETS {
+        assert_eq!(expected.len(), manual_preset_ids().count());
+        for id in manual_preset_ids() {
             let want = expected.get(id).unwrap_or_else(|| panic!("{id} отсутствует в fixture")).clone();
             let got = slots_json(&geometry_for_manual(id, 1280.0, 720.0).unwrap());
             assert_eq!(Value::Array(got), want, "{id}: расхождение с эталоном");
@@ -1416,8 +1110,15 @@ mod tests {
     /// 1-based позиции и отсутствие пересечений у неперекрывающихся схем.
     #[test]
     fn geometry_properties_hold_for_all_manual_presets() {
-        for id in MANUAL_PRESETS {
-            let expected = expected_slot_count(id).unwrap();
+        let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/reference_calculate_1280x720.json"))
+            .expect("fixture эталонной геометрии");
+        let reference = fixture.as_object().expect("объект id → slots");
+        for id in manual_preset_ids() {
+            let expected = reference
+                .get(id)
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or_else(|| panic!("{id} отсутствует в fixture"));
             for (width, height) in [(1280.0, 720.0), (1920.0, 1080.0), (640.0, 480.0), (1000.0, 700.0)] {
                 let slots = geometry_for_manual(id, width, height).unwrap();
                 assert_eq!(slots.len(), expected, "{id}: число окон на {width}×{height}");

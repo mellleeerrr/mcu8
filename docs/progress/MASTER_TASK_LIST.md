@@ -595,3 +595,46 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 | W2 | Закрытие P0/P1 ревью: FSM rollback, preflight exit 78, keyframe non-fatal, gateway-гард в обе стороны, нет legacy-endpoint после отвергнутого оффера, reverse-map cleanup, global cap, metrics, query-token, docs/rollback | 🟢 | `30aef22`; исторический прогон 28/28, актуальные артефакты — в W3 |
 | W3 | Четвёртый круг: admission-lock, runtime MCU eviction, hot-reload/override persistence, lock-order regressions, ICE rollback, gateway guards, fail-closed, Origin allowlist, метрики | 🟢 | `44abf92`; live E2E **29/29** на 43000/43001, legacy UI **233/233**, eviction tests 5/5; evidence `docs/progress/evidence/webrtc/` |
 > **W2 review loop:** ops **9.6/10 APPROVED** at `e12b0ec`; code round-6 findings (hot reload without evict, rollback clobber, override persistence) fixed in `e420b9e`. Independent final review: code **9.5/10 APPROVED**, ops **9.6/10 APPROVED**, elegance **9.2/10**; final code `44abf92`, evidence `15a0c5a` (29/29, 233/233, eviction 5/5).
+
+---
+
+## Сессия 2026-10-23 — чистка репозитория, раскладки Codian MCU 4200, ревью агентами
+
+> План: `docs/implementation/MASTER_PLAN_CLEANUP_LAYOUTS_2026-10-23.md` (§8 — итог и
+> правки по замечаниям агентов). Итоговый отчёт с промтами, оценками и полным
+> стеком: `docs/implementation/ARCHITECTURE_PLAN_2026-10-23.md`.
+> Оценки агентов: активные изменения **7,5/10**, чистота репозитория **5,5/10**,
+> корректность **7/10**, `vks-layout` **5,5/10**, `vks-media-mcu` **6,5/10**,
+> Codian-спецификация **4/10**, связность цепочек **5,5/10**, `vks-media-mcu` **4,5/10**.
+
+| ID | Задача | Статус | Коммит/артефакт |
+|---|---|---|---|
+| S1 | **54 раскладки Codian MCU 4200** (52 пресета + 2 кастомные) с ролями слотов; сверка 52/52 с 52 чертежами вендора | 🟢 | `crates/vks-layout/src/codian.rs` (529 стр.), `roles.rs` (~200), `tests/codian_layouts.rs` (6 тестов); сверка — «ТОПОЛОГИЯ СОВПАЛА В 52/52» |
+| S2 | Единый справочник раскладок: `is_known_preset`, `GET /api/v3/ui/video_layouts/presets`, Codian-ветка в `gateways.rs`, `resources.rs::preset_size` с префиксом `preset_` | 🟢 | `crates/vks-layout/src/preset.rs`, `crates/vks-admin/src/api_v3/shell.rs`, `resources.rs`, `crates/vks-server/src/gateways.rs` |
+| S3 | **Мёртвый код**: `renderer.rs` (−168, игнорировал `z_index`), блок `catalog()` (−229), `expected_slot_count` (−68, тест переведён на золотую фикстуру), копия `MANUAL_PRESETS` (−65 → `manual_preset_ids()`), `CompositeFrame` (−20), 3 мёртвых символа | 🟢 | `crates/vks-layout`, `crates/vks-media-mcu`; `vks-layout` 47 unit + 6 integration — зелёные |
+| S4 | **Медиа-контур**: `Arc<Frame>` (было 34,5 МБ memcpy/тик), `McuEngine::rekey_frames` (устаревший кадр после перестановки), `panic = "unwind"` | 🟢 | `crates/vks-media-mcu/src/engine.rs`, `compositor.rs`; регресс-тест `frames_follow_participant_after_slot_swap` |
+| S5 | **Кодек-воркер**: `scrubbed_env()` + stderr ребёнка в ошибку, `libc::kill(-pgid, SIGKILL)`, поколенческий `last_stderr`, `supports_encode_size`/`supports_decode_size`, `validate_audio`/`validate_for`/`validate_decode`, лимит H.265 4096×2160, фильтр легенды `ffmpeg -encoders` | 🟢 | `crates/vks-media-mcu/src/codec_worker/{ffmpeg,mod}.rs`; 76/76 тестов |
+| S6 | **Гигиена**: `artifacts/` 949→247 МБ (45→12 каталогов, −701 МБ), 12 отчётов E2E перенесены в `docs/progress/evidence/`, удалены бэкапы БД/лог/`__pycache__`/`.h323-venv/`/`demo-2026-10-16.rs`, `.work-tmp/` в `.gitignore` | 🟢 | `docs/progress/evidence/{e2e,e2e-layouts,e2e-label-zoom,t15-audio-in-layouts,t04a,t05,t05-low,t05b,t06a,t12b}/` |
+| S7 | **Документация приведена в соответствие с кодом**: `LAYOUT_ENGINE.md` переписан (v0.2, 8+ ложных утверждений), `MEDIA_PIPELINE.md:87`, `SIGNALING_PROTOCOL.md` (+`LayoutChanged` не отправляется), `DEVELOPMENT_PLAN.md` (ложные `[x]`), `ARCHITECTURE_AND_VERSIONS_2026-10-21.md` §4.6 («композитор игнорирует z_order» — неверно) | 🟢 | `docs/architecture/`, `docs/implementation/` |
+| S8 | **Тест-флак `ETXTBSY`** в `hung_probe_times_out_and_kills_child` (5–8 % прогонов): сценарий передан через `sh -c` вместо временного исполняемого файла | 🟢 | `crates/vks-media-mcu/src/codec_worker/ffmpeg.rs`; 0 провалов в 25 прогонах |
+
+### Осталось по итогам сессии (перенесено из §8.2 плана)
+
+| ID | Задача | Статус | Подводные камни |
+|---|---|---|---|
+| S9 | **Разрыв Ц7: `LayoutChanged` не отправляется** — раскладка не доходит до браузера | 🔴 | Сообщение объявлено (`signaling.proto:29`, поле 80), отправителя нет; NATS — заглушка; клиент рисует авто-сетку. Нужны: отправка при смене раскладки, `pinned`/`is_focus` в `LayoutDescriptor`, приём на клиенте |
+| S10 | **Разрыв Ц8: единый 0-based `slot_id`** на пути UI → `LayoutDescriptor` → движок → клиент | 🔴 | `gateways.rs` строит `geometry[]` из массива, а `position` из UI — 1-based со сдвигом `base`; `sanitize_assignments` молча отбрасывает участников |
+| S11 | **WebRTC-транспорт** (цепочки Ц1–Ц6): реальный пир не регистрируется паблишером; WebRTC не связан с MCU/SIP/H.323; `VKS_TRANSCODER_ENABLED=1` открывает кодеки без рантайма; `MAX_PEERS_PER_ROOM=2`; ICE-lite без TURN | 🔴 | Звонок умирает после 200 OK, если транскодера нет ⇒ нужен `codec_capabilities`-гейт на SDP |
+| S12 | **Роли в движке**: `assign_by_role` готов, но не вызывается автоматически; нужен `join_order` (сейчас сортировка по UUID) и передача `active_speaker` наружу (`is_speaking` всегда `false`) | 🟡 | Семантика Codian §2 (5 семейств, voice activation, «Important», self-view) требует per-viewer композиции — архитектурное решение, не задача на день |
+| S13 | **Мелкий мёртвый код**: `PixelRect` → `vks_layout::Rect`, ~25 мёртвых `pub fn` в 10 крейтах, `csv_escape`×3→1, `canonical_uri`×2→1, `now_*`×7→1, 5 неиспользуемых зависимостей, `focus.rs` — канонизация (слотный контракт + фикс округления: при m=7 на 1920 px сумма ширин 1918, 2 чёрных пикселя) | 🟡 | `focus.rs` удалять нельзя: `Speaker` = алиас `Focus`, а инлайн-копия в `engine.rs` — дубликат |
+| S14 | **Импорт PNM**: P1-1 (скрипт теряет `<script>`-теги), P1-2 (`patch-pnm-chartjs.py` не падает и не идемпотентен), P1-5 (наполовину импортированное дерево) | 🟡 | Общий `scripts/pnm_patch_lib.py` (~80 стр.) вместо дублирования; CSP не затрагивается — инлайновых `<script>` не появляется, меняется только `MANIFEST.sha256` |
+| S15 | **CI и сборка**: `vendored-protoc` нерабочая в пути с пробелом (путь проекта — с пробелом) ⇒ удалить фичу + поставить `protoc` в CI; добавить шаг `cargo check --workspace --all-features --all-targets --exclude vks-proto` (21 с, exit 0) | 🟡 | `oxideav` — no-op фича, `--all-features` её не проверяет |
+| S16 | **Грамматика id пресетов**: `PresetId::parse` не покрывает `preset_double_triple*`, `preset_selected_rbl*`; `preset_square_24` теряет «square» при round-trip | 🟡 | Вендорный словарь в бандле — 92 id; палитра пресетов — **серверная** (`vks-layout/src/preset.rs`), бандл содержит только словарь + `icons`/`presetHints` ⇒ патч вендора CSP-нейтрален |
+| S17 | **Дубли и конфиги**: B4 (дубли `docs/implementation/*`), B6 (ключи конфига vs `vks-common::Config`), B7 (два systemd-юнита), B8 (дубли в `scripts/`), B9 (дубли в `tests/e2e/`) | 🟡 | Один живой трекер — `MASTER_TASK_LIST.md` (PROJECT_RULES §3.1) |
+| S18 | **Удалить `.work-tmp/`** в конце сессии; сверить `client/pnm-frontend/MANIFEST.sha256` с фактическими файлами | 🟡 | `.work-tmp` в `.gitignore` (добавлен) |
+
+> **Блокеры, требующие решения владельца:** namespace id Codian (`codian_01…codian_52` —
+> принято мной и обоими агентами, требует подтверждения); `panic = "abort"` →
+> `unwind` (сделано, требует подтверждения); per-viewer self-view (архитектурное
+> решение); H.263 320×240 (`h263p` — «не реализовано» или отказ).
+> Полный список — `docs/implementation/ARCHITECTURE_PLAN_2026-10-23.md` §6.

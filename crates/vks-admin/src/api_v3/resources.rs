@@ -370,8 +370,13 @@ fn singular(kind: &str) -> &'static str {
 
 /// `preset_equal_25` → `Some(25)`, `preset_selected_b_4_(2)` → `Some(4)`.
 /// Как UI-маппер `Iee`: сначала отрезается суффикс `_(N)`, затем берётся хвост.
+///
+/// Только вендорские id с префиксом `preset_`: у `codian_*` число окон задано
+/// самой раскладкой (`vks_layout::codian::slot_count`), а хвост id — это номер
+/// макета, а не размер.
 pub(crate) fn preset_size(preset: &str) -> Option<u32> {
     let base = preset.rsplit_once("_(").map_or(preset, |(base, _)| base);
+    let base = base.strip_prefix("preset_")?;
     base.rsplit('_').next().and_then(|tail| tail.parse().ok())
 }
 
@@ -1190,7 +1195,8 @@ fn recalc_layout_size(record: &mut Value) {
         .and_then(Value::as_array)
         .map(Vec::len)
         .filter(|count| *count > 0)
-        .or_else(|| payload.get("preset").and_then(Value::as_str).and_then(preset_size).map(|n| n as usize));
+        .or_else(|| payload.get("preset").and_then(Value::as_str).and_then(preset_size).map(|n| n as usize))
+        .or_else(|| payload.get("preset").and_then(Value::as_str).and_then(vks_layout::codian::slot_count));
     if let Some(size) = size {
         record["payload"]["size"] = json!(size);
     }

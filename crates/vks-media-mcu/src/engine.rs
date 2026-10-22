@@ -219,18 +219,19 @@ impl RoomState {
     /// Применяет descriptor к комнате: crossfade, current layout, версия.
     /// Одна точка для ensure_room/bridge/apply, чтобы не дублировать сброс
     /// elapsed/applied_at.
-    fn adopt_layout(&mut self, layout: LayoutDescriptor) {
+    fn adopt_layout(&mut self, layout: LayoutDescriptor) -> vks_layout::Layout {
         let new_layout = Self::layout_from_descriptor(&layout);
         self.bridge.apply(&new_layout);
-        self.current_layout = new_layout;
+        self.current_layout = new_layout.clone();
         self.layout = Some(layout);
         self.layout_applied_at_ms = None;
         self.elapsed_ms = 0;
+        new_layout
     }
 
     /// Recomputes the composite + mixed audio + per-participant mix-minus + VAD from the current
     /// frames and participant audio (deterministic logical step of 33ms).
-    fn tick(&mut self, frames: &BTreeMap<u32, Frame>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
+    fn tick(&mut self, frames: &BTreeMap<u32, Arc<Frame>>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
         self.elapsed_ms += 33;
         self.process_media(frames, audio_inputs);
     }
@@ -240,7 +241,7 @@ impl RoomState {
     fn tick_at(
         &mut self,
         now_ms: u64,
-        frames: &BTreeMap<u32, Frame>,
+        frames: &BTreeMap<u32, Arc<Frame>>,
         audio_inputs: &[(ParticipantId, Vec<f32>)],
     ) -> bool {
         self.tick_audio_at(now_ms, audio_inputs);
@@ -260,7 +261,7 @@ impl RoomState {
     }
 
     /// Advances the video compositing pass at a specific monotonic timestamp `now_ms` (33 ms budget).
-    fn tick_video_at(&mut self, now_ms: u64, frames: &BTreeMap<u32, Frame>) -> bool {
+    fn tick_video_at(&mut self, now_ms: u64, frames: &BTreeMap<u32, Arc<Frame>>) -> bool {
         if let Some(last) = self.last_render_ms {
             if now_ms < last + 30 {
                 self.stats.frames_dropped += 1;
@@ -274,10 +275,10 @@ impl RoomState {
         true
     }
 
-    fn process_video(&mut self, frames: &BTreeMap<u32, Frame>) {
+    fn process_video(&mut self, frames: &BTreeMap<u32, Arc<Frame>>) {
         let t0 = std::time::Instant::now();
         let rects = self.slot_rects();
-        self.composite = Compositor.compose(frames, &rects).into_frame();
+        self.composite = Compositor.compose(frames, &rects);
         self.stats.last_duration_us = t0.elapsed().as_micros() as u64;
         self.stats.frames_rendered += 1;
     }
@@ -333,7 +334,7 @@ impl RoomState {
         }
     }
 
-    fn process_media(&mut self, frames: &BTreeMap<u32, Frame>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
+    fn process_media(&mut self, frames: &BTreeMap<u32, Arc<Frame>>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
         self.process_video(frames);
         self.process_audio(audio_inputs);
     }
@@ -341,7 +342,7 @@ impl RoomState {
 
 /// MCU engine (impl [`MediaEngine`]).
 /// Room → (slot → frame): pluggable mock frame source.
-type FrameSource = Arc<Mutex<BTreeMap<RoomId, BTreeMap<u32, Frame>>>>;
+type FrameSource = Arc<Mutex<BTreeMap<RoomId, BTreeMap<u32, Arc<Frame>>>>>;
 /// Room → (participant → 20 ms PCM frame): pluggable mock audio source.
 type AudioSource = Arc<Mutex<BTreeMap<RoomId, BTreeMap<ParticipantId, Vec<f32>>>>>;
 
@@ -402,9 +403,51 @@ impl McuEngine {
         Self::default()
     }
 
+    /// Переносит кадры на новые номера слотов после смены раскладки.
+    ///
+    /// Кадр принадлежит участнику, а не позиции в сетке: без переноса после
+    /// перестановки в окне остаётся видео прежнего участника (устаревший кадр).
+    /// Переносятся только кадры, у которых есть новый слот.
+    fn rekey_frames(
+        &self,
+        room: RoomId,
+        old_assignments: &BTreeMap<ParticipantId, u32>,
+        new_layout: &vks_layout::Layout,
+    ) {
+        // `vks_layout::ParticipantId` — тот же UUID, но в виде `u128`.
+        let new_slots: BTreeMap<ParticipantId, u32> = new_layout
+            .slots
+            .iter()
+            .filter_map(|slot| {
+                slot.participant_id.map(|pid| {
+                    let uuid = uuid::Uuid::from_u128(pid.as_u128());
+                    (ParticipantId::from_uuid(uuid), slot.id.as_u32())
+                })
+            })
+            .collect();
+        if new_slots.is_empty() {
+            return;
+        }
+        let mut guard = self.frames.lock().unwrap();
+        let Some(frames) = guard.get_mut(&room) else { return };
+        let mut moved: Vec<(u32, Arc<Frame>)> = Vec::new();
+        for (pid, old_slot) in old_assignments {
+            let Some(new_slot) = new_slots.get(pid) else { continue };
+            if *new_slot == *old_slot {
+                continue;
+            }
+            if let Some(frame) = frames.remove(old_slot) {
+                moved.push((*new_slot, frame));
+            }
+        }
+        for (slot, frame) in moved {
+            frames.insert(slot, frame);
+        }
+    }
+
     /// Injects a (mock) frame for a slot of a room (test helper).
     pub fn set_frame(&self, room: RoomId, slot: u32, frame: Frame) {
-        self.frames.lock().unwrap().entry(room).or_default().insert(slot, frame);
+        self.frames.lock().unwrap().entry(room).or_default().insert(slot, Arc::new(frame));
     }
 
     /// Injects a (mock) audio frame for a participant (test helper).
@@ -621,7 +664,7 @@ impl McuEngine {
         let Some(slot) = state.layout.as_ref().and_then(|layout| layout.assignments.get(&pid)) else {
             return false;
         };
-        self.frames.lock().unwrap().entry(room).or_default().insert(*slot, frame);
+        self.frames.lock().unwrap().entry(room).or_default().insert(*slot, Arc::new(frame));
         true
     }
 
@@ -689,11 +732,6 @@ impl McuEngine {
             .get(&room)
             .map(|s| s.subscribers.contains(&pid) || s.publisher_tracks.contains_key(&pid))
             .unwrap_or(false)
-    }
-
-    /// Returns whether the participant is registered as a publisher in the MCU room.
-    pub fn has_publisher(&self, room: RoomId, pid: ParticipantId) -> bool {
-        self.rooms.lock().unwrap().get(&room).map(|s| s.publisher_tracks.contains_key(&pid)).unwrap_or(false)
     }
 }
 
@@ -840,7 +878,11 @@ impl MediaEngine for McuEngine {
         // перестроить композитор. Repair больше не бампает отдельно, поэтому
         // двойного инкремента нет.
         layout.version = layout.version.max(version_floor);
-        state.adopt_layout(layout);
+        let old_assignments = state.layout.as_ref().map(|previous| previous.assignments.clone());
+        let new_layout = state.adopt_layout(layout);
+        if let Some(old_assignments) = old_assignments {
+            self.rekey_frames(room, &old_assignments, &new_layout);
+        }
         Ok(())
     }
 
@@ -1190,6 +1232,54 @@ mod tests {
         assert_eq!(r7.h, 1080);
         assert_eq!(r42.w, 960);
         assert_eq!(r42.h, 1080);
+    }
+
+    /// Кадр принадлежит участнику, а не номеру слота: после перестановки
+    /// участников в раскладке в окне должно быть видео нового владельца.
+    #[tokio::test]
+    async fn frames_follow_participant_after_slot_swap() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(11);
+        let b = p(12);
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.add_publisher(rid, b, vec![video_track(b)]).await.unwrap();
+
+        let mut assignments = std::collections::BTreeMap::new();
+        assignments.insert(a, 0);
+        assignments.insert(b, 1);
+        e.apply_layout(
+            rid,
+            LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments, geometry: Vec::new() },
+        )
+        .await
+        .unwrap();
+        assert!(e.set_participant_frame(rid, a, Frame::filled(320, 180, 11)));
+        assert!(e.set_participant_frame(rid, b, Frame::filled(320, 180, 22)));
+        e.tick_at(rid, 100).unwrap();
+
+        // Меняем участников местами: теперь слот 0 принадлежит B, слот 1 — A.
+        let mut swapped = std::collections::BTreeMap::new();
+        swapped.insert(a, 1);
+        swapped.insert(b, 0);
+        e.apply_layout(
+            rid,
+            LayoutDescriptor { layout_id: "grid".into(), version: 2, assignments: swapped, geometry: Vec::new() },
+        )
+        .await
+        .unwrap();
+
+        let rects = e.slot_rects(rid).expect("slot rects");
+        let out = e.tick_at(rid, 200).expect("composite");
+        // Слот 0 (левый) теперь B — там должно быть его значение 22, а не 11.
+        let left = rects.get(&0).expect("slot 0");
+        // Кадр вписывается в слот с сохранением пропорций (letterbox), поэтому
+        // берём центр слота, а не его левый верхний угол.
+        let cx = left.x + left.w / 2;
+        let cy = left.y + left.h / 2;
+        let value = out.data[cy as usize * CANVAS_SIZE.0 as usize + cx as usize];
+        assert_eq!(value, 22, "после перестановки в слоте 0 должно быть видео участника B");
     }
 
     /// P0: выбранная раскладка должна доводить абонента до ЕГО ячейки.

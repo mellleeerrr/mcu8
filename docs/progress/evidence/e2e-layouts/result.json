@@ -1,0 +1,512 @@
+{
+ "base": "http://127.0.0.1:8080",
+ "session_id": "ab6fb203-7de8-497b-a720-6345aef451b3",
+ "ranges": [
+  {
+   "index": 0,
+   "label": "1",
+   "schemes": 1,
+   "expected": 1,
+   "titles": [
+    "Все равноправные"
+   ],
+   "icons": 1
+  },
+  {
+   "index": 1,
+   "label": "2",
+   "schemes": 1,
+   "expected": 1,
+   "titles": [
+    "Все равноправные"
+   ],
+   "icons": 1
+  },
+  {
+   "index": 2,
+   "label": "3",
+   "schemes": 5,
+   "expected": 5,
+   "titles": [
+    "Все равноправные",
+    "Сверху располагается приоритетное видеоокно",
+    "Снизу располагается приоритетное видеоокно",
+    "Слева располагается приоритетное видеоокно",
+    "Справа располагается приоритетное видеоокно"
+   ],
+   "icons": 5
+  },
+  {
+   "index": 3,
+   "label": "4",
+   "schemes": 7,
+   "expected": 7,
+   "titles": [
+    "Все равноправные",
+    "Сверху располагается приоритетное видеоокно",
+    "Снизу располагается приоритетное видеоокно",
+    "Слева располагается приоритетное видеоокно",
+    "Справа располагается приоритетное видеоокно",
+    "Сверху располагается приоритетное видеоокно",
+    "Снизу располагается приоритетное видеоокно"
+   ],
+   "icons": 7
+  },
+  {
+   "index": 4,
+   "label": "5 +",
+   "schemes": 7,
+   "expected": 7,
+   "titles": [
+    "Все равноправные",
+    "Угловая раскладка с приоритетным видеоокном слева вверху",
+    "Угловая раскладка с приоритетным видеоокном слева снизу",
+    "Сверху располагается приоритетное видеоокно",
+    "Снизу располагается приоритетное видеоокно",
+    "Слева располагается приоритетное видеоокно",
+    "Справа располагается приоритетное видеоокно"
+   ],
+   "icons": 7
+  },
+  {
+   "index": 5,
+   "label": "8",
+   "schemes": 3,
+   "expected": 3,
+   "titles": [
+    "Все равноправные",
+    "Угловая раскладка с приоритетным видеоокном слева вверху",
+    "Угловая раскладка с приоритетным видеоокном слева снизу"
+   ],
+   "icons": 3
+  },
+  {
+   "index": 6,
+   "label": "9",
+   "schemes": 6,
+   "expected": 6,
+   "titles": [
+    "Все равноправные",
+    "Угловая раскладка с приоритетным видеоокном слева вверху",
+    "Угловая раскладка с приоритетным видеоокном слева снизу",
+    "Сверху располагается приоритетное видеоокно",
+    "Приоритетное видеоокно в центре, остальные сверху и снизу",
+    "Приоритетное видеоокно в центре, остальные справа и слева"
+   ],
+   "icons": 6
+  },
+  {
+   "index": 7,
+   "label": "10 +",
+   "schemes": 14,
+   "expected": 14,
+   "titles": [
+    "Все равноправные",
+    "Все равноправные",
+    "Угловая раскладка с приоритетным видеоокном слева вверху",
+    "Угловая раскладка с приоритетным видеоокном слева снизу",
+    "Приоритетное видеоокно в центре, остальные сверху и снизу",
+    "Приоритетное видеоокно в центре, остальные справа и слева",
+    "Два приоритетных видеоокна сверху, остальные снизу",
+    "Два приоритетных видеоокна в центре, остальные сверху и снизу",
+    "Два приоритетных окна в центре, неприоритетные справа и слева",
+    "Два приоритетных окна слева, неприоритетные справа",
+    "Два приоритетных видеоокна сверху, остальные снизу",
+    "Приоритетное видеоокно в центре, остальные вокруг него",
+    "Одно приоритетное видеоокно сверху, остальные по бокам и снизу",
+    "Четыре приоритетных видеоокна в центре, остальные вокруг него"
+   ],
+   "icons": 14
+  },
+  {
+   "index": 8,
+   "label": "25",
+   "schemes": 3,
+   "expected": 3,
+   "titles": [
+    "Все равноправные",
+    "Угловая раскладка с приоритетным видеоокном слева вверху",
+    "Угловая раскладка с приоритетным видеоокном слева снизу"
+   ],
+   "icons": 3
+  },
+  {
+   "index": 9,
+   "label": "34 +",
+   "schemes": 9,
+   "expected": 9,
+   "titles": [
+    "Все равноправные",
+    "Угловая раскладка с приоритетным видеоокном слева вверху",
+    "Угловая раскладка с приоритетным видеоокном слева вверху",
+    "Угловая раскладка с приоритетным видеоокном слева вверху",
+    "Угловая раскладка с приоритетным видеоокном слева вверху",
+    "Два приоритетных видеоокна сверху, остальные снизу",
+    "Два приоритетных видеоокна сверху, остальные снизу",
+    "Два приоритетных видеоокна в центре, остальные сверху и снизу",
+    "Два приоритетных окна в центре, неприоритетные справа и слева"
+   ],
+   "icons": 9
+  },
+  {
+   "index": 10,
+   "label": "",
+   "schemes": 9,
+   "expected": 9,
+   "titles": [
+    "Неприоритетное видеоокно справа снизу",
+    "Неприоритетное видеоокно справа сверху",
+    "Неприоритетные видеоокна снизу",
+    "Неприоритетные видеоокна сверху",
+    "Неприоритетные видеоокна справа",
+    "Неприоритетные видеоокна слева",
+    "Неприоритетные видеоокна справа и слева",
+    "Два приоритетных видеоокна и неприоритетные снизу",
+    "Два приоритетных видеоокна и неприоритетные сверху"
+   ],
+   "icons": 9
+  }
+ ],
+ "placements": [
+  {
+   "n": 4,
+   "pos": 1,
+   "tiles": 4,
+   "tile_texts": [
+    "1 Matrix Probe Matrix Probe",
+    "2",
+    "3",
+    "4"
+   ],
+   "target": {
+    "text": "1 Matrix Probe Matrix Probe",
+    "cx": 578.75,
+    "cy": 598.234375
+   }
+  },
+  {
+   "n": 8,
+   "pos": 8,
+   "tiles": 8,
+   "tile_texts": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8 Matrix Probe Matrix Probe"
+   ],
+   "target": {
+    "text": "8 Matrix Probe Matrix Probe",
+    "cx": 948.328125,
+    "cy": 889.28125
+   }
+  },
+  {
+   "n": 9,
+   "pos": 5,
+   "tiles": 9,
+   "tile_texts": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5 Matrix Probe Matrix Probe",
+    "6",
+    "7",
+    "8",
+    "9"
+   ],
+   "target": {
+    "text": "5 Matrix Probe Matrix Probe",
+    "cx": 800.484375,
+    "cy": 722.96875
+   }
+  },
+  {
+   "n": 25,
+   "pos": 25,
+   "tiles": 25,
+   "tile_texts": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "10",
+    "11",
+    "12",
+    "13",
+    "14",
+    "15",
+    "16",
+    "17",
+    "18",
+    "19",
+    "20",
+    "21",
+    "22",
+    "23",
+    "24",
+    "25 Matrix Probe Matrix Probe"
+   ],
+   "target": {
+    "text": "25 Matrix Probe Matrix Probe",
+    "cx": 1155.2890625,
+    "cy": 922.53125
+   }
+  }
+ ],
+ "checks": [
+  {
+   "name": "participant connected",
+   "ok": true,
+   "detail": "{\"abonents\":[{\"abonent_id\":\"sip-f20e5f9c-2e4e-49c3-ac25-420638d9460b@sip-gateway\",\"call_string_id\":\"cs-1f838e97-8e10-4842-96e0-f170902f3685\",\"connected_at\":1792603863,\"connection_id\":\"sip-f20e5f9c-2e4"
+  },
+  {
+   "name": "api layout 4 created",
+   "ok": true,
+   "detail": "201"
+  },
+  {
+   "name": "api layout 4 attached",
+   "ok": true,
+   "detail": "204"
+  },
+  {
+   "name": "api layout 8 created",
+   "ok": true,
+   "detail": "201"
+  },
+  {
+   "name": "api layout 8 attached",
+   "ok": true,
+   "detail": "204"
+  },
+  {
+   "name": "api layout 9 created",
+   "ok": true,
+   "detail": "201"
+  },
+  {
+   "name": "api layout 9 attached",
+   "ok": true,
+   "detail": "204"
+  },
+  {
+   "name": "api layout 25 created",
+   "ok": true,
+   "detail": "201"
+  },
+  {
+   "name": "api layout 25 attached",
+   "ok": true,
+   "detail": "204"
+  },
+  {
+   "name": "ui 4: tile count",
+   "ok": true,
+   "detail": "4"
+  },
+  {
+   "name": "ui 4: participant in chosen cell 1",
+   "ok": true,
+   "detail": "1 Matrix Probe Matrix Probe"
+  },
+  {
+   "name": "ui 4: participant only in one cell",
+   "ok": true,
+   "detail": "others=0"
+  },
+  {
+   "name": "ui 4: label centered",
+   "ok": true,
+   "detail": "dx=0.0 dy=28.0"
+  },
+  {
+   "name": "ui 4: label has no emoji",
+   "ok": true,
+   "detail": "1 Matrix Probe Matrix Probe"
+  },
+  {
+   "name": "ui 8: tile count",
+   "ok": true,
+   "detail": "8"
+  },
+  {
+   "name": "ui 8: participant in chosen cell 8",
+   "ok": true,
+   "detail": "8 Matrix Probe Matrix Probe"
+  },
+  {
+   "name": "ui 8: participant only in one cell",
+   "ok": true,
+   "detail": "others=0"
+  },
+  {
+   "name": "ui 8: label centered",
+   "ok": true,
+   "detail": "dx=0.0 dy=18.7"
+  },
+  {
+   "name": "ui 8: label has no emoji",
+   "ok": true,
+   "detail": "8 Matrix Probe Matrix Probe"
+  },
+  {
+   "name": "ui 9: tile count",
+   "ok": true,
+   "detail": "9"
+  },
+  {
+   "name": "ui 9: participant in chosen cell 5",
+   "ok": true,
+   "detail": "5 Matrix Probe Matrix Probe"
+  },
+  {
+   "name": "ui 9: participant only in one cell",
+   "ok": true,
+   "detail": "others=0"
+  },
+  {
+   "name": "ui 9: label centered",
+   "ok": true,
+   "detail": "dx=0.0 dy=18.7"
+  },
+  {
+   "name": "ui 9: label has no emoji",
+   "ok": true,
+   "detail": "5 Matrix Probe Matrix Probe"
+  },
+  {
+   "name": "ui 25: tile count",
+   "ok": true,
+   "detail": "25"
+  },
+  {
+   "name": "ui 25: participant in chosen cell 25",
+   "ok": true,
+   "detail": "25 Matrix Probe Matrix Probe"
+  },
+  {
+   "name": "ui 25: participant only in one cell",
+   "ok": true,
+   "detail": "others=0"
+  },
+  {
+   "name": "ui 25: label centered",
+   "ok": false,
+   "detail": "dx=0.0 dy=18.7"
+  },
+  {
+   "name": "ui 25: label has no emoji",
+   "ok": true,
+   "detail": "25 Matrix Probe Matrix Probe"
+  },
+  {
+   "name": "ui: 11 size-range variants",
+   "ok": true,
+   "detail": "11"
+  },
+  {
+   "name": "ui range 0 (1): schemes",
+   "ok": true,
+   "detail": "got 1 expected 1"
+  },
+  {
+   "name": "ui range 1 (2): schemes",
+   "ok": true,
+   "detail": "got 1 expected 1"
+  },
+  {
+   "name": "ui range 2 (3): schemes",
+   "ok": true,
+   "detail": "got 5 expected 5"
+  },
+  {
+   "name": "ui range 3 (4): schemes",
+   "ok": true,
+   "detail": "got 7 expected 7"
+  },
+  {
+   "name": "ui range 4 (5 +): schemes",
+   "ok": true,
+   "detail": "got 7 expected 7"
+  },
+  {
+   "name": "ui range 5 (8): schemes",
+   "ok": true,
+   "detail": "got 3 expected 3"
+  },
+  {
+   "name": "ui range 6 (9): schemes",
+   "ok": true,
+   "detail": "got 6 expected 6"
+  },
+  {
+   "name": "ui range 7 (10 +): schemes",
+   "ok": true,
+   "detail": "got 14 expected 14"
+  },
+  {
+   "name": "ui range 8 (25): schemes",
+   "ok": true,
+   "detail": "got 3 expected 3"
+  },
+  {
+   "name": "ui range 9 (34 +): schemes",
+   "ok": true,
+   "detail": "got 9 expected 9"
+  },
+  {
+   "name": "ui range 10 (overlap): schemes",
+   "ok": true,
+   "detail": "got 9 expected 9"
+  },
+  {
+   "name": "ui scheme create: chosen preset persisted",
+   "ok": true,
+   "detail": "\"preset_selected_b_4\""
+  },
+  {
+   "name": "ui scheme create: size persisted",
+   "ok": true,
+   "detail": "4"
+  },
+  {
+   "name": "ui scheme layout attached",
+   "ok": true,
+   "detail": "204"
+  },
+  {
+   "name": "ui: selection survives session switch",
+   "ok": true,
+   "detail": "name matches=1"
+  },
+  {
+   "name": "api: chosen layout still attached after switch",
+   "ok": true,
+   "detail": "[\"720c551b-3181-45dd-9134-18d7916bce63\",\"9c159e75-c0a6-45ac-a279-0af3ed02522f\",\"c35832f9-8d0f-44c7-a843-4683fd9207ab\",\"4cbad3d1-d26a-4bf3-97b3-2d32c3e8db88\",\"4329931e-737c-46ab-901c-8f2f181331bf\",\"55a542a4-c3a3-441f-bafe-41040c2b3668\"]"
+  }
+ ],
+ "errors": [
+  "ui 25: label centered: dx=0.0 dy=18.7"
+ ],
+ "participant": {
+  "name": "Matrix Probe",
+  "pid": "sip-f20e5f9c-2e4e-49c3-ac25-420638d9460b@sip-gateway",
+  "contact": "cs-1f838e97-8e10-4842-96e0-f170902f3685"
+ },
+ "saved_layout": {
+  "id": "55a542a4-c3a3-441f-bafe-41040c2b3668",
+  "preset": "preset_selected_b_4",
+  "size": 4,
+  "name": "Matrix scheme 55477"
+ }
+}

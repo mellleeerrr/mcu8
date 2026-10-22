@@ -692,7 +692,7 @@ pub async fn update_settings_video(
 pub async fn video_layouts_calculate(Json(body): Json<serde_json::Value>) -> Response {
     track("ui/video_layouts/calculate");
     let preset_name = body.get("preset").and_then(serde_json::Value::as_str).unwrap_or_default();
-    if !vks_layout::preset::is_manual_preset(preset_name) {
+    if !vks_layout::preset::is_known_preset(preset_name) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": {
@@ -701,8 +701,8 @@ pub async fn video_layouts_calculate(Json(body): Json<serde_json::Value>) -> Res
                 "details": [{
                     "reason": "invalid.preset",
                     "description": format!(
-                        "Must be one of: {}",
-                        vks_layout::preset::MANUAL_PRESETS.join(", ")
+                        "Must be one of: {} (или codian_01..codian_52, codian_custom_22, codian_custom_14)",
+                        vks_layout::preset::manual_preset_ids().collect::<Vec<_>>().join(", ")
                     ),
                     "position": "preset",
                 }],
@@ -736,6 +736,26 @@ pub async fn video_layouts_calculate(Json(body): Json<serde_json::Value>) -> Res
         })
         .collect();
     Json(json!({ "slots": response })).into_response()
+}
+
+/// `GET /api/v3/ui/video_layouts/presets` → справочник пресетов геометрии.
+///
+/// Два источника: 65 вендорных manual-пресетов эталона TrueConf 2.2.1.66 и
+/// 54 раскладки Codian MCU 4200 (`codian_01`…`codian_52` + 2 кастомные).
+/// Вендорный контракт `/api/v3/ui/video_layouts` не меняется — список
+/// пресетов аддитивный и отдаётся отдельным маршрутом.
+pub async fn video_layout_presets() -> Response {
+    track("ui/video_layouts/presets");
+    let mut presets = Vec::new();
+    for id in vks_layout::preset::manual_preset_ids() {
+        presets.push(json!({ "id": id, "source": "vendor" }));
+    }
+    for id in vks_layout::codian::codian_preset_ids() {
+        let title = vks_layout::codian::scheme(id).map(|scheme| scheme.title).unwrap_or_default();
+        let windows = vks_layout::codian::slot_count(id).unwrap_or_default();
+        presets.push(json!({ "id": id, "title": title, "windows": windows, "source": "codian" }));
+    }
+    Json(json!({ "presets": presets })).into_response()
 }
 
 /// `GET /api/v3/waitingroom` → `{}` (дополняется формой из бандла при реализации).

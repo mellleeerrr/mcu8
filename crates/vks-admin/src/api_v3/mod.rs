@@ -351,6 +351,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/sessions/{id}/video_layouts/{resource_id}/templates", patch(resources::edit_linked))
         .route("/api/v3/settings/video", get(shell::settings_video).patch(shell::update_settings_video))
         .route("/api/v3/ui/video_layouts/calculate", post(shell::video_layouts_calculate))
+        .route("/api/v3/ui/video_layouts/presets", get(shell::video_layout_presets))
         .route(
             "/api/v3/settings/audio_codecs",
             get(shell::settings_audio_codecs).patch(settings_admin::audio_codecs_patch),

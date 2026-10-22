@@ -84,8 +84,11 @@ Client C (publish) ──RTP──→ [decode] ──YUV──┘
 
 ### 3.3. Compositor
 - Canvas: **1920×1080** (фикс, v1).
-- Layout: `vks-layout → to_pixel_rects(layout, 1920, 1080) → HashMap<SlotId, PixelRect>`.
-- Scale: libyuv `ScalePlane` (bilinear).
+- Layout: `vks-layout::Layout` → `vks-media-mcu::layout_bridge::PixelRect` (пиксели канваса).
+  Функции `to_pixel_rects` в `vks-layout` **нет**: преобразование выполняет
+  `LayoutBridge` (`crates/vks-media-mcu/src/layout_bridge.rs`).
+- Scale: libyuv `ScalePlane` (bilinear) — за `oxideav`-фичей; в сборке по
+  умолчанию используется детерминированный nearest-neighbour с letterbox.
 - Aspect mismatch: **letterbox** (default) / crop (slot fit="cover").
 - Frame rate: **30 fps** (drop/repeat, без interpolation).
 - Layout change: **crossfade 300ms** (old rects α-blend → new rects).
