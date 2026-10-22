@@ -121,10 +121,10 @@ cd client/pnm-frontend/deployed/pnm && sha256sum -c ../../MANIFEST.sha256
 `legend.labels.fontColor` → `plugins.legend.labels.color`; ошибочно вложенные
 `responsive`/`maintainAspectRatio` вынесены из `scales` в корень options,
 `min/max` перенесены с `ticks` на уровень `scales.y`. В `index9.bundle`
-watcher'ы `shouldUpdateLabels`/`shouldUpdateData` защищены от вызова до
-создания chart (line-режим памяти больше не даёт TypeError). Правка
-воспроизводима скриптом `scripts/patch-pnm-chartjs.py`; хэши `index3`/`index9`
-в `MANIFEST.sha256` обновлены (остальные файлы манифеста уже были изменены
+оба варианта `shouldUpdateLabels` и `shouldUpdateData` TcLineChart защищены
+от вызова до создания chart (line-режим памяти больше не даёт TypeError).
+Правка воспроизводится байт-в-байт скриптом `scripts/patch-pnm-chartjs.py`;
+хэши `index3`/`index9` в `MANIFEST.sha256` обновлены (остальные файлы манифеста уже были изменены
 предыдущими правками и не являются pristine-эталоном).
 Проверено live: `/pnm/administration/statistics` — 0 console/page errors и в
 pie-, и в line-режиме памяти, 6/6 виджетов, оси CPU/resources/workers 0..100%,

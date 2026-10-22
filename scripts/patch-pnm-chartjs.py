@@ -54,9 +54,18 @@ def patch_index9(text: str) -> str:
         "(0,g.default)(f,m)||f.forEach(((y,_)=>{m[_]=y}))}",
     )
     text = text.replace(
+        "shouldUpdateLabels(){const f=this.chartData.labels,m=this.chart.data.labels;"
+        "(0,g.default)(f,m)||f.forEach(((y,_)=>{m[_]=y}))}",
+        "shouldUpdateLabels(){const f=this.chartData.labels,"
+        "m=this.chart&&this.chart.data&&this.chart.data.labels;if(!m)return;"
+        "(0,g.default)(f,m)||f.forEach(((y,_)=>{m[_]=y}))}",
+    )
+    # Только первый (TcLineChart); TcRadarChart в HEAD не защищён.
+    text = text.replace(
         "shouldUpdateData(){const f=this.chartData.datasets,m=this.chart.data.datasets;",
         "shouldUpdateData(){const f=this.chartData.datasets,"
         "m=this.chart&&this.chart.data&&this.chart.data.datasets;if(!m)return;",
+        1,
     )
     return text
 

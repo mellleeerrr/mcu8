@@ -8,11 +8,13 @@
   `legend.labels.fontColor` → `plugins.legend.labels.color`,
   `responsive`/`maintainAspectRatio` вынесены из `scales` в корень options,
   `min/max` перенесены с `ticks` на уровень `scales.y`.
-- В `index9.bundle` watcher'ы `shouldUpdateLabels`/`shouldUpdateData` защищены
-  от `chart === undefined` — переключение памяти pie↔line больше не даёт
-  `TypeError: Cannot read properties of undefined (reading 'data')`.
-- Правка воспроизводима: `scripts/patch-pnm-chartjs.py`; хэши index3/index9
-  обновлены в `MANIFEST.sha256`.
+- В `index9.bundle` оба варианта `shouldUpdateLabels` (TcLineChart/TcBarChart)
+  и `shouldUpdateData` TcLineChart защищены от `chart === undefined` —
+  переключение памяти pie↔line больше не даёт `TypeError: Cannot read
+  properties of undefined (reading 'data')`.
+- Правка воспроизводима байт-в-байт: `scripts/patch-pnm-chartjs.py` из
+  pristine `1109508` даёт текущие index3/index9 (sha256 `8b49d3…`/`f61ec9…`),
+  совпадающие с `MANIFEST.sha256`.
 - Живой Playwright (Chromium 1243, 1600×1200):
   `/pnm/administration/statistics` — **0 console errors, 0 pageerrors,
   0 HTTP>=400** в pie-режиме и после клика memory→line; 6 карточек/canvas.
