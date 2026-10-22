@@ -1,0 +1,120 @@
+{
+  "generated_at": "2026-10-22T16:49:10.669Z",
+  "base": "http://127.0.0.1:8080",
+  "room_id": "88a1f92d-61f0-4727-b79a-6feaafea737b",
+  "checks": [
+    {
+      "name": "auth: JWT issued",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "room: created",
+      "ok": true,
+      "detail": "88a1f92d-61f0-4727-b79a-6feaafea737b"
+    },
+    {
+      "name": "alice: answer is real str0m SDP",
+      "ok": true,
+      "detail": "v=0 | o=str0m-0.24.1 4216873006524894584 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS 74fbd8da-8b46-429c-9af4-dbe"
+    },
+    {
+      "name": "alice: answer offers Opus+VP8 only",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "bob: answer is real str0m SDP",
+      "ok": true,
+      "detail": "v=0 | o=str0m-0.24.1 3461166254248901878 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS 9e7780a6-7d29-456f-ac59-0cc"
+    },
+    {
+      "name": "bob: answer offers Opus+VP8 only",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "both pages: ICE connected",
+      "ok": true,
+      "detail": "alice,bob"
+    },
+    {
+      "name": "alice: connectionState connected",
+      "ok": true,
+      "detail": "connected"
+    },
+    {
+      "name": "alice: DTLS connected",
+      "ok": true,
+      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":150397,\"bytesSent\":202796}"
+    },
+    {
+      "name": "alice: SRTP cipher negotiated",
+      "ok": true,
+      "detail": "SRTP_AEAD_AES_256_GCM"
+    },
+    {
+      "name": "alice: inbound audio RTP",
+      "ok": true,
+      "detail": "{\"kind\":\"audio\",\"bytesReceived\":7353,\"packetsReceived\":300}"
+    },
+    {
+      "name": "alice: inbound video RTP",
+      "ok": true,
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":113931,\"packetsReceived\":159,\"framesDecoded\":89,\"frameWidth\":320,\"frameHeight\":240}"
+    },
+    {
+      "name": "alice: decoded video frames",
+      "ok": true,
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":113931,\"packetsReceived\":159,\"framesDecoded\":89,\"frameWidth\":320,\"frameHeight\":240}"
+    },
+    {
+      "name": "alice: outbound audio+video",
+      "ok": true,
+      "detail": "audio,video"
+    },
+    {
+      "name": "bob: connectionState connected",
+      "ok": true,
+      "detail": "connected"
+    },
+    {
+      "name": "bob: DTLS connected",
+      "ok": true,
+      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":154904,\"bytesSent\":156293}"
+    },
+    {
+      "name": "bob: SRTP cipher negotiated",
+      "ok": true,
+      "detail": "SRTP_AEAD_AES_256_GCM"
+    },
+    {
+      "name": "bob: inbound audio RTP",
+      "ok": true,
+      "detail": "{\"kind\":\"audio\",\"bytesReceived\":6561,\"packetsReceived\":305}"
+    },
+    {
+      "name": "bob: inbound video RTP",
+      "ok": true,
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":121115,\"packetsReceived\":162,\"framesDecoded\":91,\"frameWidth\":320,\"frameHeight\":240}"
+    },
+    {
+      "name": "bob: decoded video frames",
+      "ok": true,
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":121115,\"packetsReceived\":162,\"framesDecoded\":91,\"frameWidth\":320,\"frameHeight\":240}"
+    },
+    {
+      "name": "bob: outbound audio+video",
+      "ok": true,
+      "detail": "audio,video"
+    },
+    {
+      "name": "server: no page errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "passed": 22,
+  "failed": 0,
+  "total": 22
+}
