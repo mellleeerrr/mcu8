@@ -57,11 +57,26 @@
    6 ignored; `test_h323_listener` 6 + `test_h323_sidecar` 24 — 30 passed;
    clippy workspace clean.
 
+## Исходящие вызовы на reference MCU 192.168.1.92
+
+В ту же сессию `4d313d01-...` добавлены два call string:
+
+| URI | Результат |
+|---|---|
+| `sip:35a87982-1eed-4138-a8cd-589c88aac0cb@192.168.1.92` | connected; audio PCMU RX/TX ~479 KB за ~60 с, H.264 1280×720 RX ~868 KB / TX ~794 KB; через ~61 с TrueConf прислал BYE (remote hangup) |
+| `h323:35a87982-1eed-4138-a8cd-589c88aac0cb@192.168.1.92` | connected; audio PCMU RX/TX ~204 KB; видео 0 (TrueConf H.323 отдаёт audio-only — известное ограничение, T07b) |
+
+Снимок: `reference-outbound-room.png` (H.323-участник в комнате; SIP к моменту
+снимка уже получил remote BYE и показан в «Не подключившиеся»).
+Данные: `reference-outbound-summary.json`, `reference-outbound-abonents.json`.
+
 ## Ограничения
 
-- Проверка с реальным терминалом Polycom `192.168.1.132` и reference MCU
-  `192.168.1.92` не выполнялась в этом прогоне (синтетический UAC и loopback
-  H.245); SIP UAS остаётся основным путём для reference MCU.
+- Reference MCU проверен исходящими SIP и H.323 (см. выше); входящий вызов
+  с reference MCU/Polycom на наш UAS в этом прогоне не инициировался.
+- SIP-вызов на reference завершился remote BYE через ~61 с; причина на стороне
+  TrueConf не исследована (participant принят, media шла). H.323 reference —
+  audio-only.
 - H.323 — plaintext, без H.235; включать только в доверенной LAN через
   `VKS_H323_UAS_ALLOW`.
 - H.245 tunneling/fastStart не реализованы: терминал должен открыть

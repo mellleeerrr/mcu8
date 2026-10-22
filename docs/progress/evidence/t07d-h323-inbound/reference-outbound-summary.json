@@ -1,0 +1,27 @@
+{
+  "connected": 2,
+  "items": [
+    {
+      "protocol": "sip",
+      "display_name": "Ref Conf SIP",
+      "uri": "sip:35a87982-1eed-4138-a8cd-589c88aac0cb@192.168.1.92",
+      "audio_rx": 479192,
+      "audio_tx": 479880,
+      "video_rx": 868034,
+      "video_tx": 793925,
+      "video_codec": "H264",
+      "resolution": "1280x720"
+    },
+    {
+      "protocol": "h323",
+      "display_name": "Ref Conf H323",
+      "uri": "h323:35a87982-1eed-4138-a8cd-589c88aac0cb@192.168.1.92",
+      "audio_rx": 203304,
+      "audio_tx": 204852,
+      "video_rx": 0,
+      "video_tx": 0,
+      "video_codec": null,
+      "resolution": "0x0"
+    }
+  ]
+}
