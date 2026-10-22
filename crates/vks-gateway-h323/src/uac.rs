@@ -153,11 +153,13 @@ pub struct H323VideoProfile {
     pub max_bitrate_kbps: u32,
     /// H.264 level_idc (31 = 3.1, 40 = 4.0); generic parameter 42 is +40.
     pub level_idc: u8,
+    /// H.241 generic parameter 41 profile bits; baseline (bit 6) is required.
+    pub profile_bits: u8,
 }
 
 impl Default for H323VideoProfile {
     fn default() -> Self {
-        Self { max_bitrate_kbps: 512, level_idc: 31 }
+        Self { max_bitrate_kbps: 512, level_idc: 31, profile_bits: 64 }
     }
 }
 
@@ -533,17 +535,17 @@ mod tests {
 
     #[test]
     fn h323_video_profile_maps_to_h241_limits() {
-        let profile = H323VideoProfile { max_bitrate_kbps: 4096, level_idc: 40 };
+        let profile = H323VideoProfile { max_bitrate_kbps: 4096, level_idc: 40, profile_bits: 64 };
         assert_eq!(profile.h241_level(), 80);
         assert_eq!(profile.max_bitrate_100bps(), 40_960);
         let default = H323VideoProfile::default();
         assert_eq!(default.h241_level(), 71);
         assert_eq!(default.max_bitrate_100bps(), 5120);
-        assert_eq!(H323VideoProfile { max_bitrate_kbps: 0, level_idc: 1 }.max_bitrate_100bps(), 1);
-        assert_eq!(H323VideoProfile { max_bitrate_kbps: 999_999, level_idc: 99 }.h241_level(), 91);
-        assert_eq!(H323VideoProfile { max_bitrate_kbps: 2048, level_idc: 30 }.h241_level(), 70);
-        assert_eq!(H323VideoProfile { max_bitrate_kbps: 2048, level_idc: 35 }.h241_level(), 72);
-        assert_eq!(H323VideoProfile { max_bitrate_kbps: 2048, level_idc: 45 }.h241_level(), 82);
+        assert_eq!(H323VideoProfile { max_bitrate_kbps: 0, level_idc: 1, profile_bits: 64 }.max_bitrate_100bps(), 1);
+        assert_eq!(H323VideoProfile { max_bitrate_kbps: 999_999, level_idc: 99, profile_bits: 64 }.h241_level(), 91);
+        assert_eq!(H323VideoProfile { max_bitrate_kbps: 2048, level_idc: 30, profile_bits: 64 }.h241_level(), 70);
+        assert_eq!(H323VideoProfile { max_bitrate_kbps: 2048, level_idc: 35, profile_bits: 64 }.h241_level(), 72);
+        assert_eq!(H323VideoProfile { max_bitrate_kbps: 2048, level_idc: 45, profile_bits: 64 }.h241_level(), 82);
     }
 
     fn python(code: &str) -> Command {

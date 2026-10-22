@@ -26,6 +26,7 @@ async fn live_h323_connect() {
     let video_port = video.local_addr().expect("video addr").port();
 
     let profile = H323VideoProfile {
+        profile_bits: 64,
         max_bitrate_kbps: std::env::var("VKS_LIVE_H323_BITRATE_KBPS")
             .ok()
             .and_then(|value| value.parse().ok())

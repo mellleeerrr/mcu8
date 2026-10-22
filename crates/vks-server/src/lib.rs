@@ -412,6 +412,21 @@ async fn cleanup_active_membership(
 /// `b=AS` для SFU-ответа из живого профиля комнаты (конференция имеет
 /// приоритет над глобальным env); SFU не перекодирует, но обязан честно
 /// объявить полосу, которую реально отдаёт браузеру.
+/// Какие PT из `SdpAnswer.rtp_map` нужно переписать на egress SFU.
+/// Функция ровно та, что вызывает WS-обработчик после успешного offer.
+fn answer_payload_types(maps: &[vks_proto::signaling::RtpMap]) -> Vec<(vks_core::MediaKind, u8)> {
+    maps.iter()
+        .filter_map(|map| {
+            let kind = match map.codec.to_ascii_lowercase().as_str() {
+                "opus" | "pcmu" | "pcma" | "g722" => vks_core::MediaKind::Audio,
+                "vp8" | "h264" => vks_core::MediaKind::Video,
+                _ => return None,
+            };
+            u8::try_from(map.payload).ok().map(|payload_type| (kind, payload_type))
+        })
+        .collect()
+}
+
 fn conference_video_bitrate(value: Option<&serde_json::Value>) -> Option<u32> {
     let value = value?;
     let payload = value.get("payload").unwrap_or(value);
@@ -649,17 +664,10 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                     Some(Payload::SdpAnswer(answer)) => Some(answer),
                                                     _ => None,
                                                 }) {
-                                                    for map in &answer.rtp_map {
-                                                        let kind = match map.codec.to_ascii_lowercase().as_str() {
-                                                            "opus" | "pcmu" | "pcma" | "g722" => vks_core::MediaKind::Audio,
-                                                            "vp8" | "h264" => vks_core::MediaKind::Video,
-                                                            _ => continue,
-                                                        };
-                                                        if let Ok(payload_type) = u8::try_from(map.payload) {
-                                                            ctx.sfu_engine.set_subscriber_payload_type(
-                                                                m.room_id, pid, kind, payload_type,
-                                                            );
-                                                        }
+                                                    for (kind, payload_type) in answer_payload_types(&answer.rtp_map) {
+                                                        ctx.sfu_engine.set_subscriber_payload_type(
+                                                            m.room_id, pid, kind, payload_type,
+                                                        );
                                                     }
                                                 }
                                                 let mut tracks = Vec::new();
@@ -950,6 +958,50 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use tower::ServiceExt;
+
+    #[test]
+    fn room_bitrate_reaches_sfu_answer_without_overriding_env_when_absent() {
+        use vks_signaling::handler::{HandlerConfig, SignalingHandler};
+        let state = Arc::new(AppState::new());
+        let room = vks_core::RoomId::new();
+        let mut handler = SignalingHandler::new(HandlerConfig::default_test().with_video_bitrate(4096));
+        assert!(room_video_bitrate(&state, &room).is_none());
+        // Нет настройки комнаты — env/конструктор не затирается.
+        if let Some(bitrate) = room_video_bitrate(&state, &room) {
+            handler.set_video_bitrate(bitrate);
+        }
+        assert_eq!(handler.config().answer_profile().b_as, Some(4096));
+
+        state
+            .api_v3
+            .conference_settings
+            .lock()
+            .unwrap()
+            .insert(room, serde_json::json!({"payload": {"bitrate": 1024}}));
+        if let Some(bitrate) = room_video_bitrate(&state, &room) {
+            handler.set_video_bitrate(bitrate);
+        }
+        assert_eq!(handler.config().answer_profile().b_as, Some(1024));
+    }
+
+    #[test]
+    fn answer_payload_types_maps_offer_pt_to_sfu_kinds() {
+        use vks_proto::signaling::RtpMap;
+        let maps = vec![
+            RtpMap { payload: 120, codec: "opus".into(), clock: 48000, channels: 2 },
+            RtpMap { payload: 100, codec: "VP8".into(), clock: 90000, channels: 0 },
+            RtpMap { payload: 102, codec: "h264".into(), clock: 90000, channels: 0 },
+            RtpMap { payload: 300, codec: "rtx".into(), clock: 90000, channels: 0 },
+        ];
+        assert_eq!(
+            answer_payload_types(&maps),
+            vec![
+                (vks_core::MediaKind::Audio, 120),
+                (vks_core::MediaKind::Video, 100),
+                (vks_core::MediaKind::Video, 102),
+            ]
+        );
+    }
 
     #[test]
     fn conference_bitrate_reads_payload_and_clamps() {

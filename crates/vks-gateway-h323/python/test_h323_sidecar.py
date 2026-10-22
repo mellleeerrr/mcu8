@@ -237,6 +237,15 @@ class ContractTests(unittest.TestCase):
                 'video_h264_level': 75,
             })
 
+    def test_non_baseline_h264_profile_is_rejected_before_tcp(self):
+        with self.assertRaises(h.ProtocolError):
+            h.Configuration.load({
+                'target_ip': '192.168.1.132', 'local_ip': '192.168.1.93',
+                'audio_port': 41002, 'video_port': 41004, 'timeout_seconds': 30,
+                'call_id': '00010203-0405-0607-0809-0a0b0c0d0e0f', 'call_ref': 1,
+                'video_h264_profile_bits': 128,
+            })
+
     def test_tcs_and_olc_use_the_same_configured_h241_capability(self):
         call = h.Call(h.Configuration.load({
             'target_ip': '192.168.1.132', 'local_ip': '192.168.1.93',

@@ -191,6 +191,11 @@ impl SignalingHandler {
         self.room_id.as_deref()
     }
 
+    /// Текущая конфигурация ответа (для тестов и диагностики).
+    pub fn config(&self) -> &HandlerConfig {
+        &self.config
+    }
+
     /// Переопределяет `b=AS` видео из живого профиля комнаты.
     pub fn set_video_bitrate(&mut self, kbps: u32) {
         self.config.video_bitrate_kbps = kbps.clamp(64, 20_000);

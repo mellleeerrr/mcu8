@@ -487,8 +487,13 @@ impl Sdp {
             // (RFC 8866 §5.14): keep the offered formats with port 0 instead
             // of serializing `m=... 0 UDP/TLS/RTP/SAVPF` without a format.
             let rejected = selected.is_empty();
-            let payload_types =
+            let mut payload_types: Vec<u32> =
                 if rejected { media.payload_types.clone() } else { selected.iter().map(|r| r.payload).collect() };
+            // `m=application` (Data) may arrive without RTP formats; a
+            // rejected m-line still needs one fmt token to stay parseable.
+            if payload_types.is_empty() {
+                payload_types.push(0);
+            }
             let selected_video_pt =
                 selected.iter().find(|map| map.codec.eq_ignore_ascii_case("vp8")).map(|map| map.payload);
             let selected_h264 = selected.iter().any(|map| map.codec.eq_ignore_ascii_case("h264"));
@@ -715,6 +720,19 @@ mod tests {
         assert!(parsed.media.iter().all(|media| media.port == 0));
         assert!(text.contains("m=audio 0"));
         assert!(text.contains("m=video 0"));
+    }
+
+    #[test]
+    fn sfu_answer_data_mline_without_formats_stays_valid() {
+        let mut offer = two_line_offer();
+        offer.media[1].kind = MediaKind::Data;
+        offer.media[1].payload_types = Vec::new();
+        offer.media[1].rtp_maps = Vec::new();
+        let (answer, _maps) = offer.sfu_answer(&sfu_profile());
+        let data = &answer.media[1];
+        assert_eq!(data.port, 0);
+        assert_eq!(data.payload_types, vec![0], "fmt token required even for Data rejection");
+        assert!(Sdp::parse(&answer.to_sdp_text()).is_ok());
     }
 
     #[test]

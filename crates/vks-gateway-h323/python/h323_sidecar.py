@@ -122,11 +122,12 @@ def video_capability(config=None):
     # maxBitRate in 100 bit/s units. Defaults preserve the T05 POC value.
     max_bitrate = 5120 if config is None else config.video_max_bitrate_100bps
     level = 71 if config is None else config.video_h264_level
+    profile_bits = 64 if config is None else config.video_h264_profile_bits
     return ("genericVideoCapability", {
         "capabilityIdentifier": ("standard", H264_OID),
         "maxBitRate": max_bitrate,
         "collapsing": [
-            {"parameterIdentifier": ("standard", 41), "parameterValue": ("booleanArray", 64)},
+            {"parameterIdentifier": ("standard", 41), "parameterValue": ("booleanArray", profile_bits)},
             {"parameterIdentifier": ("standard", 42), "parameterValue": ("unsignedMin", level)},
         ],
     })
@@ -187,6 +188,7 @@ class Configuration:
     trace: bool = False
     video_max_bitrate_100bps: int = 5120
     video_h264_level: int = 71
+    video_h264_profile_bits: int = 64
 
     @classmethod
     def load(cls, value):
@@ -214,7 +216,10 @@ class Configuration:
         level = int(value.get("video_h264_level", 71))
         if level not in (70, 71, 72, 80, 81, 82, 90, 91):
             raise ProtocolError("Unsupported H.264 level for H.241 generic parameter 42")
-        return cls(target_ip, port, local_ip, audio, video, max(1, min(float(value["timeout_seconds"]), 180)), str(call_id), max(1, int(value["call_ref"]) & 0x7FFF), bool(value.get("trace", False)), max_bitrate, level)
+        profile_bits = int(value.get("video_h264_profile_bits", 64))
+        if profile_bits != 64:
+            raise ProtocolError("Only H.264 baseline profile (bit 6) is supported by the native bridge")
+        return cls(target_ip, port, local_ip, audio, video, max(1, min(float(value["timeout_seconds"]), 180)), str(call_id), max(1, int(value["call_ref"]) & 0x7FFF), bool(value.get("trace", False)), max_bitrate, level, profile_bits)
 
 
 class Call:

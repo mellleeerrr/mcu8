@@ -38,6 +38,19 @@ fn protocol_options<'a>(payload: &'a serde_json::Value, protocol: &str) -> Optio
         .filter(|value| value.is_object())
 }
 
+/// Явные видео-настройки из payload модалки. `default_contact_payload`
+/// всегда содержит `call_string.sip` с null-полями; такой объект не должен
+/// считаться override и затирать сохранённый профиль адреса.
+fn explicit_video_options(contact: Option<&serde_json::Value>, protocol: &str) -> Option<serde_json::Value> {
+    contact
+        .and_then(|value| protocol_options(value, protocol))
+        .filter(|options| {
+            options.get("bitrate").is_some_and(|value| !value.is_null())
+                || options.get("resolution").is_some_and(|value| !value.is_null())
+        })
+        .cloned()
+}
+
 /// Ищет intent конкретного адреса: сначала контакт этой комнаты, затем
 /// глобальную адресную книгу. `uri` сравнивается без учёта регистра.
 fn find_call_string_override<'a>(
@@ -987,7 +1000,10 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             registered: None,
         };
         let protocol = if is_h323 { "h323" } else { "sip" };
-        let call_string_profile = match contact.and_then(|value| protocol_options(value, protocol)).cloned() {
+        // Модалка может прислать только auto-call/mute-флаги без видеопрофиля:
+        // такие options не должны затирать сохранённый intent адреса.
+        let explicit_profile = explicit_video_options(contact, protocol);
+        let call_string_profile = match explicit_profile {
             Some(options) => Some(serde_json::json!({"payload": options})),
             None => self.call_string_video_profile(room_id, trimmed).await,
         };
@@ -1006,6 +1022,7 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             let h323_video = vks_gateway_h323::H323VideoProfile {
                 max_bitrate_kbps: video_profile.bitrate_kbps.max(64),
                 level_idc: video_profile.h323_level_idc(),
+                profile_bits: 64,
             };
             let session = self
                 .h323_uac_client
@@ -1412,6 +1429,18 @@ mod media_runtime_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn modal_payload_overrides_only_explicit_video_settings() {
+        use serde_json::json;
+        let empty = json!({"call_string": {"sip": {"bitrate": null, "resolution": null}}, "auto_call": true});
+        assert!(explicit_video_options(Some(&empty), "sip").is_none());
+        let bitrate = json!({"call_string": {"sip": {"bitrate": 1024}}});
+        assert_eq!(explicit_video_options(Some(&bitrate), "sip").unwrap()["bitrate"], 1024);
+        let resolution = json!({"call_string": {"h323": {"resolution": {"width": 640, "height": 360}}}});
+        assert_eq!(explicit_video_options(Some(&resolution), "h323").unwrap()["resolution"]["width"], 640);
+        assert!(explicit_video_options(None, "sip").is_none());
+    }
 
     #[test]
     fn gateway_measured_average_rates_follow_actual_counters() {

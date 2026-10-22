@@ -306,10 +306,13 @@ pcap) ≈4 Mbps; с 640×360/512 — меньше. Тест на парсинг 
 4.02 Mbps; low: `b=AS:512;max-fs=920`, live tx 0.61 Mbps; E2E 108/108 оба
 профиля. H.323 H.241/SFU `b=AS` — T05b:
 H.323 H.241 maxBitRate/level из VideoProfile и per-media `b=AS` — **T05b-1
-закрыт 9.5/10 APPROVED** (`media-engine`, `c26e185`). T05b-2: live H.323
-(`remote_release` даже на default, T07), per-room SFU profile + RTP-map/PT/
-H.264, peer H.241 clamp, packetization/profile config, call_string live proof,
-Python CI. Полный T05b не закрывать до T05b-2.
+закрыт 9.5/10 APPROVED** (`media-engine`, `c26e185`). T05b-2 SFU-часть
+закрыта по коду: per-room `b=AS`, RTP-map kind-фильтр и PT-reuse,
+per-subscriber PT rewrite на egress, валидный rejected m-line, peer H.241
+parse/clamp, profile bits, Python CI; 1036/0/6 + 114/114 high/low.
+Открыты live H.323 (`remote_release` даже на default, T07) и call_string
+live proof. H.264/H.265 в browser SFU — только с реальным forwarding
+(T06b/T08). Полный T05b не закрывать до live/T07.
 
 ---
 
