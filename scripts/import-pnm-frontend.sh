@@ -12,6 +12,11 @@
 #      исключая только служебные бэкапы `*.bak*` (следы ручных правок) и
 #      удаляя симлинки (политика безопасности: ServeDir следует симлинкам;
 #      каждый удалённый симлинк логируется).
+#   3.5 Восстанавливает ПРОЕКТНЫЙ слой (perf-overrides.js, api-errors.js и
+#      блок CSS-override в index.html — их нет в вендорском архиве, а
+#      копирование 1:1 их бы уничтожило) и применяет вендорские патчи
+#      (scripts/patch-pnm-*.py) — без них фичи T11b/T15 молча откатываются
+#      к вендорскому виду.
 #   4. Пишет `client/pnm-frontend/MANIFEST.sha256` (по каждому файлу рантайма).
 #   5. Опции:
 #        --force       — перезаписать непустой deployed/ (иначе отказ);
@@ -121,6 +126,35 @@ fi
 [ -d "$TMP/deployed/pnm" ] || { echo "в архиве нет deployed/pnm" >&2; exit 1; }
 
 # 3. Копирование рантайма 1:1 (кроме *.bak*; симлинки вычищаются — политика NOTES.md).
+# Сначала сохраняем ПРОЕКТНЫЙ слой: perf-overrides.js, api-errors.js и блок
+# CSS-override из index.html. Их нет в вендорском архиве, а копирование 1:1
+# (rm -rf + распаковка) уничтожило бы их — вместе с правками T1.1/T12b/T13/
+# T14/T15, которые в них живут.
+log "сохранение проектного слоя (perf-overrides.js, api-errors.js, CSS-override)"
+PROJECT_LAYER="$TMP/project-layer"
+mkdir -p "$PROJECT_LAYER"
+for f in perf-overrides.js api-errors.js; do
+    if [ -f "$DEST/$f" ]; then
+        cp -p "$DEST/$f" "$PROJECT_LAYER/$f"
+        log "  сохранён: $f"
+    else
+        log "  нет в текущем рантайме (пропуск): $f"
+    fi
+done
+if [ -f "$DEST/index.html" ]; then
+    python3 - "$DEST/index.html" "$PROJECT_LAYER/index-overrides.html" <<'PYEOF'
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src, encoding="utf-8").read()
+m = re.search(r'<style id="prostor-pnm-overrides">.*?</style>', text, re.S)
+if m:
+    open(dst, "w", encoding="utf-8").write(m.group(0))
+    print("  сохранён: index-overrides.html (%d символов)" % len(m.group(0)))
+else:
+    print("  в index.html нет блока prostor-pnm-overrides (пропуск)")
+PYEOF
+fi
+
 log "копирование рантайма (1:1, исключение: *.bak*, симлинки удаляются)"
 # Симлинки в рантайме — escape-риск: ServeDir следует по ссылке за пределы корня.
 SYMLINK_COUNT="$(find "$TMP/deployed/pnm" -type l | wc -l)"
@@ -140,6 +174,52 @@ TOTAL_BYTES="$(du -sb "$DEST" | cut -f1)"
 log "исключено .bak-файлов: $BAK_COUNT"
 log "удалено симлинков: $SYMLINK_COUNT"
 log "файлов в рантайме: $FILE_COUNT ($TOTAL_BYTES байт)"
+
+# 3.5. Проектный слой + вендорские патчи.
+# Порядок важен: сначала проектный слой (он правит index.html и добавляет
+# собственные скрипты), затем патчи вендорских чанков, затем — манифест
+# (шаг 4), который считается уже по итоговым байтам.
+log "восстановление проектного слоя"
+for f in perf-overrides.js api-errors.js; do
+    if [ -f "$PROJECT_LAYER/$f" ]; then
+        cp -p "$PROJECT_LAYER/$f" "$DEST/$f"
+        log "  восстановлен: $f"
+    fi
+done
+if [ -f "$PROJECT_LAYER/index-overrides.html" ]; then
+    python3 - "$DEST/index.html" "$PROJECT_LAYER/index-overrides.html" <<'PYEOF'
+import re, sys
+target, block_path = sys.argv[1], sys.argv[2]
+text = open(target, encoding="utf-8").read()
+block = open(block_path, encoding="utf-8").read()
+pattern = re.compile(r'<style id="prostor-pnm-overrides">.*?</style>', re.S)
+if pattern.search(text):
+    text = pattern.sub(lambda m: block, text, count=1)
+    action = "заменён"
+else:
+    text = text.replace("</head>", block + "\n</head>", 1)
+    action = "вставлен"
+open(target, "w", encoding="utf-8").write(text)
+print("  CSS-override %s в index.html" % action)
+PYEOF
+fi
+
+log "применение вендорских патчей"
+for patch in "$ROOT/scripts/patch-pnm-chartjs.py" "$ROOT/scripts/patch-pnm-audio-in-layouts.py"; do
+    [ -f "$patch" ] || { echo "нет патч-скрипта: $patch" >&2; exit 1; }
+    log "  патч: $(basename "$patch")"
+    if ! python3 "$patch" --root "$ROOT"; then
+        echo "ПАТЧ НЕ ПРИМЕНЁН: $(basename "$patch")" >&2
+        echo "  причина (подробности выше): вендор изменился — правьте патч-скрипт;" >&2
+        echo "  ИЛИ отсутствует проектный слой (CSS-override в index.html) — тогда" >&2
+        echo "  восстановите его из NOTES.md, раздел T15." >&2
+        exit 1
+    fi
+done
+
+log "ВНИМАНИЕ: слой PROSTOR-ребренда (frontend/06-rebrand, вне репозитория) этим"
+log "  скриптом НЕ применяется. После импорта проверьте index.html (title=PROSTOR,"
+log "  локали ru_RU/en_US) и примените ребренд вручную — см. NOTES.md, «Как обновлять»."
 
 # 4. MANIFEST.sha256.
 ( cd "$DEST" && find . -type f -print0 | sort -z | xargs -0 sha256sum ) > "$MANIFEST"

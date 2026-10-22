@@ -14,6 +14,12 @@ INDEX3 = CHUNKS / "index3.bundle-2.2.1.66.js"
 INDEX9 = CHUNKS / "index9.bundle-2.2.1.66.js"
 
 
+def resolve_paths(root: Path | None = None) -> tuple[Path, Path]:
+    """Пути к чанкам. --root нужен скрипту импорта (песочница/копия репозитория)."""
+    base = (root or ROOT) / "client/pnm-frontend/deployed/pnm/chunks"
+    return base / INDEX3.name, base / INDEX9.name
+
+
 def patch_index3(text: str) -> str:
     text = text.replace("yAxes:[{", "y:{").replace("xAxes:[{", "x:{")
     text = text.replace("gridLines:", "grid:").replace("fontSize:12", "font:{size:12}")
@@ -71,11 +77,18 @@ def patch_index9(text: str) -> str:
 
 
 def main() -> None:
-    for path, patch in ((INDEX3, patch_index3), (INDEX9, patch_index9)):
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Патч PNM: графики статистики на Chart.js v4")
+    parser.add_argument("--root", type=Path, default=ROOT, help="корень репозитория")
+    args = parser.parse_args()
+
+    index3, index9 = resolve_paths(args.root)
+    for path, patch in ((index3, patch_index3), (index9, patch_index9)):
         text = path.read_text(encoding="utf-8")
         updated = patch(text)
         path.write_text(updated, encoding="utf-8")
-        print(f"patched {path.relative_to(ROOT)} ({len(updated)} bytes)")
+        print(f"patched {path.relative_to(args.root)} ({len(updated)} bytes)")
 
 
 if __name__ == "__main__":

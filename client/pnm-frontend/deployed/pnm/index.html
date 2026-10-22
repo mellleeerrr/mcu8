@@ -147,6 +147,86 @@
 .layout-grid-slot .layout-grid-slot-dn__text {
   font-size: 2em;
 }
+/* T15: вкладка «Аудиоканал» переехала ВНУТРЬ вкладки «Раскладки»
+   (патч scripts/patch-pnm-audio-in-layouts.py). Панель «Раскладки» теперь
+   содержит два блока: список раскладок и список аудиоканалов.
+   Вендор задаёт .main-card-body как flex:1 1 1px ⇒ два блока делят высоту
+   панели 50/50, и пустой блок аудиоканалов занимает пол-экрана впустую, а
+   список раскладок сжимается и получает свою полосу прокрутки.
+   Правила возвращают нормальную раскладку:
+   - блок аудиоканалов — по своей естественной высоте (flex:0 0 auto);
+   - когда блоков два, прокручивается КОНТЕЙНЕР панели, а оба блока идут
+     по своей высоте: одна полоса прокрутки вместо двух, длинный список
+     аудиоканалов не обрезается и не «съедает» список раскладок.
+   Порядок важен: базовое правило (flex) идёт первым и работает везде,
+   включая legacy-сборку (там :has() не поддерживается и остаётся деление
+   высоты по контенту, без обрезки). Специфичность 0,3,0/0,4,0 выше
+   вендорской 0,1,0 — CSS чанка подключается рантаймом ПОСЛЕ этого блока,
+   поэтому правило равной специфичности проигрывало бы по порядку. */
+/* T15: блок аудиоканалов переехал в панель «Раскладки» (патч вендорского
+   чанка index6/index-legacy6). Панель «Раскладки» теперь содержит два блока:
+   список раскладок и блок аудиоканалов.
+
+   Зачем эти правила. Вендор задаёт .main-card-body{flex:1 1 1px} ⇒ оба блока
+   делят высоту панели 50/50: пустой блок аудиоканалов занимает пол-экрана
+   впустую (картинка 240px), а список раскладок сжимается. Если оба блока
+   остаются «по контенту», а контейнер панели скроллится, то суммарная высота
+   контента (807px в пустом состоянии) больше карточки (783.7px) ⇒ flexbox
+   сжимает заголовок карточки (74.2 → 56px) и блок аудиоканалов уезжает НИЖЕ
+   нижней границы карточки (overflow:hidden) — кнопка «Добавить» в нём
+   становится недостижимой без прокрутки.
+
+   Правила:
+   - блок аудиоканалов — по своей естественной высоте, но не выше 320px
+     (flex:0 0 auto + max-height): не выпирает из карточки и не сжимает
+     заголовок; при большом числе каналов — свой скролл;
+   - список раскладок сохраняет flex:1 1 1px: растёт на всю оставшуюся
+     высоту панели и сжимается, когда места мало (свой скролл);
+   - пустое состояние аудиоканалов — без иллюстрации: в объединённой панели
+     два пустых состояния не помещаются в карточку, и без иллюстрации у
+     блока аудио (138px) + у списка раскладок (403px) = 541px влезает даже
+     в карточку 549.8px (1024×768). Панель раскладок сохраняет вендорскую
+     иллюстрацию 240×240 — ужимается «гость», а не «хозяин»;
+   - тело таблицы аудиоканалов — минимум 140px: вендорский
+     .tc-list{flex:1 1 80px} иначе показывает всего 2 строки из 12+.
+
+   Специфичность правил 0,3,0 / 0,4,0 / 0,5,0 — выше вендорской 0,1,0.
+   Это обязательно: CSS чанка 7 (.conference-audio-channels, .layouts) и
+   рантайм-подключаемые стили подгружаются ПОСЛЕ инлайн-блока
+   #prostor-pnm-overrides, поэтому правило равной специфичности проиграло бы
+   по порядку в документе. Правило для :first-child (0,5,0) перебивает
+   правило с :has() (0,4,0) независимо от порядка. */
+.main-card-body__container > .main-card-body.conference-audio-channels,
+.main-card-body__container > .main-card-body.session-audio-channels {
+  flex: 0 0 auto;
+  min-height: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  border-top: 1px solid #dfdfdf;
+}
+.main-card-body__container:has(> .main-card-body.conference-audio-channels) > .main-card-body:first-child,
+.main-card-body__container:has(> .main-card-body.session-audio-channels) > .main-card-body:first-child {
+  flex: 1 1 1px;
+}
+.main-card-body__container > .main-card-body.conference-audio-channels .main-blank__image,
+.main-card-body__container > .main-card-body.session-audio-channels .main-blank__image {
+  display: none;
+}
+.main-card-body__container > .main-card-body.conference-audio-channels .main-blank__content > :not(:last-child),
+.main-card-body__container > .main-card-body.session-audio-channels .main-blank__content > :not(:last-child) {
+  margin-bottom: 12px;
+}
+.main-card-body__container > .main-card-body.conference-audio-channels .main-table-body,
+.main-card-body__container > .main-card-body.session-audio-channels .main-table-body {
+  min-height: 140px;
+}
+/* страховка: если сумма блоков всё же не влезла — панель прокручивается
+   (в legacy-сборке :has() не поддерживается, но там блок аудиоканалов
+   ограничен 320px и список раскладок сжимается, поэтому обрезки нет) */
+.main-card-body__container:has(> .main-card-body.conference-audio-channels),
+.main-card-body__container:has(> .main-card-body.session-audio-channels) {
+  overflow-y: auto;
+}
 </style>
 </head>
 <body>

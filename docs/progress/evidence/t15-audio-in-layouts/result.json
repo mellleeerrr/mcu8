@@ -1,0 +1,1887 @@
+{
+  "ok": true,
+  "base": "http://127.0.0.1:8080",
+  "conference_id": "49b599d7-b5cd-45a7-8999-47a28c453a92",
+  "participant": "T12b Label Probe",
+  "duration_ms": 100987,
+  "modes": {
+    "checksSelfTest": false,
+    "revertCheck": false
+  },
+  "criteria": {
+    "centerDx": 1.5,
+    "centerDy": 3,
+    "labelFontRatio": 2,
+    "fontRatioTolerance": 0.15,
+    "expectedTabs": [
+      "conference-info-tab",
+      "conference-general-tab",
+      "conference-schedule-tab",
+      "conference-layouts-tab",
+      "conference-skins-tab",
+      "conference-record-and-stream-tab",
+      "conference-additional-tab"
+    ]
+  },
+  "summary": {
+    "contractChecksOk": true,
+    "contractChecksTotal": 22,
+    "gridChecksOk": true,
+    "gridChecksTotal": 32,
+    "sizesMeasured": 10,
+    "sizesWithLabel": 10,
+    "failedFatalChecks": [],
+    "knownIssues": [
+      "conference footer: the buttons expose data-qa main-card-cancel-button / main-card-save-button"
+    ]
+  },
+  "tabWalk": [
+    {
+      "qa": "conference-info-tab",
+      "label": "Информация",
+      "present": true,
+      "markerOk": true,
+      "selectedOk": true,
+      "contentOk": true,
+      "panelCls": "main-card-body__container",
+      "panelText": "Информация\n\nСоздатель:\n\nAdministrator\n\nМаршрут:\n\nAcc_Full_UI@127.0.0.1\n\nАдрес конференции:\n\nВведите в строке вызова в пр",
+      "audioCount": 0,
+      "audioInPanel": false
+    },
+    {
+      "qa": "conference-general-tab",
+      "label": "Основное",
+      "present": true,
+      "markerOk": true,
+      "selectedOk": true,
+      "contentOk": true,
+      "panelCls": "main-card-body main-card-body--no-padding",
+      "panelText": "Название конференции (11/128)\nМаршрут (11/512)\nID (0/512)\nPIN конференции (0/10)\nРазрешить доступ к конференции по ссылк",
+      "audioCount": 0,
+      "audioInPanel": false
+    },
+    {
+      "qa": "conference-schedule-tab",
+      "label": "Расписание",
+      "present": true,
+      "markerOk": true,
+      "selectedOk": true,
+      "contentOk": true,
+      "panelCls": "main-card-body__container",
+      "panelText": "Продолжительность конференции\n\nЕсли для конференции не задано расписание, то она переводится в режим виртуальной комнаты",
+      "audioCount": 0,
+      "audioInPanel": false
+    },
+    {
+      "qa": "conference-layouts-tab",
+      "label": "Раскладки",
+      "present": true,
+      "markerOk": true,
+      "selectedOk": true,
+      "contentOk": true,
+      "panelCls": "main-card-body__container",
+      "panelText": "Нет созданных раскладок\n\nРаскладка будет автоматически создана при запуске конференции\n\narrow_drop_down\nДобавить\n\nАудиок",
+      "audioCount": 1,
+      "audioInPanel": true
+    },
+    {
+      "qa": "conference-skins-tab",
+      "label": "Оформление",
+      "present": true,
+      "markerOk": true,
+      "selectedOk": true,
+      "contentOk": true,
+      "panelCls": "main-card-body main-card-body--no-padding",
+      "panelText": "Использовать индивидуальные настройки\n\nНастройки видеоокон\n\nПодсветить говорящих рамкой\nДобавить расстояния между видеоо",
+      "audioCount": 0,
+      "audioInPanel": false
+    },
+    {
+      "qa": "conference-record-and-stream-tab",
+      "label": "Запись и трансляция",
+      "present": true,
+      "markerOk": true,
+      "selectedOk": true,
+      "contentOk": true,
+      "panelCls": "main-card-body main-card-body--no-padding",
+      "panelText": "Наилучшее\n\nkeyboard_arrow_down\nКачество записи и трансляции\nМаксимальная длительность записи - 1 час\n\nОтображение презен",
+      "audioCount": 0,
+      "audioInPanel": false
+    },
+    {
+      "qa": "conference-additional-tab",
+      "label": "Дополнительно",
+      "present": true,
+      "markerOk": true,
+      "selectedOk": true,
+      "contentOk": true,
+      "panelCls": "main-card-body main-card-body--no-padding",
+      "panelText": "Настройки аудио\n\nИспользовать значение по умолчанию\n\nkeyboard_arrow_down\nШумоподавление\n\nИспользовать значение по умолча",
+      "audioCount": 0,
+      "audioInPanel": false
+    }
+  ],
+  "sessionWalk": [
+    {
+      "qa": "session-main-tabs-control-panel",
+      "label": "Панель управления",
+      "markerPresent": true,
+      "selected": [
+        "session-main-tabs-control-panel"
+      ],
+      "panelBodyCount": 1
+    },
+    {
+      "qa": "session-main-tabs-general",
+      "label": "Основное",
+      "markerPresent": true,
+      "selected": [
+        "session-main-tabs-general"
+      ],
+      "panelBodyCount": 1
+    },
+    {
+      "qa": "session-main-tabs-layouts",
+      "label": "Раскладки",
+      "markerPresent": true,
+      "selected": [
+        "session-main-tabs-layouts"
+      ],
+      "panelBodyCount": 2
+    },
+    {
+      "qa": "session-main-tabs-skins",
+      "label": "Оформление",
+      "markerPresent": true,
+      "selected": [
+        "session-main-tabs-skins"
+      ],
+      "panelBodyCount": 1
+    },
+    {
+      "qa": "session-record-and-stream-tab",
+      "label": "Запись и трансляция",
+      "markerPresent": true,
+      "selected": [
+        "session-record-and-stream-tab"
+      ],
+      "panelBodyCount": 1
+    },
+    {
+      "qa": "session-main-tabs-additional",
+      "label": "Дополнительно",
+      "markerPresent": true,
+      "selected": [
+        "session-main-tabs-additional"
+      ],
+      "panelBodyCount": 1
+    }
+  ],
+  "geometry": {
+    "conference": {
+      "hasContainer": true,
+      "hasAudio": true,
+      "container": {
+        "top": 202.21875,
+        "bottom": 984,
+        "width": 1132,
+        "height": 781.78125
+      },
+      "containerScrollH": 782,
+      "containerClientH": 782,
+      "containerOverflowY": "auto",
+      "audio": {
+        "top": 845.78125,
+        "bottom": 984,
+        "width": 1132,
+        "height": 138.21875
+      },
+      "audioFlex": "0 0 auto",
+      "audioMaxHeight": "320px",
+      "audioScrollH": 137,
+      "audioClientH": 137,
+      "layoutsHeight": 643.5625,
+      "layoutsScrollH": 644,
+      "layoutsClientH": 644,
+      "layoutsFlex": "1 1 1px",
+      "addButton": {
+        "top": 932,
+        "bottom": 968,
+        "width": 96.59375,
+        "height": 36
+      },
+      "illustration": {
+        "top": 0,
+        "bottom": 0,
+        "width": 0,
+        "height": 0
+      },
+      "addButtonOverflowPx": -16,
+      "audioOverflowPx": 0,
+      "addButtonInsideAudioPx": -16,
+      "blocksSumPx": 0
+    },
+    "session": null,
+    "clipVariantB": null,
+    "lowViewports": [
+      {
+        "viewport": "1280x800",
+        "geometry": {
+          "hasContainer": true,
+          "hasAudio": true,
+          "container": {
+            "top": 202.21875,
+            "bottom": 784,
+            "width": 812,
+            "height": 581.78125
+          },
+          "containerScrollH": 582,
+          "containerClientH": 582,
+          "containerOverflowY": "auto",
+          "audio": {
+            "top": 645.78125,
+            "bottom": 784,
+            "width": 812,
+            "height": 138.21875
+          },
+          "audioFlex": "0 0 auto",
+          "audioMaxHeight": "320px",
+          "audioScrollH": 137,
+          "audioClientH": 137,
+          "layoutsHeight": 443.5625,
+          "layoutsScrollH": 444,
+          "layoutsClientH": 444,
+          "layoutsFlex": "1 1 1px",
+          "addButton": {
+            "top": 732,
+            "bottom": 768,
+            "width": 96.59375,
+            "height": 36
+          },
+          "illustration": {
+            "top": 0,
+            "bottom": 0,
+            "width": 0,
+            "height": 0
+          },
+          "addButtonOverflowPx": -16,
+          "audioOverflowPx": 0,
+          "addButtonInsideAudioPx": -16,
+          "blocksSumPx": 0
+        }
+      },
+      {
+        "viewport": "1024x768",
+        "geometry": {
+          "hasContainer": true,
+          "hasAudio": true,
+          "container": {
+            "top": 202.21875,
+            "bottom": 752,
+            "width": 992,
+            "height": 549.78125
+          },
+          "containerScrollH": 550,
+          "containerClientH": 550,
+          "containerOverflowY": "auto",
+          "audio": {
+            "top": 613.78125,
+            "bottom": 752,
+            "width": 992,
+            "height": 138.21875
+          },
+          "audioFlex": "0 0 auto",
+          "audioMaxHeight": "320px",
+          "audioScrollH": 137,
+          "audioClientH": 137,
+          "layoutsHeight": 411.5625,
+          "layoutsScrollH": 412,
+          "layoutsClientH": 412,
+          "layoutsFlex": "1 1 1px",
+          "addButton": {
+            "top": 700,
+            "bottom": 736,
+            "width": 96.59375,
+            "height": 36
+          },
+          "illustration": {
+            "top": 0,
+            "bottom": 0,
+            "width": 0,
+            "height": 0
+          },
+          "addButtonOverflowPx": -16,
+          "audioOverflowPx": 0,
+          "addButtonInsideAudioPx": -16,
+          "blocksSumPx": 0
+        }
+      },
+      {
+        "viewport": "820x1180",
+        "geometry": {
+          "hasContainer": true,
+          "hasAudio": true,
+          "container": {
+            "top": 202.21875,
+            "bottom": 1164,
+            "width": 788,
+            "height": 961.78125
+          },
+          "containerScrollH": 962,
+          "containerClientH": 962,
+          "containerOverflowY": "auto",
+          "audio": {
+            "top": 1025.78125,
+            "bottom": 1164,
+            "width": 788,
+            "height": 138.21875
+          },
+          "audioFlex": "0 0 auto",
+          "audioMaxHeight": "320px",
+          "audioScrollH": 137,
+          "audioClientH": 137,
+          "layoutsHeight": 823.5625,
+          "layoutsScrollH": 824,
+          "layoutsClientH": 824,
+          "layoutsFlex": "1 1 1px",
+          "addButton": {
+            "top": 1112,
+            "bottom": 1148,
+            "width": 96.59375,
+            "height": 36
+          },
+          "illustration": {
+            "top": 0,
+            "bottom": 0,
+            "width": 0,
+            "height": 0
+          },
+          "addButtonOverflowPx": -16,
+          "audioOverflowPx": 0,
+          "addButtonInsideAudioPx": -16,
+          "blocksSumPx": 0
+        }
+      },
+      {
+        "viewport": "1280x600",
+        "geometry": {
+          "hasContainer": true,
+          "hasAudio": true,
+          "container": {
+            "top": 202.21875,
+            "bottom": 584,
+            "width": 812,
+            "height": 381.78125
+          },
+          "containerScrollH": 382,
+          "containerClientH": 382,
+          "containerOverflowY": "auto",
+          "audio": {
+            "top": 445.78125,
+            "bottom": 584,
+            "width": 812,
+            "height": 138.21875
+          },
+          "audioFlex": "0 0 auto",
+          "audioMaxHeight": "320px",
+          "audioScrollH": 137,
+          "audioClientH": 137,
+          "layoutsHeight": 243.5625,
+          "layoutsScrollH": 403,
+          "layoutsClientH": 244,
+          "layoutsFlex": "1 1 1px",
+          "addButton": {
+            "top": 532,
+            "bottom": 568,
+            "width": 96.59375,
+            "height": 36
+          },
+          "illustration": {
+            "top": 0,
+            "bottom": 0,
+            "width": 0,
+            "height": 0
+          },
+          "addButtonOverflowPx": -16,
+          "audioOverflowPx": 0,
+          "addButtonInsideAudioPx": -16,
+          "blocksSumPx": 0
+        }
+      }
+    ]
+  },
+  "keyboard": {
+    "seen": [
+      "conference-skins-tab",
+      "conference-record-and-stream-tab",
+      "conference-additional-tab"
+    ],
+    "after": "conference-info-tab",
+    "selected": [
+      "conference-info-tab"
+    ]
+  },
+  "editorRoundTrip": {
+    "editorUrl": "http://127.0.0.1:8080/pnm/monitoring/conferences/49b599d7-b5cd-45a7-8999-47a28c453a92/audiochannels",
+    "backUrl": "http://127.0.0.1:8080/pnm/monitoring/conferences/49b599d7-b5cd-45a7-8999-47a28c453a92",
+    "selected": [
+      "conference-layouts-tab"
+    ],
+    "panelHasAudio": true
+  },
+  "layoutsPanel": {
+    "hasBar": true,
+    "tabs": [
+      {
+        "qa": "conference-info-tab",
+        "text": "Информация",
+        "title": "Информация",
+        "role": "tab",
+        "tabindex": "-1",
+        "ariaSelected": "false",
+        "activeClass": false
+      },
+      {
+        "qa": "conference-general-tab",
+        "text": "Основное",
+        "title": "Основное",
+        "role": "tab",
+        "tabindex": "-1",
+        "ariaSelected": "false",
+        "activeClass": false
+      },
+      {
+        "qa": "conference-schedule-tab",
+        "text": "Расписание",
+        "title": "Расписание",
+        "role": "tab",
+        "tabindex": "-1",
+        "ariaSelected": "false",
+        "activeClass": false
+      },
+      {
+        "qa": "conference-layouts-tab",
+        "text": "Раскладки",
+        "title": "Раскладки",
+        "role": "tab",
+        "tabindex": "0",
+        "ariaSelected": "true",
+        "activeClass": true
+      },
+      {
+        "qa": "conference-skins-tab",
+        "text": "Оформление",
+        "title": "Оформление",
+        "role": "tab",
+        "tabindex": "0",
+        "ariaSelected": "false",
+        "activeClass": false
+      },
+      {
+        "qa": "conference-record-and-stream-tab",
+        "text": "Запись и трансляция",
+        "title": "Запись и трансляция",
+        "role": "tab",
+        "tabindex": "0",
+        "ariaSelected": "false",
+        "activeClass": false
+      },
+      {
+        "qa": "conference-additional-tab",
+        "text": "Дополнительно",
+        "title": "Дополнительно",
+        "role": "tab",
+        "tabindex": "0",
+        "ariaSelected": "false",
+        "activeClass": false
+      }
+    ],
+    "panelFound": true,
+    "panelCls": "main-card-body__container",
+    "panelText": "Нет созданных раскладок\n\nРаскладка будет автоматически создана при запуске конференции\n\narrow_drop_down\nДобавить\n\nАудиоканалы не созданы\n\nАудиоканал будет автоматически создан при запуске конференции\n\nДобавить",
+    "panelHasLayouts": true,
+    "panelHasAudio": true,
+    "audioCount": 1,
+    "audioVisible": {
+      "visible": true,
+      "reason": null,
+      "box": {
+        "w": 1132,
+        "h": 138.2
+      }
+    },
+    "audioText": "Аудиоканалы не созданы\n\nАудиоканал будет автоматически создан при запуске конференции\n\nДобавить",
+    "audioHasTable": false,
+    "audioHasAddButton": true,
+    "audioIsDirectPanelChild": false,
+    "panelBodyCount": 2,
+    "panelBodyClasses": [
+      "main-card-body main-card-body--no-padding layouts",
+      "main-card-body main-card-body--no-padding conference-audio-channels"
+    ],
+    "panelChildClasses": [
+      "main-card-body main-card-body--no-padding layouts",
+      "main-card-body main-card-body--no-padding conference-audio-channels"
+    ],
+    "panelChildTags": [
+      "div",
+      "div"
+    ],
+    "audioIndexInPanel": 1,
+    "audioParentIsPanel": true,
+    "footerCount": 0,
+    "footerButtons": [],
+    "footerButtonQa": [],
+    "documentBodyCount": 2,
+    "documentAudioCount": 1
+  },
+  "revertProbe": null,
+  "sizes": [
+    {
+      "size": 1,
+      "plus": false,
+      "label": "1",
+      "tiles": 1,
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 24,
+      "slotFontSizePx": 12,
+      "tileW": 797,
+      "tileH": 448.3125,
+      "labelW": 189.21875,
+      "labelH": 26.390625,
+      "dx": 0,
+      "dy": -0.0078125,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "overflowX": false
+    },
+    {
+      "size": 2,
+      "plus": false,
+      "label": "2",
+      "tiles": 2,
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 24,
+      "slotFontSizePx": 12,
+      "tileW": 398,
+      "tileH": 224.15625,
+      "labelW": 189.21875,
+      "labelH": 26.390625,
+      "dx": 0,
+      "dy": -0.0078125,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "overflowX": false
+    },
+    {
+      "size": 3,
+      "plus": false,
+      "label": "3",
+      "tiles": 3,
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 24,
+      "slotFontSizePx": 12,
+      "tileW": 398,
+      "tileH": 224.15625,
+      "labelW": 189.21875,
+      "labelH": 26.390625,
+      "dx": 0,
+      "dy": -0.0078125,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "overflowX": false
+    },
+    {
+      "size": 4,
+      "plus": false,
+      "label": "4",
+      "tiles": 4,
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 24,
+      "slotFontSizePx": 12,
+      "tileW": 398,
+      "tileH": 224.15625,
+      "labelW": 189.21875,
+      "labelH": 26.390625,
+      "dx": 0,
+      "dy": -0.0078125,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "overflowX": false
+    },
+    {
+      "size": 5,
+      "plus": true,
+      "label": "5 +",
+      "tiles": 6,
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 24,
+      "slotFontSizePx": 12,
+      "tileW": 265,
+      "tileH": 224.15625,
+      "labelW": 189.21875,
+      "labelH": 26.390625,
+      "dx": 0,
+      "dy": -0.0078125,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "overflowX": false
+    },
+    {
+      "size": 8,
+      "plus": false,
+      "label": "8",
+      "tiles": 8,
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 24,
+      "slotFontSizePx": 12,
+      "tileW": 199,
+      "tileH": 224.15625,
+      "labelW": 189.21875,
+      "labelH": 26.390625,
+      "dx": 0,
+      "dy": -0.0078125,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "overflowX": false
+    },
+    {
+      "size": 9,
+      "plus": false,
+      "label": "9",
+      "tiles": 9,
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 16,
+      "slotFontSizePx": 8,
+      "tileW": 265,
+      "tileH": 149.09375,
+      "labelW": 126.140625,
+      "labelH": 17.59375,
+      "dx": -0.0078125,
+      "dy": 0,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "overflowX": false
+    },
+    {
+      "size": 10,
+      "plus": true,
+      "label": "10 +",
+      "tiles": 16,
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 16,
+      "slotFontSizePx": 8,
+      "tileW": 199,
+      "tileH": 112.078125,
+      "labelW": 126.140625,
+      "labelH": 17.59375,
+      "dx": -0.0078125,
+      "dy": -0.0078125,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "overflowX": false
+    },
+    {
+      "size": 25,
+      "plus": false,
+      "label": "25",
+      "tiles": 25,
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 16,
+      "slotFontSizePx": 8,
+      "tileW": 159,
+      "tileH": 89.046875,
+      "labelW": 126.140625,
+      "labelH": 17.59375,
+      "dx": -0.0078125,
+      "dy": -0.0078125,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "overflowX": false
+    },
+    {
+      "size": 34,
+      "plus": true,
+      "label": "34 +",
+      "tiles": 36,
+      "labelFound": true,
+      "labelText": "T12b Label Probe",
+      "labelFontSizePx": 16,
+      "slotFontSizePx": 8,
+      "tileW": 131.984375,
+      "tileH": 74.046875,
+      "labelW": 125.984375,
+      "labelH": 17.59375,
+      "dx": 0,
+      "dy": -0.0078125,
+      "labelInsideTile": true,
+      "labelInsideTileX": true,
+      "overflowX": false
+    }
+  ],
+  "checks": [
+    {
+      "name": "login: token in localStorage",
+      "ok": true,
+      "severity": "fatal",
+      "detail": null
+    },
+    {
+      "name": "conference page: tab bar rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "http://127.0.0.1:8080/pnm/monitoring/conferences/49b599d7-b5cd-45a7-8999-47a28c453a92"
+    },
+    {
+      "name": "[current] conference tab bar: the audio channel is not a separate tab",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tabs=conference-info-tab,conference-general-tab,conference-schedule-tab,conference-layouts-tab,conference-skins-tab,conference-record-and-stream-tab,conference-additional-tab"
+    },
+    {
+      "name": "[current] conference tab bar: 7 tabs in the expected order",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "expected=conference-info-tab,conference-general-tab,conference-schedule-tab,conference-layouts-tab,conference-skins-tab,conference-record-and-stream-tab,conference-additional-tab actual=conference-info-tab,conference-general-tab,conference-schedule-tab,conference-layouts-tab,conference-skins-tab,conference-record-and-stream-tab,conference-additional-tab"
+    },
+    {
+      "name": "[current] conference tab bar: role=tab / tabindex / aria-selected are intact",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "role/tabindex ok=true aria-selected=conference-info-tab active=conference-info-tab"
+    },
+    {
+      "name": "tab Информация: opens and shows its own content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "marker=.conference-info ok=true aria-selected=true panelText=\"Информация\\n\\nСоздатель:\\n\\nAdministrator\\n\\nМаршрут:\\n\\nAcc_Full_UI\""
+    },
+    {
+      "name": "tab Информация: the active tab is the one whose panel is rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "aria-selected=conference-info-tab marker=.conference-info present=true чужойМаркер=false"
+    },
+    {
+      "name": "tab Информация: the footer is absent",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "footerCount=0 buttons=[]"
+    },
+    {
+      "name": "tab Информация: no orphan panel (1 .main-card-body in the panel)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=1 documentBodyCount=1 panelTextLen=300"
+    },
+    {
+      "name": "tab Информация: the audio channel block is not mounted here",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=false"
+    },
+    {
+      "name": "tab Основное: opens and shows its own content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "marker=.conference-general ok=true aria-selected=true panelText=\"Название конференции (11/128)\\nМаршрут (11/512)\\nID (0/512)\\nPI\""
+    },
+    {
+      "name": "tab Основное: the active tab is the one whose panel is rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "aria-selected=conference-general-tab marker=.conference-general present=true чужойМаркер=false"
+    },
+    {
+      "name": "tab Основное: the footer is «Отмена»+«Сохранить»",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "footerCount=1 buttons=[\"Отмена\",\"Сохранить\"]"
+    },
+    {
+      "name": "tab Основное: no orphan panel (1 .main-card-body in the panel)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=1 documentBodyCount=1 panelTextLen=300"
+    },
+    {
+      "name": "tab Основное: the audio channel block is not mounted here",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=false"
+    },
+    {
+      "name": "tab Расписание: opens and shows its own content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "marker=Продолжительность конференции ok=true aria-selected=true panelText=\"Продолжительность конференции\\n\\nЕсли для конференции не задан\""
+    },
+    {
+      "name": "tab Расписание: the active tab is the one whose panel is rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "aria-selected=conference-schedule-tab marker=Продолжительность конференции present=true чужойМаркер=false"
+    },
+    {
+      "name": "tab Расписание: the footer is «Отмена»+«Сохранить»",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "footerCount=1 buttons=[\"Отмена\",\"Сохранить\"]"
+    },
+    {
+      "name": "tab Расписание: no orphan panel (1 .main-card-body in the panel)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=1 documentBodyCount=1 panelTextLen=300"
+    },
+    {
+      "name": "tab Расписание: the audio channel block is not mounted here",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=false"
+    },
+    {
+      "name": "tab Раскладки: opens and shows its own content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "marker=.layouts ok=true aria-selected=true panelText=\"Нет созданных раскладок\\n\\nРаскладка будет автоматически созда\""
+    },
+    {
+      "name": "tab Раскладки: the active tab is the one whose panel is rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "aria-selected=conference-layouts-tab marker=.layouts present=true чужойМаркер=false"
+    },
+    {
+      "name": "tab Раскладки: the footer is absent",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "footerCount=0 buttons=[]"
+    },
+    {
+      "name": "tab Раскладки: no orphan panel (2 .main-card-body in the panel)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=2 documentBodyCount=2 panelTextLen=209"
+    },
+    {
+      "name": "tab Раскладки: the audio channel block is rendered inside the layouts panel",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=true audioCount=1 panelCls=main-card-body__container"
+    },
+    {
+      "name": "tab Раскладки: the layouts content itself is still there",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasLayouts=true"
+    },
+    {
+      "name": "tab Раскладки: the audio channel block is visible (not just hidden)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "{\"visible\":true,\"reason\":null,\"box\":{\"w\":1132,\"h\":138.2}}"
+    },
+    {
+      "name": "tab Раскладки: the audio channel block keeps its functionality",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "table=false addButton=true text=\"Аудиоканалы не созданы\\n\\nАудиоканал будет автоматически создан при запуске конференции\\n\\nДобавить\""
+    },
+    {
+      "name": "tab Раскладки: exactly one audio block, and it is not a separate panel",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audioCount=1 isDirectPanelChild=false"
+    },
+    {
+      "name": "tab Раскладки: exactly two .main-card-body (layouts + audio channels)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=2 children=[\"main-card-body main-card-body--no-padding layouts\",\"main-card-body main-card-body--no-padding conference-audio-channels\"]"
+    },
+    {
+      "name": "tab Раскладки: the audio channel block is the second child of the same .main-card-body__container",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "children=[\"main-card-body main-card-body--no-padding layouts\",\"main-card-body main-card-body--no-padding conference-audio-channels\"] audioIndexInPanel=1 parentIsPanel=true"
+    },
+    {
+      "name": "conference: the «Добавить» button is not cut off by the bottom of the panel container",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "addButton.bottom - container.bottom = -16.00px (допуск +1px)"
+    },
+    {
+      "name": "conference: the audio channel block is not cut off by the bottom of the panel container",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audio.bottom - container.bottom = 0.00px (допуск +1px)"
+    },
+    {
+      "name": "conference: the «Добавить» button is fully visible inside the audio block (not cut by the block's own overflow)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "addButton.bottom - audioBlock.bottom = -16.00px (допуск +1px)"
+    },
+    {
+      "name": "conference: the panel container has no vertical overflow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollH=782 clientH=782 overflowY=auto"
+    },
+    {
+      "name": "conference: the empty-state illustration of the audio block takes no more than 120×120",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "illustration=0.0×0.0 (в текущей политике иллюстрация скрыта: display:none)"
+    },
+    {
+      "name": "conference: the audio channel block does not exceed its max-height",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audio.height=138.2px max-height=320px"
+    },
+    {
+      "name": "conference: the two blocks exactly fill the panel (no gap, no overlap)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "layouts.height + audio.height - container.height = 0.00px (допуск ±2px)"
+    },
+    {
+      "name": "conference: the layouts list has no internal scroll",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "layouts scrollH=644 clientH=644 flex=1 1 1px"
+    },
+    {
+      "name": "tab Оформление: opens and shows its own content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "marker=.conference-skins ok=true aria-selected=true panelText=\"Использовать индивидуальные настройки\\n\\nНастройки видеоокон\\n\\n\""
+    },
+    {
+      "name": "tab Оформление: the active tab is the one whose panel is rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "aria-selected=conference-skins-tab marker=.conference-skins present=true чужойМаркер=false"
+    },
+    {
+      "name": "tab Оформление: the footer is «Отмена»+«Сохранить»",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "footerCount=1 buttons=[\"Отмена\",\"Сохранить\"]"
+    },
+    {
+      "name": "tab Оформление: no orphan panel (1 .main-card-body in the panel)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=1 documentBodyCount=1 panelTextLen=300"
+    },
+    {
+      "name": "tab Оформление: the audio channel block is not mounted here",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=false"
+    },
+    {
+      "name": "tab Запись и трансляция: opens and shows its own content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "marker=.conference-record-and-stream ok=true aria-selected=true panelText=\"Наилучшее\\n\\nkeyboard_arrow_down\\nКачество записи и трансляции\\n\""
+    },
+    {
+      "name": "tab Запись и трансляция: the active tab is the one whose panel is rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "aria-selected=conference-record-and-stream-tab marker=.conference-record-and-stream present=true чужойМаркер=false"
+    },
+    {
+      "name": "tab Запись и трансляция: the footer is «Отмена»+«Сохранить»",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "footerCount=1 buttons=[\"Отмена\",\"Сохранить\"]"
+    },
+    {
+      "name": "tab Запись и трансляция: no orphan panel (1 .main-card-body in the panel)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=1 documentBodyCount=1 panelTextLen=300"
+    },
+    {
+      "name": "tab Запись и трансляция: the audio channel block is not mounted here",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=false"
+    },
+    {
+      "name": "tab Дополнительно: opens and shows its own content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "marker=.conference-additional ok=true aria-selected=true panelText=\"Настройки аудио\\n\\nИспользовать значение по умолчанию\\n\\nkeyboar\""
+    },
+    {
+      "name": "tab Дополнительно: the active tab is the one whose panel is rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "aria-selected=conference-additional-tab marker=.conference-additional present=true чужойМаркер=false"
+    },
+    {
+      "name": "tab Дополнительно: the footer is «Отмена»+«Сохранить»",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "footerCount=1 buttons=[\"Отмена\",\"Сохранить\"]"
+    },
+    {
+      "name": "tab Дополнительно: no orphan panel (1 .main-card-body in the panel)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=1 documentBodyCount=1 panelTextLen=300"
+    },
+    {
+      "name": "tab Дополнительно: the audio channel block is not mounted here",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=false"
+    },
+    {
+      "name": "conference footer: the buttons expose data-qa main-card-cancel-button / main-card-save-button",
+      "ok": false,
+      "severity": "known-issue",
+      "detail": "data-qa=[null,null] — в билде 2.2.1.66 TcButton не пробрасывает data-qa в DOM, поэтому футер проверяется по подписям «Отмена»/«Сохранить»"
+    },
+    {
+      "name": "conference header: the counters did not change",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "before=[{\"title\":\"Участники (SIP/H.323)\",\"texts\":[\"group\",\"1\"]},{\"title\":\"Устройства (VNC/RTSP) и медиафайлы\",\"texts\":[\"0\"]},{\"title\":\"Включено отслеживание голосовой активности\",\"texts\":[]},{\"title\":\"Добавить файл для трансляции\",\"texts\":[]},{\"title\":\"Недоступно для этого типа соединения\",\"texts\":[]},{\"title\":\"Недоступно для этого типа соединения\",\"texts\":[]},{\"title\":\"Недоступно для этого типа соединения\",\"texts\":[]},{\"title\":\"Другое\",\"texts\":[]},{\"title\":\"Недоступно для этого типа соединения\",\"texts\":[\"Отправить сообщение в конференцию\"]},{\"title\":\"Сделать копию конференции\",\"texts\":[\"Сделать копию конференции\"]},{\"title\":\"Удалить конференцию\",\"texts\":[\"delete\",\"Удалить конференцию\"]},{\"title\":\"Начать конференцию\",\"texts\":[\"Начать конференцию\"]}] after=[{\"title\":\"Участники (SIP/H.323)\",\"texts\":[\"group\",\"1\"]},{\"title\":\"Устройства (VNC/RTSP) и медиафайлы\",\"texts\":[\"0\"]},{\"title\":\"Включено отслеживание голосовой активности\",\"texts\":[]},{\"title\":\"Добавить файл для трансляции\",\"texts\":[]},{\"title\":\"Недоступно для этого типа соединения\",\"texts\":[]},{\"title\":\"Недоступно для этого типа соединения\",\"texts\":[]},{\"title\":\"Недоступно для этого типа соединения\",\"texts\":[]},{\"title\":\"Другое\",\"texts\":[]},{\"title\":\"Недоступно для этого типа соединения\",\"texts\":[\"Отправить сообщение в конференцию\"]},{\"title\":\"Сделать копию конференции\",\"texts\":[\"Сделать копию конференции\"]},{\"title\":\"Удалить конференцию\",\"texts\":[\"delete\",\"Удалить конференцию\"]},{\"title\":\"Начать конференцию\",\"texts\":[\"Начать конференцию\"]}]"
+    },
+    {
+      "name": "keyboard: 3×ArrowRight from «Раскладки» moves the focus layouts→skins→record-and-stream→additional",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "seen=[\"conference-skins-tab\",\"conference-record-and-stream-tab\",\"conference-additional-tab\"] expected=[\"conference-skins-tab\",\"conference-record-and-stream-tab\",\"conference-additional-tab\"]"
+    },
+    {
+      "name": "keyboard: the focus is not stuck on the last tab (it keeps moving)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "after one more ArrowRight: conference-info-tab"
+    },
+    {
+      "name": "keyboard: the focused tab is activated by Enter and its panel is rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "focused=conference-info-tab aria-selected=conference-info-tab marker=.conference-info markerOk=true"
+    },
+    {
+      "name": "conference: the audio channel block has an «Добавить» button",
+      "ok": true,
+      "severity": "fatal",
+      "detail": null
+    },
+    {
+      "name": "conference: the «Добавить» button really leads to the audio channel editor",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "url=http://127.0.0.1:8080/pnm/monitoring/conferences/49b599d7-b5cd-45a7-8999-47a28c453a92/audiochannels"
+    },
+    {
+      "name": "conference: the editor offers «Отмена» and «Создать» (we press only «Отмена»)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "create=1"
+    },
+    {
+      "name": "conference: after «Отмена» the URL is back to the conference page",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "url=http://127.0.0.1:8080/pnm/monitoring/conferences/49b599d7-b5cd-45a7-8999-47a28c453a92 expected=http://127.0.0.1:8080/pnm/monitoring/conferences/49b599d7-b5cd-45a7-8999-47a28c453a92"
+    },
+    {
+      "name": "conference: after «Отмена» exactly one tab is selected and it is «Раскладки»",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "aria-selected=conference-layouts-tab"
+    },
+    {
+      "name": "conference: after «Отмена» the panel is rendered and non-empty",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelFound=true panelText=\"Нет созданных раскладок\\n\\nРаскладка будет автоматически созда\""
+    },
+    {
+      "name": "conference: after «Отмена» the audio channel block is inside the panel of that tab",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=true audioCount=1"
+    },
+    {
+      "name": "(1280x800) conference: the «Добавить» button is not cut off by the bottom of the panel container",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "addButton.bottom - container.bottom = -16.00px (допуск +1px)"
+    },
+    {
+      "name": "(1280x800) conference: the audio channel block is not cut off by the bottom of the panel container",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audio.bottom - container.bottom = 0.00px (допуск +1px)"
+    },
+    {
+      "name": "(1280x800) conference: the «Добавить» button is fully visible inside the audio block (not cut by the block's own overflow)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "addButton.bottom - audioBlock.bottom = -16.00px (допуск +1px)"
+    },
+    {
+      "name": "(1280x800) conference: the panel container has no vertical overflow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollH=582 clientH=582 overflowY=auto"
+    },
+    {
+      "name": "(1280x800) conference: the empty-state illustration of the audio block takes no more than 120×120",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "illustration=0.0×0.0 (в текущей политике иллюстрация скрыта: display:none)"
+    },
+    {
+      "name": "(1280x800) conference: the audio channel block does not exceed its max-height",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audio.height=138.2px max-height=320px"
+    },
+    {
+      "name": "(1280x800) conference: the two blocks exactly fill the panel (no gap, no overlap)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "layouts.height + audio.height - container.height = 0.00px (допуск ±2px)"
+    },
+    {
+      "name": "(1280x800) conference: the layouts list has no internal scroll",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "layouts scrollH=444 clientH=444 flex=1 1 1px"
+    },
+    {
+      "name": "(1024x768) conference: the «Добавить» button is not cut off by the bottom of the panel container",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "addButton.bottom - container.bottom = -16.00px (допуск +1px)"
+    },
+    {
+      "name": "(1024x768) conference: the audio channel block is not cut off by the bottom of the panel container",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audio.bottom - container.bottom = 0.00px (допуск +1px)"
+    },
+    {
+      "name": "(1024x768) conference: the «Добавить» button is fully visible inside the audio block (not cut by the block's own overflow)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "addButton.bottom - audioBlock.bottom = -16.00px (допуск +1px)"
+    },
+    {
+      "name": "(1024x768) conference: the panel container has no vertical overflow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollH=550 clientH=550 overflowY=auto"
+    },
+    {
+      "name": "(1024x768) conference: the empty-state illustration of the audio block takes no more than 120×120",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "illustration=0.0×0.0 (в текущей политике иллюстрация скрыта: display:none)"
+    },
+    {
+      "name": "(1024x768) conference: the audio channel block does not exceed its max-height",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audio.height=138.2px max-height=320px"
+    },
+    {
+      "name": "(1024x768) conference: the two blocks exactly fill the panel (no gap, no overlap)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "layouts.height + audio.height - container.height = 0.00px (допуск ±2px)"
+    },
+    {
+      "name": "(1024x768) conference: the layouts list has no internal scroll",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "layouts scrollH=412 clientH=412 flex=1 1 1px"
+    },
+    {
+      "name": "(820x1180) conference: the «Добавить» button is not cut off by the bottom of the panel container",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "addButton.bottom - container.bottom = -16.00px (допуск +1px)"
+    },
+    {
+      "name": "(820x1180) conference: the audio channel block is not cut off by the bottom of the panel container",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audio.bottom - container.bottom = 0.00px (допуск +1px)"
+    },
+    {
+      "name": "(820x1180) conference: the «Добавить» button is fully visible inside the audio block (not cut by the block's own overflow)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "addButton.bottom - audioBlock.bottom = -16.00px (допуск +1px)"
+    },
+    {
+      "name": "(820x1180) conference: the panel container has no vertical overflow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollH=962 clientH=962 overflowY=auto"
+    },
+    {
+      "name": "(820x1180) conference: the empty-state illustration of the audio block takes no more than 120×120",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "illustration=0.0×0.0 (в текущей политике иллюстрация скрыта: display:none)"
+    },
+    {
+      "name": "(820x1180) conference: the audio channel block does not exceed its max-height",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audio.height=138.2px max-height=320px"
+    },
+    {
+      "name": "(820x1180) conference: the two blocks exactly fill the panel (no gap, no overlap)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "layouts.height + audio.height - container.height = 0.00px (допуск ±2px)"
+    },
+    {
+      "name": "(820x1180) conference: the layouts list has no internal scroll",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "layouts scrollH=824 clientH=824 flex=1 1 1px"
+    },
+    {
+      "name": "(1280x600) conference: the «Добавить» button is not cut off by the bottom of the panel container",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "addButton.bottom - container.bottom = -16.00px (допуск +1px)"
+    },
+    {
+      "name": "(1280x600) conference: the audio channel block is not cut off by the bottom of the panel container",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audio.bottom - container.bottom = 0.00px (допуск +1px)"
+    },
+    {
+      "name": "(1280x600) conference: the «Добавить» button is fully visible inside the audio block (not cut by the block's own overflow)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "addButton.bottom - audioBlock.bottom = -16.00px (допуск +1px)"
+    },
+    {
+      "name": "(1280x600) conference: the panel container has no vertical overflow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollH=382 clientH=382 overflowY=auto"
+    },
+    {
+      "name": "(1280x600) conference: the empty-state illustration of the audio block takes no more than 120×120",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "illustration=0.0×0.0 (в текущей политике иллюстрация скрыта: display:none)"
+    },
+    {
+      "name": "(1280x600) conference: the audio channel block does not exceed its max-height",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audio.height=138.2px max-height=320px"
+    },
+    {
+      "name": "(1280x600) conference: the two blocks exactly fill the panel (no gap, no overlap)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "layouts.height + audio.height - container.height = 0.00px (допуск ±2px)"
+    },
+    {
+      "name": "(1280x600) conference: the layouts list has no internal scroll (allowed on this viewport)",
+      "ok": true,
+      "severity": "info",
+      "detail": "layouts scrollH=403 clientH=244 flex=1 1 1px — на низком вьюпорте прокрутка списка раскладок допустима"
+    },
+    {
+      "name": "session page: tab bar rendered",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "http://127.0.0.1:8080/pnm/monitoring/sessions/49b599d7-b5cd-45a7-8999-47a28c453a92"
+    },
+    {
+      "name": "session page: 6 tabs in the expected order",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "expected=session-main-tabs-control-panel,session-main-tabs-general,session-main-tabs-layouts,session-main-tabs-skins,session-record-and-stream-tab,session-main-tabs-additional actual=session-main-tabs-control-panel,session-main-tabs-general,session-main-tabs-layouts,session-main-tabs-skins,session-record-and-stream-tab,session-main-tabs-additional"
+    },
+    {
+      "name": "session page: no session-main-tabs-audio and no tab named «Аудиоканалы»",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "tabs=session-main-tabs-control-panel,session-main-tabs-general,session-main-tabs-layouts,session-main-tabs-skins,session-record-and-stream-tab,session-main-tabs-additional"
+    },
+    {
+      "name": "session tab Панель управления: opens and shows its own content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "marker=.session-control-panel present=true aria-selected=session-main-tabs-control-panel"
+    },
+    {
+      "name": "session tab Панель управления: the footer is absent",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "footerCount=0 buttons=[]"
+    },
+    {
+      "name": "session tab Панель управления: no orphan panel (1 .main-card-body in the panel)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=1 documentBodyCount=1"
+    },
+    {
+      "name": "session tab Панель управления: the audio channel block is not mounted here",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=false"
+    },
+    {
+      "name": "session tab Основное: opens and shows its own content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "marker=.conference-general present=true aria-selected=session-main-tabs-general"
+    },
+    {
+      "name": "session tab Основное: the footer is «Отмена»+«Сохранить»",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "footerCount=1 buttons=[\"Отмена\",\"Сохранить\"]"
+    },
+    {
+      "name": "session tab Основное: no orphan panel (1 .main-card-body in the panel)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=1 documentBodyCount=1"
+    },
+    {
+      "name": "session tab Основное: the audio channel block is not mounted here",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=false"
+    },
+    {
+      "name": "session tab Раскладки: opens and shows its own content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "marker=.layouts present=true aria-selected=session-main-tabs-layouts"
+    },
+    {
+      "name": "session tab Раскладки: the footer is absent",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "footerCount=0 buttons=[]"
+    },
+    {
+      "name": "session tab Раскладки: no orphan panel (2 .main-card-body in the panel)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=2 documentBodyCount=2"
+    },
+    {
+      "name": "session tab Раскладки: the audio channel block is rendered inside the layouts panel",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=true audioCount=1"
+    },
+    {
+      "name": "session tab Раскладки: the audio channel block is visible (not just hidden)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "{\"visible\":true,\"reason\":null,\"box\":{\"w\":1132,\"h\":103.6}}"
+    },
+    {
+      "name": "session tab Раскладки: the audio channel block keeps its functionality",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "table=false addButton=true text=\"Аудиоканалы не созданы\\n\\nДобавить\""
+    },
+    {
+      "name": "session tab Раскладки: exactly one audio block, and it is not a separate panel",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audioCount=1 isDirectPanelChild=false"
+    },
+    {
+      "name": "session tab Раскладки: exactly two .main-card-body and the audio block is the second child",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "children=[\"main-card-body main-card-body--no-padding layouts\",\"main-card-body main-card-body--no-padding session-audio-channels\"] audioIndexInPanel=1"
+    },
+    {
+      "name": "session: the «Добавить» button is not cut off by the bottom of the panel container",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "addButton.bottom - container.bottom = -16.00px (допуск +1px)"
+    },
+    {
+      "name": "session: the audio channel block is not cut off by the bottom of the panel container",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audio.bottom - container.bottom = 0.00px (допуск +1px)"
+    },
+    {
+      "name": "session: the «Добавить» button is fully visible inside the audio block (not cut by the block's own overflow)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "addButton.bottom - audioBlock.bottom = -16.00px (допуск +1px)"
+    },
+    {
+      "name": "session: the panel container has no vertical overflow",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "scrollH=782 clientH=782 overflowY=auto"
+    },
+    {
+      "name": "session: the empty-state illustration of the audio block takes no more than 120×120",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "illustration=0.0×0.0 (в текущей политике иллюстрация скрыта: display:none)"
+    },
+    {
+      "name": "session: the audio channel block does not exceed its max-height",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "audio.height=103.6px max-height=320px"
+    },
+    {
+      "name": "session: the two blocks exactly fill the panel (no gap, no overlap)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "layouts.height + audio.height - container.height = 0.00px (допуск ±2px)"
+    },
+    {
+      "name": "session: the layouts list has no internal scroll",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "layouts scrollH=678 clientH=678 flex=1 1 1px"
+    },
+    {
+      "name": "session tab Оформление: opens and shows its own content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "marker=.conference-skins present=true aria-selected=session-main-tabs-skins"
+    },
+    {
+      "name": "session tab Оформление: the footer is «Отмена»+«Сохранить»",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "footerCount=1 buttons=[\"Отмена\",\"Сохранить\"]"
+    },
+    {
+      "name": "session tab Оформление: no orphan panel (1 .main-card-body in the panel)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=1 documentBodyCount=1"
+    },
+    {
+      "name": "session tab Оформление: the audio channel block is not mounted here",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=false"
+    },
+    {
+      "name": "session tab Запись и трансляция: opens and shows its own content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "marker=.conference-record-and-stream present=true aria-selected=session-record-and-stream-tab"
+    },
+    {
+      "name": "session tab Запись и трансляция: the footer is «Отмена»+«Сохранить»",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "footerCount=1 buttons=[\"Отмена\",\"Сохранить\"]"
+    },
+    {
+      "name": "session tab Запись и трансляция: no orphan panel (1 .main-card-body in the panel)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=1 documentBodyCount=1"
+    },
+    {
+      "name": "session tab Запись и трансляция: the audio channel block is not mounted here",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=false"
+    },
+    {
+      "name": "session tab Дополнительно: opens and shows its own content",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "marker=.conference-additional present=true aria-selected=session-main-tabs-additional"
+    },
+    {
+      "name": "session tab Дополнительно: the footer is «Отмена»+«Сохранить»",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "footerCount=1 buttons=[\"Отмена\",\"Сохранить\"]"
+    },
+    {
+      "name": "session tab Дополнительно: no orphan panel (1 .main-card-body in the panel)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelBodyCount=1 documentBodyCount=1"
+    },
+    {
+      "name": "session tab Дополнительно: the audio channel block is not mounted here",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=false"
+    },
+    {
+      "name": "session: the audio channel block has an «Добавить» button",
+      "ok": true,
+      "severity": "fatal",
+      "detail": null
+    },
+    {
+      "name": "session: the «Добавить» button really leads to the audio channel editor",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "url=http://127.0.0.1:8080/pnm/monitoring/sessions/49b599d7-b5cd-45a7-8999-47a28c453a92/audiochannels"
+    },
+    {
+      "name": "session: the editor offers «Отмена» and «Создать» (we press only «Отмена»)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "create=1"
+    },
+    {
+      "name": "session: after «Отмена» the URL is back to the session page",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "url=http://127.0.0.1:8080/pnm/monitoring/sessions/49b599d7-b5cd-45a7-8999-47a28c453a92 expected=http://127.0.0.1:8080/pnm/monitoring/sessions/49b599d7-b5cd-45a7-8999-47a28c453a92"
+    },
+    {
+      "name": "session: after «Отмена» exactly one tab is selected and it is «Раскладки»",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "aria-selected=session-main-tabs-layouts"
+    },
+    {
+      "name": "session: after «Отмена» the panel is rendered and non-empty",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelFound=true panelText=\"Создать\\nsearch\\nПоиск\\n\\nИнформация\\n\\nПолучатели\\n\\nДействие\\n\\nДля \""
+    },
+    {
+      "name": "session: after «Отмена» the audio channel block is inside the panel of that tab",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "panelHasAudio=true audioCount=1"
+    },
+    {
+      "name": "layout editor: size range selector visible",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "[\"1\",\"2\",\"3\",\"4\",\"5 +\",\"8\",\"9\",\"10 +\",\"25\",\"34 +\",\"\"]"
+    },
+    {
+      "name": "layout editor: contact added to the layout recipients",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "T12b Label Probe"
+    },
+    {
+      "name": "size 1: label font-size is 2x slot font-size",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=24px slot=12px ratio=2.00"
+    },
+    {
+      "name": "size 1: label centered in the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=0.00 dy=-0.01"
+    },
+    {
+      "name": "size 1: label fully inside the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "inside=true insideX=true overflowX=false"
+    },
+    {
+      "name": "size 2: label font-size is 2x slot font-size",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=24px slot=12px ratio=2.00"
+    },
+    {
+      "name": "size 2: label centered in the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=0.00 dy=-0.01"
+    },
+    {
+      "name": "size 2: label fully inside the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "inside=true insideX=true overflowX=false"
+    },
+    {
+      "name": "size 3: label font-size is 2x slot font-size",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=24px slot=12px ratio=2.00"
+    },
+    {
+      "name": "size 3: label centered in the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=0.00 dy=-0.01"
+    },
+    {
+      "name": "size 3: label fully inside the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "inside=true insideX=true overflowX=false"
+    },
+    {
+      "name": "size 4: label font-size is 2x slot font-size",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=24px slot=12px ratio=2.00"
+    },
+    {
+      "name": "size 4: label centered in the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=0.00 dy=-0.01"
+    },
+    {
+      "name": "size 4: label fully inside the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "inside=true insideX=true overflowX=false"
+    },
+    {
+      "name": "size 5+: label font-size is 2x slot font-size",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=24px slot=12px ratio=2.00"
+    },
+    {
+      "name": "size 5+: label centered in the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=0.00 dy=-0.01"
+    },
+    {
+      "name": "size 5+: label fully inside the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "inside=true insideX=true overflowX=false"
+    },
+    {
+      "name": "size 8: label font-size is 2x slot font-size",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=24px slot=12px ratio=2.00"
+    },
+    {
+      "name": "size 8: label centered in the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=0.00 dy=-0.01"
+    },
+    {
+      "name": "size 8: label fully inside the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "inside=true insideX=true overflowX=false"
+    },
+    {
+      "name": "size 9: label font-size is 2x slot font-size",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=16px slot=8px ratio=2.00"
+    },
+    {
+      "name": "size 9: label centered in the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=-0.01 dy=0.00"
+    },
+    {
+      "name": "size 9: label fully inside the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "inside=true insideX=true overflowX=false"
+    },
+    {
+      "name": "size 10+: label font-size is 2x slot font-size",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=16px slot=8px ratio=2.00"
+    },
+    {
+      "name": "size 10+: label centered in the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=-0.01 dy=-0.01"
+    },
+    {
+      "name": "size 10+: label fully inside the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "inside=true insideX=true overflowX=false"
+    },
+    {
+      "name": "size 25: label font-size is 2x slot font-size",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=16px slot=8px ratio=2.00"
+    },
+    {
+      "name": "size 25: label centered in the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=-0.01 dy=-0.01"
+    },
+    {
+      "name": "size 25: label fully inside the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "inside=true insideX=true overflowX=false"
+    },
+    {
+      "name": "size 34+: label font-size is 2x slot font-size",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "label=16px slot=8px ratio=2.00"
+    },
+    {
+      "name": "size 34+: label centered in the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "dx=0.00 dy=-0.01"
+    },
+    {
+      "name": "size 34+: label fully inside the tile",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "inside=true insideX=true overflowX=false"
+    },
+    {
+      "name": "ui: no pageerror",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "[]"
+    },
+    {
+      "name": "ui: no console errors",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "[]"
+    },
+    {
+      "name": "db: no writes to the live stand (draft only)",
+      "ok": true,
+      "severity": "fatal",
+      "detail": "[]"
+    }
+  ],
+  "page_errors": [],
+  "console_errors": [],
+  "failed_requests": [
+    {
+      "url": "http://127.0.0.1:8080/mcu/assets/previewCu2j3Z3R.webm",
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "url": "http://127.0.0.1:8080/mcu/assets/previewCu2j3Z3R.webm",
+      "error": "net::ERR_ABORTED"
+    }
+  ],
+  "non_get_requests": [
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/login",
+      "body": "<redacted>"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_25\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_25\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_1\",\"width\":887,\"height\":499}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_2\",\"width\":797,\"height\":448}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_3\",\"width\":797,\"height\":448}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_4\",\"width\":797,\"height\":448}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_6\",\"width\":797,\"height\":448}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_8\",\"width\":797,\"height\":448}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_9\",\"width\":797,\"height\":448}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_16\",\"width\":797,\"height\":448}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_25\",\"width\":797,\"height\":448}"
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/api/v3/ui/video_layouts/calculate",
+      "body": "{\"preset\":\"preset_equal_36\",\"width\":797,\"height\":448}"
+    }
+  ],
+  "failure": null
+}
