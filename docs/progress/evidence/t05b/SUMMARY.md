@@ -46,7 +46,8 @@ sidecar 22/22 OK.
   в m-line, `SdpAnswer.rtp_map` содержит только выбранные maps; m-line без
   общего кодека получает port 0. Тест: offer opus 120/vp8 100 → answer
   120/100, audio без vp8, video без opus. Гейты: **1026 passed / 0 failed /
-  6 ignored**, clippy/fmt чисто.
+  6 ignored**, clippy/fmt чисто. Регрессионный SIP E2E:
+  `artifacts/e2e-t05b-sfu-high/` — 114/114, page_errors 0, 0 failed.
 - Осталось: per-room профиль из `PATCH` комнаты/контакта в SFU answer,
   H.264 в SFU (или явный отказ), peer H.241 clamp, packetization/profile
   в sidecar, call_string live proof, Python CI, live H.323/T07.
