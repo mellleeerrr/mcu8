@@ -290,7 +290,13 @@ class Call:
         # H323Plus uses 384 kbit/s unrestricted digital bearer for video; 64
         # kbit/s bearer makes Polycom negotiate an audio-only call.
         bearer = b"\x88\x93\xa5" if c.video_port is not None else b"\x88\x90\xa5"
-        q931 = b"\x08\x02" + c.call_ref.to_bytes(2, "big") + b"\x05\x04\x03" + bearer + b"\x28\x07VKS MCU\x7e" + (len(body) + 1).to_bytes(2, "big") + b"\x05" + body
+        called = b""
+        if c.target_alias:
+            # Q.931 Called party number: без него шлюз TrueConf отдаёт
+            # автоответчик вместо конференции, даже при H.323 alias.
+            encoded_alias = c.target_alias.encode("ascii", "ignore")[:32]
+            called = b"\x70" + bytes([len(encoded_alias) + 1]) + b"\x80" + encoded_alias
+        q931 = b"\x08\x02" + c.call_ref.to_bytes(2, "big") + b"\x05\x04\x03" + bearer + called + b"\x28\x07VKS MCU\x7e" + (len(body) + 1).to_bytes(2, "big") + b"\x05" + body
         self.signal.sendall(tpkt(q931))
         self.wire("sent", "q931", q931, name="setup")
 

@@ -38,3 +38,17 @@
 ```text
 cargo test -p vks-server --lib reports_actual_pt → 1 passed
 ```
+
+## H.323-ветка на `078339c+` (2026-10-22)
+
+- `h323:<alias>@<ip>` теперь передаёт alias в H.225 Setup `destinationAddress`
+  и Q.931 Called party number; `;tag=N` в URI отбрасывается из host (уникальные
+  call string для 20 вызовов).
+- Убран отказ по H.264-профилю/level пира: baseline-encoder MCU декодируется
+  high/main; level пира больше не рвёт вызов.
+- Живой прогон: **20/20 H.323 call string** на `h323:Conf_293662065@192.168.1.92`
+  (`;tag=1..20`) → `connected=20`, суммарно `audio_rx=33841`,
+  `audio_tx=34304`, `rejected=0`. Двусторонний G.711 audio идёт.
+- Ограничение: TrueConf H.323-шлюз в этом сценарии отдаёт **audio-only**
+  (`video_rx=0`); SIP-ветка на ту же конференцию даёт H.264 video (см. выше).
+  H.323 video к терминалу Polycom — отдельная проверка (терминал занят SIP).

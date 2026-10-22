@@ -445,6 +445,9 @@ fn parse_alias(uri: &str) -> String {
 fn parse_target(uri: &str) -> CallResult<SocketAddrV4> {
     let address = uri.strip_prefix("h323://").or_else(|| uri.strip_prefix("h323:")).unwrap_or(uri);
     let address = address.rsplit('@').next().unwrap_or(address);
+    // URI-параметры (`;tag=N`) нужны для уникальности call string, но не
+    // являются частью host:port.
+    let address = address.split(';').next().unwrap_or(address);
     let target = if address.contains(':') { address.to_string() } else { format!("{address}:1720") };
     let target = target
         .parse::<SocketAddrV4>()
