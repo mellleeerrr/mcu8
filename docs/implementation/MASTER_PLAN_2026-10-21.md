@@ -365,8 +365,10 @@ Evidence: `docs/progress/evidence/t06b2b/`.
 `oxideav-g7231 =0.0.9` (MIT, pure Rust): PT4 `G723/8000`, 30 мс = 24 B /
 240 сэмплов, MP-MLQ 6.3k энкодер + ACELP 5.3k/MP-MLQ декодер, timestamp +240,
 накопление 240 при 20-мс MCU-тике, inbound `a=ptime:30`, native offer
-`0 8 9 15 4 107 108 109 110 111 101` (без 20-мс ptime). H.323 G723 — T06b-4.
+`0 8 9 15 4 107 108 109 110 111 101` (без 20-мс ptime). H.323 G723 — T06b-4b.
 Evidence: `docs/progress/evidence/t06b2c/`.
+
+**T06b-4b (H.323 native audio matrix) — закрыт `4d59d12`, ревью 9.5/10 APPROVED (independent re-review, frozen commit).** Shared `h323_audio.py` selects symmetric G.722/G.711U/PCMA/G.723.1 by preference, builds TCS entries from one table and gates G.723.1 on `maxAl-sduAudioFrames==1` + no silence suppression; incoming native OLC may adopt a peer-selected codec and reopen the outgoing channel; late/duplicate ACK/rejects ignored, TCS after OLC setup only ACKed, duplicate audio OLC rejected, capabilityDescriptors honored, one-way peers get an explicit two-way error. Rust shares `H323_NATIVE_AUDIO_PTS=[0,4,8,9]`; SIP keeps 15/107–111. 54 Python tests, 16/16 workspace lib green, clippy/fmt clean; live H.323 still blocked by `.132 adaptiveBusy`, G.728 H.323 deferred. Evidence: `docs/progress/evidence/t06b4b/`.
 
 **T06b-4a (H.323 G.722) — закрыт `fd0a000`, ревью 9.5/10 APPROVED (ref-engines); live H.323 ждёт свободный терминал.**
 H.245 TCS: `g722-64k` + `g711Ulaw64k` отдельными записями, видео запись 3;

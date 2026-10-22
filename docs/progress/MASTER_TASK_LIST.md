@@ -111,6 +111,13 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > 160 B/20 мс + timestamp 160, media details sample_rate 16000/clock 8000.
 > Live low-video E2E 233/233, audio TX545/RX361, rejected 0, G722/PT9/16000/8000
 > asserted; 72 SIP + 72 server тестов, workspace clippy/fmt clean. Evidence `docs/progress/evidence/t06b1/`.
+> **T06b-4b (H.323 native audio matrix: PCMA/G.723.1) закрыт `4d59d12`, ревью 9.5/10 APPROVED (independent re-review);**
+> shared `h323_audio.py`, TCS 1 G722/2 G711U/3 G711A/4 G723 + video 5,
+> `[[1,2,3,4],[5]]`, maxAl=1/silence=false gating, per-channel fallback,
+> peer-selected adoption, capabilityDescriptors, TCS freeze, SIP PT15/G726/Opus
+> preserved; 54 Python tests, 16/16 workspace libs, clippy/fmt clean.
+> G.728 H.323 deferred; live H.323 всё ещё `adaptiveBusy`. Evidence `docs/progress/evidence/t06b4b/`.
+>
 > **T06b-4a (H.323 G.722, PT9) закрыт `fd0a000`, ревью 9.5/10 APPROVED (ref-engines);** H.245
 > две audio-capability + видео запись 3; симметричный выбор G722/G711U,
 > OLC/ACK PT9 без dynamic PT, fallback G711U, Rust `(0,0)/(9,9)`, inbound PT9
