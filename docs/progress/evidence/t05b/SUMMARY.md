@@ -47,7 +47,7 @@ sidecar 22/22 OK.
   общего кодека получает port 0. Тест: offer opus 120/vp8 100 → answer
   120/100, audio без vp8, video без opus. Гейты: **1026 passed / 0 failed /
   6 ignored**, clippy/fmt чисто. Регрессионный SIP E2E:
-  `artifacts/e2e-t05b-sfu-high/` — 114/114, page_errors 0, 0 failed.
+  `artifacts/e2e-t05b2b-high/` — 114/114, page_errors 0, 0 failed (после PT rewrite и rejected-m-line).
 - Per-room `b=AS`: `handle_ws_socket` перед `SdpOffer` резолвит
   `conference_settings[room].payload.bitrate` и вызывает
   `SignalingHandler::set_video_bitrate`, env остаётся fallback; тест сеттера
@@ -55,8 +55,15 @@ sidecar 22/22 OK.
 - Caps SFU больше не обещают H.264: браузерный SFU объявляет только VP8
   (H.264 идёт через SIP/H.323-шлюз); H.264/H.265 в browser-leg — только после
   реального forwarding в T06b/T08.
-- Осталось: call_string live proof, peer H.241 clamp, packetization/profile
-  в sidecar, Python CI, live H.323/T07, H.264 SFU forwarding.
+- Ревью 25505fe закрыло B1–B4: per-subscriber rewrite PT на egress
+  (`SfuEngine::set_subscriber_payload_type` + `route_udp_packet`, тест 96/100),
+  rtcp-fb/fmtp привязаны к выбранному PT (тест `a=rtcp-fb:100`), rejected
+  m-line сохраняет fmt из offer (port 0, парсится обратно), env fallback
+  битрейта не затирается (`Option<u32>`), payload адреса из модалки доходит
+  до профиля через `dial_with_contact`.
+- Осталось: call_string live proof с реальным абонентом, peer H.241
+  parse/clamp, packetization/profile в sidecar, live H.323/T07,
+  H.264 SFU forwarding, WS-интеграционный тест per-room `b=AS`.
 
 ## Ограничения / следующие шаги
 - SFU: нет per-room инъекции (env глобальный), H.264 отсутствует в

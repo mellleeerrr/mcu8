@@ -41,7 +41,7 @@
 > до дозвона, типизированный `NoCommonCodec`, `supported` в API, live
 > 114/114 checks ×2, audio TX/RX >0, rejected 0. T05b-1 закрыт **9.5/10 APPROVED**: H.323 H.241 + per-media SFU `b=AS`
 (`7b05905`, `68da633`, `5ae9924`, `c26e185`), evidence
-`docs/progress/evidence/t05b/`. Открыт **T05b-2**: live H.323 (T07), per-room
+`docs/progress/evidence/t05b/`. Открыт **T05b-2 (SFU-часть закрыта 25505fe, live/T07 открыт)**: live H.323 (T07), per-room
 SFU profile, RTP-map/PT-reuse/H.264, peer H.241 clamp, packetization/profile,
 call_string live proof, Python CI. Далее T07/T06b.
 >
