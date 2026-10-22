@@ -13,6 +13,7 @@ pub struct UasRequest {
     pub request_uri: String,
     pub call_id: String,
     pub cseq: u32,
+    pub cseq_method: String,
     pub from: String,
     pub from_tag: Option<String>,
     pub to: String,
@@ -31,6 +32,9 @@ pub struct InboundMedia {
     pub remote_ip: String,
     pub remote_audio_port: u16,
     pub remote_video_port: Option<u16>,
+    /// В оффере была секция video (даже с портом 0): answer обязан
+    /// сохранить число m-line.
+    pub video_offered: bool,
 }
 
 impl UasRequest {
@@ -53,6 +57,7 @@ impl UasRequest {
             request_uri,
             call_id: String::new(),
             cseq: 0,
+            cseq_method: String::new(),
             from: String::new(),
             from_tag: None,
             to: String::new(),
@@ -72,10 +77,11 @@ impl UasRequest {
                 "cseq" => {
                     let mut cseq = value.split_whitespace();
                     request.cseq = cseq.next()?.parse().ok()?;
+                    request.cseq_method = cseq.next()?.to_ascii_uppercase();
                 }
                 "from" | "f" => request.from = value.to_string(),
                 "to" | "t" => request.to = value.to_string(),
-                "via" | "v" => request.via = value.to_string(),
+                "via" | "v" if request.via.is_empty() => request.via = value.to_string(),
                 "contact" | "m" => request.contact = Some(value.to_string()),
                 "require" => request.require = Some(value.to_string()),
                 "content-length" | "l" => content_length = value.parse::<usize>().ok(),
@@ -156,7 +162,7 @@ fn hex(byte: u8) -> Option<u8> {
 
 /// Выбирает PCMU/PCMA и, если есть, H.264 из SDP-оффера.
 pub fn negotiate(offer: &str) -> Option<InboundMedia> {
-    let (session_ip, _) = media_ip(offer)?;
+    let session_ip = media_ip(offer)?;
     let audio = media_section(offer, "audio")?;
     if media_proto(audio) != Some("RTP/AVP") {
         return None;
@@ -172,7 +178,9 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
     } else {
         return None;
     };
-    let video = media_section(offer, "video")
+    let video_section = media_section(offer, "video");
+    let video_offered = video_section.is_some();
+    let video = video_section
         .filter(|section| media_proto(section) == Some("RTP/AVP"))
         .filter(|section| media_port(section).is_some_and(|port| port > 0));
     let video_payload_type =
@@ -181,9 +189,10 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
     Some(InboundMedia {
         audio_payload_type,
         video_payload_type,
-        remote_ip: session_ip,
+        remote_ip: section_ip(audio, &session_ip),
         remote_audio_port: audio_port,
         remote_video_port,
+        video_offered,
     })
 }
 
@@ -205,7 +214,7 @@ pub fn build_answer(
         sdp.push_str("a=rtpmap:8 PCMA/8000\r\n");
     }
     sdp.push_str("a=ptime:20\r\n");
-    if media.remote_video_port.is_some() {
+    if media.video_offered {
         if let (Some(port), Some(payload)) = (video_port, media.video_payload_type) {
             sdp.push_str(&format!(
                 "m=video {port} RTP/AVP {payload}\r\na=rtpmap:{payload} H264/90000\r\na=fmtp:{payload} packetization-mode=1;profile-level-id=42e01f\r\n"
@@ -303,9 +312,17 @@ fn dynamic_payload(section: &str, codec: &str) -> Option<u8> {
     })
 }
 
-fn media_ip(sdp: &str) -> Option<(String, ())> {
+fn media_ip(sdp: &str) -> Option<String> {
     let line = sdp.lines().find(|line| line.starts_with("c=IN IP4 "))?;
-    Some((line.trim_start_matches("c=IN IP4 ").trim().to_string(), ()))
+    Some(line.trim_start_matches("c=IN IP4 ").trim().to_string())
+}
+
+fn section_ip(section: &str, fallback: &str) -> String {
+    section
+        .lines()
+        .find_map(|line| line.strip_prefix("c=IN IP4 "))
+        .map(|value| value.trim().to_string())
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 #[cfg(test)]

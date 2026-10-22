@@ -35,6 +35,7 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
     } else {
         RtpSource::new(target, session.audio_payload_type)
     };
+    let mut egress = target;
     let mut queue = std::collections::VecDeque::<f32>::with_capacity(960);
     let mut dtmf = std::collections::VecDeque::<u8>::new();
     let mut dtmf_active: Option<(u8, usize, u32)> = None;
@@ -84,6 +85,9 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                     }
                     continue;
                 };
+                if session.source_latch {
+                    egress = source;
+                }
                 if packet.payload.len() > 480 {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed); continue;
                 }
@@ -118,7 +122,7 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 sequence = sequence.wrapping_add(1);
                 let volume = session.controls.volume_rx.load(Relaxed);
                 for (encoded, sample) in packet[12..].iter_mut().zip(output) { *encoded = encode_sample(session.audio_payload_type, gain(sample, volume)); }
-                if let Ok(count) = session.rtp_socket.send_to(&packet, target).await {
+                if let Ok(count) = session.rtp_socket.send_to(&packet, egress).await {
                     session.media_stats.audio_tx_packets.fetch_add(1, Relaxed); session.media_stats.audio_tx_bytes.fetch_add(count as u64, Relaxed);
                 }
                 if let Some(payload_type) = session.dtmf_payload_type {
@@ -131,7 +135,7 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                             vks_gateway_sip::write_rtp_header(&mut event_packet[..12], payload_type, sequence, started, ssrc, step == 0);
                             sequence = sequence.wrapping_add(1); event_packet[12] = event; event_packet[13] = if step >= 2 { 0x8a } else { 0x0a };
                             event_packet[14..].copy_from_slice(&duration.to_be_bytes());
-                            let _ = session.rtp_socket.send_to(&event_packet, target).await;
+                            let _ = session.rtp_socket.send_to(&event_packet, egress).await;
                             if step == 4 { dtmf_active = None; dtmf_gap = 2; } else { dtmf_active = Some((event, step + 1, started)); }
                         }
                     }
@@ -140,7 +144,7 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 if last_rtcp.elapsed() >= std::time::Duration::from_secs(5) {
                     if let (Some(socket), Some(port)) = (&session.rtcp_socket, target.port().checked_add(1)) {
                         let report = rtcp_sender_report(ssrc, timestamp, session.media_stats.audio_tx_packets.load(Relaxed), session.media_stats.audio_tx_bytes.load(Relaxed));
-                        let _ = socket.send_to(&report, std::net::SocketAddr::new(target.ip(), port)).await;
+                        let _ = socket.send_to(&report, std::net::SocketAddr::new(egress.ip(), port)).await;
                     }
                     last_rtcp = std::time::Instant::now();
                 }

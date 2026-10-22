@@ -44,3 +44,18 @@ Q.931/H.245/RAS), per-m `c=`, симметричный RTP-latch для NAT (P2,
   с фиксацией; video-failure → unbridge + audio-only downgrade.
 - Добавлен автоматический сетевой тест `inbound_sip_uas_answers_with_to_tag_and_cleans_up_on_bye`
   (180 tag, 200, spoofed BYE 481, CANCEL-after-200, BYE cleanup).
+
+## Второй проход (по ревью `3efc486`)
+
+- Reaper теперь **шлёт BYE** вызывающему при admin hangup и по media-timeout,
+  затем снимает participant/registry; live: DELETE абонента → терминал получает
+  `BYE sip:…`, `abonents=0`.
+- Media-watchdog после ACK: `media_bridge_dead` по `last_rx_ms`/`audio_codec_running`,
+  а не только no-ACK таймер.
+- Audio-latch обновляет и ingress `RtpSource.target`, и **egress** RTP/RTCP
+  (двусторонний NAT-порт); per-m `c=IN IP4` учитывается; `c=0.0.0.0` → 488.
+- `video_offered` сохраняет video m-line (`m=video 0`) даже при port 0/несовместимом кодеках.
+- История входящих: `record_incoming_call`; media_details с clock/PT/answer-портами.
+- CANCEL: известный диалог → 200 (не рвёт), неизвестный → 481; ACK/BYE требуют
+  правильный CSeq-метод; парсер берёт первый Via.
+- Тест admin hangup: `inbound_sip_uas_admin_hangup_sends_bye_and_reaps_call`.
