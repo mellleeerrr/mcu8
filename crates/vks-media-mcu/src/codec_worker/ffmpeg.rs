@@ -108,7 +108,13 @@ impl FfmpegCapabilities {
     pub async fn probe(ffmpeg_path: &std::path::Path) -> Result<Self, WorkerError> {
         let version_out = tokio::time::timeout(
             Duration::from_secs(2),
-            Command::new(ffmpeg_path).arg("-hide_banner").arg("-version").output(),
+            Command::new(ffmpeg_path)
+                .arg("-hide_banner")
+                .arg("-version")
+                .env_clear()
+                .env("LC_ALL", "C")
+                .env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into()))
+                .output(),
         )
         .await
         .map_err(|_| WorkerError::Timeout(Duration::from_secs(2)))?
@@ -159,7 +165,19 @@ impl FfmpegCapabilities {
 }
 
 async fn list_codecs(ffmpeg: &std::path::Path, flag: &str) -> Result<BTreeSet<String>, WorkerError> {
-    let output = Command::new(ffmpeg).arg("-hide_banner").arg(flag).output().await.map_err(WorkerError::Spawn)?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(2),
+        Command::new(ffmpeg)
+            .arg("-hide_banner")
+            .arg(flag)
+            .env_clear()
+            .env("LC_ALL", "C")
+            .env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into()))
+            .output(),
+    )
+    .await
+    .map_err(|_| WorkerError::Timeout(Duration::from_secs(2)))?
+    .map_err(WorkerError::Spawn)?;
     if !output.status.success() {
         return Err(WorkerError::Unavailable(format!("{} {flag} failed", ffmpeg.display())));
     }
@@ -192,12 +210,36 @@ pub struct FfmpegWorker {
     stdin: Option<ChildStdin>,
     last_stderr: Arc<Mutex<String>>,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    poisoned: bool,
     pub stats: Arc<WorkerStats>,
 }
 
 impl FfmpegWorker {
-    /// Spawns a worker after validating the slot and host support.
+    /// Spawns a worker after validating codec-specific slot ranges.
+    ///
+    /// This does not consult host FFmpeg encoders; use [`Self::spawn_checked`]
+    /// (or [`WorkerPool`] with capabilities attached) when availability must be
+    /// enforced before the first frame.
     pub async fn spawn(mode: WorkerMode, slot: SlotConfig, config: WorkerConfig) -> Result<Self, WorkerError> {
+        Self::spawn_internal(mode, slot, config, None).await
+    }
+
+    /// Spawns a worker and rejects a mode the probed FFmpeg cannot run.
+    pub async fn spawn_checked(
+        mode: WorkerMode,
+        slot: SlotConfig,
+        config: WorkerConfig,
+        capabilities: &FfmpegCapabilities,
+    ) -> Result<Self, WorkerError> {
+        Self::spawn_internal(mode, slot, config, Some(capabilities)).await
+    }
+
+    async fn spawn_internal(
+        mode: WorkerMode,
+        slot: SlotConfig,
+        config: WorkerConfig,
+        capabilities: Option<&FfmpegCapabilities>,
+    ) -> Result<Self, WorkerError> {
         if let WorkerMode::VideoEncode(codec) | WorkerMode::VideoDecode(codec) = mode {
             slot.validate_for(codec)?;
         } else {
@@ -205,6 +247,11 @@ impl FfmpegWorker {
         }
         if matches!(mode, WorkerMode::AudioEncode(AudioCodec::G729)) {
             return Err(WorkerError::Unavailable("FFmpeg has no G.729 encoder".into()));
+        }
+        if let Some(capabilities) = capabilities {
+            if !capabilities.supports(mode) {
+                return Err(WorkerError::Unavailable(format!("{mode:?} is not supported by this FFmpeg")));
+            }
         }
         let last_stderr = Arc::new(Mutex::new(String::new()));
         let (child, stdin) = spawn_child(mode, slot, &config, last_stderr.clone()).await?;
@@ -216,6 +263,7 @@ impl FfmpegWorker {
             stdin: Some(stdin),
             last_stderr,
             permit: None,
+            poisoned: false,
             stats: Arc::new(WorkerStats::default()),
         })
     }
@@ -249,8 +297,51 @@ impl FfmpegWorker {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// Whether a partial read/write desynchronised the pipe. A poisoned worker
+    /// must be [`Self::restart`]ed before further frames are exchanged.
+    #[must_use]
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    fn require_audio_encode(&self) -> Result<(), WorkerError> {
+        match self.mode {
+            WorkerMode::AudioEncode(_) => Ok(()),
+            other => Err(WorkerError::InvalidConfig(format!("write_audio requires AudioEncode, got {other:?}"))),
+        }
+    }
+
+    fn require_audio_decode(&self) -> Result<(), WorkerError> {
+        match self.mode {
+            WorkerMode::AudioDecode(_) => Ok(()),
+            other => Err(WorkerError::InvalidConfig(format!("read_audio requires AudioDecode, got {other:?}"))),
+        }
+    }
+
+    fn require_video_encode(&self) -> Result<(), WorkerError> {
+        match self.mode {
+            WorkerMode::VideoEncode(_) => Ok(()),
+            other => Err(WorkerError::InvalidConfig(format!("write_video requires VideoEncode, got {other:?}"))),
+        }
+    }
+
+    fn require_video_decode(&self) -> Result<(), WorkerError> {
+        match self.mode {
+            WorkerMode::VideoDecode(_) => Ok(()),
+            other => Err(WorkerError::InvalidConfig(format!("read_video requires VideoDecode, got {other:?}"))),
+        }
+    }
+
+    fn require_encoded_input(&self) -> Result<(), WorkerError> {
+        match self.mode {
+            WorkerMode::AudioDecode(_) | WorkerMode::VideoDecode(_) => Ok(()),
+            other => Err(WorkerError::InvalidConfig(format!("write_encoded requires a decoder, got {other:?}"))),
+        }
+    }
+
     /// Writes one 20 ms mono PCM frame.
     pub async fn write_audio(&mut self, pcm: &[i16]) -> Result<(), WorkerError> {
+        self.require_audio_encode()?;
         if pcm.len() != super::AUDIO_FRAME_SAMPLES {
             return Err(WorkerError::InvalidConfig(format!(
                 "audio frame must be {} samples, got {}",
@@ -274,12 +365,21 @@ impl FfmpegWorker {
 
     /// Reads exactly `samples` mono `s16le` PCM samples.
     pub async fn read_audio_samples(&mut self, samples: usize) -> Result<Vec<i16>, WorkerError> {
+        self.require_audio_decode()?;
         if samples == 0 || samples > super::WORKER_SAMPLE_RATE as usize {
             return Err(WorkerError::InvalidConfig(format!("audio block size {samples} outside 1..=48000")));
         }
         let bytes = self.read_exact(samples * 2).await?;
         self.stats.frames_out.fetch_add(1, Ordering::Relaxed);
         Ok(bytes.chunks_exact(2).map(|pair| i16::from_le_bytes([pair[0], pair[1]])).collect())
+    }
+
+    /// Writes raw encoded input bytes to a decoder worker (RTP payload,
+    /// ADTS/LOAS frame, or a video bitstream fragment). No framing is added;
+    /// the caller must feed complete codec frames for deterministic output.
+    pub async fn write_encoded(&mut self, bytes: &[u8]) -> Result<(), WorkerError> {
+        self.require_encoded_input()?;
+        self.write_all(bytes).await
     }
 
     /// Reads exactly one encoded audio frame from an encoder worker.
@@ -334,6 +434,7 @@ impl FfmpegWorker {
 
     /// Writes one `yuv420p` frame of the slot resolution.
     pub async fn write_video(&mut self, frame: &[u8]) -> Result<(), WorkerError> {
+        self.require_video_encode()?;
         let expected = self.video_frame_bytes()?;
         if frame.len() != expected {
             return Err(WorkerError::InvalidConfig(format!(
@@ -348,6 +449,7 @@ impl FfmpegWorker {
 
     /// Reads one `yuv420p` frame of the slot resolution.
     pub async fn read_video(&mut self) -> Result<Vec<u8>, WorkerError> {
+        self.require_video_decode()?;
         let expected = self.video_frame_bytes()?;
         let frame = self.read_exact(expected).await?;
         self.stats.frames_out.fetch_add(1, Ordering::Relaxed);
@@ -376,10 +478,13 @@ impl FfmpegWorker {
                 self.stats.bytes_in.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 Ok(())
             }
-            Ok(Err(error)) => Err(self.classify_io(error)),
+            Ok(Err(error)) => {
+                let error = self.classify_io(error);
+                Err(self.poison(error))
+            }
             Err(_) => {
                 self.stats.timeouts.fetch_add(1, Ordering::Relaxed);
-                Err(WorkerError::Timeout(self.config.io_timeout))
+                Err(self.poison(WorkerError::Timeout(self.config.io_timeout)))
             }
         }
     }
@@ -400,13 +505,17 @@ impl FfmpegWorker {
             let read = tokio::time::timeout(self.config.io_timeout, stdout.read(&mut buffer[filled..])).await;
             match read {
                 Ok(Ok(0)) => {
-                    return Err(WorkerError::Exited(self.exited_reason()));
+                    let error = WorkerError::Exited(self.exited_reason());
+                    return Err(self.poison(error));
                 }
                 Ok(Ok(count)) => filled += count,
-                Ok(Err(error)) => return Err(self.classify_io(error)),
+                Ok(Err(error)) => {
+                    let error = self.classify_io(error);
+                    return Err(self.poison(error));
+                }
                 Err(_) => {
                     self.stats.timeouts.fetch_add(1, Ordering::Relaxed);
-                    return Err(WorkerError::Timeout(self.config.io_timeout));
+                    return Err(self.poison(WorkerError::Timeout(self.config.io_timeout)));
                 }
             }
         }
@@ -436,10 +545,13 @@ impl FfmpegWorker {
                     }
                     output.extend_from_slice(&chunk[..count]);
                 }
-                Ok(Err(error)) => return Err(self.classify_io(error)),
+                Ok(Err(error)) => {
+                    let error = self.classify_io(error);
+                    return Err(self.poison(error));
+                }
                 Err(_) => {
                     self.stats.timeouts.fetch_add(1, Ordering::Relaxed);
-                    return Err(WorkerError::Timeout(self.config.io_timeout));
+                    return Err(self.poison(WorkerError::Timeout(self.config.io_timeout)));
                 }
             }
         }
@@ -458,18 +570,39 @@ impl FfmpegWorker {
         }
     }
 
-    /// Kills the child immediately (room teardown / fault injection).
+    /// Kills the child process group immediately (room teardown / fault
+    /// injection). FFmpeg has no children today, but the group is killed so a
+    /// future helper process cannot outlive the worker.
     pub fn kill(&mut self) {
+        if let Some(pid) = self.child.id() {
+            let _ = std::process::Command::new("kill").arg("-KILL").arg("--").arg(format!("-{pid}")).status();
+        }
         let _ = self.child.start_kill();
     }
 
-    /// Restarts a dead child with the same mode and slot settings.
+    /// Marks the worker desynchronised and kills the child. The caller must
+    /// `restart()` before reusing it.
+    fn poison(&mut self, error: WorkerError) -> WorkerError {
+        self.poisoned = true;
+        self.stdin = None;
+        self.kill();
+        error
+    }
+
+    /// Restarts a dead or poisoned child with the same mode and slot settings.
     pub async fn restart(&mut self) -> Result<(), WorkerError> {
         self.kill();
-        let _ = self.child.wait().await;
+        if tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await.is_err() {
+            let _ = self.child.start_kill();
+        }
+        self.stdin = None;
+        if let Ok(mut stderr) = self.last_stderr.lock() {
+            stderr.clear();
+        }
         let (child, stdin) = spawn_child(self.mode, self.slot, &self.config, self.last_stderr.clone()).await?;
         self.child = child;
         self.stdin = Some(stdin);
+        self.poisoned = false;
         self.stats.restarts.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -518,13 +651,23 @@ impl Drop for FfmpegWorker {
 pub struct WorkerPool {
     semaphore: Arc<tokio::sync::Semaphore>,
     max_workers: usize,
+    capabilities: Option<Arc<FfmpegCapabilities>>,
 }
 
 impl WorkerPool {
     /// Creates a pool capped at `max_workers` concurrent children.
     pub fn new(max_workers: usize) -> Self {
+        Self::with_capabilities(max_workers, None)
+    }
+
+    /// Creates a pool that rejects modes the probed FFmpeg cannot run.
+    pub fn with_capabilities(max_workers: usize, capabilities: Option<FfmpegCapabilities>) -> Self {
         let max_workers = max_workers.max(1);
-        Self { semaphore: Arc::new(tokio::sync::Semaphore::new(max_workers)), max_workers }
+        Self {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(max_workers)),
+            max_workers,
+            capabilities: capabilities.map(Arc::new),
+        }
     }
 
     /// Configured process cap.
@@ -552,7 +695,10 @@ impl WorkerPool {
             .acquire_owned()
             .await
             .map_err(|_| WorkerError::Unavailable("worker pool closed".into()))?;
-        let mut worker = FfmpegWorker::spawn(mode, slot, config).await?;
+        let mut worker = match self.capabilities.as_deref() {
+            Some(capabilities) => FfmpegWorker::spawn_checked(mode, slot, config, capabilities).await?,
+            None => FfmpegWorker::spawn(mode, slot, config).await?,
+        };
         worker.permit = Some(permit);
         Ok(worker)
     }
@@ -570,7 +716,10 @@ impl WorkerPool {
             .clone()
             .try_acquire_owned()
             .map_err(|_| WorkerError::Unavailable("codec worker pool is full".into()))?;
-        let mut worker = FfmpegWorker::spawn(mode, slot, config).await?;
+        let mut worker = match self.capabilities.as_deref() {
+            Some(capabilities) => FfmpegWorker::spawn_checked(mode, slot, config, capabilities).await?,
+            None => FfmpegWorker::spawn(mode, slot, config).await?,
+        };
         worker.permit = Some(permit);
         Ok(worker)
     }
@@ -660,7 +809,16 @@ fn ffmpeg_args(mode: WorkerMode, slot: SlotConfig) -> Vec<String> {
             // Native AAC only; G.729 encode is rejected before spawn.
             args.extend(["-f", "s16le", "-ar", "48000", "-ac", "1", "-i", "pipe:0"].map(str::to_string));
             args.extend(
-                ["-c:a", encoder, "-b:a", "64000", "-f", codec.ffmpeg_container(), "pipe:1"].map(str::to_string),
+                [
+                    "-c:a",
+                    encoder,
+                    "-b:a",
+                    &slot.audio_bitrate_bps.to_string(),
+                    "-f",
+                    codec.ffmpeg_container(),
+                    "pipe:1",
+                ]
+                .map(str::to_string),
             );
         }
         WorkerMode::VideoDecode(codec) => {
@@ -669,6 +827,8 @@ fn ffmpeg_args(mode: WorkerMode, slot: SlotConfig) -> Vec<String> {
                 [
                     "-vf",
                     &format!("scale={}:{}", slot.width, slot.height),
+                    "-fps_mode",
+                    "passthrough",
                     "-f",
                     "rawvideo",
                     "-pix_fmt",
@@ -700,7 +860,19 @@ fn ffmpeg_args(mode: WorkerMode, slot: SlotConfig) -> Vec<String> {
                     .map(str::to_string),
             );
             if codec == VideoCodec::H265 {
-                args.extend(["-preset", "ultrafast", "-x265-params", "log-level=error"].map(str::to_string));
+                // Real-time: no B-frames/lookahead, otherwise the first frame
+                // is 5+ frames late and encode/decode 1-in/1-out desyncs.
+                args.extend(
+                    [
+                        "-preset",
+                        "ultrafast",
+                        "-tune",
+                        "zerolatency",
+                        "-x265-params",
+                        "log-level=error:bframes=0:rc-lookahead=0:scenecut=0",
+                    ]
+                    .map(str::to_string),
+                );
             }
             args.extend(["-f", codec.ffmpeg_name(), "pipe:1"].map(str::to_string));
         }
@@ -779,8 +951,8 @@ mod tests {
         let mut decoder =
             FfmpegWorker::spawn(WorkerMode::AudioDecode(AudioCodec::Aac), slot, config).await.expect("decoder");
         // ADTS output can be written as one blob, then decoded to EOF.
-        decoder.stdin.as_mut().unwrap().write_all(&first).await.expect("write adts header frame");
-        decoder.stdin.as_mut().unwrap().write_all(&encoded).await.expect("write adts tail");
+        decoder.write_encoded(&first).await.expect("write adts header frame");
+        decoder.write_encoded(&encoded).await.expect("write adts tail");
         decoder.finish_input().await;
         let decoded = decoder.read_to_end(1 << 24).await.expect("decoded pcm");
         assert!(decoded.len() >= super::super::AUDIO_FRAME_BYTES, "decoded {} bytes", decoded.len());
@@ -841,8 +1013,8 @@ mod tests {
 
         let mut decoder =
             FfmpegWorker::spawn(WorkerMode::AudioDecode(AudioCodec::AacLatm), slot, config).await.expect("decoder");
-        decoder.stdin.as_mut().unwrap().write_all(&first).await.expect("latm");
-        decoder.stdin.as_mut().unwrap().write_all(&second).await.expect("latm");
+        decoder.write_encoded(&first).await.expect("latm");
+        decoder.write_encoded(&second).await.expect("latm");
         decoder.finish_input().await;
         let decoded = decoder.read_to_end(1 << 24).await.expect("pcm");
         assert!(decoded.len() >= 1024 * 2, "LATM decoded {} bytes", decoded.len());
@@ -856,7 +1028,8 @@ mod tests {
         for (codec, width, height) in
             [(VideoCodec::H261, 176, 144), (VideoCodec::H263, 176, 144), (VideoCodec::H265, 176, 144)]
         {
-            let slot = SlotConfig { bitrate_bps: 200_000, width, height, fps: 10, max_queue: 4 };
+            let slot =
+                SlotConfig { bitrate_bps: 200_000, width, height, fps: 10, audio_bitrate_bps: 64_000, max_queue: 4 };
             let config = WorkerConfig::default();
             let mut encoder = match FfmpegWorker::spawn(WorkerMode::VideoEncode(codec), slot, config.clone()).await {
                 Ok(worker) => worker,
@@ -874,7 +1047,7 @@ mod tests {
             let mut decoder = FfmpegWorker::spawn(WorkerMode::VideoDecode(codec), slot, config)
                 .await
                 .unwrap_or_else(|error| panic!("{codec:?} decoder: {error}"));
-            decoder.stdin.as_mut().unwrap().write_all(&bitstream).await.expect("write bitstream");
+            decoder.write_encoded(&bitstream).await.expect("write bitstream");
             decoder.finish_input().await;
             let frames = decoder.read_to_end(4 << 20).await.expect("decoded frames");
             let expected = usize::from(width) * usize::from(height) * 3 / 2;
@@ -887,7 +1060,14 @@ mod tests {
         if !ffmpeg_available() {
             return;
         }
-        let slot = SlotConfig { bitrate_bps: 200_000, width: 176, height: 144, fps: 10, max_queue: 4 };
+        let slot = SlotConfig {
+            bitrate_bps: 200_000,
+            width: 176,
+            height: 144,
+            fps: 10,
+            audio_bitrate_bps: 64_000,
+            max_queue: 4,
+        };
         let pool = WorkerPool::new(1);
         let first = pool
             .spawn(WorkerMode::VideoDecode(VideoCodec::H261), slot, WorkerConfig::default())
@@ -905,7 +1085,14 @@ mod tests {
         if !ffmpeg_available() {
             return;
         }
-        let slot = SlotConfig { bitrate_bps: 200_000, width: 176, height: 144, fps: 10, max_queue: 4 };
+        let slot = SlotConfig {
+            bitrate_bps: 200_000,
+            width: 176,
+            height: 144,
+            fps: 10,
+            audio_bitrate_bps: 64_000,
+            max_queue: 4,
+        };
         let mut worker = FfmpegWorker::spawn(
             WorkerMode::VideoDecode(VideoCodec::H261),
             slot,
@@ -925,11 +1112,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wrong_mode_calls_fail_fast_without_touching_the_pipe() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let slot = SlotConfig {
+            bitrate_bps: 200_000,
+            width: 176,
+            height: 144,
+            fps: 10,
+            audio_bitrate_bps: 64_000,
+            max_queue: 4,
+        };
+        let mut encoder = FfmpegWorker::spawn(WorkerMode::VideoEncode(VideoCodec::H261), slot, WorkerConfig::default())
+            .await
+            .expect("encoder");
+        let started = Instant::now();
+        assert!(matches!(encoder.read_video().await, Err(WorkerError::InvalidConfig(_))));
+        assert!(matches!(encoder.write_encoded(b"x").await, Err(WorkerError::InvalidConfig(_))));
+        assert!(started.elapsed() < Duration::from_millis(200), "mode guards must not block");
+        assert!(!encoder.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn read_timeout_poisons_worker_and_restart_recovers() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let slot = SlotConfig {
+            bitrate_bps: 200_000,
+            width: 176,
+            height: 144,
+            fps: 10,
+            audio_bitrate_bps: 64_000,
+            max_queue: 4,
+        };
+        let mut worker = FfmpegWorker::spawn(
+            WorkerMode::VideoDecode(VideoCodec::H261),
+            slot,
+            WorkerConfig { io_timeout: Duration::from_millis(150), ..WorkerConfig::default() },
+        )
+        .await
+        .expect("worker");
+        worker.write_encoded(&[0u8; 32]).await.expect("partial input");
+        let error = worker.read_video().await.unwrap_err();
+        assert!(matches!(error, WorkerError::Timeout(_)), "{error:?}");
+        assert!(worker.is_poisoned(), "partial read must poison the pipe");
+        worker.restart().await.expect("restart");
+        assert!(!worker.is_poisoned());
+        assert!(worker.is_running());
+    }
+
+    #[tokio::test]
+    async fn g729_decoder_produces_pcm_without_encoder() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let slot = SlotConfig {
+            bitrate_bps: 200_000,
+            width: 176,
+            height: 144,
+            fps: 10,
+            audio_bitrate_bps: 64_000,
+            max_queue: 4,
+        };
+        let mut decoder = FfmpegWorker::spawn(WorkerMode::AudioDecode(AudioCodec::G729), slot, WorkerConfig::default())
+            .await
+            .expect("g729 decoder");
+        // FFmpeg's raw demuxer needs a couple of KiB before it emits frames.
+        decoder.write_encoded(&vec![0u8; 1600]).await.expect("g729 frames");
+        let pcm = decoder.read_audio_samples(960).await.expect("decoded pcm");
+        assert_eq!(pcm.len(), 960);
+        assert!(!decoder.is_poisoned());
+    }
+
+    #[tokio::test]
     async fn malformed_payload_fails_closed_and_restarts() {
         if !ffmpeg_available() {
             return;
         }
-        let slot = SlotConfig { bitrate_bps: 200_000, width: 176, height: 144, fps: 10, max_queue: 4 };
+        let slot = SlotConfig {
+            bitrate_bps: 200_000,
+            width: 176,
+            height: 144,
+            fps: 10,
+            audio_bitrate_bps: 64_000,
+            max_queue: 4,
+        };
         let mut worker = FfmpegWorker::spawn(
             WorkerMode::VideoDecode(VideoCodec::H261),
             slot,
@@ -938,7 +1207,7 @@ mod tests {
         .await
         .expect("worker");
         let started = Instant::now();
-        worker.stdin.as_mut().unwrap().write_all(&[0xff; 64]).await.expect("write junk");
+        worker.write_encoded(&[0xff; 64]).await.expect("write junk");
         let result = worker.read_video().await;
         assert!(result.is_err(), "garbage must not yield a frame");
         assert!(started.elapsed() < Duration::from_secs(3), "garbage handling must not hang");
@@ -948,7 +1217,14 @@ mod tests {
 
     #[tokio::test]
     async fn video_frame_size_validation_is_exact() {
-        let slot = SlotConfig { bitrate_bps: 200_000, width: 176, height: 144, fps: 10, max_queue: 4 };
+        let slot = SlotConfig {
+            bitrate_bps: 200_000,
+            width: 176,
+            height: 144,
+            fps: 10,
+            audio_bitrate_bps: 64_000,
+            max_queue: 4,
+        };
         // Spawning needs ffmpeg; validation itself is checked without it.
         let expected = usize::from(slot.width) * usize::from(slot.height) * 3 / 2;
         assert_eq!(expected, 38_016);

@@ -122,10 +122,10 @@ impl VideoCodec {
         match self {
             // H.261 defines exactly QCIF and CIF.
             Self::H261 => matches!((width, height), (176, 144) | (352, 288)),
-            // H.263 supports sub-QCIF..CIF; the worker allows the common range.
-            Self::H263 => width <= 352 && height <= 288,
-            // HEVC has no mandatory small sizes; cap to 1080p for the MCU.
-            Self::H265 => width <= 1920 && height <= 1080,
+            // FFmpeg's H.263 encoder accepts exactly these picture formats.
+            Self::H263 => matches!((width, height), (128, 96) | (176, 144) | (352, 288) | (704, 576) | (1408, 1152)),
+            // HEVC/x265 requires at least 16x16 macroblock granularity.
+            Self::H265 => width >= 16 && height >= 16 && width <= 1920 && height <= 1080,
         }
     }
 }
@@ -142,7 +142,10 @@ pub struct SlotConfig {
     pub height: u16,
     /// Target video frame rate.
     pub fps: u8,
-    /// Maximum queued input frames per worker before backpressure.
+    /// AAC target bitrate (audio workers only).
+    pub audio_bitrate_bps: u32,
+    /// Advisory queue depth for the caller's bounded channel (the worker
+    /// itself is a synchronous pipe and does not queue frames).
     pub max_queue: usize,
 }
 
@@ -150,7 +153,7 @@ impl SlotConfig {
     /// A safe 720p30 default.
     #[must_use]
     pub const fn default_720p() -> Self {
-        Self { bitrate_bps: 1_500_000, width: 1280, height: 720, fps: 30, max_queue: 30 }
+        Self { bitrate_bps: 1_500_000, width: 1280, height: 720, fps: 30, audio_bitrate_bps: 64_000, max_queue: 30 }
     }
 
     /// Validates ranges shared by all codecs.
@@ -163,6 +166,12 @@ impl SlotConfig {
         }
         if self.max_queue == 0 {
             return Err(WorkerError::InvalidConfig("max_queue must be positive".into()));
+        }
+        if !(6_000..=256_000).contains(&self.audio_bitrate_bps) {
+            return Err(WorkerError::InvalidConfig(format!(
+                "audio bitrate {} outside 6k..=256k",
+                self.audio_bitrate_bps
+            )));
         }
         if self.width == 0 || self.height == 0 {
             return Err(WorkerError::InvalidConfig("width/height must be positive".into()));
@@ -210,7 +219,16 @@ mod tests {
         slot.width = 352;
         slot.height = 288;
         assert!(slot.validate_for(VideoCodec::H261).is_ok());
-        slot.width = 353;
+        slot.width = 320;
+        slot.height = 240;
+        assert!(slot.validate_for(VideoCodec::H263).is_err(), "FFmpeg rejects 320x240 H.263");
+        slot.width = 350;
+        slot.height = 286;
         assert!(slot.validate_for(VideoCodec::H263).is_err());
+        slot.width = 128;
+        slot.height = 96;
+        assert!(slot.validate_for(VideoCodec::H263).is_ok());
+        assert!(!VideoCodec::H265.supports_size(8, 8));
+        assert!(VideoCodec::H265.supports_size(16, 16));
     }
 }

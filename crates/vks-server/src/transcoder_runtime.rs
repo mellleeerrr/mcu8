@@ -60,8 +60,8 @@ pub async fn init() -> Result<(), String> {
     if let Some(capabilities) = &capabilities {
         publish_support(capabilities);
     }
+    let _ = POOL.set(WorkerPool::with_capabilities(max_workers, capabilities.clone()));
     let _ = CAPABILITIES.set(capabilities);
-    let _ = POOL.set(WorkerPool::new(max_workers));
     vks_common::metrics::CODEC_WORKER_POOL_SIZE.set(i64::try_from(max_workers).unwrap_or(i64::MAX));
     info!(max_workers, "codec worker pool initialized");
     Ok(())
@@ -92,11 +92,13 @@ pub fn capabilities() -> Option<&'static FfmpegCapabilities> {
     CAPABILITIES.get().and_then(Option::as_ref)
 }
 
-/// Host-wide worker pool. Always initialized after [`init`] (falls back to a
-/// lazy default so tests and early callers do not panic).
+/// Host-wide worker pool, available only after a successful [`init`].
+///
+/// Returning `Option` is deliberate: a lazy default here would silently
+/// ignore `VKS_CODEC_WORKER_POOL` for any caller that races startup.
 #[must_use]
-pub fn pool() -> &'static WorkerPool {
-    POOL.get_or_init(|| WorkerPool::new(8))
+pub fn pool() -> Option<&'static WorkerPool> {
+    POOL.get()
 }
 
 #[cfg(test)]
@@ -112,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_is_bounded() {
-        assert!(pool().max_workers() >= 1);
+    fn pool_is_absent_before_init() {
+        assert!(pool().is_none());
     }
 }
