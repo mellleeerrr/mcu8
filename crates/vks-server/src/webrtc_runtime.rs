@@ -38,6 +38,11 @@ pub fn registry(config: &HandlerConfig) -> Option<Arc<WebRtcRoomRegistry>> {
         .clone()
 }
 
+/// Whether this participant currently has a real str0m transport.
+pub fn has_peer(room: vks_core::RoomId, participant: vks_core::ParticipantId) -> bool {
+    REGISTRY.get().and_then(|registry| registry.as_ref()).is_some_and(|registry| registry.has_peer(room, participant))
+}
+
 /// Removes a participant's real transport, if the registry was initialized.
 pub fn remove(room: vks_core::RoomId, participant: vks_core::ParticipantId) {
     if let Some(Some(registry)) = REGISTRY.get() {

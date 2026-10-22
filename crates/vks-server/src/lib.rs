@@ -455,6 +455,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
     let mut handler = SignalingHandler::new(handler_config.clone());
     let state = ctx.state;
     let mut current_membership: Option<ActiveMembership> = None;
+    // Set when the current SDP offer was answered by the real str0m peer; the
+    // legacy plaintext PT/SSRC/endpoint side effects are skipped for it.
+    let mut real_webrtc_peer;
     let mut room_rx: Option<tokio::sync::broadcast::Receiver<vks_admin::hub::RoomBroadcastEvent>> = None;
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -660,6 +663,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                 // answer before it is sent. Failure keeps the legacy
                                 // answer as a deliberate fallback until the browser E2E
                                 // proves the str0m path on this deployment.
+                                real_webrtc_peer = false;
                                 if let (Some(Payload::SdpOffer(ref offer)), Some(ref membership)) =
                                     (&payload_opt, &current_membership)
                                 {
@@ -680,6 +684,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                 }) {
                                                     answer.sdp = accepted.answer_sdp;
                                                 }
+                                                real_webrtc_peer = true;
                                                 info!(
                                                     room = %membership.room_id,
                                                     participant = %pid,
@@ -712,10 +717,12 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                     Some(Payload::SdpAnswer(answer)) => Some(answer),
                                                     _ => None,
                                                 }) {
-                                                    for (kind, payload_type) in answer_payload_types(&answer.rtp_map) {
-                                                        ctx.sfu_engine.set_subscriber_payload_type(
-                                                            m.room_id, pid, kind, payload_type,
-                                                        );
+                                                    if !real_webrtc_peer {
+                                                        for (kind, payload_type) in answer_payload_types(&answer.rtp_map) {
+                                                            ctx.sfu_engine.set_subscriber_payload_type(
+                                                                m.room_id, pid, kind, payload_type,
+                                                            );
+                                                        }
                                                     }
                                                 }
                                                 let mut tracks = Vec::new();
@@ -725,9 +732,11 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                         _ => vks_core::track::TrackKind::Video,
                                                     };
                                                     let track = vks_core::ports::media_engine::MediaTrack::new(pid, track_kind);
-                                                    for ssrc_str in &media.ssrcs {
-                                                        if let Ok(ssrc) = ssrc_str.split_whitespace().next().unwrap_or("").parse::<u32>() {
-                                                            ctx.sfu_engine.register_ssrc(m.room_id, pid, track.id, ssrc);
+                                                    if !real_webrtc_peer {
+                                                        for ssrc_str in &media.ssrcs {
+                                                            if let Ok(ssrc) = ssrc_str.split_whitespace().next().unwrap_or("").parse::<u32>() {
+                                                                ctx.sfu_engine.register_ssrc(m.room_id, pid, track.id, ssrc);
+                                                            }
                                                         }
                                                     }
                                                     tracks.push(track);
@@ -775,8 +784,10 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                     if !replies.iter().any(|r| matches!(r.payload(), Some(Payload::Error(_)))) {
                                         if let Some(ref m) = current_membership {
                                             let pid = parse_participant_id(&m.participant_id);
-                                            if let Some(addr) = parse_ice_candidate_addr(&c.candidate) {
-                                                ctx.sfu_engine.register_endpoint(m.room_id, pid, addr);
+                                            if !crate::webrtc_runtime::has_peer(m.room_id, pid) {
+                                                if let Some(addr) = parse_ice_candidate_addr(&c.candidate) {
+                                                    ctx.sfu_engine.register_endpoint(m.room_id, pid, addr);
+                                                }
                                             }
                                         }
                                     }
@@ -795,6 +806,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             track_ids: track_ids.clone(),
                                             audio_only: false,
                                         }).await;
+                                        if let Some(registry) = crate::webrtc_runtime::registry(&handler_config) {
+                                            registry.set_subscription(m.room_id, pid, true, true);
+                                        }
                                         let _ = ctx.mcu_engine.add_subscriber(m.room_id, pid, vks_core::ports::media_engine::SubscribeRequest {
                                             track_ids,
                                             audio_only: false,
@@ -807,6 +821,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                         let pid = parse_participant_id(&m.participant_id);
                                         let _ = ctx.sfu_engine.remove_subscriber(m.room_id, pid).await;
                                         let _ = ctx.mcu_engine.remove_subscriber(m.room_id, pid).await;
+                                        if let Some(registry) = crate::webrtc_runtime::registry(&handler_config) {
+                                            registry.set_subscription(m.room_id, pid, false, false);
+                                        }
                                     }
                                 }
 

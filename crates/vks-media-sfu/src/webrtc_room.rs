@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,14 @@ const MAX_DATAGRAM: usize = 2048;
 pub struct PeerHandle {
     pub participant: ParticipantId,
     tx: mpsc::Sender<PeerCommand>,
+    audio: Arc<AtomicBool>,
+    video: Arc<AtomicBool>,
+}
+
+impl PeerHandle {
+    fn wants(&self, audio: bool) -> bool {
+        (if audio { &self.audio } else { &self.video }).load(Ordering::Relaxed)
+    }
 }
 
 /// A peer was accepted; answer SDP and handle for later removal.
@@ -44,6 +53,7 @@ pub struct AcceptedPeer {
 enum PeerCommand {
     Write { audio: bool, params: PayloadParams, wallclock: Instant, rtp_time: MediaTime, data: Arc<[u8]> },
     RequestKeyframe { audio: bool },
+    SetSubscription { audio: bool, video: bool },
 }
 
 /// Registry of real WebRTC peers, keyed by room and participant.
@@ -94,7 +104,12 @@ impl WebRtcRoomRegistry {
         let socket = UdpSocket::from_std(std_socket)?;
 
         let (tx, rx) = mpsc::channel(PEER_COMMAND_QUEUE);
-        let handle = PeerHandle { participant, tx };
+        let handle = PeerHandle {
+            participant,
+            tx,
+            audio: Arc::new(AtomicBool::new(true)),
+            video: Arc::new(AtomicBool::new(true)),
+        };
         {
             let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             rooms.entry(room).or_default().insert(participant, handle.clone());
@@ -135,6 +150,42 @@ impl WebRtcRoomRegistry {
         self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&room).map_or(0, HashMap::len)
     }
 
+    /// Applies `SubscribeRequest` semantics to the peer fanout: a subscriber
+    /// that asked only for audio does not receive video frames, and vice versa.
+    pub fn set_subscription(&self, room: RoomId, participant: ParticipantId, audio: bool, video: bool) {
+        let handle = {
+            let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            rooms.get(&room).and_then(|peers| peers.get(&participant)).cloned()
+        };
+        let Some(handle) = handle else { return };
+        handle.audio.store(audio, Ordering::Relaxed);
+        handle.video.store(video, Ordering::Relaxed);
+        let _ = handle.tx.try_send(PeerCommand::SetSubscription { audio, video });
+    }
+
+    fn targets_for(&self, room: RoomId, from: ParticipantId, audio: bool) -> Vec<PeerHandle> {
+        let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        rooms
+            .get(&room)
+            .map(|peers| {
+                peers
+                    .iter()
+                    .filter(|(pid, handle)| **pid != from && handle.wants(audio))
+                    .map(|(_, h)| h.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether a participant has a live browser transport.
+    pub fn has_peer(&self, room: RoomId, participant: ParticipantId) -> bool {
+        self.rooms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&room)
+            .is_some_and(|peers| peers.contains_key(&participant))
+    }
+
     fn request_keyframe(&self, room: RoomId, from: ParticipantId, audio: bool) {
         let targets: Vec<PeerHandle> = {
             let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -149,17 +200,11 @@ impl WebRtcRoomRegistry {
     }
 
     async fn forward(&self, room: RoomId, from: ParticipantId, data: str0m::media::MediaData) {
-        let targets: Vec<PeerHandle> = {
-            let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            rooms
-                .get(&room)
-                .map(|peers| peers.iter().filter(|(pid, _)| **pid != from).map(|(_, h)| h.clone()).collect())
-                .unwrap_or_default()
-        };
+        let audio = data.params.spec().codec.is_audio();
+        let targets = self.targets_for(room, from, audio);
         if targets.is_empty() {
             return;
         }
-        let audio = data.params.spec().codec.is_audio();
         for target in targets {
             // A slow browser must never stall the publisher or other peers.
             if target
@@ -201,13 +246,16 @@ async fn run_peer(
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
                 }
-                None => tokio::time::sleep(Duration::from_millis(10)).await,
+                None => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         };
         tokio::select! {
             received = socket.recv_from(&mut buf) => {
                 let Ok((len, source)) = received else { break };
-                let destination = socket.local_addr().unwrap_or(SocketAddr::new(registry.advertise_ip, 0));
+                // The socket is bound to 0.0.0.0; str0m needs the advertised
+                // local candidate address to associate an ICE-lite Binding
+                // Request with the right local candidate.
+                let destination = peer.local_addr();
                 let actions = match peer.handle_receive(Instant::now(), source, destination, &buf[..len]) {
                     Ok(actions) => actions,
                     Err(error) => {
@@ -234,6 +282,10 @@ async fn run_peer(
                         Some(mid) => peer.request_keyframe(mid),
                         None => Ok(Vec::new()),
                     },
+                    PeerCommand::SetSubscription { audio, video } => {
+                        tracing::trace!(?participant, audio, video, "webrtc subscription updated");
+                        continue;
+                    }
                 };
                 let actions = match actions {
                     Ok(actions) => actions,
@@ -304,4 +356,75 @@ async fn dispatch(
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handle(participant: ParticipantId) -> (PeerHandle, mpsc::Receiver<PeerCommand>) {
+        let (tx, rx) = mpsc::channel(8);
+        (
+            PeerHandle {
+                participant,
+                tx,
+                audio: Arc::new(AtomicBool::new(true)),
+                video: Arc::new(AtomicBool::new(true)),
+            },
+            rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn fanout_respects_participant_exclusion_and_audio_only() {
+        let registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+        let room = RoomId::new();
+        let publisher = ParticipantId::new();
+        let audio_sub = ParticipantId::new();
+        let video_sub = ParticipantId::new();
+        let (publisher_handle, _publisher_rx) = handle(publisher);
+        let (audio_handle, _audio_rx) = handle(audio_sub);
+        let (video_handle, _video_rx) = handle(video_sub);
+        {
+            let mut rooms = registry.rooms.lock().unwrap();
+            let peers = rooms.entry(room).or_default();
+            peers.insert(publisher, publisher_handle);
+            peers.insert(audio_sub, audio_handle);
+            peers.insert(video_sub, video_handle);
+        }
+        let audio_targets = registry.targets_for(room, publisher, true);
+        assert_eq!(audio_targets.len(), 2);
+        let video_targets = registry.targets_for(room, publisher, false);
+        assert_eq!(video_targets.len(), 2);
+
+        registry.set_subscription(room, audio_sub, true, false);
+        let audio_targets = registry.targets_for(room, publisher, true);
+        assert_eq!(audio_targets.len(), 2, "audio-only subscriber still receives audio");
+        let video_targets = registry.targets_for(room, publisher, false);
+        assert_eq!(video_targets.len(), 1, "audio-only subscriber is excluded from video");
+        assert_ne!(video_targets[0].participant, audio_sub);
+
+        registry.set_subscription(room, video_sub, false, false);
+        assert_eq!(registry.targets_for(room, publisher, true).len(), 1);
+        assert!(registry.targets_for(room, publisher, false).is_empty());
+        assert_eq!(registry.peer_count(room), 3);
+        assert!(registry.has_peer(room, publisher));
+        registry.remove(room, publisher);
+        registry.remove(room, publisher);
+        assert_eq!(registry.peer_count(room), 2);
+        assert!(!registry.has_peer(room, publisher));
+    }
+
+    #[tokio::test]
+    async fn removing_last_peer_drops_the_room_entry() {
+        let registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+        let room = RoomId::new();
+        let participant = ParticipantId::new();
+        let (peer, _rx) = handle(participant);
+        registry.rooms.lock().unwrap().entry(room).or_default().insert(participant, peer);
+        assert_eq!(registry.peer_count(room), 1);
+        registry.remove(room, participant);
+        assert_eq!(registry.peer_count(room), 0);
+        assert!(registry.rooms.lock().unwrap().get(&room).is_none());
+    }
 }
