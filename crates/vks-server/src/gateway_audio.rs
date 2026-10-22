@@ -91,7 +91,7 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 session.media_stats.audio_rx_bytes.fetch_add(count as u64, Relaxed);
                 if session.controls.audio_tx_muted.load(Relaxed) { queue.clear(); continue; }
                 while queue.len() + packet.payload.len() > 960 { queue.pop_front(); }
-                queue.extend(packet.payload.iter().map(|byte| decode_sample(session.audio_payload_type, *byte)));
+                queue.extend(packet.payload.iter().map(|byte| decode_sample(packet.payload_type, *byte)));
             }
             _ = ticker.tick() => {
                 let mut input = [0.0; 160];
@@ -224,6 +224,7 @@ pub(super) struct RtpSource {
 
 pub(super) struct RtpPayload<'a> {
     pub payload: &'a [u8],
+    pub payload_type: u8,
     pub sequence: u16,
     pub timestamp: u32,
     pub marker: bool,
@@ -242,7 +243,11 @@ impl RtpSource {
             return None;
         }
         let (pt, seq, ts, ssrc, offset) = vks_gateway_sip::parse_rtp_header(packet)?;
-        if pt != self.payload_type {
+        // G.711 PCMU/PCMA may be sent with either static PT after SDP answer:
+        // cross-vendor MCUs (TrueConf) commonly answer PCMU but transmit PCMA.
+        // Video/dynamic PTs still require exact match.
+        let g711_interchange = matches!(pt, 0 | 8) && matches!(self.payload_type, 0 | 8);
+        if pt != self.payload_type && !g711_interchange {
             return None;
         }
         let padding = if packet[0] & 0x20 != 0 {
@@ -266,7 +271,7 @@ impl RtpSource {
         }
         self.ssrc = Some(ssrc);
         self.sequence = Some(seq);
-        Some(RtpPayload { payload: &packet[offset..end], sequence: seq, timestamp: ts, marker: packet[1] & 0x80 != 0 })
+        Some(RtpPayload { payload: &packet[offset..end], payload_type: pt, sequence: seq, timestamp: ts, marker: packet[1] & 0x80 != 0 })
     }
 }
 
@@ -290,5 +295,18 @@ mod tests {
         packet[0] |= 0x20;
         packet[171] = 0;
         assert!(source.accept(target, &packet).is_none(), "zero padding size is malformed");
+    }
+
+    #[test]
+    fn accepts_alternate_g711_payload_and_reports_actual_pt() {
+        let target: std::net::SocketAddr = "192.0.2.1:40000".parse().unwrap();
+        let mut source = RtpSource::new(target, 0);
+        let mut packet = [0u8; 172];
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 8, 1, 0, 42, false);
+        let accepted = source.accept(target, &packet).expect("PCMA on a PCMU answer must be accepted");
+        assert_eq!(accepted.payload_type, 8);
+        packet[1] = 0;
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 2, 160, 42, false);
+        assert_eq!(source.accept(target, &packet).unwrap().payload_type, 0);
     }
 }

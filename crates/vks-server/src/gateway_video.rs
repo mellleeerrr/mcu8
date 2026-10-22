@@ -1053,7 +1053,7 @@ mod tests {
     }
 
     fn payload(data: &[u8], sequence: u16, timestamp: u32) -> RtpPayload<'_> {
-        RtpPayload { payload: data, sequence, timestamp, marker: false }
+        RtpPayload { payload: data, payload_type: 96, sequence, timestamp, marker: false }
     }
 
     #[test]
