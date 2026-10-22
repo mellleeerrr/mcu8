@@ -58,11 +58,20 @@ call_string live proof.
   `artifacts/e2e-t05b2-final-high/` — 114/114, `final-low/` — 114/114,
   page_errors 0, failed 0.
 
+## Живой call_string proof (2026-10-22)
+- Модальный payload `call_string.sip {bitrate:4096, resolution:1920x1080}` →
+  live SIP-вызов: `offered_video_b_as=4096`, `offered_resolution=1920x1080`,
+  `offered_max_fs=8160`, фактический `video.tx ≈3.03 Mbps`, audio rx/tx и
+  video rx/tx >0 в обе стороны.
+- Сохранённый contact (bitrate 512/640x360) + пустой payload вызова →
+  `offered_b_as=512`, `offered_resolution=640x360` (ресурс-фолбэк работает).
+- Оба дозвона завершены, терминал освобождён; session/conference/address
+  удалены.
+
 ## Остаток T05b-2 / ограничения
 - Live H.323/T07: CONNECT + двусторонние audio/video + H.241 peer, только
-  на свободном от SIP терминале.
-- call_string live proof: нужен template-contact + PATCH + recall с реальным
-  абонентом (product-fix персистентности session-контакта не делался).
+  на свободном от SIP терминале; terminal отвечает `remote_release` даже
+  после освобождения SIP, H.241 peer live не подтверждён.
 - H.264/H.265 в browser SFU — только после реального forwarding (T06b/T08);
   сейчас caps честно VP8-only.
 - WS-интеграционный тест ограничен проверкой `answer_payload_types` и
