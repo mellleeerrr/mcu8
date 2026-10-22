@@ -279,6 +279,11 @@ pub struct OfferCodec {
 }
 
 /// Audio codecs advertised in the outbound offer, in `m=audio` order.
+///
+/// G.729/G.722.1(C)/G.719/MP4A-LATM are listed only in [`CodecProfile::Full`]
+/// (lab/transcoder matrix) and are answered with an explicit 488 until their
+/// worker bridge lands — never silently downgraded. The native profile omits
+/// every `native: false` entry.
 pub const AUDIO_OFFER: &[OfferCodec] = &[
     OfferCodec { payload: 0, name: "PCMU", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
     OfferCodec { payload: 8, name: "PCMA", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
@@ -430,8 +435,9 @@ impl VideoSdpProfile {
 
 /// Video codecs advertised in the outbound offer, in `m=video` order.
 ///
-/// H.264 baseline goes first (the only natively bridged video codec, and the
-/// configuration the FFmpeg worker emits: Baseline, level 3.0, 640x360).
+/// Only bridgeable video is advertised: H.264 baseline and high (the gateway
+/// decodes both and re-encodes baseline). H.265/H.261/H.263 entries return once
+/// their worker bridge and RFC 7798/4587/4629 payloaders are wired.
 pub const VIDEO_OFFER: &[OfferCodec] = &[
     OfferCodec {
         payload: 97,
@@ -448,26 +454,6 @@ pub const VIDEO_OFFER: &[OfferCodec] = &[
         clock: 90000,
         channels: 0,
         fmtp: Some("packetization-mode=1;profile-level-id=64001f;max-mbps=13800;max-fs=920;max-br=256"),
-        native: false,
-        dtmf: false,
-    },
-    OfferCodec {
-        payload: 99,
-        name: "H265",
-        clock: 90000,
-        channels: 0,
-        fmtp: Some("profile-id=1"),
-        native: false,
-        dtmf: false,
-    },
-    OfferCodec { payload: 31, name: "H261", clock: 90000, channels: 0, fmtp: None, native: false, dtmf: false },
-    OfferCodec { payload: 34, name: "H263", clock: 90000, channels: 0, fmtp: None, native: false, dtmf: false },
-    OfferCodec {
-        payload: 96,
-        name: "H263-1998",
-        clock: 90000,
-        channels: 0,
-        fmtp: Some("CIF=1;QCIF=1;SQCIF=1"),
         native: false,
         dtmf: false,
     },
@@ -843,20 +829,15 @@ m=video 5006 RTP/AVP 96\r\n";
     }
 
     #[test]
-    fn offer_carries_full_video_matrix_with_h264_and_h265_profiles() {
+    fn offer_carries_bridgeable_video_matrix() {
         let sdp = build_offer(CodecProfile::Full, "192.168.1.93", 41000, Some(41002));
         for line in [
-            "m=video 41002 RTP/AVP 97 98 99 31 34 96",
+            "m=video 41002 RTP/AVP 97 98",
             "a=rtpmap:97 H264/90000",
             "b=AS:2048",
             "a=fmtp:97 packetization-mode=1;profile-level-id=42c01f;max-mbps=108000;max-fs=3600;max-br=2048",
             "a=rtpmap:98 H264/90000",
             "a=fmtp:98 packetization-mode=1;profile-level-id=64001f;max-mbps=108000;max-fs=3600;max-br=2048",
-            "a=rtpmap:99 H265/90000",
-            "a=fmtp:99 profile-id=1",
-            "a=rtpmap:31 H261/90000",
-            "a=rtpmap:34 H263/90000",
-            "a=rtpmap:96 H263-1998/90000",
             "a=rtcp:41003",
         ] {
             assert!(sdp.contains(line), "offer misses `{line}`:\n{sdp}");
