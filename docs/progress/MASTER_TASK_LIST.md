@@ -482,7 +482,8 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 > (до вызова — `DISABLED`), структурная классификация terminal/transport без
 > подстрочных эвристик, TTL-самолечения нет. Evidence `docs/progress/evidence/t11a/`.
 >
-> **T04b (полная матрица раскладок) закрыт по live-матрице:** E2E 173 checks /
-> 0 failed / 148.4 s, page_errors 0; все диапазоны 1/2/3/4/5+/8/9/10+/25/34+,
-> участник в первой/средней/последней ячейке, `calculate` для 11 пресетов,
-> 11-я icon-only кнопка режима схем. Evidence `docs/progress/evidence/t04b/`.
+> **T04b (полная матрица раскладок) закрыт по live-матрице:** E2E 201 checks /
+> 0 failed / 145.3 s, page_errors 0; все 11 диапазонов 1/2/3/4/5+/8/9/10+/25/34+
+> + icon-only overlap (9 схем), участник в 1/ceil(N/2)/N от фактического числа
+> ячеек (5+→6, 10+→16, 34+→36), overlap-схема с 11 ячейками, `calculate` для
+> 14 пресетов. Evidence `docs/progress/evidence/t04b/`.

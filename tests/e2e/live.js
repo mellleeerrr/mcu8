@@ -362,11 +362,18 @@ async function api(token, method, urlPath, body) {
       const rect = element.getBoundingClientRect();
       return { text: (element.innerText || '').trim(), left: rect.left, top: rect.top, width: rect.width, height: rect.height };
     }));
-    const sizeLabel = size => ({ 5: '5 +', 10: '10 +', 34: '34 +' })[size] || String(size);
-    const placeParticipant = async (size, position) => {
-      const label = sizeLabel(size).replace('+', '\\+');
-      await page.locator('button').filter({ hasText: new RegExp(`^${label}$`) }).first().click();
+    const rangeButtons = page.locator('.layout-size-range-selector button');
+    const selectRange = async range => {
+      const button = range === 'overlap'
+        ? rangeButtons.last()
+        : page.locator('button').filter({
+          hasText: new RegExp(`^${({ 5: '5 \\+', 10: '10 \\+', 34: '34 \\+' })[range] || String(range)}$`),
+        }).first();
+      await button.click();
       await page.waitForTimeout(650);
+      return readTiles();
+    };
+    const placeAt = async position => {
       const cell = page.locator('.layout-grid-slot-wrapper').nth(position - 1);
       await cell.click();
       await page.waitForTimeout(500);
@@ -377,25 +384,52 @@ async function api(token, method, urlPath, body) {
       }
       return readTiles();
     };
-    // T04b: полный ряд диапазонов 1/2/3/4/5+/8/9/10+/25/34+; для каждого —
-    // первая, средняя и последняя ячейка (уникальные), участник именно в ней.
+    const checkPlacement = async (label, tiles, position) => {
+      const target = tiles[position - 1];
+      check(`layout: UI ${label} cell ${position} rendered`, Boolean(target && target.width > 20 && target.height > 20),
+        JSON.stringify(target));
+      check(`layout: UI ${label} cell ${position} holds SIP participant`, Boolean(target && target.text.includes(SIP_NAME)),
+        JSON.stringify(tiles.map(tile => tile.text)));
+    };
+
+    // T04b: полный ряд 11 диапазонов: numeric 1/2/3/4/5+/8/9/10+/25/34+
+    // и icon-only overlap. Средняя/последняя ячейки считаются от фактического
+    // числа ячеек схемы (5+ → 6, 10+ → 16, 34+ → 36), а не от нижней границы.
     for (const size of [1, 2, 3, 4, 5, 8, 9, 10, 25, 34]) {
-      for (const position of [...new Set([1, Math.ceil(size / 2), size])]) {
-        const tiles = await placeParticipant(size, position);
-        const target = tiles[position - 1];
-        check(`layout: UI ${size} cell ${position} rendered`, Boolean(target && target.width > 20 && target.height > 20),
-          JSON.stringify(target));
-        check(`layout: UI ${size} cell ${position} holds SIP participant`, Boolean(target && target.text.includes(SIP_NAME)),
-          JSON.stringify(tiles.map(tile => tile.text)));
-        // Диапазоны «5+/10+/34+» дают схему с числом ячеек >= нижней границы.
-        const plusRange = size === 5 || size === 10 || size === 34;
-        const cellsOk = plusRange ? tiles.length >= size : tiles.length === size;
-        check(`layout: UI ${size} keeps ${plusRange ? 'at least ' : ''}${size} cells when participant is in ${position}`,
-          cellsOk, JSON.stringify(tiles.map(tile => tile.text)));
+      const initial = await selectRange(size);
+      const plusRange = size === 5 || size === 10 || size === 34;
+      check(`layout: UI ${size}${plusRange ? '+' : ''} range opens ${plusRange ? 'at least ' : ''}${size} cells`,
+        plusRange ? initial.length >= size : initial.length === size, JSON.stringify(initial.map(tile => tile.text)));
+      for (const position of [...new Set([1, Math.ceil(initial.length / 2), initial.length])]) {
+        const tiles = await placeAt(position);
+        await checkPlacement(`${size}${plusRange ? '+' : ''}`, tiles, position);
+        check(`layout: UI ${size}${plusRange ? '+' : ''} keeps ${initial.length} cells when participant is in ${position}`,
+          tiles.length === initial.length, JSON.stringify(tiles.map(tile => tile.text)));
       }
     }
+
+    // 11-й диапазон вендорского rangeMap — icon-only overlap, 9 схем.
+    const overlapSchemes = page.locator('.layout-scheme-selector-item');
+    const overlapInitial = await selectRange('overlap');
+    check('layout: overlap range has 9 icon-only schemes', (await overlapSchemes.count()) === 9,
+      `schemes=${await overlapSchemes.count()}`);
+    for (const position of [...new Set([1, Math.ceil(overlapInitial.length / 2), overlapInitial.length])]) {
+      const tiles = await placeAt(position);
+      await checkPlacement('overlap', tiles, position);
+    }
+    await overlapSchemes.nth(6).click();
+    await page.waitForTimeout(650);
+    const overlapLast = await readTiles();
+    check('layout: overlap 11-cell scheme has 11 cells', overlapLast.length === 11,
+      JSON.stringify(overlapLast.map(tile => tile.text)));
+    for (const position of [...new Set([1, 6, 11])]) {
+      const tiles = await placeAt(position);
+      await checkPlacement('overlap-11', tiles, position);
+    }
+
     // Возвращаем ручную 2×2 с участником в ячейке 1 для clear-all/detach.
-    await placeParticipant(4, 1);
+    await selectRange(4);
+    await placeAt(1);
 
     // 7d. T04a: calculate для 4/8/9/25 — ровно N ячеек и 1-based позиции.
     for (const [preset, expected] of [
@@ -403,6 +437,8 @@ async function api(token, method, urlPath, body) {
       ['preset_equal_4', 4], ['preset_selected_r_5', 5], ['preset_equal_8', 8],
       ['preset_equal_9', 9], ['preset_double_btb_10', 10], ['preset_equal_25', 25],
       ['preset_double_b_34', 34], ['preset_equal_36', 36],
+      ['preset_selected_rb_overlap_2', 2], ['preset_double_b_overlap_5', 5],
+      ['preset_selected_rlr_overlap_11', 11],
     ]) {
       const calc = await api(token, 'POST', '/api/v3/ui/video_layouts/calculate', { preset, width: 1280, height: 720 });
       const slots = calc.json && calc.json.slots || [];
