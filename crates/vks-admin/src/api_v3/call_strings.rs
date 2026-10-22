@@ -792,6 +792,7 @@ pub async fn invite_session_call_strings_list(
             uri: canonical_uri(&raw),
             display_name: item
                 .display_name
+                .map(|name| vks_common::sanitize_label_or(&name, &raw))
                 .or_else(|| previous.as_ref().map(|r| r.display_name.clone()))
                 .unwrap_or(raw),
             created_at: now_unix_sec(),
@@ -1185,17 +1186,18 @@ pub async fn update_call_string(
             if !body.is_object() {
                 return validation_error("body must be an object", "body");
             }
+            let explicit_name = body.get("display_name").is_some_and(|value| !value.is_null());
             let mut candidate = body.clone();
             if candidate.get("uri").is_none_or(Value::is_null) {
                 candidate["uri"] = json!(current.uri);
             }
-            if candidate.get("display_name").is_none_or(Value::is_null) {
-                candidate["display_name"] = json!(current.display_name);
-            }
-            let (uri, display_name, patch) = match address_fields(&candidate) {
+            // В candidate не подставляем текущее имя: address_fields санитизирует
+            // display_name, а унаследованное raw-имя перезаписывать нельзя.
+            let (uri, fallback_name, patch) = match address_fields(&candidate) {
                 Ok(values) => values,
                 Err((reason, position)) => return validation_error(reason, position),
             };
+            let display_name = if explicit_name { fallback_name } else { current.display_name.clone() };
             let previous = resources.clone();
             let record = AddressRecord {
                 id,
@@ -1222,16 +1224,19 @@ pub async fn update_call_string(
             if !body.is_object() {
                 return validation_error("body must be an object", "body");
             }
+            let explicit_name = body.get("display_name").is_some_and(|value| !value.is_null());
             let mut candidate = body.clone();
             if candidate.get("uri").is_none_or(Value::is_null) {
                 candidate["uri"] = current["uri"].clone();
             }
-            if candidate.get("display_name").is_none_or(Value::is_null) {
-                candidate["display_name"] = current["display_name"].clone();
-            }
-            let (uri, display_name, patch) = match address_fields(&candidate) {
+            let (uri, fallback_name, patch) = match address_fields(&candidate) {
                 Ok(values) => values,
                 Err((reason, position)) => return validation_error(reason, position),
+            };
+            let display_name = if explicit_name {
+                fallback_name
+            } else {
+                current["display_name"].as_str().unwrap_or_default().to_string()
             };
             // Сохраняем top-level настройки контакта (auto_call, volume_*, флаги
             // медиа, crown, slot_render_type, stop_details и пр.), меняя только

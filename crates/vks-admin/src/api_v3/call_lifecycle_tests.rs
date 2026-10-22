@@ -559,3 +559,44 @@ async fn call_string_display_name_has_no_emoji_and_keeps_uri_fallback() {
     assert_eq!(fallback.status(), StatusCode::CREATED);
     assert_eq!(response_json(fallback).await["call_string"]["display_name"], "10.9.9.10");
 }
+
+#[tokio::test]
+async fn patch_without_explicit_name_keeps_raw_display_name_and_explicit_emoji_is_cleaned() {
+    let state = Arc::new(AppState::new());
+    let auth = operator_auth(Role::Operator);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.addresses.insert(
+            "cs-raw".into(),
+            AddressRecord {
+                id: "cs-raw".into(),
+                uri: "sip:10.0.0.1".into(),
+                display_name: "Зал 🎤".into(),
+                created_at: 1,
+                payload: json!({}),
+            },
+        );
+    }
+
+    let patched = update_call_string(
+        State(state.clone()),
+        Extension(auth.clone()),
+        Path("cs-raw".into()),
+        Json(json!({"payload": {"sip": {"bitrate": 2048}}})),
+    )
+    .await;
+    assert_eq!(patched.status(), StatusCode::OK);
+    let body = response_json(patched).await;
+    assert_eq!(body["call_string"]["display_name"], "Зал 🎤", "унаследованное raw-имя не перезаписывается");
+    assert_eq!(body["call_string"]["payload"]["sip"]["bitrate"], 2048);
+
+    let cleaned = update_call_string(
+        State(state.clone()),
+        Extension(auth),
+        Path("cs-raw".into()),
+        Json(json!({"display_name": "🎤🔥"})),
+    )
+    .await;
+    assert_eq!(cleaned.status(), StatusCode::OK);
+    assert_eq!(response_json(cleaned).await["call_string"]["display_name"], "10.0.0.1");
+}
