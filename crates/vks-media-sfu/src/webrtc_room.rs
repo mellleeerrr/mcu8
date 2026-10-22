@@ -12,13 +12,13 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use vks_common::metrics::{WEBRTC_FRAMES_DROPPED, WEBRTC_ICE_FAILURES, WEBRTC_OFFERS, WEBRTC_PEERS};
+use vks_common::metrics::{MEDIA_BYTES, WEBRTC_FRAMES_DROPPED, WEBRTC_ICE_FAILURES, WEBRTC_OFFERS, WEBRTC_PEERS};
 use vks_core::{ParticipantId, RoomId};
 
 use crate::webrtc::{WebRtcAction, WebRtcConfig, WebRtcError, WebRtcPeer};
@@ -43,6 +43,7 @@ pub struct PeerHandle {
     video: Arc<AtomicBool>,
     /// Operator/client cap for BWE, 0 = unlimited.
     max_bitrate_bps: Arc<AtomicU64>,
+    publishes_video: bool,
     generation: u64,
 }
 
@@ -79,6 +80,10 @@ pub struct WebRtcRoomRegistry {
     /// ordering and across re-offers.
     subscriptions: Mutex<HashMap<(RoomId, ParticipantId), (bool, bool)>>,
     bitrate_caps: Mutex<HashMap<(RoomId, ParticipantId), u64>>,
+    /// Process-wide cap, separate from the per-room cap; prevents valid JWTs
+    /// from exhausting FDs/UDP ports.
+    peer_total: AtomicUsize,
+    max_peers: usize,
 }
 
 impl std::fmt::Debug for WebRtcRoomRegistry {
@@ -110,6 +115,12 @@ impl WebRtcRoomRegistry {
             port_range,
             subscriptions: Mutex::new(HashMap::new()),
             bitrate_caps: Mutex::new(HashMap::new()),
+            peer_total: AtomicUsize::new(0),
+            max_peers: std::env::var("VKS_WEBRTC_MAX_PEERS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(256),
         })
     }
 
@@ -127,6 +138,7 @@ impl WebRtcRoomRegistry {
                     Err(error) => return Err(error.into()),
                 }
             }
+            WEBRTC_OFFERS.with_label_values(&["port_range_exhausted"]).inc();
             tracing::warn!(min, max, "WebRTC port range exhausted; refusing peer");
             return Err(WebRtcError::Net(format!("WebRTC port range {min}-{max} exhausted")));
         }
@@ -151,6 +163,10 @@ impl WebRtcRoomRegistry {
                     WEBRTC_OFFERS.with_label_values(&["room_full"]).inc();
                     return Err(WebRtcError::RoomFull);
                 }
+                if self.peer_total.load(Ordering::Relaxed) >= self.max_peers && !peers.contains_key(&participant) {
+                    WEBRTC_OFFERS.with_label_values(&["capacity_exceeded"]).inc();
+                    return Err(WebRtcError::CapacityExceeded);
+                }
             }
         }
         let std_socket = self.bind_socket()?;
@@ -164,19 +180,21 @@ impl WebRtcRoomRegistry {
                 return Err(error);
             }
         };
-        WEBRTC_OFFERS.with_label_values(&["accepted"]).inc();
         let answer_sdp = peer.answer_sdp().to_string();
         let rtp_maps = peer.rtp_maps();
         let socket = UdpSocket::from_std(std_socket)?;
 
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let publishes_video = offer_publishes_video(offer_sdp);
         let (audio, video) = self
             .subscriptions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&(room, participant))
             .copied()
-            .unwrap_or((false, false));
+            // Legacy/API clients may offer without SubscribeRequest; keep the
+            // old (true,true) behaviour until an explicit subscription narrows it.
+            .unwrap_or((true, true));
         let max_bitrate_bps = self
             .bitrate_caps
             .lock()
@@ -184,6 +202,7 @@ impl WebRtcRoomRegistry {
             .get(&(room, participant))
             .copied()
             .unwrap_or(0);
+        tracing::info!(?room, ?participant, audio, video, publishes_video, "WebRTC peer subscription at offer");
         let (tx, rx) = mpsc::channel(PEER_COMMAND_QUEUE);
         let max_bitrate_bps = Arc::new(AtomicU64::new(max_bitrate_bps));
         let handle = PeerHandle {
@@ -192,6 +211,7 @@ impl WebRtcRoomRegistry {
             audio: Arc::new(AtomicBool::new(audio)),
             video: Arc::new(AtomicBool::new(video)),
             max_bitrate_bps: Arc::clone(&max_bitrate_bps),
+            publishes_video,
             generation,
         };
         {
@@ -203,8 +223,12 @@ impl WebRtcRoomRegistry {
             }
             // Re-offer: replace the old generation; its task exits on channel
             // close and its stale `remove_generation` becomes a no-op.
-            peers.insert(participant, handle.clone());
+            let is_new = peers.insert(participant, handle.clone()).is_none();
+            if is_new {
+                self.peer_total.fetch_add(1, Ordering::Relaxed);
+            }
             WEBRTC_PEERS.set(rooms.values().map(HashMap::len).sum::<usize>() as i64);
+            WEBRTC_OFFERS.with_label_values(&["accepted"]).inc();
         }
 
         // A new subscriber cannot decode video until the publisher sends an
@@ -213,7 +237,13 @@ impl WebRtcRoomRegistry {
             let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             rooms
                 .get(&room)
-                .map(|peers| peers.iter().filter(|(pid, _)| **pid != participant).map(|(_, h)| h.clone()).collect())
+                .map(|peers| {
+                    peers
+                        .iter()
+                        .filter(|(pid, handle)| **pid != participant && handle.publishes_video)
+                        .map(|(_, h)| h.clone())
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         for handle in existing {
@@ -232,7 +262,9 @@ impl WebRtcRoomRegistry {
         self.bitrate_caps.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(room, participant));
         let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(peers) = rooms.get_mut(&room) {
-            peers.remove(&participant);
+            if peers.remove(&participant).is_some() {
+                self.peer_total.fetch_sub(1, Ordering::Relaxed);
+            }
             if peers.is_empty() {
                 rooms.remove(&room);
             }
@@ -248,6 +280,7 @@ impl WebRtcRoomRegistry {
         if let Some(peers) = rooms.get_mut(&room) {
             if peers.get(&participant).is_some_and(|handle| handle.generation == generation) {
                 peers.remove(&participant);
+                self.peer_total.fetch_sub(1, Ordering::Relaxed);
                 removed = true;
             }
             if peers.is_empty() {
@@ -296,6 +329,15 @@ impl WebRtcRoomRegistry {
         }
     }
 
+    /// Whether at least one real peer is registered in the room.
+    pub fn room_has_peer(&self, room: RoomId) -> bool {
+        self.rooms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&room)
+            .is_some_and(|peers| !peers.is_empty())
+    }
+
     fn targets_for(&self, room: RoomId, from: ParticipantId, audio: bool) -> Vec<PeerHandle> {
         let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         rooms
@@ -325,7 +367,9 @@ impl WebRtcRoomRegistry {
             rooms.get(&room).and_then(|peers| peers.get(&publisher)).cloned()
         };
         if let Some(handle) = handle {
-            let _ = handle.tx.try_send(PeerCommand::RequestKeyframe { audio });
+            if handle.publishes_video {
+                let _ = handle.tx.try_send(PeerCommand::RequestKeyframe { audio });
+            }
         }
     }
 
@@ -334,7 +378,13 @@ impl WebRtcRoomRegistry {
             let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             rooms
                 .get(&room)
-                .map(|peers| peers.iter().filter(|(pid, _)| **pid != from).map(|(_, h)| h.clone()).collect())
+                .map(|peers| {
+                    peers
+                        .iter()
+                        .filter(|(pid, handle)| **pid != from && handle.publishes_video)
+                        .map(|(_, h)| h.clone())
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         for target in targets {
@@ -349,6 +399,9 @@ impl WebRtcRoomRegistry {
             return;
         }
         for target in targets {
+            MEDIA_BYTES
+                .with_label_values(&[if audio { "audio" } else { "video" }, "downlink"])
+                .inc_by(data.data.len() as u64);
             // A slow browser must never stall the publisher or other peers.
             if target
                 .tx
@@ -371,6 +424,7 @@ impl WebRtcRoomRegistry {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_peer(
     registry: Arc<WebRtcRoomRegistry>,
     room: RoomId,
@@ -391,6 +445,7 @@ async fn run_peer(
             break;
         }
         if last_seen.elapsed() > IDLE_TIMEOUT {
+            WEBRTC_ICE_FAILURES.with_label_values(&["idle_timeout"]).inc();
             tracing::info!(?participant, "WebRTC peer idle; evicting");
             break;
         }
@@ -440,10 +495,19 @@ async fn run_peer(
                             None => Ok(Vec::new()),
                         }
                     }
-                    PeerCommand::RequestKeyframe { audio } => match peer.mid_for_kind(audio) {
-                        Some(mid) => peer.request_keyframe(mid),
-                        None => Ok(Vec::new()),
-                    },
+                    PeerCommand::RequestKeyframe { audio } => {
+                        let result = match peer.mid_for_kind(audio) {
+                            Some(mid) => peer.request_keyframe(mid),
+                            None => Ok(Vec::new()),
+                        };
+                        if let Err(error) = result {
+                            // A recvonly/camera-off peer has no receiver source;
+                            // a keyframe request must never kill its transport.
+                            tracing::debug!(?error, ?participant, "WebRTC keyframe request ignored");
+                            continue;
+                        }
+                        result
+                    }
                     PeerCommand::SetSubscription { audio, video } => {
                         tracing::trace!(?participant, audio, video, "webrtc subscription updated");
                         continue;
@@ -550,6 +614,31 @@ async fn dispatch(
     true
 }
 
+/// Whether the browser offer publishes video (a video m-line that is not
+/// `a=recvonly`). Used to avoid requesting keyframes from view-only peers.
+fn offer_publishes_video(offer: &str) -> bool {
+    let mut in_video = false;
+    let mut publishes = false;
+    for line in offer.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("m=") {
+            in_video = rest.starts_with("video ");
+            continue;
+        }
+        if !in_video {
+            continue;
+        }
+        if line.starts_with("a=recvonly") || line.starts_with("a=inactive") {
+            return false;
+        }
+        if line.starts_with("a=sendrecv") || line.starts_with("a=sendonly") {
+            publishes = true;
+        }
+    }
+    // Absent an explicit direction, WebRTC defaults to sendrecv.
+    in_video || publishes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,6 +652,7 @@ mod tests {
                 audio: Arc::new(AtomicBool::new(true)),
                 video: Arc::new(AtomicBool::new(true)),
                 max_bitrate_bps: Arc::new(AtomicU64::new(0)),
+                publishes_video: true,
                 generation: 1,
             },
             rx,

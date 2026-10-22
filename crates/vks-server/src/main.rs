@@ -369,6 +369,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_room_mode(proto_room_mode)
     .with_caps(caps);
 
+    if let Err(error) = vks_server::webrtc_runtime::preflight(&handler_config) {
+        error!(%error, "WebRTC preflight failed");
+        eprintln!("vks-server: WebRTC preflight failed: {error}");
+        std::process::exit(78);
+    }
+
     let gateway_manager =
         Arc::new(GatewayManager::new().with_mcu(mcu_engine.clone()).with_candidate_ip(&candidate_addr));
     gateway_manager.bind_state(Arc::downgrade(&admin_state));

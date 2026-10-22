@@ -101,6 +101,12 @@ impl Session {
         self.state
     }
 
+    /// Restores the previous state after a server-side rejection of an event
+    /// that has already been applied (e.g. str0m rejected the SDP offer).
+    pub fn restore(&mut self, state: SessionState) {
+        self.state = state;
+    }
+
     /// Применяет событие: если переход допустим — меняет состояние и
     /// логирует; иначе — возвращает `Err(InvalidTransition)` (состояние не меняется).
     pub fn apply(&mut self, event: SessionEvent) -> Result<SessionState, InvalidTransition> {

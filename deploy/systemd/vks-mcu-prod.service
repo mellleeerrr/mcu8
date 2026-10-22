@@ -16,6 +16,10 @@ EnvironmentFile=/etc/vks/vks.env
 # не нуждается в доступе к /etc/vks.
 LoadCredential=server.toml:/etc/vks/server.toml
 Environment=PYTHONDONTWRITEBYTECODE=1
+# Opt-in: uncomment together with an open UDP range and a public candidate_addr.
+#Environment=VKS_WEBRTC_TRANSPORT=1
+#Environment=VKS_WEBRTC_PORT_MIN=43000
+#Environment=VKS_WEBRTC_PORT_MAX=43100
 ExecStart=/opt/vks/bin/vks-server --config %d/server.toml
 Restart=on-failure
 RestartSec=3

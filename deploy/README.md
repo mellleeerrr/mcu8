@@ -51,6 +51,28 @@ the Rust supervisor owns the process group and reaps/terminates the whole tree
 on shutdown. H.323 is plaintext and unauthenticated: do not expose 1720 to the
 Internet, use a firewall/allowlist, and keep room aliases/PINs private.
 
+## WebRTC media
+
+Real browser WebRTC (str0m, ICE-lite, DTLS-SRTP) is **off by default**; the
+legacy SDP answer remains in place unless it is explicitly enabled:
+
+```bash
+VKS_WEBRTC_TRANSPORT=1
+VKS_WEBRTC_PORT_MIN=43000
+VKS_WEBRTC_PORT_MAX=43100
+```
+
+`candidate_addr` must be the address browsers can reach; startup preflight
+fails with exit 78 if it is empty/loopback (unless
+`VKS_ALLOW_LOOPBACK_MEDIA=1`) or if the port pair is invalid/unbindable. Open
+the UDP range in the firewall and port-forward it 1:1 to the server (the
+advertised ICE host candidate is the bound port). ICE-lite does not allocate
+TURN relay candidates; use client-side TURN if needed. Signalling clients
+connect to `/ws` with a Bearer token, or from a browser with
+`?token=<JWT>`. Today the only end-to-end client is `tests/e2e/webrtc.js`;
+the PNM UI is not yet wired to this transport. Rollback: set
+`VKS_WEBRTC_TRANSPORT=0` and restart (live calls are dropped).
+
 ## First start
 
 ```bash

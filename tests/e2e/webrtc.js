@@ -15,6 +15,8 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
+const { execFileSync } = require('node:child_process');
 const { chromium } = require('playwright');
 const { ws: WebSocket } = require('playwright-core/lib/utilsBundle');
 
@@ -197,7 +199,8 @@ class SignalPeer {
     const fields = nested(reply, 200);
     if (!fields) return null;
     const text = field => fields.find(f => f.field === field)?.bytes?.toString() || '';
-    return { code: text(1), message: text(2) };
+    const retryable = fields.find(f => f.field === 3)?.value === 1;
+    return { code: text(1), message: text(2), retryable };
   }
   close() {
     try { this.socket.close(); } catch { /* already closed */ }
@@ -365,10 +368,53 @@ async function collectStats(page) {
       const roomFull = await thirdSignal.offerExpectError(thirdOffer.sdp);
       check('third peer: rejected with room_full', Boolean(roomFull) && roomFull.code === 'room_full',
         JSON.stringify(roomFull));
+      check('third peer: room_full is retryable', Boolean(roomFull) && roomFull.retryable === true,
+        JSON.stringify(roomFull));
+      // Same socket, same offer: the server must roll the FSM back after a
+      // rejected offer, otherwise this returns bad_state instead of room_full.
+      const retry = await thirdSignal.offerExpectError(thirdOffer.sdp);
+      check('third peer: retry after rejection reaches room_full (FSM rollback)',
+        Boolean(retry) && retry.code === 'room_full', JSON.stringify(retry));
       thirdSignal.close();
       await thirdPage.close();
       check('third peer: existing peers stay connected',
         (await Promise.all(peers.map(p => p.page.evaluate(() => window.__vksPc.connectionState)))).every(s => s === 'connected'), '');
+    }
+
+    // audio_only contract: a subscriber that sets SubscribeRequest.audio_only
+    // must receive audio but no video fan-out.
+    {
+      const created = await api(token, 'POST', '/api/v3/conferences', {
+        display_name: 'WebRTC audio-only ' + new Date().toISOString().slice(11, 19),
+      });
+      const audioOnlyRoom = created.conference && created.conference.id;
+      const pageA = await context.newPage();
+      const pageB = await context.newPage();
+      await pageA.goto(BASE + '/pnm/authorization', { waitUntil: 'domcontentloaded' });
+      await pageB.goto(BASE + '/pnm/authorization', { waitUntil: 'domcontentloaded' });
+      const sigA = await new SignalPeer(token, audioOnlyRoom, 'AudioOnly-A').connect();
+      const sigB = await new SignalPeer(token, audioOnlyRoom, 'AudioOnly-B').connect();
+      await sigA.hello(); await sigA.join(); await sigA.subscribe(false);
+      await sigB.hello(); await sigB.join(); await sigB.subscribe(true);
+      const offerA = await createBrowserPeer(pageA);
+      const answerA = await sigA.offer(offerA.sdp);
+      await applyAnswer(pageA, answerA);
+      const offerB = await createBrowserPeer(pageB);
+      const answerB = await sigB.offer(offerB.sdp);
+      await applyAnswer(pageB, answerB);
+      await Promise.all([waitConnected(pageA), waitConnected(pageB)]);
+      await new Promise(resolve => setTimeout(resolve, 2500));
+      const statsB = await collectStats(pageB);
+      const inVideo = statsB.inbound.find(stat => stat.kind === 'video');
+      const inAudio = statsB.inbound.find(stat => stat.kind === 'audio');
+      check('audio_only: subscriber receives audio', Boolean(inAudio) && inAudio.packetsReceived > 0,
+        JSON.stringify(inAudio || null));
+      // A negotiated video m-line can still expose RTCP bookkeeping, but no
+      // payload/frames may arrive for an audio-only subscriber.
+      check('audio_only: subscriber receives no video payload',
+        !inVideo || (!inVideo.bytesReceived && !inVideo.framesDecoded), JSON.stringify(inVideo || null));
+      sigA.close(); sigB.close();
+      await pageA.close(); await pageB.close();
     }
 
     await new Promise(resolve => setTimeout(resolve, RUN_SECONDS * 1000));
@@ -389,8 +435,34 @@ async function collectStats(page) {
     }
 
     check('server: no page errors', !checks.some(c => c.name.startsWith('pageerror')), '');
+    let commit = '';
+    try { commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(); } catch { /* not a git checkout */ }
+    let binarySha256 = '';
+    try {
+      const binary = process.env.VKS_BINARY || '/home/pro/mcu/target/release/vks-server';
+      binarySha256 = crypto.createHash('sha256').update(fs.readFileSync(binary)).digest('hex');
+    } catch { /* optional */ }
+    const metrics = await fetch(BASE + '/metrics').then(r => r.text()).catch(() => '');
+    let effectiveEnv = {};
+    try {
+      const shown = execFileSync('systemctl', ['--user', 'show', 'vks-mcu.service', '-p', 'Environment'], { encoding: 'utf8' });
+      for (const pair of shown.replace(/^Environment=/, '').split(/\s+/)) {
+        const [key, ...rest] = pair.split('=');
+        if (key.startsWith('VKS_WEBRTC') || key.startsWith('VKS_ALLOW_LOOPBACK')) effectiveEnv[key] = rest.join('=');
+      }
+    } catch { /* not a systemd deployment */ }
     const result = {
       generated_at: new Date().toISOString(),
+      commit,
+      binary_sha256: binarySha256,
+      env: {
+        process: {
+          VKS_WEBRTC_TRANSPORT: process.env.VKS_WEBRTC_TRANSPORT || null,
+          VKS_WEBRTC_PORT_MIN: process.env.VKS_WEBRTC_PORT_MIN || null,
+          VKS_WEBRTC_PORT_MAX: process.env.VKS_WEBRTC_PORT_MAX || null,
+        },
+        server: effectiveEnv,
+      },
       base: BASE,
       room_id: roomId,
       checks,
@@ -398,6 +470,11 @@ async function collectStats(page) {
       failed: checks.filter(c => !c.ok).length,
       total: checks.length,
     };
+    fs.writeFileSync(path.join(ART, 'metrics.txt'), metrics);
+    try {
+      const log = fs.readFileSync(process.env.VKS_SERVER_LOG || '/home/pro/mcu/vks_server.log', 'utf8').split('\n');
+      fs.writeFileSync(path.join(ART, 'server-log-tail.txt'), log.slice(-300).join('\n'));
+    } catch { /* log path optional */ }
     fs.writeFileSync(path.join(ART, 'result.json'), JSON.stringify(result, null, 2));
     console.log(`\nWebRTC E2E: ${result.passed}/${result.total} checks passed`);
     if (result.failed > 0) process.exitCode = 1;

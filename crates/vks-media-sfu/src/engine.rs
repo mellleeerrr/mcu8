@@ -196,6 +196,10 @@ impl SfuEngine {
         if let Some(room_state) = self.rooms.lock().unwrap().get_mut(&room) {
             room_state.endpoints.remove(&participant);
         }
+        // The reverse map is what `route_udp_packet` uses to re-learn an
+        // endpoint; leaving it would let a stale plaintext source revive the
+        // endpoint after a peer switched to SRTP.
+        self.addr_to_participant.lock().unwrap().retain(|_, (r, p)| !(*r == room && *p == participant));
     }
 
     pub fn get_endpoint(&self, room: RoomId, participant: ParticipantId) -> Option<SocketAddr> {

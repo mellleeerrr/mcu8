@@ -536,14 +536,18 @@ impl GatewayManager {
             || active_call.sip_codec.name.to_lowercase().contains("vp8")
             || sdp_offer.iter().any(|c| c.name.to_lowercase().contains("264") || c.name.to_lowercase().contains("vp8"));
 
-        land_gateway_participant_in_room(
+        if !land_gateway_participant_in_room(
             state,
             self.mcu_engine.as_ref(),
             room_id,
             &active_call.participant_id,
             &display_name,
             has_video,
-        );
+        ) {
+            return Err(Error::Conflict(
+                "room has a real WebRTC participant; SIP/H.323 bridge is not supported".into(),
+            ));
+        }
 
         vks_admin::api_v3::call_strings::record_incoming_call(
             state.as_ref(),
@@ -605,14 +609,18 @@ impl GatewayManager {
                 .iter()
                 .any(|c| c.name.to_lowercase().contains("264") || c.name.to_lowercase().contains("vp8"));
 
-        land_gateway_participant_in_room(
+        if !land_gateway_participant_in_room(
             state,
             self.mcu_engine.as_ref(),
             room_id,
             &active_call.participant_id,
             &display_name,
             has_video,
-        );
+        ) {
+            return Err(Error::Conflict(
+                "room has a real WebRTC participant; SIP/H.323 bridge is not supported".into(),
+            ));
+        }
 
         vks_admin::api_v3::call_strings::record_incoming_call(
             state.as_ref(),
@@ -894,9 +902,21 @@ pub fn land_gateway_participant_in_room(
     participant_id: &str,
     display_name: &str,
     has_video: bool,
-) {
+) -> bool {
+    // The real WebRTC path has no SIP/H.323 plaintext<->SRTP bridge. Enforce
+    // the same-room guard when the gateway joins, not only at browser offer
+    // time, otherwise the room silently becomes half-bridged.
+    if crate::webrtc_runtime::room_has_peer(*room_id) {
+        tracing::error!(
+            room = %room_id,
+            participant = %participant_id,
+            "gateway participant rejected: room has a real WebRTC peer (no SRTP bridge)"
+        );
+        return false;
+    }
     bridge_gateway_participant_media(mcu_engine, room_id, participant_id, has_video);
     announce_gateway_participant(state, room_id, participant_id, display_name, has_video);
+    true
 }
 
 /// Удаляет участника шлюза из RoomHub, обновляет счетчик комнаты,
@@ -2230,14 +2250,16 @@ async fn serve_sip_uas_on(
                     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let controls = GatewayMediaControls::default();
-                    land_gateway_participant_in_room(
+                    if !land_gateway_participant_in_room(
                         &state,
                         Some(&mcu),
                         &room_id,
                         &participant_id,
                         &display_name,
                         has_video,
-                    );
+                    ) {
+                        tracing::warn!(room = %room_id, "inbound SIP participant not landed: real WebRTC peer present");
+                    }
                     let from_uri = request
                         .from
                         .split("sip:")
@@ -3092,14 +3114,16 @@ async fn serve_h323_uas_session(
                         },
                     );
                 }
-                land_gateway_participant_in_room(
+                if !land_gateway_participant_in_room(
                     &state,
                     Some(&mcu),
                     &pending_call.room_id,
                     &pending_call.participant_id,
                     &pending_call.display_name,
                     has_video,
-                );
+                ) {
+                    tracing::warn!(room = %pending_call.room_id, "outbound participant not landed: real WebRTC peer present");
+                }
                 vks_admin::api_v3::call_strings::record_incoming_call(
                     &state,
                     pending_call.room_id,

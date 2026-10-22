@@ -18,6 +18,7 @@ pub use recorder::RecorderManager;
 use std::sync::Arc;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use axum::extract::Query;
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
@@ -261,7 +262,19 @@ async fn metrics_handler() -> Response {
 /// токеном — 401. Браузерный JS (не умеет ставить заголовки) обязан идти через
 /// адаптер `/api/v3/ws`. Роль на этом шаге не проверяется: авторизация
 /// конкретных сигналинг-действий — зона FSM и следующих волн.
-async fn ws_handler(State(ctx): State<WsContext>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+#[derive(Debug, serde::Deserialize)]
+struct WsQuery {
+    /// Short-lived JWT supplied by the browser bootstrap; browsers cannot set
+    /// the Authorization header on WebSocket. Header auth remains supported.
+    token: Option<String>,
+}
+
+async fn ws_handler(
+    State(ctx): State<WsContext>,
+    headers: HeaderMap,
+    Query(query): Query<WsQuery>,
+    ws: WebSocketUpgrade,
+) -> Response {
     let Some(_issuer) = &ctx.state.jwt_issuer else {
         return ws_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -273,8 +286,13 @@ async fn ws_handler(State(ctx): State<WsContext>, headers: HeaderMap, ws: WebSoc
         let (scheme, token) = h.split_once(' ')?;
         (scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty()).then(|| token.trim())
     });
+    let bearer = bearer.or_else(|| query.token.as_deref().map(str::trim).filter(|token| !token.is_empty()));
     let Some(token) = bearer else {
-        return ws_error(StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid Authorization header");
+        return ws_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "missing or invalid Authorization header or ?token= query parameter",
+        );
     };
     let Some(verified) = ctx.state.verify_token(token) else {
         tracing::debug!("ws jwt verification failed or token revoked");
@@ -465,6 +483,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
     // Set when the current SDP offer was answered by the real str0m peer; the
     // legacy plaintext PT/SSRC/endpoint side effects are skipped for it.
     let mut real_webrtc_peer;
+    let mut real_webrtc_attempted = false;
     let mut room_rx: Option<tokio::sync::broadcast::Receiver<vks_admin::hub::RoomBroadcastEvent>> = None;
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -688,6 +707,12 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             vks_common::metrics::WEBRTC_FALLBACK
                                                 .with_label_values(&["legacy_offer"])
                                                 .inc();
+                                        } else if handler_config.room_mode == vks_proto::media::RoomMode::Mcu as i32 {
+                                            real_webrtc_attempted = true;
+                                            webrtc_failure = Some((
+                                                "webrtc_mcu_room_unsupported",
+                                                "Real WebRTC is not bridged into MCU-mode rooms".to_string(),
+                                            ));
                                         } else if gateway_room {
                                             warn!(
                                                 room = %membership.room_id,
@@ -699,6 +724,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                 "Real WebRTC in a room with SIP/H.323 participants is not supported yet".to_string(),
                                             ));
                                         } else {
+                                            real_webrtc_attempted = true;
                                             match crate::webrtc_runtime::accept_offer(
                                                 &handler_config,
                                                 membership.room_id,
@@ -749,7 +775,14 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                         format!("Real WebRTC transport rejected the offer: {error}"),
                                                     ));
                                                 }
-                                                None => {}
+                                                None => {
+                                                    if crate::webrtc_runtime::enabled() {
+                                                        webrtc_failure = Some((
+                                                            "webrtc_unavailable",
+                                                            "WebRTC transport is enabled but failed to initialize".to_string(),
+                                                        ));
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -758,8 +791,13 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                 // enabled: never answer with fake ICE/DTLS credentials if
                                 // str0m rejected the offer.
                                 if let Some((code, message)) = webrtc_failure {
+                                    // handler.handle already moved InRoom->Negotiating;
+                                    // without rollback a retry on the same socket is
+                                    // rejected as bad_state.
+                                    handler.rollback_offer();
                                     replies.retain(|reply| !matches!(reply.payload(), Some(Payload::SdpAnswer(_))));
-                                    replies.push(Envelope::error_reply(request_msg_id, code, &message, false));
+                                    let retryable = matches!(code, "room_full" | "webrtc_capacity");
+                                    replies.push(Envelope::error_reply(request_msg_id, code, &message, retryable));
                                     vks_common::metrics::WEBRTC_FALLBACK
                                         .with_label_values(&["offer_rejected"])
                                         .inc();
@@ -845,7 +883,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                     if !replies.iter().any(|r| matches!(r.payload(), Some(Payload::Error(_)))) {
                                         if let Some(ref m) = current_membership {
                                             let pid = parse_participant_id(&m.participant_id);
-                                            if !crate::webrtc_runtime::has_peer(m.room_id, pid) {
+                                            if !real_webrtc_attempted && !crate::webrtc_runtime::has_peer(m.room_id, pid) {
                                                 if let Some(addr) = parse_ice_candidate_addr(&c.candidate) {
                                                     ctx.sfu_engine.register_endpoint(m.room_id, pid, addr);
                                                 }

@@ -140,6 +140,17 @@ pub static FRONTEND_DENIED: LazyLock<IntCounterVec> = LazyLock::new(|| {
 pub fn init_default() {
     INIT.call_once(|| {
         BUILD_INFO.with_label_values(&[env!("CARGO_PKG_VERSION")]).set(1);
+        // Materialise zero samples so /metrics shows the WebRTC subsystem even
+        // before the first browser offer.
+        WEBRTC_PEERS.set(0);
+        for result in ["accepted", "rejected", "room_full", "port_range_exhausted"] {
+            WEBRTC_OFFERS.with_label_values(&[result]);
+        }
+        for reason in ["connect_deadline", "idle_timeout", "Disconnected"] {
+            WEBRTC_ICE_FAILURES.with_label_values(&[reason]);
+        }
+        WEBRTC_FRAMES_DROPPED.with_label_values(&["queue_full"]);
+        WEBRTC_FALLBACK.with_label_values(&["disabled"]);
     });
 }
 
@@ -367,6 +378,21 @@ mod tests {
         SIGNALING_MESSAGES.with_label_values(&["uplink"]).inc();
         let text = encode();
         assert!(text.contains("vks_signaling_messages_total"));
+    }
+
+    #[test]
+    fn webrtc_metrics_are_registered() {
+        init_default();
+        let text = encode();
+        for name in [
+            "vks_webrtc_peers",
+            "vks_webrtc_offers_total",
+            "vks_webrtc_ice_failures_total",
+            "vks_webrtc_frames_dropped_total",
+            "vks_webrtc_fallback_total",
+        ] {
+            assert!(text.contains(name), "missing {name} in /metrics output");
+        }
     }
 
     #[test]

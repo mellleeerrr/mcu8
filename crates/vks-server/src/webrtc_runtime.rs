@@ -14,8 +14,60 @@ use vks_media_sfu::webrtc::WebRtcConfig;
 use vks_media_sfu::webrtc_room::{AcceptedPeer, WebRtcRoomRegistry};
 use vks_signaling::handler::HandlerConfig;
 
-fn enabled() -> bool {
-    std::env::var("VKS_WEBRTC_TRANSPORT").map_or(true, |value| value != "0")
+/// `VKS_WEBRTC_TRANSPORT` defaults to OFF: enabling a new media plane must be
+/// an explicit deployment decision. Accepts 0/false/off/no as disable.
+pub fn enabled() -> bool {
+    match std::env::var("VKS_WEBRTC_TRANSPORT") {
+        Ok(value) => !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Err(_) => false,
+    }
+}
+
+/// Validates WebRTC deployment settings before the listener starts.
+///
+/// Returns `Err` when the transport is enabled but cannot work; `main` exits
+/// nonzero instead of silently falling back to the fake legacy SDP.
+pub fn preflight(config: &HandlerConfig) -> Result<(), String> {
+    if !enabled() {
+        return Ok(());
+    }
+    let candidate = config.candidate_addr.trim();
+    if candidate.is_empty() {
+        return Err("VKS_WEBRTC_TRANSPORT is enabled but candidate_addr is empty".into());
+    }
+    let ip: IpAddr =
+        candidate.parse().map_err(|error| format!("candidate_addr {candidate:?} is not a valid IP: {error}"))?;
+    if (ip.is_loopback() || ip.is_unspecified()) && std::env::var("VKS_ALLOW_LOOPBACK_MEDIA").as_deref() != Ok("1") {
+        return Err(format!(
+            "candidate_addr {ip} is loopback/unspecified; set a reachable address or VKS_ALLOW_LOOPBACK_MEDIA=1"
+        ));
+    }
+    match (std::env::var("VKS_WEBRTC_PORT_MIN"), std::env::var("VKS_WEBRTC_PORT_MAX")) {
+        (Ok(min), Ok(max)) => {
+            let min: u16 = min.parse().map_err(|_| "VKS_WEBRTC_PORT_MIN is not a port".to_string())?;
+            let max: u16 = max.parse().map_err(|_| "VKS_WEBRTC_PORT_MAX is not a port".to_string())?;
+            if min == 0 || max < min {
+                return Err(format!("invalid WebRTC port range {min}..={max}"));
+            }
+            let bind_ip: IpAddr = if ip.is_ipv6() {
+                std::net::Ipv6Addr::UNSPECIFIED.into()
+            } else {
+                std::net::Ipv4Addr::UNSPECIFIED.into()
+            };
+            let probe = std::net::UdpSocket::bind((bind_ip, min))
+                .map_err(|error| format!("cannot bind WebRTC port range start {bind_ip}:{min}: {error}"))?;
+            drop(probe);
+            tracing::info!(candidate = %ip, min, max, "WebRTC preflight OK");
+        }
+        (Err(_), Err(_)) => tracing::info!(candidate = %ip, ports = "ephemeral", "WebRTC preflight OK"),
+        _ => return Err("set both VKS_WEBRTC_PORT_MIN and VKS_WEBRTC_PORT_MAX, or neither".into()),
+    }
+    Ok(())
+}
+
+/// Whether any participant in this room has a real str0m transport.
+pub fn room_has_peer(room: vks_core::RoomId) -> bool {
+    REGISTRY.get().and_then(|registry| registry.as_ref()).is_some_and(|registry| registry.room_has_peer(room))
 }
 
 static REGISTRY: OnceLock<Option<Arc<WebRtcRoomRegistry>>> = OnceLock::new();

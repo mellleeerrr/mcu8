@@ -172,11 +172,13 @@ pub struct SignalingHandler {
     config: HandlerConfig,
     room_id: Option<String>,
     participant_id: Option<String>,
+    /// State before the latest SdpOffer, so a transport rejection can roll back.
+    pre_offer_state: Option<SessionState>,
 }
 
 impl SignalingHandler {
     pub fn new(config: HandlerConfig) -> Self {
-        Self { session: Session::new(), config, room_id: None, participant_id: None }
+        Self { session: Session::new(), config, room_id: None, participant_id: None, pre_offer_state: None }
     }
 
     pub fn state(&self) -> SessionState {
@@ -189,6 +191,14 @@ impl SignalingHandler {
 
     pub fn room_id(&self) -> Option<&str> {
         self.room_id.as_deref()
+    }
+
+    /// Rolls back an already-applied SdpOffer when the media transport rejected
+    /// it, so the client can retry on the same WebSocket.
+    pub fn rollback_offer(&mut self) {
+        if let Some(state) = self.pre_offer_state.take() {
+            self.session.restore(state);
+        }
     }
 
     /// Текущая конфигурация ответа (для тестов и диагностики).
@@ -346,6 +356,7 @@ impl SignalingHandler {
                 return vec![Envelope::error_reply(reply_to, "sdp_parse_error", &e.to_string(), true)];
             }
         };
+        self.pre_offer_state = Some(state);
         if let Err(e) = self.session.apply(SessionEvent::SdpOffer) {
             return vec![Envelope::error_reply(reply_to, "bad_state", &format!("offer: {e}"), false)];
         }
@@ -378,6 +389,7 @@ impl SignalingHandler {
     }
 
     fn on_ice_complete(&mut self, c: &ProtoIceComplete, reply_to: u64) -> Vec<Envelope> {
+        self.pre_offer_state = None;
         if self.session.state() != SessionState::Negotiating {
             let state = self.session.state();
             return vec![Envelope::error_reply(
@@ -482,6 +494,21 @@ mod tests {
     }
 
     const OFFER_2: &str = "v=0\no=c1 1 1 0 IN IP4 0.0.0.0\ns=test\nm=audio 9 UDP/TLS/RTP/SAVPF 111\na=mid:0\na=rtpmap:111 opus/48000/2\nm=video 9 UDP/TLS/RTP/SAVPF 96\na=mid:1\na=rtpmap:96 VP8/90000";
+
+    #[test]
+    fn rejected_offer_can_be_retried_after_rollback() {
+        let mut handler = SignalingHandler::new(HandlerConfig::default_test());
+        handler.handle(hello(1, 1));
+        handler.handle(join(2, "r1"));
+        handler.handle(offer(3, OFFER_2));
+        assert_eq!(handler.state(), SessionState::Negotiating);
+        // The server rejected the real transport and rolled the FSM back.
+        handler.rollback_offer();
+        assert_eq!(handler.state(), SessionState::InRoom);
+        let retry = handler.handle(offer(4, OFFER_2));
+        assert!(matches!(retry[0].payload(), Some(Payload::SdpAnswer(_))));
+        assert_eq!(handler.state(), SessionState::Negotiating);
+    }
 
     #[test]
     fn full_happy_path_over_mock_ws() {

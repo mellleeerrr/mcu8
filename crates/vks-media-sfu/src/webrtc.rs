@@ -73,6 +73,8 @@ pub enum WebRtcError {
     UnknownMid,
     #[error("room already has the maximum number of real WebRTC peers")]
     RoomFull,
+    #[error("server reached its global WebRTC peer limit")]
+    CapacityExceeded,
     #[error("invalid offer: {0}")]
     InvalidOffer(String),
 }
