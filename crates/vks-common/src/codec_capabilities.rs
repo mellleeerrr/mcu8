@@ -3,7 +3,7 @@
 //! содержать полную матрицу T06b; SDP и выбор кодека фильтруются здесь.
 
 /// Аудио, которое native-профиль шлюза принимает/отдаёт без транскодера.
-pub const NATIVE_AUDIO: &[&str] = &["PCMU", "PCMA", "G711", "G711U", "G711A"];
+pub const NATIVE_AUDIO: &[&str] = &["PCMU", "PCMA", "G711", "G711U", "G711A", "G722"];
 /// Видео, которое native-профиль шлюза кодирует/декодирует (H.264 baseline mode=1).
 pub const NATIVE_VIDEO: &[&str] = &["H264"];
 
@@ -53,10 +53,10 @@ mod tests {
 
     #[test]
     fn native_names_match_gateway_offer() {
-        for name in ["PCMU", "PCMA", "G711", "g711u", "G.711-A"] {
+        for name in ["PCMU", "PCMA", "G711", "g711u", "G.711-A", "G722", "g722"] {
             assert!(is_native_audio(name), "{name} должен моститься");
         }
-        for name in ["G722", "G729", "OPUS", "AAC", "G7221C"] {
+        for name in ["G729", "OPUS", "AAC", "G7221C"] {
             assert!(!is_native_audio(name), "{name} требует T06b-транскодера");
         }
         assert!(is_native_video("H264"));

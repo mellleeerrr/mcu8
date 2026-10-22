@@ -145,6 +145,32 @@ pub fn upsample_8k_to_48k(src: &[f32; 160], dst: &mut [f32; 960]) {
     }
 }
 
+/// Повышает 16 кГц → 48 кГц (линейная интерполяция 1:3, 20 мс).
+pub fn upsample_16k_to_48k(src: &[f32; 320], dst: &mut [f32; 960]) {
+    for i in 0..319 {
+        let s0 = src[i];
+        let s1 = src[i + 1];
+        let step = (s1 - s0) / 3.0;
+        for k in 0..3 {
+            dst[i * 3 + k] = s0 + step * (k as f32);
+        }
+    }
+    let last = src[319];
+    for k in 0..3 {
+        dst[957 + k] = last;
+    }
+}
+
+/// Понижает 48 кГц → 16 кГц (усреднение 3 отсчётов, 20 мс).
+pub fn downsample_48k_to_16k(src: &[f32], dst: &mut [f32; 320]) {
+    dst.fill(0.0);
+    let chunks = (src.len() / 3).min(320);
+    for i in 0..chunks {
+        let chunk = &src[i * 3..(i + 1) * 3];
+        dst[i] = chunk.iter().sum::<f32>() / 3.0;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RFC 3550 RTP Header Serializer / Deserializer
 // ---------------------------------------------------------------------------
@@ -218,13 +244,14 @@ mod header_regressions {
 // **not** a claim that the media bridge can process it:
 //
 // * Native today (really decoded and re-encoded by this gateway):
-//   PCMU, PCMA (G.711) and H.264 Constrained Baseline, packetization-mode=1.
+//   PCMU, PCMA (G.711), G.722 (PT9, Mode1 64k) and H.264 Constrained Baseline,
+//   packetization-mode=1.
 // * Everything else is offered for interoperability and **refused on answer**:
 //   [`negotiate_media_detailed`] returns [`NegotiationFailure::UnsupportedAudio`]
 //   instead of handing a codec we cannot bridge to the RTP bridge (that would
 //   produce a connected call with dead audio). The outgoing caller answers such
-//   an SDP with ACK+BYE. The in-memory UAS returns `Error::InvalidInput`; a
-//   wire-level 488 requires the SIP UAS transport (T08), it is not sent today.
+//   an SDP with ACK+BYE; the inbound SIP UAS (T07c) refuses before 200 with a
+//   wire-level 488 Not Acceptable Here.
 //
 // Payload numbering follows RFC 3551 for static assignments (0/8/9/15/4/18/31/34)
 // and dynamic 96..127 otherwise. G.722.1 is `G7221/16000` (24/32 kbit/s) and
@@ -254,7 +281,7 @@ pub struct OfferCodec {
 pub const AUDIO_OFFER: &[OfferCodec] = &[
     OfferCodec { payload: 0, name: "PCMU", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
     OfferCodec { payload: 8, name: "PCMA", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
-    OfferCodec { payload: 9, name: "G722", clock: 8000, channels: 1, fmtp: None, native: false, dtmf: false },
+    OfferCodec { payload: 9, name: "G722", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
     OfferCodec { payload: 15, name: "G728", clock: 8000, channels: 1, fmtp: None, native: false, dtmf: false },
     OfferCodec { payload: 4, name: "G723", clock: 8000, channels: 1, fmtp: None, native: false, dtmf: false },
     OfferCodec {
@@ -471,8 +498,8 @@ fn payload_list(codecs: &[&OfferCodec]) -> String {
 /// Which codecs an outbound offer advertises.
 ///
 /// * [`CodecProfile::Native`] — only codecs the media bridge really
-///   decodes/encodes (G.711 + H.264 baseline, plus `telephone-event`). This is
-///   the production default: a terminal answers with a codec we can actually
+///   decodes/encodes (G.711, G.722, H.264 baseline, plus `telephone-event`).
+///   This is the production default: a terminal answers with a codec we can actually
 ///   bridge, and the RTP bridge's single-payload-type pinning stays valid.
 /// * [`CodecProfile::Full`] — the whole vendor matrix. Required for lab
 ///   interoperability checks, but it changes what a terminal chooses to send:
@@ -694,6 +721,21 @@ mod tests {
     }
 
     #[test]
+    fn wideband_resampling_cadence() {
+        let mut src_16k = [0.0f32; 320];
+        for (i, sample) in src_16k.iter_mut().enumerate() {
+            *sample = ((i as f32) * 2.0 * std::f32::consts::PI * 440.0 / 16_000.0).sin();
+        }
+        let mut dst_48k = [0.0f32; 960];
+        upsample_16k_to_48k(&src_16k, &mut dst_48k);
+        let mut roundtrip = [0.0f32; 320];
+        downsample_48k_to_16k(&dst_48k, &mut roundtrip);
+        for i in 1..319 {
+            assert!((src_16k[i] - roundtrip[i]).abs() < 0.1, "sample {i}");
+        }
+    }
+
+    #[test]
     fn rtp_header_roundtrip() {
         let mut buf = [0u8; 12];
         write_rtp_header(&mut buf, 0, 100, 16000, 0x12345678, true);
@@ -847,7 +889,7 @@ a=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1\r\n";
     fn native_profile_offers_only_bridgeable_codecs() {
         let sdp = build_offer(CodecProfile::Native, "192.168.1.93", 41000, Some(41002));
         for line in [
-            "m=audio 41000 RTP/AVP 0 8 101",
+            "m=audio 41000 RTP/AVP 0 8 9 101",
             "a=rtpmap:0 PCMU/8000",
             "a=rtpmap:8 PCMA/8000",
             "a=rtpmap:101 telephone-event/8000",
@@ -1049,6 +1091,12 @@ fn audio_offer_entry(payload: u8) -> Option<&'static OfferCodec> {
 /// redefined as another codec makes that payload unusable. RFC 3551 allows
 /// static payload types to omit `a=rtpmap`.
 fn audio_identity(media: &SdpMedia, payload: u8) -> Option<&'static OfferCodec> {
+    // A static payload type is still only present if it is listed in `m=`.
+    // Without this check PT9 G722 was treated as offered merely because the
+    // static table knows it, and a PCMU-only offer negotiated G722.
+    if !media.payloads.contains(&payload) {
+        return None;
+    }
     let local = audio_offer_entry(payload)?;
     match media.maps.get(&payload) {
         Some(map) => {
@@ -1105,31 +1153,30 @@ fn h264_baseline_level(media: &SdpMedia, payload: u8) -> Option<u8> {
 
 /// Intersect local offer with the peer's answer and report *why* it failed.
 ///
-/// Selection rule: scan the answer's payloads in order and take the first one
-/// that is present in our offer with the same payload number and the same
-/// `rtpmap` identity (name + clock + channels) **and** that this gateway can
-/// really bridge (`native`). Payload numbers must be symmetric because the RTP
-/// bridge uses one payload type for both directions.
+/// Selection rule: scan the answer's payloads in order and take the **first**
+/// one that is present in our offer with the same payload number and the same
+/// `rtpmap` identity (name + clock + channels). Payload numbers must be
+/// symmetric because the RTP bridge uses one payload type for both directions.
 ///
-/// Hardware terminals (e.g. Polycom RPD 3.5) put codecs they cannot be given
-/// first in their answer, so a strict "first common" rule would refuse a call
-/// that actually works. The bridge therefore picks the first *bridgeable*
-/// common codec and warns when the peer listed an unbridgeable one earlier —
-/// the peer may still transmit that codec, in which case the RTP source
-/// validator drops its packets.
-///
-/// If no bridgeable codec is common, the call is refused with
-/// [`NegotiationFailure::UnsupportedAudio`] (never a "connected" call with dead
-/// media); vendor/unknown codecs are skipped and never cause a parse error.
-/// Unsupported video leaves audio usable.
+/// Strict-first is deliberate: the peer expects to send its first choice. A
+/// later native codec must not mask that choice (Polycom lists G722.1C before
+/// PCMU), otherwise the gateway reports a connected call while the peer's RTP
+/// is dropped by the source validator. If the first common codec is not
+/// natively bridged, the call is refused with
+/// [`NegotiationFailure::UnsupportedAudio`] instead of "connected with dead
+/// audio"; vendor/unknown codecs never cause a parse error. Unsupported video
+/// leaves audio usable.
 pub fn negotiate_media_detailed(offer: &str, answer: &str) -> Result<NegotiatedMedia, NegotiationFailure> {
     let local = parse_sdp(offer).ok_or(NegotiationFailure::UnusableSdp)?;
     let remote = parse_sdp(answer).ok_or(NegotiationFailure::UnusableSdp)?;
     let local_audio = usable_media(&local, "audio").ok_or(NegotiationFailure::NoCommonAudio)?;
     let remote_audio = usable_media(&remote, "audio").ok_or(NegotiationFailure::NoCommonAudio)?;
 
+    // Strict-first: the first common codec is what the peer expects to send.
+    // Falling through to a later native codec while the peer's first choice is
+    // unbridged produces "connected" with dead audio (Polycom lists G722.1C
+    // before PCMU). Either bridge the first one or refuse before 200 OK.
     let mut first_common = None;
-    let mut selected = None;
     for payload in &remote_audio.payloads {
         let Some(remote_codec) = audio_identity(remote_audio, *payload) else {
             continue;
@@ -1143,30 +1190,12 @@ pub fn negotiate_media_detailed(offer: &str, answer: &str) -> Result<NegotiatedM
         if !local_codec.name.eq_ignore_ascii_case(remote_codec.name) || local_codec.clock != remote_codec.clock {
             continue;
         }
-        first_common.get_or_insert(local_codec);
-        if local_codec.native {
-            selected = Some(local_codec);
-            break;
-        }
+        first_common = Some(local_codec);
+        break;
     }
-    let codec = match (selected, first_common) {
-        (Some(codec), _) => codec,
-        (None, Some(first)) => {
-            return Err(NegotiationFailure::UnsupportedAudio { codec: first.name.to_string(), payload: first.payload });
-        }
-        (None, None) => return Err(NegotiationFailure::NoCommonAudio),
-    };
-    if let Some(first) = first_common {
-        if first.payload != codec.payload {
-            tracing::warn!(
-                peer_first = first.name,
-                peer_payload = first.payload,
-                selected = codec.name,
-                selected_payload = codec.payload,
-                "peer lists a codec this gateway cannot bridge before the selected one; \
-                 if it transmits that codec its RTP is dropped by the source validator"
-            );
-        }
+    let codec = first_common.ok_or(NegotiationFailure::NoCommonAudio)?;
+    if !codec.native {
+        return Err(NegotiationFailure::UnsupportedAudio { codec: codec.name.to_string(), payload: codec.payload });
     }
 
     let ip = remote_audio.ip.clone().or(remote.ip.clone()).ok_or(NegotiationFailure::NoCommonAudio)?;
@@ -1193,7 +1222,7 @@ pub fn negotiate_media_detailed(offer: &str, answer: &str) -> Result<NegotiatedM
         ip,
         audio_port: remote_audio.port,
         audio_payload_type: codec.payload,
-        audio_codec: if codec.name.eq_ignore_ascii_case("PCMA") { "PCMA" } else { "PCMU" },
+        audio_codec: codec.name,
         dtmf_payload_type,
         video_ip: video.as_ref().map(|value| value.0.clone()),
         video_port: video.as_ref().map(|value| value.1),
@@ -1212,6 +1241,36 @@ pub fn negotiate_media(offer: &str, answer: &str) -> Option<NegotiatedMedia> {
 /// uses `negotiate_media` with the exact local offer instead of this convenience.
 pub fn parse_negotiated_media(answer: &str) -> Option<NegotiatedMedia> {
     negotiate_media(&build_plain_sdp("127.0.0.1", 2, Some(4)), answer)
+}
+
+#[cfg(test)]
+mod g722_and_strict_first_regressions {
+    use super::*;
+
+    #[test]
+    fn native_offer_selects_g722_when_peer_lists_it_before_pcmu() {
+        let offer = build_offer(CodecProfile::Native, "192.168.1.93", 41000, None);
+        assert!(offer.contains("m=audio 41000 RTP/AVP 0 8 9 101"), "{offer}");
+        let answer = "v=0\r\nc=IN IP4 192.168.1.132\r\n\
+m=audio 3230 RTP/AVP 9 0 8 101\r\na=rtpmap:9 G722/8000\r\na=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\n";
+        let media = negotiate_media(&offer, answer).expect("G722 is now native");
+        assert_eq!(media.audio_payload_type, 9);
+        assert_eq!(media.audio_codec, "G722");
+        assert_eq!(media.dtmf_payload_type, Some(101));
+    }
+
+    #[test]
+    fn strict_first_rejects_unbridged_codec_before_a_later_pcmu() {
+        let offer = build_offer(CodecProfile::Full, "192.168.1.93", 41000, None);
+        let answer = "v=0\r\nc=IN IP4 192.168.1.132\r\n\
+m=audio 3230 RTP/AVP 18 0\r\na=rtpmap:18 G729/8000\r\na=rtpmap:0 PCMU/8000\r\n";
+        assert_eq!(
+            negotiate_media_detailed(&offer, answer),
+            Err(NegotiationFailure::UnsupportedAudio { codec: "G729".into(), payload: 18 }),
+            "late PCMU must not mask a peer-first G729 choice"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1315,12 +1374,12 @@ a=sendrecv\r\n";
         // Only the full matrix offers G.722; the native profile would report
         // NoCommonAudio instead, which is a different (also correct) verdict.
         let offer = build_offer(CodecProfile::Full, "127.0.0.1", 41000, None);
-        let answer = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 3230 RTP/AVP 9\r\na=rtpmap:9 G722/8000\r\n";
+        let answer = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 3230 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\n";
         assert_eq!(
             negotiate_media_detailed(&offer, answer),
-            Err(NegotiationFailure::UnsupportedAudio { codec: "G722".into(), payload: 9 })
+            Err(NegotiationFailure::UnsupportedAudio { codec: "G729".into(), payload: 18 })
         );
-        assert!(negotiate_media(&offer, answer).is_none(), "G.722 must never be reported as connected media");
+        assert!(negotiate_media(&offer, answer).is_none(), "G.729 must never be reported as connected media");
     }
 
     #[test]

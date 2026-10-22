@@ -326,18 +326,30 @@ live proof. H.264/H.265 в browser SFU — только с реальным forw
 **Приёмка.** UI/настройки/конференция/SDP согласованы; G722-first терминал
 получает понятный 488 или PCMU fallback, а не молчаливую потерю.
 
-**Статус 2026-10-22 — T06a закрыт `22c7003`, ревью 9.5/10 APPROVED.** Native-оффер не изменён; полные
-списки сохранены как intent, API помечает `supported`; Full включается только
+**Статус 2026-10-22 — T06a закрыт `22c7003`, ревью 9.5/10 APPROVED.** На момент T06a
+native-оффер был PCMU/PCMA; в T06b-1 он расширен G722 PT9 (см. ниже), полные
+списки по-прежнему intent, API помечает `supported`; Full включается только
 с `VKS_TRANSCODER_ENABLED=1`/lab-флагом; выбор только немостимых кодеков даёт
 явную ошибку до дозвона; UAC сохраняет `NoCommonCodec{codec,payload,peer_status}`. Live
-high/low: 114/114 checks, audio TX/RX 562/367 и 542/348, rejected 0, video 3.55/0.55 Mbps. T06b —
+high/low T06a: 114/114 checks, audio TX/RX 562/367 и 542/348, rejected 0, video 3.55/0.55 Mbps. T06b —
 транскодер полной матрицы; H.323 — T05b/T07.
+
+**T06b-1 (G.722 SIP end-to-end) — реализован 2026-10-22, ожидает ревью/коммита.**
+G722 PT9/8000 native в SDP (offer `0 8 9 101`, inbound UAS отвечает PT9),
+строгий выбор первого общего кодека без позднего PCMU fallback, G722
+16 кГц↔48 кГц мост с payload 160 B/20 мс и timestamp +160, media details
+`audio_codec=G722`/`audio_sample_rate=16000`. Live low-video E2E 233/233,
+audio TX 545/RX 361, rejected 0, G722/PT9/16000/8000 asserted; unit 72 SIP +
+72 server, clippy/fmt clean.
+Evidence: `docs/progress/evidence/t06b1/`. Остальные кодеки/видео — T06b-2..5,
+H.323 — T06b-4; полный T06b не закрыт.
 
 ## T06b. Транскодирование полной матрицы (P1)
 
-**Проблема.** В настройках 18 audio/8 video, в конференции 16/5, в UI 17;
-реально мостится PCMU/PCMA/H264. G722 первым у терминала — отбрасывается,
-звонок может деградировать. Полная матрица — только env и без транскодера.
+**Проблема (состояние до T06b-1).** В настройках 18 audio/8 video, в
+конференции 16/5, в UI 17; реально мостились PCMU/PCMA/H264, G722 первым у
+терминала отбрасывался. В T06b-1 G722 SIP/T06b-1 уже native; остальные
+кодеки полной матрицы по-прежнему только intent/env.
 
 **Что сделать (T06b, после T06a).**
 1. `vks-transcoder` на GStreamer 1.28.2/FFmpeg 8.0.1 (LGPL),

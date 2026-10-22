@@ -23,6 +23,7 @@ serde.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 vks-common = { path = "../vks-common" }
+oxideav-g722 = "=0.0.7"
 
 # Тяжёлая SIP-стек (опционально, ADR-0006).
 rvoip = { version = "0.2", optional = true }

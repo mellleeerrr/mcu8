@@ -3,7 +3,7 @@
 //! Транспорт (UDP-сокет) и жизненный цикл живут в `vks-server`; здесь только
 //! разбор запроса, выбор кодека и сериализация ответов, чтобы это тестировалось
 //! без сети. Поддерживаются INVITE/ACK/BYE/CANCEL/OPTIONS и plain RTP/AVP
-//! (PCMU/PCMA + H.264). SRTP/TLS/100rel/digest осознанно отклоняются, а не
+//! (PCMU/PCMA/G722 + H.264). SRTP/TLS/100rel/digest осознанно отклоняются, а не
 //! имитируются.
 
 /// Разобранный входящий SIP-запрос.
@@ -162,7 +162,8 @@ fn hex(byte: u8) -> Option<u8> {
     }
 }
 
-/// Выбирает PCMU/PCMA и, если есть, H.264 из SDP-оффера.
+/// Выбирает первый поддерживаемый аудиокодек в порядке оффера (PCMU/PCMA/G722)
+/// и, если есть, H.264 из SDP-оффера.
 pub fn negotiate(offer: &str) -> Option<InboundMedia> {
     let session_ip = media_ip(offer).unwrap_or_default();
     let audio = media_section(offer, "audio")?;
@@ -173,13 +174,15 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
     if audio_port == 0 {
         return None;
     }
-    let audio_payload_type = if has_payload(audio, 0) {
-        0
-    } else if has_payload(audio, 8) {
-        8
-    } else {
-        return None;
-    };
+    // Peer's m-line order is its preference order; pick the first codec we
+    // actually bridge. G722 (PT9) keeps inbound calls wideband instead of
+    // silently downgrading to PCMU when both are offered.
+    let audio_payload_type = audio_payload_order(audio).into_iter().find(|payload| match payload {
+        0 => payload_is(audio, 0, "PCMU", 8000),
+        8 => payload_is(audio, 8, "PCMA", 8000),
+        9 => payload_is(audio, 9, "G722", 8000),
+        _ => false,
+    })?;
     let video_section = media_section(offer, "video");
     let video_offered = video_section.is_some();
     let video = video_section
@@ -216,10 +219,10 @@ pub fn build_answer(
         "v=0\r\no=- {session_id} {session_id} IN IP4 {local_ip}\r\ns=VKS MCU\r\nc=IN IP4 {local_ip}\r\nt=0 0\r\nm=audio {audio_port} RTP/AVP {}\r\n",
         media.audio_payload_type
     );
-    if media.audio_payload_type == 0 {
-        sdp.push_str("a=rtpmap:0 PCMU/8000\r\n");
-    } else {
-        sdp.push_str("a=rtpmap:8 PCMA/8000\r\n");
+    match media.audio_payload_type {
+        0 => sdp.push_str("a=rtpmap:0 PCMU/8000\r\n"),
+        9 => sdp.push_str("a=rtpmap:9 G722/8000\r\n"),
+        _ => sdp.push_str("a=rtpmap:8 PCMA/8000\r\n"),
     }
     sdp.push_str("a=ptime:20\r\n");
     if media.video_offered {
@@ -296,9 +299,27 @@ fn media_port(section: &str) -> Option<u16> {
     line.split_whitespace().nth(1)?.parse().ok()
 }
 
-fn has_payload(section: &str, payload: u8) -> bool {
-    let Some(line) = section.lines().next() else { return false };
-    line.split_whitespace().skip(3).any(|item| item == payload.to_string())
+fn audio_payload_order(section: &str) -> Vec<u8> {
+    let Some(line) = section.lines().next() else { return Vec::new() };
+    line.split_whitespace().skip(3).filter_map(|item| item.parse().ok()).collect()
+}
+
+/// A static payload type may omit `a=rtpmap`; if present it must agree.
+fn payload_is(section: &str, payload: u8, name: &str, clock: u32) -> bool {
+    let declared = section.lines().filter_map(|line| {
+        let line = line.trim().strip_prefix("a=rtpmap:")?;
+        let (pt, rest) = line.split_once(' ')?;
+        (pt.parse::<u8>().ok()? == payload).then_some(rest)
+    });
+    let mut declared = declared.peekable();
+    if declared.peek().is_none() {
+        return true;
+    }
+    declared.any(|rest| {
+        let mut parts = rest.split('/');
+        parts.next().is_some_and(|declared_name| declared_name.eq_ignore_ascii_case(name))
+            && parts.next().and_then(|value| value.parse::<u32>().ok()) == Some(clock)
+    })
 }
 
 fn has_h264(section: &str) -> bool {
@@ -363,6 +384,25 @@ Content-Type: application/sdp\r\nContent-Length: %LEN%\r\n\r\n%SDP%";
         assert_eq!(media.remote_audio_port, 5004);
         assert_eq!(media.remote_video_port, Some(5006));
         assert_eq!(media.video_payload_type, Some(96));
+    }
+
+    #[test]
+    fn inbound_offer_selects_g722_when_it_is_first_bridgeable() {
+        let offer = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP 9 0 8 101\r\n\
+a=rtpmap:9 G722/8000\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\n\
+a=rtpmap:101 telephone-event/8000\r\n";
+        let media = negotiate(offer).expect("G722 inbound offer must be accepted");
+        assert_eq!(media.audio_payload_type, 9);
+        let sdp = build_answer("192.168.1.93", 1, 41000, None, &media);
+        assert!(sdp.contains("m=audio 41000 RTP/AVP 9"), "{sdp}");
+        assert!(sdp.contains("a=rtpmap:9 G722/8000"), "{sdp}");
+        // Static payload types redefined as another codec must be refused.
+        for (payload, spoof) in [(9, "Opus/48000/2"), (0, "G722/8000"), (8, "PCMU/8000")] {
+            let spoofed = format!(
+                "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP {payload}\r\na=rtpmap:{payload} {spoof}\r\n"
+            );
+            assert!(negotiate(&spoofed).is_none(), "PT{payload} spoofed as {spoof} must be rejected");
+        }
     }
 
     #[test]

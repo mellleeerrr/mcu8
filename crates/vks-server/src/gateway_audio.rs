@@ -1,4 +1,4 @@
-//! G.711 payload conversion at the negotiated RTP boundary.
+//! G.711/G.722 payload conversion at the negotiated RTP boundary.
 
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -26,7 +26,7 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
         session.media_stats.audio_codec_running.store(false, Relaxed);
         return;
     };
-    if ![0, 8].contains(&session.audio_payload_type) || target.port() == 0 {
+    if ![0, 8, 9].contains(&session.audio_payload_type) || target.port() == 0 {
         session.media_stats.audio_codec_running.store(false, Relaxed);
         return;
     }
@@ -37,7 +37,10 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
     };
     session.media_stats.audio_codec_running.store(true, Relaxed);
     let mut egress = target;
-    let mut queue = std::collections::VecDeque::<f32>::with_capacity(960);
+    // G.722 is 16 kHz with an 8 kHz RTP timestamp clock; G.711 is 8 kHz.
+    let is_g722 = session.audio_payload_type == 9;
+    let mut g722 = is_g722.then(vks_gateway_sip::g722::G722Codec::new);
+    let mut queue = std::collections::VecDeque::<f32>::with_capacity(1920);
     let mut dtmf = std::collections::VecDeque::<u8>::new();
     let mut dtmf_active: Option<(u8, usize, u32)> = None;
     let mut dtmf_gap = 0;
@@ -89,7 +92,10 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 if session.source_latch {
                     egress = source;
                 }
-                if packet.payload.len() > 480 {
+                // 40 ms G.711 ptime (320 B) and 40 ms G.722 (320 B) are legal
+                // per RFC 4566/3551; never truncate the second half of a packet.
+                let max_payload = 480;
+                if packet.payload.len() > max_payload {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed); continue;
                 }
                 session.media_stats.audio_rx_packets.fetch_add(1, Relaxed);
@@ -99,31 +105,69 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 );
                 session.media_stats.audio_rx_bytes.fetch_add(count as u64, Relaxed);
                 if session.controls.audio_tx_muted.load(Relaxed) { queue.clear(); continue; }
-                while queue.len() + packet.payload.len() > 960 { queue.pop_front(); }
-                queue.extend(packet.payload.iter().map(|byte| decode_sample(packet.payload_type, *byte)));
+                let decoded: Vec<f32> = if let Some(codec) = g722.as_mut() {
+                    codec.decode(packet.payload).into_iter()
+                        // oxideav-g722 can overshoot the nominal 14-bit range on
+                        // transients; clamp before the MCU mixer sees > 1.0.
+                        .map(|sample| (sample as f32 / 8192.0).clamp(-1.0, 1.0))
+                        .collect()
+                } else {
+                    packet.payload.iter().map(|byte| decode_sample(packet.payload_type, *byte)).collect()
+                };
+                while queue.len() + decoded.len() > 1920 { queue.pop_front(); }
+                queue.extend(decoded);
             }
             _ = ticker.tick() => {
-                let mut input = [0.0; 160];
-                if session.controls.audio_tx_muted.load(Relaxed) { queue.clear(); }
-                else {
-                    let volume = session.controls.volume_tx.load(Relaxed);
-                    for sample in &mut input { *sample = gain(queue.pop_front().unwrap_or(0.0), volume); }
-                }
                 let mut upsampled = [0.0; 960];
-                vks_gateway_sip::upsample_8k_to_48k(&input, &mut upsampled);
-                session.mcu_engine.set_audio_slice(session.room_id, session.participant_id_val, &upsampled);
-                session.mcu_engine.tick_audio_at(session.room_id, media_clock_ms());
-                let mut output = [0.0; 160];
-                if !session.controls.audio_rx_muted.load(Relaxed)
-                    && session.mcu_engine.copy_participant_audio(session.room_id, session.participant_id_val, &mut mixed) {
-                    vks_gateway_sip::downsample_48k_to_8k(&mixed, &mut output);
+                if is_g722 {
+                    let mut input = [0.0; 320];
+                    if session.controls.audio_tx_muted.load(Relaxed) { queue.clear(); }
+                    else {
+                        let volume = session.controls.volume_tx.load(Relaxed);
+                        for sample in &mut input { *sample = gain(queue.pop_front().unwrap_or(0.0), volume); }
+                    }
+                    vks_gateway_sip::upsample_16k_to_48k(&input, &mut upsampled);
+                    session.mcu_engine.set_audio_slice(session.room_id, session.participant_id_val, &upsampled);
+                } else {
+                    let mut input = [0.0; 160];
+                    if session.controls.audio_tx_muted.load(Relaxed) { queue.clear(); }
+                    else {
+                        let volume = session.controls.volume_tx.load(Relaxed);
+                        for sample in &mut input { *sample = gain(queue.pop_front().unwrap_or(0.0), volume); }
+                    }
+                    vks_gateway_sip::upsample_8k_to_48k(&input, &mut upsampled);
+                    session.mcu_engine.set_audio_slice(session.room_id, session.participant_id_val, &upsampled);
                 }
-                let mut packet = [0; 172];
+                session.mcu_engine.tick_audio_at(session.room_id, media_clock_ms());
+                let mut packet = [0; 512];
                 vks_gateway_sip::write_rtp_header(&mut packet[..12], session.audio_payload_type, sequence, timestamp, ssrc, false);
                 sequence = sequence.wrapping_add(1);
                 let volume = session.controls.volume_rx.load(Relaxed);
-                for (encoded, sample) in packet[12..].iter_mut().zip(output) { *encoded = encode_sample(session.audio_payload_type, gain(sample, volume)); }
-                if let Ok(count) = session.rtp_socket.send_to(&packet, egress).await {
+                let payload_len = if let Some(codec) = g722.as_mut() {
+                    let mut output = [0.0; 320];
+                    if !session.controls.audio_rx_muted.load(Relaxed)
+                        && session.mcu_engine.copy_participant_audio(session.room_id, session.participant_id_val, &mut mixed) {
+                        vks_gateway_sip::downsample_48k_to_16k(&mixed, &mut output);
+                    }
+                    let pcm: Vec<i32> = output.iter()
+                        .map(|sample| (gain(*sample, volume) * 8192.0).clamp(-8192.0, 8191.0) as i32)
+                        .collect();
+                    let encoded = codec.encode(&pcm);
+                    let len = encoded.len().min(packet.len() - 12);
+                    packet[12..12 + len].copy_from_slice(&encoded[..len]);
+                    len
+                } else {
+                    let mut output = [0.0; 160];
+                    if !session.controls.audio_rx_muted.load(Relaxed)
+                        && session.mcu_engine.copy_participant_audio(session.room_id, session.participant_id_val, &mut mixed) {
+                        vks_gateway_sip::downsample_48k_to_8k(&mixed, &mut output);
+                    }
+                    for (encoded, sample) in packet[12..172].iter_mut().zip(output) {
+                        *encoded = encode_sample(session.audio_payload_type, gain(sample, volume));
+                    }
+                    160
+                };
+                if let Ok(count) = session.rtp_socket.send_to(&packet[..12 + payload_len], egress).await {
                     session.media_stats.audio_tx_packets.fetch_add(1, Relaxed); session.media_stats.audio_tx_bytes.fetch_add(count as u64, Relaxed);
                 }
                 if let Some(payload_type) = session.dtmf_payload_type {
@@ -154,7 +198,11 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
     }
     session.mcu_engine.set_audio_slice(session.room_id, session.participant_id_val, &[0.0; 960]);
     session.media_stats.audio_codec_running.store(false, Relaxed);
-    tracing::info!(participant = %session.participant_id_str, "G711 RTP bridge stopped");
+    tracing::info!(
+        participant = %session.participant_id_str,
+        codec = super::audio_codec_name(session.audio_payload_type),
+        "RTP audio bridge stopped"
+    );
 }
 
 pub(super) fn rtcp_sender_report(ssrc: u32, timestamp: u32, packets: u64, bytes: u64) -> Vec<u8> {

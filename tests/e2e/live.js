@@ -221,15 +221,31 @@ async function api(token, method, urlPath, body) {
         .find(item => String(item.display_name || '').includes(SIP_NAME));
       sipVideoTx = participant && participant.details && participant.details.video && participant.details.video.tx;
     }
-    // T06a: терминал выбирает PCMU/PCMA fallback из Native-оффера; реальные
-    // пакеты в обе стороны и ноль отвергнутых по PT доказывают, что нет
-    // «connected, dead audio» из-за немостимого кодека.
+    // T06b-1: терминал выбирает G722 (или PCMU/PCMA) из Native-оффера;
+    // реальные пакеты в обе стороны и ноль отвергнутых по PT доказывают,
+    // что нет «connected, dead audio» из-за немостимого кодека.
     const sipMedia = sipRuntime && sipRuntime.media || {};
     const audioTxPackets = Number(sipMedia.audio_tx_packets || 0);
     const audioRxPackets = Number(sipMedia.audio_rx_packets || 0);
     const rejectedPackets = Number(sipMedia.rejected_packets || 0);
-    check('audio: two-way RTP packets (PCMU/PCMA fallback)',
+    check('audio: two-way RTP packets (native codec)',
       audioTxPackets > 0 && audioRxPackets > 0, JSON.stringify({audioTxPackets, audioRxPackets}));
+    // T06b-1 acceptance: the live call must really run G722 wideband, not a
+    // silent PCMU fallback. PT9 + 8 kHz RTP clock + 16 kHz PCM sample rate.
+    check('audio: G722 wideband negotiated (PT9, 16 kHz samples, 8 kHz clock)',
+      String(sipMedia.audio_codec || '') === 'G722'
+      && Number(sipMedia.audio_payload_type) === 9
+      && Number(sipMedia.audio_rx_payload_type) === 9
+      && Number(sipMedia.audio_tx_payload_type) === 9
+      && Number(sipMedia.audio_sample_rate) === 16000
+      && Number(sipMedia.audio_clock_rate) === 8000
+      && sipMedia.audio_codec_running === true,
+      JSON.stringify({
+        codec: sipMedia.audio_codec, pt: sipMedia.audio_payload_type,
+        rx_pt: sipMedia.audio_rx_payload_type, tx_pt: sipMedia.audio_tx_payload_type,
+        sample_rate: sipMedia.audio_sample_rate, clock: sipMedia.audio_clock_rate,
+        running: sipMedia.audio_codec_running
+      }));
     check('audio: no RTP packets rejected by payload type',
       rejectedPackets === 0, String(rejectedPackets));
     check(`video: offer size ${VIDEO_WIDTH}x${VIDEO_HEIGHT}`,
@@ -543,8 +559,8 @@ async function api(token, method, urlPath, body) {
     check('codecs: settings marks G711 (PCMU/PCMA) supported',
       audio.status === 200 && audio.json.audio_codecs.some(codec => codec.name === 'G711' && codec.supported === true),
       JSON.stringify(audio.json).slice(0, 800));
-    check('codecs: settings marks G722 unsupported (needs T06b)',
-      audio.status === 200 && audio.json.audio_codecs.some(codec => codec.name === 'G722' && codec.supported === false),
+    check('codecs: settings marks G722 supported (T06b-1 native wideband)',
+      audio.status === 200 && audio.json.audio_codecs.some(codec => codec.name === 'G722' && codec.supported === true),
       JSON.stringify(audio.json).slice(0, 800));
     const video = await api(token, 'GET', '/api/v3/settings/video_codecs');
     check('api: video_codecs shape [string]', video.status === 200 && Array.isArray(video.json.video_codecs)

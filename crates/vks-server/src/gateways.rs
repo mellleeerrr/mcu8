@@ -82,9 +82,11 @@ fn find_call_string_override<'a>(
 }
 
 /// Проверяет выбор кодеков комнаты/адреса до дозвона. Клиент, оставивший
-/// только несовместимые кодеки (G.722-only, H.265-only), должен получить
-/// явную причину, а не молчаливый PCMU/H.264 fallback и не «connected» без
+/// только несовместимые кодеки (например G.729-only, H.265-only), должен
+/// получить явную причину, а не молчаливый fallback и не «connected» без
 /// медиа. `None`/пустой список = выбор не задан, действует native-профиль.
+/// Для `h323:` используется отдельный список реально открываемых sidecar'ом
+/// кодеков (G.711U), иначе SIP-wideband G.722 проходил бы precheck H.323.
 fn codec_name(item: &serde_json::Value) -> Option<String> {
     item.as_str()
         .or_else(|| item.get("name").and_then(serde_json::Value::as_str))
@@ -92,13 +94,33 @@ fn codec_name(item: &serde_json::Value) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
+/// Audio codecs the H.323 sidecar actually opens an OLC for. The sidecar
+/// currently advertises/accepts only G.711U (PT0); SIP-only G722 must not be
+/// reported as bridgeable for an `h323:` destination.
+const H323_AUDIO: &[&str] = &["PCMU", "G711U", "G711"];
+
+fn h323_audio_native(name: &str) -> bool {
+    H323_AUDIO.iter().any(|codec| codec.eq_ignore_ascii_case(name))
+}
+
+#[cfg(test)]
 fn ensure_bridgeable_codec_selection(
     audio: Option<&serde_json::Value>,
     video: Option<&serde_json::Value>,
 ) -> Result<(), String> {
+    ensure_bridgeable_codec_selection_for(false, audio, video)
+}
+
+fn ensure_bridgeable_codec_selection_for(
+    h323: bool,
+    audio: Option<&serde_json::Value>,
+    video: Option<&serde_json::Value>,
+) -> Result<(), String> {
     use vks_common::codec_capabilities::{is_native_audio, is_native_video, NATIVE_AUDIO, NATIVE_VIDEO};
+    let audio_supported: &[&str] = if h323 { H323_AUDIO } else { NATIVE_AUDIO };
+    let audio_native: fn(&str) -> bool = if h323 { h323_audio_native } else { is_native_audio };
     for (kind, value, supported, native) in [
-        ("audio", audio, NATIVE_AUDIO, is_native_audio as fn(&str) -> bool),
+        ("audio", audio, audio_supported, audio_native),
         ("video", video, NATIVE_VIDEO, is_native_video as fn(&str) -> bool),
     ] {
         let Some(items) = value.and_then(serde_json::Value::as_array) else { continue };
@@ -409,7 +431,11 @@ impl GatewayManager {
                 .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
                 .or_else(|| payload.and_then(|value| value.get(snake).or_else(|| value.get(camel))))
         };
-        ensure_bridgeable_codec_selection(pick("audio_codecs", "audioCodecs"), pick("video_codecs", "videoCodecs"))
+        ensure_bridgeable_codec_selection_for(
+            uri.trim_start().to_ascii_lowercase().starts_with("h323:"),
+            pick("audio_codecs", "audioCodecs"),
+            pick("video_codecs", "videoCodecs"),
+        )
     }
 
     /// Проверяет, что выбранные для адреса/комнаты кодеки реально мостятся
@@ -630,7 +656,28 @@ impl GatewayManager {
     }
 }
 
-/// Параметры для двунаправленного RTP медиа-моста между шлюзом и McuEngine.
+/// PCM sample rate the bridge works with for this payload type (G722 is
+/// wideband even though its RTP timestamp clock stays 8000 Hz).
+///
+/// The value is advertised in media details; it is not an RTP clock.
+pub(super) fn audio_sample_rate(payload_type: u8) -> u32 {
+    if payload_type == 9 {
+        16_000
+    } else {
+        8_000
+    }
+}
+
+/// Canonical audio codec name for stats/UI (RTP payload type → name).
+pub(super) fn audio_codec_name(payload_type: u8) -> &'static str {
+    match payload_type {
+        0 => "PCMU",
+        8 => "PCMA",
+        9 => "G722",
+        _ => "unknown",
+    }
+}
+
 pub struct RtpBridgeSession {
     pub room_id: RoomId,
     pub participant_id_str: String,
@@ -706,7 +753,7 @@ impl Drop for PendingOutboundGuard {
     }
 }
 
-/// Запускает фоновый 20-мс RTP медиа-мост (G.711 PCMU <-> McuEngine N-1 mix-minus).
+/// Запускает фоновый 20-мс RTP медиа-мост (G.711/G.722 <-> McuEngine N-1 mix-minus).
 ///
 /// Полностью абстрагирован от сигнального протокола (используется одинаково для SIP и H.323).
 /// Zero heap allocation на горячем пути: стек-буферы и `set_audio_slice`/`copy_participant_audio`.
@@ -1054,8 +1101,8 @@ impl GatewayManager {
                 session.call_id.clone(),
             )
         };
-        if ![0, 8].contains(&audio_payload_type) {
-            return Err("Only negotiated PCMU/PCMA audio can be bridged".into());
+        if ![0, 8, 9].contains(&audio_payload_type) {
+            return Err("Only negotiated PCMU/PCMA/G722 audio can be bridged".into());
         }
         let remote_audio_ip =
             remote_ip.parse::<std::net::IpAddr>().map_err(|_| "Invalid negotiated audio IP".to_string())?;
@@ -1068,8 +1115,9 @@ impl GatewayManager {
         }
         let mut has_video = video_configuration.is_some();
         let media_details = serde_json::json!({
-            "audio_codec": if audio_payload_type == 8 { "PCMA" } else { "PCMU" },
+            "audio_codec": audio_codec_name(audio_payload_type),
             "audio_payload_type": audio_payload_type, "audio_clock_rate": 8000,
+            "audio_sample_rate": audio_sample_rate(audio_payload_type),
             "audio_tx_payload_type": audio_payload_type, "audio_rx_payload_type": audio_payload_type,
             "remote_audio_address": std::net::SocketAddr::new(remote_audio_ip, remote_audio_port).to_string(),
             "video_codec": if has_video { Some("H264") } else { None },
@@ -2260,11 +2308,12 @@ async fn serve_sip_uas_on(
                             media.remote_video_ip.as_deref().unwrap_or(&media.remote_ip),
                             port
                         )),
-                        "audio_codec": if media.audio_payload_type == 8 { "PCMA" } else { "PCMU" },
+                        "audio_codec": audio_codec_name(media.audio_payload_type),
                         "audio_payload_type": media.audio_payload_type,
                         "audio_rx_payload_type": media.audio_payload_type,
                         "audio_tx_payload_type": media.audio_payload_type,
                         "audio_clock_rate": 8000,
+                        "audio_sample_rate": audio_sample_rate(media.audio_payload_type),
                         "video_codec": media.video_payload_type.map(|_| "H264"),
                         "video_payload_type": media.video_payload_type,
                         "video_clock_rate": media.video_payload_type.map(|_| 90000u32),
@@ -3401,16 +3450,14 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
 
     #[test]
     fn codec_selection_rejects_unbridgeable_only_lists() {
-        let g722_only = serde_json::json!([{"name": "G722", "bitrate": null}]);
+        let g729_only = serde_json::json!([{"name": "G729", "bitrate": null}]);
         let h265_only = serde_json::json!(["H265"]);
-        assert!(ensure_bridgeable_codec_selection(Some(&g722_only), Some(&h265_only)).is_err());
-        let error = ensure_bridgeable_codec_selection(Some(&g722_only), Some(&h265_only)).unwrap_err();
+        assert!(ensure_bridgeable_codec_selection(Some(&g729_only), Some(&h265_only)).is_err());
+        let error = ensure_bridgeable_codec_selection(Some(&g729_only), Some(&h265_only)).unwrap_err();
         assert!(error.contains("no common audio"), "{error}");
         let g711_g722 = serde_json::json!([{"name": "G722"}, {"name": "G711"}]);
-        assert!(
-            ensure_bridgeable_codec_selection(Some(&g711_g722), Some(&h265_only)).is_err(),
-            "H.265-only video всё ещё не мостится"
-        );
+        let error = ensure_bridgeable_codec_selection(Some(&g711_g722), Some(&h265_only)).unwrap_err();
+        assert!(error.contains("no common video"), "H.265-only video всё ещё не мостится: {error}");
         let native = serde_json::json!([{"name": "G711", "bitrate": null}]);
         let h264 = serde_json::json!(["H264"]);
         assert!(ensure_bridgeable_codec_selection(Some(&native), Some(&h264)).is_ok());
@@ -3418,6 +3465,13 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert!(ensure_bridgeable_codec_selection(Some(&serde_json::json!([])), None).is_ok());
         let high_only = serde_json::json!(["H264-HIGH"]);
         assert!(ensure_bridgeable_codec_selection(Some(&native), Some(&high_only)).is_err());
+        // H.323 sidecar is G.711U only; SIP-wideband G722 must be rejected for
+        // an h323: destination even though it is natively bridged over SIP.
+        let g722_only = serde_json::json!([{"name": "G722", "bitrate": null}]);
+        assert!(ensure_bridgeable_codec_selection(Some(&g722_only), None).is_ok());
+        assert!(ensure_bridgeable_codec_selection_for(true, Some(&g722_only), None).is_err());
+        let pcmu_only = serde_json::json!([{"name": "PCMU", "bitrate": null}]);
+        assert!(ensure_bridgeable_codec_selection_for(true, Some(&pcmu_only), None).is_ok());
     }
 
     #[test]
@@ -3474,17 +3528,18 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
                 "uri": "SIP:probe@192.168.1.132",
                 "payload": {"call_string": {"sip": {
                     "audioCodecs": [{"name": "G722"}],
-                    "videoCodecs": ["H265"]
+                    "videoCodecs": ["H264"]
                 }}}
             })],
         );
         let selected =
             find_call_string_override(&resources, Some(room), "sip:probe@192.168.1.132").expect("contact override");
         assert_eq!(selected["audioCodecs"][0]["name"], "G722");
-        assert!(ensure_bridgeable_codec_selection(selected.get("audioCodecs"), selected.get("videoCodecs")).is_err());
-        let error = GatewayManager::bridgeable_codec_selection(&resources, room, None, "sip:probe@192.168.1.132")
-            .expect_err("contact G722-only must be refused");
-        assert!(error.contains("no common audio"), "{error}");
+        assert!(
+            ensure_bridgeable_codec_selection(selected.get("audioCodecs"), selected.get("videoCodecs")).is_ok(),
+            "G722 + H264 are both natively bridged"
+        );
+        assert!(GatewayManager::bridgeable_codec_selection(&resources, room, None, "sip:probe@192.168.1.132").is_ok());
         // Глобальный адрес для другого SIP URI всё ещё читается как плоская карта.
         let global = find_call_string_override(&resources, Some(room), "sip:other@192.168.1.132");
         assert!(global.is_none());
@@ -3509,10 +3564,15 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
     fn conference_intent_is_a_fallback_when_no_contact_or_address() {
         let room = RoomId::new();
         let resources = vks_admin::api_v3::resources::ResourceState::default();
-        let g722 = serde_json::json!({"payload": {"audio_codecs": [{"name": "G722"}]}});
-        let error = GatewayManager::bridgeable_codec_selection(&resources, room, Some(&g722), "sip:x@192.168.1.132")
-            .expect_err("conference G722-only must be refused");
+        let g729 = serde_json::json!({"payload": {"audio_codecs": [{"name": "G729"}]}});
+        let error = GatewayManager::bridgeable_codec_selection(&resources, room, Some(&g729), "sip:x@192.168.1.132")
+            .expect_err("conference G729-only must be refused");
         assert!(error.contains("no common audio"), "{error}");
+        let g722 = serde_json::json!({"payload": {"audio_codecs": [{"name": "G722"}]}});
+        assert!(
+            GatewayManager::bridgeable_codec_selection(&resources, room, Some(&g722), "sip:x@192.168.1.132").is_ok(),
+            "G722 is natively bridged since T06b-1"
+        );
         let native = serde_json::json!({"payload": {"audio_codecs": [{"name": "G711"}]}});
         assert!(
             GatewayManager::bridgeable_codec_selection(&resources, room, Some(&native), "sip:x@192.168.1.132").is_ok()
@@ -4022,6 +4082,144 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         task.await.unwrap();
         assert!(second_half.is_ok(), "the second half of negotiated G711 packetization was truncated");
         assert!(after.iter().all(|sample| sample.abs() < 0.01), "old PCM repeated after its RTP packet ended");
+    }
+
+    #[tokio::test]
+    async fn gateway_audio_bridges_g722_pt9_with_8khz_timestamp_clock() {
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let room = RoomId::new();
+        let source = vks_core::ParticipantId::new();
+        let listener = vks_core::ParticipantId::new();
+        for pid in [source, listener] {
+            mcu.bridge_participant(
+                room,
+                pid,
+                vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Audio)],
+            );
+        }
+        let terminal = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = socket.local_addr().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_tx, dtmf_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_rtp_media_bridge(RtpBridgeSession {
+            room_id: room,
+            participant_id_str: source.to_string(),
+            participant_id_val: source,
+            remote_media_ip: "127.0.0.1".into(),
+            remote_audio_port: terminal.local_addr().unwrap().port(),
+            audio_payload_type: 9,
+            source_latch: false,
+            dtmf_payload_type: None,
+            media_stats: Arc::new(GatewayMediaStats::default()),
+            rtp_socket: socket,
+            rtcp_socket: None,
+            rtp_port: target.port(),
+            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(49000, 49000)),
+            mcu_engine: mcu.clone(),
+            controls: GatewayMediaControls::default(),
+            cancel_flag: cancel.clone(),
+            dtmf_rx,
+        });
+        let mut codec = vks_gateway_sip::g722::G722Codec::new();
+        let pcm: Vec<i32> = (0..320)
+            .map(|i| ((i as f32 * 2.0 * std::f32::consts::PI * 440.0 / 16_000.0).sin() * 6000.0) as i32)
+            .collect();
+        let payload = codec.encode(&pcm);
+        assert_eq!(payload.len(), 160);
+        let mut packet = [0u8; 172];
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 9, 1, 0, 42, false);
+        packet[12..].copy_from_slice(&payload);
+        terminal.send_to(&packet, target).await.unwrap();
+        tokio::time::timeout(Duration::from_millis(300), async {
+            loop {
+                if mcu
+                    .participant_audio(room, listener)
+                    .is_some_and(|audio| audio.iter().any(|sample| sample.abs() > 0.05))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("G722 PCM must reach the 48 kHz MCU mix");
+        let mut first = [0u8; 512];
+        let (count, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut first))
+            .await
+            .expect("bridge must emit G722 RTP")
+            .unwrap();
+        assert_eq!(first[1] & 0x7F, 9, "G722 payload type");
+        assert_eq!(count - 12, 160, "20 ms of G722 is 160 octets");
+        let first_ts = u32::from_be_bytes(first[4..8].try_into().unwrap());
+        let mut second = [0u8; 512];
+        let (count2, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut second))
+            .await
+            .expect("bridge must emit a second G722 RTP packet")
+            .unwrap();
+        assert_eq!(count2 - 12, 160);
+        let second_ts = u32::from_be_bytes(second[4..8].try_into().unwrap());
+        assert_eq!(second_ts.wrapping_sub(first_ts), 160, "G722 RTP clock is 8000 Hz");
+        // The emitted payload must be decodable G722 (160 octets -> 320 samples).
+        // The source participant hears the listener's silence here, so only
+        // framing/length is asserted; the codec energy test lives in g722.rs.
+        let decoded = codec.decode(&first[12..count]);
+        assert_eq!(decoded.len(), 320);
+        cancel.store(true, Ordering::Relaxed);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inbound_sip_uas_answers_g722_and_rejects_g729_only_with_488() {
+        use vks_admin::state::AppState;
+        let state = Arc::new(AppState::new());
+        let room = Rooms::create(&state, "uas-g722");
+        let manager = Arc::new(
+            GatewayManager::new().with_mcu(Arc::new(vks_media_mcu::McuEngine::new())).with_candidate_ip("127.0.0.1"),
+        );
+        manager.bind_state(Arc::downgrade(&state));
+        let server = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let server_port = server.local_addr().unwrap().port();
+        let listener = tokio::spawn(serve_sip_uas_on(
+            manager.clone(),
+            server,
+            "127.0.0.1".into(),
+            std::time::Duration::from_secs(15),
+        ));
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(("127.0.0.1", server_port)).await.unwrap();
+        let port = client.local_addr().unwrap().port();
+        let invite = |call_id: &str, sdp: &str| {
+            format!(
+                "INVITE sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:{port};branch=z9hG4bK{call_id}\r\nFrom: \"T\" <sip:t@127.0.0.1>;tag=ft\r\nTo: <sip:{}@127.0.0.1>\r\nCall-ID: {call_id}\r\nCSeq: 1 INVITE\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+                room.id, room.id, sdp.len(), sdp
+            )
+        };
+        async fn read_until(client: &tokio::net::UdpSocket, prefix: &str) -> String {
+            let mut buf = [0u8; 8192];
+            for _ in 0..6 {
+                let len = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv(&mut buf))
+                    .await
+                    .expect("UAS response timeout")
+                    .unwrap();
+                let text = String::from_utf8_lossy(&buf[..len]).into_owned();
+                if text.starts_with(prefix) {
+                    return text;
+                }
+            }
+            panic!("no {prefix} response");
+        }
+        let g729 = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\n";
+        client.send(invite("cid-g729", g729).as_bytes()).await.unwrap();
+        let rejection = read_until(&client, "SIP/2.0 488").await;
+        assert!(rejection.starts_with("SIP/2.0 488"), "{rejection}");
+        let g722 = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 9\r\na=rtpmap:9 G722/8000\r\n";
+        client.send(invite("cid-g722", g722).as_bytes()).await.unwrap();
+        let answer = read_until(&client, "SIP/2.0 200").await;
+        assert!(answer.contains("m=audio "), "{answer}");
+        assert!(answer.contains(" RTP/AVP 9\r\n"), "G722 must be selected, not PCMU fallback: {answer}");
+        assert!(answer.contains("a=rtpmap:9 G722/8000"), "{answer}");
+        listener.abort();
     }
 
     #[test]

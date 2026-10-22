@@ -268,9 +268,8 @@ impl SipUacClient {
                         Err(failure) => {
                             // The peer selected a codec this gateway cannot bridge (or nothing
                             // common is left): refuse the call instead of reporting a connected
-                            // session with dead media. As the offerer we can only ACK+BYE
-                            // here; the in-memory UAS reports the failure as InvalidInput
-                            // and wire-level 488 is T08.
+                            // session with dead media. As the offerer we can only ACK+BYE here
+                            // (488 is a UAS-before-200 response, used by the inbound SIP UAS).
                             warn!(call_id=%c.call_id, ?failure, "SIP answer refused: no mutually bridged codec");
                             let bye = build_bye(contact, &c.ip, c.port, &c.call_id, &c.from_tag, to_tag, 2);
                             c.socket.send_to(bye.as_bytes(), c.target).await?;
@@ -503,6 +502,12 @@ mod tests {
             terminal.send_to(response.as_bytes(), source).await.unwrap();
             let (size, _) = terminal.recv_from(&mut buf).await.unwrap();
             assert!(buf[..size].starts_with(b"ACK "));
+            // Unsupported answer must be torn down, not just ACKed.
+            let (size, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut buf))
+                .await
+                .expect("BYE after ACK timeout")
+                .unwrap();
+            assert!(buf[..size].starts_with(b"BYE "));
         });
         let result = SipUacClient::new("127.0.0.1")
             .dial(
@@ -513,8 +518,8 @@ mod tests {
             .await;
         match result {
             Err(SipDialError::NoCommonCodec { codec, payload, peer_status }) => {
-                assert_eq!(codec.as_deref(), Some("G729"));
-                assert_eq!(payload, Some(18));
+                assert_eq!(codec, None, "G729 was never in our local offer");
+                assert_eq!(payload, None);
                 assert_eq!(peer_status, None);
             }
             other => panic!("An unsupported codec must not be shown as connected: {other:?}"),

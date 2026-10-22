@@ -105,6 +105,14 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > `perf-cache.js` fresh=true; 281/0, clippy/fmt чисто, manifest OK.
 > Evidence: `docs/progress/evidence/t12b/`.
 >
+> **T06b-1 (G.722 SIP end-to-end) реализован, ожидает ревью/коммита:** G722 PT9/8000
+> native, native offer `0 8 9 101`, inbound SIP UAS отвечает G722, строгий выбор
+> первого общего кодека (нет позднего PCMU fallback), G722 16k↔48k RTP-мост
+> 160 B/20 мс + timestamp 160, media details sample_rate 16000/clock 8000.
+> Live low-video E2E 233/233, audio TX545/RX361, rejected 0, G722/PT9/16000/8000
+> asserted; 72 SIP + 72 server тестов, workspace clippy/fmt clean. Evidence `docs/progress/evidence/t06b1/`.
+> Полный T06b (G729/G726/Opus/AAC/H265/H323-матрица) остаётся открытым: T06b-2..5.
+>
 > Правило цикла: перед задачей — агент «подводные камни»; после реализации — параллельное
 > code-review (оценка /10, обязательные правки); цикл не закрывается, пока хотя бы один
 > независимый ревьюер не поставит **≥9.5/10**. Затем — агент «условия задачи/элегантность»
