@@ -586,3 +586,10 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 > + icon-only overlap (9 схем), участник в 1/ceil(N/2)/N от фактического числа
 > ячеек (5+→6, 10+→16, 34+→36), overlap-схема с 11 ячейками, `calculate` для
 > 14 пресетов. Evidence `docs/progress/evidence/t04b/`.
+
+## WebRTC media plane (2026-10-22)
+
+| ID | Задача | Статус | Коммит/артефакт |
+|---|---|---|---|
+| W1 | Реальный str0m-транспорт: ICE-lite, DTLS-SRTP, BWE, sub/audio_only, 2-peer cap, fail-closed | 🟢 | `0cb50f2` + `98aa292`; evidence `docs/progress/evidence/webrtc/` (24/24) |
+| W2 | Закрытие P0/P1 ревью: FSM rollback, preflight exit 78, keyframe non-fatal, gateway-гард в обе стороны, нет legacy-endpoint после отвергнутого оффера, reverse-map cleanup, global cap, metrics, query-token, docs/rollback | 🟢 | `30aef22`; live E2E 28/28 на 43000/43001, legacy UI 233/233; evidence `docs/progress/evidence/webrtc/` (commit/sha256/env/metrics/log) |
