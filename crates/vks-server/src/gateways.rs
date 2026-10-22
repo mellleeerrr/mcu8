@@ -1635,6 +1635,11 @@ async fn serve_sip_uas_on(
             for call in dead {
                 // Admin hangup уже снял participant/media; при media-timeout
                 // снимаем здесь. В обоих случаях завершаем удалённый диалог.
+                if let Ok(mut registry) = manager_reaper.registry.lock() {
+                    if let Some(session) = registry.by_participant.remove(&call.participant_id) {
+                        registry.by_call.remove(&session.call_id);
+                    }
+                }
                 if let Some(state) =
                     manager_reaper.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
                 {
@@ -3121,6 +3126,78 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
     }
 
     #[tokio::test]
+    async fn inbound_sip_uas_media_timeout_reaps_registry_and_sends_bye() {
+        use vks_admin::state::AppState;
+        let state = Arc::new(AppState::new());
+        let room = Rooms::create(&state, "uas-timeout");
+        let manager = Arc::new(
+            GatewayManager::new().with_mcu(Arc::new(vks_media_mcu::McuEngine::new())).with_candidate_ip("127.0.0.1"),
+        );
+        manager.bind_state(Arc::downgrade(&state));
+        let server = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let server_port = server.local_addr().unwrap().port();
+        let listener = tokio::spawn(serve_sip_uas_on(manager.clone(), server, "127.0.0.1".into()));
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(("127.0.0.1", server_port)).await.unwrap();
+        let sdp = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+        let invite = format!(
+            "INVITE sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:40004;branch=z9hG4bKt\r\nFrom: \"S\" <sip:s@127.0.0.1>;tag=sf\r\nTo: <sip:{}@127.0.0.1>\r\nCall-ID: cid-timeout\r\nCSeq: 1 INVITE\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+            room.id, room.id, sdp.len(), sdp
+        );
+        client.send(invite.as_bytes()).await.unwrap();
+        let mut to_tag = String::new();
+        for _ in 0..4 {
+            let mut buf = [0u8; 8192];
+            let len = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv(&mut buf))
+                .await
+                .expect("response timeout")
+                .unwrap();
+            let text = String::from_utf8_lossy(&buf[..len]);
+            if text.starts_with("SIP/2.0 200") {
+                to_tag = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("To:"))
+                    .and_then(|line| line.split(";tag=").nth(1))
+                    .map(|tag| tag.trim().to_string())
+                    .expect("To tag");
+                break;
+            }
+        }
+        let ack = format!(
+            "ACK sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:40004;branch=z9hG4bKa\r\nFrom: \"S\" <sip:s@127.0.0.1>;tag=sf\r\nTo: <sip:{}@127.0.0.1>;tag={}\r\nCall-ID: cid-timeout\r\nCSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n",
+            room.id, room.id, to_tag
+        );
+        client.send(ack.as_bytes()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(manager.registry.lock().unwrap().by_participant.len(), 1);
+        // Ни одного RTP-пакета: media-watchdog должен снять вызов за ~15-20 с.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
+        let mut bye_text = String::new();
+        while tokio::time::Instant::now() < deadline {
+            let mut buf = [0u8; 8192];
+            let Ok(Ok(len)) = tokio::time::timeout(std::time::Duration::from_secs(1), client.recv(&mut buf)).await
+            else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&buf[..len]).into_owned();
+            if text.starts_with("BYE ") {
+                bye_text = text;
+                break;
+            }
+        }
+        assert!(bye_text.starts_with("BYE "), "media timeout must send BYE");
+        assert!(
+            bye_text.contains(&format!("From: <sip:{}@127.0.0.1>;tag={to_tag}", room.id)),
+            "media-timeout BYE From must be local side: {bye_text}"
+        );
+        assert!(
+            manager.registry.lock().unwrap().by_participant.is_empty(),
+            "media timeout must clean GatewayCallRegistry"
+        );
+        listener.abort();
+    }
+
+    #[tokio::test]
     async fn inbound_sip_uas_admin_hangup_sends_bye_and_reaps_call() {
         use vks_admin::state::AppState;
         let state = Arc::new(AppState::new());
@@ -3168,19 +3245,28 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             manager.registry.lock().unwrap().by_participant.keys().next().cloned().expect("registered participant");
         assert!(manager.hangup(&pid), "admin hangup must find the inbound dialog");
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
-        let mut saw_bye = false;
+        let mut bye_text = String::new();
         while tokio::time::Instant::now() < deadline {
             let mut buf = [0u8; 8192];
             let Ok(Ok(len)) = tokio::time::timeout(std::time::Duration::from_secs(1), client.recv(&mut buf)).await
             else {
                 continue;
             };
-            if String::from_utf8_lossy(&buf[..len]).starts_with("BYE ") {
-                saw_bye = true;
+            let text = String::from_utf8_lossy(&buf[..len]).into_owned();
+            if text.starts_with("BYE ") {
+                bye_text = text;
                 break;
             }
         }
-        assert!(saw_bye, "admin hangup must send BYE to the remote terminal");
+        assert!(bye_text.starts_with("BYE "), "admin hangup must send BYE to the remote terminal");
+        assert!(
+            bye_text.contains(&format!("From: <sip:{}@127.0.0.1>;tag={to_tag}", room.id)),
+            "server BYE From must be the local dialog side with our tag: {bye_text}"
+        );
+        assert!(
+            bye_text.contains("To: \"A\" <sip:a@127.0.0.1>;tag=af"),
+            "server BYE To must be the remote caller side with their tag: {bye_text}"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert!(manager.registry.lock().unwrap().by_participant.is_empty(), "admin hangup must clear registry");
         listener.abort();

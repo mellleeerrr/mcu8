@@ -73,3 +73,11 @@ Q.931/H.245/RAS), per-m `c=`, симметричный RTP-latch для NAT (P2,
 - RTCP egress — на `egress.port()+1` (NAT source), per-m-only `c=` в audio,
   отдельный video `c=`, `video_offered`; video downgrade обновляет RoomHub
   (`is_video_muted`) и registry media_details.
+
+## Четвёртый проход (по ревью `d59ee5d`)
+
+- Reaper при media-timeout теперь реально удаляет `by_participant`/`by_call`
+  из `GatewayCallRegistry` (проверено сетевым тестом
+  `inbound_sip_uas_media_timeout_reaps_registry_and_sends_bye`, ~20 с).
+- Тест admin hangup проверяет **заголовки** BYE: From = локальная сторона с
+  нашим tag, To = вызывающий с его tag.
