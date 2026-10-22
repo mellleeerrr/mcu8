@@ -9,7 +9,7 @@ VKS_CHROMIUM=/home/pro/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome 
 node tests/e2e/webrtc.js
 ```
 
-Result: 29/29 checks passed, 0 fatal; commit `43f9147`, binary SHA-256 `d8d5b742296f…` pinned
+Result: 29/29 checks passed, 0 fatal; commit `3b7f905`, binary SHA-256 `debb60bbbc97…` pinned
 in `result.json`, effective server env (`VKS_WEBRTC_TRANSPORT=1`, ports
 43000–43100) recorded there too. Two real Chromium peers through the
 authenticated /ws, real str0m answers, ICE-lite host candidates on
@@ -22,8 +22,8 @@ audio but zero video payload.
 
 Key stats (from `result.json`):
 
-- alice: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 612 pkts,
-  inbound video 484 pkts / 183 frames, 320x240.
+- alice: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 607 pkts,
+  inbound video 329 pkts / 181 frames, 320x240.
 - bob: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 618 pkts,
   inbound video 331 pkts / 185 frames, 320x240.
 - Third browser peer: explicitly rejected with `room_full` (`retryable=true`);
