@@ -64,8 +64,13 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > аудио. Исправлена взаимозаменяемость G.711 0↔8 с декодом по PT пакета;
 > видео-PT оставлен строгим, иначе ломался приём H.264. Тест
 > `accepts_alternate_g711_payload_and_reports_actual_pt`. Evidence
-> `docs/progress/evidence/t07b-cross-mcu/`. **Остаётся T07c:** наша MCU
-> UAC-only, нет listener 5060/1720, входящие вызовы с другой MCU не принимаются.
+> `docs/progress/evidence/t07b-cross-mcu/`. **T07c (входящий SIP UAS) — закрыт** на `078339c`: UDP listener 5060,
+> 180/200 с To-tag, ACK/BYE/CANCEL с диалоговой валидацией, 20 одновременных
+> входящих, media-timeout с BYE и очисткой registry/RoomHub, re-INVITE 501,
+> graceful shutdown с BYE всем активным диалогам. Ревью: `protocols-net`
+> **9.5/10**, `media-engine` **9.0/10**, P1 нет; LAN-scope принят.
+> Evidence `docs/progress/evidence/t07c/`. H.323 inbound (Q.931/H.245/RAS)
+> остаётся отдельным эпиком.
 >
 > **T12a (подписи без emoji/стикеров) закрыт:** `a4629a4`, ревью **9.5/10 APPROVED**
 > (`layout-ui`). Единый denylist-санитайзер `vks-common::text` (кириллица/combining/

@@ -108,3 +108,14 @@ Q.931/H.245/RAS), per-m `c=`, симметричный RTP-latch для NAT (P2,
   активные входящие получают BYE, registry и RoomHub/MCU очищаются.
 - Тесты: re-INVITE 501 + Via `received`/`rport` + graceful shutdown BYE,
   порог hold-watchdog 90 с vs потерянный терминал. Итого 1072 passed.
+
+## Финальное ревью и живая приёмка (LAN-scope)
+
+- `protocols-net`: **9.5/10**, P1 нет; `media-engine`: **9.0/10**, P1 нет.
+  Оба подтвердили закрытие T07c в доверенном LAN; P2/P3 — backlog
+  (video latch, a=rtcp, auth/allowlist для внешнего 5060, multi-call shutdown test).
+- Живой прогон `078339c`: 20 одновременных входящих `200 OK` + ACK,
+  через 20 с `connected=20`, занято 40 RTP-портов; после BYE
+  `connected=0`, `disconnected=20`, портов `:410xx` — 0.
+- Живой graceful shutdown: 3 активных входящих, `systemctl --user restart`
+  → клиенты получили **3/3 BYE**, сервис поднялся, `/readyz=200`.
