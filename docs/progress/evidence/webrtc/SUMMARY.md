@@ -40,6 +40,8 @@ Legacy UI/API regression at the same HEAD: `tests/e2e/live.js` 233/233,
 Files: `result.json`, `alice-offer.sdp`, `alice-answer.sdp`, `bob-offer.sdp`,
 `bob-answer.sdp`, `metrics.txt`, `server-log-tail.txt.
 
+Legacy run note: the vendor UI recorded 8 non-fatal console `TypeError`s (captured in `legacy-ui-result.json` `console_errors`); `page_errors` is empty.
+
 Mode-eviction coverage (separate pinned run, `TMPDIR=/var/tmp cargo test -p vks-admin evict`):
 `mode-eviction-tests.txt` — 5/5 passed, including per-room/global/settings eviction
 targeting and a regression test proving `Rooms::update` releases `state.rooms`

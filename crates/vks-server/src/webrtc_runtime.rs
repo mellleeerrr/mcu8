@@ -136,7 +136,8 @@ pub fn remove(room: vks_core::RoomId, participant: vks_core::ParticipantId) {
 }
 
 ///
-/// Errors are returned to the caller so it can fall back to the legacy answer
+/// Errors are returned to the caller, which fails the offer closed (the legacy
+/// answer is used only when the transport is disabled, never as a fallback)
 /// instead of dropping the signalling session.
 pub fn accept_offer(
     config: &HandlerConfig,

@@ -91,9 +91,11 @@ impl Rooms {
         // announce takes admission then reads rooms, so the reverse order would
         // deadlock and also let an offer slip between the override and eviction.
         if let Some(m) = mode {
-            let old_effective = state.mode.lock().expect("mode store poisoned").effective_mode(id);
             let epoch = {
                 let mut mode_state = state.mode.lock().expect("mode store poisoned");
+                // Same lock acquisition for read+insert: a concurrent global
+                // switch cannot make this event stale between the two.
+                let old_effective = mode_state.effective_mode(id);
                 mode_state.room_mode_overrides.insert(*id, m);
                 if old_effective == m {
                     None

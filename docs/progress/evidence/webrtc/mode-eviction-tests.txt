@@ -1,3 +1,7 @@
+# Mode/eviction regression tests
+# tree: e420b9e (+docs), command: TMPDIR=/var/tmp cargo test -p vks-admin evict -- --nocapture
+# binary: target/debug/deps/vks_admin-*
+
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.59s
      Running unittests src/lib.rs (target/debug/deps/vks_admin-ebfdbcddfe847054)
 
