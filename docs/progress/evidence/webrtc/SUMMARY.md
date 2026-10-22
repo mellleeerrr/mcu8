@@ -22,10 +22,10 @@ audio but zero video payload.
 
 Key stats (from `result.json`):
 
-- alice: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 607 pkts,
+- alice: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 601 pkts,
+  inbound video 471 pkts / 180 frames, 320x240.
+- bob: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 607 pkts,
   inbound video 329 pkts / 181 frames, 320x240.
-- bob: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 618 pkts,
-  inbound video 331 pkts / 185 frames, 320x240.
 - Third browser peer: explicitly rejected with `room_full` (`retryable=true`);
   a same-socket retry reaches `room_full` again, not `bad_state`, and the
   existing peers stay connected.
