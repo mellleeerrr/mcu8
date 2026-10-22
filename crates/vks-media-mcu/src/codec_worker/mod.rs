@@ -24,6 +24,10 @@ pub const WORKER_SAMPLE_RATE: u32 = 48_000;
 pub const AUDIO_FRAME_SAMPLES: usize = 960;
 /// Bytes of one 20 ms `s16le` frame.
 pub const AUDIO_FRAME_BYTES: usize = AUDIO_FRAME_SAMPLES * 2;
+/// Product canvas cap shared by encoder and decoder slots (3840×2160 fits).
+pub const MAX_VIDEO_WIDTH: u16 = 4096;
+/// Product canvas cap shared by encoder and decoder slots.
+pub const MAX_VIDEO_HEIGHT: u16 = 2160;
 
 /// Audio codecs that can be bridged through an isolated FFmpeg worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -142,7 +146,7 @@ impl VideoCodec {
             // x265 requires at least 16x16; a multiple of 16 is NOT required
             // (x265 accepts 18x18, 100x100, 176x144). Even dimensions are
             // required by the `rawvideo`/`yuv420p` framing, not by the codec.
-            Self::H265 => width >= 16 && height >= 16 && width <= 4096 && height <= 2160,
+            Self::H265 => width >= 16 && height >= 16 && width <= MAX_VIDEO_WIDTH && height <= MAX_VIDEO_HEIGHT,
         }
     }
 
@@ -150,7 +154,12 @@ impl VideoCodec {
     /// within the MCU canvas. The decoder scales the incoming picture to the
     /// slot resolution, so the source size is not constrained by the codec.
     pub const fn supports_decode_size(self, width: u16, height: u16) -> bool {
-        width > 0 && height > 0 && width.is_multiple_of(2) && height.is_multiple_of(2)
+        width > 0
+            && height > 0
+            && width.is_multiple_of(2)
+            && height.is_multiple_of(2)
+            && width <= MAX_VIDEO_WIDTH
+            && height <= MAX_VIDEO_HEIGHT
     }
 }
 
@@ -281,5 +290,12 @@ mod tests {
         assert!(slot.validate_for(VideoCodec::H263).is_ok());
         assert!(!VideoCodec::H265.supports_encode_size(8, 8));
         assert!(VideoCodec::H265.supports_encode_size(16, 16));
+        assert!(VideoCodec::H265.supports_decode_size(3840, 2160));
+        assert!(!VideoCodec::H265.supports_decode_size(4098, 2162));
+        assert!(!VideoCodec::H265.supports_decode_size(u16::MAX, u16::MAX));
+        let mut huge = SlotConfig::default_720p();
+        huge.width = u16::MAX;
+        huge.height = u16::MAX;
+        assert!(huge.validate_decode(VideoCodec::H265).is_err(), "huge decode slot must be rejected before allocating");
     }
 }
