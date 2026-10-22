@@ -111,6 +111,13 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > 160 B/20 мс + timestamp 160, media details sample_rate 16000/clock 8000.
 > Live low-video E2E 233/233, audio TX545/RX361, rejected 0, G722/PT9/16000/8000
 > asserted; 72 SIP + 72 server тестов, workspace clippy/fmt clean. Evidence `docs/progress/evidence/t06b1/`.
+> **T06b-4a (H.323 G.722, PT9) реализован, ожидает ревью/коммита:** H.245
+> две audio-capability + видео запись 3; симметричный выбор G722/G711U,
+> OLC/ACK PT9 без dynamic PT, fallback G711U, Rust `(0,0)/(9,9)`, inbound PT9
+> в bridge. Workspace lib all green, Python H.323 38 OK. Живой H.323 `.132`
+> отвечает `adaptiveBusy` до H.245 (SIP live параллельно работает) —
+> live-доказательство G.722 не получено. Evidence `docs/progress/evidence/t06b4a/`.
+>
 > **T06b-2c (G.723.1, PT4/30 мс) закрыт `ff0a12d`, ревью 9.5/10 APPROVED (protocols-net);** oxideav-g7231
 > 0.0.9, MP-MLQ 6.3k + ACELP 5.3k decoder, timestamp +240, накопление 240 при
 > 20-мс тике, inbound ptime 30; native offer `0 8 9 15 4 107 108 109 110 111 101`.

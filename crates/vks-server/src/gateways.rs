@@ -109,10 +109,10 @@ fn codec_name(item: &serde_json::Value) -> Option<String> {
     Some(name)
 }
 
-/// Audio codecs the H.323 sidecar actually opens an OLC for. The sidecar
-/// currently advertises/accepts only G.711U (PT0); SIP-only G722 must not be
-/// reported as bridgeable for an `h323:` destination.
-const H323_AUDIO: &[&str] = &["PCMU", "G711U", "G711"];
+/// Audio codecs the H.323 sidecar actually opens an OLC for: symmetric
+/// G.722 (PT9) or G.711U (PT0).
+
+const H323_AUDIO: &[&str] = &["PCMU", "G711U", "G711", "G722"];
 
 fn h323_audio_native(name: &str) -> bool {
     H323_AUDIO.iter().any(|codec| codec.eq_ignore_ascii_case(name))
@@ -684,6 +684,16 @@ pub(super) fn audio_sample_rate(payload_type: u8) -> u32 {
     }
 }
 
+/// H.323 single-codec bridge: only symmetric static G.711U (PT0) or G.722
+/// (PT9) may reach `RtpBridgeSession`; anything else is a listener/sidecar bug.
+fn symmetric_h323_audio_pt(remote: Option<u8>, local: Option<u8>) -> Option<u8> {
+    match (remote?, local?) {
+        (0, 0) => Some(0),
+        (9, 9) => Some(9),
+        _ => None,
+    }
+}
+
 /// Canonical audio codec name for stats/UI (RTP payload type → name).
 pub(super) fn audio_codec_name(payload_type: u8) -> &'static str {
     match payload_type {
@@ -1069,7 +1079,8 @@ impl GatewayManager {
                 .ok_or_else(|| "H.323 did not negotiate an audio RTP channel".to_string())?;
             if session.local_audio_payload_type != session.remote_audio_payload_type {
                 return Err(
-                    "Asymmetric H.323 audio payload types are not supported by the negotiated G711 bridge".into()
+                    "Asymmetric H.323 audio payload types are not supported by the single-codec G.711/G.722 bridge"
+                        .into(),
                 );
             }
             let video = session
@@ -2976,9 +2987,16 @@ async fn serve_h323_uas_session(
                 let audio_payload_type = event
                     .get("remote_audio_payload_type")
                     .and_then(serde_json::Value::as_u64)
+                    .and_then(|pt| u8::try_from(pt).ok())
+                    .filter(|pt| matches!(pt, 0 | 9));
+                let local_audio_payload_type = event
+                    .get("local_audio_payload_type")
+                    .and_then(serde_json::Value::as_u64)
                     .and_then(|pt| u8::try_from(pt).ok());
-                let (Some(remote_audio_port), Some(0)) = (remote_audio_port, audio_payload_type) else {
-                    warn!(%call_id, "H.323 connected event has unusable audio");
+                let (Some(remote_audio_port), Some(audio_payload_type)) =
+                    (remote_audio_port, symmetric_h323_audio_pt(audio_payload_type, local_audio_payload_type))
+                else {
+                    warn!(%call_id, "H.323 connected event has unusable or asymmetric audio");
                     handle.hangup(call_id).await;
                     pending.insert(call_id.to_string(), pending_call);
                     continue;
@@ -3034,11 +3052,12 @@ async fn serve_h323_uas_session(
                     "direction": "inbound",
                     "remote_audio_address": format!("{remote_ip}:{remote_audio_port}"),
                     "remote_video_address": video_remote.map(|(ip, port, _, _)| format!("{ip}:{port}")),
-                    "audio_codec": "PCMU",
-                    "audio_payload_type": 0,
-                    "audio_rx_payload_type": 0,
-                    "audio_tx_payload_type": 0,
+                    "audio_codec": audio_codec_name(audio_payload_type),
+                    "audio_payload_type": audio_payload_type,
+                    "audio_rx_payload_type": audio_payload_type,
+                    "audio_tx_payload_type": audio_payload_type,
                     "audio_clock_rate": 8000,
+                    "audio_sample_rate": if audio_payload_type == 9 { 16000 } else { 8000 },
                     "video_codec": if has_video { Some("H264") } else { None },
                     "video_payload_type": video_remote.map(|(_, _, tx, _)| tx),
                     "video_tx_payload_type": video_remote.map(|(_, _, tx, _)| tx),
@@ -3092,8 +3111,8 @@ async fn serve_h323_uas_session(
                     participant_id_val: participant,
                     remote_media_ip: remote_ip.to_string(),
                     remote_audio_port,
-                    audio_payload_type: 0,
-                    audio_codec: None,
+                    audio_payload_type,
+                    audio_codec: Some(audio_codec_name(audio_payload_type)),
                     // H.323 already binds the media address via H.245. Any
                     // first-packet relatch would let a LAN scanner hijack the
                     // bridge/egress, so keep the OLC-pinned peer.
@@ -3264,6 +3283,15 @@ mod media_runtime_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn h323_inbound_audio_requires_symmetric_static_pt() {
+        assert_eq!(symmetric_h323_audio_pt(Some(0), Some(0)), Some(0));
+        assert_eq!(symmetric_h323_audio_pt(Some(9), Some(9)), Some(9));
+        for (remote, local) in [(Some(9), Some(0)), (Some(0), Some(9)), (Some(8), Some(8)), (Some(9), None)] {
+            assert_eq!(symmetric_h323_audio_pt(remote, local), None, "{remote:?}/{local:?}");
+        }
+    }
 
     #[test]
     fn h323_contact_uri_is_ascii_and_keeps_peer() {
@@ -3498,11 +3526,10 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert!(ensure_bridgeable_codec_selection(Some(&serde_json::json!([])), None).is_ok());
         let high_only = serde_json::json!(["H264-HIGH"]);
         assert!(ensure_bridgeable_codec_selection(Some(&native), Some(&high_only)).is_err());
-        // H.323 sidecar is G.711U only; SIP-wideband G722 must be rejected for
-        // an h323: destination even though it is natively bridged over SIP.
+        // H.323 negotiates G.722 (PT9) or G.711U (PT0); both are bridged.
         let g722_only = serde_json::json!([{"name": "G722", "bitrate": null}]);
         assert!(ensure_bridgeable_codec_selection(Some(&g722_only), None).is_ok());
-        assert!(ensure_bridgeable_codec_selection_for(true, Some(&g722_only), None).is_err());
+        assert!(ensure_bridgeable_codec_selection_for(true, Some(&g722_only), None).is_ok());
         let pcmu_only = serde_json::json!([{"name": "PCMU", "bitrate": null}]);
         assert!(ensure_bridgeable_codec_selection_for(true, Some(&pcmu_only), None).is_ok());
         // G.726 is variant-aware: only 16/24/32/40 kbit/s are bridged, and the

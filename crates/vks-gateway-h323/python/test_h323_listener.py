@@ -61,6 +61,40 @@ class InboundContractTests(unittest.TestCase):
         call.on_close({"forwardLogicalChannelNumber": 1})
         self.assertTrue(call.closed)
 
+    def test_capability_set_advertises_g722_and_g711_as_one_audio_slot(self):
+        call = object.__new__(listener.InboundCall)
+        call.config = {}
+        caps = call.capability_set()
+        table = {entry["capabilityTableEntryNumber"]: entry["capability"] for entry in caps["capabilityTable"]}
+        self.assertEqual(table[1], ("receiveAndTransmitAudioCapability", ("g722-64k", 20)))
+        self.assertEqual(table[2], ("receiveAndTransmitAudioCapability", ("g711Ulaw64k", 20)))
+        self.assertEqual(caps["capabilityDescriptors"][0]["simultaneousCapabilities"], [[1, 2]])
+        self.assertEqual(listener.select_audio_codec({"G722", "G711U"}, {"G722", "G711U"}), "G722")
+        self.assertIsNone(listener.select_audio_codec({"G722"}, {"G711U"}))
+
+    def test_incoming_g722_olc_is_acked_with_pt9_and_local_ports(self):
+        call = object.__new__(listener.InboundCall)
+        call.config = {"local_ip": "192.168.1.93", "audio_port": 41002}
+        call.audio_codec = "G722"
+        call.incoming_channels = {}
+        call.local_audio_pt = 0
+        call.incoming_audio = False
+        call.acks = []
+        call.send_control = lambda value: call.acks.append(value)
+        params = {
+            "forwardLogicalChannelNumber": 1,
+            "forwardLogicalChannelParameters": {
+                "dataType": ("audioData", ("g722-64k", 20)),
+                "multiplexParameters": ("h2250LogicalChannelParameters", {"sessionID": 1}),
+            },
+        }
+        call.on_open(params)
+        self.assertTrue(call.incoming_audio)
+        self.assertEqual(call.local_audio_pt, 9)
+        ack = call.acks[-1][1][1]["forwardMultiplexAckParameters"][1]
+        self.assertNotIn("dynamicRTPPayloadType", ack)
+        self.assertEqual(ack["mediaChannel"], listener.h245_address("192.168.1.93", 41002))
+
     def test_release_complete_is_a_valid_q931_frame(self):
         class FakeConn:
             def __init__(self):

@@ -59,6 +59,16 @@ async fn live_h323_connect() {
         session.local_video_payload_type,
     );
 
+    if std::env::var("VKS_LIVE_EXPECT_G722").is_ok_and(|value| value == "1") {
+        assert_eq!(
+            (session.remote_audio_payload_type, session.local_audio_payload_type),
+            (9, 9),
+            "live H.323 peer did not select symmetric G.722/PT9; got remote={} local={}",
+            session.remote_audio_payload_type,
+            session.local_audio_payload_type
+        );
+    }
+
     let mut audio_packets = 0u32;
     let mut video_packets = 0u32;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);

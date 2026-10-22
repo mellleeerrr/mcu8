@@ -197,10 +197,114 @@ class ContractTests(unittest.TestCase):
         model = h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage
         decoded = h.decode(model, h.encode(model, value))
         capabilities = decoded[1][1]
-        self.assertEqual(capabilities['capabilityTable'][1]['capability'][1], h.video_capability())
+        table = {entry['capabilityTableEntryNumber']: entry['capability'] for entry in capabilities['capabilityTable']}
+        self.assertEqual(table[1], ('receiveAndTransmitAudioCapability', ('g722-64k', 20)))
+        self.assertEqual(table[2], ('receiveAndTransmitAudioCapability', ('g711Ulaw64k', 20)))
+        self.assertEqual(table[3][1], h.video_capability())
+        self.assertEqual(capabilities['capabilityDescriptors'][0]['simultaneousCapabilities'], [[1, 2], [3]])
         packetization = capabilities['multiplexCapability'][1]['mediaPacketizationCapability']
         self.assertEqual(packetization['rtpPayloadType'][0]['payloadDescriptor'], ('oid', h.H264_NON_INTERLEAVED))
         self.assertEqual(h.codec_kind(('videoData', h.video_capability())), ('video', None))
+
+    def test_symmetric_audio_selection_prefers_g722_and_rejects_asymmetry(self):
+        self.assertEqual(h.select_audio_codec({'G722', 'G711U'}, {'G722', 'G711U'}), 'G722')
+        self.assertEqual(h.select_audio_codec({'G711U'}, {'G711U', 'G722'}), 'G711U')
+        self.assertIsNone(h.select_audio_codec({'G722'}, {'G711U'}))
+        self.assertIsNone(h.select_audio_codec(set(), set()))
+
+    def test_g722_outgoing_olc_uses_static_pt9_and_ack_keeps_it_symmetric(self):
+        call = self.call()
+        call.control = FakeSocket()
+        call.audio_codec = 'G722'
+        call.open_outgoing(1, 'audio', 41002)
+        request = h.decode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, call.control.sent[-1][4:])
+        fw = request[1][1]['forwardLogicalChannelParameters']
+        self.assertEqual(fw['dataType'], ('audioData', ('g722-64k', 20)))
+        params = fw['multiplexParameters'][1]
+        self.assertNotIn('dynamicRTPPayloadType', params)
+        self.assertIs(params['silenceSuppression'], False)
+        call.requested_channels[1] = 'audio'
+        with contextlib.redirect_stdout(io.StringIO()):
+            call.on_control(OUTGOING_ACK)
+        self.assertEqual(call.audio_tx_pt, 9)
+        self.assertEqual(call.remote_audio, ('192.168.1.132', 3230))
+
+    def test_g722_reject_retries_g711_on_fresh_channel(self):
+        call = self.call()
+        call.control = FakeSocket()
+        call.audio_codec = 'G722'
+        call.remote_audio_rx = {'G722', 'G711U'}
+        call.remote_audio_tx = {'G722', 'G711U'}
+        call.requested_channels[1] = 'audio'
+        reject = {'forwardLogicalChannelNumber': 1, 'cause': ('dataTypeNotSupported', 0)}
+        model = h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage
+        packet = h.encode(model, ('response', ('openLogicalChannelReject', reject)))
+        with contextlib.redirect_stdout(io.StringIO()):
+            call.on_control(packet)
+        self.assertEqual(call.audio_codec, 'G711U')
+        self.assertIn(3, call.requested_channels)
+        request = h.decode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, call.control.sent[-1][4:])
+        data_type = request[1][1]['forwardLogicalChannelParameters']['dataType']
+        self.assertEqual(data_type, ('audioData', ('g711Ulaw64k', 20)))
+        self.assertTrue(call.audio_fallback_tried)
+
+    def test_fallback_requires_g711_in_both_peer_directions(self):
+        for rx, tx, expect_error in [
+            ({'G722', 'G711U'}, {'G722', 'G711U'}, False),
+            ({'G722'}, {'G722', 'G711U'}, True),
+            ({'G722', 'G711U'}, {'G722'}, True),
+        ]:
+            call = self.call()
+            call.control = FakeSocket()
+            call.audio_codec = 'G722'
+            call.remote_audio_rx, call.remote_audio_tx = rx, tx
+            call.requested_channels[1] = 'audio'
+            model = h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage
+            reject = {'forwardLogicalChannelNumber': 1, 'cause': ('dataTypeNotSupported', 0)}
+            packet = h.encode(model, ('response', ('openLogicalChannelReject', reject)))
+            with contextlib.redirect_stdout(io.StringIO()):
+                if expect_error:
+                    with self.assertRaises(h.ProtocolError):
+                        call.on_control(packet)
+                else:
+                    call.on_control(packet)
+                    self.assertEqual(call.audio_codec, 'G711U')
+
+    def test_incoming_audio_olc_with_dynamic_pt_is_rejected(self):
+        call = self.call()
+        call.control = FakeSocket()
+        call.audio_codec = 'G722'
+        params = {
+            'forwardLogicalChannelNumber': 1,
+            'forwardLogicalChannelParameters': {
+                'dataType': ('audioData', ('g722-64k', 20)),
+                'multiplexParameters': ('h2250LogicalChannelParameters', {'sessionID': 1, 'dynamicRTPPayloadType': 96}),
+            },
+        }
+        with contextlib.redirect_stdout(io.StringIO()):
+            call.on_open(params)
+        self.assertFalse(call.incoming_audio)
+        reject = h.decode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, call.control.sent[-1][4:])
+        self.assertEqual(reject[1][0], 'openLogicalChannelReject')
+
+    def test_g722_incoming_olc_is_acked_without_dynamic_pt(self):
+        call = self.call()
+        call.control = FakeSocket()
+        call.audio_codec = 'G722'
+        params = {
+            'forwardLogicalChannelNumber': 1,
+            'forwardLogicalChannelParameters': {
+                'dataType': ('audioData', ('g722-64k', 20)),
+                'multiplexParameters': ('h2250LogicalChannelParameters', {'sessionID': 1}),
+            },
+        }
+        with contextlib.redirect_stdout(io.StringIO()): call.on_open(params)
+        self.assertTrue(call.incoming_audio)
+        self.assertEqual(call.audio_rx_pt, 9)
+        ack = h.decode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, call.control.sent[-1][4:])
+        ack_params = ack[1][1]['forwardMultiplexAckParameters'][1]
+        self.assertNotIn('dynamicRTPPayloadType', ack_params)
+        self.assertEqual(ack_params['mediaChannel'], h.h245_address('192.168.1.93', 41002))
 
     def test_foreign_peer_address_and_overlapping_ports_fail_closed(self):
         with self.assertRaises(h.ProtocolError): h.endpoint(h.h245_address('10.0.0.99', 3230), '192.168.1.132')

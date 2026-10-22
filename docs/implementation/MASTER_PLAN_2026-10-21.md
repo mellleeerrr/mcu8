@@ -368,6 +368,14 @@ Evidence: `docs/progress/evidence/t06b2b/`.
 `0 8 9 15 4 107 108 109 110 111 101` (без 20-мс ptime). H.323 G723 — T06b-4.
 Evidence: `docs/progress/evidence/t06b2c/`.
 
+**T06b-4a (H.323 G.722) — реализован 2026-10-22, ожидает ревью/коммита.**
+H.245 TCS: `g722-64k` + `g711Ulaw64k` отдельными записями, видео запись 3;
+peer-direction пересечение, только симметричный кодек; OLC/ACK PT9 без
+dynamic PT; fallback G.711U; Rust принимает `(0,0)/(9,9)`, inbound PT9
+прокинут в media_details/bridge. Живой H.323 `.132` сейчас отвечает
+`adaptiveBusy` (Q.931 до H.245); SIP live в это же время работает.
+Evidence `docs/progress/evidence/t06b4a/`.
+
 ## T06b. Транскодирование полной матрицы (P1)
 
 **Проблема (состояние до T06b-1).** В настройках 18 audio/8 video, в

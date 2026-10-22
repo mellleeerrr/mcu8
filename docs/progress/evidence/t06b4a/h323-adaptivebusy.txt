@@ -1,0 +1,20 @@
+T06b-4a external block: Polycom .132 H.323 admission, 2026-10-22 ~16:12-16:22 MSK
+Reproduce:
+  printf '%s\n' '{"target_ip":"192.168.1.132","target_port":1720,"local_ip":"192.168.1.93","audio_port":41002,"video_port":41004,"timeout_seconds":15,"call_id":"00010203-0405-0607-0809-0a0b0c0d0e0f","call_ref":12631,"trace":true}' \
+    | timeout 12 ~/.local/share/vks-mcu/h323-venv/bin/python3 crates/vks-gateway-h323/python/h323_sidecar.py
+
+Observed Q.931 ReleaseComplete (before any H.245 exchange):
+hex: 0802b1575a7e00270525c0060008914a00054888c01100000102030405060708090a0b0c0d0e0f0100014010800100
+Decoded H.225 UserInformation:
+  message-type=releaseComplete
+  protocolIdentifier=(0,0,8,2250,0,5)
+  reason=('adaptiveBusy', 0)
+  callIdentifier=00010203-0405-0607-0809-0a0b0c0d0e0f
+
+Thus the terminal itself reports "adaptive busy" at call admission; H.245 TCS/OLC
+and G.722 are never reached. The same sidecar code path works for the
+SIP live call to the same .132 at 16:16 MSK:
+  audio: pt=9 (G722), 207 packets / 35604 bytes
+  video: tx_pt=110 rx_pt=97, 40 packets
+The H.323 block is external (terminal capacity/H.323 service state), not a TCS
+or OLC rejection; it must be retried when the terminal's H.323 stack is free.
