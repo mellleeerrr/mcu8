@@ -1284,3 +1284,29 @@ async fn vendor_directory_collection_aliases_return_same_users() {
         assert_eq!(json_body(response).await, canonical, "{uri}");
     }
 }
+
+#[tokio::test]
+async fn vendor_collection_trailing_slash_aliases_are_transparent() {
+    let (state, _issuer) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    for (canonical, alias) in [
+        ("/api/v3/abonents", "/api/v3/abonents/"),
+        ("/api/v3/call_history", "/api/v3/call_history/"),
+        ("/api/v3/call_strings", "/api/v3/call_strings/"),
+        ("/api/v3/conferences", "/api/v3/conferences/"),
+        ("/api/v3/groups", "/api/v3/groups/"),
+        ("/api/v3/roles", "/api/v3/roles/"),
+        ("/api/v3/sessions", "/api/v3/sessions/"),
+        ("/api/v3/video_layout_grids", "/api/v3/video_layout_grids/"),
+        ("/api/v3/video_layouts", "/api/v3/video_layouts/"),
+        ("/api/v3/ui/call_strings", "/api/v3/ui/call_strings/"),
+        ("/api/v3/ui/conferences", "/api/v3/ui/conferences/"),
+    ] {
+        let a = send(&app, request("GET", canonical, Some(&token), json!({}))).await;
+        let b = send(&app, request("GET", alias, Some(&token), json!({}))).await;
+        assert_eq!(a.status(), StatusCode::OK, "{canonical}");
+        assert_eq!(b.status(), StatusCode::OK, "{alias}");
+        assert_eq!(json_body(a).await, json_body(b).await, "{canonical} vs {alias}");
+    }
+}

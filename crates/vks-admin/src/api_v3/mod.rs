@@ -227,6 +227,7 @@ pub fn router(state: SharedState) -> Router {
             get(directory::profile_credentials).patch(directory::update_profile_credentials),
         )
         .route("/api/v3/groups", get(directory::list_groups).post(directory::create_group))
+        .route("/api/v3/groups/", get(directory::list_groups).post(directory::create_group))
         .route(
             "/api/v3/groups/{id}",
             get(directory::get_group).patch(directory::update_group).delete(directory::delete_group),
@@ -237,6 +238,7 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/v3/users/{id}/roles/{role_id}", post(directory::add_user_role).delete(directory::remove_user_role))
         .route("/api/v3/roles", get(directory::list_roles).post(directory::create_role))
+        .route("/api/v3/roles/", get(directory::list_roles).post(directory::create_role))
         .route(
             "/api/v3/roles/{id}",
             get(directory::get_role).patch(directory::update_role).delete(directory::delete_role),
@@ -275,6 +277,7 @@ pub fn router(state: SharedState) -> Router {
             get(resources::get_schedule).patch(resources::edit_schedule).delete(resources::remove_schedule),
         )
         .route("/api/v3/video_layout_grids", get(resources::grids))
+        .route("/api/v3/video_layout_grids/", get(resources::grids))
         .route("/api/v3/video_layout_grids/{id}", get(resources::get_grid))
         .route("/api/v3/conferences/{id}/video_layouts/{resource_id}/contacts", get(resources::layout_contacts))
         .route(
@@ -362,15 +365,18 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/ui/sessions/{id}", get(sessions::session).delete(sessions::stop_session))
         .route("/api/v3/ui/sessions/{id}/abonents", get(sessions::session_abonents))
         .route("/api/v3/sessions", get(sessions::sessions).post(sessions::start_session))
+        .route("/api/v3/sessions/", get(sessions::sessions).post(sessions::start_session))
         .route("/api/v3/sessions/{id}", get(sessions::session).delete(sessions::stop_session))
         .route("/api/v3/sessions/{id}/abonents", get(sessions::session_abonents))
         .route("/api/v3/conferences", get(sessions::conferences).post(sessions::create_conference))
+        .route("/api/v3/conferences/", get(sessions::conferences).post(sessions::create_conference))
         .route(
             "/api/v3/conferences/{id}",
             get(sessions::conference).patch(sessions::update_conference).delete(sessions::delete_conference),
         )
         .route("/api/v3/conferences/{id}/contacts", get(sessions::conference_contacts))
         .route("/api/v3/ui/conferences", get(sessions::ui_conferences).post(sessions::create_conference))
+        .route("/api/v3/ui/conferences/", get(sessions::ui_conferences).post(sessions::create_conference))
         .route(
             "/api/v3/ui/conferences/{id}",
             get(sessions::conference).patch(sessions::update_conference).delete(sessions::delete_conference),
@@ -415,10 +421,12 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/ui/sessions/{id}/contacts/{contact_id}", delete(sessions::remove_session_contact))
         .route("/api/v3/ui/video_layouts", get(resources::list_global).post(resources::create))
         .route("/api/v3/video_layouts", get(shell::video_layouts))
+        .route("/api/v3/video_layouts/", get(shell::video_layouts))
         .route("/api/v3/ui/video_layouts/mode", post(shell::switch_video_layout_mode))
         .route("/api/v3/ui/sessions/quick", post(sessions::quick_session))
         .route("/api/v3/sessions/quick", post(sessions::quick_session))
         .route("/api/v3/abonents", get(sessions::list_abonents))
+        .route("/api/v3/abonents/", get(sessions::list_abonents))
         .route("/api/v3/abonents/previews", get(sessions::abonents_previews))
         .route("/api/v3/abonents/{id}", delete(sessions::remove_abonent).patch(sessions::edit_abonent))
         .route("/api/v3/abonents/{id}/{setting}", post(sessions::switch_abonent_settings))
@@ -428,10 +436,13 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/ui/sessions/{id}/abonents/{abonent_id}", delete(sessions::remove_session_abonent))
         // T2.2: история конференций (vendor /call_history*).
         .route("/api/v3/call_history", get(history::list))
+        .route("/api/v3/call_history/", get(history::list))
         .route("/api/v3/call_history/export", get(history::export))
         .route("/api/v3/call_history/{id}/export", get(history::export_session))
         .route("/api/v3/call_history/clean", post(history::clean))
         .route("/api/v3/call_history/{id}", get(history::detail))
+        .route("/api/v3/ui/call_history", get(history::list))
+        .route("/api/v3/ui/call_history/", get(history::list))
         .route("/api/v3/ui/session_history/{id}", get(history::ui_session_history))
         .route("/api/v3/ui/call_history/{id}", get(history::ui_call_history))
         .route("/api/v3/engine/command", post(shell::engine_command))
