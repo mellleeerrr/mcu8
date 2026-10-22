@@ -98,3 +98,13 @@ Q.931/H.245/RAS), per-m `c=`, симметричный RTP-latch для NAT (P2,
 - Video downgrade удаляет video-трек из RoomHub snapshot и media_details.
 - Graceful shutdown UAS: listener получает notify, снимает registry и шлёт BYE
   активным входящим диалогам.
+
+## Шестой проход (надёжный shutdown, re-INVITE, тесты)
+
+- re-INVITE с новым CSeq → 501 (кэшированный 200 только для retransmission
+  с тем же CSeq); rate-limit 503 теперь с To-tag.
+- `notify_one` заменён на atomic `sip_uas_stopping` + `notify_waiters`:
+  сигнал не теряется, listener джойнится через сохранённый `sip_uas_task`,
+  активные входящие получают BYE, registry и RoomHub/MCU очищаются.
+- Тесты: re-INVITE 501 + Via `received`/`rport` + graceful shutdown BYE,
+  порог hold-watchdog 90 с vs потерянный терминал. Итого 1072 passed.

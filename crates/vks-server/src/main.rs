@@ -427,9 +427,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
-            uas_shutdown.shutdown_sip_uas();
-            // Дать listener'у отправить BYE активным входящим диалогам.
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            uas_shutdown.shutdown_sip_uas().await;
         })
         .await?;
 
