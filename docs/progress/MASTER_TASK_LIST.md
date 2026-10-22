@@ -105,7 +105,7 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > `perf-cache.js` fresh=true; 281/0, clippy/fmt чисто, manifest OK.
 > Evidence: `docs/progress/evidence/t12b/`.
 >
-> **T06b-1 (G.722 SIP end-to-end) реализован, ожидает ревью/коммита:** G722 PT9/8000
+> **T06b-1 (G.722 SIP end-to-end) закрыт `f8456b0`, ревью 9.5/10 APPROVED:** G722 PT9/8000
 > native, native offer `0 8 9 101`, inbound SIP UAS отвечает G722, строгий выбор
 > первого общего кодека (нет позднего PCMU fallback), G722 16k↔48k RTP-мост
 > 160 B/20 мс + timestamp 160, media details sample_rate 16000/clock 8000.

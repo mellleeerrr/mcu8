@@ -1,6 +1,6 @@
 # T06b-1 — G.722 end-to-end (SIP outbound + inbound), strict-first negotiation
 
-Дата: 2026-10-22. Статус: код/тесты/E2E готовы; ревью ref-engines **9.5/10 APPROVED**.
+Дата: 2026-10-22. Статус: закрыт коммитом `f8456b0`; ревью ref-engines **9.5/10 APPROVED**.
 Scope: только SIP + G.722; остальная матрица аудио/видео и H.323 — T06b-2..T06b-5.
 
 ## Что сделано

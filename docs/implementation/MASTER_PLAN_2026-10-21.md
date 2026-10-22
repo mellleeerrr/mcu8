@@ -334,7 +334,7 @@ native-оффер был PCMU/PCMA; в T06b-1 он расширен G722 PT9 (с
 high/low T06a: 114/114 checks, audio TX/RX 562/367 и 542/348, rejected 0, video 3.55/0.55 Mbps. T06b —
 транскодер полной матрицы; H.323 — T05b/T07.
 
-**T06b-1 (G.722 SIP end-to-end) — реализован 2026-10-22, ожидает ревью/коммита.**
+**T06b-1 (G.722 SIP end-to-end) — закрыт `f8456b0`, ревью ref-engines 9.5/10 APPROVED.**
 G722 PT9/8000 native в SDP (offer `0 8 9 101`, inbound UAS отвечает PT9),
 строгий выбор первого общего кодека без позднего PCMU fallback, G722
 16 кГц↔48 кГц мост с payload 160 B/20 мс и timestamp +160, media details
