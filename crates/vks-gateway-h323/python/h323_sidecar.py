@@ -41,6 +41,7 @@ H264_NON_INTERLEAVED = (0, 0, 8, 241, 0, 0, 0, 1)
 try:
     with contextlib.redirect_stdout(sys.stderr):
         import h323_asn as asn
+        import h323_audio as audio
         from pycrate_core.charpy import Charpy
 except ImportError as dependency_error:
     sys.stdout.write(json.dumps({"event": "failed", "reason": "ASN.1 runtime unavailable; Pycrate 0.8.1 and generated H.323 descriptions are required"}) + "\n")
@@ -337,7 +338,7 @@ class Call:
             raise ProtocolError("Mismatched Q.931 call reference")
         self.wire("received", "q931", payload, message_type=message)
         if message == 0x5A:
-            self.reason = "remote_release" + (f":cause={cause}" if cause is not None else "")
+            self.reason = audio.release_reason_token(information, cause)
             self.stopping = True
             return
         if information is None:

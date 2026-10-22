@@ -16,6 +16,29 @@ AUDIO_CODECS = {
 AUDIO_PREFERENCE = ("G722", "G711U", "G711A", "G723")
 
 
+def release_reason_token(information, cause=None):
+    """Stable terminal token for a Q.931 RELEASE COMPLETE.
+
+    Decodes the H.225 ``releaseCompleteReason`` choice instead of collapsing
+    every remote release to ``remote_release``. This is what makes
+    ``remote_release:adaptiveBusy`` observable to Rust and the operator.
+    """
+    token = "remote_release"
+    try:
+        body = information["h323-uu-pdu"]["h323-message-body"]
+        if isinstance(body, (tuple, list)) and body and body[0] == "releaseComplete":
+            reason = body[1].get("reason") if isinstance(body[1], dict) else None
+            if isinstance(reason, (tuple, list)) and reason:
+                reason = reason[0]
+            if isinstance(reason, str) and reason:
+                token = f"remote_release:{reason}"
+    except (KeyError, TypeError, IndexError):
+        pass
+    if cause is not None:
+        token += f":cause={cause}"
+    return token
+
+
 def select_audio_candidates(peer_rx, peer_tx):
     """Symmetric native codecs in preference order."""
     usable = set(peer_rx) & set(peer_tx)

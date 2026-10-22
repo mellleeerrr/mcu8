@@ -39,6 +39,17 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn('fastStart', connect)
         self.assertFalse(value['h323-uu-pdu']['h245Tunneling'])
 
+    def test_release_complete_surfaces_adaptive_busy_reason(self):
+        # Golden capture from the real Polycom .132 terminal, 2026-10-22.
+        packet = bytes.fromhex(
+            '0802b1575a7e00270525c0060008914a00054888c01100000102030405060708090a0b0c0d0e0f0100014010800100'
+        )
+        call = self.call()
+        with contextlib.redirect_stdout(io.StringIO()):
+            call.on_signal(packet)
+        self.assertEqual(call.reason, 'remote_release:adaptiveBusy')
+        self.assertTrue(call.stopping)
+
     def test_alerting_is_not_connect_and_contains_no_media(self):
         _, message, value, _ = h.parse_q931(ALERTING)
         self.assertEqual(message, 1)
