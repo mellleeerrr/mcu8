@@ -39,6 +39,11 @@ pub struct HandlerConfig {
     pub video_bitrate_kbps: u32,
 }
 
+/// Parse/clamp `VKS_SFU_VIDEO_BITRATE_KBPS`: invalid/empty → 2048, range 64..20000.
+fn video_bitrate_from(raw: Option<&str>) -> u32 {
+    raw.and_then(|value| value.trim().parse::<u32>().ok()).unwrap_or(2048).clamp(64, 20_000)
+}
+
 impl HandlerConfig {
     /// Создаёт конфигурацию обработчика с явными параметрами.
     #[allow(clippy::too_many_arguments)]
@@ -71,11 +76,7 @@ impl HandlerConfig {
                 svc: false,
                 dtls_srtp: true,
             }),
-            video_bitrate_kbps: std::env::var("VKS_SFU_VIDEO_BITRATE_KBPS")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(2048)
-                .clamp(64, 20_000),
+            video_bitrate_kbps: video_bitrate_from(std::env::var("VKS_SFU_VIDEO_BITRATE_KBPS").ok().as_deref()),
         }
     }
 
@@ -637,6 +638,11 @@ mod tests {
 
     #[test]
     fn sfu_video_bitrate_is_clamped_in_constructor_and_answer() {
+        assert_eq!(video_bitrate_from(Some("0")), 64);
+        assert_eq!(video_bitrate_from(Some("100000")), 20_000);
+        assert_eq!(video_bitrate_from(Some("4096")), 4096);
+        assert_eq!(video_bitrate_from(Some("junk")), 2048);
+        assert_eq!(video_bitrate_from(None), 2048);
         let mut low = HandlerConfig::default_test();
         low.video_bitrate_kbps = 0;
         assert_eq!(low.answer_profile().b_as, Some(64));
