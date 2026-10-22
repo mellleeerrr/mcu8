@@ -111,7 +111,7 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > 160 B/20 мс + timestamp 160, media details sample_rate 16000/clock 8000.
 > Live low-video E2E 233/233, audio TX545/RX361, rejected 0, G722/PT9/16000/8000
 > asserted; 72 SIP + 72 server тестов, workspace clippy/fmt clean. Evidence `docs/progress/evidence/t06b1/`.
-> **T06b-2c (G.723.1, PT4/30 мс) реализован, ожидает ревью/коммита:** oxideav-g7231
+> **T06b-2c (G.723.1, PT4/30 мс) закрыт `ff0a12d`, ревью 9.5/10 APPROVED (protocols-net);** oxideav-g7231
 > 0.0.9, MP-MLQ 6.3k + ACELP 5.3k decoder, timestamp +240, накопление 240 при
 > 20-мс тике, inbound ptime 30; native offer `0 8 9 15 4 107 108 109 110 111 101`.
 > Gates 90 SIP (+1) / 80 server (+3) / 77 common; live E2E 233/233 G722.

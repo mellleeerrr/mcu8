@@ -361,7 +361,7 @@ G719/AAC-LATM — 488 до 200 с явной причиной; G723 (30 мс) �
 Live E2E 233/233 остаётся G722 (`.132`), settings `OPUS`/`G728` supported.
 Evidence: `docs/progress/evidence/t06b2b/`.
 
-**T06b-2c (G.723.1 native) — реализован 2026-10-22, ожидает ревью/коммита.**
+**T06b-2c (G.723.1 native) — закрыт `ff0a12d`, ревью 9.5/10 APPROVED (protocols-net); media-engine/ref-engines P1 исправлены.**
 `oxideav-g7231 =0.0.9` (MIT, pure Rust): PT4 `G723/8000`, 30 мс = 24 B /
 240 сэмплов, MP-MLQ 6.3k энкодер + ACELP 5.3k/MP-MLQ декодер, timestamp +240,
 накопление 240 при 20-мс MCU-тике, inbound `a=ptime:30`, native offer
