@@ -259,6 +259,7 @@ pub fn router(state: SharedState) -> Router {
         // Карточка пользователя в справочнике: эталон зовёт `/ui/users/{id}`,
         // а не `/users/{id}`. Без алиаса карточка падала в 501.
         .route("/api/v3/ui/users/{id}", get(directory::get_user))
+        .route("/api/v3/ui/directory/users/{id}", get(directory::get_user))
         .route("/api/v3/tags_to_objects", get(shell::tags_to_objects_get).post(shell::tags_to_objects))
         .route("/api/v3/tags_to_objects/", get(shell::tags_to_objects_get).post(shell::tags_to_objects))
         .route("/api/v3/files", get(shell::files_list).post(shell::file_upload))
