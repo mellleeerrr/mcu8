@@ -24,18 +24,14 @@ pub struct WorkerConfig {
     /// FFmpeg executable (PATH lookup when just `ffmpeg`).
     pub ffmpeg_path: PathBuf,
     /// Idle timeout for one pipe read/write (not a total frame deadline: a
-    /// multi-chunk frame may take several reads).
+    /// multi-chunk frame may take several reads) and for child reaping.
     pub io_timeout: Duration,
-    /// Extra frames buffered by the caller before applying backpressure.
-    pub max_queue: usize,
-    /// Host-wide worker process cap (enforced by [`WorkerPool`]).
-    pub max_workers: usize,
 }
 
 impl Default for WorkerConfig {
     fn default() -> Self {
         let ffmpeg_path = std::env::var_os("VKS_FFMPEG_BIN").map_or_else(|| PathBuf::from("ffmpeg"), PathBuf::from);
-        Self { ffmpeg_path, io_timeout: Duration::from_secs(5), max_queue: 30, max_workers: 8 }
+        Self { ffmpeg_path, io_timeout: Duration::from_secs(5) }
     }
 }
 
@@ -482,7 +478,9 @@ impl FfmpegWorker {
 
     /// Reads one Annex-B NAL unit from an H.265 encoder worker.
     ///
-    /// Returns the NAL **including** its start code. The last NAL of an access
+    /// Returns the NAL **including** its start code, or `Ok(None)` at clean EOF
+    /// after [`Self::finish_input`] (errors are never reported as end-of-stream).
+    /// The last NAL of an access
     /// unit is released only when the next access unit's start code arrives;
     /// a reader must therefore keep one access unit of lookahead and use an
     /// `io_timeout` longer than a paused-stream gap. H.261/H.263 raw FFmpeg
@@ -518,13 +516,17 @@ impl FfmpegWorker {
                 Ok(Ok(0)) => {
                     self.encoded_eof = true;
                     if self.encoded_pending.len() > MAX_ENCODED_FRAME_BYTES {
-                        return Err(self.poison(WorkerError::Codec("encoded video frame exceeds 4 MiB".into())));
+                        return Err(self.poison(WorkerError::Codec(format!(
+                            "encoded video frame exceeds {MAX_ENCODED_FRAME_BYTES} bytes"
+                        ))));
                     }
                 }
                 Ok(Ok(count)) => {
                     self.encoded_pending.extend_from_slice(&chunk[..count]);
                     if self.encoded_pending.len() > MAX_ENCODED_FRAME_BYTES {
-                        return Err(self.poison(WorkerError::Codec("encoded video frame exceeds 4 MiB".into())));
+                        return Err(self.poison(WorkerError::Codec(format!(
+                            "encoded video frame exceeds {MAX_ENCODED_FRAME_BYTES} bytes"
+                        ))));
                     }
                 }
                 Ok(Err(error)) => {

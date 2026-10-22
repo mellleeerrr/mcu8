@@ -53,7 +53,7 @@
 `TMPDIR=/var/tmp cargo test -p vks-media-mcu codec_worker` — 21 тест:
 
 - probe видит AAC/G.729/H.261/H.263/H.265 на этом хосте;
-- AAC ADTS encode→decode и LATM encode→decode дают ненулевую энергию PCM;
+- AAC ADTS encode→decode даёт ненулевую энергию PCM; LATM encode→decode — PCM нужной длины;
 - потоковый AAC-энкодер отдаёт первый ADTS-пакет без EOF;
 - H.261/H.263/H.265 encode→decode возвращают кадры нужного размера (H.265
   с realtime-параметрами x265);

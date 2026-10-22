@@ -146,6 +146,17 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > Inbound произвольный dynamic PT 96–127 с `a=rtpmap` поддержан (кодек отдельно от PT).
 > Полный T06b (G723/G728/G729/Opus/AAC/H265/H323-матрица) остаётся открытым: T06b-2..5.
 >
+> **T06b-5 (изолированные FFmpeg-воркеры: фундамент) закрыт `212649b`, ревью 9.5/10 APPROVED (r6, независимый):**
+> `codec_worker` — один долгоживущий FFmpeg на кодек/направление, `FfmpegCapabilities` probe
+> (`aac`/`aac_latm`/`g729` decode, H.261/H.263/H.265), bounded `WorkerPool`, per-slot
+> bitrate/fps/разрешение, раздельная валидация encode/decode + cap 4096×2160, poison+restart,
+> group-kill (`libc::kill(-pgid)`, ADR-0028), scrub env, streaming AAC ADTS/LOAS и H.265 Annex-B NAL,
+> H.265 x265 realtime (`frame-threads=1:pools=1`). 21 codec-тест (+ ETXTBSY-флак закрыт), workspace
+> **1174 passed / 0 failed / 7 ignored**, clippy/fmt 0. Live `/metrics`: aac/aac_latm/g729-decode/
+> h261/h263/h265 = 1, g729-encode = 0, pool=8; SDP пока **не** объявляет новые кодеки.
+> Следующий этап — H.265 RFC 7798 + AAC-LATM RTP-мост, затем H.261/H.263 payloaders и
+> привязка SDP-гейта `VKS_TRANSCODER_ENABLED` к probe. Evidence: `docs/implementation/CODEC_WORKERS_2026-10-23.md`.
+>
 > Правило цикла: перед задачей — агент «подводные камни»; после реализации — параллельное
 > code-review (оценка /10, обязательные правки); цикл не закрывается, пока хотя бы один
 > независимый ревьюер не поставит **≥9.5/10**. Затем — агент «условия задачи/элегантность»
