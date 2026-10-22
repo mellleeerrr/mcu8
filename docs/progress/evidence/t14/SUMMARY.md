@@ -118,7 +118,35 @@
 
 **Чувствительность к откату** `VKS_REVERT_CHECK=1 node tests/e2e/label-zoom.js` → **EXIT 1**:
 откат пойман на 10/10 размерах (падают «tile avatar hidden», «nothing pushes the label down» — 1.334em,
-и «label centered in tile» — dy=+16.01px/+10.67px). То есть харнесс проверяет РЕЗУЛЬТАТ, а не наличие правила.
+«tile avatar takes no space in the flow» — avatarBox 24×24 вместо 0×0, и «label centered in tile» —
+dy=+16.01px/+10.67px): **40 FAIL**. То есть харнесс проверяет РЕЗУЛЬТАТ, а не наличие правила.
+Режим `VKS_APPLY_CANDIDATE=1` (инъекция кандидата) — **EXIT 0**, 159 проверок ok.
+
+### Что добавлено в харнесс по итогам спора
+
+* `size N: tile avatar takes no space in the flow` — аватар должен быть **вне потока** (бокс 0×0),
+  иначе `visibility:hidden` / `opacity:0` / скрытие внутреннего `.tc-avatar` прошли бы как «скрыто»,
+  оставив дыру 2em.
+* `preview tile: the preview guard shifts the preview tile separately` — негативный тест: сдвиг
+  превью-плитки обязан отличаться от сдвига обычной на `12px + .335em` (замерено: −8px против
+  −22.68px при шрифте 8px), иначе страховка умерла бы молча.
+* `size N: label does not overflow vertically` + `size N: horizontal clipping uses the vendor ellipsis`.
+  Первая версия этой проверки требовала `!overflowX` — **по замеру отозвана** (обрезка длинного имени
+  штатна: вендор даёт `nowrap + overflow:hidden + text-overflow:ellipsis`, `scrollW=566` при `clientW=171`,
+  за плитку ничего не вылезает). Корректный критерий — контейнерность, а не отсутствие обрезки.
+* `CANDIDATE_CSS` синхронизирован с продом (`:has(> .media-preview)`).
+
+## Область действия (важно для заказчика)
+
+`.layout-grid-slot` встречается **только** в чанках `index6` / `index-legacy6` — это **редактор
+раскладки в админке** (`/monitoring/{conferences,sessions}/:id/layouts` → вкладка «Ручная настройка»).
+Живая вкладка «Видео» мониторинга рисует `<video class="auto-layout-configurator-content__video">`
+(статичный webm), а не сетку слотов; в `index3`/`index9`/`index10` вхождений нет.
+Если под «плиткой раскладки» имелась в виду плитка **в самой конференции** (клиент участника) —
+это другое место, и в этом репозитории такого клиента нет (`client/vks-client-sdk` — только
+сигналинг и рендер видео). Вендорский переключатель `slot_avatars` (HIDE/SHOW/DEFAULT) как
+альтернатива недоступен: UI есть (`data-qa="slot-avatars-select"`), но сервер поле не реализует
+(в `crates/**/*.rs` — 0 совпадений), то есть CSS — единственный рабочий рычаг.
 
 ## Ограничения (осознанные)
 
