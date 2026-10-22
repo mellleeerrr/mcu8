@@ -47,19 +47,26 @@ outbound sidecar и inbound listener. G.728 в H.323 **не включён**: н
 - `cargo fmt --all --check` — OK; `cargo clippy --workspace --all-targets
   -- -D warnings` — OK.
 - `cargo test --workspace --lib` — 16/16 бинарей green, 0 failed
-  (server 81+3, H.323 51, SIP 90+1, admin 281 и т.д.).
-- H.323 Python — **48 tests OK**; новые: capability-записи и simultaneous,
+  (server 83+3, H.323 51, SIP 90+1, admin 281 и т.д.).
+- H.323 Python — **52 tests OK**; новые: capability-записи и simultaneous,
   data type/PT для G722/G723/G711U/G711A, предпочтение G711/G711A,
   многошаговый fallback G722→G711U→G723 (sidecar и listener), peer G723
   maxAl=2 не выбирается/отклоняется, повторный входящий audio OLC
   отклоняется, peer-selected входящий PT переключает кодек и переоткрывает
   исходящий OLC, capabilityDescriptors ограничивают используемые записи,
-  one-way TCS даёт явную ошибку «two-way audio is required», UAC accept PT4/8.
+  one-way TCS даёт явную ошибку «two-way audio is required», stale reject
+  старого канала игнорируется, TCS после открытия каналов только ACK-ается,
+  mux-level silenceSuppression=True для G.723 отклоняется, listener
+  peer-selected adoption покрыт тестом, UAC accept PT4/8.
 - deploy/README, crate README и PROVENANCE включают `h323_audio.py`;
   CI запускает `test_h323_sidecar test_h323_listener`.
 - SIP-путь не затронут: allowlist payload types разделён по протоколу
   (`bridgeable_audio_pts`), G.728/PT15 и Opus/PT111 остаются SIP-only;
   отдельный тест это фиксирует.
+- Принятые ограничения: dynamic audio PT не поддерживаются; G.728 (H.323)
+  отложен до проверки frame-count на реальном терминале; superseded OLC после
+  adoption/fallback не закрывается (терминал должен игнорировать лишний
+  receive-channel); live H.323 proof не получен.
 - Live H.323 `.132` по-прежнему `adaptiveBusy` до H.245; SIP live и
   матрица layout E2E не затронуты (233/233 checks ранее). Живого
   H.323-доказательства новых кодеков нет.

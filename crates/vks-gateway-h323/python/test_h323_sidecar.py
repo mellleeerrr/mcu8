@@ -297,6 +297,52 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(opened[1][1]['forwardLogicalChannelNumber'], 3)
         self.assertEqual(opened[1][1]['forwardLogicalChannelParameters']['dataType'][1][0], 'g711Alaw64k')
 
+    def test_stale_reject_with_terminal_cause_does_not_abort_current_channel(self):
+        call = self.call()
+        call.control = FakeSocket()
+        call.audio_channel = 3
+        call.requested_channels = {1: 'audio', 3: 'audio'}
+        call.requested_audio_codec = {3: 'G711U'}
+        call.remote_audio = None
+        call.incoming_audio = False
+        packet = h.encode(
+            h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage,
+            ('response', ('openLogicalChannelReject', {'forwardLogicalChannelNumber': 1, 'cause': ('unspecified', 0)})),
+        )
+        with contextlib.redirect_stdout(io.StringIO()): call.on_control(packet)
+        self.assertEqual(call.audio_channel, 3)
+        self.assertEqual(call.audio_codec, 'G711U')
+
+    def test_tcs_after_channel_setup_is_only_acknowledged(self):
+        call = self.call()
+        call.control = FakeSocket()
+        call.channels_opened = True
+        call.audio_codec = 'G722'
+        caps = call.capability_set()
+        caps['capabilityTable'] = [
+            {'capabilityTableEntryNumber': 1, 'capability': ('receiveAndTransmitAudioCapability', ('g711Alaw64k', 20))},
+        ]
+        caps['capabilityDescriptors'][0]['simultaneousCapabilities'] = [[1]]
+        with contextlib.redirect_stdout(io.StringIO()):
+            call.on_control(h.encode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, ('request', ('terminalCapabilitySet', caps))))
+        self.assertEqual(call.audio_codec, 'G722')
+
+    def test_incoming_g723_with_mux_silence_suppression_is_rejected(self):
+        call = self.call()
+        call.control = FakeSocket()
+        call.audio_codec = 'G723'
+        call.incoming_audio = False
+        params = {
+            'forwardLogicalChannelNumber': 1,
+            'forwardLogicalChannelParameters': {
+                'dataType': ('audioData', ('g7231', {'maxAl-sduAudioFrames': 1, 'silenceSuppression': False})),
+                'multiplexParameters': ('h2250LogicalChannelParameters', {'sessionID': 1, 'silenceSuppression': True}),
+            },
+        }
+        with contextlib.redirect_stdout(io.StringIO()): call.on_open(params)
+        reject = h.decode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, call.control.sent[-1][4:])
+        self.assertEqual(reject[1][0], 'openLogicalChannelReject')
+
     def test_duplicate_incoming_audio_olc_is_rejected(self):
         call = self.call()
         call.control = FakeSocket()

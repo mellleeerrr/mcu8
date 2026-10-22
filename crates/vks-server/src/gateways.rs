@@ -1149,9 +1149,7 @@ impl GatewayManager {
                 session.call_id.clone(),
             )
         };
-        let bridgeable_pts: &[u8] =
-            if is_h323 { vks_gateway_h323::H323_NATIVE_AUDIO_PTS } else { &[0, 4, 8, 9, 15, 107, 108, 109, 110, 111] };
-        if !bridgeable_pts.contains(&audio_payload_type) {
+        if !bridgeable_audio_pts(is_h323).contains(&audio_payload_type) {
             return Err("Negotiated audio payload type is not supported by the RTP bridge".into());
         }
         let remote_audio_ip =

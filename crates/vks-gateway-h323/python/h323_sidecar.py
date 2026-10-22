@@ -447,7 +447,9 @@ class Call:
                 self.reject_open(number, "dataTypeNotSupported", kind)
                 return
             if fw["dataType"][1][0] == "g7231" and (
-                not peer_transmits_g723(fw["dataType"][1]) or fw["dataType"][1][1].get("silenceSuppression") is not False
+                not peer_transmits_g723(fw["dataType"][1])
+                or fw["dataType"][1][1].get("silenceSuppression") is not False
+                or media.get("silenceSuppression") is True
             ):
                 self.reject_open(number, "dataTypeNotSupported", kind)
                 return
@@ -596,11 +598,11 @@ class Call:
                 number = params["forwardLogicalChannelNumber"]
                 kind = self.requested_channels.get(number)
                 if kind == "audio":
+                    if (self.audio_channel is not None and number != self.audio_channel) or self.remote_audio is not None:
+                        return
                     cause = params.get("cause", (None, 0))[0]
                     if cause not in ("dataTypeNotSupported", "inconsistentParameters"):
                         raise ProtocolError(f"Peer rejected the audio channel with terminal cause {cause}")
-                    if (self.audio_channel is not None and number != self.audio_channel) or self.remote_audio is not None:
-                        return
                     self.requested_channels.pop(number, None)
                     if not self.incoming_audio:
                         candidates = self.audio_candidates or select_audio_candidates(self.remote_audio_rx, self.remote_audio_tx)

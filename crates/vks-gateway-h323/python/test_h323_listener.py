@@ -91,6 +91,29 @@ class InboundContractTests(unittest.TestCase):
         call.on_open(params)
         self.assertEqual(call.rejected, [7])
 
+    def test_peer_selected_incoming_pt_adopts_codec_and_reopens_outgoing(self):
+        call = object.__new__(listener.InboundCall)
+        call.config = {"local_ip": "127.0.0.1", "audio_port": 41002}
+        call.audio_codec = "G722"
+        call.audio_fallback_channel = 3
+        call.remote_audio = None
+        call.incoming_audio = False
+        call.incoming_channels = {}
+        call.ack = []
+        call.send_control = lambda value: call.ack.append(value)
+        call.open_outgoing = lambda number, kind, port: call.ack.append((number, kind))
+        params = {
+            "forwardLogicalChannelNumber": 1,
+            "forwardLogicalChannelParameters": {
+                "dataType": ("audioData", ("g711Alaw64k", 20)),
+                "multiplexParameters": ("h2250LogicalChannelParameters", {"sessionID": 1}),
+            },
+        }
+        call.on_open(params)
+        self.assertEqual(call.audio_codec, "G711A")
+        self.assertEqual(call.local_audio_pt, 8)
+        self.assertEqual(call.ack[-2], (3, "audio"))
+
     def test_duplicate_incoming_audio_olc_is_rejected(self):
         call = object.__new__(listener.InboundCall)
         call.config = {"local_ip": "127.0.0.1", "audio_port": 41002}

@@ -46,7 +46,9 @@ outgoing/incoming payload types to the Rust media bridge.
 Supported outbound negotiation:
 
 - Direct IPv4 H.225 TCP, separate H.245 TCP control; no gatekeeper/RAS requirement.
-- G.711 mu-law audio, RTP PT 0, 20 ms offer. Unsupported codecs are rejected.
+- Native symmetric audio: G.722 (PT9), G.711U (PT0), G.711A/PCMA (PT8),
+  G.723.1 (PT4, maxAl-sduAudioFrames=1, no silence suppression), all with
+  static H.245 payload types. Dynamic audio PTs and G.728 are rejected.
 - Optional H.264 baseline capability, level 3.1, H.241 non-interleaved RTP
   packetization, negotiated dynamic PTs in each direction. Video is reported only
   when both logical channels negotiate. It also requires the server's H.264 media
