@@ -14,7 +14,13 @@
 - T6 — DONE: живые дубли схлопнуты (147→29 layouts), 1 `call_string` на адрес; остался root-cause default + COW.
 - T7 — SDP-матрица реализована (18 audio PT + 6 video), production default `Native` (только мостуемые); H.323 — терминал.
 - T8 — страница статистики живая (4/6 виджетов реальные), диск/workers исправлены; RTP/QoE-метрик пока нет.
-- T9/T10 — в работе: финальный gate, чистка, commit.
+- T9 — DONE: конфиги прочитаны полностью, мёртвых tracked-конфигов/модулей нет;
+  удалены только регенерируемые `scripts/__pycache__` и
+  `crates/vks-gateway-h323/python/__pycache__`; live DB/backups/target/archive/
+  venv/legacy-bundles оставлены. Evidence `docs/progress/evidence/t09/`.
+- T10 — DONE: release пересобран, сервис перезапущен на `configs/default.toml`;
+  `cargo fmt/clippy`, workspace lib 16/16, Python 54/54; live Playwright
+  **233/233**, page_errors 0, failure null. Evidence `docs/progress/evidence/t10/`.
 
 
 ## T0. Пересборка и безопасный перезапуск живого сервера
