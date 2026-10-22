@@ -19,8 +19,8 @@
   по умолчанию 8), `try_spawn` отказывает, а не ставит в очередь.
 - `SlotConfig` — per-slot bitrate/fps/width/height с раздельной валидацией:
   энкодер H.261 только 176×144/352×288, H.263 128×96/176×144/352×288/704×576/
-  1408×1152, H.265 ≥16×16 и до 4096×2160; декодер принимает любое чётное
-  положительное разрешение (FFmpeg scales to slot).
+  1408×1152, H.265 ≥16×16 и до 4096×2160; декодер принимает чётное
+  положительное разрешение до 4096×2160 (FFmpeg scales to slot).
 - Изоляция: `env_clear` (в дочерний процесс не попадают `VKS_*` секреты),
   минимальные `PATH/LANG/LC_ALL`, `current_dir("/")`, отдельная process group,
   `kill_on_drop` + killpg, непрерывный drain stderr с последней строкой для
@@ -48,7 +48,7 @@
 
 ## Проверено
 
-`TMPDIR=/var/tmp cargo test -p vks-media-mcu codec_worker` — 20 тестов:
+`TMPDIR=/var/tmp cargo test -p vks-media-mcu codec_worker` — 21 тест:
 
 - probe видит AAC/G.729/H.261/H.263/H.265 на этом хосте;
 - AAC ADTS encode→decode и LATM encode→decode дают ненулевую энергию PCM;

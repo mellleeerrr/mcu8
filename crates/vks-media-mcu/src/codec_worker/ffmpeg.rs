@@ -261,6 +261,11 @@ async fn list_codecs(ffmpeg: &std::path::Path, flag: &str) -> Result<BTreeSet<St
         if flags.len() < 6 || rest.trim().is_empty() {
             continue;
         }
+        // The trailing legend uses the same six-dot shape (`D..... = Decoding
+        // supported`); never insert its `=` token as a codec name.
+        if rest.trim_start().starts_with('=') {
+            continue;
+        }
         // Флаги FFmpeg — заглавные буквы и точки (`V....D`, `A....D`). Легенда
         // в конце вывода (`D..... = Decoding supported`) такую строку не даёт,
         // но если формат изменится — имя кодека вставится в набор мусором.
@@ -789,8 +794,12 @@ impl FfmpegWorker {
 
 impl Drop for FfmpegWorker {
     fn drop(&mut self) {
-        // `kill_on_drop` in spawn_child also fires; explicit start_kill keeps
-        // teardown deterministic for tests that observe process exit.
+        // `kill_on_drop` also fires, but it signals only the leader. The child
+        // is still unreaped here, so its pgid cannot have been reused: killing
+        // the group is safe and takes any helper down with the worker.
+        if let Some(pid) = self.child.id() {
+            kill_process_group(pid);
+        }
         let _ = self.child.start_kill();
     }
 }
@@ -885,19 +894,10 @@ async fn spawn_child(
 ) -> Result<(Child, ChildStdin), WorkerError> {
     let args = ffmpeg_args(mode, slot);
     let mut command = Command::new(&config.ffmpeg_path);
-    command
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        // Codec subprocesses are untrusted parsers: never inherit the MCU's
-        // environment (it contains JWT secrets and DB credentials).
-        .env_clear()
-        .env("LC_ALL", "C")
-        .env("LANG", "C")
-        .env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into()))
-        .current_dir("/");
+    command.args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    // Same scrubbed environment as the probe (PATH, locale, optional
+    // LD_LIBRARY_PATH for a private-prefix FFmpeg); never inherit JWT/DB secrets.
+    scrubbed_env(&mut command).current_dir("/");
     #[cfg(unix)]
     {
         // Own process group: a kill of the worker cannot signal the MCU.
@@ -1399,6 +1399,19 @@ mod tests {
         let last = take_annexb_nal(&mut buffer, true).expect("last nal at EOF");
         assert_eq!(last, vec![0, 0, 0, 1, 0x44, 0x55]);
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn annexb_split_preserves_leading_four_byte_prefix_and_skips_empty_nal() {
+        let mut leading = vec![0, 0, 0, 1, 0x42, 0, 0, 1, 0x44];
+        let first = take_annexb_nal(&mut leading, false).expect("first");
+        assert_eq!(first, vec![0, 0, 0, 1, 0x42]);
+        assert_eq!(leading, vec![0, 0, 1, 0x44]);
+
+        let mut empty = vec![0, 0, 1, 0, 0, 1, 0x42, 0, 0, 1, 0x44];
+        let first = take_annexb_nal(&mut empty, false).expect("non-empty after empty NAL");
+        assert_eq!(first, vec![0, 0, 1, 0x42]);
+        assert_eq!(empty, vec![0, 0, 1, 0x44]);
     }
 
     #[tokio::test]

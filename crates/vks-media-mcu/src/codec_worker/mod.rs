@@ -68,6 +68,17 @@ impl AudioCodec {
         }
     }
 
+    /// PCM samples one decoded codec frame expands to at 48 kHz.
+    #[must_use]
+    pub const fn decoded_samples_48k(self) -> usize {
+        match self {
+            // AAC-LC: 1024 samples at its native rate, resampled to 48 kHz.
+            Self::Aac | Self::AacLatm => 1024,
+            // G.729: 80 samples / 10 ms at 8 kHz -> 480 at 48 kHz.
+            Self::G729 => 480,
+        }
+    }
+
     /// FFmpeg encoder name, if the host can encode this codec.
     #[must_use]
     pub const fn ffmpeg_encoder(self) -> Option<&'static str> {
@@ -169,6 +180,16 @@ impl SlotConfig {
         Self { bitrate_bps: 1_500_000, width: 1280, height: 720, fps: 30, audio_bitrate_bps: 64_000, max_queue: 30 }
     }
 
+    fn validate_geometry(&self) -> Result<(), WorkerError> {
+        if self.max_queue == 0 {
+            return Err(WorkerError::InvalidConfig("max_queue must be positive".into()));
+        }
+        if self.width == 0 || self.height == 0 {
+            return Err(WorkerError::InvalidConfig("width/height must be positive".into()));
+        }
+        Ok(())
+    }
+
     /// Validates ranges shared by all codecs.
     pub fn validate(&self) -> Result<(), WorkerError> {
         if !(32_000..=20_000_000).contains(&self.bitrate_bps) {
@@ -177,13 +198,7 @@ impl SlotConfig {
         if !(1..=60).contains(&self.fps) {
             return Err(WorkerError::InvalidConfig(format!("fps {} outside 1..=60", self.fps)));
         }
-        if self.max_queue == 0 {
-            return Err(WorkerError::InvalidConfig("max_queue must be positive".into()));
-        }
-        if self.width == 0 || self.height == 0 {
-            return Err(WorkerError::InvalidConfig("width/height must be positive".into()));
-        }
-        Ok(())
+        self.validate_geometry()
     }
 
     /// Validates this slot for an **audio** worker.
@@ -217,7 +232,7 @@ impl SlotConfig {
 
     /// Validates this slot for a **video decoder** worker.
     pub fn validate_decode(&self, codec: VideoCodec) -> Result<(), WorkerError> {
-        self.validate()?;
+        self.validate_geometry()?;
         if !codec.supports_decode_size(self.width, self.height) {
             return Err(WorkerError::InvalidConfig(format!(
                 "{} decoder does not support {}x{}",

@@ -31,7 +31,8 @@
 //!   so the workspace baseline (298 tests) stays green.
 //!
 //! ## Invariants
-//! - No `unsafe` (CODE_STYLE §6).
+//! - No `unsafe` in the engine; the only `unsafe` is the isolated
+//!   `libc::kill(-pgid)` in `codec_worker` (ADR-0028, `// SAFETY:`).
 //! - Deterministic: same input sequence → same composite.
 //! - Fixed 30 fps pipeline (drop/repeat, no interpolation).
 //!
