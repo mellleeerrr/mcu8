@@ -39,7 +39,11 @@
 > `docs/progress/evidence/t06a/SUMMARY.md`. Единый capability-модуль, Full
 > только с транскодером/lab-флагом, явная ошибка `no common audio|video codec`
 > до дозвона, типизированный `NoCommonCodec`, `supported` в API, live
-> 114/114 checks ×2, audio TX/RX >0, rejected 0. T05b частично: H.323 H.241 + per-media SFU `b=AS` (`7b05905`, `68da633`), evidence `docs/progress/evidence/t05b/`; live H.323 — T07. Далее T05b-2/T06b.
+> 114/114 checks ×2, audio TX/RX >0, rejected 0. T05b-1 закрыт **9.5/10 APPROVED**: H.323 H.241 + per-media SFU `b=AS`
+(`7b05905`, `68da633`, `5ae9924`, `c26e185`), evidence
+`docs/progress/evidence/t05b/`. Открыт **T05b-2**: live H.323 (T07), per-room
+SFU profile, RTP-map/PT-reuse/H.264, peer H.241 clamp, packetization/profile,
+call_string live proof, Python CI. Далее T07/T06b.
 >
 > Правило цикла: перед задачей — агент «подводные камни»; после реализации — параллельное
 > code-review (оценка /10, обязательные правки); цикл не закрывается, пока хотя бы один

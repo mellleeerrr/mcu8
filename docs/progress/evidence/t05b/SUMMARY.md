@@ -1,7 +1,8 @@
 # T05b — H.323 H.241 и SFU b=AS (частично закрыто)
 
-**Статус:** H.323-часть и per-media `b=AS` реализованы и покрыты unit-тестами;
-live H.323 и per-contact override остаются за T07/T05b-2. Коммиты part 1:
+**Статус:** T05b-1 закрыт **9.5/10 APPROVED** (`media-engine`, HEAD `c26e185`):
+H.323-часть и per-media `b=AS` реализованы и покрыты unit-тестами. Live H.323
+и per-contact override — T07/T05b-2; полный T05b не закрывать до их приёмки. Коммиты part 1:
 `7b05905` (H.323), `68da633` (SFU), `78153a1` (trace/диагностика), `5ae9924`
 (P2: clamp/normalization/TCS-OLC-тест) и docs-фиксация part 1.
 
