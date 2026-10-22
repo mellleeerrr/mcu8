@@ -48,9 +48,15 @@ sidecar 22/22 OK.
   120/100, audio без vp8, video без opus. Гейты: **1026 passed / 0 failed /
   6 ignored**, clippy/fmt чисто. Регрессионный SIP E2E:
   `artifacts/e2e-t05b-sfu-high/` — 114/114, page_errors 0, 0 failed.
-- Осталось: per-room профиль из `PATCH` комнаты/контакта в SFU answer,
-  H.264 в SFU (или явный отказ), peer H.241 clamp, packetization/profile
-  в sidecar, call_string live proof, Python CI, live H.323/T07.
+- Per-room `b=AS`: `handle_ws_socket` перед `SdpOffer` резолвит
+  `conference_settings[room].payload.bitrate` и вызывает
+  `SignalingHandler::set_video_bitrate`, env остаётся fallback; тест сеттера
+  и клампа 4096/0/100000.
+- Caps SFU больше не обещают H.264: браузерный SFU объявляет только VP8
+  (H.264 идёт через SIP/H.323-шлюз); H.264/H.265 в browser-leg — только после
+  реального forwarding в T06b/T08.
+- Осталось: call_string live proof, peer H.241 clamp, packetization/profile
+  в sidecar, Python CI, live H.323/T07, H.264 SFU forwarding.
 
 ## Ограничения / следующие шаги
 - SFU: нет per-room инъекции (env глобальный), H.264 отсутствует в

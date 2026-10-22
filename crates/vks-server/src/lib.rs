@@ -409,6 +409,24 @@ async fn cleanup_active_membership(
     }
 }
 
+/// `b=AS` для SFU-ответа из живого профиля комнаты (конференция имеет
+/// приоритет над глобальным env); SFU не перекодирует, но обязан честно
+/// объявить полосу, которую реально отдаёт браузеру.
+fn room_video_bitrate(state: &Arc<AppState>, room: &vks_core::RoomId) -> u32 {
+    state
+        .api_v3
+        .conference_settings
+        .lock()
+        .ok()
+        .and_then(|settings| settings.get(room).cloned())
+        .and_then(|value| {
+            let payload = value.get("payload").unwrap_or(&value);
+            payload.get("bitrate").and_then(serde_json::Value::as_u64)
+        })
+        .map(|bitrate| u32::try_from(bitrate.clamp(64, 8192)).unwrap_or(2048))
+        .unwrap_or(2048)
+}
+
 /// Обработка сессии WebSocket-сигналинга.
 ///
 /// Сайд-эффекты комнаты (создание записи, счётчик участников) применяются только
@@ -604,6 +622,17 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                     }
                                 }
 
+                                // Живой профиль комнаты попадает в SFU-ответ до
+                                // FSM: PATCH комнаты применяется к следующему offer.
+                                if matches!(payload_opt, Some(Payload::SdpOffer(_))) {
+                                    if let Some(room) = handler
+                                        .room_id()
+                                        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                                        .map(vks_core::RoomId::from_uuid)
+                                    {
+                                        handler.set_video_bitrate(room_video_bitrate(&state, &room));
+                                    }
+                                }
                                 // Запрос исполняет FSM; сайд-эффекты — только по успешному результату.
                                 let mut replies = handler.handle(env);
                                 let joined_ok = replies.iter().any(|r| matches!(r.payload(), Some(Payload::JoinRoomResult(_))));

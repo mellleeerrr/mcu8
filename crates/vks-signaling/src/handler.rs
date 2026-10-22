@@ -70,8 +70,8 @@ impl HandlerConfig {
             room_mode: 1, // ROOM_MODE_SFU
             caps: Some(vks_proto::media::RoomCaps {
                 room_mode: 1,
-                video_codecs: vec![1, 3], // VP8, H264
-                audio_codecs: vec![6],    // OPUS
+                video_codecs: vec![1], // VP8; H.264 browser-leg не мостится в SFU до T06b
+                audio_codecs: vec![6], // OPUS
                 simulcast: true,
                 svc: false,
                 dtls_srtp: true,
@@ -125,7 +125,7 @@ impl HandlerConfig {
             room_mode: 1,
             caps: Some(vks_proto::media::RoomCaps {
                 room_mode: 1,
-                video_codecs: vec![1, 3],
+                video_codecs: vec![1],
                 audio_codecs: vec![6],
                 simulcast: true,
                 svc: false,
@@ -189,6 +189,11 @@ impl SignalingHandler {
 
     pub fn room_id(&self) -> Option<&str> {
         self.room_id.as_deref()
+    }
+
+    /// Переопределяет `b=AS` видео из живого профиля комнаты.
+    pub fn set_video_bitrate(&mut self, kbps: u32) {
+        self.config.video_bitrate_kbps = kbps.clamp(64, 20_000);
     }
 
     /// (config/defaults)
@@ -634,6 +639,17 @@ mod tests {
         let resp = handler.handle(ice_failed);
         assert_ne!(handler.state(), SessionState::MediaActive);
         assert!(matches!(resp[0].payload(), Some(Payload::Error(e)) if e.code == "ice_failed"));
+    }
+
+    #[test]
+    fn room_video_bitrate_setter_reaches_answer_with_clamp() {
+        let mut handler = SignalingHandler::new(HandlerConfig::default_test());
+        handler.set_video_bitrate(4096);
+        assert_eq!(handler.config.answer_profile().b_as, Some(4096));
+        handler.set_video_bitrate(0);
+        assert_eq!(handler.config.answer_profile().b_as, Some(64));
+        handler.set_video_bitrate(100_000);
+        assert_eq!(handler.config.answer_profile().b_as, Some(20_000));
     }
 
     #[test]

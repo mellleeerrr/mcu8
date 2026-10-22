@@ -337,7 +337,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let caps = vks_proto::media::RoomCaps {
         room_mode: proto_room_mode,
-        video_codecs: vec![vks_proto::media::CodecId::Vp8 as i32, vks_proto::media::CodecId::H264 as i32],
+        video_codecs: vec![vks_proto::media::CodecId::Vp8 as i32],
         audio_codecs: vec![vks_proto::media::CodecId::Opus as i32],
         simulcast: true,
         svc: false,
