@@ -31,24 +31,49 @@
    `VKS_WEBRTC_TRANSPORT=0`). Для реального пира сервер **не** регистрирует
    plaintext-endpoint/SSRC/PT в `SfuEngine`, чтобы SRTP-трафик не смешивался
    с plaintext-путём.
-4. `SubscribeRequest`/`Unsubscribe` управляют подпиской пира: audio-only
-   подписчик не получает видео; `Join` нового пира запрашивает keyframe у
-   уже подключённых; `Event::KeyframeRequest` от подписчика уходит
-   публишеру через `Writer::request_keyframe`.
+4. Подписка обязательна: `SubscribeRequest` (в proto добавлено
+   `bool audio_only = 5`) сохраняется даже до SDP-оффера и задаёт
+   `(audio, video)`; audio-only пир не получает видео. `Unsubscribe`
+   отключает оба потока. `Join`/`Connected` и переполнение очереди
+   запрашивают keyframe у публишера; `Event::KeyframeRequest` от
+   подписчика уходит публишеру через `Writer::request_keyframe`.
 5. PT на выходе выбирается `Writer::match_params` по параметрам входящего
-   кадра (у каждого пира свои PT), а не «первым negotiated PT». NACK/RTX,
-   jitter buffer, pacing и BWE — внутри str0m; второй BWE на этом пути не
-   запускается.
+   кадра (у каждого пира свои PT), а не «первым negotiated PT».
+   `answer.rtp_map` пересобирается из реально согласованных PT.
+6. BWE реальный: `Event::EgressBitrateEstimate` применяется через
+   `set_desired_bitrate`, пейсер str0m ограничивает отправку; NACK/RTX,
+   jitter buffer и pacing — внутри str0m.
+7. Ёмкость: не более **2** реальных WebRTC-пиров на комнату
+   (`MAX_PEERS_PER_ROOM`). Третий оффер получает явную ошибку
+   `room_full`, а не молчаливое смешивание двух RTP-часовых доменов в один
+   mid. Re-offer атомарно заменяет поколение пира; задача старого
+   поколения не может удалить новую запись.
+8. Отказ закрытый: если транспорт включён и str0m отверг оффер, сервер
+   возвращает `Payload::Error` (`webrtc_offer_rejected`), а не поддельный
+   legacy-SDP с `FF:00:11`. В комнате с SIP/H.323-участником реальный
+   браузерный WebRTC отклоняется (`webrtc_gateway_room_unsupported`), пока
+   нет моста plaintext↔SRTP.
+9. Наблюдаемость: `vks_webrtc_peers`, `vks_webrtc_offers_total`,
+   `vks_webrtc_ice_failures_total`, `vks_webrtc_frames_dropped_total`,
+   `vks_webrtc_fallback_total`; состояния ICE/Connected и ошибки таймеров
+   логируются на `info`/`warn`. Пир удаляется при ошибке `Rtc`, по
+   дедлайну подключения (15 с) и по idle-таймауту (30 с).
 
 ## Конфигурация
 
 - `VKS_WEBRTC_TRANSPORT` — `0` выключает реальный транспорт и оставляет
   прежний SDP. Не задан — включён (текущий live-стенд).
 - `VKS_WEBRTC_BWE_INITIAL_BPS` — стартовая оценка BWE (64 kbit/s..50 Mbit/s).
+- `VKS_WEBRTC_PORT_MIN`/`VKS_WEBRTC_PORT_MAX` — UDP-диапазон для пиров;
+  пусто = эфемерные порты. На стенде `43000..43100`.
+- `VKS_ALLOW_LOOPBACK_MEDIA=1` разрешает loopback `candidate_addr` для
+  локальных тестов; без него выводится предупреждение.
 - Кандидат берётся из `HandlerConfig.candidate_addr` (`192.168.1.93` на
-  стенде); порт — фактически занятый эфемерный UDP-порт.
-- Для внешнего развёртывания нужен открытый диапазон UDP-портов и
-  `candidate_addr`, доступный клиентам (NAT/TURN — задача эксплуатации).
+  стенде); IPv6-кандидат биндит `::`.
+- Для внешнего развёртывания нужен открытый UDP-диапазон и
+  `candidate_addr`, доступный клиентам. ICE-lite не собирает relay-
+  кандидаты, поэтому TURN должен быть на стороне клиента; это ограничение
+  задокументировано в `prod.example.toml`.
 
 ## Доказательство (live, Chromium)
 
@@ -67,9 +92,8 @@ ICE/DTLS/SRTP → взаимные аудио/видео. Итог: **22/22 пр
 ## Границы (честно)
 
 - Это 1:1/комнатный SFU-фан-аут браузер↔браузер. N-way с несколькими
-  источниками требует, чтобы клиент заранее предложил recv-m-line на
-  каждый источник (answer не добавляет m-lines); сейчас один источник
-  audio+video на пира.
+  источниками требует per-source transceiver/MSID-маршрутизации; сейчас
+  жёстко ограничено 2 пирами на комнату, третий получает `room_full`.
 - Мост SIP/H.323 (plaintext RTP) ↔ SRTP-браузер не реализован в этом
   коммите; для комнат со шлюзами нужен отдельный frame↔RTP мост.
 - Симулкаст: если браузер пришлёт несколько rid, фан-аут пока не выбирает

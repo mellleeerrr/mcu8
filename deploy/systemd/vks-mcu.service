@@ -14,6 +14,11 @@ Environment=VKS_H323_UAS_ENABLED=1
 Environment=VKS_H323_UAS_ALLOW=127.0.0.1/32,192.168.1.0/24
 Environment=VKS_H323_UAS_MAX_CALLS=20
 Environment=VKS_H323_UAS_MAX_PER_IP=20
+# Real str0m ICE-lite/DTLS-SRTP browser transport (1 on this stand).
+Environment=VKS_WEBRTC_TRANSPORT=1
+# Firewall/NAT must open this UDP range; empty = ephemeral ports.
+Environment=VKS_WEBRTC_PORT_MIN=43000
+Environment=VKS_WEBRTC_PORT_MAX=43100
 ExecStart=/home/pro/mcu/target/release/vks-server --config /home/pro/mcu/configs/default.toml
 Restart=on-failure
 RestartSec=2

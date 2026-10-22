@@ -24,6 +24,7 @@ av1 = []
 
 [dependencies]
 vks-core = { path = "../vks-core" }
+vks-common = { path = "../vks-common" }
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true

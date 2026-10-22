@@ -417,6 +417,13 @@ async fn cleanup_active_membership(
 /// объявить полосу, которую реально отдаёт браузеру.
 /// Какие PT из `SdpAnswer.rtp_map` нужно переписать на egress SFU.
 /// Функция ровно та, что вызывает WS-обработчик после успешного offer.
+/// Offers without ICE/DTLS material are legacy clients (and integration
+/// tests): they keep the old hand-built answer. A real offer that str0m
+/// rejects is failed closed instead.
+fn offer_supports_real_webrtc(sdp: &str) -> bool {
+    sdp.contains("a=ice-ufrag:") && sdp.contains("a=ice-pwd:") && sdp.contains("a=fingerprint:")
+}
+
 fn answer_payload_types(maps: &[vks_proto::signaling::RtpMap]) -> Vec<(vks_core::MediaKind, u8)> {
     maps.iter()
         .filter_map(|map| {
@@ -657,6 +664,14 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                     }
                                 }
                                 // Запрос исполняет FSM; сайд-эффекты — только по успешному результату.
+                                let request_msg_id = env.msg_id();
+                                let gateway_room = current_membership.as_ref().is_some_and(|membership| {
+                                    state.room_hub.list_participants(&membership.room_id).iter().any(|participant| {
+                                        participant.participant_id.contains("@sip-gateway")
+                                            || participant.participant_id.contains("@h323-gateway")
+                                    })
+                                });
+                                let mut webrtc_failure: Option<(&'static str, String)> = None;
                                 let mut replies = handler.handle(env);
 
                                 // Real WebRTC transport: replace the legacy hand-built
@@ -669,39 +684,85 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                 {
                                     if replies.iter().any(|r| matches!(r.payload(), Some(Payload::SdpAnswer(_)))) {
                                         let pid = parse_participant_id(&membership.participant_id);
-                                        match crate::webrtc_runtime::accept_offer(
-                                            &handler_config,
-                                            membership.room_id,
-                                            pid,
-                                            &offer.sdp,
-                                        ) {
-                                            Some(Ok(accepted)) => {
-                                                if let Some(answer) = replies.iter_mut().find_map(|reply| {
-                                                    match reply.payload_mut() {
-                                                        Some(Payload::SdpAnswer(answer)) => Some(answer),
-                                                        _ => None,
+                                        if !offer_supports_real_webrtc(&offer.sdp) {
+                                            vks_common::metrics::WEBRTC_FALLBACK
+                                                .with_label_values(&["legacy_offer"])
+                                                .inc();
+                                        } else if gateway_room {
+                                            warn!(
+                                                room = %membership.room_id,
+                                                participant = %pid,
+                                                "WebRTC: real browser transport is not bridged to SIP/H.323 in this room"
+                                            );
+                                            webrtc_failure = Some((
+                                                "webrtc_gateway_room_unsupported",
+                                                "Real WebRTC in a room with SIP/H.323 participants is not supported yet".to_string(),
+                                            ));
+                                        } else {
+                                            match crate::webrtc_runtime::accept_offer(
+                                                &handler_config,
+                                                membership.room_id,
+                                                pid,
+                                                &offer.sdp,
+                                            ) {
+                                                Some(Ok(accepted)) => {
+                                                    let rtp_maps = accepted.rtp_maps;
+                                                    if let Some(answer) = replies.iter_mut().find_map(|reply| {
+                                                        match reply.payload_mut() {
+                                                            Some(Payload::SdpAnswer(answer)) => Some(answer),
+                                                            _ => None,
+                                                        }
+                                                    }) {
+                                                        answer.sdp = accepted.answer_sdp;
+                                                        answer.rtp_map = rtp_maps
+                                                            .into_iter()
+                                                            .map(|(payload, codec, clock, channels)| vks_proto::signaling::RtpMap {
+                                                                payload: u32::from(payload),
+                                                                codec,
+                                                                clock,
+                                                                channels,
+                                                            })
+                                                            .collect();
                                                     }
-                                                }) {
-                                                    answer.sdp = accepted.answer_sdp;
+                                                    real_webrtc_peer = true;
+                                                    ctx.sfu_engine.remove_endpoint(membership.room_id, pid);
+                                                    info!(
+                                                        room = %membership.room_id,
+                                                        participant = %pid,
+                                                        "WebRTC: real str0m transport accepted"
+                                                    );
                                                 }
-                                                real_webrtc_peer = true;
-                                                info!(
-                                                    room = %membership.room_id,
-                                                    participant = %pid,
-                                                    "WebRTC: real str0m transport accepted"
-                                                );
+                                                Some(Err(error)) => {
+                                                    warn!(
+                                                        room = %membership.room_id,
+                                                        participant = %pid,
+                                                        %error,
+                                                        "WebRTC: real transport rejected offer"
+                                                    );
+                                                    let code = if matches!(error, vks_media_sfu::WebRtcError::RoomFull) {
+                                                        "room_full"
+                                                    } else {
+                                                        "webrtc_offer_rejected"
+                                                    };
+                                                    webrtc_failure = Some((
+                                                        code,
+                                                        format!("Real WebRTC transport rejected the offer: {error}"),
+                                                    ));
+                                                }
+                                                None => {}
                                             }
-                                            Some(Err(error)) => {
-                                                warn!(
-                                                    room = %membership.room_id,
-                                                    participant = %pid,
-                                                    %error,
-                                                    "WebRTC: real transport rejected offer; keeping legacy SDP answer"
-                                                );
-                                            }
-                                            None => {}
                                         }
                                     }
+                                }
+                                // The real transport is authoritative whenever it is
+                                // enabled: never answer with fake ICE/DTLS credentials if
+                                // str0m rejected the offer.
+                                if let Some((code, message)) = webrtc_failure {
+                                    replies.retain(|reply| !matches!(reply.payload(), Some(Payload::SdpAnswer(_))));
+                                    replies.push(Envelope::error_reply(request_msg_id, code, &message, false));
+                                    vks_common::metrics::WEBRTC_FALLBACK
+                                        .with_label_values(&["offer_rejected"])
+                                        .inc();
                                 }
 
                                 let joined_ok = replies.iter().any(|r| matches!(r.payload(), Some(Payload::JoinRoomResult(_))));
@@ -741,7 +802,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                     }
                                                     tracks.push(track);
                                                 }
-                                                if !tracks.is_empty() {
+                                                if !real_webrtc_peer && !tracks.is_empty() {
                                                     let _ = ctx.sfu_engine.add_publisher(m.room_id, pid, tracks.clone()).await;
                                                     let _ = ctx.mcu_engine.add_publisher(m.room_id, pid, tracks.clone()).await;
                                                     for track in &tracks {
@@ -807,7 +868,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             audio_only: false,
                                         }).await;
                                         if let Some(registry) = crate::webrtc_runtime::registry(&handler_config) {
-                                            registry.set_subscription(m.room_id, pid, true, true);
+                                            registry.set_subscription(m.room_id, pid, true, !s.audio_only);
                                         }
                                         let _ = ctx.mcu_engine.add_subscriber(m.room_id, pid, vks_core::ports::media_engine::SubscribeRequest {
                                             track_ids,

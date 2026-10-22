@@ -71,6 +71,10 @@ pub enum WebRtcError {
     Candidate(SocketAddr),
     #[error("unknown media mid")]
     UnknownMid,
+    #[error("room already has the maximum number of real WebRTC peers")]
+    RoomFull,
+    #[error("invalid offer: {0}")]
+    InvalidOffer(String),
 }
 
 /// A side effect produced by the transport after an input.
@@ -117,6 +121,7 @@ impl WebRtcPeer {
     /// Accepts a browser SDP offer and returns a real str0m answer
     /// (with a real ICE ufrag/pwd and a real DTLS certificate fingerprint).
     pub fn accept_offer(offer_sdp: &str, local_addr: SocketAddr, config: &WebRtcConfig) -> Result<Self, WebRtcError> {
+        validate_offer(offer_sdp)?;
         let mut builder = RtcConfig::new()
             .set_ice_lite(config.ice_lite)
             // VKS SFU pipeline is Opus + VP8 only. Never let str0m's default
@@ -142,7 +147,9 @@ impl WebRtcPeer {
 
         let offer = SdpOffer::from_sdp_string(offer_sdp).map_err(|e| WebRtcError::Sdp(e.to_string()))?;
         let answer = rtc.sdp_api().accept_offer(offer)?;
-        let answer_sdp = answer.to_sdp_string();
+        // This transport does not apply trickled remote candidates; do not
+        // advertise trickle support we cannot honour.
+        let answer_sdp = answer.to_sdp_string().replace("a=ice-options:trickle\r\n", "");
         let mut mids = Vec::new();
         let mut mid_audio = Vec::new();
         let mut current_audio = None;
@@ -165,6 +172,11 @@ impl WebRtcPeer {
         Ok(peer)
     }
 
+    /// Whether ICE+DTLS+SRTP are fully established.
+    pub fn is_connected(&self) -> bool {
+        self.connected && self.rtc.is_connected()
+    }
+
     /// The SDP answer to send back to the browser.
     pub fn answer_sdp(&self) -> &str {
         &self.answer_sdp
@@ -178,6 +190,28 @@ impl WebRtcPeer {
     /// Negotiated media mids in SDP order (audio, video, ...).
     pub fn mids(&self) -> &[Mid] {
         &self.mids
+    }
+
+    /// Negotiated primary RTP maps `(pt, codec, clock, channels)` from the answer.
+    ///
+    /// The server rebuilds `SdpAnswer.rtp_map` from these so clients never see
+    /// the legacy profile's stale payload types.
+    pub fn rtp_maps(&self) -> Vec<(u8, String, u32, u32)> {
+        let mut maps = Vec::new();
+        for line in self.answer_sdp.lines() {
+            let Some(spec) = line.strip_prefix("a=rtpmap:") else { continue };
+            let Some((pt, codec)) = spec.split_once(' ') else { continue };
+            let Ok(pt) = pt.trim().parse::<u8>() else { continue };
+            let mut parts = codec.split('/');
+            let name = parts.next().unwrap_or_default();
+            if name.eq_ignore_ascii_case("rtx") {
+                continue;
+            }
+            let clock = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let channels = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            maps.push((pt, name.to_ascii_lowercase(), clock, channels));
+        }
+        maps
     }
 
     /// First negotiated payload type for a mid (codec chosen by str0m).
@@ -226,11 +260,6 @@ impl WebRtcPeer {
     /// Earliest instant the caller should drive [`Self::handle_timeout`].
     pub fn next_timeout(&self) -> Option<Instant> {
         self.next_timeout
-    }
-
-    /// True after ICE and DTLS completed.
-    pub fn is_connected(&self) -> bool {
-        self.connected
     }
 
     /// Feed one received UDP datagram and drain all resulting output.
@@ -347,6 +376,43 @@ impl WebRtcPeer {
 fn shared_dtls_cert() -> Option<str0m::crypto::dtls::DtlsCert> {
     static CERT: OnceLock<Option<str0m::crypto::dtls::DtlsCert>> = OnceLock::new();
     CERT.get_or_init(|| str0m::crypto::from_feature_flags().dtls_provider.generate_certificate()).clone()
+}
+
+/// Rejects offers this SFU cannot safely serve before str0m allocates state.
+///
+/// The real path supports exactly one audio + one video m-line per peer and
+/// requires browser ICE/DTLS credentials. Application/data or extra m-lines
+/// are rejected explicitly instead of being silently mis-mapped.
+fn validate_offer(offer: &str) -> Result<(), WebRtcError> {
+    if offer.len() > 64 * 1024 {
+        return Err(WebRtcError::InvalidOffer("SDP larger than 64 KiB".into()));
+    }
+    if !offer.contains("a=ice-ufrag:") || !offer.contains("a=ice-pwd:") {
+        return Err(WebRtcError::InvalidOffer("missing ICE credentials".into()));
+    }
+    if !offer.contains("a=fingerprint:") {
+        return Err(WebRtcError::InvalidOffer("missing DTLS fingerprint".into()));
+    }
+    let mut audio = 0;
+    let mut video = 0;
+    for line in offer.lines() {
+        if let Some(rest) = line.strip_prefix("m=") {
+            if rest.starts_with("audio ") {
+                audio += 1;
+            } else if rest.starts_with("video ") {
+                video += 1;
+            } else {
+                return Err(WebRtcError::InvalidOffer(format!("unsupported media line: {line}")));
+            }
+        }
+    }
+    if audio > 1 || video > 1 {
+        return Err(WebRtcError::InvalidOffer(format!("too many media lines: audio={audio} video={video}")));
+    }
+    if audio == 0 && video == 0 {
+        return Err(WebRtcError::InvalidOffer("no audio or video m-line".into()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

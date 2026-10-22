@@ -176,6 +176,14 @@ class SignalPeer {
     if (error) throw new Error('JoinRoom error: ' + error.map(f => f.bytes && f.bytes.toString()).join(' '));
     return reply;
   }
+  async subscribe(audioOnly = false) {
+    // SubscribeRequest.audio_only = 5; empty source list means the whole room.
+    const sub = audioOnly ? fvar(5, 1) : Buffer.alloc(0);
+    const reply = await this.send(60, sub);
+    const error = nested(reply, 200);
+    if (error) throw new Error('SubscribeRequest error: ' + JSON.stringify(error));
+    return reply;
+  }
   async offer(sdp) {
     const reply = await this.send(40, fstr(1, sdp));
     const error = nested(reply, 200);
@@ -183,6 +191,13 @@ class SignalPeer {
     const answer = nestedString(reply, 41, 1);
     if (!answer) throw new Error('SdpAnswer has no SDP');
     return answer;
+  }
+  async offerExpectError(sdp) {
+    const reply = await this.send(40, fstr(1, sdp));
+    const fields = nested(reply, 200);
+    if (!fields) return null;
+    const text = field => fields.find(f => f.field === field)?.bytes?.toString() || '';
+    return { code: text(1), message: text(2) };
   }
   close() {
     try { this.socket.close(); } catch { /* already closed */ }
@@ -309,6 +324,7 @@ async function collectStats(page) {
       const signal = await new SignalPeer(token, roomId, 'WebRTC-' + name).connect();
       await signal.hello();
       await signal.join();
+      await signal.subscribe();
       const offer = await createBrowserPeer(page);
       const answer = await signal.offer(offer.sdp);
       fs.writeFileSync(path.join(ART, `${name}-offer.sdp`), offer.sdp);
@@ -335,6 +351,26 @@ async function collectStats(page) {
 
     check('both pages: ICE connected', peers.length === 2 && peers.every(p => p.connected),
       peers.map(p => `${p.name}:${p.connected}`).join(','));
+
+    // The SFU currently maps one source per kind per subscriber; a third real
+    // peer must be refused explicitly instead of silently mixing RTP clocks.
+    if (peers.every(p => p.connected)) {
+      const thirdPage = await context.newPage();
+      await thirdPage.goto(BASE + '/pnm/authorization', { waitUntil: 'domcontentloaded' });
+      const thirdOffer = await createBrowserPeer(thirdPage);
+      const thirdSignal = await new SignalPeer(token, roomId, 'WebRTC-third').connect();
+      await thirdSignal.hello();
+      await thirdSignal.join();
+      await thirdSignal.subscribe();
+      const roomFull = await thirdSignal.offerExpectError(thirdOffer.sdp);
+      check('third peer: rejected with room_full', Boolean(roomFull) && roomFull.code === 'room_full',
+        JSON.stringify(roomFull));
+      thirdSignal.close();
+      await thirdPage.close();
+      check('third peer: existing peers stay connected',
+        (await Promise.all(peers.map(p => p.page.evaluate(() => window.__vksPc.connectionState)))).every(s => s === 'connected'), '');
+    }
+
     await new Promise(resolve => setTimeout(resolve, RUN_SECONDS * 1000));
 
     for (const peer of peers) {
@@ -345,7 +381,7 @@ async function collectStats(page) {
       check(`${peer.name}: SRTP cipher negotiated`, typeof transport.srtpCipher === 'string' && transport.srtpCipher.length > 0, String(transport.srtpCipher));
       const audioIn = stats.inbound.find(s => s.kind === 'audio');
       const videoIn = stats.inbound.find(s => s.kind === 'video');
-      check(`${peer.name}: inbound audio RTP`, Boolean(audioIn && audioIn.bytesReceived > 0), JSON.stringify(audioIn || null));
+      check(`${peer.name}: inbound audio RTP`, Boolean(audioIn && audioIn.bytesReceived > 0), JSON.stringify(stats.inbound));
       check(`${peer.name}: inbound video RTP`, Boolean(videoIn && videoIn.bytesReceived > 0), JSON.stringify(videoIn || null));
       check(`${peer.name}: decoded video frames`, Boolean(videoIn && videoIn.framesDecoded > 0), JSON.stringify(videoIn || null));
       const outbound = stats.outbound.filter(s => s.bytesSent > 0).map(s => s.kind);

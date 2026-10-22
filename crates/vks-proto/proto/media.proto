@@ -59,6 +59,8 @@ message SubscribeRequest {
   repeated string source_track_ids = 2;
   repeated CodecId preferred_codecs = 3;
   uint32 max_bitrate_bps = 4;
+  // Subscribe audio only; video is not forwarded for this participant.
+  bool audio_only = 5;
 }
 
 // Ответ на подписку.

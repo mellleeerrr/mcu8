@@ -190,6 +190,14 @@ impl SfuEngine {
     }
 
     /// Получение UDP эндпоинта участника.
+    /// Removes a plaintext endpoint, e.g. when the participant switches to a
+    /// real SRTP transport that must not share the legacy media path.
+    pub fn remove_endpoint(&self, room: RoomId, participant: ParticipantId) {
+        if let Some(room_state) = self.rooms.lock().unwrap().get_mut(&room) {
+            room_state.endpoints.remove(&participant);
+        }
+    }
+
     pub fn get_endpoint(&self, room: RoomId, participant: ParticipantId) -> Option<SocketAddr> {
         self.rooms.lock().unwrap().get(&room).and_then(|r| r.endpoints.get(&participant).copied())
     }

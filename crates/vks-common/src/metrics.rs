@@ -50,6 +50,36 @@ pub static MEDIA_PACKETS_DROPPED: LazyLock<IntCounterVec> = LazyLock::new(|| {
         .expect("vks_media_packets_dropped_total must register once")
 });
 
+/// Gauge: real WebRTC peer tasks currently registered (process-wide).
+pub static WEBRTC_PEERS: LazyLock<prometheus::IntGauge> = LazyLock::new(|| {
+    prometheus::register_int_gauge!("vks_webrtc_peers", "Real WebRTC peer tasks")
+        .expect("vks_webrtc_peers must register once")
+});
+
+/// Counter: browser offers by result (`accepted|rejected|room_full`).
+pub static WEBRTC_OFFERS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!("vks_webrtc_offers_total", "WebRTC offers by result", &["result"])
+        .expect("vks_webrtc_offers_total must register once")
+});
+
+/// Counter: ICE failures/evictions by reason.
+pub static WEBRTC_ICE_FAILURES: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!("vks_webrtc_ice_failures_total", "WebRTC ICE failures", &["reason"])
+        .expect("vks_webrtc_ice_failures_total must register once")
+});
+
+/// Counter: dropped fanout frames by reason (`queue_full`).
+pub static WEBRTC_FRAMES_DROPPED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!("vks_webrtc_frames_dropped_total", "WebRTC fanout frames dropped", &["reason"])
+        .expect("vks_webrtc_frames_dropped_total must register once")
+});
+
+/// Counter: offers that fell back to the legacy (non-WebRTC) answer.
+pub static WEBRTC_FALLBACK: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!("vks_webrtc_fallback_total", "WebRTC fallback events", &["reason"])
+        .expect("vks_webrtc_fallback_total must register once")
+});
+
 /// Gauge: задержка сигнала в комнате в миллисекундах (label: room_id).
 /// Обновляется по последнему измерению signal round-trip в комнате.
 pub static ROOM_SIGNAL_LATENCY_MS: LazyLock<IntGaugeVec> = LazyLock::new(|| {
@@ -258,6 +288,58 @@ pub fn new_registry() -> Registry {
             .expect("IntCounterVec::new vks_frontend_denied_total"),
         ),
         "vks_frontend_denied_total",
+    );
+    register(
+        &mut registry,
+        Box::new(
+            prometheus::IntGauge::new("vks_webrtc_peers", "Real WebRTC peer tasks")
+                .expect("IntGauge::new vks_webrtc_peers"),
+        ),
+        "vks_webrtc_peers",
+    );
+    register(
+        &mut registry,
+        Box::new(
+            prometheus::IntCounterVec::new(
+                Opts::new("vks_webrtc_offers_total", "WebRTC offers by result"),
+                &["result"],
+            )
+            .expect("IntCounterVec::new vks_webrtc_offers_total"),
+        ),
+        "vks_webrtc_offers_total",
+    );
+    register(
+        &mut registry,
+        Box::new(
+            prometheus::IntCounterVec::new(
+                Opts::new("vks_webrtc_ice_failures_total", "WebRTC ICE failures"),
+                &["reason"],
+            )
+            .expect("IntCounterVec::new vks_webrtc_ice_failures_total"),
+        ),
+        "vks_webrtc_ice_failures_total",
+    );
+    register(
+        &mut registry,
+        Box::new(
+            prometheus::IntCounterVec::new(
+                Opts::new("vks_webrtc_frames_dropped_total", "WebRTC fanout frames dropped"),
+                &["reason"],
+            )
+            .expect("IntCounterVec::new vks_webrtc_frames_dropped_total"),
+        ),
+        "vks_webrtc_frames_dropped_total",
+    );
+    register(
+        &mut registry,
+        Box::new(
+            prometheus::IntCounterVec::new(
+                Opts::new("vks_webrtc_fallback_total", "WebRTC fallback events"),
+                &["reason"],
+            )
+            .expect("IntCounterVec::new vks_webrtc_fallback_total"),
+        ),
+        "vks_webrtc_fallback_total",
     );
     registry
 }

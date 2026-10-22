@@ -15,6 +15,10 @@ media_listen_addr = "0.0.0.0:40000"
 
 # Публичный IPv4, который анонсируется в SDP (обязателен за NAT).
 # ВАЖНО: принимается только IP-адрес (DNS-имя сервер отвергает).
+# Public address browsers use for the ICE host candidate. Keep VKS_WEBRTC_TRANSPORT=0
+# until a canary proves the path; when enabled, open the UDP range
+# VKS_WEBRTC_PORT_MIN..VKS_WEBRTC_PORT_MAX (or accept ephemeral ports) and note
+# that ICE-lite cannot gather TURN relay candidates itself.
 candidate_addr = "203.0.113.10"
 
 # Аутентификация: JWT-секрет только из env, минимум 32 случайных байта:

@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-10-22T16:49:10.669Z",
+  "generated_at": "2026-10-22T17:13:59.186Z",
   "base": "http://127.0.0.1:8080",
-  "room_id": "88a1f92d-61f0-4727-b79a-6feaafea737b",
+  "room_id": "faa43b0c-cbe9-4a19-8a4e-1b58c596bbc2",
   "checks": [
     {
       "name": "auth: JWT issued",
@@ -11,12 +11,12 @@
     {
       "name": "room: created",
       "ok": true,
-      "detail": "88a1f92d-61f0-4727-b79a-6feaafea737b"
+      "detail": "faa43b0c-cbe9-4a19-8a4e-1b58c596bbc2"
     },
     {
       "name": "alice: answer is real str0m SDP",
       "ok": true,
-      "detail": "v=0 | o=str0m-0.24.1 4216873006524894584 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS 74fbd8da-8b46-429c-9af4-dbe"
+      "detail": "v=0 | o=str0m-0.24.1 3321155881078703123 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS 6384abc4-7278-4425-91e5-42b"
     },
     {
       "name": "alice: answer offers Opus+VP8 only",
@@ -26,7 +26,7 @@
     {
       "name": "bob: answer is real str0m SDP",
       "ok": true,
-      "detail": "v=0 | o=str0m-0.24.1 3461166254248901878 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS 9e7780a6-7d29-456f-ac59-0cc"
+      "detail": "v=0 | o=str0m-0.24.1 3872867054223693579 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS f1612b37-ac19-43b0-aeb8-eaf"
     },
     {
       "name": "bob: answer offers Opus+VP8 only",
@@ -36,7 +36,17 @@
     {
       "name": "both pages: ICE connected",
       "ok": true,
-      "detail": "alice,bob"
+      "detail": "alice:true,bob:true"
+    },
+    {
+      "name": "third peer: rejected with room_full",
+      "ok": true,
+      "detail": "{\"code\":\"room_full\",\"message\":\"Real WebRTC transport rejected the offer: room already has the maximum number of real WebRTC peers\"}"
+    },
+    {
+      "name": "third peer: existing peers stay connected",
+      "ok": true,
+      "detail": ""
     },
     {
       "name": "alice: connectionState connected",
@@ -46,7 +56,7 @@
     {
       "name": "alice: DTLS connected",
       "ok": true,
-      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":150397,\"bytesSent\":202796}"
+      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":210380,\"bytesSent\":240417}"
     },
     {
       "name": "alice: SRTP cipher negotiated",
@@ -56,17 +66,17 @@
     {
       "name": "alice: inbound audio RTP",
       "ok": true,
-      "detail": "{\"kind\":\"audio\",\"bytesReceived\":7353,\"packetsReceived\":300}"
+      "detail": "[{\"kind\":\"audio\",\"bytesReceived\":9414,\"packetsReceived\":379},{\"kind\":\"video\",\"bytesReceived\":146165,\"packetsReceived\":350,\"framesDecoded\":114,\"frameWidth\":320,\"frameHeight\":240}]"
     },
     {
       "name": "alice: inbound video RTP",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":113931,\"packetsReceived\":159,\"framesDecoded\":89,\"frameWidth\":320,\"frameHeight\":240}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":146165,\"packetsReceived\":350,\"framesDecoded\":114,\"frameWidth\":320,\"frameHeight\":240}"
     },
     {
       "name": "alice: decoded video frames",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":113931,\"packetsReceived\":159,\"framesDecoded\":89,\"frameWidth\":320,\"frameHeight\":240}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":146165,\"packetsReceived\":350,\"framesDecoded\":114,\"frameWidth\":320,\"frameHeight\":240}"
     },
     {
       "name": "alice: outbound audio+video",
@@ -81,7 +91,7 @@
     {
       "name": "bob: DTLS connected",
       "ok": true,
-      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":154904,\"bytesSent\":156293}"
+      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":194471,\"bytesSent\":198476}"
     },
     {
       "name": "bob: SRTP cipher negotiated",
@@ -91,17 +101,17 @@
     {
       "name": "bob: inbound audio RTP",
       "ok": true,
-      "detail": "{\"kind\":\"audio\",\"bytesReceived\":6561,\"packetsReceived\":305}"
+      "detail": "[{\"kind\":\"audio\",\"bytesReceived\":7453,\"packetsReceived\":385},{\"kind\":\"video\",\"bytesReceived\":153321,\"packetsReceived\":200,\"framesDecoded\":115,\"frameWidth\":320,\"frameHeight\":240}]"
     },
     {
       "name": "bob: inbound video RTP",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":121115,\"packetsReceived\":162,\"framesDecoded\":91,\"frameWidth\":320,\"frameHeight\":240}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":153321,\"packetsReceived\":200,\"framesDecoded\":115,\"frameWidth\":320,\"frameHeight\":240}"
     },
     {
       "name": "bob: decoded video frames",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":121115,\"packetsReceived\":162,\"framesDecoded\":91,\"frameWidth\":320,\"frameHeight\":240}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":153321,\"packetsReceived\":200,\"framesDecoded\":115,\"frameWidth\":320,\"frameHeight\":240}"
     },
     {
       "name": "bob: outbound audio+video",
@@ -114,7 +124,7 @@
       "detail": ""
     }
   ],
-  "passed": 22,
+  "passed": 24,
   "failed": 0,
-  "total": 22
+  "total": 24
 }
