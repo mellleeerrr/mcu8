@@ -319,6 +319,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Один источник истины с ICE: conference-адреса (`sip:/h323:`) — тот же
     // нормализованный candidate IP (trim/fallback/bind-fail уже учтены выше).
     let _ = admin_state.server_addr.set(candidate_addr.clone());
+    if let Some(path) = vks_storage::db_lock::sqlite_path_from_url(&config.database_url) {
+        let _ = admin_state.database_file.set(path.to_string_lossy().into_owned());
+    }
 
     // 8. Конфигурация обработчика сигналинга с реальными ICE/кодек атрибутами
     let ice_servers: Vec<vks_proto::signaling::IceServer> = config

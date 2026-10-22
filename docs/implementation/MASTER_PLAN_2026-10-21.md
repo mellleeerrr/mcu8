@@ -438,6 +438,11 @@ RR/SR, TWCC/REMB, pacer; тест через `tc netem loss 10%` (если ес�
 
 ## T11a. Честный system status (P0, дешёвый)
 
+**Статус 2026-10-22 — реализовано, live-проверка:** реальный IP
+(192.168.1.93), `database.size_bytes` из `stat` (2011136 == `ls -l`),
+`h323.status=FAILED/last_error` после реального `remote_release`, READY после
+успешного SIP; evidence `docs/progress/evidence/t11a/`.
+
 **Проблема.** `/api/v3/ui/system/status` отдаёт `network.ip=127.0.0.1`,
 `sip/h323 local_address=127.0.0.1`, `database.size_bytes=0`, sip/h323 READY
 при `remote_release`.

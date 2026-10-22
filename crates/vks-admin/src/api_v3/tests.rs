@@ -868,6 +868,36 @@ async fn ws_rate_limit_returns_http_429() {
 }
 
 #[tokio::test]
+async fn system_status_uses_real_ip_db_size_and_last_gateway_dial() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let token = login_token(&app, "admin", "s3cret").await;
+    let _ = state.server_addr.set("192.168.1.93".to_string());
+    let db = std::env::temp_dir().join(format!("vks-status-{}.db", std::process::id()));
+    std::fs::write(&db, vec![0u8; 4096]).expect("write fake db");
+    let _ = state.database_file.set(db.to_string_lossy().into_owned());
+
+    state.record_gateway_health("h323", false, Some("H.323 outbound dial failed: remote_release".into()));
+    let resp = send(&app, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    let expected_ip = state.server_addr.get().expect("server_addr").clone();
+    assert_eq!(body["network"]["ip"], expected_ip);
+    assert_eq!(body["sip"]["local_address"], expected_ip);
+    assert_eq!(body["database"]["size_bytes"], 4096);
+    assert_eq!(body["h323"]["status"], "FAILED");
+    assert_eq!(body["h323"]["connected"], false);
+    assert!(body["h323"]["last_error"].as_str().unwrap_or_default().contains("remote_release"));
+
+    state.record_gateway_health("h323", true, None);
+    let resp = send(&app, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    let body = json_body(resp).await;
+    assert_eq!(body["h323"]["status"], "READY");
+    assert!(body["h323"]["last_error"].is_null());
+    let _ = std::fs::remove_file(db);
+}
+
+#[tokio::test]
 async fn shell_monitoring_shapes_and_lifecycle_m4() {
     let (state, _) = test_state();
     let app = app(state);

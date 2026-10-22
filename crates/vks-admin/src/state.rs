@@ -244,6 +244,18 @@ pub struct AppState {
     /// Адрес MCU для conference-адресов (`addresses.sip/h323`). `OnceLock` — потому
     /// что известен только после bind UDP-лупа (нормализованный ICE candidate).
     pub server_addr: std::sync::OnceLock<String>,
+    /// Файл SQLite для честного `database.size_bytes`; пусто для in-memory/PG.
+    pub database_file: std::sync::OnceLock<String>,
+    /// Последний фактический результат SIP/H.323-дозвона (T11a).
+    pub gateway_health: Mutex<std::collections::HashMap<String, GatewayHealth>>,
+}
+
+/// Последний наблюдаемый результат шлюза: READY/FAILED + причина.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GatewayHealth {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub checked_at: i64,
 }
 
 impl std::fmt::Debug for AppState {
@@ -263,6 +275,8 @@ impl std::fmt::Debug for AppState {
             .field("settings", &self.settings)
             .field("mode", &self.mode)
             .field("server_addr", &self.server_addr)
+            .field("database_file", &self.database_file)
+            .field("gateway_health", &self.gateway_health)
             .field("event_queue", &self.event_queue)
             .field("media_healthy", &self.media_healthy.load(std::sync::atomic::Ordering::Relaxed))
             .finish()
@@ -302,6 +316,8 @@ impl AppState {
             media_healthy: std::sync::atomic::AtomicBool::new(true),
             faults: Mutex::new(std::collections::HashSet::new()),
             server_addr: std::sync::OnceLock::new(),
+            database_file: std::sync::OnceLock::new(),
+            gateway_health: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -340,6 +356,24 @@ impl AppState {
     /// Проверяет, активен ли сбой в указанной подсистеме (M0.6 / M6.3).
     pub fn has_fault(&self, fault: &str) -> bool {
         self.faults.lock().map(|f| f.contains(fault)).unwrap_or(false)
+    }
+
+    /// Записывает фактический результат дозвона SIP/H.323 (T11a).
+    pub fn record_gateway_health(&self, protocol: &str, ok: bool, error: Option<String>) {
+        if let Ok(mut health) = self.gateway_health.lock() {
+            health.insert(
+                protocol.to_string(),
+                GatewayHealth { ok, error, checked_at: crate::state::now_unix_ms() as i64 / 1000 },
+            );
+        }
+    }
+
+    /// Последний результат шлюза моложе `ttl_secs`; устаревший — None.
+    pub fn gateway_health(&self, protocol: &str, ttl_secs: i64) -> Option<GatewayHealth> {
+        let now = crate::state::now_unix_ms() as i64 / 1000;
+        self.gateway_health.lock().ok().and_then(|health| {
+            health.get(protocol).filter(|entry| now.saturating_sub(entry.checked_at) <= ttl_secs).cloned()
+        })
     }
 
     /// Устанавливает статус здоровья медиа-подсистемы (M0.6 / M6.3).

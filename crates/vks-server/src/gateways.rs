@@ -282,6 +282,14 @@ impl GatewayManager {
     }
 
     /// Связывает шлюз со слабым указателем на AppState для устранения циклов ссылок.
+    /// Пишет последний результат дозвона в общий AppState для `/ui/system/status`.
+    fn note_gateway_health(&self, protocol: &str, ok: bool, error: Option<String>) {
+        if let Some(state) = self.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
+        {
+            state.record_gateway_health(protocol, ok, error);
+        }
+    }
+
     pub fn bind_state(&self, state: std::sync::Weak<AppState>) {
         if let Ok(mut lock) = self.state.write() {
             *lock = Some(state);
@@ -1034,7 +1042,11 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                     h323_video,
                 )
                 .await
-                .map_err(|error| format!("H.323 outbound dial failed: {error}"))?;
+                .map_err(|error| {
+                    let message = format!("H.323 outbound dial failed: {error}");
+                    self.note_gateway_health("h323", false, Some(message.clone()));
+                    message
+                })?;
             setup.h323 = Some(session.clone());
             // H.241 peer limits are authoritative for the encoder: never send
             // above the peer's maxBitRate/level even if the room asks for more.
@@ -1086,11 +1098,12 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                 rtp_port,
                 video_pair.as_ref().map(|pair| pair.rtp_port),
             );
-            let session = self
-                .uac_client
-                .dial(trimmed, &offer, std::time::Duration::from_secs(60))
-                .await
-                .map_err(|error| format!("SIP outbound dial failed: {error}"))?;
+            let session =
+                self.uac_client.dial(trimmed, &offer, std::time::Duration::from_secs(60)).await.map_err(|error| {
+                    let message = format!("SIP outbound dial failed: {error}");
+                    self.note_gateway_health("sip", false, Some(message.clone()));
+                    message
+                })?;
             setup.sip = Some(session.clone());
             answer_limits =
                 vks_gateway_sip::video_answer_limits(&session.answer_sdp, session.remote_video_payload_type);
@@ -1116,6 +1129,7 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                 session.call_id.clone(),
             )
         };
+        self.note_gateway_health(protocol, true, None);
         if ![0, 8].contains(&audio_payload_type) {
             return Err("Only negotiated PCMU/PCMA audio can be bridged".into());
         }

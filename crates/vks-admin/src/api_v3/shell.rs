@@ -226,9 +226,23 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
     let engine_desc = if readiness.media { "" } else { "Media engine degraded" };
     let db_status = if readiness.db { "READY" } else { "FAILED" };
 
-    let sip_healthy = !state.has_fault("sip") && !state.has_fault("gateway") && readiness.gateway;
-    let h323_healthy = !state.has_fault("h323") && !state.has_fault("gateway") && readiness.gateway;
+    // T11a: сначала факт последнего дозвона (5 мин), затем fault/readiness.
+    // Один неудачный вызов на занятый терминал не должен навсегда красить шлюз.
+    let gateway_health = |protocol: &str| state.gateway_health(protocol, 300);
+    let sip_probe = gateway_health("sip");
+    let h323_probe = gateway_health("h323");
+    let sip_healthy = !state.has_fault("sip")
+        && !state.has_fault("gateway")
+        && readiness.gateway
+        && sip_probe.as_ref().is_none_or(|probe| probe.ok);
+    let h323_healthy = !state.has_fault("h323")
+        && !state.has_fault("gateway")
+        && readiness.gateway
+        && h323_probe.as_ref().is_none_or(|probe| probe.ok);
     let cluster_healthy = readiness.cluster;
+    let ip = state.server_addr.get().cloned().unwrap_or_else(|| settings.ip.clone());
+    let db_size =
+        state.database_file.get().and_then(|path| std::fs::metadata(path).ok()).map_or(0, |metadata| metadata.len());
 
     let sip_status = if sip_healthy { "READY" } else { "FAILED" };
     let h323_status = if h323_healthy { "READY" } else { "FAILED" };
@@ -259,9 +273,9 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
         "database": {
             "status": db_status,
             "connected": readiness.db,
-            "size_bytes": 0
+            "size_bytes": db_size
         },
-        "network": { "status": "READY", "connected": true, "editable": true, "ip": settings.ip },
+        "network": { "status": "READY", "connected": true, "editable": true, "ip": ip },
         "disk": disk_status(),
         "time": crate::state::now_unix_ms() / 1000,
         "sip": {
@@ -271,7 +285,8 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
             "registration": sip_healthy,
             // `sip.account` в эталоне — boolean (isAvailable), не строка.
             "account": sip_healthy,
-            "local_address": settings.ip
+            "local_address": ip,
+            "last_error": sip_probe.and_then(|probe| probe.error)
         },
         "h323": {
             "status": h323_status,
@@ -279,7 +294,8 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
             "enable": h323_healthy,
             "registration": h323_healthy,
             "account": h323_healthy,
-            "local_address": settings.ip
+            "local_address": ip,
+            "last_error": h323_probe.and_then(|probe| probe.error)
         },
         "cluster": {
             "status": cluster_status,
