@@ -370,7 +370,9 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
         // RFC 3016: MPEG-4 LATM uses a fixed 90 kHz RTP clock and no
         // `channels` parameter in rtpmap.
         channels: 1,
-        fmtp: Some("profile-level-id=1;object=2;cpresent=0"),
+        // FFmpeg's latm muxer emits the StreamMuxConfig in-band on the first
+        // audioMuxElement, so cpresent=1 (and no config=) is the honest fmtp.
+        fmtp: Some("profile-level-id=1;object=2;cpresent=1"),
         native: false,
         dtmf: false,
     },

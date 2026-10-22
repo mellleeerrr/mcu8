@@ -43,11 +43,14 @@ pub fn strip_loas(frame: &[u8]) -> Result<&[u8], LatmError> {
     if frame.len() < LOAS_HEADER_BYTES {
         return Err(LatmError::TooShort);
     }
-    if frame[0] != LOAS_SYNC {
+    if frame[0] != LOAS_SYNC || frame[1] & 0xe0 != 0xe0 {
         return Err(LatmError::BadSync);
     }
     let length = (usize::from(frame[1] & 0x1f) << 8) | usize::from(frame[2]);
-    if length == 0 || frame.len() != LOAS_HEADER_BYTES + length {
+    if length == 0 {
+        return Err(LatmError::TooShort);
+    }
+    if frame.len() != LOAS_HEADER_BYTES + length {
         return Err(LatmError::BadLength);
     }
     Ok(&frame[LOAS_HEADER_BYTES..])
@@ -112,7 +115,7 @@ impl LatmRtpClock {
     /// Creates a clock for `sample_rate`; timestamp starts at `start`.
     #[must_use]
     pub const fn new(sample_rate: u32, start: u32) -> Self {
-        Self { start, samples: 0, sample_rate }
+        Self { start, samples: 0, sample_rate: if sample_rate == 0 { 48_000 } else { sample_rate } }
     }
 
     fn offset(&self) -> u32 {
@@ -156,8 +159,9 @@ mod tests {
     fn strip_rejects_bad_sync_length_or_short_buffer() {
         assert_eq!(strip_loas(&[]), Err(LatmError::TooShort));
         assert_eq!(strip_loas(&[0x55, 0xe0, 0x02, 1, 2]), Err(LatmError::BadSync));
+        assert_eq!(strip_loas(&[0x56, 0x00, 0x02, 1, 2]), Err(LatmError::BadSync));
         assert_eq!(strip_loas(&[0x56, 0xe0, 0x03, 1, 2]), Err(LatmError::BadLength));
-        assert_eq!(strip_loas(&[0x56, 0xe0, 0x00]), Err(LatmError::BadLength));
+        assert_eq!(strip_loas(&[0x56, 0xe0, 0x00]), Err(LatmError::TooShort));
         assert_eq!(strip_loas(&[0x56, 0xe0, 0x02, 1, 2, 3]), Err(LatmError::BadLength));
     }
 
@@ -185,6 +189,8 @@ mod tests {
         assert_eq!(frame_ticks(44_100), 2090);
         assert_eq!(frame_ticks(32_000), 2880);
         assert_eq!(frame_ticks(0), 0);
+        assert_eq!(LatmRtpClock::new(0, 0).next_timestamp(), 0);
+        assert_eq!(LatmRtpClock::new(0, 5).next_timestamp(), 5);
     }
 
     #[test]
