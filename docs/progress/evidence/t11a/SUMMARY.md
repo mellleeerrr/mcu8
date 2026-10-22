@@ -1,30 +1,39 @@
 # T11a — честный system status
 
-**Статус:** реализовано; код/тесты в рабочем дереве, live-проверка выполнена.
+**Статус:** реализовано и проверено live; ожидает финального ревью.
 
 ## Что изменено
-- `AppState.server_addr` уже содержал нормализованный ICE-candidate; статус
-  теперь берёт IP оттуда, а не `settings.ip` (`127.0.0.1`).
-- `AppState.database_file` заполняется в `main.rs` из `database_url` через
-  `vks_storage::db_lock::sqlite_path_from_url`; `database.size_bytes` — реальный
-  `stat` файла (0 для in-memory/PostgreSQL).
-- `AppState.gateway_health` + `record_gateway_health`/`gateway_health(ttl)`:
-  `GatewayManager` пишет факт SIP/H.323-дозвона (успех/ошибка), статус читает
-  последний результат с TTL 300 с.
-- `/api/v3/ui/system/status`: `sip`/`h323` получают `status/connected/enable/
-  registration/account=FALSE` и `last_error` при реальном отказе; `network.ip`
-  и `local_address` — фактический IP.
+- `network.ip` и `sip/h323.local_address` берутся из `AppState.server_addr`
+  (нормализованный ICE candidate), а не из `settings.ip`.
+- `database.size_bytes` — реальный `stat` SQLite-файла; путь заполняется в
+  `main.rs` через `sqlite_path_from_url`. Для in-memory/PG остаётся 0 (T10).
+- `AppState.gateway_health` хранит **последний фактический** результат
+  SIP/H.323-дозвона; `GatewayManager` пишет его ровно один раз на попытку:
+  успех — после полного media-setup, ошибка — из единой обёртки
+  `dial_with_contact` (включая ошибки до/после сети).
+- Классификация: `busy/486/603/remote_release/decline/adaptiveBusy` — отказ
+  терминала, он **не** переводит шлюз в FAILED; транспортные/ресурсные
+  ошибки — FAILED до следующего фактического успеха.
+- `enable` — наличие dialer, `registration` — реальный
+  `SipGateway::is_registered()` / `H323Gateway::is_registered()`,
+  `account/connected/status` — health. TTL-самолечения нет: FAILED не
+  исчезает сам, READY без регистрации/успеха не выставляется.
+- Убрано случайное изменение sidecar (`VKS_H323_WIRE_LOG`) из T11a-scope.
 
-## Live-проверка (2026-10-22, HEAD рабочего дерева)
-- `network.ip=192.168.1.93`, `sip.local_address=192.168.1.93`.
-- `database.size_bytes=2011136`, совпадает с `ls -l vks_data.db`.
-- Реальный H.323-дозвон: `remote_release` → `h323.status=FAILED`,
-  `connected=false`, `last_error="H.323 outbound dial failed: ... remote_release"`.
-- После успешного SIP-дозвона — `READY`, `last_error=null`; неудачный вызов на
-  занятый терминал не красит шлюз навсегда (TTL 300 с).
+## Live-проверка (2026-10-22, HEAD после redeploy)
+- `network.ip=192.168.1.93`, `sip/h323.local_address=192.168.1.93`.
+- `database.size_bytes=2019328` == `ls -l vks_data.db`.
+- До вызова: `sip/h323.status=READY`, `registration=true`, `last_error=null`.
+- Реальный H.323 `remote_release`: `h323.status=READY`, `connected=true`,
+  `registration=true`, `last_error="H.323 outbound dial failed: ... remote_release"`
+  — отказ терминала не гасит живой шлюз и не «лечится» таймаутом.
+- Транспортный FAILED и отсутствие регистрации проверены unit-тестами
+  (`system_status_uses_real_ip_db_size_and_last_gateway_dial`,
+  `terminal_and_transport_gateway_errors_are_classified`).
 
 ## Гейты
-- Rust: **1038 passed / 0 failed / 6 ignored**; clippy/fmt чисто.
-- Новый тест: `system_status_uses_real_ip_db_size_and_last_gateway_dial`.
-- Живой SIP E2E остаётся 114/114 (high/low), H.323 live по-прежнему заблокирован
-  терминалом (`remote_release`) — T07.
+- Rust: **1039 passed / 0 failed / 6 ignored**; clippy/fmt чисто.
+- Python sidecar: **24/24**.
+- Живой SIP E2E: high/low 114/114 (на предыдущем финальном бинарнике; этот
+  коммит меняет только статус и не трогает медиа-путь).
+- H.323 live по-прежнему `remote_release` — T07, не T11a.

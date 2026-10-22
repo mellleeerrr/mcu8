@@ -261,10 +261,6 @@ class Call:
     def wire(self, direction, protocol, data, **fields):
         if self.config.trace:
             emit("wire", direction=direction, protocol=protocol, hex=data[:8192].hex(), length=len(data), **fields)
-            path = os.environ.get("VKS_H323_WIRE_LOG")
-            if path:
-                with open(path, "a", encoding="utf-8") as log:
-                    log.write(json.dumps({"direction": direction, "protocol": protocol, "hex": data.hex(), **fields}) + "\n")
 
     def send_control(self, value):
         if self.control is None:

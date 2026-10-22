@@ -867,29 +867,51 @@ async fn ws_rate_limit_returns_http_429() {
     panic!("не удалось наблюдать 429 за 50 попыток (границы секунд)");
 }
 
+struct RegisteredDialer;
+
+#[async_trait::async_trait]
+impl crate::state::OutboundDialer for RegisteredDialer {
+    async fn dial(&self, _: RoomId, _: &str, _: Option<&str>) -> Result<String, String> {
+        Ok("registered@gw".into())
+    }
+
+    fn gateway_registration(&self, _protocol: &str) -> Option<bool> {
+        Some(true)
+    }
+}
+
 #[tokio::test]
 async fn system_status_uses_real_ip_db_size_and_last_gateway_dial() {
     let (state, _) = test_state();
+    state.set_dialer(Arc::new(RegisteredDialer));
     let app = app(state.clone());
     let token = login_token(&app, "admin", "s3cret").await;
-    let _ = state.server_addr.set("192.168.1.93".to_string());
+    let expected_ip = state.server_addr.get().expect("server_addr").clone();
     let db = std::env::temp_dir().join(format!("vks-status-{}.db", std::process::id()));
     std::fs::write(&db, vec![0u8; 4096]).expect("write fake db");
     let _ = state.database_file.set(db.to_string_lossy().into_owned());
 
-    state.record_gateway_health("h323", false, Some("H.323 outbound dial failed: remote_release".into()));
+    // Терминальный отказ не красит живой зарегистрированный шлюз.
+    state.record_gateway_health("h323", false, true, Some("H.323 outbound dial failed: remote_release".into()));
     let resp = send(&app, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = json_body(resp).await;
-    let expected_ip = state.server_addr.get().expect("server_addr").clone();
     assert_eq!(body["network"]["ip"], expected_ip);
     assert_eq!(body["sip"]["local_address"], expected_ip);
     assert_eq!(body["database"]["size_bytes"], 4096);
-    assert_eq!(body["h323"]["status"], "FAILED");
-    assert_eq!(body["h323"]["connected"], false);
+    assert_eq!(body["h323"]["status"], "READY");
+    assert_eq!(body["h323"]["registration"], true);
     assert!(body["h323"]["last_error"].as_str().unwrap_or_default().contains("remote_release"));
 
-    state.record_gateway_health("h323", true, None);
+    // Транспортный отказ — FAILED до следующего фактического успеха.
+    state.record_gateway_health("h323", false, false, Some("connect refused".into()));
+    let resp = send(&app, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    let body = json_body(resp).await;
+    assert_eq!(body["h323"]["status"], "FAILED");
+    assert_eq!(body["h323"]["connected"], false);
+    assert_eq!(body["h323"]["registration"], true, "transport down must not fake unregistration");
+
+    state.record_gateway_health("h323", true, false, None);
     let resp = send(&app, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
     let body = json_body(resp).await;
     assert_eq!(body["h323"]["status"], "READY");
@@ -1482,10 +1504,12 @@ async fn test_m0_custom_layouts_api_keys_and_gateway_cluster_status() {
     let status_resp = send(&app_router, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
     assert_eq!(status_resp.status(), StatusCode::OK);
     let status_body = json_body(status_resp).await;
-    assert_eq!(status_body["sip"]["status"], "READY");
-    assert_eq!(status_body["sip"]["connected"], true);
-    assert_eq!(status_body["h323"]["status"], "READY");
-    assert_eq!(status_body["h323"]["connected"], true);
+    // Без dialer нет ни регистрации, ни факта успеха: честный DISABLED,
+    // а не статический READY.
+    assert_eq!(status_body["sip"]["status"], "DISABLED");
+    assert_eq!(status_body["sip"]["connected"], false);
+    assert_eq!(status_body["h323"]["status"], "DISABLED");
+    assert_eq!(status_body["h323"]["connected"], false);
     assert_eq!(status_body["cluster"]["status"], "READY");
     assert_eq!(status_body["cluster"]["connected"], true);
     assert_eq!(status_body["cluster"]["lease_valid"], true);
@@ -1496,7 +1520,7 @@ async fn test_m0_custom_layouts_api_keys_and_gateway_cluster_status() {
     let body = json_body(resp).await;
     assert_eq!(body["sip"]["status"], "FAILED");
     assert_eq!(body["sip"]["connected"], false);
-    assert_eq!(body["h323"]["status"], "READY");
+    assert_eq!(body["h323"]["status"], "DISABLED");
     state.clear_fault("sip");
 
     // 7. Inject Cluster fault

@@ -226,27 +226,35 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
     let engine_desc = if readiness.media { "" } else { "Media engine degraded" };
     let db_status = if readiness.db { "READY" } else { "FAILED" };
 
-    // T11a: сначала факт последнего дозвона (5 мин), затем fault/readiness.
-    // Один неудачный вызов на занятый терминал не должен навсегда красить шлюз.
-    let gateway_health = |protocol: &str| state.gateway_health(protocol, 300);
-    let sip_probe = gateway_health("sip");
-    let h323_probe = gateway_health("h323");
-    let sip_healthy = !state.has_fault("sip")
-        && !state.has_fault("gateway")
-        && readiness.gateway
-        && sip_probe.as_ref().is_none_or(|probe| probe.ok);
-    let h323_healthy = !state.has_fault("h323")
-        && !state.has_fault("gateway")
-        && readiness.gateway
-        && h323_probe.as_ref().is_none_or(|probe| probe.ok);
+    // T11a: статус шлюза = реальная регистрация + последний транспортный
+    // отказ. Отказ терминала (busy/decline) не гасит живой шлюз и не лечится
+    // таймаутом; READY без факта регистрации не выставляется.
+    let dialer = state.outbound_dialer();
+    let registered =
+        |protocol: &str| dialer.as_ref().and_then(|dialer| dialer.gateway_registration(protocol)).unwrap_or(false);
+    let health = |protocol: &str| {
+        let registered = registered(protocol);
+        let probe = state.gateway_health(protocol);
+        if state.has_fault(protocol) || state.has_fault("gateway") {
+            return ("FAILED".to_string(), false, probe.and_then(|probe| probe.error));
+        }
+        match probe {
+            Some(probe) if probe.ok => ("READY".to_string(), true, probe.error),
+            Some(probe) if !probe.terminal => ("FAILED".to_string(), false, probe.error),
+            // Терминальный отказ: шлюз жив, ошибка видна, но статус не FAILED.
+            Some(probe) => (if registered { "READY" } else { "DISABLED" }.to_string(), registered, probe.error),
+            None => (if registered { "READY" } else { "DISABLED" }.to_string(), registered, None),
+        }
+    };
+    let (sip_status, sip_connected, sip_error) = health("sip");
+    let (h323_status, h323_connected, h323_error) = health("h323");
+    let sip_registered = registered("sip");
+    let h323_registered = registered("h323");
     let cluster_healthy = readiness.cluster;
+    let cluster_status = if cluster_healthy { "READY" } else { "FAILED" };
     let ip = state.server_addr.get().cloned().unwrap_or_else(|| settings.ip.clone());
     let db_size =
         state.database_file.get().and_then(|path| std::fs::metadata(path).ok()).map_or(0, |metadata| metadata.len());
-
-    let sip_status = if sip_healthy { "READY" } else { "FAILED" };
-    let h323_status = if h323_healthy { "READY" } else { "FAILED" };
-    let cluster_status = if cluster_healthy { "READY" } else { "FAILED" };
 
     let matrix = std::env::var("VKS_SDP_CODEC_MATRIX").ok();
     let transcoder = std::env::var("VKS_TRANSCODER_ENABLED").ok();
@@ -280,22 +288,22 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
         "time": crate::state::now_unix_ms() / 1000,
         "sip": {
             "status": sip_status,
-            "connected": sip_healthy,
-            "enable": sip_healthy,
-            "registration": sip_healthy,
+            "connected": sip_connected,
+            "enable": dialer.is_some(),
+            "registration": sip_registered,
             // `sip.account` в эталоне — boolean (isAvailable), не строка.
-            "account": sip_healthy,
+            "account": sip_connected,
             "local_address": ip,
-            "last_error": sip_probe.and_then(|probe| probe.error)
+            "last_error": sip_error
         },
         "h323": {
             "status": h323_status,
-            "connected": h323_healthy,
-            "enable": h323_healthy,
-            "registration": h323_healthy,
-            "account": h323_healthy,
+            "connected": h323_connected,
+            "enable": dialer.is_some(),
+            "registration": h323_registered,
+            "account": h323_connected,
             "local_address": ip,
-            "last_error": h323_probe.and_then(|probe| probe.error)
+            "last_error": h323_error
         },
         "cluster": {
             "status": cluster_status,

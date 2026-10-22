@@ -9,7 +9,7 @@ use tracing::{info, warn};
 
 use vks_admin::hub::ParticipantSnapshot;
 use vks_admin::rooms::Rooms;
-use vks_admin::state::AppState;
+use vks_admin::state::{AppState, OutboundDialer as _};
 use vks_common::Error;
 use vks_core::RoomId;
 use vks_gateway_h323::{H323Call, H323Codec, H323Gateway};
@@ -236,6 +236,14 @@ pub struct GatewayManager {
     candidate_ip: String,
 }
 
+/// Отказ терминала (занят/отклонил) — не отказ шлюза: статус не гасим.
+fn terminal_gateway_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    ["busy here", "486", "603", "decline", "remote_release", "adaptivebusy", "not found", "404"]
+        .iter()
+        .any(|marker| message.contains(marker))
+}
+
 impl Default for GatewayManager {
     fn default() -> Self {
         Self::new()
@@ -281,12 +289,11 @@ impl GatewayManager {
         self
     }
 
-    /// Связывает шлюз со слабым указателем на AppState для устранения циклов ссылок.
     /// Пишет последний результат дозвона в общий AppState для `/ui/system/status`.
-    fn note_gateway_health(&self, protocol: &str, ok: bool, error: Option<String>) {
+    fn note_gateway_health(&self, protocol: &str, ok: bool, terminal: bool, error: Option<String>) {
         if let Some(state) = self.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
         {
-            state.record_gateway_health(protocol, ok, error);
+            state.record_gateway_health(protocol, ok, terminal, error);
         }
     }
 
@@ -795,153 +802,8 @@ fn layout_identifier_has_uuid(value: &str) -> bool {
     })
 }
 
-#[async_trait::async_trait]
-impl vks_admin::state::OutboundDialer for GatewayManager {
-    fn media_stats(&self, participant_id: &str) -> Option<serde_json::Value> {
-        GatewayManager::media_stats(self, participant_id)
-    }
-
-    /// Проводит выбранную PNM-раскладку в MCU: слот → участник.
-    ///
-    /// Из `payload.slots[]` берётся `position` и первый непустой идентификатор
-    /// (`contact_id`, `call_string_id`, `abonent_id`, `connection_id`); он
-    /// нормализуется `parse_participant_id`, чтобы `sip-<uuid>@sip-gateway`
-    /// и голый UUID давали один и тот же `ParticipantId`. Слоты без
-    /// идентификатора/позиции пропускаются (пустые окна сетки).
-    ///
-    /// Идентификатор без UUID (`cs-1`, имя адресной книги) отбрасывается:
-    /// `parse_participant_id` превратил бы его в sha-256 UUIDv5, который
-    /// никогда не совпадёт с реально забридженным участником, — такой слот
-    /// стал бы лишней пустой ячейкой в композите.
-    async fn apply_layout(&self, room_id: RoomId, layout: serde_json::Value) -> Result<(), String> {
-        use vks_core::ports::media_engine::{LayoutDescriptor, LayoutSlot, MediaEngine};
-
-        let Some(mcu) = &self.mcu_engine else {
-            return Ok(());
-        };
-        let layout_id = layout["id"].as_str().filter(|id| !id.is_empty()).unwrap_or("grid").to_string();
-        let version =
-            layout["payload"]["version"].as_u64().and_then(|version| u32::try_from(version).ok()).unwrap_or(1);
-        let Some(slots) = layout["payload"]["slots"].as_array() else {
-            return Ok(());
-        };
-
-        // Явный контракт: `calculate` и `attach_abonent` отдают 1-based
-        // позиции, поэтому по умолчанию вычитаем 1. Для старых 0-based
-        // документов можно прислать `payload.position_base = 0`; inference
-        // по «есть ли ноль» больше нет (он ломал разреженные [2,3]).
-        let position_base = match layout["payload"]["position_base"].as_u64() {
-            Some(0) => 0,
-            Some(1) | None => 1,
-            Some(other) => {
-                tracing::warn!(position_base = other, "unsupported position_base; expected 0 or 1, using 1");
-                1
-            }
-        };
-
-        let mut assignments = std::collections::BTreeMap::new();
-        let mut geometry = Vec::new();
-        for (index, slot) in slots.iter().enumerate() {
-            let Some(position) = slot["position"].as_u64().and_then(|value| u32::try_from(value).ok()) else {
-                continue;
-            };
-            let Some(position) = position.checked_sub(position_base) else {
-                tracing::warn!(
-                    position,
-                    position_base,
-                    "layout slot position is below position_base; skipped (legacy 0-based layouts must send position_base=0)"
-                );
-                continue;
-            };
-            let identifier = ["contact_id", "call_string_id", "abonent_id", "connection_id"]
-                .iter()
-                .filter_map(|key| slot[*key].as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .find(|value| uuid::Uuid::parse_str(value).is_ok() || layout_identifier_has_uuid(value));
-            if let Some(identifier) = identifier {
-                assignments.insert(crate::parse_participant_id(identifier), position);
-            }
-            let number = |key: &str| {
-                slot[key].as_f64().filter(|value| value.is_finite()).map(|value| value.max(0.0).round() as u32)
-            };
-            if let (Some(x), Some(y), Some(width), Some(height)) =
-                (number("x"), number("y"), number("width"), number("height"))
-            {
-                if width > 0 && height > 0 {
-                    geometry.push(LayoutSlot {
-                        slot: position,
-                        x,
-                        y,
-                        width,
-                        height,
-                        z_order: slot["z_order"]
-                            .as_u64()
-                            .and_then(|value| u32::try_from(value).ok())
-                            .unwrap_or(index as u32),
-                    });
-                }
-            }
-        }
-        // Реальные PNM-раскладки хранят только `position`/`role`; геометрия
-        // задаётся `payload.preset` (`preset_equal_25`, `preset_selected_b_4_(2)`…).
-        // Без этого MCU рисовал sqrt-сетку и выбранная схема терялась.
-        let mode = layout["payload"]["mode"].as_str().unwrap_or_default();
-        // AUTO (`mode=="auto"`) оставляет geometry пустой: движок строит сетку
-        // по числу забридженных паблишеров (фиксированные 13 ячеек
-        // `preset_default_13` давали участнику плитку 480×270). Для
-        // manual/dynamic геометрия берётся из `payload.preset`.
-        if geometry.is_empty() && mode != "auto" {
-            let slot_count = assignments.values().copied().max().unwrap_or(0).saturating_add(1);
-            let preset_name = layout["payload"]["preset"].as_str().unwrap_or_default();
-            let preset_size = layout["payload"]["size"].as_u64().and_then(|value| u8::try_from(value).ok());
-            let preset_name = vks_layout::preset::resolve(preset_name, preset_size);
-            let parsed = vks_layout::preset::PresetId::parse(&preset_name)
-                .filter(|preset| u32::from(preset.size) >= slot_count)
-                .unwrap_or_else(|| {
-                    vks_layout::preset::PresetId::equal(u8::try_from(slot_count.clamp(1, 64)).unwrap_or(1))
-                });
-            let overlap_factor = layout["payload"]["overlap_factor"]
-                .as_f64()
-                .filter(|value| value.is_finite() && *value > 0.0)
-                .unwrap_or(1.0);
-            let pip = layout["payload"]["pip"].as_bool().unwrap_or(false);
-            // `geometry_for_manual` сохраняет вендорный z_order (overlap/PiP),
-            // generic `geometry` его не возвращает — для остальных схем z=0.
-            let calculated = vks_layout::preset::geometry_for_manual(&parsed.to_string(), 1920.0, 1080.0)
-                .unwrap_or_else(|| {
-                    vks_layout::preset::geometry(&parsed, 1920.0, 1080.0, overlap_factor, pip)
-                        .into_iter()
-                        .map(|rect| vks_layout::preset::CalculatedSlot { rect, z_order: 0 })
-                        .collect()
-                });
-            for (index, cell) in calculated.iter().enumerate() {
-                geometry.push(LayoutSlot {
-                    slot: index as u32,
-                    x: cell.rect.x.round().max(0.0) as u32,
-                    y: cell.rect.y.round().max(0.0) as u32,
-                    width: cell.rect.width.round().max(1.0) as u32,
-                    height: cell.rect.height.round().max(1.0) as u32,
-                    z_order: u32::from(cell.z_order),
-                });
-            }
-        }
-        if assignments.is_empty() && geometry.is_empty() && mode != "auto" {
-            return Ok(());
-        }
-        geometry.sort_by_key(|cell| cell.slot);
-        // Если MCU-комнаты ещё нет, движок сохранит pending layout и применит
-        // его на первом bridge — пустая SFU-сессия не аллоцирует композит.
-        mcu.apply_layout(room_id, LayoutDescriptor { layout_id, version, assignments, geometry })
-            .await
-            .map_err(|error| format!("MCU layout apply failed: {error}"))
-    }
-
-    async fn dial(&self, room_id: RoomId, uri: &str, display_name: Option<&str>) -> Result<String, String> {
-        self.dial_with_contact(room_id, uri, display_name, None).await
-    }
-
-    async fn dial_with_contact(
+impl GatewayManager {
+    async fn dial_with_contact_inner(
         &self,
         room_id: RoomId,
         uri: &str,
@@ -1042,11 +904,7 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                     h323_video,
                 )
                 .await
-                .map_err(|error| {
-                    let message = format!("H.323 outbound dial failed: {error}");
-                    self.note_gateway_health("h323", false, Some(message.clone()));
-                    message
-                })?;
+                .map_err(|error| format!("H.323 outbound dial failed: {error}"))?;
             setup.h323 = Some(session.clone());
             // H.241 peer limits are authoritative for the encoder: never send
             // above the peer's maxBitRate/level even if the room asks for more.
@@ -1098,12 +956,11 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                 rtp_port,
                 video_pair.as_ref().map(|pair| pair.rtp_port),
             );
-            let session =
-                self.uac_client.dial(trimmed, &offer, std::time::Duration::from_secs(60)).await.map_err(|error| {
-                    let message = format!("SIP outbound dial failed: {error}");
-                    self.note_gateway_health("sip", false, Some(message.clone()));
-                    message
-                })?;
+            let session = self
+                .uac_client
+                .dial(trimmed, &offer, std::time::Duration::from_secs(60))
+                .await
+                .map_err(|error| format!("SIP outbound dial failed: {error}"))?;
             setup.sip = Some(session.clone());
             answer_limits =
                 vks_gateway_sip::video_answer_limits(&session.answer_sdp, session.remote_video_payload_type);
@@ -1129,7 +986,6 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                 session.call_id.clone(),
             )
         };
-        self.note_gateway_health(protocol, true, None);
         if ![0, 8].contains(&audio_payload_type) {
             return Err("Only negotiated PCMU/PCMA audio can be bridged".into());
         }
@@ -1312,6 +1168,175 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         info!(call_id = %call_id, pid = %pid_str, room = %room_id, rtp_port, has_video, protocol = if is_h323 { "H.323" } else { "SIP" }, "Outbound gateway call connected with negotiated media");
         Ok(pid_str)
     }
+}
+
+#[async_trait::async_trait]
+impl vks_admin::state::OutboundDialer for GatewayManager {
+    fn media_stats(&self, participant_id: &str) -> Option<serde_json::Value> {
+        GatewayManager::media_stats(self, participant_id)
+    }
+
+    /// Проводит выбранную PNM-раскладку в MCU: слот → участник.
+    ///
+    /// Из `payload.slots[]` берётся `position` и первый непустой идентификатор
+    /// (`contact_id`, `call_string_id`, `abonent_id`, `connection_id`); он
+    /// нормализуется `parse_participant_id`, чтобы `sip-<uuid>@sip-gateway`
+    /// и голый UUID давали один и тот же `ParticipantId`. Слоты без
+    /// идентификатора/позиции пропускаются (пустые окна сетки).
+    ///
+    /// Идентификатор без UUID (`cs-1`, имя адресной книги) отбрасывается:
+    /// `parse_participant_id` превратил бы его в sha-256 UUIDv5, который
+    /// никогда не совпадёт с реально забридженным участником, — такой слот
+    /// стал бы лишней пустой ячейкой в композите.
+    async fn apply_layout(&self, room_id: RoomId, layout: serde_json::Value) -> Result<(), String> {
+        use vks_core::ports::media_engine::{LayoutDescriptor, LayoutSlot, MediaEngine};
+
+        let Some(mcu) = &self.mcu_engine else {
+            return Ok(());
+        };
+        let layout_id = layout["id"].as_str().filter(|id| !id.is_empty()).unwrap_or("grid").to_string();
+        let version =
+            layout["payload"]["version"].as_u64().and_then(|version| u32::try_from(version).ok()).unwrap_or(1);
+        let Some(slots) = layout["payload"]["slots"].as_array() else {
+            return Ok(());
+        };
+
+        // Явный контракт: `calculate` и `attach_abonent` отдают 1-based
+        // позиции, поэтому по умолчанию вычитаем 1. Для старых 0-based
+        // документов можно прислать `payload.position_base = 0`; inference
+        // по «есть ли ноль» больше нет (он ломал разреженные [2,3]).
+        let position_base = match layout["payload"]["position_base"].as_u64() {
+            Some(0) => 0,
+            Some(1) | None => 1,
+            Some(other) => {
+                tracing::warn!(position_base = other, "unsupported position_base; expected 0 or 1, using 1");
+                1
+            }
+        };
+
+        let mut assignments = std::collections::BTreeMap::new();
+        let mut geometry = Vec::new();
+        for (index, slot) in slots.iter().enumerate() {
+            let Some(position) = slot["position"].as_u64().and_then(|value| u32::try_from(value).ok()) else {
+                continue;
+            };
+            let Some(position) = position.checked_sub(position_base) else {
+                tracing::warn!(
+                    position,
+                    position_base,
+                    "layout slot position is below position_base; skipped (legacy 0-based layouts must send position_base=0)"
+                );
+                continue;
+            };
+            let identifier = ["contact_id", "call_string_id", "abonent_id", "connection_id"]
+                .iter()
+                .filter_map(|key| slot[*key].as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .find(|value| uuid::Uuid::parse_str(value).is_ok() || layout_identifier_has_uuid(value));
+            if let Some(identifier) = identifier {
+                assignments.insert(crate::parse_participant_id(identifier), position);
+            }
+            let number = |key: &str| {
+                slot[key].as_f64().filter(|value| value.is_finite()).map(|value| value.max(0.0).round() as u32)
+            };
+            if let (Some(x), Some(y), Some(width), Some(height)) =
+                (number("x"), number("y"), number("width"), number("height"))
+            {
+                if width > 0 && height > 0 {
+                    geometry.push(LayoutSlot {
+                        slot: position,
+                        x,
+                        y,
+                        width,
+                        height,
+                        z_order: slot["z_order"]
+                            .as_u64()
+                            .and_then(|value| u32::try_from(value).ok())
+                            .unwrap_or(index as u32),
+                    });
+                }
+            }
+        }
+        // Реальные PNM-раскладки хранят только `position`/`role`; геометрия
+        // задаётся `payload.preset` (`preset_equal_25`, `preset_selected_b_4_(2)`…).
+        // Без этого MCU рисовал sqrt-сетку и выбранная схема терялась.
+        let mode = layout["payload"]["mode"].as_str().unwrap_or_default();
+        // AUTO (`mode=="auto"`) оставляет geometry пустой: движок строит сетку
+        // по числу забридженных паблишеров (фиксированные 13 ячеек
+        // `preset_default_13` давали участнику плитку 480×270). Для
+        // manual/dynamic геометрия берётся из `payload.preset`.
+        if geometry.is_empty() && mode != "auto" {
+            let slot_count = assignments.values().copied().max().unwrap_or(0).saturating_add(1);
+            let preset_name = layout["payload"]["preset"].as_str().unwrap_or_default();
+            let preset_size = layout["payload"]["size"].as_u64().and_then(|value| u8::try_from(value).ok());
+            let preset_name = vks_layout::preset::resolve(preset_name, preset_size);
+            let parsed = vks_layout::preset::PresetId::parse(&preset_name)
+                .filter(|preset| u32::from(preset.size) >= slot_count)
+                .unwrap_or_else(|| {
+                    vks_layout::preset::PresetId::equal(u8::try_from(slot_count.clamp(1, 64)).unwrap_or(1))
+                });
+            let overlap_factor = layout["payload"]["overlap_factor"]
+                .as_f64()
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(1.0);
+            let pip = layout["payload"]["pip"].as_bool().unwrap_or(false);
+            // `geometry_for_manual` сохраняет вендорный z_order (overlap/PiP),
+            // generic `geometry` его не возвращает — для остальных схем z=0.
+            let calculated = vks_layout::preset::geometry_for_manual(&parsed.to_string(), 1920.0, 1080.0)
+                .unwrap_or_else(|| {
+                    vks_layout::preset::geometry(&parsed, 1920.0, 1080.0, overlap_factor, pip)
+                        .into_iter()
+                        .map(|rect| vks_layout::preset::CalculatedSlot { rect, z_order: 0 })
+                        .collect()
+                });
+            for (index, cell) in calculated.iter().enumerate() {
+                geometry.push(LayoutSlot {
+                    slot: index as u32,
+                    x: cell.rect.x.round().max(0.0) as u32,
+                    y: cell.rect.y.round().max(0.0) as u32,
+                    width: cell.rect.width.round().max(1.0) as u32,
+                    height: cell.rect.height.round().max(1.0) as u32,
+                    z_order: u32::from(cell.z_order),
+                });
+            }
+        }
+        if assignments.is_empty() && geometry.is_empty() && mode != "auto" {
+            return Ok(());
+        }
+        geometry.sort_by_key(|cell| cell.slot);
+        // Если MCU-комнаты ещё нет, движок сохранит pending layout и применит
+        // его на первом bridge — пустая SFU-сессия не аллоцирует композит.
+        mcu.apply_layout(room_id, LayoutDescriptor { layout_id, version, assignments, geometry })
+            .await
+            .map_err(|error| format!("MCU layout apply failed: {error}"))
+    }
+
+    async fn dial(&self, room_id: RoomId, uri: &str, display_name: Option<&str>) -> Result<String, String> {
+        self.dial_with_contact(room_id, uri, display_name, None).await
+    }
+
+    async fn dial_with_contact(
+        &self,
+        room_id: RoomId,
+        uri: &str,
+        display_name: Option<&str>,
+        contact: Option<&serde_json::Value>,
+    ) -> Result<String, String> {
+        let protocol = if uri.trim().starts_with("h323:") { "h323" } else { "sip" };
+        let result = self.dial_with_contact_inner(room_id, uri, display_name, contact).await;
+        let terminal = result.as_ref().err().is_some_and(|error| terminal_gateway_error(error));
+        self.note_gateway_health(protocol, result.is_ok(), terminal, result.as_ref().err().cloned());
+        result
+    }
+
+    fn gateway_registration(&self, protocol: &str) -> Option<bool> {
+        match protocol {
+            "sip" => self.sip.lock().ok().map(|gateway| gateway.is_registered()),
+            "h323" => self.h323.lock().ok().map(|gateway| gateway.is_registered()),
+            _ => None,
+        }
+    }
 
     fn hangup(&self, participant_id: &str) -> bool {
         let session = {
@@ -1454,6 +1479,16 @@ mod media_runtime_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn terminal_and_transport_gateway_errors_are_classified() {
+        assert!(terminal_gateway_error("SIP outbound dial failed: Call rejected by remote terminal: 486 Busy Here"));
+        assert!(terminal_gateway_error("H.323 outbound dial failed: internal error: H.323: remote_release"));
+        assert!(terminal_gateway_error("603 Decline"));
+        assert!(!terminal_gateway_error("SIP outbound dial failed: connect timeout"));
+        assert!(!terminal_gateway_error("H.323 outbound dial failed: sidecar exited"));
+        assert!(!terminal_gateway_error("No RTP/RTCP port pair is available"));
+    }
 
     #[test]
     fn modal_payload_overrides_only_explicit_video_settings() {

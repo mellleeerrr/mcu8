@@ -167,6 +167,11 @@ pub trait OutboundDialer: Send + Sync {
         false
     }
 
+    /// Реальная регистрация/готовность транспорта шлюза (для system status).
+    fn gateway_registration(&self, _protocol: &str) -> Option<bool> {
+        None
+    }
+
     /// Управляет медиа-потоками абонента (Mute TX/RX, регулировка громкости).
     #[allow(clippy::too_many_arguments)]
     fn set_media_control(
@@ -254,6 +259,8 @@ pub struct AppState {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GatewayHealth {
     pub ok: bool,
+    /// `true` — отказ терминала (busy/decline/remote_release), не шлюза.
+    pub terminal: bool,
     pub error: Option<String>,
     pub checked_at: i64,
 }
@@ -359,21 +366,18 @@ impl AppState {
     }
 
     /// Записывает фактический результат дозвона SIP/H.323 (T11a).
-    pub fn record_gateway_health(&self, protocol: &str, ok: bool, error: Option<String>) {
+    pub fn record_gateway_health(&self, protocol: &str, ok: bool, terminal: bool, error: Option<String>) {
         if let Ok(mut health) = self.gateway_health.lock() {
             health.insert(
                 protocol.to_string(),
-                GatewayHealth { ok, error, checked_at: crate::state::now_unix_ms() as i64 / 1000 },
+                GatewayHealth { ok, terminal, error, checked_at: crate::state::now_unix_ms() as i64 / 1000 },
             );
         }
     }
 
-    /// Последний результат шлюза моложе `ttl_secs`; устаревший — None.
-    pub fn gateway_health(&self, protocol: &str, ttl_secs: i64) -> Option<GatewayHealth> {
-        let now = crate::state::now_unix_ms() as i64 / 1000;
-        self.gateway_health.lock().ok().and_then(|health| {
-            health.get(protocol).filter(|entry| now.saturating_sub(entry.checked_at) <= ttl_secs).cloned()
-        })
+    /// Последний фактический результат шлюза (без TTL-самолечения).
+    pub fn gateway_health(&self, protocol: &str) -> Option<GatewayHealth> {
+        self.gateway_health.lock().ok().and_then(|health| health.get(protocol).cloned())
     }
 
     /// Устанавливает статус здоровья медиа-подсистемы (M0.6 / M6.3).
