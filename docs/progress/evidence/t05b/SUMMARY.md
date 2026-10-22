@@ -13,9 +13,10 @@ live H.323 и per-contact override остаются за T07/T05b-2. Комми�
   остаются default 512 kbps/3.1 для обратной совместимости POC.
 - Sidecar `video_capability(config)` использует переданные значения в TCS и
   OLC; невалидный H.241 level отклоняется до TCP.
-- Тесты: Rust 512→5120, 4096→40960, 30→70, 31→71, 40→80, 49→89? — таблица
-  `70/71/72/80/81/82/90/91`; Python 21 тест, включая custom profile и отказ
-  level=75; Polycom-захваты остаются на дефолтном 5120/71.
+- Тесты: Rust 512→5120, 4096→40960, 30→70, 31→71, 40→80, 45→82; неизвестные
+  level_idc нормализуются вниз до таблицы `70/71/72/80/81/82/90/91`; Python
+  22 теста, включая custom profile, TCS==OLC и отказ level=75;
+  Polycom-захваты остаются на дефолтном 5120/71.
 - **Live-попытка 2026-10-22:** `remote_release` и для 4096/4.0, и для
   дефолтного 512/3.1; это T07-поведение терминала, не регрессия профиля.
   H.323 live-proof не получен, пока терминал не принимает вызов. Диагностика
@@ -27,9 +28,15 @@ live H.323 и per-contact override остаются за T07/T05b-2. Комми�
 - `SfuAnswerProfile.b_as/fmtp/rtcp_fb` теперь применяются только к video
   m-line; audio их не получает.
 - `HandlerConfig.video_bitrate_kbps` (env `VKS_SFU_VIDEO_BITRATE_KBPS`,
-  default 2048, clamp 64..20000) и `with_video_bitrate`; answer объявляет
-  `b=AS` только на video.
-- Тест: audio `b_as=None/fmtp=[]`, video `b_as=Some(2048)/fmtp` есть.
+  default 2048, clamp 64..20000 в конструкторе и в `answer_profile`) и
+  `with_video_bitrate`; answer объявляет `b=AS` только на video.
+- Тесты: audio `b_as=None/fmtp=[]`, video `b_as=Some(2048)/fmtp` есть;
+  clamp 0→64 и 100000→20000.
+
+## Гейты
+`cargo test --workspace --all-targets --no-fail-fast` — **1025 passed / 0
+failed / 6 ignored**; `clippy -D warnings` и `fmt --check` чисто; Python
+sidecar 22/22 OK.
 
 ## Ограничения / следующие шаги
 - SFU: нет per-room инъекции (env глобальный), H.264 отсутствует в

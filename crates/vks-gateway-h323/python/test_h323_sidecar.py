@@ -237,6 +237,25 @@ class ContractTests(unittest.TestCase):
                 'video_h264_level': 75,
             })
 
+    def test_tcs_and_olc_use_the_same_configured_h241_capability(self):
+        call = h.Call(h.Configuration.load({
+            'target_ip': '192.168.1.132', 'local_ip': '192.168.1.93',
+            'audio_port': 41002, 'video_port': 41004, 'timeout_seconds': 30,
+            'call_id': '00010203-0405-0607-0809-0a0b0c0d0e0f', 'call_ref': 1,
+            'video_max_bitrate_100bps': 40960, 'video_h264_level': 80,
+        }))
+        tcs = call.capability_set()
+        video = next(e['capability'] for e in tcs['capabilityTable']
+                     if e['capability'][0] == 'receiveAndTransmitVideoCapability')
+        sent = []
+        call.send_control = lambda value: sent.append(value)
+        call.open_outgoing(2, 'video', 41004)
+        olc = sent[0][1][1]['forwardLogicalChannelParameters']['dataType']
+        self.assertEqual(video[1][1]['maxBitRate'], olc[1][1]['maxBitRate'])
+        self.assertEqual(video[1][1]['collapsing'], olc[1][1]['collapsing'])
+        self.assertEqual(olc[1][1]['maxBitRate'], 40960)
+        self.assertEqual(olc[1][1]['collapsing'][1]['parameterValue'][1], 80)
+
     def test_video_capability_uses_live_profile_limits(self):
         config = h.Configuration.load({
             'target_ip': '192.168.1.132', 'local_ip': '192.168.1.93',

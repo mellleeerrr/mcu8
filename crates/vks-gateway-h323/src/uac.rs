@@ -153,7 +153,12 @@ impl Default for H323VideoProfile {
 
 impl H323VideoProfile {
     fn h241_level(self) -> u32 {
-        u32::from(self.level_idc.clamp(30, 51)) + 40
+        // Only the H.264 levels that have a defined H.241 generic value:
+        // 3.0/3.1/3.2/4.0/4.1/4.2/5.0/5.1. Unknown values are normalized down
+        // to the nearest supported level so Rust and the sidecar cannot drift.
+        const LEVELS: [u8; 8] = [30, 31, 32, 40, 41, 42, 50, 51];
+        let idc = LEVELS.iter().rev().find(|&&level| level <= self.level_idc).copied().unwrap_or(30);
+        u32::from(idc) + 40
     }
 
     fn max_bitrate_100bps(self) -> u32 {
@@ -524,6 +529,8 @@ mod tests {
         assert_eq!(H323VideoProfile { max_bitrate_kbps: 0, level_idc: 1 }.max_bitrate_100bps(), 1);
         assert_eq!(H323VideoProfile { max_bitrate_kbps: 999_999, level_idc: 99 }.h241_level(), 91);
         assert_eq!(H323VideoProfile { max_bitrate_kbps: 2048, level_idc: 30 }.h241_level(), 70);
+        assert_eq!(H323VideoProfile { max_bitrate_kbps: 2048, level_idc: 35 }.h241_level(), 72);
+        assert_eq!(H323VideoProfile { max_bitrate_kbps: 2048, level_idc: 45 }.h241_level(), 82);
     }
 
     fn python(code: &str) -> Command {

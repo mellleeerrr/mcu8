@@ -74,7 +74,8 @@ impl HandlerConfig {
             video_bitrate_kbps: std::env::var("VKS_SFU_VIDEO_BITRATE_KBPS")
                 .ok()
                 .and_then(|value| value.parse().ok())
-                .unwrap_or(2048),
+                .unwrap_or(2048)
+                .clamp(64, 20_000),
         }
     }
 
@@ -147,7 +148,7 @@ impl HandlerConfig {
                 typ: "host".into(),
             },
             fingerprint: self.fingerprint.clone(),
-            b_as: Some(self.video_bitrate_kbps),
+            b_as: Some(self.video_bitrate_kbps.clamp(64, 20_000)),
             fmtp: Vec::new(),
             rtcp_fb: vec![
                 "96 nack".into(),
@@ -632,5 +633,17 @@ mod tests {
         let resp = handler.handle(ice_failed);
         assert_ne!(handler.state(), SessionState::MediaActive);
         assert!(matches!(resp[0].payload(), Some(Payload::Error(e)) if e.code == "ice_failed"));
+    }
+
+    #[test]
+    fn sfu_video_bitrate_is_clamped_in_constructor_and_answer() {
+        let mut low = HandlerConfig::default_test();
+        low.video_bitrate_kbps = 0;
+        assert_eq!(low.answer_profile().b_as, Some(64));
+        let mut high = HandlerConfig::default_test();
+        high.video_bitrate_kbps = 100_000;
+        assert_eq!(high.answer_profile().b_as, Some(20_000));
+        let configured = HandlerConfig::default_test().with_video_bitrate(4096);
+        assert_eq!(configured.answer_profile().b_as, Some(4096));
     }
 }

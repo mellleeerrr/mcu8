@@ -305,9 +305,9 @@ pcap) ≈4 Mbps; с 640×360/512 — меньше. Тест на парсинг 
 `b=AS:4096;max-fs=8160;max-mbps=244800;profile-level-id=42c028`, live tx
 4.02 Mbps; low: `b=AS:512;max-fs=920`, live tx 0.61 Mbps; E2E 108/108 оба
 профиля. H.323 H.241/SFU `b=AS` — T05b:
-H.323 H.241 maxBitRate/level из VideoProfile и per-media `b=AS` закрыты
+H.323 H.241 maxBitRate/level из VideoProfile и per-media `b=AS` — **part 1**
 (`7b05905`/`68da633`); live H.323 (`remote_release` даже на default) и
-per-room SFU/override остаются T07/T05b-2.
+per-room SFU/override — T07/T05b-2, T05b не закрывать до них.
 
 ---
 
