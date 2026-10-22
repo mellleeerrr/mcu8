@@ -16,6 +16,7 @@ pub mod metrics;
 pub mod qoe;
 pub mod ratelimit;
 pub mod slo;
+pub mod text;
 pub mod tracing;
 pub mod uri;
 
@@ -25,6 +26,7 @@ pub use error::{is_terminal_failure, strip_terminal_failure, terminal_failure, E
 pub use qoe::{QoeAggregator, QoeReport, MOS_THRESHOLD, QOE_SLO_PCT, RTT_P95_MAX_MS};
 pub use ratelimit::{RateLimiter, ADMIN_PER_MIN, WS_FRAME_MAX_BYTES};
 pub use slo::{SloEvaluator, SloResult, SloTarget};
+pub use text::{sanitize_label, sanitize_label_or, LABEL_MAX_CHARS};
 pub use uri::canonical_uri;
 
 /// Тип-алиас для результата с единым `Error`.

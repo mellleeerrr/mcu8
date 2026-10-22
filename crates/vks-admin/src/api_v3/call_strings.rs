@@ -517,7 +517,7 @@ pub async fn create_conference_call_string(
     let cs_id = body.id.unwrap_or_else(|| format!("cs-{}", Uuid::new_v4()));
     let now = now_unix_sec();
 
-    let display_name = body.display_name.clone().unwrap_or_else(|| raw_uri.to_string());
+    let display_name = vks_common::sanitize_label_or(body.display_name.as_deref().unwrap_or_default(), raw_uri);
     let payload = default_contact_payload(body.payload.as_ref());
     let record = json!({"id":cs_id,"contact_id":cs_id,"call_string_id":cs_id,
         "contact_type":"call_strings","display_name":display_name,"created_at":now,
@@ -646,7 +646,7 @@ pub async fn create_session_call_string(
         return validation_error("invalid.uri", "uri");
     }
     let uri = canonical_uri(raw_uri);
-    let display_name = body.display_name.unwrap_or_else(|| raw_uri.to_string());
+    let display_name = vks_common::sanitize_label_or(body.display_name.as_deref().unwrap_or_default(), raw_uri);
     let cs_id = body.id.unwrap_or_else(|| format!("cs-{}", Uuid::new_v4()));
     let now = now_unix_sec();
 
@@ -705,7 +705,7 @@ pub async fn create_session_call_string_standby(
         return validation_error("invalid.uri", "uri");
     }
     let uri = canonical_uri(raw_uri);
-    let display_name = body.display_name.unwrap_or_else(|| raw_uri.to_string());
+    let display_name = vks_common::sanitize_label_or(body.display_name.as_deref().unwrap_or_default(), raw_uri);
     let cs_id = body.id.unwrap_or_else(|| format!("cs-{}", Uuid::new_v4()));
     let now = now_unix_sec();
 
@@ -1065,8 +1065,11 @@ fn address_fields(body: &Value) -> Result<(String, String, Option<Value>), (&'st
             return Err(("payload protocol options must be an object", "payload"));
         }
     }
-    let display_name =
-        body["display_name"].as_str().map(str::trim).filter(|value| !value.is_empty()).unwrap_or(address).to_string();
+    let display_name = body["display_name"]
+        .as_str()
+        .map(vks_common::sanitize_label)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| address.to_string());
     Ok((uri, display_name, payload))
 }
 
@@ -1083,7 +1086,7 @@ pub async fn create_call_string(
         return validation_error("body must be an object", "body");
     }
     let explicit_display_name =
-        body["display_name"].as_str().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
+        body["display_name"].as_str().map(vks_common::sanitize_label).filter(|value| !value.is_empty());
     let (uri, fallback_display_name, patch) = match address_fields(&body) {
         Ok(values) => values,
         Err((reason, position)) => return validation_error(reason, position),

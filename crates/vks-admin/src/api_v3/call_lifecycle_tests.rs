@@ -535,3 +535,27 @@ async fn invite_global_address_requires_global_read_scope() {
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn call_string_display_name_has_no_emoji_and_keeps_uri_fallback() {
+    let state = Arc::new(AppState::new());
+    let auth = operator_auth(Role::Operator);
+    let created = create_call_string(
+        State(state.clone()),
+        Extension(auth.clone()),
+        Json(json!({"uri": "sip:10.9.9.9", "display_name": "  Зал 132 🎤  "})),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let body = response_json(created).await;
+    assert_eq!(body["call_string"]["display_name"], "Зал 132", "emoji/лишние пробелы вычищены");
+
+    let fallback = create_call_string(
+        State(state.clone()),
+        Extension(auth),
+        Json(json!({"uri": "sip:10.9.9.10", "display_name": "🔥🔥"})),
+    )
+    .await;
+    assert_eq!(fallback.status(), StatusCode::CREATED);
+    assert_eq!(response_json(fallback).await["call_string"]["display_name"], "10.9.9.10");
+}

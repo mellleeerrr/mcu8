@@ -267,12 +267,7 @@ fn default_audio_payload() -> Value {
 /// Гигиена названия раскладки: без emoji/пиктограмм/управляющих символов,
 /// одиночные пробелы, максимум 64 символа. UI рисует это имя по центру ячейки.
 fn sanitize_layout_label(value: &str) -> String {
-    let cleaned: String = value
-        .chars()
-        .filter(|ch| ch.is_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.' | '(' | ')' | '/' | '+' | '#'))
-        .collect();
-    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed.chars().take(64).collect()
+    vks_common::sanitize_label(value)
 }
 
 fn sanitize_layout_record(record: &mut Value) {
