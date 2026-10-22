@@ -57,10 +57,33 @@ pub async fn init() -> Result<(), String> {
         }
     };
 
+    if let Some(capabilities) = &capabilities {
+        publish_support(capabilities);
+    }
     let _ = CAPABILITIES.set(capabilities);
     let _ = POOL.set(WorkerPool::new(max_workers));
+    vks_common::metrics::CODEC_WORKER_POOL_SIZE.set(i64::try_from(max_workers).unwrap_or(i64::MAX));
     info!(max_workers, "codec worker pool initialized");
     Ok(())
+}
+
+fn publish_support(capabilities: &FfmpegCapabilities) {
+    use vks_common::metrics::CODEC_WORKER_SUPPORTED;
+    for (codec, decode, encode) in [
+        ("aac", capabilities.has_audio_decoder(AudioCodec::Aac), capabilities.has_audio_encoder(AudioCodec::Aac)),
+        (
+            "aac_latm",
+            capabilities.has_audio_decoder(AudioCodec::AacLatm),
+            capabilities.has_audio_encoder(AudioCodec::AacLatm),
+        ),
+        ("g729", capabilities.has_audio_decoder(AudioCodec::G729), false),
+        ("h261", capabilities.has_video_decoder(VideoCodec::H261), capabilities.has_video_encoder(VideoCodec::H261)),
+        ("h263", capabilities.has_video_decoder(VideoCodec::H263), capabilities.has_video_encoder(VideoCodec::H263)),
+        ("h265", capabilities.has_video_decoder(VideoCodec::H265), capabilities.has_video_encoder(VideoCodec::H265)),
+    ] {
+        CODEC_WORKER_SUPPORTED.with_label_values(&[codec, "decode"]).set(i64::from(decode));
+        CODEC_WORKER_SUPPORTED.with_label_values(&[codec, "encode"]).set(i64::from(encode));
+    }
 }
 
 /// Probed capabilities, if FFmpeg was available at startup.

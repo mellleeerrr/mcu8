@@ -80,6 +80,26 @@ pub static WEBRTC_FALLBACK: LazyLock<IntCounterVec> = LazyLock::new(|| {
         .expect("vks_webrtc_fallback_total must register once")
 });
 
+/// Gauge: host codec-worker capability per codec/direction (1 = available).
+///
+/// Labels: `codec` (`aac`, `aac_latm`, `g729`, `h261`, `h263`, `h265`) and
+/// `direction` (`decode`, `encode`). The gateway's SDP policy remains native
+/// until the RTP bridge for a codec exists; this gauge only reports the probe.
+pub static CODEC_WORKER_SUPPORTED: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        "vks_codec_worker_supported",
+        "Host codec worker support (1 available, 0 absent)",
+        &["codec", "direction"]
+    )
+    .expect("vks_codec_worker_supported must register once")
+});
+
+/// Gauge: host-wide codec worker process budget.
+pub static CODEC_WORKER_POOL_SIZE: LazyLock<prometheus::IntGauge> = LazyLock::new(|| {
+    prometheus::register_int_gauge!("vks_codec_worker_pool_size", "Configured codec worker process cap")
+        .expect("vks_codec_worker_pool_size must register once")
+});
+
 /// Gauge: задержка сигнала в комнате в миллисекундах (label: room_id).
 /// Обновляется по последнему измерению signal round-trip в комнате.
 pub static ROOM_SIGNAL_LATENCY_MS: LazyLock<IntGaugeVec> = LazyLock::new(|| {
@@ -151,6 +171,12 @@ pub fn init_default() {
         }
         WEBRTC_FRAMES_DROPPED.with_label_values(&["queue_full"]);
         WEBRTC_FALLBACK.with_label_values(&["disabled"]);
+        for codec in ["aac", "aac_latm", "g729", "h261", "h263", "h265"] {
+            for direction in ["decode", "encode"] {
+                CODEC_WORKER_SUPPORTED.with_label_values(&[codec, direction]).set(0);
+            }
+        }
+        CODEC_WORKER_POOL_SIZE.set(0);
     });
 }
 
@@ -179,6 +205,25 @@ pub fn new_registry() -> Registry {
             .expect("IntCounterVec::new vks_signaling_messages_total"),
         ),
         "vks_signaling_messages_total",
+    );
+    register(
+        &mut registry,
+        Box::new(
+            prometheus::IntGaugeVec::new(
+                Opts::new("vks_codec_worker_supported", "Host codec worker support (1 available, 0 absent)"),
+                &["codec", "direction"],
+            )
+            .expect("IntGaugeVec::new vks_codec_worker_supported"),
+        ),
+        "vks_codec_worker_supported",
+    );
+    register(
+        &mut registry,
+        Box::new(
+            prometheus::IntGauge::new("vks_codec_worker_pool_size", "Configured codec worker process cap")
+                .expect("IntGauge::new vks_codec_worker_pool_size"),
+        ),
+        "vks_codec_worker_pool_size",
     );
     register(
         &mut registry,
@@ -378,6 +423,15 @@ mod tests {
         SIGNALING_MESSAGES.with_label_values(&["uplink"]).inc();
         let text = encode();
         assert!(text.contains("vks_signaling_messages_total"));
+    }
+
+    #[test]
+    fn codec_worker_metrics_are_registered() {
+        init_default();
+        let text = encode();
+        for name in ["vks_codec_worker_supported", "vks_codec_worker_pool_size"] {
+            assert!(text.contains(name), "missing {name} in /metrics output");
+        }
     }
 
     #[test]

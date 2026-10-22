@@ -40,8 +40,10 @@
 - дочерний процесс не содержит `VKS_` в `/proc/<pid>/environ`, restart меняет pid.
 
 Сервер при старте вызывает `transcoder_runtime::init()`: probe и пул
-инициализируются, capability логируются. `VKS_TRANSCODER_REQUIRED=1` делает
-неудачный probe фатальным (exit 78), по умолчанию сервис остаётся на native.
+инициализируются, capability логируются и публикуются в `/metrics` как
+`vks_codec_worker_supported{codec,direction}` и `vks_codec_worker_pool_size`.
+`VKS_TRANSCODER_REQUIRED=1` делает неудачный probe фатальным (exit 78), по
+умолчанию сервис остаётся на native.
 
 ## Честные границы
 
