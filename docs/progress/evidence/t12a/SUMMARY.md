@@ -9,7 +9,7 @@
   последовательности, keycap-базы (`1️⃣` → пусто), управляющие и bidi/format-
   символы; **сохраняет** буквы любого алфавита, combining marks (NFD-кириллица),
   цифры и типографскую пунктуацию (`— «» № % & ! ?`); схлопывает пробелы,
-  обрезает до 128 символов без хвостового пробела и без разрыва combining-кластера.
+  обрезает до 128 символов без хвостового пробела; на границе не оставляет ни combining mark без базы, ни базу с отрезанным mark.
 - `sanitize_label_or(raw, fallback)` — пустое/всё-emoji имя заменяется fallback.
 - `resources::sanitize_layout_label` делегирует в общий helper (раньше был
   локальный allowlist, резавший `—`, `«»`, `%`).
@@ -32,7 +32,7 @@ POST /api/v3/call_strings {"uri":"sip:10.77.77.77","display_name":"  Тест �
 
 ```text
 cargo test --workspace --all-targets --no-fail-fast
-1058 passed / 0 failed / 6 ignored
+1059 passed / 0 failed / 6 ignored
 cargo clippy --workspace --all-targets -- -D warnings   clean
 cargo fmt --all -- --check                              clean
 ```

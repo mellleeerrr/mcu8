@@ -6,7 +6,7 @@
 //! Политика — **denylist emoji/пиктограмм и format-контролов**, а не allowlist:
 //! буквы любого алфавита, combining marks (NFD-кириллица, деванагари, арабика),
 //! цифры, типографская пунктуация (`— «» № % & ! ?`) сохраняются. Длина
-//! ограничена 64 символами; обрезка не оставляет хвостовой пробел и не рвёт
+//! ограничена 128 символами; обрезка не оставляет хвостовой пробел и не рвёт
 //! combining-кластер посередине.
 
 /// Максимальная длина подписи в символах.
@@ -30,10 +30,16 @@ pub fn sanitize_label(raw: &str) -> String {
         out.push(ch);
     }
     let collapsed = out.iter().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ");
-    let cut = collapsed.chars().count() > LABEL_MAX_CHARS;
-    let mut truncated: Vec<char> = collapsed.chars().take(LABEL_MAX_CHARS).collect();
+    let all: Vec<char> = collapsed.chars().collect();
+    let cut = all.len() > LABEL_MAX_CHARS;
+    let mut truncated: Vec<char> = all.iter().take(LABEL_MAX_CHARS).copied().collect();
     if cut {
+        // Не оставляем combining marks без базы и не оставляем базу, у которой
+        // mark попал за границу: оба случая — разрыв кластера.
         while truncated.last().is_some_and(|ch| is_combining_mark(*ch)) {
+            truncated.pop();
+        }
+        if all.get(truncated.len()).is_some_and(|ch| is_combining_mark(*ch)) {
             truncated.pop();
         }
     }
@@ -119,11 +125,18 @@ mod tests {
         assert_eq!(sanitize_label(&once), once);
         let long = "Ж".repeat(200);
         assert_eq!(sanitize_label(&long).chars().count(), LABEL_MAX_CHARS);
-        // Обрезка не оставляет trailing space и не рвёт combining-кластер.
-        let cut = format!("{} и\u{0306}", "Ж".repeat(63));
-        let cleaned = sanitize_label(&cut);
+        // Граница 128: `127 Ж + и + U+0306` (129 символов) не должна оставить
+        // `127 Ж + и` — база без своего combining-mark тоже разрыв кластера.
+        let boundary = format!("{}и\u{0306}", "Ж".repeat(LABEL_MAX_CHARS - 1));
+        assert!(boundary.chars().count() > LABEL_MAX_CHARS);
+        let cleaned = sanitize_label(&boundary);
+        assert_eq!(cleaned.chars().count(), LABEL_MAX_CHARS - 1, "база с отрезанным mark тоже отбрасывается");
+        assert!(!cleaned.contains('и'));
         assert_eq!(sanitize_label(&cleaned), cleaned);
         assert!(!cleaned.ends_with(char::is_whitespace));
+        // Кластер целиком помещается — mark сохраняется.
+        let fits = format!("{}и\u{0306}", "Ж".repeat(LABEL_MAX_CHARS - 2));
+        assert_eq!(sanitize_label(&fits), fits);
     }
 
     #[test]
