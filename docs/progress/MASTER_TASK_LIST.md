@@ -56,6 +56,15 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > durable unique index `call_strings`, перенос addresses/directory из document,
 > миграция history `contact_id`, drop пустых legacy-таблиц.
 >
+> **T12a (подписи без emoji/стикеров) закрыт:** `a4629a4`, ревью **9.5/10 APPROVED**
+> (`layout-ui`). Единый denylist-санитайзер `vks-common::text` (кириллица/combining/
+> типографика сохраняются, emoji/флаги/ZWJ/keycap/bidi/control удаляются,
+> grapheme-safe лимит 128); санитизируется только явный `display_name` на
+> write-boundary, raw identity/URI/history/audit/slot не перезаписываются;
+> PATCH без имени сохраняет raw-имя; live POST с emoji → очищено, URI не изменён;
+> 1059/0, clippy/fmt чисто. **T12b** (CSS-центр подписи, previews, лишние
+> codec-запросы) — открыта.
+>
 > Правило цикла: перед задачей — агент «подводные камни»; после реализации — параллельное
 > code-review (оценка /10, обязательные правки); цикл не закрывается, пока хотя бы один
 > независимый ревьюер не поставит **≥9.5/10**. Затем — агент «условия задачи/элегантность»

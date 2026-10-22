@@ -484,6 +484,14 @@ H.323 — FAILED, а не READY.
 
 ## T12. UI: поллинг, превью, подписи (P2)
 
+> **T12a (подписи без emoji) закрыт 2026-10-22, 9.5/10 APPROVED (`layout-ui`), HEAD `a4629a4`.**
+> Единый denylist-санитайзер в `vks-common::text`: сохраняет кириллицу/combining/
+> типографику, убирает emoji/флаги/ZWJ/keycap/bidi/control, grapheme-safe лимит 128;
+> санитизируется только явный `display_name` на write-boundary, raw identity/URI/
+> history/audit/slot не перезаписываются; PATCH без имени сохраняет raw-имя.
+> Evidence `docs/progress/evidence/t12a/`. **T12b** (CSS-центр, previews, лишние
+> codec-запросы) остаётся открытой.
+
 **Проблема.** 1550×2 запросов codecs за 79 с; `GET /api/v3/abonents/previews`
 сейчас **200 с пустым списком** (кнопка мертва, не 501); вертикальный центр
 подписи для 25 окон dy=18.7; emoji в именах.
