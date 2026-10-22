@@ -38,4 +38,4 @@ Legacy UI/API regression at the same HEAD: `tests/e2e/live.js` 233/233,
 `/ws` or RTCPeerConnection and is cited only as UI/API regression evidence.
 
 Files: `result.json`, `alice-offer.sdp`, `alice-answer.sdp`, `bob-offer.sdp`,
-`bob-answer.sdp`, `metrics.txt`, `server-log-tail.txt`, `*-connected.png`.
+`bob-answer.sdp`, `metrics.txt`, `server-log-tail.txt.

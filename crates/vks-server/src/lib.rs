@@ -286,7 +286,8 @@ async fn ws_handler(
         let (scheme, token) = h.split_once(' ')?;
         (scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty()).then(|| token.trim())
     });
-    let bearer = bearer.or_else(|| query.token.as_deref().map(str::trim).filter(|token| !token.is_empty()));
+    let query_token = query.token.as_deref().map(str::trim).filter(|token| !token.is_empty());
+    let bearer = bearer.or(query_token);
     let Some(token) = bearer else {
         return ws_error(
             StatusCode::UNAUTHORIZED,
@@ -294,6 +295,24 @@ async fn ws_handler(
             "missing or invalid Authorization header or ?token= query parameter",
         );
     };
+    if query_token.is_some() {
+        // A query token is the browser-compatible path; browsers send Origin.
+        // Reject cross-site WebSocket hijacking unless explicitly allowlisted.
+        if let Some(origin) = headers.get(header::ORIGIN).and_then(|value| value.to_str().ok()) {
+            let authority = origin
+                .strip_prefix("http://")
+                .or_else(|| origin.strip_prefix("https://"))
+                .unwrap_or(origin)
+                .trim_end_matches('/');
+            let host = headers.get(header::HOST).and_then(|value| value.to_str().ok()).unwrap_or_default();
+            let allowlisted = std::env::var("VKS_WS_ORIGIN_ALLOW")
+                .ok()
+                .is_some_and(|list| list.split(',').map(str::trim).any(|entry| entry == origin || entry == authority));
+            if !allowlisted && !authority.eq_ignore_ascii_case(host) {
+                return ws_error(StatusCode::FORBIDDEN, "forbidden", "WebSocket Origin is not allowed");
+            }
+        }
+    }
     let Some(verified) = ctx.state.verify_token(token) else {
         tracing::debug!("ws jwt verification failed or token revoked");
         return ws_error(StatusCode::UNAUTHORIZED, "unauthorized", "invalid, expired, or revoked token");
@@ -692,6 +711,18 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                 });
                                 let mut webrtc_failure: Option<(&'static str, String)> = None;
                                 let mut replies = handler.handle(env);
+                                // Per-room/global runtime mode can differ from
+                                // the startup default; resolve it at offer time.
+                                let effective_room_mode = state
+                                    .mode
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mode| {
+                                        current_membership
+                                            .as_ref()
+                                            .map(|membership| mode.effective_mode(&membership.room_id))
+                                    })
+                                    .unwrap_or(vks_core::RoomMode::Sfu);
 
                                 // Real WebRTC transport: replace the legacy hand-built
                                 // answer before it is sent. If the transport is enabled
@@ -707,7 +738,18 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             vks_common::metrics::WEBRTC_FALLBACK
                                                 .with_label_values(&["legacy_offer"])
                                                 .inc();
-                                        } else if handler_config.room_mode == vks_proto::media::RoomMode::Mcu as i32 {
+                                            if crate::webrtc_runtime::enabled() {
+                                                // Enabled transport is authoritative: a
+                                                // non-ICE offer would receive fake DTLS
+                                                // credentials, so reject it instead.
+                                                real_webrtc_attempted = true;
+                                                webrtc_failure = Some((
+                                                    "webrtc_offer_unsupported",
+                                                    "WebRTC transport is enabled; SDP offer has no ICE/DTLS material"
+                                                        .to_string(),
+                                                ));
+                                            }
+                                        } else if effective_room_mode == vks_core::RoomMode::Mcu {
                                             real_webrtc_attempted = true;
                                             webrtc_failure = Some((
                                                 "webrtc_mcu_room_unsupported",
@@ -765,10 +807,12 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                         %error,
                                                         "WebRTC: real transport rejected offer"
                                                     );
-                                                    let code = if matches!(error, vks_media_sfu::WebRtcError::RoomFull) {
-                                                        "room_full"
-                                                    } else {
-                                                        "webrtc_offer_rejected"
+                                                    let code = match error {
+                                                        vks_media_sfu::WebRtcError::RoomFull => "room_full",
+                                                        vks_media_sfu::WebRtcError::CapacityExceeded => {
+                                                            "webrtc_capacity"
+                                                        }
+                                                        _ => "webrtc_offer_rejected",
                                                     };
                                                     webrtc_failure = Some((
                                                         code,

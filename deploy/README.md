@@ -60,6 +60,7 @@ legacy SDP answer remains in place unless it is explicitly enabled:
 VKS_WEBRTC_TRANSPORT=1
 VKS_WEBRTC_PORT_MIN=43000
 VKS_WEBRTC_PORT_MAX=43100
+VKS_WEBRTC_MAX_PEERS=256
 ```
 
 `candidate_addr` must be the address browsers can reach; startup preflight

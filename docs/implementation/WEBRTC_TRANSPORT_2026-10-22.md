@@ -32,9 +32,9 @@
    `VKS_WEBRTC_TRANSPORT=0|false|off|no` — единственный путь к legacy-SDP.
    Для реального пира сервер **не** регистрирует plaintext-endpoint/SSRC/PT
    в `SfuEngine` и очищает ранее зарегистрированный endpoint/reverse-map.
-4. Подписка обязательна: `SubscribeRequest` (в proto добавлено
-   `bool audio_only = 5`) сохраняется даже до SDP-оффера и задаёт
-   `(audio, video)`; audio-only пир не получает видео. `max_bitrate_bps`
+4. `SubscribeRequest` (в proto добавлено `bool audio_only = 5`) сохраняется
+   даже до SDP-оффера и задаёт `(audio, video)`; без явной подписки новый пир
+   получает `(true, true)` для совместимости, audio-only пир не получает видео. `max_bitrate_bps`
    ограничивает BWE-потолок подписчика. `Unsubscribe` отключает оба потока. `Join`/`Connected` и переполнение очереди
    запрашивают keyframe у публишера; `Event::KeyframeRequest` от
    подписчика уходит публишеру через `Writer::request_keyframe`.
@@ -45,15 +45,19 @@
    `set_desired_bitrate`, пейсер str0m ограничивает отправку; NACK/RTX,
    jitter buffer и pacing — внутри str0m.
 7. Ёмкость: не более **2** реальных WebRTC-пиров на комнату
-   (`MAX_PEERS_PER_ROOM`). Третий оффер получает явную ошибку
+   (`MAX_PEERS_PER_ROOM`) и `VKS_WEBRTC_MAX_PEERS` (по умолчанию 256) на
+   процесс; глобальный лимит проверяется и для пустой комнаты. Третий оффер получает явную ошибку
    `room_full`, а не молчаливое смешивание двух RTP-часовых доменов в один
    mid. Re-offer атомарно заменяет поколение пира; задача старого
    поколения не может удалить новую запись.
 8. Отказ закрытый: если транспорт включён и str0m отверг оффер, сервер
    возвращает `Payload::Error` (`webrtc_offer_rejected`), а не поддельный
-   legacy-SDP с `FF:00:11`. В комнате с SIP/H.323-участником реальный
-   браузерный WebRTC отклоняется (`webrtc_gateway_room_unsupported`), пока
-   нет моста plaintext↔SRTP.
+   legacy-SDP с `FF:00:11`; оффер без ICE/DTLS-материала при включённом
+   транспорте также отклоняется (`webrtc_offer_unsupported`). Legacy-SDP
+   остаётся только при явном `VKS_WEBRTC_TRANSPORT=0|false|off|no`. В комнате
+   с SIP/H.323-участником реальный браузерный WebRTC отклоняется
+   (`webrtc_gateway_room_unsupported`), а шлюз не приземляется в комнату с
+   реальным пиром; моста plaintext↔SRTP нет.
 9. Наблюдаемость: `vks_webrtc_peers`, `vks_webrtc_offers_total`,
    `vks_webrtc_ice_failures_total`, `vks_webrtc_frames_dropped_total`,
    `vks_webrtc_fallback_total`; состояния ICE/Connected и ошибки таймеров
@@ -68,14 +72,18 @@
   preflight проверяет `candidate_addr`, оба порта диапазона и bind; ошибка —
   exit 78, а не тихий откат на фиктивный SDP.
 - `VKS_WEBRTC_BWE_INITIAL_BPS` — стартовая оценка BWE (64 kbit/s..50 Mbit/s).
+- `VKS_WEBRTC_MAX_PEERS` — глобальный лимит реальных пиров процесса
+  (по умолчанию 256); исчерпание даёт `webrtc_capacity` с `retryable=true`.
 - `VKS_WEBRTC_PORT_MIN`/`VKS_WEBRTC_PORT_MAX` — UDP-диапазон для пиров;
   пусто = эфемерные порты. На стенде `43000..43100`.
 - `VKS_ALLOW_LOOPBACK_MEDIA=1` разрешает loopback `candidate_addr` для
-  локальных тестов; без него выводится предупреждение.
+  локальных тестов; без него стартовый preflight завершает процесс с exit 78.
 - Кандидат берётся из `HandlerConfig.candidate_addr` (`192.168.1.93` на
   стенде); IPv6-кандидат биндит `::`. Браузерный вход в signalling — `/ws`
   с `Authorization: Bearer` или `?token=<JWT>` (браузерный WebSocket не умеет
   заголовки); UI пока не подключён, единственный клиент — `tests/e2e/webrtc.js`.
+- `/readyz` проверяет БД/media/шлюзы; WebRTC-транспорт валидируется
+  стартовым preflight (exit 78), а не отдельным полем readiness.
 - Для внешнего развёртывания нужен открытый UDP-диапазон и
   `candidate_addr`, доступный клиентам. ICE-lite не собирает relay-
   кандидаты, поэтому TURN должен быть на стороне клиента; это ограничение
@@ -111,4 +119,4 @@ audio/video `bytesReceived > 0`, `framesDecoded` 189/191,
   SIP/H.323-участником: при попытке такой комбинации обе стороны получают
   явный отказ, а не half-bridged «тишину».
 - Порт-диапазон/файрвол и TURN не автоматизированы; на стенде работает
-  host-кандидат `192.168.1.93:<ephemeral>`.
+  host-кандидат `192.168.1.93:43000/43001` из диапазона 43000–43100.

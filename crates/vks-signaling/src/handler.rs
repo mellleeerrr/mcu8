@@ -389,7 +389,6 @@ impl SignalingHandler {
     }
 
     fn on_ice_complete(&mut self, c: &ProtoIceComplete, reply_to: u64) -> Vec<Envelope> {
-        self.pre_offer_state = None;
         if self.session.state() != SessionState::Negotiating {
             let state = self.session.state();
             return vec![Envelope::error_reply(
@@ -400,8 +399,12 @@ impl SignalingHandler {
             )];
         }
         if !c.success {
+            // The dead peer must not leave the session stuck in Negotiating;
+            // roll back so the client can retry on the same socket.
+            self.rollback_offer();
             return vec![Envelope::error_reply(reply_to, "ice_failed", "ICE negotiation failed", false)];
         }
+        self.pre_offer_state = None;
         if let Err(e) = self.session.apply(SessionEvent::IceComplete) {
             return vec![Envelope::error_reply(reply_to, "bad_state", &format!("ice: {e}"), false)];
         }
@@ -508,6 +511,24 @@ mod tests {
         let retry = handler.handle(offer(4, OFFER_2));
         assert!(matches!(retry[0].payload(), Some(Payload::SdpAnswer(_))));
         assert_eq!(handler.state(), SessionState::Negotiating);
+    }
+
+    #[test]
+    fn ice_failure_rolls_back_to_in_room() {
+        let mut handler = SignalingHandler::new(HandlerConfig::default_test());
+        handler.handle(hello(1, 1));
+        handler.handle(join(2, "r1"));
+        handler.handle(offer(3, OFFER_2));
+        assert_eq!(handler.state(), SessionState::Negotiating);
+        let reply = handler.handle(Envelope::new(SignalingMessage {
+            msg_id: 4,
+            reply_to: 0,
+            payload: Some(Payload::IceComplete(sig::IceComplete { success: false, rtt_ms: 0 })),
+        }));
+        assert!(matches!(reply[0].payload(), Some(Payload::Error(_))));
+        assert_eq!(handler.state(), SessionState::InRoom);
+        let retry = handler.handle(offer(5, OFFER_2));
+        assert!(matches!(retry[0].payload(), Some(Payload::SdpAnswer(_))));
     }
 
     #[test]

@@ -143,7 +143,7 @@ pub fn init_default() {
         // Materialise zero samples so /metrics shows the WebRTC subsystem even
         // before the first browser offer.
         WEBRTC_PEERS.set(0);
-        for result in ["accepted", "rejected", "room_full", "port_range_exhausted"] {
+        for result in ["accepted", "rejected", "room_full", "capacity_exceeded", "port_range_exhausted"] {
             WEBRTC_OFFERS.with_label_values(&[result]);
         }
         for reason in ["connect_deadline", "idle_timeout", "Disconnected"] {

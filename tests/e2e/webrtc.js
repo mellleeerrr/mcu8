@@ -383,7 +383,6 @@ async function collectStats(page) {
       try {
         await waitConnected(page);
         connected = true;
-        await page.screenshot({ path: path.join(ART, `${name}-connected.png`) });
       } catch (error) {
         const debug = await collectStats(page).catch(() => ({}));
         console.error(`[${name}] connect timeout; debug=`, JSON.stringify(debug));

@@ -523,6 +523,9 @@ impl GatewayManager {
         room_id: &RoomId,
         sdp_offer: &[SipCodec],
     ) -> Result<SipCall, Error> {
+        if crate::webrtc_runtime::room_has_peer(*room_id) {
+            return Err(Error::Conflict("room has a real WebRTC participant; SIP bridge is not supported".into()));
+        }
         let active_call = {
             let mut sip = self.sip.lock().map_err(|_| Error::Conflict("SIP lock poisoned".into()))?;
             let room_str = room_id.to_string();
@@ -593,6 +596,9 @@ impl GatewayManager {
         room_id: &RoomId,
         h323_offer: &[H323Codec],
     ) -> Result<H323Call, Error> {
+        if crate::webrtc_runtime::room_has_peer(*room_id) {
+            return Err(Error::Conflict("room has a real WebRTC participant; H.323 bridge is not supported".into()));
+        }
         let active_call = {
             let mut h323 = self.h323.lock().map_err(|_| Error::Conflict("H323 lock poisoned".into()))?;
             let room_str = room_id.to_string();
@@ -2232,6 +2238,22 @@ async fn serve_sip_uas_on(
                         "",
                     ),
                 );
+                if room_id.is_some_and(crate::webrtc_runtime::room_has_peer) {
+                    sip_send(
+                        &socket,
+                        peer,
+                        &vks_gateway_sip::build_response(
+                            486,
+                            "Busy Here",
+                            &request,
+                            &advertised_ip,
+                            local_port,
+                            Some(&to_tag),
+                            "",
+                        ),
+                    );
+                    continue;
+                }
                 let response = vks_gateway_sip::build_response(
                     200,
                     "OK",
@@ -2259,6 +2281,7 @@ async fn serve_sip_uas_on(
                         has_video,
                     ) {
                         tracing::warn!(room = %room_id, "inbound SIP participant not landed: real WebRTC peer present");
+                        continue;
                     }
                     let from_uri = request
                         .from
@@ -3071,6 +3094,11 @@ async fn serve_h323_uas_session(
                     }
                     None
                 };
+                if crate::webrtc_runtime::room_has_peer(pending_call.room_id) {
+                    tracing::warn!(room = %pending_call.room_id, "inbound H.323 call rejected: real WebRTC peer present");
+                    handle.hangup(call_id).await;
+                    continue;
+                }
                 let participant = crate::parse_participant_id(&pending_call.participant_id);
                 let media_details = serde_json::json!({
                     "protocol": "H.323",
@@ -3123,6 +3151,8 @@ async fn serve_h323_uas_session(
                     has_video,
                 ) {
                     tracing::warn!(room = %pending_call.room_id, "outbound participant not landed: real WebRTC peer present");
+                    handle.hangup(call_id).await;
+                    continue;
                 }
                 vks_admin::api_v3::call_strings::record_incoming_call(
                     &state,

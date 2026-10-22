@@ -158,14 +158,15 @@ impl WebRtcRoomRegistry {
         // Reserve capacity before doing any expensive binding/crypto work.
         {
             let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let existing = rooms.get(&room).is_some_and(|peers| peers.contains_key(&participant));
+            if !existing && self.peer_total.load(Ordering::Relaxed) >= self.max_peers {
+                WEBRTC_OFFERS.with_label_values(&["capacity_exceeded"]).inc();
+                return Err(WebRtcError::CapacityExceeded);
+            }
             if let Some(peers) = rooms.get(&room) {
-                if peers.len() >= MAX_PEERS_PER_ROOM && !peers.contains_key(&participant) {
+                if peers.len() >= MAX_PEERS_PER_ROOM && !existing {
                     WEBRTC_OFFERS.with_label_values(&["room_full"]).inc();
                     return Err(WebRtcError::RoomFull);
-                }
-                if self.peer_total.load(Ordering::Relaxed) >= self.max_peers && !peers.contains_key(&participant) {
-                    WEBRTC_OFFERS.with_label_values(&["capacity_exceeded"]).inc();
-                    return Err(WebRtcError::CapacityExceeded);
                 }
             }
         }
@@ -217,9 +218,14 @@ impl WebRtcRoomRegistry {
         {
             let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let peers = rooms.entry(room).or_default();
-            if peers.len() >= MAX_PEERS_PER_ROOM && !peers.contains_key(&participant) {
+            let replacing = peers.contains_key(&participant);
+            if peers.len() >= MAX_PEERS_PER_ROOM && !replacing {
                 WEBRTC_OFFERS.with_label_values(&["room_full"]).inc();
                 return Err(WebRtcError::RoomFull);
+            }
+            if !replacing && self.peer_total.load(Ordering::Relaxed) >= self.max_peers {
+                WEBRTC_OFFERS.with_label_values(&["capacity_exceeded"]).inc();
+                return Err(WebRtcError::CapacityExceeded);
             }
             // Re-offer: replace the old generation; its task exits on channel
             // close and its stale `remove_generation` becomes a no-op.
@@ -399,9 +405,6 @@ impl WebRtcRoomRegistry {
             return;
         }
         for target in targets {
-            MEDIA_BYTES
-                .with_label_values(&[if audio { "audio" } else { "video" }, "downlink"])
-                .inc_by(data.data.len() as u64);
             // A slow browser must never stall the publisher or other peers.
             if target
                 .tx
@@ -419,6 +422,10 @@ impl WebRtcRoomRegistry {
                 // Ask the publisher for a fresh keyframe so the slow
                 // subscriber can resynchronise after its queue drains.
                 self.request_keyframe_from(room, from, audio);
+            } else {
+                MEDIA_BYTES
+                    .with_label_values(&[if audio { "opus" } else { "vp8" }, "downlink"])
+                    .inc_by(data.data.len() as u64);
             }
         }
     }
@@ -617,26 +624,29 @@ async fn dispatch(
 /// Whether the browser offer publishes video (a video m-line that is not
 /// `a=recvonly`). Used to avoid requesting keyframes from view-only peers.
 fn offer_publishes_video(offer: &str) -> bool {
-    let mut in_video = false;
-    let mut publishes = false;
+    let mut video_seen = false;
+    let mut video_recvonly = false;
     for line in offer.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("m=") {
-            in_video = rest.starts_with("video ");
+            if rest.starts_with("video ") {
+                video_seen = true;
+                video_recvonly = false;
+            } else if video_seen {
+                // The previous video section ended; classify it now.
+                break;
+            }
             continue;
         }
-        if !in_video {
+        if !video_seen {
             continue;
         }
         if line.starts_with("a=recvonly") || line.starts_with("a=inactive") {
-            return false;
-        }
-        if line.starts_with("a=sendrecv") || line.starts_with("a=sendonly") {
-            publishes = true;
+            video_recvonly = true;
         }
     }
-    // Absent an explicit direction, WebRTC defaults to sendrecv.
-    in_video || publishes
+    // No explicit direction on the video m-line defaults to sendrecv.
+    video_seen && !video_recvonly
 }
 
 #[cfg(test)]
@@ -730,6 +740,15 @@ mod tests {
             registry.accept_offer(room, ParticipantId::new(), "v=0\r\n").expect_err("third peer must be rejected");
         assert!(matches!(error, WebRtcError::RoomFull));
         assert_eq!(registry.peer_count(room), MAX_PEERS_PER_ROOM);
+    }
+
+    #[tokio::test]
+    async fn global_cap_rejects_first_peer_in_a_fresh_room() {
+        let mut registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+        Arc::get_mut(&mut registry).expect("unique registry").max_peers = 0;
+        let error = registry.accept_offer(RoomId::new(), ParticipantId::new(), "v=0\r\n").expect_err("global cap");
+        assert!(matches!(error, WebRtcError::CapacityExceeded), "unexpected: {error:?}");
+        assert_eq!(registry.peer_total.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
