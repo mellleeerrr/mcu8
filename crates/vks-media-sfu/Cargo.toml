@@ -15,7 +15,7 @@ description = "VKS SFU engine: forwarder, simulcast, BWE, congestion (str0m)"
 # Codec registry features (ADR-0017): default = opus + vp8.
 default = ["opus", "vp8"]
 # DTLS-SRTP backend (optional; core compiles without it).
-str0m = ["dep:str0m"]
+str0m = ["dep:str0m", "str0m/rust-crypto"]
 # Codec feature flags (ADR-0017).
 opus = []
 vp8 = []
