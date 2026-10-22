@@ -32,6 +32,8 @@ pub struct InboundMedia {
     pub remote_ip: String,
     pub remote_audio_port: u16,
     pub remote_video_port: Option<u16>,
+    /// Per-media `c=` video-секции (если отличается от audio/session).
+    pub remote_video_ip: Option<String>,
     /// В оффере была секция video (даже с портом 0): answer обязан
     /// сохранить число m-line.
     pub video_offered: bool,
@@ -162,7 +164,7 @@ fn hex(byte: u8) -> Option<u8> {
 
 /// Выбирает PCMU/PCMA и, если есть, H.264 из SDP-оффера.
 pub fn negotiate(offer: &str) -> Option<InboundMedia> {
-    let session_ip = media_ip(offer)?;
+    let session_ip = media_ip(offer).unwrap_or_default();
     let audio = media_section(offer, "audio")?;
     if media_proto(audio) != Some("RTP/AVP") {
         return None;
@@ -186,12 +188,18 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
     let video_payload_type =
         video.filter(|section| has_h264(section)).and_then(|section| dynamic_payload(section, "H264"));
     let remote_video_port = video.and_then(media_port);
+    let audio_ip = section_ip(audio, &session_ip);
+    if audio_ip.is_empty() {
+        return None;
+    }
+    let video_ip = video.map(|section| section_ip(section, &audio_ip));
     Some(InboundMedia {
         audio_payload_type,
         video_payload_type,
-        remote_ip: section_ip(audio, &session_ip),
+        remote_ip: audio_ip,
         remote_audio_port: audio_port,
         remote_video_port,
+        remote_video_ip: video_ip,
         video_offered,
     })
 }

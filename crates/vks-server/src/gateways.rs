@@ -1543,17 +1543,27 @@ fn build_uas_bye(
         .as_deref()
         .and_then(|contact| contact.split('<').nth(1).and_then(|rest| rest.split('>').next()))
         .map(str::to_string)
-        .unwrap_or_else(|| format!("sip:{}@{}:{}", request.target_user().unwrap_or_default(), peer.ip(), peer.port()));
-    let mut to = request.to.clone();
-    if !to.contains(";tag=") {
-        to.push_str(&format!(";tag={to_tag}"));
+        .unwrap_or_else(|| {
+            let user = request
+                .from
+                .split("sip:")
+                .nth(1)
+                .and_then(|rest| rest.split(['@', '>', ';']).next())
+                .unwrap_or("remote");
+            format!("sip:{user}@{}:{}", peer.ip(), peer.port())
+        });
+    // Сервер — локальная сторона диалога: From = To из INVITE + наш tag,
+    // To = From вызывающего с его tag. Обратный порядок терминал отвергнет.
+    let mut from = request.to.clone();
+    if !from.contains(";tag=") {
+        from.push_str(&format!(";tag={to_tag}"));
     }
     format!(
-        "BYE {target} SIP/2.0\r\nVia: SIP/2.0/UDP {advertised_ip}:{local_port};branch=z9hG4bKvksbye{}\r\nFrom: {}\r\nTo: {to}\r\nCall-ID: {}\r\nCSeq: {} BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
+        "BYE {target} SIP/2.0\r\nVia: SIP/2.0/UDP {advertised_ip}:{local_port};branch=z9hG4bKvksbye{}\r\nFrom: {from}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {} BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
         uuid::Uuid::new_v4().simple(),
         request.from,
         request.call_id,
-        request.cseq + 1,
+        request.cseq.saturating_add(1),
     )
 }
 
@@ -1916,9 +1926,13 @@ async fn serve_sip_uas_on(
                     if let (Some(pair), Some(remote_port), Some(payload)) =
                         (video_pair, media.remote_video_port, media.video_payload_type)
                     {
-                        if let Ok(remote_ip) = media.remote_ip.parse::<std::net::IpAddr>() {
+                        let video_ip = media.remote_video_ip.as_deref().unwrap_or(&media.remote_ip);
+                        if let Ok(remote_ip) = video_ip.parse::<std::net::IpAddr>() {
                             let mcu_downgrade = mcu.clone();
                             let participant_downgrade = participant;
+                            let participant_id_downgrade = participant_id.clone();
+                            let state_downgrade = state.clone();
+                            let manager_downgrade = manager.clone();
                             let session = video::VideoBridgeSession {
                                 room_id,
                                 participant_id: participant,
@@ -1953,6 +1967,24 @@ async fn serve_sip_uas_on(
                                                 vks_core::track::TrackKind::Audio,
                                             )],
                                         );
+                                        state_downgrade.room_hub.update_participant_media(
+                                            &room_id,
+                                            &participant_id_downgrade,
+                                            None,
+                                            Some(true),
+                                            None,
+                                        );
+                                        if let Ok(mut registry) = manager_downgrade.registry.lock() {
+                                            if let Some(session) =
+                                                registry.by_participant.get_mut(&participant_id_downgrade)
+                                            {
+                                                session.media_details["video_codec"] = serde_json::Value::Null;
+                                                session.media_details["video_codec_running"] =
+                                                    serde_json::Value::Bool(false);
+                                                session.media_details["video_downgraded"] =
+                                                    serde_json::Value::Bool(true);
+                                            }
+                                        }
                                     }
                                 }
                             });
@@ -2124,7 +2156,15 @@ async fn serve_sip_uas_on(
                 // 200 OK отправляется синхронно до вставки в `calls`, поэтому
                 // известный CANCEL относится уже к финальному ответу:
                 // RFC 3261 §9.2 — подтверждаем, но диалог не рвём.
-                if calls.lock().expect("inbound calls poisoned").contains_key(&sip_dialog_key(&request)) {
+                let valid = {
+                    let guard = calls.lock().expect("inbound calls poisoned");
+                    guard.get(&sip_dialog_key(&request)).is_some_and(|call| {
+                        request.to_tag.as_deref() == Some(call.to_tag.as_str())
+                            && request.cseq == call.invite_cseq
+                            && request.cseq_method == "CANCEL"
+                    })
+                };
+                if valid {
                     sip_send(
                         &socket,
                         peer,

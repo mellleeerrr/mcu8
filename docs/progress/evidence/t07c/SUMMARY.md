@@ -59,3 +59,17 @@ Q.931/H.245/RAS), per-m `c=`, симметричный RTP-latch для NAT (P2,
 - CANCEL: известный диалог → 200 (не рвёт), неизвестный → 481; ACK/BYE требуют
   правильный CSeq-метод; парсер берёт первый Via.
 - Тест admin hangup: `inbound_sip_uas_admin_hangup_sends_bye_and_reaps_call`.
+
+## Третий проход (по ревью `abc4b08`)
+
+- Серверный BYE: From = локальная сторона (`To` из INVITE + наш tag),
+  To = вызывающий (`From` с его tag); fallback Request-URI — remote From-user,
+  CSeq `saturating_add(1)`. Тест проверяет оба заголовка и tags.
+- Media-timeout reaper чистит и `GatewayCallRegistry` (`by_participant`/`by_call`),
+  а не только `calls`/RoomHub.
+- CANCEL валидируется по To-tag+CSeq-методу (известный/правильный → 200,
+  иначе 481).
+- `audio_codec_running=true` для G.711 (раньше watchdog ложно считал codec мёртвым).
+- RTCP egress — на `egress.port()+1` (NAT source), per-m-only `c=` в audio,
+  отдельный video `c=`, `video_offered`; video downgrade обновляет RoomHub
+  (`is_video_muted`) и registry media_details.
