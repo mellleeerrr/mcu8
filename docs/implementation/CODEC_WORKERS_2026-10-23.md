@@ -22,7 +22,8 @@
   1408×1152, H.265 ≥16×16 и до 4096×2160; декодер принимает чётное
   положительное разрешение до 4096×2160 (FFmpeg scales to slot).
 - Изоляция: `env_clear` (в дочерний процесс не попадают `VKS_*` секреты),
-  минимальные `PATH/LANG/LC_ALL`, `current_dir("/")`, отдельная process group,
+  минимальные `PATH/LANG/LC_ALL` (+`LD_LIBRARY_PATH` для приватного FFmpeg),
+  `current_dir("/")`, отдельная process group,
   `kill_on_drop` + killpg, непрерывный drain stderr с последней строкой для
   диагностики. rlimits/`PR_SET_PDEATHSIG` не выставлены; единственный
   `unsafe` — `libc::kill(-pgid)` для group-kill (ADR-0028,
@@ -37,7 +38,8 @@
   `Exited("worker is poisoned; restart is required")`, повторное
   использование — только через `restart()`.
 - Публичный `write_encoded` для decoder-направления; вызовы методов не того
-  направления возвращают `InvalidConfig` до касания pipe.
+  направления возвращают `InvalidConfig` до касания pipe. `read_encoded_video`
+  возвращает `Ok(None)` на нормальном EOF (ошибки не смешиваются с концом потока).
 - `read_encoded_video` отдаёт один Annex-B NAL (с start code) только для
   H.265; H.261/H.263 не Annex-B и читаются только `read_to_end` после
   `finish_input` (EOF-only). Последний NAL AU приходит со следующим AU, поэтому
@@ -59,7 +61,7 @@
 - пул из 1 процесса отказывает второму и возвращает permit после drop;
 - дочерний процесс не содержит `VKS_` в `/proc/<pid>/environ`, restart меняет pid;
 - таймаут чтения отравляет worker, restart восстанавливает поток;
-- все шесть методов при неверном направлении дают `InvalidConfig` без блокировки;
+- все семь directional-методов при неверном направлении дают `InvalidConfig` без блокировки;
 - H.265 отдаёт Annex-B NAL до EOF; H.263 704×576 проходит roundtrip;
 - зависший probe убивает всю process group за timeout, включая forked sleep (Linux-тест);
 - смешанные 3-/4-байтовые start codes не оставляют лишний нуль в предыдущем NAL;

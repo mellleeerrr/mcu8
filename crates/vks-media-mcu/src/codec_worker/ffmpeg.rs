@@ -23,7 +23,8 @@ use super::{AudioCodec, SlotConfig, VideoCodec};
 pub struct WorkerConfig {
     /// FFmpeg executable (PATH lookup when just `ffmpeg`).
     pub ffmpeg_path: PathBuf,
-    /// Deadline for one frame read/write.
+    /// Idle timeout for one pipe read/write (not a total frame deadline: a
+    /// multi-chunk frame may take several reads).
     pub io_timeout: Duration,
     /// Extra frames buffered by the caller before applying backpressure.
     pub max_queue: usize,
@@ -54,10 +55,18 @@ pub enum WorkerMode {
 /// Worker failure. All variants fail the affected slot closed; none panic the
 /// MCU.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum WorkerError {
-    /// Codec/FFmpeg is not installed on this host.
+    /// Codec/FFmpeg is not installed on this host (permanent: fall back to
+    /// the native profile).
     #[error("codec worker unavailable: {0}")]
     Unavailable(String),
+    /// Host process budget is saturated (transient: retry after a slot ends).
+    #[error("codec worker pool is full")]
+    PoolBusy,
+    /// Pool was shut down (permanent for this process).
+    #[error("codec worker pool is closed")]
+    PoolClosed,
     /// Invalid slot configuration.
     #[error("invalid worker config: {0}")]
     InvalidConfig(String),
@@ -160,6 +169,13 @@ impl FfmpegCapabilities {
 }
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Upper bound for one encoded video frame (4K IDR headroom; exceeds it =
+/// corrupted stream).
+const MAX_ENCODED_FRAME_BYTES: usize = 4 * 1024 * 1024;
+/// Parent-side read chunk; distinct from codec-defined length caps.
+const IO_CHUNK_BYTES: usize = 8192;
+/// Give FFmpeg a moment to fail on bad CLI arguments before the first I/O.
+const STARTUP_SETTLE: Duration = Duration::from_millis(30);
 
 /// Среда дочернего FFmpeg: пусто, кроме локали, `PATH` и (если задан)
 /// `LD_LIBRARY_PATH` — последний нужен для ffmpeg из приватного префикса
@@ -472,7 +488,7 @@ impl FfmpegWorker {
     /// `io_timeout` longer than a paused-stream gap. H.261/H.263 raw FFmpeg
     /// output is not Annex-B and is rejected here: those encoders are EOF-only
     /// via [`Self::read_to_end`] after [`Self::finish_input`].
-    pub async fn read_encoded_video(&mut self) -> Result<Vec<u8>, WorkerError> {
+    pub async fn read_encoded_video(&mut self) -> Result<Option<Vec<u8>>, WorkerError> {
         self.require_video_encode()?;
         if matches!(self.mode, WorkerMode::VideoEncode(codec) if codec != VideoCodec::H265) {
             return Err(WorkerError::InvalidConfig(
@@ -484,14 +500,14 @@ impl FfmpegWorker {
         }
         loop {
             if self.encoded_eof && self.encoded_pending.is_empty() {
-                return Err(WorkerError::Exited("encoded video output ended".into()));
+                return Ok(None);
             }
             if let Some(nal) = take_annexb_nal(&mut self.encoded_pending, self.encoded_eof) {
                 self.stats.frames_out.fetch_add(1, Ordering::Relaxed);
                 self.stats.bytes_out.fetch_add(nal.len() as u64, Ordering::Relaxed);
-                return Ok(nal);
+                return Ok(Some(nal));
             }
-            let mut chunk = [0u8; 8192];
+            let mut chunk = [0u8; IO_CHUNK_BYTES];
             let read = {
                 let Some(stdout) = self.child.stdout.as_mut() else {
                     return Err(WorkerError::Exited("stdout already taken".into()));
@@ -501,13 +517,13 @@ impl FfmpegWorker {
             match read {
                 Ok(Ok(0)) => {
                     self.encoded_eof = true;
-                    if self.encoded_pending.len() > 4 * 1024 * 1024 {
+                    if self.encoded_pending.len() > MAX_ENCODED_FRAME_BYTES {
                         return Err(self.poison(WorkerError::Codec("encoded video frame exceeds 4 MiB".into())));
                     }
                 }
                 Ok(Ok(count)) => {
                     self.encoded_pending.extend_from_slice(&chunk[..count]);
-                    if self.encoded_pending.len() > 4 * 1024 * 1024 {
+                    if self.encoded_pending.len() > MAX_ENCODED_FRAME_BYTES {
                         return Err(self.poison(WorkerError::Codec("encoded video frame exceeds 4 MiB".into())));
                     }
                 }
@@ -689,7 +705,7 @@ impl FfmpegWorker {
         let mut output = Vec::new();
         let stdout = self.child.stdout.as_mut().ok_or_else(|| WorkerError::Exited("stdout closed".into()))?;
         loop {
-            let mut chunk = [0u8; 8192];
+            let mut chunk = [0u8; IO_CHUNK_BYTES];
             let read = tokio::time::timeout(self.config.io_timeout, stdout.read(&mut chunk)).await;
             match read {
                 Ok(Ok(0)) => break,
@@ -747,7 +763,7 @@ impl FfmpegWorker {
     pub async fn restart(&mut self) -> Result<(), WorkerError> {
         self.poisoned = true;
         self.kill();
-        if tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await.is_err() {
+        if tokio::time::timeout(self.config.io_timeout, self.child.wait()).await.is_err() {
             let _ = self.child.start_kill();
         }
         self.stdin = None;
@@ -850,12 +866,7 @@ impl WorkerPool {
         slot: SlotConfig,
         config: WorkerConfig,
     ) -> Result<FfmpegWorker, WorkerError> {
-        let permit = self
-            .semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| WorkerError::Unavailable("worker pool closed".into()))?;
+        let permit = self.semaphore.clone().acquire_owned().await.map_err(|_| WorkerError::PoolClosed)?;
         let mut worker = match self.capabilities.as_deref() {
             Some(capabilities) => FfmpegWorker::spawn_checked(mode, slot, config, capabilities).await?,
             None => FfmpegWorker::spawn(mode, slot, config).await?,
@@ -872,11 +883,7 @@ impl WorkerPool {
         slot: SlotConfig,
         config: WorkerConfig,
     ) -> Result<FfmpegWorker, WorkerError> {
-        let permit = self
-            .semaphore
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| WorkerError::Unavailable("codec worker pool is full".into()))?;
+        let permit = self.semaphore.clone().try_acquire_owned().map_err(|_| WorkerError::PoolBusy)?;
         let mut worker = match self.capabilities.as_deref() {
             Some(capabilities) => FfmpegWorker::spawn_checked(mode, slot, config, capabilities).await?,
             None => FfmpegWorker::spawn(mode, slot, config).await?,
@@ -893,16 +900,8 @@ async fn spawn_child(
     last_stderr: Arc<Mutex<String>>,
 ) -> Result<(Child, ChildStdin), WorkerError> {
     let args = ffmpeg_args(mode, slot);
-    let mut command = Command::new(&config.ffmpeg_path);
-    command.args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    // Same scrubbed environment as the probe (PATH, locale, optional
-    // LD_LIBRARY_PATH for a private-prefix FFmpeg); never inherit JWT/DB secrets.
-    scrubbed_env(&mut command).current_dir("/");
-    #[cfg(unix)]
-    {
-        // Own process group: a kill of the worker cannot signal the MCU.
-        command.process_group(0);
-    }
+    let mut command = command(&config.ffmpeg_path);
+    command.args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).current_dir("/");
     let mut child = command.spawn().map_err(WorkerError::Spawn)?;
     let stdin = child.stdin.take().ok_or_else(|| WorkerError::Spawn(std::io::Error::other("worker stdin missing")))?;
 
@@ -930,7 +929,7 @@ async fn spawn_child(
     // Catch invalid FFmpeg arguments immediately instead of on the first
     // frame; this is the common failure mode for a codec that is advertised
     // but cannot start at the requested resolution.
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::sleep(STARTUP_SETTLE).await;
     if let Ok(Some(status)) = child.try_wait() {
         let stderr = last_stderr.lock().map(|s| s.clone()).unwrap_or_default();
         return Err(WorkerError::Unavailable(format!("ffmpeg exited at startup ({status}): {stderr}")));
@@ -1277,11 +1276,12 @@ mod tests {
             .expect("first worker");
         assert_eq!(pool.available(), 0);
         let second = pool.try_spawn(WorkerMode::VideoDecode(VideoCodec::H261), slot, WorkerConfig::default()).await;
-        assert!(matches!(second, Err(WorkerError::Unavailable(_))), "pool must refuse, not queue");
+        assert!(matches!(second, Err(WorkerError::PoolBusy)), "pool must refuse, not queue");
         drop(first);
         assert_eq!(pool.available(), 1, "dropping a worker must return its permit");
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn child_env_is_scrubbed_and_restart_changes_pid() {
         if !ffmpeg_available() {
@@ -1485,12 +1485,13 @@ mod tests {
         let nal = tokio::time::timeout(Duration::from_secs(5), encoder.read_encoded_video())
             .await
             .expect("nal before EOF")
+            .expect("read error")
             .expect("nal");
         assert!(nal.len() > 4);
         assert!(nal.starts_with(&[0, 0, 1]) || nal.starts_with(&[0, 0, 0, 1]), "not Annex-B: {nal:?}");
         encoder.finish_input().await;
         let mut rest = 0usize;
-        while let Ok(nal) = encoder.read_encoded_video().await {
+        while let Some(nal) = encoder.read_encoded_video().await.expect("drain") {
             assert!(nal.starts_with(&[0, 0, 1]) || nal.starts_with(&[0, 0, 0, 1]));
             rest += 1;
             if rest > 10_000 {
