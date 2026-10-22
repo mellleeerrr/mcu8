@@ -1688,3 +1688,43 @@ async fn t02_conference_mutation_while_live_session_keeps_session_active() {
         "push живой сессии должен применять session-раскладку, а не conference"
     );
 }
+
+#[test]
+fn normalize_loaded_collapses_duplicate_canonical_addresses_and_rewrites_refs() {
+    let mut resources = ResourceState::default();
+    let older = AddressRecord {
+        id: "addr-old".into(),
+        uri: "SIP:192.168.1.132:5060".into(),
+        display_name: String::new(),
+        created_at: 10,
+        payload: json!({"sip":{"bitrate":1024}}),
+    };
+    let newer = AddressRecord {
+        id: "addr-new".into(),
+        uri: "sip:192.168.1.132".into(),
+        display_name: "Зал 132".into(),
+        created_at: 20,
+        payload: json!({"sip":{"bitrate":4096},"media":{"loop":true}}),
+    };
+    resources.addresses.insert(older.id.clone(), older);
+    resources.addresses.insert(newer.id.clone(), newer);
+    resources
+        .directory
+        .user_addresses
+        .entry("user-1".into())
+        .or_default()
+        .insert("addr-new".into(), resources.addresses[&"addr-old".to_string()].clone());
+
+    normalize_loaded(&mut resources);
+
+    assert_eq!(resources.addresses.len(), 1, "canonical-дубль должен схлопнуться");
+    let kept = resources.addresses.values().next().expect("address");
+    assert_eq!(kept.uri, "SIP:192.168.1.132:5060");
+    assert_eq!(kept.display_name, "Зал 132");
+    assert_eq!(kept.created_at, 10);
+    assert_eq!(kept.payload["sip"]["bitrate"], 4096);
+    assert_eq!(kept.payload["media"]["loop"], true);
+    let personal = &resources.directory.user_addresses["user-1"];
+    assert_eq!(personal.len(), 1);
+    assert_eq!(personal.keys().next().map(String::as_str), Some(kept.id.as_str()));
+}

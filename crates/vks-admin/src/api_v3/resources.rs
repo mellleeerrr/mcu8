@@ -908,6 +908,56 @@ pub fn normalize_loaded(resources: &mut ResourceState) {
             resources.active_layouts.insert(key, fallback);
         }
     }
+    dedup_addresses(resources);
+}
+
+/// Схлопывает глобальные адреса с одинаковым canonical URI, сохраняя самый
+/// ранний id: документ мог накопить дубли до появления canonical-idempotent
+/// create. Личные ссылки переписываются на оставшийся id, payload'ы
+/// объединяются, пустое имя заменяется непустым. Это дешёвая durable-защита
+/// на старте; API-путь дополнительно сериализован мьютексом и canonical-create.
+fn dedup_addresses(resources: &mut ResourceState) {
+    let mut keep_by_uri: HashMap<String, String> = HashMap::new();
+    let mut aliases: Vec<(String, String)> = Vec::new();
+    let mut ids: Vec<String> = resources.addresses.keys().cloned().collect();
+    // Ранний created_at важнее порядка id: именно его id остаётся стабильным
+    // для ссылок из личных книг.
+    ids.sort_by_key(|id| {
+        resources
+            .addresses
+            .get(id)
+            .map(|record| (record.created_at, record.id.clone()))
+            .unwrap_or((u64::MAX, id.clone()))
+    });
+    for id in ids {
+        let Some(key) = resources.addresses.get(&id).map(|record| vks_common::uri::canonical_uri(&record.uri)) else {
+            continue;
+        };
+        match keep_by_uri.get(&key).cloned() {
+            Some(keep) => aliases.push((id, keep)),
+            None => {
+                keep_by_uri.insert(key, id);
+            }
+        }
+    }
+    for (duplicate_id, keep_id) in aliases {
+        let Some(duplicate) = resources.addresses.remove(&duplicate_id) else {
+            continue;
+        };
+        let Some(keep) = resources.addresses.get_mut(&keep_id) else {
+            continue;
+        };
+        keep.created_at = keep.created_at.min(duplicate.created_at);
+        if keep.display_name.trim().is_empty() {
+            keep.display_name = duplicate.display_name;
+        }
+        merge_json(&mut keep.payload, &duplicate.payload);
+        for addresses in resources.directory.user_addresses.values_mut() {
+            if addresses.remove(&duplicate_id).is_some() {
+                addresses.insert(keep_id.clone(), keep.clone());
+            }
+        }
+    }
 }
 
 /// Удаление комнаты: убираются только её scoped-ссылки и ставшие недостижимыми
