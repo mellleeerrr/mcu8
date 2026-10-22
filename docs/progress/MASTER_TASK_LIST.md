@@ -474,3 +474,10 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 ## Вопросы к команде
 
 Открытых вопросов нет.
+>
+> **T11a (честный system status) закрыт:** `8a75350`, ревью **9.5/10 APPROVED**
+> (`stats-deps`), 1041 passed / 0 failed / 6 ignored, Python 24/24, clippy/fmt.
+> Реальный IP 192.168.1.93, `database.size_bytes` = main+WAL, SIP `registration`
+> от UAS, H.323 `READY` только по факту H.225 setup или реального Q.931-ответа
+> (до вызова — `DISABLED`), структурная классификация terminal/transport без
+> подстрочных эвристик, TTL-самолечения нет. Evidence `docs/progress/evidence/t11a/`.
