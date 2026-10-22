@@ -284,7 +284,15 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
     OfferCodec { payload: 8, name: "PCMA", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
     OfferCodec { payload: 9, name: "G722", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
     OfferCodec { payload: 15, name: "G728", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
-    OfferCodec { payload: 4, name: "G723", clock: 8000, channels: 1, fmtp: None, native: false, dtmf: false },
+    OfferCodec {
+        payload: 4,
+        name: "G723",
+        clock: 8000,
+        channels: 1,
+        fmtp: Some("annexa=no"),
+        native: true,
+        dtmf: false,
+    },
     OfferCodec {
         payload: 18,
         name: "G729",
@@ -501,8 +509,8 @@ fn payload_list(codecs: &[&OfferCodec]) -> String {
 /// Which codecs an outbound offer advertises.
 ///
 /// * [`CodecProfile::Native`] — only codecs the media bridge really
-///   decodes/encodes (G.711, G.722, G.726, G.728, Opus, H.264 baseline, plus
-///   `telephone-event`).
+///   decodes/encodes (G.711, G.722, G.723.1, G.726, G.728, Opus, H.264
+///   baseline, plus `telephone-event`).
 ///   This is the production default: a terminal answers with a codec we can actually
 ///   bridge, and the RTP bridge's single-payload-type pinning stays valid.
 /// * [`CodecProfile::Full`] — the whole vendor matrix. Required for lab
@@ -587,10 +595,13 @@ m=audio {audio_port} RTP/AVP {}\r\n",
         payload_list(&audio)
     );
     push_codec_attrs(&mut sdp, &audio);
-    // G.723.1 uses 30 ms frames; do not contradict it in the full/lab offer.
-    // The native profile never contains G723, so hardware terminals still get
-    // an explicit 20 ms ptime.
-    if audio.iter().all(|codec| codec.name != "G723") {
+    // G.723.1 uses 30 ms frames; a media-level 20 ms ptime would contradict
+    // it.  Both the full/lab and native profiles now contain G723, so no
+    // single ptime is emitted; 20 ms codecs use their default (RFC 3551).
+    if audio.iter().any(|codec| codec.name == "G723") {
+        // One 30 ms G.723.1 frame per packet; no media-level ptime preference.
+        sdp.push_str("a=maxptime:30\r\n");
+    } else {
         sdp.push_str("a=ptime:20\r\na=maxptime:20\r\n");
     }
     sdp.push_str(&format!("a=sendrecv\r\na=rtcp:{}\r\n", audio_port + 1));
@@ -899,11 +910,11 @@ a=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1\r\n";
     fn native_profile_offers_only_bridgeable_codecs() {
         let sdp = build_offer(CodecProfile::Native, "192.168.1.93", 41000, Some(41002));
         for line in [
-            "m=audio 41000 RTP/AVP 0 8 9 15 107 108 109 110 111 101",
+            "m=audio 41000 RTP/AVP 0 8 9 15 4 107 108 109 110 111 101",
             "a=rtpmap:111 opus/48000/2",
             "a=fmtp:111 useinbandfec=1;stereo=0;sprop-stereo=0",
-            "a=ptime:20",
-            "a=maxptime:20",
+            "a=rtpmap:4 G723/8000",
+            "a=fmtp:4 annexa=no",
             "a=rtpmap:0 PCMU/8000",
             "a=rtpmap:8 PCMA/8000",
             "a=rtpmap:101 telephone-event/8000",
@@ -912,6 +923,9 @@ a=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1\r\n";
         ] {
             assert!(sdp.contains(line), "native offer misses `{line}`:\n{sdp}");
         }
+        // G.723.1 is 30 ms; a single 20 ms ptime hint would contradict it.
+        assert!(!sdp.contains("a=ptime:"), "native G723 offer must not claim 20 ms ptime:\n{sdp}");
+        assert!(sdp.contains("a=maxptime:30"), "native G723 offer caps packets at 30 ms:\n{sdp}");
         for absent in ["G7221", "G729", "G719", "H265", "H263", "MP4A-LATM"] {
             assert!(!sdp.contains(absent), "native offer must not advertise unbridgeable `{absent}`:\n{sdp}");
         }
@@ -1277,7 +1291,7 @@ mod g722_and_strict_first_regressions {
     #[test]
     fn native_offer_selects_g722_when_peer_lists_it_before_pcmu() {
         let offer = build_offer(CodecProfile::Native, "192.168.1.93", 41000, None);
-        assert!(offer.contains("m=audio 41000 RTP/AVP 0 8 9 15 107 108 109 110 111 101"), "{offer}");
+        assert!(offer.contains("m=audio 41000 RTP/AVP 0 8 9 15 4 107 108 109 110 111 101"), "{offer}");
         let answer = "v=0\r\nc=IN IP4 192.168.1.132\r\n\
 m=audio 3230 RTP/AVP 9 0 8 101\r\na=rtpmap:9 G722/8000\r\na=rtpmap:0 PCMU/8000\r\n\
 a=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\n";

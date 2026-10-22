@@ -361,6 +361,13 @@ G719/AAC-LATM — 488 до 200 с явной причиной; G723 (30 мс) �
 Live E2E 233/233 остаётся G722 (`.132`), settings `OPUS`/`G728` supported.
 Evidence: `docs/progress/evidence/t06b2b/`.
 
+**T06b-2c (G.723.1 native) — реализован 2026-10-22, ожидает ревью/коммита.**
+`oxideav-g7231 =0.0.9` (MIT, pure Rust): PT4 `G723/8000`, 30 мс = 24 B /
+240 сэмплов, MP-MLQ 6.3k энкодер + ACELP 5.3k/MP-MLQ декодер, timestamp +240,
+накопление 240 при 20-мс MCU-тике, inbound `a=ptime:30`, native offer
+`0 8 9 15 4 107 108 109 110 111 101` (без 20-мс ptime). H.323 G723 — T06b-4.
+Evidence: `docs/progress/evidence/t06b2c/`.
+
 ## T06b. Транскодирование полной матрицы (P1)
 
 **Проблема (состояние до T06b-1).** В настройках 18 audio/8 video, в

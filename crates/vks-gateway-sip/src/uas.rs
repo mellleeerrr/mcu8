@@ -244,6 +244,10 @@ pub fn build_answer(
         sdp.push_str(&format!("a=fmtp:{} {fmtp}\r\n", media.audio_payload_type));
     }
     sdp.push_str(&format!("a=ptime:{}\r\n", media.audio_ptime_ms));
+    if media.audio_codec == "G723" {
+        // G.723.1 can pack multiple 30 ms frames; the bridge decodes one.
+        sdp.push_str("a=maxptime:30\r\n");
+    }
     if media.video_offered {
         if let (Some(port), Some(payload)) = (video_port, media.video_payload_type) {
             sdp.push_str(&format!(
@@ -388,6 +392,7 @@ fn bridgeable_audio(section: &str, payload: u8) -> Option<BridgeableAudio> {
         8 => Some("PCMA"),
         9 => Some("G722"),
         15 => Some("G728"),
+        4 => Some("G723"),
         107 => Some("G726-16"),
         108 => Some("G726-24"),
         109 => Some("G726-32"),
@@ -401,6 +406,14 @@ fn bridgeable_audio(section: &str, payload: u8) -> Option<BridgeableAudio> {
             declared_codec(section, payload)
                 .is_some_and(|(name, clock, _)| name.eq_ignore_ascii_case(codec) && clock == 8000)
                 .then_some(BridgeableAudio::narrow(codec))
+        } else if codec == "G723" {
+            payload_is(section, payload, codec, 8000).then_some(BridgeableAudio {
+                codec: "G723",
+                clock: 8000,
+                channels: 1,
+                fmtp: Some("annexa=no"),
+                ptime_ms: 30,
+            })
         } else {
             payload_is(section, payload, codec, 8000).then_some(BridgeableAudio::narrow(codec))
         }
@@ -428,12 +441,22 @@ fn bridgeable_audio(section: &str, payload: u8) -> Option<BridgeableAudio> {
             "PCMU" => "PCMU",
             "PCMA" => "PCMA",
             "G722" => "G722",
+            "G723" | "G7231" => "G723",
             "G72616" => "G726-16",
             "G72624" => "G726-24",
             "G72632" => "G726-32",
             "G72640" => "G726-40",
             _ => return None,
         };
+        if codec == "G723" {
+            return Some(BridgeableAudio {
+                codec: "G723",
+                clock: 8000,
+                channels: 1,
+                fmtp: Some("annexa=no"),
+                ptime_ms: 30,
+            });
+        }
         Some(BridgeableAudio::narrow(codec))
     } else {
         None
@@ -541,7 +564,6 @@ a=rtpmap:96 G726-32/8000\r\na=rtpmap:0 PCMU/8000\r\n";
     #[test]
     fn licensed_or_unimplemented_audio_is_rejected_without_fallback() {
         for (payload, name, clock) in [
-            (4, "G723", 8000),
             (18, "G729", 8000),
             (102, "G7221", 16000),
             (104, "G7221", 32000),
@@ -558,6 +580,38 @@ a=rtpmap:96 G726-32/8000\r\na=rtpmap:0 PCMU/8000\r\n";
 a=rtpmap:18 G729/8000\r\na=rtpmap:0 PCMU/8000\r\n";
         let media = negotiate(mixed).expect("PCMU is still selectable");
         assert_eq!(media.audio_payload_type, 0);
+    }
+
+    #[test]
+    fn g723_static_pt_is_accepted_with_30ms_ptime() {
+        let offer = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP 4 0\r\n\
+a=rtpmap:4 G723/8000\r\na=rtpmap:0 PCMU/8000\r\n";
+        let media = negotiate(offer).expect("G.723.1 must be accepted");
+        assert_eq!(media.audio_payload_type, 4);
+        assert_eq!(media.audio_codec, "G723");
+        assert_eq!(media.audio_ptime_ms, 30);
+        let sdp = build_answer("192.168.1.93", 1, 41000, None, &media);
+        assert!(sdp.contains("m=audio 41000 RTP/AVP 4"), "{sdp}");
+        assert!(sdp.contains("a=rtpmap:4 G723/8000"), "{sdp}");
+        assert!(sdp.contains("a=fmtp:4 annexa=no"), "{sdp}");
+        assert!(sdp.contains("a=ptime:30"), "{sdp}");
+        // A wrong clock must not be accepted as G723.
+        let wrong_clock = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP 4\r\n\
+a=rtpmap:4 G723/16000\r\n";
+        assert!(negotiate(wrong_clock).is_none());
+    }
+
+    #[test]
+    fn dynamic_g723_keeps_30ms_ptime_and_annexa_no() {
+        let offer = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP 96\r\n\
+a=rtpmap:96 G723/8000\r\n";
+        let media = negotiate(offer).expect("dynamic G723 must be accepted");
+        assert_eq!(media.audio_payload_type, 96);
+        assert_eq!(media.audio_codec, "G723");
+        assert_eq!(media.audio_ptime_ms, 30);
+        let sdp = build_answer("192.168.1.93", 1, 41000, None, &media);
+        assert!(sdp.contains("a=fmtp:96 annexa=no"), "{sdp}");
+        assert!(sdp.contains("a=ptime:30"), "{sdp}");
     }
 
     #[test]

@@ -27,6 +27,7 @@ oxideav-g722 = "=0.0.7"
 oxideav-adpcm = "=0.0.7"
 rusty-opus = "=1.0.2"
 oxideav-g728 = "=0.0.8"
+oxideav-g7231 = "=0.0.9"
 
 # Тяжёлая SIP-стек (опционально, ADR-0006).
 rvoip = { version = "0.2", optional = true }

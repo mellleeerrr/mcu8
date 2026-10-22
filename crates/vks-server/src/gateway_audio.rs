@@ -1,5 +1,5 @@
-//! G.711/G.722/G.726/G.728/Opus payload conversion at the negotiated RTP
-//! boundary.
+//! G.711/G.722/G.723.1/G.726/G.728/Opus payload conversion at the negotiated
+//! RTP boundary.
 
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -17,9 +17,10 @@ fn gain(sample: f32, volume: u32) -> f32 {
     }
 }
 
-/// Selected RTP audio codec and its PCM domain.  G.711/G.726/G.728 are 8 kHz,
-/// G.722 is 16 kHz, Opus is 48 kHz; all use a 20 ms MCU tick, while the RTP
-/// timestamp step is 160 (8 kHz family) or 960 (Opus).
+/// Selected RTP audio codec and its PCM domain.  G.711/G.723.1/G.726/G.728 are
+/// 8 kHz, G.722 is 16 kHz, Opus is 48 kHz; all use a 20 ms MCU tick, while the
+/// RTP timestamp step is 160 (8 kHz family except G.723.1), 240 (G.723.1
+/// 30 ms packets) or 960 (Opus).
 enum AudioBridgeCodec {
     G711 {
         /// G.711 law (0 = µ-law/PCMU, 8 = A-law/PCMA), independent of the RTP
@@ -32,6 +33,7 @@ enum AudioBridgeCodec {
     G722(Box<vks_gateway_sip::g722::G722Codec>),
     G726(Box<vks_gateway_sip::g726::G726Codec>),
     G728(Box<vks_gateway_sip::g728::G728Codec>),
+    G7231(Box<vks_gateway_sip::g7231::G7231Codec>),
     Opus(Box<vks_gateway_sip::opus::OpusCodec>),
 }
 
@@ -56,12 +58,14 @@ impl AudioBridgeCodec {
             Some("G722") => Some(Self::G722(Box::new(vks_gateway_sip::g722::G722Codec::new()))),
             Some("OPUS") => Some(Self::Opus(Box::new(vks_gateway_sip::opus::OpusCodec::new()?))),
             Some("G728") => Some(Self::G728(Box::new(vks_gateway_sip::g728::G728Codec::new()))),
+            Some("G723") | Some("G7231") => Some(Self::G7231(Box::new(vks_gateway_sip::g7231::G7231Codec::new()))),
             Some("PCMU") => Some(Self::G711 { law: 0, encode_payload_type: 0 }),
             Some("PCMA") => Some(Self::G711 { law: 8, encode_payload_type: 8 }),
             _ => match payload_type {
                 0 | 8 => Some(Self::G711 { law: payload_type, encode_payload_type: payload_type }),
                 9 => Some(Self::G722(Box::new(vks_gateway_sip::g722::G722Codec::new()))),
                 15 => Some(Self::G728(Box::new(vks_gateway_sip::g728::G728Codec::new()))),
+                4 => Some(Self::G7231(Box::new(vks_gateway_sip::g7231::G7231Codec::new()))),
                 111 => Some(Self::Opus(Box::new(vks_gateway_sip::opus::OpusCodec::new()?))),
                 107..=110 => {
                     let rate = vks_gateway_sip::g726::G726Rate::from_payload_type(payload_type)?;
@@ -77,7 +81,8 @@ impl AudioBridgeCodec {
             Self::G722(_) => 320,
             Self::G728(_) => vks_gateway_sip::g728::FRAME_SAMPLES,
             Self::Opus(_) => vks_gateway_sip::opus::FRAME_SAMPLES,
-            Self::G711 { .. } | Self::G726(_) => 160,
+            // G.723.1 is packetized at 30 ms but consumed at the 20 ms tick.
+            Self::G711 { .. } | Self::G726(_) | Self::G7231(_) => 160,
         }
     }
 
@@ -86,6 +91,7 @@ impl AudioBridgeCodec {
             Self::G726(codec) => 2 * codec.rate().bytes_20ms(),
             Self::Opus(_) => vks_gateway_sip::opus::MAX_PAYLOAD,
             Self::G728(_) => vks_gateway_sip::g728::PAYLOAD_BYTES,
+            Self::G7231(_) => vks_gateway_sip::g7231::PAYLOAD_BYTES,
             Self::G711 { .. } | Self::G722(_) => 480,
         }
     }
@@ -110,12 +116,28 @@ impl AudioBridgeCodec {
         out
     }
 
+    fn is_g723(&self) -> bool {
+        matches!(self, Self::G7231(_))
+    }
+
+    /// PCM samples per RTP packet.  G.723.1 uses 30 ms (240 samples) while
+    /// every other native codec matches the 20 ms MCU tick.
+    fn packet_samples(&self) -> usize {
+        match self {
+            Self::G7231(_) => 240,
+            _ => self.frame_samples(),
+        }
+    }
+
     /// RTP timestamp increment per 20 ms packet: 48 kHz for Opus, 8 kHz for
     /// the narrowband/wideband codecs (G.722 keeps an 8 kHz RTP clock).
     fn timestamp_step(&self) -> u32 {
         match self {
             Self::Opus(_) => vks_gateway_sip::opus::FRAME_SAMPLES as u32,
             Self::G711 { .. } | Self::G722(_) | Self::G726(_) | Self::G728(_) => 160,
+            // G.723.1 packets are 30 ms (240 samples); the MCU tick still
+            // consumes/produces 20 ms, so packetization is accumulated.
+            Self::G7231(_) => 240,
         }
     }
 
@@ -145,6 +167,7 @@ impl AudioBridgeCodec {
                 Some(codec.decode(payload).into_iter().map(|sample| f32::from(sample) / 32768.0).collect())
             }
             Self::G728(codec) => codec.decode(payload),
+            Self::G7231(codec) => codec.decode(payload),
             Self::Opus(codec) => codec.decode(payload),
         }
     }
@@ -164,6 +187,7 @@ impl AudioBridgeCodec {
                 codec.encode(&pcm)
             }
             Self::G728(codec) => codec.encode(pcm).unwrap_or_default(),
+            Self::G7231(codec) => codec.encode(pcm).unwrap_or_default(),
             Self::Opus(codec) => codec.encode(pcm).unwrap_or_default(),
         }
     }
@@ -210,6 +234,14 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
     // a 48 kHz RTP timestamp.
     let mut dtmf_timestamp = 0u32;
     let mut last_sequence: Option<u16> = None;
+    // G.723.1 only: 8 kHz output accumulated until one 30 ms / 240-sample
+    // packet is ready.
+    let mut g723_accum: Vec<f32> = Vec::with_capacity(480);
+    // G.723.1 receives 240 samples every 30 ms but the mixer consumes 160
+    // every 20 ms.  Two packets (480 samples) of playout prefill keep the
+    // 60 ms arrival/consumption pattern from underrunning every cycle.
+    let mut g723_playout_started = false;
+    const G723_PREFILL: usize = 480;
     let ssrc = (uuid::Uuid::new_v4().as_u128() as u32).max(1);
     let mut incoming = [0; 2048];
     let mut mixed = [0.0; 960];
@@ -293,11 +325,17 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 let mut upsampled = [0.0; 960];
                 let frame_samples = bridge_codec.frame_samples();
                 let mut input = [0.0; 960];
-                if session.controls.audio_tx_muted.load(Relaxed) { queue.clear(); }
-                else {
+                if session.controls.audio_tx_muted.load(Relaxed) {
+                    queue.clear();
+                    g723_playout_started = false;
+                } else {
                     let volume = session.controls.volume_tx.load(Relaxed);
+                    if bridge_codec.is_g723() && !g723_playout_started && queue.len() >= G723_PREFILL {
+                        g723_playout_started = true;
+                    }
+                    let play = !bridge_codec.is_g723() || g723_playout_started;
                     for sample in input.iter_mut().take(frame_samples) {
-                        *sample = gain(queue.pop_front().unwrap_or(0.0), volume);
+                        *sample = if play { gain(queue.pop_front().unwrap_or(0.0), volume) } else { 0.0 };
                     }
                 }
                 if frame_samples == vks_gateway_sip::opus::FRAME_SAMPLES {
@@ -316,7 +354,6 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 session.mcu_engine.tick_audio_at(session.room_id, media_clock_ms());
                 let mut packet = [0; 12 + vks_gateway_sip::opus::MAX_PAYLOAD];
                 vks_gateway_sip::write_rtp_header(&mut packet[..12], session.audio_payload_type, sequence, timestamp, ssrc, false);
-                sequence = sequence.wrapping_add(1);
                 let volume = session.controls.volume_rx.load(Relaxed);
                 let frame_samples = bridge_codec.frame_samples();
                 let mut output = [0.0; 960];
@@ -337,14 +374,39 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 for sample in output.iter_mut().take(frame_samples) {
                     *sample = gain(*sample, volume);
                 }
-                let encoded = bridge_codec.encode(&output[..frame_samples]);
-                // A codec failure must not become a zero-length RTP packet:
-                // skip this frame and keep the timestamp advancing.
-                if !encoded.is_empty() {
-                    let payload_len = encoded.len().min(packet.len() - 12);
-                    packet[12..12 + payload_len].copy_from_slice(&encoded[..payload_len]);
-                    if let Ok(count) = session.rtp_socket.send_to(&packet[..12 + payload_len], egress).await {
-                        session.media_stats.audio_tx_packets.fetch_add(1, Relaxed); session.media_stats.audio_tx_bytes.fetch_add(count as u64, Relaxed);
+                let packet_samples = bridge_codec.packet_samples();
+                let mut g723_frame = [0.0f32; 240];
+                let mut ready = packet_samples == frame_samples;
+                if ready {
+                    // The 20 ms tick is exactly one packet.
+                } else {
+                    g723_accum.extend_from_slice(&output[..frame_samples]);
+                    if g723_accum.len() >= packet_samples {
+                        g723_frame.copy_from_slice(&g723_accum[..packet_samples]);
+                        g723_accum.drain(..packet_samples);
+                        ready = true;
+                    }
+                }
+                if ready {
+                    let encode_slice: &[f32] = if packet_samples == frame_samples {
+                        &output[..frame_samples]
+                    } else {
+                        &g723_frame[..packet_samples]
+                    };
+                    let encoded = bridge_codec.encode(encode_slice);
+                    // A codec failure must not become a zero-length RTP packet:
+                    // skip this frame and keep the timestamp advancing.
+                    if !encoded.is_empty() {
+                        let payload_len = encoded.len().min(packet.len() - 12);
+                        packet[12..12 + payload_len].copy_from_slice(&encoded[..payload_len]);
+                        if let Ok(count) = session.rtp_socket.send_to(&packet[..12 + payload_len], egress).await {
+                            session.media_stats.audio_tx_packets.fetch_add(1, Relaxed); session.media_stats.audio_tx_bytes.fetch_add(count as u64, Relaxed);
+                            sequence = sequence.wrapping_add(1);
+                        }
+                        // The sampling instant advances even when the socket
+                        // temporarily refuses the datagram; the next payload
+                        // must carry the later timestamp, not repeat it.
+                        timestamp = timestamp.wrapping_add(bridge_codec.timestamp_step());
                     }
                 }
                 if let Some(payload_type) = session.dtmf_payload_type {
@@ -362,7 +424,6 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                         }
                     }
                 } else { dtmf.clear(); }
-                timestamp = timestamp.wrapping_add(bridge_codec.timestamp_step());
                 dtmf_timestamp = dtmf_timestamp.wrapping_add(160);
                 if last_rtcp.elapsed() >= std::time::Duration::from_secs(5) {
                     if let Some(socket) = &session.rtcp_socket {
@@ -604,6 +665,19 @@ mod tests {
         // G.711/G.728 have no loss-concealment path in this bridge.
         let mut g711 = AudioBridgeCodec::new(0, None).expect("PCMU");
         assert!(g711.conceal(1, &[0u8; 160]).is_empty());
+    }
+
+    #[test]
+    fn bridge_codec_g723_uses_30ms_packets_and_240_samples() {
+        let mut codec = AudioBridgeCodec::new(4, None).expect("G.723.1 bridge codec");
+        assert_eq!(codec.frame_samples(), 160, "MCU tick stays 20 ms");
+        assert_eq!(codec.packet_samples(), 240, "one RTP packet is 30 ms");
+        assert_eq!(codec.timestamp_step(), 240);
+        let pcm: Vec<f32> =
+            (0..240).map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 440.0 / 8000.0).sin() * 0.2).collect();
+        let packet = codec.encode(&pcm);
+        assert_eq!(packet.len(), 24);
+        assert_eq!(codec.decode(4, &packet).expect("G.723.1 decode").len(), 240);
     }
 
     #[test]

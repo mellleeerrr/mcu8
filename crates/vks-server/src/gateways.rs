@@ -691,6 +691,7 @@ pub(super) fn audio_codec_name(payload_type: u8) -> &'static str {
         8 => "PCMA",
         9 => "G722",
         15 => "G728",
+        4 => "G723",
         107 => "G726-16",
         108 => "G726-24",
         109 => "G726-32",
@@ -1125,8 +1126,8 @@ impl GatewayManager {
                 session.call_id.clone(),
             )
         };
-        if ![0, 8, 9, 15, 107, 108, 109, 110, 111].contains(&audio_payload_type) {
-            return Err("Only negotiated PCMU/PCMA/G722/G728/G726/Opus audio can be bridged".into());
+        if ![0, 4, 8, 9, 15, 107, 108, 109, 110, 111].contains(&audio_payload_type) {
+            return Err("Only negotiated PCMU/PCMA/G722/G723/G728/G726/Opus audio can be bridged".into());
         }
         let remote_audio_ip =
             remote_ip.parse::<std::net::IpAddr>().map_err(|_| "Invalid negotiated audio IP".to_string())?;
@@ -4270,6 +4271,12 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert!(answer.contains("m=audio "), "{answer}");
         assert!(answer.contains(" RTP/AVP 9\r\n"), "G722 must be selected, not PCMU fallback: {answer}");
         assert!(answer.contains("a=rtpmap:9 G722/8000"), "{answer}");
+        let g723 = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 4\r\na=rtpmap:4 G723/8000\r\n";
+        client.send(invite("cid-g723", g723).as_bytes()).await.unwrap();
+        let g723_answer = read_until(&client, "SIP/2.0 200").await;
+        assert!(g723_answer.contains(" RTP/AVP 4\r\n"), "G.723.1 must be answered: {g723_answer}");
+        assert!(g723_answer.contains("a=rtpmap:4 G723/8000"), "{g723_answer}");
+        assert!(g723_answer.contains("a=ptime:30"), "{g723_answer}");
         let g728 = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 15\r\na=rtpmap:15 G728/8000\r\n";
         client.send(invite("cid-g728", g728).as_bytes()).await.unwrap();
         let g728_answer = read_until(&client, "SIP/2.0 200").await;
@@ -4488,6 +4495,116 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         let mut decoder = vks_gateway_sip::opus::OpusCodec::new().expect("opus decoder");
         let decoded = decoder.decode(&first[12..count]).expect("outbound Opus decodes");
         assert_eq!(decoded.len(), 960);
+        cancel.store(true, Ordering::Relaxed);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gateway_audio_bridges_g723_at_pt4_with_30ms_timestamps() {
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let room = RoomId::new();
+        let source = vks_core::ParticipantId::new();
+        let listener = vks_core::ParticipantId::new();
+        for pid in [source, listener] {
+            mcu.bridge_participant(
+                room,
+                pid,
+                vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Audio)],
+            );
+        }
+        let terminal = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = socket.local_addr().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stats = Arc::new(GatewayMediaStats::default());
+        let (_tx, dtmf_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_rtp_media_bridge(RtpBridgeSession {
+            room_id: room,
+            participant_id_str: source.to_string(),
+            participant_id_val: source,
+            remote_media_ip: "127.0.0.1".into(),
+            remote_audio_port: terminal.local_addr().unwrap().port(),
+            audio_payload_type: 4,
+            audio_codec: Some("G723"),
+            source_latch: false,
+            dtmf_payload_type: None,
+            media_stats: stats,
+            rtp_socket: socket,
+            rtcp_socket: None,
+            rtp_port: target.port(),
+            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(49000, 49000)),
+            mcu_engine: mcu.clone(),
+            controls: GatewayMediaControls::default(),
+            cancel_flag: cancel.clone(),
+            dtmf_rx,
+        });
+        let mut codec = vks_gateway_sip::g7231::G7231Codec::new();
+        let pcm: Vec<f32> = (0..vks_gateway_sip::g7231::FRAME_SAMPLES)
+            .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 440.0 / 8000.0).sin() * 0.25)
+            .collect();
+        let payload = codec.encode(&pcm).expect("encode G.723.1");
+        let mut packet = vec![0u8; 12 + payload.len()];
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 4, 1, 0, 42, false);
+        packet[12..].copy_from_slice(&payload);
+        terminal.send_to(&packet, target).await.unwrap();
+        // 30 ms codec / 20 ms consumer: two packets (480 samples) are the
+        // playout prefill; a single packet must not start the mixer yet.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let mut second_in = packet.clone();
+        vks_gateway_sip::write_rtp_header(&mut second_in[..12], 4, 2, 240, 42, false);
+        terminal.send_to(&second_in, target).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !mcu
+                .participant_audio(room, listener)
+                .is_some_and(|audio| audio.iter().any(|sample| sample.abs() > 0.02))
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("G.723.1 PCM must reach the MCU mix");
+        let mut first = vec![0u8; 1400];
+        let (count, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut first))
+            .await
+            .expect("bridge must emit G.723.1 RTP")
+            .unwrap();
+        assert_eq!(first[1] & 0x7F, 4);
+        assert_eq!(count, 12 + 24, "one MP-MLQ frame per 30 ms packet");
+        let first_ts = u32::from_be_bytes(first[4..8].try_into().unwrap());
+        let mut second = vec![0u8; 1400];
+        let (count2, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut second))
+            .await
+            .expect("bridge must emit a second G.723.1 packet")
+            .unwrap();
+        assert_eq!(count2, 12 + 24);
+        assert_eq!(
+            u32::from_be_bytes(second[4..8].try_into().unwrap()).wrapping_sub(first_ts),
+            240,
+            "G.723.1 timestamp advances by 240 (30 ms)"
+        );
+        let mut decoder = vks_gateway_sip::g7231::G7231Codec::new();
+        assert_eq!(decoder.decode(&first[12..count]).expect("outbound decodes").len(), 240);
+
+        // Continuous 30 ms arrivals must never starve the 20 ms consumer:
+        // without the 480-sample prefill the queue would hit zero every 60 ms.
+        let mut seen_audio = false;
+        let mut zero_snapshots = 0;
+        for step in 3..13u16 {
+            let mut next = packet.clone();
+            let timestamp = 240 * u32::from(step - 1);
+            vks_gateway_sip::write_rtp_header(&mut next[..12], 4, step, timestamp, 42, false);
+            terminal.send_to(&next, target).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            if let Some(audio) = mcu.participant_audio(room, listener) {
+                if audio.iter().any(|sample| sample.abs() > 0.002) {
+                    seen_audio = true;
+                } else if seen_audio {
+                    zero_snapshots += 1;
+                }
+            }
+        }
+        assert!(seen_audio, "continuous G.723.1 never reached the mixer");
+        assert_eq!(zero_snapshots, 0, "G.723.1 playout underran despite prefill");
         cancel.store(true, Ordering::Relaxed);
         task.await.unwrap();
     }

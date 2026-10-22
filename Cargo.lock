@@ -2408,6 +2408,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideav-g7231"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1a917f672f76e54d31b286d788d9462c4c863643a526a3dfaa3dfa431c7e233"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
 name = "oxideav-g728"
 version = "0.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5293,6 +5302,7 @@ version = "0.1.0"
 dependencies = [
  "oxideav-adpcm",
  "oxideav-g722",
+ "oxideav-g7231",
  "oxideav-g728",
  "rusty-opus",
  "rvoip",

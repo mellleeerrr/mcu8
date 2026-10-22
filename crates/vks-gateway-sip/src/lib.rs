@@ -25,6 +25,7 @@
 pub mod call;
 pub mod codec;
 pub mod g722;
+pub mod g7231;
 pub mod g726;
 pub mod g728;
 pub mod opus;
