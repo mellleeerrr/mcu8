@@ -1489,6 +1489,484 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
     }
 }
 
+/// Входящий SIP-вызов, принятый UAS-listener'ом.
+struct InboundUasCall {
+    participant_id: String,
+    room_id: RoomId,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    controls: GatewayMediaControls,
+    stats: Arc<GatewayMediaStats>,
+    ack: Arc<std::sync::atomic::AtomicBool>,
+    sdp: String,
+    to_tag: String,
+}
+
+fn sip_from_display_name(from: &str) -> String {
+    let quoted = from.trim();
+    if let Some(start) = quoted.find('"') {
+        if let Some(end) = quoted[start + 1..].find('"') {
+            let name = quoted[start + 1..start + 1 + end].trim();
+            if !name.is_empty() {
+                return vks_common::sanitize_label_or(name, "SIP");
+            }
+        }
+    }
+    let user = quoted.split("sip:").nth(1).and_then(|rest| rest.split(['@', '>', ';']).next()).unwrap_or("SIP");
+    vks_common::sanitize_label_or(user, "SIP")
+}
+
+fn sip_dialog_key(request: &vks_gateway_sip::UasRequest) -> String {
+    format!("{}|{}", request.call_id, request.from_tag.as_deref().unwrap_or("-"))
+}
+
+fn sip_send(socket: &tokio::net::UdpSocket, peer: std::net::SocketAddr, text: &str) {
+    let _ = socket.try_send_to(text.as_bytes(), peer);
+}
+
+/// UDP SIP UAS: принимает `INVITE sip:<room-id>@<advertised-ip>` и поднимает
+/// существующий RTP-мост. Транспорт минимален (UDP + plain RTP), потому что
+/// именно так вызывают терминалы/TrueConf в этом стенде; SRTP/TLS/100rel
+/// возвращают 488/420, а не изображают поддержку.
+pub async fn serve_sip_uas(manager: Arc<GatewayManager>, bind: String, advertised_ip: String) -> std::io::Result<()> {
+    let socket = Arc::new(tokio::net::UdpSocket::bind(&bind).await?);
+    info!(bind = %bind, advertised_ip = %advertised_ip, "SIP UAS listening");
+    let max_calls =
+        std::env::var("VKS_SIP_UAS_MAX_CALLS").ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(64);
+    let calls: Arc<Mutex<std::collections::HashMap<String, InboundUasCall>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let mut buf = [0u8; 65535];
+    loop {
+        let Ok((count, peer)) = socket.recv_from(&mut buf).await else { continue };
+        let text = String::from_utf8_lossy(&buf[..count]);
+        let Some(request) = vks_gateway_sip::UasRequest::parse(&text) else { continue };
+        match request.method.as_str() {
+            "INVITE" => {
+                if let Some(require) = &request.require {
+                    let unsupported = require
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|value| matches!(*value, "100rel" | "timer"))
+                        .collect::<Vec<_>>();
+                    if !unsupported.is_empty() {
+                        let mut response = vks_gateway_sip::build_response(
+                            420,
+                            "Bad Extension",
+                            &request,
+                            &advertised_ip,
+                            5060,
+                            None,
+                            "",
+                        );
+                        response = response.replace(
+                            "Content-Length:",
+                            &format!("Unsupported: {}\r\nContent-Length:", unsupported.join(", ")),
+                        );
+                        sip_send(&socket, peer, &response);
+                        continue;
+                    }
+                }
+                let key = sip_dialog_key(&request);
+                let existing = calls
+                    .lock()
+                    .expect("inbound calls poisoned")
+                    .get(&key)
+                    .map(|call| (call.to_tag.clone(), call.sdp.clone()));
+                if let Some((to_tag, sdp)) = existing {
+                    // Retransmission (same dialog): rebuild with this request's
+                    // Via/branch, but keep the established To-tag and SDP.
+                    let response =
+                        vks_gateway_sip::build_response(200, "OK", &request, &advertised_ip, 5060, Some(&to_tag), &sdp);
+                    sip_send(&socket, peer, &response);
+                    continue;
+                }
+                if calls.lock().expect("inbound calls poisoned").len() >= max_calls {
+                    sip_send(
+                        &socket,
+                        peer,
+                        &vks_gateway_sip::build_response(
+                            503,
+                            "Service Unavailable",
+                            &request,
+                            &advertised_ip,
+                            5060,
+                            None,
+                            "",
+                        ),
+                    );
+                    continue;
+                }
+                let Some(user) = request.target_user() else {
+                    sip_send(
+                        &socket,
+                        peer,
+                        &vks_gateway_sip::build_response(404, "Not Found", &request, &advertised_ip, 5060, None, ""),
+                    );
+                    continue;
+                };
+                let Some(state) =
+                    manager.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
+                else {
+                    sip_send(
+                        &socket,
+                        peer,
+                        &vks_gateway_sip::build_response(
+                            503,
+                            "Service Unavailable",
+                            &request,
+                            &advertised_ip,
+                            5060,
+                            None,
+                            "",
+                        ),
+                    );
+                    continue;
+                };
+                let room_id = uuid::Uuid::parse_str(&user).ok().map(RoomId::from_uuid);
+                if room_id
+                    .is_none_or(|room_id| state.rooms.lock().expect("rooms store poisoned").get(&room_id).is_none())
+                {
+                    sip_send(
+                        &socket,
+                        peer,
+                        &vks_gateway_sip::build_response(404, "Not Found", &request, &advertised_ip, 5060, None, ""),
+                    );
+                    continue;
+                }
+                let Some(media) = vks_gateway_sip::negotiate(&request.body) else {
+                    sip_send(
+                        &socket,
+                        peer,
+                        &vks_gateway_sip::build_response(
+                            488,
+                            "Not Acceptable Here",
+                            &request,
+                            &advertised_ip,
+                            5060,
+                            None,
+                            "",
+                        ),
+                    );
+                    continue;
+                };
+                let Some(mcu) = manager.mcu_engine.clone() else {
+                    sip_send(
+                        &socket,
+                        peer,
+                        &vks_gateway_sip::build_response(
+                            503,
+                            "Service Unavailable",
+                            &request,
+                            &advertised_ip,
+                            5060,
+                            None,
+                            "",
+                        ),
+                    );
+                    continue;
+                };
+                let Some(audio_pair) = manager.port_pool.allocate_pair("0.0.0.0").await else {
+                    sip_send(
+                        &socket,
+                        peer,
+                        &vks_gateway_sip::build_response(
+                            503,
+                            "Service Unavailable",
+                            &request,
+                            &advertised_ip,
+                            5060,
+                            None,
+                            "",
+                        ),
+                    );
+                    continue;
+                };
+                let mut audio_lease = RtpPortLease::new(manager.port_pool.clone(), audio_pair.rtp_port);
+                let video_pair = if media.video_payload_type.is_some() {
+                    manager.port_pool.allocate_pair("0.0.0.0").await
+                } else {
+                    None
+                };
+                let mut video_lease =
+                    video_pair.as_ref().map(|pair| RtpPortLease::new(manager.port_pool.clone(), pair.rtp_port));
+                let has_video = video_pair.is_some();
+                let session_id = uuid::Uuid::new_v4().as_u128() as u64;
+                let sdp = vks_gateway_sip::build_answer(
+                    &advertised_ip,
+                    session_id,
+                    audio_pair.rtp_port,
+                    video_pair.as_ref().map(|pair| pair.rtp_port),
+                    &media,
+                );
+                let to_tag = format!("vks{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+                sip_send(
+                    &socket,
+                    peer,
+                    &vks_gateway_sip::build_response(100, "Trying", &request, &advertised_ip, 5060, None, ""),
+                );
+                sip_send(
+                    &socket,
+                    peer,
+                    &vks_gateway_sip::build_response(180, "Ringing", &request, &advertised_ip, 5060, None, ""),
+                );
+                let response =
+                    vks_gateway_sip::build_response(200, "OK", &request, &advertised_ip, 5060, Some(&to_tag), &sdp);
+                sip_send(&socket, peer, &response);
+                if let Some(room_id) = room_id {
+                    let participant_id = format!("sip-{}-in@sip-gateway", uuid::Uuid::new_v4());
+                    let participant = crate::parse_participant_id(&participant_id);
+                    let display_name = sip_from_display_name(&request.from);
+                    let stats = Arc::new(GatewayMediaStats::default());
+                    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let controls = GatewayMediaControls::default();
+                    land_gateway_participant_in_room(
+                        &state,
+                        Some(&mcu),
+                        &room_id,
+                        &participant_id,
+                        &display_name,
+                        has_video,
+                    );
+                    let (dtmf_tx, dtmf_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let controls = GatewayMediaControls { dtmf_sender: dtmf_tx, ..controls };
+                    spawn_rtp_media_bridge(RtpBridgeSession {
+                        room_id,
+                        participant_id_str: participant_id.clone(),
+                        participant_id_val: participant,
+                        remote_media_ip: media.remote_ip.clone(),
+                        remote_audio_port: media.remote_audio_port,
+                        audio_payload_type: media.audio_payload_type,
+                        dtmf_payload_type: None,
+                        media_stats: stats.clone(),
+                        rtp_socket: audio_pair.rtp_socket,
+                        rtcp_socket: Some(audio_pair.rtcp_socket),
+                        rtp_port: audio_pair.rtp_port,
+                        port_pool: manager.port_pool.clone(),
+                        mcu_engine: mcu.clone(),
+                        controls: controls.clone(),
+                        cancel_flag: cancel.clone(),
+                        dtmf_rx,
+                    });
+                    audio_lease.disarm();
+                    if let (Some(pair), Some(remote_port), Some(payload)) =
+                        (video_pair, media.remote_video_port, media.video_payload_type)
+                    {
+                        if let Ok(remote_ip) = media.remote_ip.parse::<std::net::IpAddr>() {
+                            let session = video::VideoBridgeSession {
+                                room_id,
+                                participant_id: participant,
+                                rtp_socket: pair.rtp_socket,
+                                rtcp_socket: Some(pair.rtcp_socket),
+                                remote_target: std::net::SocketAddr::new(remote_ip, remote_port),
+                                payload_type: payload,
+                                receive_payload_type: payload,
+                                port_pool: manager.port_pool.clone(),
+                                engine: mcu,
+                                controls: controls.clone(),
+                                cancelled: cancel.clone(),
+                                stats: stats.clone(),
+                                profile: video::VideoProfile::default(),
+                            };
+                            tokio::spawn(async move {
+                                let mut lease = video_lease.take();
+                                match video::spawn_video_media_bridge(session).await {
+                                    Ok(_) => {
+                                        if let Some(lease) = lease.as_mut() {
+                                            lease.disarm();
+                                        }
+                                    }
+                                    Err(error) => warn!(%error, "inbound SIP video bridge unavailable; audio-only"),
+                                }
+                            });
+                        }
+                    }
+                    let media_details = serde_json::json!({
+                        "protocol": "SIP",
+                        "direction": "inbound",
+                        "remote_audio_address": format!("{}:{}", media.remote_ip, media.remote_audio_port),
+                        "remote_video_address": media.remote_video_port.map(|port| format!("{}:{}", media.remote_ip, port)),
+                        "audio_codec": if media.audio_payload_type == 8 { "PCMA" } else { "PCMU" },
+                        "audio_payload_type": media.audio_payload_type,
+                        "video_codec": media.video_payload_type.map(|_| "H264"),
+                    });
+                    if let Ok(mut registry) = manager.registry.lock() {
+                        registry.by_call.insert(request.call_id.clone(), participant_id.clone());
+                        registry.by_participant.insert(
+                            participant_id.clone(),
+                            GatewayCallSession {
+                                call_id: request.call_id.clone(),
+                                participant_id: participant_id.clone(),
+                                room_id,
+                                display_name: display_name.clone(),
+                                uri: request.request_uri.clone(),
+                                active_sip: None,
+                                active_h323: None,
+                                cancel_flag: cancel.clone(),
+                                controls: controls.clone(),
+                                media_stats: stats.clone(),
+                                media_details,
+                                connected_at: std::time::Instant::now(),
+                            },
+                        );
+                    }
+                    let socket_clone = socket.clone();
+                    let ack_flag = ack.clone();
+                    let cancel_task = cancel.clone();
+                    let response_clone = response.clone();
+                    let calls_cleanup = calls.clone();
+                    let manager_cleanup = manager.clone();
+                    let cleanup_key = key.clone();
+                    calls.lock().expect("inbound calls poisoned").insert(
+                        key.clone(),
+                        InboundUasCall {
+                            participant_id: participant_id.clone(),
+                            room_id,
+                            cancel: cancel.clone(),
+                            controls: controls.clone(),
+                            stats: stats.clone(),
+                            ack: ack.clone(),
+                            sdp: sdp.clone(),
+                            to_tag: to_tag.clone(),
+                        },
+                    );
+                    tokio::spawn(async move {
+                        for _ in 0..20 {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            if ack_flag.load(std::sync::atomic::Ordering::Relaxed)
+                                || cancel_task.load(std::sync::atomic::Ordering::Relaxed)
+                            {
+                                return;
+                            }
+                            sip_send(&socket_clone, peer, &response_clone);
+                        }
+                        // Терминал не подтвердил 200 ACK: снимаем фантомный
+                        // participant и возвращаем RTP-порты вместо вечной утечки.
+                        if ack_flag.load(std::sync::atomic::Ordering::Relaxed)
+                            || cancel_task.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            return;
+                        }
+                        let call = calls_cleanup.lock().expect("inbound calls poisoned").remove(&cleanup_key);
+                        if let Some(call) = call {
+                            call.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                            if let Ok(mut registry) = manager_cleanup.registry.lock() {
+                                if let Some(session) = registry.by_participant.remove(&call.participant_id) {
+                                    registry.by_call.remove(&session.call_id);
+                                }
+                            }
+                            if let Some(state) = manager_cleanup
+                                .state
+                                .read()
+                                .ok()
+                                .and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
+                            {
+                                terminate_gateway_participant_in_room(
+                                    &state,
+                                    manager_cleanup.mcu_engine.as_ref(),
+                                    &call.room_id,
+                                    &call.participant_id,
+                                );
+                            }
+                        }
+                    });
+                }
+            }
+            "ACK" => {
+                if let Some(call) = calls.lock().expect("inbound calls poisoned").get(&sip_dialog_key(&request)) {
+                    call.ack.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            "BYE" => {
+                sip_send(
+                    &socket,
+                    peer,
+                    &vks_gateway_sip::build_response(200, "OK", &request, &advertised_ip, 5060, None, ""),
+                );
+                if let Some(call) = calls.lock().expect("inbound calls poisoned").remove(&sip_dialog_key(&request)) {
+                    call.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    if let Ok(mut registry) = manager.registry.lock() {
+                        if let Some(session) = registry.by_participant.remove(&call.participant_id) {
+                            registry.by_call.remove(&session.call_id);
+                        }
+                    }
+                    if let Some(state) =
+                        manager.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
+                    {
+                        terminate_gateway_participant_in_room(
+                            &state,
+                            manager.mcu_engine.as_ref(),
+                            &call.room_id,
+                            &call.participant_id,
+                        );
+                    }
+                    let _ = (call.controls, call.stats);
+                }
+            }
+            "CANCEL" => {
+                sip_send(
+                    &socket,
+                    peer,
+                    &vks_gateway_sip::build_response(200, "OK", &request, &advertised_ip, 5060, None, ""),
+                );
+                if let Some(call) = calls.lock().expect("inbound calls poisoned").remove(&sip_dialog_key(&request)) {
+                    call.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    if let Ok(mut registry) = manager.registry.lock() {
+                        if let Some(session) = registry.by_participant.remove(&call.participant_id) {
+                            registry.by_call.remove(&session.call_id);
+                        }
+                    }
+                    let mut invite = request.clone();
+                    invite.method = "INVITE".into();
+                    sip_send(
+                        &socket,
+                        peer,
+                        &vks_gateway_sip::build_response(
+                            487,
+                            "Request Terminated",
+                            &invite,
+                            &advertised_ip,
+                            5060,
+                            None,
+                            "",
+                        ),
+                    );
+                    if let Some(state) =
+                        manager.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
+                    {
+                        terminate_gateway_participant_in_room(
+                            &state,
+                            manager.mcu_engine.as_ref(),
+                            &call.room_id,
+                            &call.participant_id,
+                        );
+                    }
+                }
+            }
+            "OPTIONS" => {
+                let mut response = vks_gateway_sip::build_response(200, "OK", &request, &advertised_ip, 5060, None, "");
+                response =
+                    response.replace("Content-Length:", "Allow: INVITE, ACK, BYE, CANCEL, OPTIONS\r\nContent-Length:");
+                sip_send(&socket, peer, &response);
+            }
+            _ => {
+                sip_send(
+                    &socket,
+                    peer,
+                    &vks_gateway_sip::build_response(
+                        405,
+                        "Method Not Allowed",
+                        &request,
+                        &advertised_ip,
+                        5060,
+                        None,
+                        "",
+                    ),
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod media_runtime_tests {
     use super::*;

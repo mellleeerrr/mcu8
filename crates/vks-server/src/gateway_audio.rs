@@ -271,7 +271,13 @@ impl RtpSource {
         }
         self.ssrc = Some(ssrc);
         self.sequence = Some(seq);
-        Some(RtpPayload { payload: &packet[offset..end], payload_type: pt, sequence: seq, timestamp: ts, marker: packet[1] & 0x80 != 0 })
+        Some(RtpPayload {
+            payload: &packet[offset..end],
+            payload_type: pt,
+            sequence: seq,
+            timestamp: ts,
+            marker: packet[1] & 0x80 != 0,
+        })
     }
 }
 

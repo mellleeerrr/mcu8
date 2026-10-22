@@ -373,6 +373,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(GatewayManager::new().with_mcu(mcu_engine.clone()).with_candidate_ip(&candidate_addr));
     gateway_manager.bind_state(Arc::downgrade(&admin_state));
     admin_state.set_dialer(gateway_manager.clone());
+    // Входящий SIP UAS включается явно; в тестах listener не поднимается,
+    // чтобы 5060 не конфликтовал с mock-терминалами. `VKS_SIP_UAS_ENABLED=0`
+    // выключает его на стенде.
+    if std::env::var("VKS_SIP_UAS_ENABLED").map_or(true, |value| value != "0") {
+        let bind = std::env::var("VKS_SIP_UAS_BIND").unwrap_or_else(|_| "0.0.0.0:5060".to_string());
+        let advertised = candidate_addr.clone();
+        let manager = gateway_manager.clone();
+        tokio::spawn(async move {
+            if let Err(error) = vks_server::gateways::serve_sip_uas(manager, bind, advertised).await {
+                tracing::error!(%error, "SIP UAS listener stopped");
+            }
+        });
+    }
     let recorder_manager = Arc::new(RecorderManager::new());
     let cluster_manager = Arc::new(ClusterManager::new(&config.server_name));
 

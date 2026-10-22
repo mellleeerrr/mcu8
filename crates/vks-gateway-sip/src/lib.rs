@@ -27,6 +27,7 @@ pub mod codec;
 pub mod rtp_bridge;
 pub mod sip_message;
 pub mod uac;
+pub mod uas;
 
 pub use call::{CallState, SipCall, SipGateway};
 pub use codec::{CodecMap, NegotiatedCodec, SipCodec, WebRtcCodec};
@@ -39,3 +40,4 @@ pub use rtp_bridge::{
 };
 pub use sip_message::{build_ack, build_bye, build_cancel, build_invite, SipResponse};
 pub use uac::{ActiveSipSession, SipDialError, SipUacClient};
+pub use uas::{build_answer, build_response, negotiate, InboundMedia, UasRequest};
