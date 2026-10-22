@@ -2379,6 +2379,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideav-adpcm"
+version = "0.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fb6a4c97605fbc425d827fc29824d471b50c8e90a86f2469743a3b15e1b8eee"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
 name = "oxideav-core"
 version = "0.1.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5267,6 +5276,7 @@ dependencies = [
 name = "vks-gateway-sip"
 version = "0.1.0"
 dependencies = [
+ "oxideav-adpcm",
  "oxideav-g722",
  "rvoip",
  "serde",

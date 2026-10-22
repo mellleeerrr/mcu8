@@ -25,6 +25,7 @@
 pub mod call;
 pub mod codec;
 pub mod g722;
+pub mod g726;
 pub mod rtp_bridge;
 pub mod sip_message;
 pub mod uac;

@@ -1,0 +1,10 @@
+$ cargo fmt --all --check
+OK
+$ cargo clippy --workspace --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.79s
+$ cargo test -p vks-gateway-sip --lib
+test result: ok. 78 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+$ cargo test -p vks-server --lib
+test result: ok. 74 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 15.03s
+$ cargo test -p vks-common --lib
+test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s

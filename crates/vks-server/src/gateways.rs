@@ -88,10 +88,21 @@ fn find_call_string_override<'a>(
 /// Для `h323:` используется отдельный список реально открываемых sidecar'ом
 /// кодеков (G.711U), иначе SIP-wideband G.722 проходил бы precheck H.323.
 fn codec_name(item: &serde_json::Value) -> Option<String> {
-    item.as_str()
-        .or_else(|| item.get("name").and_then(serde_json::Value::as_str))
-        .map(|name| name.trim().to_uppercase().replace(['.', '-', '_'], ""))
-        .filter(|name| !name.is_empty())
+    let raw = item.as_str().or_else(|| item.get("name").and_then(serde_json::Value::as_str))?;
+    let (raw, inline_bitrate) =
+        raw.split_once(':').map_or((raw, None), |(name, bitrate)| (name, bitrate.trim().parse::<u32>().ok()));
+    let name = raw.trim().to_uppercase().replace(['.', '-', '_'], "");
+    if name.is_empty() {
+        return None;
+    }
+    if name == "G726" {
+        // Keep the bitrate in the token so the variant-aware capability check
+        // cannot accept unsupported G726:48 / G726:null selections.
+        let bitrate =
+            item.get("bitrate").and_then(serde_json::Value::as_u64).map(|value| value as u32).or(inline_bitrate);
+        return Some(bitrate.map_or_else(|| name.clone(), |bitrate| format!("{name}{bitrate}")));
+    }
+    Some(name)
 }
 
 /// Audio codecs the H.323 sidecar actually opens an OLC for. The sidecar
@@ -116,9 +127,10 @@ fn ensure_bridgeable_codec_selection_for(
     audio: Option<&serde_json::Value>,
     video: Option<&serde_json::Value>,
 ) -> Result<(), String> {
-    use vks_common::codec_capabilities::{is_native_audio, is_native_video, NATIVE_AUDIO, NATIVE_VIDEO};
+    use vks_common::codec_capabilities::{is_native_audio_variant, is_native_video, NATIVE_AUDIO, NATIVE_VIDEO};
     let audio_supported: &[&str] = if h323 { H323_AUDIO } else { NATIVE_AUDIO };
-    let audio_native: fn(&str) -> bool = if h323 { h323_audio_native } else { is_native_audio };
+    let audio_native: fn(&str) -> bool =
+        if h323 { h323_audio_native } else { |name| is_native_audio_variant(name, None) };
     for (kind, value, supported, native) in [
         ("audio", audio, audio_supported, audio_native),
         ("video", video, NATIVE_VIDEO, is_native_video as fn(&str) -> bool),
@@ -674,6 +686,10 @@ pub(super) fn audio_codec_name(payload_type: u8) -> &'static str {
         0 => "PCMU",
         8 => "PCMA",
         9 => "G722",
+        107 => "G726-16",
+        108 => "G726-24",
+        109 => "G726-32",
+        110 => "G726-40",
         _ => "unknown",
     }
 }
@@ -685,6 +701,8 @@ pub struct RtpBridgeSession {
     pub remote_media_ip: String,
     pub remote_audio_port: u16,
     pub audio_payload_type: u8,
+    /// Canonical negotiated codec name; authoritative for dynamic PTs 96-127.
+    pub audio_codec: Option<&'static str>,
     /// Первый входящий RTP-пакет может прийти с другого source (NAT).
     pub source_latch: bool,
     pub dtmf_payload_type: Option<u8>,
@@ -753,10 +771,10 @@ impl Drop for PendingOutboundGuard {
     }
 }
 
-/// Запускает фоновый 20-мс RTP медиа-мост (G.711/G.722 <-> McuEngine N-1 mix-minus).
+/// Запускает фоновый 20-мс RTP медиа-мост (G.711/G.722/G.726 <-> McuEngine N-1 mix-minus).
 ///
 /// Полностью абстрагирован от сигнального протокола (используется одинаково для SIP и H.323).
-/// Zero heap allocation на горячем пути: стек-буферы и `set_audio_slice`/`copy_participant_audio`.
+/// Per-packet conversion buffers, no shared mutable state на горячем пути: стек-буферы и `set_audio_slice`/`copy_participant_audio`.
 pub fn spawn_rtp_media_bridge(session: RtpBridgeSession) -> tokio::task::JoinHandle<()> {
     let lease = RtpPortLease::new(session.port_pool.clone(), session.rtp_port);
     session.media_stats.audio_codec_running.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1101,8 +1119,8 @@ impl GatewayManager {
                 session.call_id.clone(),
             )
         };
-        if ![0, 8, 9].contains(&audio_payload_type) {
-            return Err("Only negotiated PCMU/PCMA/G722 audio can be bridged".into());
+        if ![0, 8, 9, 107, 108, 109, 110].contains(&audio_payload_type) {
+            return Err("Only negotiated PCMU/PCMA/G722/G726 audio can be bridged".into());
         }
         let remote_audio_ip =
             remote_ip.parse::<std::net::IpAddr>().map_err(|_| "Invalid negotiated audio IP".to_string())?;
@@ -1177,6 +1195,7 @@ impl GatewayManager {
             remote_media_ip: remote_ip,
             remote_audio_port,
             audio_payload_type,
+            audio_codec: Some(audio_codec_name(audio_payload_type)),
             source_latch: false,
             dtmf_payload_type,
             media_stats: media_stats.clone(),
@@ -2211,6 +2230,7 @@ async fn serve_sip_uas_on(
                         remote_media_ip: media.remote_ip.clone(),
                         remote_audio_port: media.remote_audio_port,
                         audio_payload_type: media.audio_payload_type,
+                        audio_codec: Some(media.audio_codec),
                         source_latch: true,
                         dtmf_payload_type: None,
                         media_stats: stats.clone(),
@@ -2308,12 +2328,12 @@ async fn serve_sip_uas_on(
                             media.remote_video_ip.as_deref().unwrap_or(&media.remote_ip),
                             port
                         )),
-                        "audio_codec": audio_codec_name(media.audio_payload_type),
+                        "audio_codec": media.audio_codec,
                         "audio_payload_type": media.audio_payload_type,
                         "audio_rx_payload_type": media.audio_payload_type,
                         "audio_tx_payload_type": media.audio_payload_type,
                         "audio_clock_rate": 8000,
-                        "audio_sample_rate": audio_sample_rate(media.audio_payload_type),
+                        "audio_sample_rate": if media.audio_codec == "G722" { 16_000 } else { 8_000 },
                         "video_codec": media.video_payload_type.map(|_| "H264"),
                         "video_payload_type": media.video_payload_type,
                         "video_clock_rate": media.video_payload_type.map(|_| 90000u32),
@@ -3061,6 +3081,7 @@ async fn serve_h323_uas_session(
                     remote_media_ip: remote_ip.to_string(),
                     remote_audio_port,
                     audio_payload_type: 0,
+                    audio_codec: None,
                     // H.323 already binds the media address via H.245. Any
                     // first-packet relatch would let a LAN scanner hijack the
                     // bridge/egress, so keep the OLC-pinned peer.
@@ -3472,6 +3493,18 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert!(ensure_bridgeable_codec_selection_for(true, Some(&g722_only), None).is_err());
         let pcmu_only = serde_json::json!([{"name": "PCMU", "bitrate": null}]);
         assert!(ensure_bridgeable_codec_selection_for(true, Some(&pcmu_only), None).is_ok());
+        // G.726 is variant-aware: only 16/24/32/40 kbit/s are bridged, and the
+        // H.323 sidecar (G.711U only) must reject it before dialing.
+        for bitrate in [16, 24, 32, 40] {
+            let g726 = serde_json::json!([{"name": "G726", "bitrate": bitrate}]);
+            assert!(ensure_bridgeable_codec_selection(Some(&g726), None).is_ok(), "G726:{bitrate}");
+            assert!(ensure_bridgeable_codec_selection_for(true, Some(&g726), None).is_err(), "h323 G726:{bitrate}");
+        }
+        for bad in [serde_json::json!([{"name": "G726", "bitrate": 48}]), serde_json::json!([{"name": "G726"}])] {
+            assert!(ensure_bridgeable_codec_selection(Some(&bad), None).is_err(), "unsupported G726 variant: {bad}");
+        }
+        let g726_string = serde_json::json!(["G726:32"]);
+        assert!(ensure_bridgeable_codec_selection(Some(&g726_string), None).is_ok());
     }
 
     #[test]
@@ -3897,6 +3930,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             remote_media_ip: "127.0.0.1".into(),
             remote_audio_port: terminal.local_addr().unwrap().port(),
             audio_payload_type: 0,
+            audio_codec: None,
             source_latch: false,
             dtmf_payload_type: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
@@ -3950,6 +3984,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             remote_media_ip: "127.0.0.1".into(),
             remote_audio_port: terminal.local_addr().unwrap().port(),
             audio_payload_type: 0,
+            audio_codec: None,
             source_latch: false,
             dtmf_payload_type: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
@@ -3999,6 +4034,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             remote_media_ip: "127.0.0.1".into(),
             remote_audio_port: terminal.local_addr().unwrap().port(),
             audio_payload_type: 8,
+            audio_codec: None,
             source_latch: false,
             dtmf_payload_type: None,
             rtp_socket: socket,
@@ -4047,6 +4083,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             remote_media_ip: "127.0.0.1".into(),
             remote_audio_port: terminal.local_addr().unwrap().port(),
             audio_payload_type: 0,
+            audio_codec: None,
             source_latch: false,
             dtmf_payload_type: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
@@ -4109,6 +4146,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             remote_media_ip: "127.0.0.1".into(),
             remote_audio_port: terminal.local_addr().unwrap().port(),
             audio_payload_type: 9,
+            audio_codec: None,
             source_latch: false,
             dtmf_payload_type: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
@@ -4219,7 +4257,137 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert!(answer.contains("m=audio "), "{answer}");
         assert!(answer.contains(" RTP/AVP 9\r\n"), "G722 must be selected, not PCMU fallback: {answer}");
         assert!(answer.contains("a=rtpmap:9 G722/8000"), "{answer}");
+        let g726 = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 109\r\na=rtpmap:109 G726-32/8000\r\n";
+        client.send(invite("cid-g726", g726).as_bytes()).await.unwrap();
+        let g726_answer = read_until(&client, "SIP/2.0 200").await;
+        assert!(g726_answer.contains(" RTP/AVP 109\r\n"), "G726-32 must be answered: {g726_answer}");
+        assert!(g726_answer.contains("a=rtpmap:109 G726-32/8000"), "{g726_answer}");
         listener.abort();
+    }
+
+    #[tokio::test]
+    async fn gateway_audio_bridges_g726_32_at_peer_dynamic_pt_with_8khz_clock() {
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let room = RoomId::new();
+        let source = vks_core::ParticipantId::new();
+        let listener = vks_core::ParticipantId::new();
+        for pid in [source, listener] {
+            mcu.bridge_participant(
+                room,
+                pid,
+                vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Audio)],
+            );
+        }
+        let terminal = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = socket.local_addr().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stats = Arc::new(GatewayMediaStats::default());
+        let (_tx, dtmf_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = spawn_rtp_media_bridge(RtpBridgeSession {
+            room_id: room,
+            participant_id_str: source.to_string(),
+            participant_id_val: source,
+            remote_media_ip: "127.0.0.1".into(),
+            remote_audio_port: terminal.local_addr().unwrap().port(),
+            audio_payload_type: 96,
+            audio_codec: Some("G726-32"),
+            source_latch: false,
+            dtmf_payload_type: None,
+            media_stats: stats.clone(),
+            rtp_socket: socket,
+            rtcp_socket: None,
+            rtp_port: target.port(),
+            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(49000, 49000)),
+            mcu_engine: mcu.clone(),
+            controls: GatewayMediaControls::default(),
+            cancel_flag: cancel.clone(),
+            dtmf_rx,
+        });
+        let rate = vks_gateway_sip::g726::G726Rate::R32;
+        let mut codec = vks_gateway_sip::g726::G726Codec::new(rate);
+        let pcm: Vec<i16> = (0..320)
+            .map(|i| ((i as f32 * 2.0 * std::f32::consts::PI * 440.0 / 8000.0).sin() * 12_000.0) as i16)
+            .collect();
+        let mut malformed = [0u8; 173];
+        vks_gateway_sip::write_rtp_header(&mut malformed[..12], 96, 1, 0, 42, false);
+        malformed[12..].fill(0x55); // 161 bytes: more than the 40 ms G.726-32 cap
+        terminal.send_to(&malformed, target).await.unwrap();
+        tokio::time::timeout(Duration::from_millis(300), async {
+            while stats.rejected_packets.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("oversized G.726 payload must be rejected");
+        assert_eq!(stats.audio_rx_packets.load(Ordering::Relaxed), 0);
+        let payload = codec.encode(&pcm[..160]);
+        assert_eq!(payload.len(), 80);
+        let mut packet = [0u8; 92];
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 96, 2, 0, 42, false);
+        packet[12..].copy_from_slice(&payload);
+        terminal.send_to(&packet, target).await.unwrap();
+        tokio::time::timeout(Duration::from_millis(300), async {
+            loop {
+                if mcu
+                    .participant_audio(room, listener)
+                    .is_some_and(|audio| audio.iter().any(|sample| sample.abs() > 0.05))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("G.726 PCM must reach the 48 kHz MCU mix");
+        let mut first = [0u8; 512];
+        let (count, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut first))
+            .await
+            .expect("bridge must emit G.726 RTP")
+            .unwrap();
+        assert_eq!(first[1] & 0x7F, 96, "peer-chosen dynamic G.726-32 payload type");
+        assert_eq!(count - 12, 80, "20 ms of G.726-32 is 80 octets");
+        let first_ts = u32::from_be_bytes(first[4..8].try_into().unwrap());
+        let mut second = [0u8; 512];
+        let (count2, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut second))
+            .await
+            .expect("bridge must emit a second G.726 RTP packet")
+            .unwrap();
+        assert_eq!(count2 - 12, 80);
+        assert_eq!(
+            u32::from_be_bytes(second[4..8].try_into().unwrap()).wrapping_sub(first_ts),
+            160,
+            "G.726 RTP clock is 8000 Hz"
+        );
+        assert_eq!(codec.decode(&first[12..count]).len(), 160);
+        // 40 ms input: 320 samples -> 160 octets, but the bridge still emits
+        // two 20 ms packets with timestamp +160 each.
+        let payload40 = codec.encode(&pcm);
+        assert_eq!(payload40.len(), 160);
+        let mut packet40 = [0u8; 172];
+        vks_gateway_sip::write_rtp_header(&mut packet40[..12], 96, 3, 480, 42, false);
+        packet40[12..].copy_from_slice(&payload40);
+        terminal.send_to(&packet40, target).await.unwrap();
+        let mut tick1 = [0u8; 512];
+        let (tick1_len, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut tick1))
+            .await
+            .expect("first 20 ms tick after 40 ms input")
+            .unwrap();
+        let mut tick2 = [0u8; 512];
+        let (tick2_len, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut tick2))
+            .await
+            .expect("second 20 ms tick after 40 ms input")
+            .unwrap();
+        assert_eq!(tick1_len - 12, 80);
+        assert_eq!(tick2_len - 12, 80);
+        assert_eq!(
+            u32::from_be_bytes(tick2[4..8].try_into().unwrap())
+                .wrapping_sub(u32::from_be_bytes(tick1[4..8].try_into().unwrap())),
+            160,
+            "40 ms input must not advance the RTP timestamp by 320"
+        );
+        cancel.store(true, Ordering::Relaxed);
+        task.await.unwrap();
     }
 
     #[test]

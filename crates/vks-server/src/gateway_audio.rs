@@ -1,4 +1,4 @@
-//! G.711/G.722 payload conversion at the negotiated RTP boundary.
+//! G.711/G.722/G.726 payload conversion at the negotiated RTP boundary.
 
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -16,6 +16,114 @@ fn gain(sample: f32, volume: u32) -> f32 {
     }
 }
 
+/// Selected RTP audio codec and its PCM domain.  G.711/G.726 are 8 kHz,
+/// G.722 is 16 kHz; all use a 20 ms tick and an 8 kHz RTP timestamp clock.
+enum AudioBridgeCodec {
+    G711 {
+        /// G.711 law (0 = µ-law/PCMU, 8 = A-law/PCMA), independent of the RTP
+        /// payload number, which may be a peer-chosen dynamic PT.
+        law: u8,
+        /// Canonical payload type used by `encode_sample`; the RTP header
+        /// still carries the negotiated peer PT.
+        encode_payload_type: u8,
+    },
+    G722(Box<vks_gateway_sip::g722::G722Codec>),
+    G726(Box<vks_gateway_sip::g726::G726Codec>),
+}
+
+impl AudioBridgeCodec {
+    fn new(payload_type: u8, codec: Option<&str>) -> Option<Self> {
+        // Codec identity is authoritative: a peer may choose any dynamic PT
+        // 96-127 for G.726, so the payload number alone is not enough.
+        let normalized = codec.map(|name| name.trim().to_ascii_uppercase().replace(['.', '-', '_'], ""));
+        match normalized.as_deref() {
+            Some("G72616") => {
+                Some(Self::G726(Box::new(vks_gateway_sip::g726::G726Codec::new(vks_gateway_sip::g726::G726Rate::R16))))
+            }
+            Some("G72624") => {
+                Some(Self::G726(Box::new(vks_gateway_sip::g726::G726Codec::new(vks_gateway_sip::g726::G726Rate::R24))))
+            }
+            Some("G72632") => {
+                Some(Self::G726(Box::new(vks_gateway_sip::g726::G726Codec::new(vks_gateway_sip::g726::G726Rate::R32))))
+            }
+            Some("G72640") => {
+                Some(Self::G726(Box::new(vks_gateway_sip::g726::G726Codec::new(vks_gateway_sip::g726::G726Rate::R40))))
+            }
+            Some("G722") => Some(Self::G722(Box::new(vks_gateway_sip::g722::G722Codec::new()))),
+            Some("PCMU") => Some(Self::G711 { law: 0, encode_payload_type: 0 }),
+            Some("PCMA") => Some(Self::G711 { law: 8, encode_payload_type: 8 }),
+            _ => match payload_type {
+                0 | 8 => Some(Self::G711 { law: payload_type, encode_payload_type: payload_type }),
+                9 => Some(Self::G722(Box::new(vks_gateway_sip::g722::G722Codec::new()))),
+                107..=110 => {
+                    let rate = vks_gateway_sip::g726::G726Rate::from_payload_type(payload_type)?;
+                    Some(Self::G726(Box::new(vks_gateway_sip::g726::G726Codec::new(rate))))
+                }
+                _ => None,
+            },
+        }
+    }
+
+    fn frame_samples(&self) -> usize {
+        match self {
+            Self::G722(_) => 320,
+            Self::G711 { .. } | Self::G726(_) => 160,
+        }
+    }
+
+    fn max_payload(&self) -> usize {
+        match self {
+            Self::G726(codec) => 2 * codec.rate().bytes_20ms(),
+            Self::G711 { .. } | Self::G722(_) => 480,
+        }
+    }
+
+    fn decode(&mut self, payload_type: u8, payload: &[u8]) -> Option<Vec<f32>> {
+        match self {
+            // The validator permits PCMU/PCMA interchange, so decode with the
+            // packet's actual payload type, never with the session's choice.
+            Self::G711 { law, .. } => {
+                // 0/8 interchange keeps the packet's law; a dynamic PT keeps
+                // the law negotiated via a=rtpmap because its number is not 0/8.
+                let law = if matches!(payload_type, 0 | 8) { payload_type } else { *law };
+                Some(payload.iter().map(|byte| decode_sample(law, *byte)).collect())
+            }
+            Self::G722(codec) => Some(
+                codec
+                    .decode(payload)
+                    .into_iter()
+                    // oxideav-g722 can overshoot the nominal 14-bit range on
+                    // transients; clamp before the MCU mixer sees > 1.0.
+                    .map(|sample| (sample as f32 / 8192.0).clamp(-1.0, 1.0))
+                    .collect(),
+            ),
+            Self::G726(codec) => {
+                if !codec.rate().accepts_payload_len(payload.len()) {
+                    return None;
+                }
+                Some(codec.decode(payload).into_iter().map(|sample| f32::from(sample) / 32768.0).collect())
+            }
+        }
+    }
+
+    fn encode(&mut self, pcm: &[f32]) -> Vec<u8> {
+        match self {
+            Self::G711 { encode_payload_type, .. } => {
+                pcm.iter().map(|sample| encode_sample(*encode_payload_type, *sample)).collect()
+            }
+            Self::G722(codec) => {
+                let pcm: Vec<i32> = pcm.iter().map(|sample| (sample * 8192.0).clamp(-8192.0, 8191.0) as i32).collect();
+                codec.encode(&pcm)
+            }
+            Self::G726(codec) => {
+                let pcm: Vec<i16> =
+                    pcm.iter().map(|sample| (sample * 32768.0).round().clamp(-32768.0, 32767.0) as i16).collect();
+                codec.encode(&pcm)
+            }
+        }
+    }
+}
+
 pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
     let Some(target) = session
         .remote_media_ip
@@ -26,7 +134,11 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
         session.media_stats.audio_codec_running.store(false, Relaxed);
         return;
     };
-    if ![0, 8, 9].contains(&session.audio_payload_type) || target.port() == 0 {
+    let Some(mut bridge_codec) = AudioBridgeCodec::new(session.audio_payload_type, session.audio_codec) else {
+        session.media_stats.audio_codec_running.store(false, Relaxed);
+        return;
+    };
+    if target.port() == 0 {
         session.media_stats.audio_codec_running.store(false, Relaxed);
         return;
     }
@@ -37,9 +149,6 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
     };
     session.media_stats.audio_codec_running.store(true, Relaxed);
     let mut egress = target;
-    // G.722 is 16 kHz with an 8 kHz RTP timestamp clock; G.711 is 8 kHz.
-    let is_g722 = session.audio_payload_type == 9;
-    let mut g722 = is_g722.then(vks_gateway_sip::g722::G722Codec::new);
     let mut queue = std::collections::VecDeque::<f32>::with_capacity(1920);
     let mut dtmf = std::collections::VecDeque::<u8>::new();
     let mut dtmf_active: Option<(u8, usize, u32)> = None;
@@ -92,12 +201,18 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 if session.source_latch {
                     egress = source;
                 }
-                // 40 ms G.711 ptime (320 B) and 40 ms G.722 (320 B) are legal
+                // 40 ms G.711/G.722 ptime and 20/40 ms G.726 ptime are legal
                 // per RFC 4566/3551; never truncate the second half of a packet.
-                let max_payload = 480;
-                if packet.payload.len() > max_payload {
+                if packet.payload.len() > bridge_codec.max_payload() {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed); continue;
                 }
+                let Some(decoded) = bridge_codec.decode(packet.payload_type, packet.payload) else {
+                    session.media_stats.rejected_packets.fetch_add(1, Relaxed);
+                    continue;
+                };
+                // Only complete, decodable frames count as received audio;
+                // partial G.726 groups are rejected above and must not feed
+                // the "call is alive" watchdog.
                 session.media_stats.audio_rx_packets.fetch_add(1, Relaxed);
                 session.media_stats.last_rx_ms.store(
                     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
@@ -105,68 +220,53 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 );
                 session.media_stats.audio_rx_bytes.fetch_add(count as u64, Relaxed);
                 if session.controls.audio_tx_muted.load(Relaxed) { queue.clear(); continue; }
-                let decoded: Vec<f32> = if let Some(codec) = g722.as_mut() {
-                    codec.decode(packet.payload).into_iter()
-                        // oxideav-g722 can overshoot the nominal 14-bit range on
-                        // transients; clamp before the MCU mixer sees > 1.0.
-                        .map(|sample| (sample as f32 / 8192.0).clamp(-1.0, 1.0))
-                        .collect()
-                } else {
-                    packet.payload.iter().map(|byte| decode_sample(packet.payload_type, *byte)).collect()
-                };
                 while queue.len() + decoded.len() > 1920 { queue.pop_front(); }
                 queue.extend(decoded);
             }
             _ = ticker.tick() => {
                 let mut upsampled = [0.0; 960];
-                if is_g722 {
-                    let mut input = [0.0; 320];
-                    if session.controls.audio_tx_muted.load(Relaxed) { queue.clear(); }
-                    else {
-                        let volume = session.controls.volume_tx.load(Relaxed);
-                        for sample in &mut input { *sample = gain(queue.pop_front().unwrap_or(0.0), volume); }
+                let frame_samples = bridge_codec.frame_samples();
+                let mut input = [0.0; 320];
+                if session.controls.audio_tx_muted.load(Relaxed) { queue.clear(); }
+                else {
+                    let volume = session.controls.volume_tx.load(Relaxed);
+                    for sample in input.iter_mut().take(frame_samples) {
+                        *sample = gain(queue.pop_front().unwrap_or(0.0), volume);
                     }
-                    vks_gateway_sip::upsample_16k_to_48k(&input, &mut upsampled);
-                    session.mcu_engine.set_audio_slice(session.room_id, session.participant_id_val, &upsampled);
-                } else {
-                    let mut input = [0.0; 160];
-                    if session.controls.audio_tx_muted.load(Relaxed) { queue.clear(); }
-                    else {
-                        let volume = session.controls.volume_tx.load(Relaxed);
-                        for sample in &mut input { *sample = gain(queue.pop_front().unwrap_or(0.0), volume); }
-                    }
-                    vks_gateway_sip::upsample_8k_to_48k(&input, &mut upsampled);
-                    session.mcu_engine.set_audio_slice(session.room_id, session.participant_id_val, &upsampled);
                 }
+                if frame_samples == 320 {
+                    vks_gateway_sip::upsample_16k_to_48k(&input, &mut upsampled);
+                } else {
+                    let mut narrow = [0.0; 160];
+                    narrow.copy_from_slice(&input[..160]);
+                    vks_gateway_sip::upsample_8k_to_48k(&narrow, &mut upsampled);
+                }
+                session.mcu_engine.set_audio_slice(session.room_id, session.participant_id_val, &upsampled);
                 session.mcu_engine.tick_audio_at(session.room_id, media_clock_ms());
                 let mut packet = [0; 512];
                 vks_gateway_sip::write_rtp_header(&mut packet[..12], session.audio_payload_type, sequence, timestamp, ssrc, false);
                 sequence = sequence.wrapping_add(1);
                 let volume = session.controls.volume_rx.load(Relaxed);
-                let payload_len = if let Some(codec) = g722.as_mut() {
-                    let mut output = [0.0; 320];
-                    if !session.controls.audio_rx_muted.load(Relaxed)
-                        && session.mcu_engine.copy_participant_audio(session.room_id, session.participant_id_val, &mut mixed) {
-                        vks_gateway_sip::downsample_48k_to_16k(&mixed, &mut output);
+                let frame_samples = bridge_codec.frame_samples();
+                let mut output = [0.0; 320];
+                if !session.controls.audio_rx_muted.load(Relaxed)
+                    && session.mcu_engine.copy_participant_audio(session.room_id, session.participant_id_val, &mut mixed) {
+                    if frame_samples == 320 {
+                        let mut wide = [0.0; 320];
+                        vks_gateway_sip::downsample_48k_to_16k(&mixed, &mut wide);
+                        output[..320].copy_from_slice(&wide);
+                    } else {
+                        let mut narrow = [0.0; 160];
+                        vks_gateway_sip::downsample_48k_to_8k(&mixed, &mut narrow);
+                        output[..160].copy_from_slice(&narrow);
                     }
-                    let pcm: Vec<i32> = output.iter()
-                        .map(|sample| (gain(*sample, volume) * 8192.0).clamp(-8192.0, 8191.0) as i32)
-                        .collect();
-                    let encoded = codec.encode(&pcm);
-                    let len = encoded.len().min(packet.len() - 12);
-                    packet[12..12 + len].copy_from_slice(&encoded[..len]);
-                    len
-                } else {
-                    let mut output = [0.0; 160];
-                    if !session.controls.audio_rx_muted.load(Relaxed)
-                        && session.mcu_engine.copy_participant_audio(session.room_id, session.participant_id_val, &mut mixed) {
-                        vks_gateway_sip::downsample_48k_to_8k(&mixed, &mut output);
-                    }
-                    for (encoded, sample) in packet[12..172].iter_mut().zip(output) {
-                        *encoded = encode_sample(session.audio_payload_type, gain(sample, volume));
-                    }
-                    160
-                };
+                }
+                for sample in output.iter_mut().take(frame_samples) {
+                    *sample = gain(*sample, volume);
+                }
+                let encoded = bridge_codec.encode(&output[..frame_samples]);
+                let payload_len = encoded.len().min(packet.len() - 12);
+                packet[12..12 + payload_len].copy_from_slice(&encoded[..payload_len]);
                 if let Ok(count) = session.rtp_socket.send_to(&packet[..12 + payload_len], egress).await {
                     session.media_stats.audio_tx_packets.fetch_add(1, Relaxed); session.media_stats.audio_tx_bytes.fetch_add(count as u64, Relaxed);
                 }
@@ -200,7 +300,7 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
     session.media_stats.audio_codec_running.store(false, Relaxed);
     tracing::info!(
         participant = %session.participant_id_str,
-        codec = super::audio_codec_name(session.audio_payload_type),
+        codec = session.audio_codec.unwrap_or_else(|| super::audio_codec_name(session.audio_payload_type)),
         "RTP audio bridge stopped"
     );
 }
@@ -385,6 +485,20 @@ mod tests {
         assert!(source.accept(attacker, &packet).is_none(), "source is pinned after latch");
         vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 3, 320, 42, false);
         assert!(source.accept(nat, &packet).is_some(), "latched source keeps flowing");
+    }
+
+    #[test]
+    fn dynamic_pcma_keeps_alaw_identity_independent_of_pt96() {
+        let pcm = [0.25f32; 160];
+        let mut pcma = AudioBridgeCodec::new(96, Some("PCMA")).expect("dynamic PCMA");
+        let mut pcmu = AudioBridgeCodec::new(96, Some("PCMU")).expect("dynamic PCMU");
+        let alaw = pcma.encode(&pcm);
+        let ulaw = pcmu.encode(&pcm);
+        assert_eq!(alaw.len(), 160);
+        assert_ne!(alaw, ulaw, "dynamic PCMA must not be encoded with the µ-law table");
+        let decoded = pcma.decode(96, &alaw).expect("decode dynamic PCMA");
+        assert_eq!(decoded.len(), 160);
+        assert!(decoded.iter().all(|sample| (sample - 0.25).abs() < 0.04), "{decoded:?}");
     }
 
     #[test]

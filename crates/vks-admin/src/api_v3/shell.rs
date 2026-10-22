@@ -568,7 +568,7 @@ pub async fn settings_audio_codecs(State(state): State<SharedState>, headers: He
             json!({
                 "name": name,
                 "bitrate": bitrate,
-                "supported": vks_common::codec_capabilities::is_native_audio(&name)
+                "supported": vks_common::codec_capabilities::is_native_audio_variant(&name, bitrate)
             })
         })
         .collect();

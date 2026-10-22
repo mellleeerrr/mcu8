@@ -244,7 +244,8 @@ mod header_regressions {
 // **not** a claim that the media bridge can process it:
 //
 // * Native today (really decoded and re-encoded by this gateway):
-//   PCMU, PCMA (G.711), G.722 (PT9, Mode1 64k) and H.264 Constrained Baseline,
+//   PCMU, PCMA (G.711), G.722 (PT9, Mode1 64k), G.726-16/24/32/40
+//   (PT107-110, RFC 3551 LSB-first) and H.264 Constrained Baseline,
 //   packetization-mode=1.
 // * Everything else is offered for interoperability and **refused on answer**:
 //   [`negotiate_media_detailed`] returns [`NegotiationFailure::UnsupportedAudio`]
@@ -338,10 +339,10 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
         native: false,
         dtmf: false,
     },
-    OfferCodec { payload: 107, name: "G726-16", clock: 8000, channels: 1, fmtp: None, native: false, dtmf: false },
-    OfferCodec { payload: 108, name: "G726-24", clock: 8000, channels: 1, fmtp: None, native: false, dtmf: false },
-    OfferCodec { payload: 109, name: "G726-32", clock: 8000, channels: 1, fmtp: None, native: false, dtmf: false },
-    OfferCodec { payload: 110, name: "G726-40", clock: 8000, channels: 1, fmtp: None, native: false, dtmf: false },
+    OfferCodec { payload: 107, name: "G726-16", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
+    OfferCodec { payload: 108, name: "G726-24", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
+    OfferCodec { payload: 109, name: "G726-32", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
+    OfferCodec { payload: 110, name: "G726-40", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
     OfferCodec {
         payload: 111,
         name: "opus",
@@ -787,6 +788,10 @@ m=video 5006 RTP/AVP 96\r\n";
             "a=rtpmap:111 opus/48000/2",
             "a=rtpmap:112 G719/48000",
             "a=rtpmap:113 MP4A-LATM/90000",
+            "a=rtpmap:107 G726-16/8000",
+            "a=rtpmap:108 G726-24/8000",
+            "a=rtpmap:109 G726-32/8000",
+            "a=rtpmap:110 G726-40/8000",
             "a=rtpmap:101 telephone-event/8000",
             "a=fmtp:101 0-16",
             "a=rtcp:41001",
@@ -889,7 +894,7 @@ a=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1\r\n";
     fn native_profile_offers_only_bridgeable_codecs() {
         let sdp = build_offer(CodecProfile::Native, "192.168.1.93", 41000, Some(41002));
         for line in [
-            "m=audio 41000 RTP/AVP 0 8 9 101",
+            "m=audio 41000 RTP/AVP 0 8 9 107 108 109 110 101",
             "a=rtpmap:0 PCMU/8000",
             "a=rtpmap:8 PCMA/8000",
             "a=rtpmap:101 telephone-event/8000",
@@ -898,7 +903,7 @@ a=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1\r\n";
         ] {
             assert!(sdp.contains(line), "native offer misses `{line}`:\n{sdp}");
         }
-        for absent in ["G7221", "G729", "G726", "opu", "H265", "H263", "MP4A-LATM", "G719"] {
+        for absent in ["G7221", "G729", "opu", "H265", "H263", "MP4A-LATM", "G719"] {
             assert!(!sdp.contains(absent), "native offer must not advertise unbridgeable `{absent}`:\n{sdp}");
         }
     }
@@ -1248,9 +1253,22 @@ mod g722_and_strict_first_regressions {
     use super::*;
 
     #[test]
+    fn native_offer_selects_each_g726_rate_when_peer_lists_it_first() {
+        let offer = build_offer(CodecProfile::Native, "192.168.1.93", 41000, None);
+        for (payload, name) in [(107, "G726-16"), (108, "G726-24"), (109, "G726-32"), (110, "G726-40")] {
+            let answer = format!(
+                "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 3230 RTP/AVP {payload} 9 0\r\na=rtpmap:{payload} {name}/8000\r\na=rtpmap:9 G722/8000\r\na=rtpmap:0 PCMU/8000\r\n"
+            );
+            let media = negotiate_media(&offer, &answer).expect("G.726 is native");
+            assert_eq!(media.audio_payload_type, payload, "{name}");
+            assert_eq!(media.audio_codec, name);
+        }
+    }
+
+    #[test]
     fn native_offer_selects_g722_when_peer_lists_it_before_pcmu() {
         let offer = build_offer(CodecProfile::Native, "192.168.1.93", 41000, None);
-        assert!(offer.contains("m=audio 41000 RTP/AVP 0 8 9 101"), "{offer}");
+        assert!(offer.contains("m=audio 41000 RTP/AVP 0 8 9 107 108 109 110 101"), "{offer}");
         let answer = "v=0\r\nc=IN IP4 192.168.1.132\r\n\
 m=audio 3230 RTP/AVP 9 0 8 101\r\na=rtpmap:9 G722/8000\r\na=rtpmap:0 PCMU/8000\r\n\
 a=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\n";

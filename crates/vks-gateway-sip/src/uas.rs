@@ -3,7 +3,7 @@
 //! Транспорт (UDP-сокет) и жизненный цикл живут в `vks-server`; здесь только
 //! разбор запроса, выбор кодека и сериализация ответов, чтобы это тестировалось
 //! без сети. Поддерживаются INVITE/ACK/BYE/CANCEL/OPTIONS и plain RTP/AVP
-//! (PCMU/PCMA/G722 + H.264). SRTP/TLS/100rel/digest осознанно отклоняются, а не
+//! (PCMU/PCMA/G722/G726 + H.264). SRTP/TLS/100rel/digest осознанно отклоняются, а не
 //! имитируются.
 
 /// Разобранный входящий SIP-запрос.
@@ -28,6 +28,9 @@ pub struct UasRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundMedia {
     pub audio_payload_type: u8,
+    /// Canonical codec name (`PCMU`, `PCMA`, `G722`, `G726-16`…), independent
+    /// of the peer-chosen payload number for dynamic PTs 96-127.
+    pub audio_codec: &'static str,
     pub video_payload_type: Option<u8>,
     pub remote_ip: String,
     pub remote_audio_port: u16,
@@ -162,7 +165,8 @@ fn hex(byte: u8) -> Option<u8> {
     }
 }
 
-/// Выбирает первый поддерживаемый аудиокодек в порядке оффера (PCMU/PCMA/G722)
+/// Выбирает первый поддерживаемый аудиокодек в порядке оффера
+/// (PCMU/PCMA/G722/G726); динамический PT сохраняется, кодек едет отдельно.
 /// и, если есть, H.264 из SDP-оффера.
 pub fn negotiate(offer: &str) -> Option<InboundMedia> {
     let session_ip = media_ip(offer).unwrap_or_default();
@@ -176,13 +180,11 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
     }
     // Peer's m-line order is its preference order; pick the first codec we
     // actually bridge. G722 (PT9) keeps inbound calls wideband instead of
-    // silently downgrading to PCMU when both are offered.
-    let audio_payload_type = audio_payload_order(audio).into_iter().find(|payload| match payload {
-        0 => payload_is(audio, 0, "PCMU", 8000),
-        8 => payload_is(audio, 8, "PCMA", 8000),
-        9 => payload_is(audio, 9, "G722", 8000),
-        _ => false,
-    })?;
+    // silently downgrading to PCMU when both are offered.  Dynamic PTs keep
+    // the peer's number but carry the codec identity separately.
+    let (audio_payload_type, audio_codec) = audio_payload_order(audio)
+        .into_iter()
+        .find_map(|payload| bridgeable_audio(audio, payload).map(|codec| (payload, codec)))?;
     let video_section = media_section(offer, "video");
     let video_offered = video_section.is_some();
     let video = video_section
@@ -198,6 +200,7 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
     let video_ip = video.map(|section| section_ip(section, &audio_ip));
     Some(InboundMedia {
         audio_payload_type,
+        audio_codec,
         video_payload_type,
         remote_ip: audio_ip,
         remote_audio_port: audio_port,
@@ -219,11 +222,7 @@ pub fn build_answer(
         "v=0\r\no=- {session_id} {session_id} IN IP4 {local_ip}\r\ns=VKS MCU\r\nc=IN IP4 {local_ip}\r\nt=0 0\r\nm=audio {audio_port} RTP/AVP {}\r\n",
         media.audio_payload_type
     );
-    match media.audio_payload_type {
-        0 => sdp.push_str("a=rtpmap:0 PCMU/8000\r\n"),
-        9 => sdp.push_str("a=rtpmap:9 G722/8000\r\n"),
-        _ => sdp.push_str("a=rtpmap:8 PCMA/8000\r\n"),
-    }
+    sdp.push_str(&format!("a=rtpmap:{} {}/8000\r\n", media.audio_payload_type, media.audio_codec));
     sdp.push_str("a=ptime:20\r\n");
     if media.video_offered {
         if let (Some(port), Some(payload)) = (video_port, media.video_payload_type) {
@@ -322,6 +321,66 @@ fn payload_is(section: &str, payload: u8, name: &str, clock: u32) -> bool {
     })
 }
 
+/// Declared `a=rtpmap` for a payload, if any: (name, clock).
+fn declared_codec(section: &str, payload: u8) -> Option<(&str, u32)> {
+    section
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim().strip_prefix("a=rtpmap:")?;
+            let (pt, rest) = line.split_once(' ')?;
+            if pt.parse::<u8>().ok()? != payload {
+                return None;
+            }
+            let mut parts = rest.split('/');
+            let name = parts.next()?;
+            let clock = parts.next()?.parse::<u32>().ok()?;
+            Some((name, clock))
+        })
+        .next()
+}
+
+/// Map one offered payload to a codec the bridge can handle without a
+/// transcoder.  Static PTs 0/8/9 may omit rtpmap; dynamic PTs (including our
+/// 107-110) must declare a matching name+clock, otherwise a hostile offer
+/// could claim PCMU while sending G.726.
+fn bridgeable_audio(section: &str, payload: u8) -> Option<&'static str> {
+    let codec = match payload {
+        0 => "PCMU",
+        8 => "PCMA",
+        9 => "G722",
+        107 => "G726-16",
+        108 => "G726-24",
+        109 => "G726-32",
+        110 => "G726-40",
+        _ => {
+            let (name, clock) = declared_codec(section, payload)?;
+            if clock != 8000 {
+                return None;
+            }
+            let name = name.trim().to_ascii_uppercase().replace(['.', '-', '_'], "");
+            return match name.as_str() {
+                "PCMU" => Some("PCMU"),
+                "PCMA" => Some("PCMA"),
+                "G722" => Some("G722"),
+                "G72616" => Some("G726-16"),
+                "G72624" => Some("G726-24"),
+                "G72632" => Some("G726-32"),
+                "G72640" => Some("G726-40"),
+                _ => None,
+            };
+        }
+    };
+    // Dynamic G.726 must be explicitly mapped; static G.711/G.722 may rely on
+    // the RFC 3551 default map, but a present rtpmap must still agree.
+    if payload >= 96 {
+        declared_codec(section, payload)
+            .is_some_and(|(name, clock)| name.eq_ignore_ascii_case(codec) && clock == 8000)
+            .then_some(codec)
+    } else {
+        payload_is(section, payload, codec, 8000).then_some(codec)
+    }
+}
+
 fn has_h264(section: &str) -> bool {
     section.lines().any(|line| {
         let line = line.trim();
@@ -403,6 +462,21 @@ a=rtpmap:101 telephone-event/8000\r\n";
             );
             assert!(negotiate(&spoofed).is_none(), "PT{payload} spoofed as {spoof} must be rejected");
         }
+    }
+
+    #[test]
+    fn dynamic_pt_g726_keeps_peer_payload_number_and_codec_name() {
+        let offer = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP 96 0\r\n\
+a=rtpmap:96 G726-32/8000\r\na=rtpmap:0 PCMU/8000\r\n";
+        let media = negotiate(offer).expect("dynamic G.726-32 must be accepted");
+        assert_eq!(media.audio_payload_type, 96);
+        assert_eq!(media.audio_codec, "G726-32");
+        let sdp = build_answer("192.168.1.93", 1, 41000, None, &media);
+        assert!(sdp.contains("m=audio 41000 RTP/AVP 96"), "{sdp}");
+        assert!(sdp.contains("a=rtpmap:96 G726-32/8000"), "{sdp}");
+        // A dynamic PT without rtpmap is not a codec declaration.
+        let undeclared = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP 96\r\n";
+        assert!(negotiate(undeclared).is_none());
     }
 
     #[test]

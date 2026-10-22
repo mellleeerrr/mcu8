@@ -3,7 +3,8 @@
 //! содержать полную матрицу T06b; SDP и выбор кодека фильтруются здесь.
 
 /// Аудио, которое native-профиль шлюза принимает/отдаёт без транскодера.
-pub const NATIVE_AUDIO: &[&str] = &["PCMU", "PCMA", "G711", "G711U", "G711A", "G722"];
+pub const NATIVE_AUDIO: &[&str] =
+    &["PCMU", "PCMA", "G711", "G711U", "G711A", "G722", "G72616", "G72624", "G72632", "G72640"];
 /// Видео, которое native-профиль шлюза кодирует/декодирует (H.264 baseline mode=1).
 pub const NATIVE_VIDEO: &[&str] = &["H264"];
 
@@ -15,6 +16,20 @@ fn normalize(name: &str) -> String {
 #[must_use]
 pub fn is_native_audio(name: &str) -> bool {
     NATIVE_AUDIO.contains(&normalize(name).as_str())
+}
+
+/// Variant-aware audio check: `G726` is only supported at 16/24/32/40 kbit/s,
+/// so settings entries `{name:"G726", bitrate:...}` must be validated with
+/// their bitrate instead of a generic name match.
+#[must_use]
+pub fn is_native_audio_variant(name: &str, bitrate: Option<u32>) -> bool {
+    if let Some(suffix) = normalize(name).strip_prefix("G726") {
+        if let Ok(bits) = suffix.parse::<u32>() {
+            return matches!(bits, 16 | 24 | 32 | 40) && bitrate.is_none_or(|value| value == bits);
+        }
+        return matches!(bitrate, Some(16 | 24 | 32 | 40));
+    }
+    is_native_audio(name)
 }
 
 /// Мостится ли видеокодек native-профилем. `H264-HIGH`/`H265` — нет.
@@ -56,6 +71,15 @@ mod tests {
         for name in ["PCMU", "PCMA", "G711", "g711u", "G.711-A", "G722", "g722"] {
             assert!(is_native_audio(name), "{name} должен моститься");
         }
+        for (name, bitrate) in [("G726", Some(16)), ("G726", Some(24)), ("G726", Some(32)), ("G726", Some(40))] {
+            assert!(is_native_audio_variant(name, bitrate), "{name}:{bitrate:?} должен моститься");
+        }
+        for (name, bitrate) in
+            [("G726", None), ("G726", Some(48)), ("G726", Some(8)), ("G72616", Some(48)), ("G72648", None)]
+        {
+            assert!(!is_native_audio_variant(name, bitrate), "{name}:{bitrate:?} не поддерживается");
+        }
+        assert!(is_native_audio_variant("G72616", None));
         for name in ["G729", "OPUS", "AAC", "G7221C"] {
             assert!(!is_native_audio(name), "{name} требует T06b-транскодера");
         }

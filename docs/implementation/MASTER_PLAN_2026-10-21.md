@@ -342,7 +342,16 @@ G722 PT9/8000 native в SDP (offer `0 8 9 101`, inbound UAS отвечает PT9
 audio TX 545/RX 361, rejected 0, G722/PT9/16000/8000 asserted; unit 72 SIP +
 72 server, clippy/fmt clean.
 Evidence: `docs/progress/evidence/t06b1/`. Остальные кодеки/видео — T06b-2..5,
-H.323 — T06b-4; полный T06b не закрыт.
+H.323 — T06b-4; полный T06b не закрыт. В T06b-2a добавлен G726 all-rates.
+
+**T06b-2a (G.726 16/24/32/40 SIP) — реализован 2026-10-22, ожидает ревью/коммита.**
+`oxideav-adpcm =0.0.7`, LSB-first для всех четырёх rate, PT107–110 в
+native-оффере, 20/30/40 мс frame lengths, `AudioBridgeCodec` в мосте,
+UAS отвечает G726-only и принимает произвольный inbound PT 96–127 с
+`a=rtpmap` (кодек едет отдельно от PT), variant-aware
+`is_native_audio_variant`, FFmpeg `g726le` probe. Live E2E остаётся G722
+233/233 (`.132` G726 не предлагает). H.323 динамические PT/TCS — T06b-4.
+Evidence: `docs/progress/evidence/t06b2a/`.
 
 ## T06b. Транскодирование полной матрицы (P1)
 
