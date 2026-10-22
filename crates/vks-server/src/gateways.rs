@@ -1039,9 +1039,20 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             // H.241 peer limits are authoritative for the encoder: never send
             // above the peer's maxBitRate/level even if the room asks for more.
             if let Some(max_bitrate_100bps) = session.remote_video_max_bitrate_100bps {
-                video_profile.bitrate_kbps = video_profile.bitrate_kbps.min((max_bitrate_100bps / 10).max(64));
+                // Peer may advertise less than 64 kbit/s; never round UP past
+                // its declared maxBitRate (16 kbit/s is the encoder floor).
+                video_profile.bitrate_kbps = video_profile.bitrate_kbps.min((max_bitrate_100bps / 10).max(16));
             }
-            if let Some(level) = session.remote_video_h264_level.and_then(video::h264_level_name) {
+            if let Some(bits) = session.remote_video_h264_profile_bits {
+                if bits & 64 == 0 {
+                    return Err(
+                        "Peer H.264 profile is not baseline-compatible (generic parameter 41 bit 6 is clear)".into()
+                    );
+                }
+            }
+            if let Some(level_idc) = session.remote_video_h264_level {
+                let level = video::h264_level_name(level_idc)
+                    .ok_or_else(|| format!("Peer advertised unsupported H.264 level_idc {level_idc}"))?;
                 video_profile.level = level.to_string();
             }
             let audio_port = session

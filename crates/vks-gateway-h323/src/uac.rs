@@ -173,6 +173,15 @@ impl H323VideoProfile {
         u32::from(idc) + 40
     }
 
+    /// JSON-поля H.241, которые Rust передаёт sidecar (единая точка истины).
+    fn sidecar_video_fields(self) -> serde_json::Value {
+        serde_json::json!({
+            "video_max_bitrate_100bps": self.max_bitrate_100bps(),
+            "video_h264_level": self.h241_level(),
+            "video_h264_profile_bits": self.profile_bits,
+        })
+    }
+
     fn max_bitrate_100bps(self) -> u32 {
         self.max_bitrate_kbps.saturating_mul(10).clamp(1, 192_400)
     }
@@ -254,15 +263,18 @@ impl H323UacClient {
         let guid = uuid::Uuid::new_v4();
         let call_id = guid.to_string();
         let call_ref = ((guid.as_u128() & 0x7fff) as u16).max(1);
-        let config = json!({
+        let mut config = json!({
             "target_ip": target.ip().to_string(), "target_port": target.port(),
             "local_ip": local_ip.to_string(), "audio_port": audio_port,
             "video_port": video_port, "timeout_seconds": dial_timeout.as_secs_f64().min(180.0),
             "call_id": call_id, "call_ref": call_ref,
-            "video_max_bitrate_100bps": video_profile.max_bitrate_100bps(),
-            "video_h264_level": video_profile.h241_level(),
             "trace": std::env::var("VKS_H323_TRACE").is_ok_and(|value| value == "1" || value == "true"),
         });
+        if let (Some(object), Some(video)) =
+            (config.as_object_mut(), video_profile.sidecar_video_fields().as_object().cloned())
+        {
+            object.extend(video);
+        }
         command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
         let mut child = command.spawn().map_err(|err| failure(format!("cannot start ASN.1 sidecar: {err}")))?;
         let mut stdin = child.stdin.take().ok_or_else(|| failure("sidecar stdin unavailable"))?;
@@ -532,6 +544,15 @@ impl Supervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidecar_video_fields_carry_profile_bits() {
+        let fields =
+            H323VideoProfile { max_bitrate_kbps: 4096, level_idc: 40, profile_bits: 64 }.sidecar_video_fields();
+        assert_eq!(fields["video_max_bitrate_100bps"], 40_960);
+        assert_eq!(fields["video_h264_level"], 80);
+        assert_eq!(fields["video_h264_profile_bits"], 64);
+    }
 
     #[test]
     fn h323_video_profile_maps_to_h241_limits() {

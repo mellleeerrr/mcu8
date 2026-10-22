@@ -20,7 +20,7 @@ call_string live proof.
   по лимитам терминала (`h264_level_name` — белый список).
 - Packetization: sidecar объявляет H.241 non-interleaved RTP packetization
   и проверяет её в OLC; bearer 384 kbit/s оставлен как POC-решение.
-- Тесты: Rust bitrate/level/profile, live-профиль; Python **23/23**
+- Тесты: Rust bitrate/level/profile, live-профиль; Python **24/24**
   (custom profile 40960/80/64, TCS==OLC, отказ level=75 и profile=128,
   peer H.241 helper, Polycom-захваты на 5120/71).
 - **Live-попытка:** `remote_release` и для 4096/4.0, и для 512/3.1; терминал
@@ -50,10 +50,10 @@ call_string live proof.
   forwarding, которого нет.
 
 ## Гейты (HEAD с фиксами T05b-2)
-- `cargo test --workspace --all-targets --no-fail-fast` — **1036 passed /
+- `cargo test --workspace --all-targets --no-fail-fast` — **1037 passed /
   0 failed / 6 ignored**.
 - `clippy --workspace --all-targets -D warnings` и `fmt --check` — чисто.
-- Python sidecar — **23/23 OK**; CI job с pinned Pycrate добавлен (`0a4dd89`).
+- Python sidecar — **24/24 OK**; CI job с pinned Pycrate добавлен (`0a4dd89`).
 - Живой SIP E2E на финальном бинарнике:
   `artifacts/e2e-t05b2-final-high/` — 114/114, `final-low/` — 114/114,
   page_errors 0, failed 0.
