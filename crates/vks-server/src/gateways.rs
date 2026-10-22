@@ -909,6 +909,9 @@ pub fn land_gateway_participant_in_room(
     display_name: &str,
     has_video: bool,
 ) -> bool {
+    // Serialise with browser offer admission and mode eviction: check and
+    // registration must be one atomic decision.
+    let _admission = crate::webrtc_runtime::admission();
     // The real WebRTC path has no SIP/H.323 plaintext<->SRTP bridge. Enforce
     // the same-room guard when the gateway joins, not only at browser offer
     // time, otherwise the room silently becomes half-bridged.
@@ -1240,10 +1243,19 @@ impl GatewayManager {
             );
         }
         setup.registered = Some((self.clone(), pid_str.clone()));
-        if crate::webrtc_runtime::room_has_peer(room_id) {
-            return Err("room gained a real WebRTC participant during outbound dial".into());
-        }
         let state = self.state.read().ok().and_then(|value| value.as_ref().and_then(|weak| weak.upgrade()));
+        {
+            let _admission = crate::webrtc_runtime::admission();
+            if crate::webrtc_runtime::room_has_peer(room_id) {
+                return Err("room gained a real WebRTC participant during outbound dial".into());
+            }
+            // Announce under the admission lock and before the (awaiting)
+            // media bridge: a concurrent browser offer then sees the gateway
+            // and is rejected instead of creating a half-bridged room.
+            if let Some(state) = &state {
+                announce_gateway_participant(state, &room_id, &pid_str, &effective_name, has_video);
+            }
+        }
         if state.is_some() {
             bridge_gateway_participant_media(Some(&mcu), &room_id, &pid_str, has_video);
         } else {
@@ -1309,7 +1321,7 @@ impl GatewayManager {
                 lease.disarm();
             }
         }
-        if let Some(state) = &state {
+        if let Some(_state) = &state {
             // Start the media watchdog clock only when the participant is
             // actually visible, not before the FFmpeg probe and channel start.
             if let Ok(mut registry) = self.registry.lock() {
@@ -1317,7 +1329,6 @@ impl GatewayManager {
                     session.connected_at = std::time::Instant::now();
                 }
             }
-            announce_gateway_participant(state, &room_id, &pid_str, &effective_name, has_video);
         }
         let manager = self.clone();
         let monitored_participant = pid_str.clone();

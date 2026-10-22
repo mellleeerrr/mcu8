@@ -65,8 +65,17 @@ pub fn preflight(config: &HandlerConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Process-wide admission lock: serialises "check room shape -> register
+/// peer/gateway" and mode eviction, so a browser offer, SIP/H.323 landing and
+/// MCU switch cannot interleave into a half-bridged room.
+pub fn admission() -> std::sync::MutexGuard<'static, ()> {
+    static ADMISSION: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    ADMISSION.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Evicts real peers from one room (or all rooms) on an MCU mode switch.
 pub fn evict_rooms(room: Option<vks_core::RoomId>) {
+    let _admission = admission();
     if let Some(registry) = REGISTRY.get().and_then(|registry| registry.as_ref()) {
         registry.evict(room);
     }

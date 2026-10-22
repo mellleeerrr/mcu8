@@ -89,21 +89,44 @@ impl ModeService {
     /// Возвращает `(old, new)`. Комнаты с per-room override не
     /// затрагиваются; остальные переходят в новый режим.
     pub fn set_global_mode(state: &AppState, new_mode: RoomMode) -> (RoomMode, RoomMode) {
-        let mut m = state.mode.lock().expect("mode store poisoned");
-        let old = m.global_mode;
-        m.global_mode = new_mode;
-        if old != new_mode {
+        let old = {
+            let mut m = state.mode.lock().expect("mode store poisoned");
+            let old = m.global_mode;
+            m.global_mode = new_mode;
+            old
+        };
+        Self::announce_global_mode(state, old, new_mode);
+        (old, new_mode)
+    }
+
+    /// Publishes a successful global mode change and evicts real peers only in
+    /// rooms whose effective mode actually becomes MCU (per-room SFU
+    /// overrides must keep their calls).
+    pub(crate) fn announce_global_mode(state: &AppState, old: RoomMode, new_mode: RoomMode) {
+        if old == new_mode {
+            return;
+        }
+        {
+            let mut m = state.mode.lock().expect("mode store poisoned");
             m.switch_epoch += 1;
             state.event_queue.publish(ModeChangedEvent { room_id: None, new_mode, switch_epoch: m.switch_epoch });
-            if new_mode == RoomMode::Mcu {
-                drop(m);
-                if let Some(evict) = &state.webrtc_evict {
-                    // Real SRTP peers cannot be mixed by the MCU engine.
-                    evict(None);
-                }
+        }
+        if new_mode == RoomMode::Mcu {
+            Self::evict_mcu_rooms(state);
+        }
+    }
+
+    pub(crate) fn evict_mcu_rooms(state: &AppState) {
+        let targets: Vec<RoomId> = {
+            let rooms = state.rooms.lock().expect("rooms store poisoned");
+            let mode = state.mode.lock().expect("mode store poisoned");
+            rooms.keys().filter(|id| mode.effective_mode(id) == RoomMode::Mcu).copied().collect()
+        };
+        if let Some(evict) = &state.webrtc_evict {
+            for id in targets {
+                evict(Some(id));
             }
         }
-        (old, new_mode)
     }
 
     /// Переключает режим КОНКРЕТНОЙ комнаты (per-room override, ADR-0026, Q7).
@@ -138,6 +161,30 @@ impl ModeService {
                     "switch_epoch": m.switch_epoch,
                 }),
             );
+            let proto_mode = match new_mode {
+                RoomMode::Sfu => vks_proto::media::RoomMode::Sfu,
+                RoomMode::Mcu => vks_proto::media::RoomMode::Mcu,
+            };
+            let mode_msg = vks_proto::signaling::SignalingMessage {
+                msg_id: 0,
+                reply_to: 0,
+                payload: Some(vks_proto::signaling::signaling_message::Payload::RoomModeChanged(
+                    vks_proto::signaling::RoomModeChanged {
+                        new_mode: proto_mode as i32,
+                        caps: None,
+                        switch_epoch: m.switch_epoch,
+                        graceful: true,
+                    },
+                )),
+            };
+            let payload_bytes = prost::Message::encode_to_vec(&mode_msg);
+            state.room_hub.broadcast(room_id, None, payload_bytes.into());
+            if new_mode == RoomMode::Mcu {
+                drop(m);
+                if let Some(evict) = &state.webrtc_evict {
+                    evict(Some(*room_id));
+                }
+            }
         }
         Ok((old, new_mode))
     }
@@ -245,6 +292,30 @@ mod tests {
         let events = state.event_queue.drain(10);
         let global = events.iter().find(|e| e.room_id.is_none()).expect("global event");
         assert_eq!(global.new_mode, RoomMode::Mcu);
+    }
+
+    #[test]
+    fn mode_switch_evicts_only_actually_mcu_rooms() {
+        let (mut state, mcu_room) = state_with_room();
+        let sfu_room = RoomId::new();
+        {
+            let mut rooms = state.rooms.lock().unwrap();
+            rooms.insert(sfu_room, RoomRecord::new(sfu_room, "sfu", None));
+        }
+        ModeService::set_room_mode(&state, &sfu_room, RoomMode::Sfu).unwrap();
+        let evicted = Arc::new(Mutex::new(Vec::new()));
+        let sink = evicted.clone();
+        state.webrtc_evict = Some(Arc::new(move |room: Option<RoomId>| {
+            sink.lock().unwrap().push(room);
+        }));
+        // Global MCU: only the room without an explicit SFU override loses peers.
+        ModeService::set_global_mode(&state, RoomMode::Mcu);
+        assert_eq!(*evicted.lock().unwrap(), vec![Some(mcu_room)]);
+
+        // Canonical per-room endpoint also evicts when it becomes MCU.
+        evicted.lock().unwrap().clear();
+        ModeService::set_room_mode(&state, &sfu_room, RoomMode::Mcu).unwrap();
+        assert_eq!(*evicted.lock().unwrap(), vec![Some(sfu_room)]);
     }
 
     #[test]

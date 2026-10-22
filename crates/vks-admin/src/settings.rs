@@ -277,7 +277,9 @@ impl SettingsService {
         next.merge_preserving_secrets(&settings);
         *settings = next.clone();
         // Синхронизируем глобальный режим с настройками.
+        let previous_mode = state.mode.lock().expect("mode store poisoned").global_mode;
         state.mode.lock().expect("mode store poisoned").global_mode = next.default_mode;
+        crate::mode::ModeService::announce_global_mode(state, previous_mode, next.default_mode);
         next
     }
 
@@ -320,7 +322,12 @@ impl SettingsService {
             (previous, previous_mode, next, json)
         };
         match persist(state, &json_str).await {
-            Ok(()) => Ok(next),
+            Ok(()) => {
+                if next.default_mode != previous_mode {
+                    crate::mode::ModeService::announce_global_mode(state, previous_mode, next.default_mode);
+                }
+                Ok(next)
+            }
             Err(error) => {
                 *state.settings.lock().expect("settings store poisoned") = previous;
                 state.mode.lock().expect("mode store poisoned").global_mode = previous_mode;
@@ -379,7 +386,12 @@ impl SettingsService {
             (previous, previous_mode, mode_changed, settings.clone(), json)
         };
         match persist(state, &json_str).await {
-            Ok(()) => Ok(next),
+            Ok(()) => {
+                if mode_changed {
+                    crate::mode::ModeService::announce_global_mode(state, previous_mode, next.default_mode);
+                }
+                Ok(next)
+            }
             Err(error) => {
                 *state.settings.lock().expect("settings store poisoned") = previous;
                 if mode_changed {

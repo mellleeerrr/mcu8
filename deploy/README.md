@@ -74,8 +74,11 @@ the UDP range in the firewall and port-forward it 1:1 to the server (the
 advertised ICE host candidate is the bound port). ICE-lite does not allocate
 TURN relay candidates; use client-side TURN if needed. Signalling clients
 connect to `/ws` with a Bearer token, or from a browser with
-`?token=<JWT>`. Today the only end-to-end client is `tests/e2e/webrtc.js`;
-the PNM UI is not yet wired to this transport. Rollback: set
+`?token=<JWT>`. A query token can leak through proxy access logs, browser
+history or a Referer, so terminate TLS, keep the JWT TTL short, do not log query
+strings at the proxy, and preserve `Host` for the Origin check (override with
+`VKS_WS_ORIGIN_ALLOW=https://ui.example`). Today the only end-to-end client is
+`tests/e2e/webrtc.js`; the PNM UI is not yet wired to this transport. Rollback: set
 `VKS_WEBRTC_TRANSPORT=0` and restart (live calls are dropped).
 
 ## First start

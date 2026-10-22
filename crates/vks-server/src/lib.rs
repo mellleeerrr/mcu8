@@ -703,26 +703,8 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                 }
                                 // Запрос исполняет FSM; сайд-эффекты — только по успешному результату.
                                 let request_msg_id = env.msg_id();
-                                let gateway_room = current_membership.as_ref().is_some_and(|membership| {
-                                    state.room_hub.list_participants(&membership.room_id).iter().any(|participant| {
-                                        participant.participant_id.contains("@sip-gateway")
-                                            || participant.participant_id.contains("@h323-gateway")
-                                    })
-                                });
                                 let mut webrtc_failure: Option<(&'static str, String)> = None;
                                 let mut replies = handler.handle(env);
-                                // Per-room/global runtime mode can differ from
-                                // the startup default; resolve it at offer time.
-                                let effective_room_mode = state
-                                    .mode
-                                    .lock()
-                                    .ok()
-                                    .and_then(|mode| {
-                                        current_membership
-                                            .as_ref()
-                                            .map(|membership| mode.effective_mode(&membership.room_id))
-                                    })
-                                    .unwrap_or(vks_core::RoomMode::Sfu);
 
                                 // Real WebRTC transport: replace the legacy hand-built
                                 // answer before it is sent. If the transport is enabled
@@ -732,6 +714,23 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                 if let (Some(Payload::SdpOffer(ref offer)), Some(ref membership)) =
                                     (&payload_opt, &current_membership)
                                 {
+                                    let _admission = crate::webrtc_runtime::admission();
+                                    // Re-check the room shape under the admission
+                                    // lock, not only before handler.handle.
+                                    let gateway_room = state.room_hub.list_participants(&membership.room_id).iter().any(
+                                        |participant| {
+                                            participant.participant_id.contains("@sip-gateway")
+                                                || participant.participant_id.contains("@h323-gateway")
+                                        },
+                                    );
+                                    // Mode may have switched while we waited for the
+                                    // admission lock; the decision must use the lock-time value.
+                                    let effective_room_mode = state
+                                        .mode
+                                        .lock()
+                                        .ok()
+                                        .map(|mode| mode.effective_mode(&membership.room_id))
+                                        .unwrap_or(vks_core::RoomMode::Sfu);
                                     if replies.iter().any(|r| matches!(r.payload(), Some(Payload::SdpAnswer(_)))) {
                                         let pid = parse_participant_id(&membership.participant_id);
                                         if !offer_supports_real_webrtc(&offer.sdp) {
