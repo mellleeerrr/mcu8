@@ -111,7 +111,7 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > 160 B/20 мс + timestamp 160, media details sample_rate 16000/clock 8000.
 > Live low-video E2E 233/233, audio TX545/RX361, rejected 0, G722/PT9/16000/8000
 > asserted; 72 SIP + 72 server тестов, workspace clippy/fmt clean. Evidence `docs/progress/evidence/t06b1/`.
-> **T06b-2b (Opus + G.728) реализован, ожидает ревью/коммита:** rusty-opus 1.0.2
+> **T06b-2b (Opus + G.728) закрыт `246ab97`, ревью 9.5/10 APPROVED (protocols-net), media-engine 9.0 без P1:** rusty-opus 1.0.2
 > (48 кГц, 960/+960, bridge-side FEC/PLC по sequence-gap, PT111, dynamic
 > inbound PT, mono stereo=0, DTMF на отдельном 8-кГц timestamp),
 > oxideav-g728 0.0.8 (PT15, 40 B/20 мс, +160); native offer
