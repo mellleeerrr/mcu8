@@ -9,7 +9,7 @@ VKS_CHROMIUM=/home/pro/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome 
 node tests/e2e/webrtc.js
 ```
 
-Result: 29/29 checks passed, 0 fatal; commit `34ec386`, binary SHA-256 `3780469ca3ea…` pinned
+Result: 29/29 checks passed, 0 fatal; commit `62b7187`, binary SHA-256 `400eb09fdaa6…` pinned
 in `result.json`, effective server env (`VKS_WEBRTC_TRANSPORT=1`, ports
 43000–43100) recorded there too. Two real Chromium peers through the
 authenticated /ws, real str0m answers, ICE-lite host candidates on
@@ -22,14 +22,14 @@ audio but zero video payload.
 
 Key stats (from `result.json`):
 
-- alice: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 613 pkts,
-  inbound video 473 pkts / 184 frames, 320x240.
+- alice: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 618 pkts,
+  inbound video 473 pkts / 185 frames, 320x240.
 - bob: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 624 pkts,
-  inbound video 329 pkts / 186 frames, 320x240.
+  inbound video 334 pkts / 187 frames, 320x240.
 - Third browser peer: explicitly rejected with `room_full` (`retryable=true`);
   a same-socket retry reaches `room_full` again, not `bad_state`, and the
   existing peers stay connected.
-- `audio_only` subscriber: 130 audio packets, 0 video bytes / 0 decoded frames.
+- `audio_only` subscriber: 131 audio packets, 0 video bytes / 0 decoded frames.
 - Both answers: `a=ice-lite`, real 32-byte SHA-256 fingerprint (not
   `FF:00:11`), host candidate on 192.168.1.93:43000/43001, opus+VP8 only.
 
