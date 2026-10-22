@@ -64,7 +64,12 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > аудио. Исправлена взаимозаменяемость G.711 0↔8 с декодом по PT пакета;
 > видео-PT оставлен строгим, иначе ломался приём H.264. Тест
 > `accepts_alternate_g711_payload_and_reports_actual_pt`. Evidence
-> `docs/progress/evidence/t07b-cross-mcu/`. **T07c (входящий SIP UAS) — закрыт** на `078339c`: UDP listener 5060,
+> `docs/progress/evidence/t07b-cross-mcu/`.
+> H.323-ветка: `h323:<alias>@<ip>` передаёт alias в H.225/Q.931, принимает любой
+> H.264-профиль/level пира; живой прогон **20/20 H.323** на
+> `h323:Conf_293662065@192.168.1.92` → `connected=20`, `audio_rx=33841`,
+> `audio_tx=34304`, rejected=0 (TrueConf H.323 отдаёт audio-only; SIP-ветка
+> даёт H.264 video). **T07c (входящий SIP UAS) — закрыт** на `078339c`: UDP listener 5060,
 > 180/200 с To-tag, ACK/BYE/CANCEL с диалоговой валидацией, 20 одновременных
 > входящих, media-timeout с BYE и очисткой registry/RoomHub, re-INVITE 501,
 > graceful shutdown с BYE всем активным диалогам. Ревью: `protocols-net`
