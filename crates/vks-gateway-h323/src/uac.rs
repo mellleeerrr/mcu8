@@ -244,6 +244,7 @@ impl H323UacClient {
             "call_id": call_id, "call_ref": call_ref,
             "video_max_bitrate_100bps": video_profile.max_bitrate_100bps(),
             "video_h264_level": video_profile.h241_level(),
+            "trace": std::env::var("VKS_H323_TRACE").is_ok_and(|value| value == "1" || value == "true"),
         });
         command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
         let mut child = command.spawn().map_err(|err| failure(format!("cannot start ASN.1 sidecar: {err}")))?;
