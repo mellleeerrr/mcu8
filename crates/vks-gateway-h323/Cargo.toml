@@ -25,6 +25,7 @@ serde_json.workspace = true
 uuid.workspace = true
 vks-common = { path = "../vks-common" }
 tokio = { workspace = true }
+libc = { workspace = true }
 
 [features]
 default = []

@@ -112,7 +112,7 @@ class ContractTests(unittest.TestCase):
         call.signal_connected = call.tcs_acked = call.master_determined = call.incoming_audio = True
         call.remote_audio = ('192.168.1.132', 3230)
         call.remote_h264 = True
-        call.audio_ready_at = h.time.monotonic() - 3
+        call.audio_ready_at = h.time.monotonic() - 9
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             call.maybe_connected()

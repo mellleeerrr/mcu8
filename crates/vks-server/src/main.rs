@@ -386,6 +386,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+    // Входящий H.323 UAS: Q.931/H.245 listener 1720. По умолчанию выключен:
+    // это неаутентифицированный LAN-протокол, включайте явно и ограничивайте
+    // `VKS_H323_UAS_ALLOW`.
+    if std::env::var("VKS_H323_UAS_ENABLED").is_ok_and(|value| value == "1") {
+        let bind = std::env::var("VKS_H323_UAS_BIND").unwrap_or_else(|_| "0.0.0.0:1720".to_string());
+        let local_ip = candidate_addr.clone();
+        let manager = gateway_manager.clone();
+        tokio::spawn(async move {
+            if let Err(error) = vks_server::gateways::serve_h323_uas(manager, bind, local_ip).await {
+                tracing::error!(%error, "H.323 UAS listener stopped");
+            }
+        });
+    }
     let recorder_manager = Arc::new(RecorderManager::new());
     let cluster_manager = Arc::new(ClusterManager::new(&config.server_name));
 
@@ -427,7 +440,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
+            uas_shutdown.begin_shutdown();
             uas_shutdown.shutdown_sip_uas().await;
+            uas_shutdown.shutdown_h323_uas().await;
         })
         .await?;
 

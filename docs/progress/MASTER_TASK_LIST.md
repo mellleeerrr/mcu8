@@ -74,8 +74,18 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > входящих, media-timeout с BYE и очисткой registry/RoomHub, re-INVITE 501,
 > graceful shutdown с BYE всем активным диалогам. Ревью: `protocols-net`
 > **9.5/10**, `media-engine` **9.0/10**, P1 нет; LAN-scope принят.
-> Evidence `docs/progress/evidence/t07c/`. H.323 inbound (Q.931/H.245/RAS)
-> остаётся отдельным эпиком.
+> Evidence `docs/progress/evidence/t07c/`.
+>
+> **T07d (входящий H.323 UAS) закрыт:** ревью `media-engine` **9.5/10**,
+> `stats-deps` **9.5/10**, `protocols-net` **9.6/10**, 1078 passed / 0 failed /
+> 6 ignored, clippy clean. Q.931/H.225/H.245 listener (TCP 1720, fork-per-call),
+> двусторонние audio PT0 + video PT96, 20 одновременных вызовов в сессию
+> `4d313d01-...`, 20/20 connected + video, 0 детей/0 зомби после cleanup.
+> Security: opt-in/allowlist fail-closed, peer IP pinning, отключён source-latch,
+> max calls 20, pending TTL + hard fallback, video-close не рвёт audio,
+> cancellation-safe reader task, single reaper без stale PID, `KillMode=mixed`,
+> process group, pending leases до остановки listener. Evidence
+> `docs/progress/evidence/t07d-h323-inbound/`.
 >
 > **T12a (подписи без emoji/стикеров) закрыт:** `a4629a4`, ревью **9.5/10 APPROVED**
 > (`layout-ui`). Единый denylist-санитайзер `vks-common::text` (кириллица/combining/

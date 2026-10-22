@@ -22,7 +22,7 @@ use vks_common::{terminal_failure, Error};
 const MAX_EVENT_BYTES: usize = 32 * 1024;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
-type CallResult<T> = Result<T, Error>;
+pub(crate) type CallResult<T> = Result<T, Error>;
 
 /// Терминальный отказ терминала (Q.931 RELEASE/причина busy) отделяется от
 /// транспортных сбоев точным токеном sidecar, а не поиском подстрок.
@@ -38,7 +38,7 @@ fn classify_dial_reason(reason: String) -> String {
     }
 }
 
-fn failure(message: impl std::fmt::Display) -> Error {
+pub(crate) fn failure(message: impl std::fmt::Display) -> Error {
     Error::Internal(anyhow::anyhow!("H.323: {message}"))
 }
 
@@ -188,7 +188,7 @@ impl H323VideoProfile {
     }
 
     /// JSON-поля H.241, которые Rust передаёт sidecar (единая точка истины).
-    fn sidecar_video_fields(self) -> serde_json::Value {
+    pub(crate) fn sidecar_video_fields(self) -> serde_json::Value {
         serde_json::json!({
             "video_max_bitrate_100bps": self.max_bitrate_100bps(),
             "video_h264_level": self.h241_level(),
@@ -368,7 +368,7 @@ impl H323UacClient {
     }
 }
 
-fn default_python() -> PathBuf {
+pub(crate) fn default_python() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         let candidate = PathBuf::from(home).join(".local/share/vks-mcu/h323-venv/bin/python3");
         if candidate.is_file() {
@@ -385,7 +385,7 @@ fn default_python() -> PathBuf {
 /// override, then the installed layout next to the executable, then the
 /// source-tree layouts used by `cargo run`/`cargo test`, and keep the
 /// compile-time path as a last resort for unusual build setups.
-fn resolve_helper() -> CallResult<PathBuf> {
+pub(crate) fn resolve_helper() -> CallResult<PathBuf> {
     let executable = std::env::current_exe().ok();
     let current_dir = std::env::current_dir().ok();
     let override_path = std::env::var_os("VKS_H323_HELPER");

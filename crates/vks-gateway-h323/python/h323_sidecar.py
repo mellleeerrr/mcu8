@@ -526,8 +526,8 @@ class Call:
             # video channel. Do not lose a working audio call to that.
             if self.audio_ready_at is None:
                 self.audio_ready_at = time.monotonic()
-            # TrueConf открывает свою video-OLC с задержкой после нашего
-            # openLogicalChannel; 2.5 с обрывали видео до его прихода.
+            # Некоторые шлюзы (TrueConf) открывают свою video-OLC с задержкой
+            # после нашего openLogicalChannel; короткий grace обрывал видео.
             if time.monotonic() - self.audio_ready_at < 8.0:
                 return
             self.requested_video_rejected = True

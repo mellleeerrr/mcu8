@@ -10,9 +10,14 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/home/pro/mcu
+Environment=VKS_H323_UAS_ENABLED=1
+Environment=VKS_H323_UAS_ALLOW=127.0.0.1/32,192.168.1.0/24
+Environment=VKS_H323_UAS_MAX_CALLS=20
+Environment=VKS_H323_UAS_MAX_PER_IP=20
 ExecStart=/home/pro/mcu/target/release/vks-server --config /home/pro/mcu/configs/default.toml
 Restart=on-failure
 RestartSec=2
+KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=30
 LimitNOFILE=65536

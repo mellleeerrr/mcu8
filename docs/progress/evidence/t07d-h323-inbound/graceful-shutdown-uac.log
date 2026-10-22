@@ -1,0 +1,8 @@
+{"event":"negotiating","protocol":"h245","control_ip":"192.168.1.93","control_port":33863}
+{"event":"capabilities","h264":true,"entries":2,"max_bitrate_100bps":5120,"profile_bits":64,"level_idc":71}
+{"event":"channel","direction":"incoming","kind":"audio","payload_type":0,"local_port":47800}
+{"event":"channel","direction":"incoming","kind":"video","payload_type":96,"local_port":47802}
+{"event":"channel","direction":"outgoing","kind":"audio","remote_ip":"192.168.1.93","remote_port":41000,"payload_type":0}
+{"event":"channel","direction":"outgoing","kind":"video","remote_ip":"192.168.1.93","remote_port":41002,"payload_type":96}
+{"event":"connected","call_id":"a85151fa-18f0-4da4-be8b-4e46317bec42","call_ref":777,"remote_ip":"192.168.1.93","remote_audio_port":41000,"remote_audio_payload_type":0,"local_audio_payload_type":0,"remote_video_ip":"192.168.1.93","remote_video_port":41002,"remote_video_payload_type":96,"local_video_payload_type":96,"remote_video_max_bitrate_100bps":5120,"remote_video_h264_level":71,"remote_video_h264_profile_bits":64,"video_status":"connected"}
+{"event":"disconnected","reason":"remote_end_session","was_connected":true}

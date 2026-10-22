@@ -203,6 +203,13 @@ impl Default for GatewayMediaControls {
     }
 }
 
+/// Управление входящим H.323-вызовом: команда Release идёт в sidecar listener.
+#[derive(Clone)]
+pub struct InboundH323Control {
+    pub uas: vks_gateway_h323::H323UasHandle,
+    pub call_id: String,
+}
+
 /// Сессия исходящего или входящего шлюзового вызова.
 #[derive(Clone)]
 pub struct GatewayCallSession {
@@ -213,6 +220,7 @@ pub struct GatewayCallSession {
     pub uri: String,
     pub active_sip: Option<vks_gateway_sip::ActiveSipSession>,
     pub active_h323: Option<vks_gateway_h323::ActiveH323Session>,
+    pub inbound_h323: Option<InboundH323Control>,
     pub cancel_flag: Arc<std::sync::atomic::AtomicBool>,
     pub controls: GatewayMediaControls,
     pub media_stats: Arc<GatewayMediaStats>,
@@ -243,6 +251,9 @@ pub struct GatewayManager {
     sip_uas_stopping: Arc<std::sync::atomic::AtomicBool>,
     sip_uas_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     sip_uas_reaper_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    h323_uas_shutdown: Arc<tokio::sync::Notify>,
+    h323_uas_stopping: Arc<std::sync::atomic::AtomicBool>,
+    h323_uas_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 /// SIP-ответ терминала (4xx/6xx/488/606, невалидный SDP) — шлюз жив.
@@ -291,6 +302,9 @@ impl GatewayManager {
             sip_uas_stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sip_uas_task: Arc::new(std::sync::Mutex::new(None)),
             sip_uas_reaper_task: Arc::new(std::sync::Mutex::new(None)),
+            h323_uas_shutdown: Arc::new(tokio::sync::Notify::new()),
+            h323_uas_stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            h323_uas_task: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -328,6 +342,25 @@ impl GatewayManager {
         let reaper = { self.sip_uas_reaper_task.lock().expect("sip uas reaper poisoned").take() };
         if let Some(reaper) = reaper {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(6), reaper).await;
+        }
+    }
+
+    /// Сигнализирует об остановке до любых await, чтобы супервизоры не
+    /// успели перезапустить listener во время graceful shutdown.
+    pub fn begin_shutdown(&self) {
+        self.sip_uas_stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.sip_uas_shutdown.notify_one();
+        self.h323_uas_stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.h323_uas_shutdown.notify_one();
+    }
+
+    /// Останавливает входящий H.323 UAS: Release всем диалогам и join listener.
+    pub async fn shutdown_h323_uas(&self) {
+        self.h323_uas_stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.h323_uas_shutdown.notify_one();
+        let handle = { self.h323_uas_task.lock().expect("h323 uas task poisoned").take() };
+        if let Some(handle) = handle {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(8), handle).await;
         }
     }
 
@@ -1069,6 +1102,7 @@ impl GatewayManager {
                     uri: trimmed.to_string(),
                     active_sip: setup.sip.clone(),
                     active_h323: setup.h323.clone(),
+                    inbound_h323: None,
                     cancel_flag: cancel_flag.clone(),
                     controls: controls.clone(),
                     media_stats: media_stats.clone(),
@@ -1402,6 +1436,11 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         if let Some(active_h323) = session.active_h323 {
             tokio::spawn(async move {
                 let _ = active_h323.hangup().await;
+            });
+        }
+        if let Some(inbound) = session.inbound_h323 {
+            tokio::spawn(async move {
+                inbound.uas.hangup(&inbound.call_id).await;
             });
         }
 
@@ -2244,6 +2283,7 @@ async fn serve_sip_uas_on(
                                 uri: request.request_uri.clone(),
                                 active_sip: None,
                                 active_h323: None,
+                                inbound_h323: None,
                                 cancel_flag: cancel.clone(),
                                 controls: controls.clone(),
                                 media_stats: stats.clone(),
@@ -2443,11 +2483,720 @@ async fn serve_sip_uas_on(
     }
 }
 
+/// Состояние входящего H.323-вызова до/после приземления в комнату.
+struct InboundH323State {
+    room_id: RoomId,
+    participant_id: String,
+    participant: vks_core::ParticipantId,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    connected_at: std::time::Instant,
+    stats: Arc<GatewayMediaStats>,
+    audio_task: Option<tokio::task::JoinHandle<()>>,
+    video_task: Option<tokio::task::JoinHandle<()>>,
+    /// Keeps an accepted but unbridgeable video socket/lease out of the free
+    /// pool until the call really ends, preventing cross-talk on port reuse.
+    _video_guard: Option<(vks_gateway_sip::PortPair, RtpPortLease)>,
+}
+
+fn inbound_h323_dead(elapsed: std::time::Duration, last_rx_ms: u64, now_ms: u64, audio_running: bool) -> bool {
+    let silence_ms = if last_rx_ms == 0 { elapsed.as_millis() as u64 } else { now_ms.saturating_sub(last_rx_ms) };
+    silence_ms > 90_000 || (!audio_running && elapsed > std::time::Duration::from_secs(20))
+}
+
+struct PendingInboundH323 {
+    room_id: RoomId,
+    participant_id: String,
+    stats: Arc<GatewayMediaStats>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    controls: GatewayMediaControls,
+    display_name: String,
+    from_alias: String,
+    peer_ip: String,
+    created_at: std::time::Instant,
+    hangup_sent_at: Option<std::time::Instant>,
+    audio_pair: vks_gateway_sip::PortPair,
+    video_pair: Option<vks_gateway_sip::PortPair>,
+    audio_lease: RtpPortLease,
+    video_lease: Option<RtpPortLease>,
+    dtmf_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+}
+
+/// H.323 alias can contain spaces/Cyrillic; a redial URI stays ASCII-safe.
+fn h323_contact_uri(alias: &str, peer_ip: &str) -> String {
+    let safe: String =
+        alias.chars().filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '@')).take(64).collect();
+    if safe.is_empty() {
+        format!("h323:inbound@{peer_ip}")
+    } else {
+        format!("h323:{safe}@{peer_ip}")
+    }
+}
+
+fn resolve_h323_room(state: &AppState, alias: &str) -> Option<RoomId> {
+    let alias = alias.trim();
+    if let Ok(id) = uuid::Uuid::parse_str(alias) {
+        let room_id = RoomId::from_uuid(id);
+        return state.rooms.lock().ok().and_then(|rooms| rooms.contains_key(&room_id).then_some(room_id));
+    }
+    if let Ok(raw) = std::env::var("VKS_H323_UAS_DEFAULT_ROOM") {
+        if let Ok(id) = uuid::Uuid::parse_str(raw.trim()) {
+            let room_id = RoomId::from_uuid(id);
+            return state.rooms.lock().ok().and_then(|rooms| rooms.contains_key(&room_id).then_some(room_id));
+        }
+    }
+    let alias = alias.to_ascii_lowercase();
+    if alias.is_empty() {
+        return None;
+    }
+    if let Ok(settings) = state.api_v3.conference_settings.lock() {
+        for (room_id, value) in settings.iter() {
+            for key in ["dtmf", "route", "alias", "name"] {
+                if value.get(key).and_then(serde_json::Value::as_str).is_some_and(|v| v.eq_ignore_ascii_case(&alias))
+                    && state.rooms.lock().ok().is_some_and(|rooms| rooms.contains_key(room_id))
+                {
+                    return Some(*room_id);
+                }
+            }
+        }
+    }
+    Rooms::list(state).into_iter().find(|room| room.name.eq_ignore_ascii_case(&alias)).map(|room| room.id)
+}
+
+fn remove_inbound_h323_state(manager: &GatewayManager, state: Option<&Arc<AppState>>, call: &InboundH323State) {
+    if let Ok(mut registry) = manager.registry.lock() {
+        if let Some(session) = registry.by_participant.remove(&call.participant_id) {
+            registry.by_call.remove(&session.call_id);
+        }
+    }
+    if let Some(state) = state {
+        terminate_gateway_participant_in_room(state, manager.mcu_engine.as_ref(), &call.room_id, &call.participant_id);
+    } else if let Some(mcu) = manager.mcu_engine.as_ref() {
+        mcu.unbridge_participant(call.room_id, call.participant);
+    }
+}
+
+/// Retires one or many calls under a single bridge budget. Every failed/
+/// disconnected event uses this path concurrently, so a network-wide failure
+/// of 20 calls cannot serialize 20 x 2 s waits in the UAS event loop.
+async fn retire_inbound_h323(
+    manager: Arc<GatewayManager>,
+    state: Option<Arc<AppState>>,
+    mut calls: Vec<InboundH323State>,
+) {
+    let mut bridge_tasks = Vec::new();
+    for call in &mut calls {
+        call.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(task) = call.audio_task.take() {
+            bridge_tasks.push(task);
+        }
+        if let Some(task) = call.video_task.take() {
+            bridge_tasks.push(task);
+        }
+    }
+    if !bridge_tasks.is_empty() {
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(3), futures_util::future::join_all(bridge_tasks)).await;
+    }
+    for call in &calls {
+        remove_inbound_h323_state(manager.as_ref(), state.as_ref(), call);
+    }
+}
+
+/// Поднимает входящий H.323 UAS listener и обслуживает его события.
+pub async fn serve_h323_uas(manager: Arc<GatewayManager>, bind: String, local_ip: String) -> std::io::Result<()> {
+    let runner = manager.clone();
+    let task = tokio::spawn(async move {
+        // The Python listener forks one child per call, so a single parent
+        // handles concurrent inbound calls. Respawn it if it ever exits.
+        let mut failures = 0u32;
+        while !runner.h323_uas_stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            let profile = vks_gateway_h323::H323VideoProfile::default();
+            let mut uas = match vks_gateway_h323::H323Uas::spawn(&bind, &local_ip, profile).await {
+                Ok(uas) => {
+                    failures = 0;
+                    uas
+                }
+                Err(error) => {
+                    failures = failures.saturating_add(1);
+                    let delay = 1u64 << failures.min(4);
+                    warn!(%error, failures, delay, "H.323 UAS listener failed to start; backing off");
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    continue;
+                }
+            };
+            let handle = uas.handle();
+            info!(bind = %bind, local_ip = %local_ip, "H.323 UAS listening");
+            let pending_guard = serve_h323_uas_session(&runner, &mut uas, handle, &local_ip).await;
+            uas.shutdown().await;
+            // Safe now: every forked child is gone before ports are released.
+            drop(pending_guard);
+            if !runner.h323_uas_stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    });
+    *manager.h323_uas_task.lock().expect("h323 uas task poisoned") = Some(task);
+    Ok(())
+}
+
+async fn serve_h323_uas_session(
+    manager: &Arc<GatewayManager>,
+    uas: &mut vks_gateway_h323::H323Uas,
+    handle: vks_gateway_h323::H323UasHandle,
+    local_ip: &str,
+) -> std::collections::HashMap<String, PendingInboundH323> {
+    let mut pending: std::collections::HashMap<String, PendingInboundH323> = std::collections::HashMap::new();
+    let mut active: std::collections::HashMap<String, InboundH323State> = std::collections::HashMap::new();
+    let mut cleanup_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let max_calls = std::env::var("VKS_H323_UAS_MAX_CALLS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(1, 20))
+        .unwrap_or(20);
+    let Some(mut event_reader) = uas.take_event_stream() else {
+        warn!("H.323 UAS event stream unavailable");
+        return pending;
+    };
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Result<serde_json::Value, String>>(64);
+    let reader_task = tokio::spawn(async move {
+        loop {
+            match vks_gateway_h323::read_event(&mut event_reader).await {
+                Ok(event) => {
+                    if event_tx.send(Ok(event)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = event_tx.send(Err(error)).await;
+                    break;
+                }
+            }
+        }
+    });
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        if manager.h323_uas_stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        let event = tokio::select! {
+            _ = manager.h323_uas_shutdown.notified() => break,
+            _ = ticker.tick() => {
+                let now = std::time::Instant::now();
+                let stale: Vec<String> = pending
+                    .iter()
+                    .filter(|(_, call)| now.duration_since(call.created_at) > std::time::Duration::from_secs(30))
+                    .map(|(call_id, _)| call_id.clone())
+                    .collect();
+                for call_id in stale {
+                    if let Some(call) = pending.get_mut(&call_id) {
+                        if call.hangup_sent_at.is_none() {
+                            warn!(%call_id, "H.323 inbound call did not connect in time; releasing");
+                            call.hangup_sent_at = Some(std::time::Instant::now());
+                            handle.hangup(&call_id).await;
+                        }
+                    }
+                }
+                // The listener parent SIGKILLs a child that ignores hangup for
+                // 5 s. This longer fallback only reclaims the cap/ports if the
+                // listener itself is unresponsive; session shutdown still holds
+                // pending leases until the listener tree is reaped.
+                let expired: Vec<String> = pending
+                    .iter()
+                    .filter(|(_, call)| {
+                        call.hangup_sent_at
+                            .is_some_and(|at| now.duration_since(at) > std::time::Duration::from_secs(10))
+                    })
+                    .map(|(call_id, _)| call_id.clone())
+                    .collect();
+                for call_id in expired {
+                    warn!(%call_id, "H.323 pending call ignored hangup; reclaiming slot");
+                    pending.remove(&call_id);
+                }
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|value| value.as_millis() as u64)
+                    .unwrap_or(0);
+                let dead: Vec<String> = active
+                    .iter()
+                    .filter(|(_, call)| {
+                        inbound_h323_dead(
+                            now.duration_since(call.connected_at),
+                            call.stats.last_rx_ms.load(std::sync::atomic::Ordering::Relaxed),
+                            now_ms,
+                            call.stats.audio_codec_running.load(std::sync::atomic::Ordering::Relaxed),
+                        )
+                    })
+                    .map(|(call_id, _)| call_id.clone())
+                    .collect();
+                let mut dead_calls = Vec::new();
+                for call_id in dead {
+                    warn!(%call_id, "H.323 inbound call is media-dead; releasing");
+                    handle.hangup(&call_id).await;
+                    if let Some(call) = active.remove(&call_id) {
+                        dead_calls.push(call);
+                    }
+                }
+                if !dead_calls.is_empty() {
+                    let state = manager
+                        .state
+                        .read()
+                        .ok()
+                        .and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade));
+                    cleanup_tasks.push(tokio::spawn(retire_inbound_h323(manager.clone(), state, dead_calls)));
+                }
+                cleanup_tasks.retain(|task| !task.is_finished());
+                continue;
+            }
+            event = event_rx.recv() => match event {
+                Some(Ok(event)) => event,
+                Some(Err(error)) => {
+                    warn!(%error, "H.323 UAS event stream failed");
+                    break;
+                }
+                None => break,
+            },
+        };
+        match event.get("event").and_then(serde_json::Value::as_str) {
+            Some("incoming") => {
+                let (Some(call_id), Some(called)) = (
+                    event.get("call_id").and_then(serde_json::Value::as_str),
+                    event.get("called_alias").and_then(serde_json::Value::as_str),
+                ) else {
+                    continue;
+                };
+                if pending.contains_key(call_id) || active.contains_key(call_id) {
+                    warn!(%call_id, "duplicate H.323 incoming event; rejecting duplicate");
+                    let _ = handle.reject(call_id).await;
+                    continue;
+                }
+                if pending.len() + active.len() >= max_calls {
+                    warn!(%call_id, max_calls, "H.323 inbound call cap reached; rejecting");
+                    let _ = handle.reject(call_id).await;
+                    continue;
+                }
+                let Some(state) =
+                    manager.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
+                else {
+                    let _ = handle.reject(call_id).await;
+                    continue;
+                };
+                let Some(room_id) = resolve_h323_room(&state, called) else {
+                    info!(%call_id, %called, "H.323 inbound call rejected: room alias not found");
+                    let _ = handle.reject(call_id).await;
+                    continue;
+                };
+                if manager.mcu_engine.is_none() {
+                    let _ = handle.reject(call_id).await;
+                    continue;
+                }
+                let Some(audio_pair) = manager.port_pool.allocate_pair("0.0.0.0").await else {
+                    let _ = handle.reject(call_id).await;
+                    continue;
+                };
+                let video_pair = if video::codec_available().await {
+                    manager.port_pool.allocate_pair("0.0.0.0").await
+                } else {
+                    None
+                };
+                let audio_lease = RtpPortLease::new(manager.port_pool.clone(), audio_pair.rtp_port);
+                let video_lease =
+                    video_pair.as_ref().map(|pair| RtpPortLease::new(manager.port_pool.clone(), pair.rtp_port));
+                if let Err(error) = handle
+                    .accept(call_id, local_ip, audio_pair.rtp_port, video_pair.as_ref().map(|pair| pair.rtp_port))
+                    .await
+                {
+                    warn!(%call_id, %error, "H.323 inbound accept failed");
+                    continue;
+                }
+                let participant_id = format!("h323-{}-in@h323-gateway", uuid::Uuid::new_v4());
+                let display_name = event
+                    .get("from_alias")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| format!("{value} (H.323)"))
+                    .unwrap_or_else(|| "H.323 (inbound)".to_string());
+                let (dtmf_tx, dtmf_rx) = tokio::sync::mpsc::unbounded_channel();
+                let controls = GatewayMediaControls { dtmf_sender: dtmf_tx, ..GatewayMediaControls::default() };
+                controls.dtmf_payload_type.store(256, std::sync::atomic::Ordering::Relaxed);
+                pending.insert(
+                    call_id.to_string(),
+                    PendingInboundH323 {
+                        room_id,
+                        participant_id,
+                        stats: Arc::new(GatewayMediaStats::default()),
+                        cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        controls,
+                        display_name,
+                        from_alias: event
+                            .get("from_alias")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        peer_ip: event
+                            .get("peer_ip")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("0.0.0.0")
+                            .to_string(),
+                        created_at: std::time::Instant::now(),
+                        hangup_sent_at: None,
+                        audio_pair,
+                        video_pair,
+                        audio_lease,
+                        video_lease,
+                        dtmf_rx,
+                    },
+                );
+            }
+            Some("connected") => {
+                let Some(call_id) = event.get("call_id").and_then(serde_json::Value::as_str) else { continue };
+                if active.contains_key(call_id) {
+                    warn!(%call_id, "duplicate H.323 connected event; releasing duplicate");
+                    handle.hangup(call_id).await;
+                    continue;
+                }
+                let Some(pending_call) = pending.remove(call_id) else { continue };
+                if pending_call.hangup_sent_at.is_some() {
+                    warn!(%call_id, "H.323 call connected after its pending TTL; rejecting late connect");
+                    handle.hangup(call_id).await;
+                    pending.insert(call_id.to_string(), pending_call);
+                    continue;
+                }
+                let Some(state) =
+                    manager.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
+                else {
+                    handle.hangup(call_id).await;
+                    pending.insert(call_id.to_string(), pending_call);
+                    continue;
+                };
+                let Some(mcu) = manager.mcu_engine.clone() else {
+                    handle.hangup(call_id).await;
+                    pending.insert(call_id.to_string(), pending_call);
+                    continue;
+                };
+                let remote_ip = event.get("remote_ip").and_then(serde_json::Value::as_str).unwrap_or_default();
+                let Ok(remote_ip) = remote_ip.parse::<std::net::Ipv4Addr>() else {
+                    warn!(%call_id, "H.323 connected event has an invalid media IP");
+                    handle.hangup(call_id).await;
+                    pending.insert(call_id.to_string(), pending_call);
+                    continue;
+                };
+                if remote_ip.to_string() != pending_call.peer_ip {
+                    warn!(%call_id, peer = %pending_call.peer_ip, %remote_ip, "H.323 media address differs from the TCP peer; refusing redirect");
+                    handle.hangup(call_id).await;
+                    pending.insert(call_id.to_string(), pending_call);
+                    continue;
+                }
+                let remote_audio_port = event
+                    .get("remote_audio_port")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|port| u16::try_from(port).ok())
+                    .filter(|port| *port != 0);
+                let audio_payload_type = event
+                    .get("remote_audio_payload_type")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|pt| u8::try_from(pt).ok());
+                let (Some(remote_audio_port), Some(0)) = (remote_audio_port, audio_payload_type) else {
+                    warn!(%call_id, "H.323 connected event has unusable audio");
+                    handle.hangup(call_id).await;
+                    pending.insert(call_id.to_string(), pending_call);
+                    continue;
+                };
+                let video_remote = event
+                    .get("remote_video_ip")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
+                    .zip(
+                        event
+                            .get("remote_video_port")
+                            .and_then(serde_json::Value::as_u64)
+                            .and_then(|port| u16::try_from(port).ok())
+                            .filter(|port| *port != 0),
+                    )
+                    .zip(
+                        event
+                            .get("video_tx_payload_type")
+                            .and_then(serde_json::Value::as_u64)
+                            .and_then(|pt| u8::try_from(pt).ok())
+                            .filter(|pt| (96..=127).contains(pt)),
+                    )
+                    .zip(
+                        event
+                            .get("video_rx_payload_type")
+                            .and_then(serde_json::Value::as_u64)
+                            .and_then(|pt| u8::try_from(pt).ok())
+                            .filter(|pt| (96..=127).contains(pt)),
+                    )
+                    .map(|(((ip, port), tx_pt), rx_pt)| (ip, port, tx_pt, rx_pt));
+                if let Some((video_ip, _, _, _)) = video_remote {
+                    if video_ip.to_string() != pending_call.peer_ip {
+                        warn!(%call_id, %video_ip, "H.323 video address differs from the TCP peer; refusing redirect");
+                        handle.hangup(call_id).await;
+                        pending.insert(call_id.to_string(), pending_call);
+                        continue;
+                    }
+                }
+                let mut video_lease = pending_call.video_lease;
+                let has_video = video_remote.is_some() && pending_call.video_pair.is_some();
+                let mut video_guard = None;
+                let pair_for_bridge = if has_video {
+                    pending_call.video_pair
+                } else {
+                    if let (Some(pair), Some(lease)) = (pending_call.video_pair, video_lease.take()) {
+                        video_guard = Some((pair, lease));
+                    }
+                    None
+                };
+                let participant = crate::parse_participant_id(&pending_call.participant_id);
+                let media_details = serde_json::json!({
+                    "protocol": "H.323",
+                    "direction": "inbound",
+                    "remote_audio_address": format!("{remote_ip}:{remote_audio_port}"),
+                    "remote_video_address": video_remote.map(|(ip, port, _, _)| format!("{ip}:{port}")),
+                    "audio_codec": "PCMU",
+                    "audio_payload_type": 0,
+                    "audio_rx_payload_type": 0,
+                    "audio_tx_payload_type": 0,
+                    "audio_clock_rate": 8000,
+                    "video_codec": if has_video { Some("H264") } else { None },
+                    "video_payload_type": video_remote.map(|(_, _, tx, _)| tx),
+                    "video_tx_payload_type": video_remote.map(|(_, _, tx, _)| tx),
+                    "video_rx_payload_type": video_remote.map(|(_, _, _, rx)| rx),
+                    "video_clock_rate": video_remote.map(|_| 90000u32),
+                    "inbound": true,
+                });
+                if let Ok(mut registry) = manager.registry.lock() {
+                    registry.by_call.insert(call_id.to_string(), pending_call.participant_id.clone());
+                    registry.by_participant.insert(
+                        pending_call.participant_id.clone(),
+                        GatewayCallSession {
+                            call_id: call_id.to_string(),
+                            participant_id: pending_call.participant_id.clone(),
+                            room_id: pending_call.room_id,
+                            display_name: pending_call.display_name.clone(),
+                            uri: h323_contact_uri(&pending_call.from_alias, &pending_call.peer_ip),
+                            active_sip: None,
+                            active_h323: None,
+                            inbound_h323: Some(InboundH323Control {
+                                uas: handle.clone(),
+                                call_id: call_id.to_string(),
+                            }),
+                            cancel_flag: pending_call.cancel.clone(),
+                            controls: pending_call.controls.clone(),
+                            media_stats: pending_call.stats.clone(),
+                            media_details: media_details.clone(),
+                            connected_at: std::time::Instant::now(),
+                        },
+                    );
+                }
+                land_gateway_participant_in_room(
+                    &state,
+                    Some(&mcu),
+                    &pending_call.room_id,
+                    &pending_call.participant_id,
+                    &pending_call.display_name,
+                    has_video,
+                );
+                vks_admin::api_v3::call_strings::record_incoming_call(
+                    &state,
+                    pending_call.room_id,
+                    &pending_call.participant_id,
+                    &h323_contact_uri(&pending_call.from_alias, &pending_call.peer_ip),
+                    &pending_call.display_name,
+                );
+                let mut audio_lease = pending_call.audio_lease;
+                let audio_task = spawn_rtp_media_bridge(RtpBridgeSession {
+                    room_id: pending_call.room_id,
+                    participant_id_str: pending_call.participant_id.clone(),
+                    participant_id_val: participant,
+                    remote_media_ip: remote_ip.to_string(),
+                    remote_audio_port,
+                    audio_payload_type: 0,
+                    // H.323 already binds the media address via H.245. Any
+                    // first-packet relatch would let a LAN scanner hijack the
+                    // bridge/egress, so keep the OLC-pinned peer.
+                    source_latch: false,
+                    dtmf_payload_type: None,
+                    media_stats: pending_call.stats.clone(),
+                    rtp_socket: pending_call.audio_pair.rtp_socket,
+                    rtcp_socket: Some(pending_call.audio_pair.rtcp_socket),
+                    rtp_port: pending_call.audio_pair.rtp_port,
+                    port_pool: manager.port_pool.clone(),
+                    mcu_engine: mcu.clone(),
+                    controls: pending_call.controls.clone(),
+                    cancel_flag: pending_call.cancel.clone(),
+                    dtmf_rx: pending_call.dtmf_rx,
+                });
+                audio_lease.disarm();
+                let mut video_task = None;
+                if let (Some(pair), Some((video_ip, video_port, tx_pt, rx_pt))) = (pair_for_bridge, video_remote) {
+                    let profile = manager.video_profile(pending_call.room_id, None);
+                    match video::spawn_video_media_bridge(video::VideoBridgeSession {
+                        room_id: pending_call.room_id,
+                        participant_id: participant,
+                        rtp_socket: pair.rtp_socket,
+                        rtcp_socket: Some(pair.rtcp_socket),
+                        remote_target: std::net::SocketAddr::new(std::net::IpAddr::V4(video_ip), video_port),
+                        payload_type: tx_pt,
+                        receive_payload_type: rx_pt,
+                        port_pool: manager.port_pool.clone(),
+                        engine: mcu.clone(),
+                        controls: pending_call.controls.clone(),
+                        cancelled: pending_call.cancel.clone(),
+                        stats: pending_call.stats.clone(),
+                        profile,
+                    })
+                    .await
+                    {
+                        Ok(task) => {
+                            if let Some(lease) = video_lease.as_mut() {
+                                lease.disarm();
+                            }
+                            video_task = Some(task);
+                        }
+                        Err(error) => {
+                            warn!(%error, "inbound H.323 video bridge unavailable; audio-only");
+                            mcu.unbridge_participant(pending_call.room_id, participant);
+                            mcu.bridge_participant(
+                                pending_call.room_id,
+                                participant,
+                                vec![vks_core::track::Track::new(participant, vks_core::track::TrackKind::Audio)],
+                            );
+                            state.room_hub.update_participant_media(
+                                &pending_call.room_id,
+                                &pending_call.participant_id,
+                                None,
+                                Some(true),
+                                None,
+                            );
+                            state.room_hub.update_participant_tracks(
+                                &pending_call.room_id,
+                                &pending_call.participant_id,
+                                vec!["audio".to_string()],
+                            );
+                            if let Ok(mut registry) = manager.registry.lock() {
+                                if let Some(session) = registry.by_participant.get_mut(&pending_call.participant_id) {
+                                    session.media_details["video_codec"] = serde_json::Value::Null;
+                                    session.media_details["video_payload_type"] = serde_json::Value::Null;
+                                    session.media_details["video_tx_payload_type"] = serde_json::Value::Null;
+                                    session.media_details["video_rx_payload_type"] = serde_json::Value::Null;
+                                }
+                            }
+                        }
+                    }
+                }
+                active.insert(
+                    call_id.to_string(),
+                    InboundH323State {
+                        room_id: pending_call.room_id,
+                        participant_id: pending_call.participant_id,
+                        participant,
+                        cancel: pending_call.cancel,
+                        connected_at: std::time::Instant::now(),
+                        stats: pending_call.stats,
+                        audio_task: Some(audio_task),
+                        video_task,
+                        _video_guard: video_guard,
+                    },
+                );
+                info!(%call_id, room = %pending_call.room_id, has_video, "H.323 inbound participant landed in room");
+            }
+            Some("channel_closed") => {
+                let Some(call_id) = event.get("call_id").and_then(serde_json::Value::as_str) else { continue };
+                let kind = event.get("kind").and_then(serde_json::Value::as_str).unwrap_or_default();
+                if kind != "video" {
+                    continue;
+                }
+                if let Some(call) = active.get_mut(call_id) {
+                    warn!(%call_id, "remote H.323 peer closed its video channel; keeping audio");
+                    if let Some(task) = call.video_task.take() {
+                        task.abort();
+                    }
+                    if let Ok(mut registry) = manager.registry.lock() {
+                        if let Some(session) = registry.by_participant.get_mut(&call.participant_id) {
+                            session.media_details["video_codec"] = serde_json::Value::Null;
+                            session.media_details["video_payload_type"] = serde_json::Value::Null;
+                            session.media_details["video_tx_payload_type"] = serde_json::Value::Null;
+                            session.media_details["video_rx_payload_type"] = serde_json::Value::Null;
+                        }
+                    }
+                    if let Some(state) =
+                        manager.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
+                    {
+                        state.room_hub.update_participant_media(
+                            &call.room_id,
+                            &call.participant_id,
+                            None,
+                            Some(true),
+                            None,
+                        );
+                        state.room_hub.update_participant_tracks(
+                            &call.room_id,
+                            &call.participant_id,
+                            vec!["audio".to_string()],
+                        );
+                    }
+                }
+            }
+            Some("failed" | "disconnected") => {
+                let Some(call_id) = event.get("call_id").and_then(serde_json::Value::as_str) else { continue };
+                if let Some(pending_call) = pending.remove(call_id) {
+                    drop(pending_call);
+                }
+                if let Some(call) = active.remove(call_id) {
+                    let state =
+                        manager.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade));
+                    cleanup_tasks.push(tokio::spawn(retire_inbound_h323(manager.clone(), state, vec![call])));
+                }
+                cleanup_tasks.retain(|task| !task.is_finished());
+            }
+            _ => {}
+        }
+    }
+    // Shutdown must not serialize 20 x 2 s bridge waits; cancel and join all
+    // media tasks under one budget, then remove registry/RoomHub state.
+    for call_id in active.keys() {
+        handle.hangup(call_id).await;
+    }
+    let state = manager.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade));
+    let active_calls: Vec<InboundH323State> = active.drain().map(|(_, call)| call).collect();
+    retire_inbound_h323(manager.clone(), state.clone(), active_calls).await;
+    if !cleanup_tasks.is_empty() {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            futures_util::future::join_all(cleanup_tasks.drain(..)),
+        )
+        .await;
+    }
+    reader_task.abort();
+    // Pending children may still own their accepted RTP sockets. The caller
+    // keeps these guards until the listener process tree is gone.
+    for call_id in pending.keys() {
+        handle.hangup(call_id).await;
+    }
+    pending
+}
+
 #[cfg(test)]
 mod media_runtime_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn h323_contact_uri_is_ascii_and_keeps_peer() {
+        assert_eq!(h323_contact_uri("VKS MCU", "192.168.1.132"), "h323:VKSMCU@192.168.1.132");
+        assert_eq!(h323_contact_uri("Терминал", "10.0.0.5"), "h323:inbound@10.0.0.5");
+    }
+
+    #[test]
+    fn h323_watchdog_only_reaps_real_media_death() {
+        let secs = std::time::Duration::from_secs;
+        assert!(!inbound_h323_dead(secs(5), 0, 0, true));
+        assert!(inbound_h323_dead(secs(120), 0, 0, true));
+        assert!(inbound_h323_dead(secs(120), 1, 120_001, true));
+        assert!(inbound_h323_dead(secs(25), 0, 0, false));
+    }
 
     #[test]
     fn terminal_and_transport_gateway_errors_are_classified() {
@@ -2510,6 +3259,7 @@ mod media_runtime_tests {
                 uri: "sip:127.0.0.1".into(),
                 active_sip: None,
                 active_h323: None,
+                inbound_h323: None,
                 cancel_flag: Arc::new(AtomicBool::new(false)),
                 controls: GatewayMediaControls::default(),
                 media_stats: stats,

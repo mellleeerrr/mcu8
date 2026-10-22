@@ -29,6 +29,28 @@ root:root` while `DynamicUser=yes` still reads it.
 Requires systemd >= 247 for `LoadCredential=` and the `%d` credential
 directory (verified on systemd 259).
 
+## Inbound H.323 UAS
+
+`h323_listener.py` is installed next to the outbound sidecar. Inbound H.323 is
+disabled by default (`VKS_H323_UAS_ENABLED=0` in the sample env); enable it
+explicitly and restrict source networks:
+
+```bash
+VKS_H323_UAS_ENABLED=1
+VKS_H323_UAS_HELPER=/opt/vks/share/vks-mcu/h323_listener.py
+VKS_H323_UAS_ALLOW=192.168.0.0/16,127.0.0.1/32
+VKS_H323_UAS_MAX_CALLS=20
+VKS_H323_UAS_MAX_PER_IP=8
+VKS_H323_UAS_MAX_CHILDREN=64
+```
+
+Then edit `/etc/vks/vks.env`: set `VKS_H323_UAS_ENABLED=1`, narrow
+`VKS_H323_UAS_ALLOW` to your LAN, and restart. Open TCP 1720 only from those
+networks. The listener forks one child per call;
+the Rust supervisor owns the process group and reaps/terminates the whole tree
+on shutdown. H.323 is plaintext and unauthenticated: do not expose 1720 to the
+Internet, use a firewall/allowlist, and keep room aliases/PINs private.
+
 ## First start
 
 ```bash
@@ -36,6 +58,7 @@ sudo install -d -m 0755 /opt/vks /opt/vks/bin /opt/vks/frontend
 sudo install -d -m 0755 /opt/vks/share/vks-mcu
 sudo install -d -m 0750 /etc/vks
 sudo install -m 0644 crates/vks-gateway-h323/python/h323_sidecar.py \
+  crates/vks-gateway-h323/python/h323_listener.py \
   crates/vks-gateway-h323/python/h323_asn.py /opt/vks/share/vks-mcu/
 sudo install -m 0644 crates/vks-gateway-h323/python/requirements.lock /opt/vks/share/vks-mcu/
 sudo install -m 0755 target/release/vks-server /opt/vks/bin/vks-server

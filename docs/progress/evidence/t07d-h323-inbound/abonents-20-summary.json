@@ -1,0 +1,7 @@
+{
+  "connected": 20,
+  "protocols": [
+    "h323"
+  ],
+  "with_video": 20
+}

@@ -30,6 +30,7 @@ pub mod codec;
 pub mod ffi;
 pub mod q931;
 pub mod uac;
+pub mod uas;
 
 pub use call::{H323Call, H323CallState, H323Gateway};
 pub use codec::{H323Codec, H323CodecMap, NegotiatedCodec, WebRtcCodec};
@@ -39,3 +40,4 @@ pub use q931::{
     MSG_CONNECT, MSG_RELEASE_COMPLETE, MSG_SETUP,
 };
 pub use uac::{ActiveH323Session, H323UacClient, H323VideoProfile};
+pub use uas::{read_event, H323EventStream, H323Uas, H323UasHandle};

@@ -20,6 +20,7 @@ ExecStart=/opt/vks/bin/vks-server --config %d/server.toml
 Restart=on-failure
 RestartSec=3
 RestartPreventExitStatus=78
+KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=30
 LimitNOFILE=65536
