@@ -412,19 +412,18 @@ async fn cleanup_active_membership(
 /// `b=AS` для SFU-ответа из живого профиля комнаты (конференция имеет
 /// приоритет над глобальным env); SFU не перекодирует, но обязан честно
 /// объявить полосу, которую реально отдаёт браузеру.
-fn room_video_bitrate(state: &Arc<AppState>, room: &vks_core::RoomId) -> u32 {
-    state
-        .api_v3
-        .conference_settings
-        .lock()
-        .ok()
-        .and_then(|settings| settings.get(room).cloned())
-        .and_then(|value| {
-            let payload = value.get("payload").unwrap_or(&value);
-            payload.get("bitrate").and_then(serde_json::Value::as_u64)
-        })
+fn conference_video_bitrate(value: Option<&serde_json::Value>) -> Option<u32> {
+    let value = value?;
+    let payload = value.get("payload").unwrap_or(value);
+    payload
+        .get("bitrate")
+        .and_then(serde_json::Value::as_u64)
         .map(|bitrate| u32::try_from(bitrate.clamp(64, 8192)).unwrap_or(2048))
-        .unwrap_or(2048)
+}
+
+fn room_video_bitrate(state: &Arc<AppState>, room: &vks_core::RoomId) -> Option<u32> {
+    let settings = state.api_v3.conference_settings.lock().ok()?;
+    conference_video_bitrate(settings.get(room))
 }
 
 /// Обработка сессии WebSocket-сигналинга.
@@ -630,7 +629,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                         .and_then(|value| uuid::Uuid::parse_str(value).ok())
                                         .map(vks_core::RoomId::from_uuid)
                                     {
-                                        handler.set_video_bitrate(room_video_bitrate(&state, &room));
+                                        if let Some(bitrate) = room_video_bitrate(&state, &room) {
+                                            handler.set_video_bitrate(bitrate);
+                                        }
                                     }
                                 }
                                 // Запрос исполняет FSM; сайд-эффекты — только по успешному результату.
@@ -932,6 +933,17 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use tower::ServiceExt;
+
+    #[test]
+    fn conference_bitrate_reads_payload_and_clamps() {
+        use serde_json::json;
+        assert_eq!(conference_video_bitrate(None), None);
+        assert_eq!(conference_video_bitrate(Some(&json!({}))), None);
+        assert_eq!(conference_video_bitrate(Some(&json!({"bitrate": 4096}))), Some(4096));
+        assert_eq!(conference_video_bitrate(Some(&json!({"payload": {"bitrate": 512}}))), Some(512));
+        assert_eq!(conference_video_bitrate(Some(&json!({"payload": {"bitrate": 0}}))), Some(64));
+        assert_eq!(conference_video_bitrate(Some(&json!({"payload": {"bitrate": 99999}}))), Some(8192));
+    }
 
     #[test]
     fn classify_path_matrix() {

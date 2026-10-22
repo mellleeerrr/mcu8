@@ -917,6 +917,16 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
     }
 
     async fn dial(&self, room_id: RoomId, uri: &str, display_name: Option<&str>) -> Result<String, String> {
+        self.dial_with_contact(room_id, uri, display_name, None).await
+    }
+
+    async fn dial_with_contact(
+        &self,
+        room_id: RoomId,
+        uri: &str,
+        display_name: Option<&str>,
+        contact: Option<&serde_json::Value>,
+    ) -> Result<String, String> {
         let trimmed = uri.trim();
         let is_h323 = trimmed.starts_with("h323:");
         let is_sip = trimmed.starts_with("sip:")
@@ -976,7 +986,11 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             armed: true,
             registered: None,
         };
-        let call_string_profile = self.call_string_video_profile(room_id, trimmed).await;
+        let protocol = if is_h323 { "h323" } else { "sip" };
+        let call_string_profile = match contact.and_then(|value| protocol_options(value, protocol)).cloned() {
+            Some(options) => Some(serde_json::json!({"payload": options})),
+            None => self.call_string_video_profile(room_id, trimmed).await,
+        };
         let mut answer_limits = vks_gateway_sip::VideoAnswerLimits::default();
         let mut video_profile = self.video_profile(room_id, call_string_profile.as_ref());
         let offered_video_profile = video_profile.clone();

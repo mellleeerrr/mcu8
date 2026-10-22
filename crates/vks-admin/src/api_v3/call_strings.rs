@@ -368,7 +368,8 @@ pub(super) fn queue_call(
     let attempt_key = (room_id, record.uri.clone());
     let task = tokio::spawn(async move {
         let _guard = InFlightCallGuard { state: dial_state.clone(), room_id, address: record.uri.clone(), generation };
-        let result = dialer.dial(room_id, &record.uri, Some(&record.display_name)).await;
+        let result =
+            dialer.dial_with_contact(room_id, &record.uri, Some(&record.display_name), Some(&record.payload)).await;
         let stopped = dial_state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room_id);
         let mut obsolete = stopped;
         {

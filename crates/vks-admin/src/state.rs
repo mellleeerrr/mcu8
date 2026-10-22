@@ -136,6 +136,18 @@ pub trait OutboundDialer: Send + Sync {
     /// Возвращает идентификатор участника (participant_id).
     async fn dial(&self, room_id: RoomId, uri: &str, display_name: Option<&str>) -> Result<String, String>;
 
+    /// Дозвон с payload строки вызова (настройки конкретного терминала из
+    /// модалки «Добавить по адресу»). По умолчанию payload игнорируется.
+    async fn dial_with_contact(
+        &self,
+        room_id: RoomId,
+        uri: &str,
+        display_name: Option<&str>,
+        _contact: Option<&serde_json::Value>,
+    ) -> Result<String, String> {
+        self.dial(room_id, uri, display_name).await
+    }
+
     /// Передаёт выбранную раскладку комнаты в медиа-движок (MCU).
     ///
     /// `layout` — PNM-ресурс `video_layouts` целиком (`id` + `payload.slots[]`
