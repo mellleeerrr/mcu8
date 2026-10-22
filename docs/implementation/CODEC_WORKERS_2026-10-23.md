@@ -13,7 +13,8 @@
   - аудио: 20 мс mono `s16le` 48 кГц (960 сэмплов);
   - видео: один `yuv420p` кадр разрешения слота.
 - `FfmpegCapabilities::probe` — один разовый разбор
-  `ffmpeg -encoders/-decoders` с таймаутом 2 с.
+  `ffmpeg -version/-encoders/-decoders` с таймаутом 5 с на команду
+  (худший случай 15 с; повтор после 300 мс при холодном старте).
 - `WorkerPool` — host-wide лимит процессов (`VKS_CODEC_WORKER_POOL`,
   по умолчанию 8), `try_spawn` отказывает, а не ставит в очередь.
 - `SlotConfig` — per-slot bitrate/fps/width/height с валидацией под кодек
@@ -25,18 +26,25 @@
   проекте); это ограничение документально, не «сделано».
 - Low-latency режим: `-probesize 32 -analyzeduration 0` (без них FFmpeg
   буферизует до ~1.6 КиБ/5 с перед первым кадром); H.265 дополнительно
-  `-tune zerolatency -x265-params bframes=0:rc-lookahead=0:scenecut=0`.
-- Частичное чтение/таймаут «отравляет» worker: буфер не теряется молча,
-  процесс убивается, повторное использование — только через `restart()`.
+  `-tune zerolatency -x265-params bframes=0:rc-lookahead=0:scenecut=0:
+  frame-threads=1:pools=1` (без `frame-threads=1:pools=1` x265 задерживает
+  первый кадр на ~4 кадра).
+- Частичное чтение/таймаут/ошибка разбора/превышение лимита «отравляют»
+  worker: процесс убивается, последующий I/O возвращает
+  `Exited("worker is poisoned; restart is required")`, повторное
+  использование — только через `restart()`.
 - Публичный `write_encoded` для decoder-направления; вызовы методов не того
   направления возвращают `InvalidConfig` до касания pipe.
+- `read_encoded_video` отдаёт один Annex-B NAL (с start code) для H.261/H.263/
+  H.265 энкодера; остальные видео-энкодеры до появления NAL-фреймера читаются
+  только `read_to_end` после `finish_input` (EOF-only).
 - Самодекодирующиеся аудио-пакеты: ADTS (7-байтовый заголовок, 13-битная
   длина) и LOAS/LATM (3-байтовый заголовок) читаются целиком, без догадок
   о размере.
 
 ## Проверено
 
-`TMPDIR=/var/tmp cargo test -p vks-media-mcu codec_worker` — 11 тестов:
+`TMPDIR=/var/tmp cargo test -p vks-media-mcu codec_worker` — 18 тестов:
 
 - probe видит AAC/G.729/H.261/H.263/H.265 на этом хосте;
 - AAC ADTS encode→decode и LATM encode→decode дают ненулевую энергию PCM;
@@ -45,7 +53,11 @@
   с realtime-параметрами x265);
 - мусорный payload завершается ошибкой за <3 с и worker перезапускается;
 - пул из 1 процесса отказывает второму и возвращает permit после drop;
-- дочерний процесс не содержит `VKS_` в `/proc/<pid>/environ`, restart меняет pid.
+- дочерний процесс не содержит `VKS_` в `/proc/<pid>/environ`, restart меняет pid;
+- таймаут чтения отравляет worker, restart восстанавливает поток;
+- все шесть методов при неверном направлении дают `InvalidConfig` без блокировки;
+- H.265 отдаёт Annex-B NAL до EOF; H.263 704×576 проходит roundtrip;
+- зависший probe убивает дочерний процесс за timeout (Linux-тест).
 
 Сервер при старте вызывает `transcoder_runtime::init()`: probe и пул
 инициализируются, capability логируются и публикуются в `/metrics` как

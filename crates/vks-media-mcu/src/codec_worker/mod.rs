@@ -145,7 +145,7 @@ impl VideoCodec {
 /// bitrate and resolution instead of one global profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlotConfig {
-    /// Target video bitrate in bit/s (audio: ignored, uses 64 kbit/s AAC).
+    /// Target video bitrate in bit/s (audio workers use `audio_bitrate_bps`).
     pub bitrate_bps: u32,
     /// Target video width.
     pub width: u16,

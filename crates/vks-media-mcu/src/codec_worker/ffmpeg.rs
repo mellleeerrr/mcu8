@@ -111,6 +111,7 @@ impl FfmpegCapabilities {
             Command::new(ffmpeg_path)
                 .arg("-hide_banner")
                 .arg("-version")
+                .kill_on_drop(true)
                 .env_clear()
                 .env("LC_ALL", "C")
                 .env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into()))
@@ -170,6 +171,7 @@ async fn list_codecs(ffmpeg: &std::path::Path, flag: &str) -> Result<BTreeSet<St
         Command::new(ffmpeg)
             .arg("-hide_banner")
             .arg(flag)
+            .kill_on_drop(true)
             .env_clear()
             .env("LC_ALL", "C")
             .env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into()))
@@ -211,6 +213,8 @@ pub struct FfmpegWorker {
     last_stderr: Arc<Mutex<String>>,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
     poisoned: bool,
+    encoded_pending: Vec<u8>,
+    encoded_eof: bool,
     pub stats: Arc<WorkerStats>,
 }
 
@@ -264,6 +268,8 @@ impl FfmpegWorker {
             last_stderr,
             permit: None,
             poisoned: false,
+            encoded_pending: Vec::new(),
+            encoded_eof: false,
             stats: Arc::new(WorkerStats::default()),
         })
     }
@@ -382,6 +388,59 @@ impl FfmpegWorker {
         self.write_all(bytes).await
     }
 
+    /// Reads one Annex-B NAL unit from an encoder worker (H.261/H.263/H.265).
+    ///
+    /// Returns the NAL **including** its start code. The call waits until the
+    /// next start code (or EOF after [`Self::finish_input`]) so the returned
+    /// buffer is complete. This is the streaming counterpart of
+    /// [`Self::read_to_end`] for video encoders; codec payloaders can then
+    /// split/aggregate NAL units per RFC 4587/4629/7798.
+    pub async fn read_encoded_video(&mut self) -> Result<Vec<u8>, WorkerError> {
+        self.require_video_encode()?;
+        if self.poisoned {
+            return Err(WorkerError::Exited("worker is poisoned; restart is required".into()));
+        }
+        loop {
+            if self.encoded_eof && self.encoded_pending.is_empty() {
+                return Err(WorkerError::Exited("encoded video output ended".into()));
+            }
+            if let Some(nal) = take_annexb_nal(&mut self.encoded_pending, self.encoded_eof) {
+                self.stats.frames_out.fetch_add(1, Ordering::Relaxed);
+                self.stats.bytes_out.fetch_add(nal.len() as u64, Ordering::Relaxed);
+                return Ok(nal);
+            }
+            let mut chunk = [0u8; 8192];
+            let read = {
+                let Some(stdout) = self.child.stdout.as_mut() else {
+                    return Err(WorkerError::Exited("stdout already taken".into()));
+                };
+                tokio::time::timeout(self.config.io_timeout, stdout.read(&mut chunk)).await
+            };
+            match read {
+                Ok(Ok(0)) => {
+                    self.encoded_eof = true;
+                    if self.encoded_pending.len() > 4 * 1024 * 1024 {
+                        return Err(self.poison(WorkerError::Codec("encoded video frame exceeds 4 MiB".into())));
+                    }
+                }
+                Ok(Ok(count)) => {
+                    self.encoded_pending.extend_from_slice(&chunk[..count]);
+                    if self.encoded_pending.len() > 4 * 1024 * 1024 {
+                        return Err(self.poison(WorkerError::Codec("encoded video frame exceeds 4 MiB".into())));
+                    }
+                }
+                Ok(Err(error)) => {
+                    let error = self.classify_io(error);
+                    return Err(self.poison(error));
+                }
+                Err(_) => {
+                    self.stats.timeouts.fetch_add(1, Ordering::Relaxed);
+                    return Err(self.poison(WorkerError::Timeout(self.config.io_timeout)));
+                }
+            }
+        }
+    }
+
     /// Reads exactly one encoded audio frame from an encoder worker.
     ///
     /// ADTS and LOAS/LATM are self-delimiting; this keeps RTP packetization
@@ -397,13 +456,15 @@ impl FfmpegWorker {
                 let mut header = [0u8; 7];
                 self.read_exact_into(&mut header).await?;
                 if header[0] != 0xff || (header[1] & 0xf0) != 0xf0 {
-                    return Err(WorkerError::Codec(format!("bad ADTS sync {:02x}{:02x}", header[0], header[1])));
+                    return Err(
+                        self.poison(WorkerError::Codec(format!("bad ADTS sync {:02x}{:02x}", header[0], header[1])))
+                    );
                 }
                 let length = (usize::from(header[3] & 0x03) << 11)
                     | (usize::from(header[4]) << 3)
                     | (usize::from(header[5]) >> 5);
                 if !(7..=8192).contains(&length) {
-                    return Err(WorkerError::Codec(format!("invalid ADTS length {length}")));
+                    return Err(self.poison(WorkerError::Codec(format!("invalid ADTS length {length}"))));
                 }
                 let mut frame = vec![0u8; length];
                 frame[..7].copy_from_slice(&header);
@@ -416,11 +477,13 @@ impl FfmpegWorker {
                 let mut header = [0u8; 3];
                 self.read_exact_into(&mut header).await?;
                 if header[0] != 0x56 || (header[1] & 0xe0) != 0xe0 {
-                    return Err(WorkerError::Codec(format!("bad LOAS sync {:02x}{:02x}", header[0], header[1])));
+                    return Err(
+                        self.poison(WorkerError::Codec(format!("bad LOAS sync {:02x}{:02x}", header[0], header[1])))
+                    );
                 }
                 let length = (usize::from(header[1] & 0x1f) << 8) | usize::from(header[2]);
                 if length == 0 || length > 8192 {
-                    return Err(WorkerError::Codec(format!("invalid LOAS length {length}")));
+                    return Err(self.poison(WorkerError::Codec(format!("invalid LOAS length {length}"))));
                 }
                 let mut frame = vec![0u8; 3 + length];
                 frame[..3].copy_from_slice(&header);
@@ -465,6 +528,9 @@ impl FfmpegWorker {
     }
 
     async fn write_all(&mut self, bytes: &[u8]) -> Result<(), WorkerError> {
+        if self.poisoned {
+            return Err(WorkerError::Exited("worker is poisoned; restart is required".into()));
+        }
         let Some(stdin) = self.stdin.as_mut() else {
             return Err(WorkerError::Exited("stdin already closed".into()));
         };
@@ -496,6 +562,9 @@ impl FfmpegWorker {
     }
 
     async fn read_exact_into(&mut self, buffer: &mut [u8]) -> Result<(), WorkerError> {
+        if self.poisoned {
+            return Err(WorkerError::Exited("worker is poisoned; restart is required".into()));
+        }
         let len = buffer.len();
         let mut filled = 0;
         while filled < len {
@@ -532,6 +601,9 @@ impl FfmpegWorker {
 
     /// Reads the rest of stdout (bounded) after [`Self::finish_input`].
     pub async fn read_to_end(&mut self, limit: usize) -> Result<Vec<u8>, WorkerError> {
+        if self.poisoned {
+            return Err(WorkerError::Exited("worker is poisoned; restart is required".into()));
+        }
         let mut output = Vec::new();
         let stdout = self.child.stdout.as_mut().ok_or_else(|| WorkerError::Exited("stdout closed".into()))?;
         loop {
@@ -541,7 +613,7 @@ impl FfmpegWorker {
                 Ok(Ok(0)) => break,
                 Ok(Ok(count)) => {
                     if output.len() + count > limit {
-                        return Err(WorkerError::Codec(format!("output exceeds {limit} bytes")));
+                        return Err(self.poison(WorkerError::Codec(format!("output exceeds {limit} bytes"))));
                     }
                     output.extend_from_slice(&chunk[..count]);
                 }
@@ -591,11 +663,14 @@ impl FfmpegWorker {
 
     /// Restarts a dead or poisoned child with the same mode and slot settings.
     pub async fn restart(&mut self) -> Result<(), WorkerError> {
+        self.poisoned = true;
         self.kill();
         if tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await.is_err() {
             let _ = self.child.start_kill();
         }
         self.stdin = None;
+        self.encoded_pending.clear();
+        self.encoded_eof = false;
         if let Ok(mut stderr) = self.last_stderr.lock() {
             stderr.clear();
         }
@@ -869,7 +944,7 @@ fn ffmpeg_args(mode: WorkerMode, slot: SlotConfig) -> Vec<String> {
                         "-tune",
                         "zerolatency",
                         "-x265-params",
-                        "log-level=error:bframes=0:rc-lookahead=0:scenecut=0",
+                        "log-level=error:bframes=0:rc-lookahead=0:scenecut=0:frame-threads=1:pools=1",
                     ]
                     .map(str::to_string),
                 );
@@ -880,13 +955,43 @@ fn ffmpeg_args(mode: WorkerMode, slot: SlotConfig) -> Vec<String> {
     args
 }
 
+/// Extracts one Annex-B NAL unit from `buffer`, keeping the next start code.
+fn take_annexb_nal(buffer: &mut Vec<u8>, eof: bool) -> Option<Vec<u8>> {
+    let Some(start) = find_start_code(buffer, 0) else {
+        if eof {
+            buffer.clear();
+        }
+        return None;
+    };
+    if start > 0 {
+        buffer.drain(..start);
+    }
+    match find_start_code(buffer, 4) {
+        Some(next) => Some(buffer.drain(..next).collect()),
+        None if eof && buffer.len() > 4 => Some(std::mem::take(buffer)),
+        None if eof => {
+            buffer.clear();
+            None
+        }
+        None => None,
+    }
+}
+
+fn find_start_code(buffer: &[u8], from: usize) -> Option<usize> {
+    if buffer.len() < from + 3 {
+        return None;
+    }
+    buffer[from..].windows(3).position(|window| window == [0, 0, 1]).map(|index| index + from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Instant;
 
     fn ffmpeg_available() -> bool {
-        std::process::Command::new("ffmpeg").arg("-version").output().is_ok_and(|out| out.status.success())
+        let binary = std::env::var("VKS_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".into());
+        std::process::Command::new(binary).arg("-version").output().is_ok_and(|out| out.status.success())
     }
 
     fn pcm_sine(frames: usize) -> Vec<i16> {
@@ -1110,6 +1215,142 @@ mod tests {
         let second_pid = worker.pid().expect("pid");
         assert_ne!(first_pid, second_pid, "restart must relaunch the process");
         assert!(worker.is_running());
+    }
+
+    #[tokio::test]
+    async fn h263_encoder_roundtrips_704x576() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let slot = SlotConfig {
+            bitrate_bps: 800_000,
+            width: 704,
+            height: 576,
+            fps: 5,
+            audio_bitrate_bps: 64_000,
+            max_queue: 4,
+        };
+        let mut encoder = FfmpegWorker::spawn(WorkerMode::VideoEncode(VideoCodec::H263), slot, WorkerConfig::default())
+            .await
+            .expect("h263 encoder");
+        encoder.write_video(&vec![32u8; 704 * 576 * 3 / 2]).await.expect("frame");
+        encoder.finish_input().await;
+        let bitstream = encoder.read_to_end(4 * 1024 * 1024).await.expect("bitstream");
+        assert!(!bitstream.is_empty());
+        let mut decoder = FfmpegWorker::spawn(WorkerMode::VideoDecode(VideoCodec::H263), slot, WorkerConfig::default())
+            .await
+            .expect("h263 decoder");
+        decoder.write_encoded(&bitstream).await.expect("bitstream in");
+        decoder.finish_input().await;
+        let pixels = decoder.read_to_end(4 * 1024 * 1024).await.expect("pixels");
+        assert!(pixels.len() >= 704 * 576 * 3 / 2);
+    }
+
+    #[tokio::test]
+    async fn all_wrong_direction_calls_fail_fast() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let video = SlotConfig {
+            bitrate_bps: 200_000,
+            width: 176,
+            height: 144,
+            fps: 10,
+            audio_bitrate_bps: 64_000,
+            max_queue: 4,
+        };
+        let audio = SlotConfig { audio_bitrate_bps: 48_000, ..video };
+        let mut video_encoder =
+            FfmpegWorker::spawn(WorkerMode::VideoEncode(VideoCodec::H261), video, WorkerConfig::default())
+                .await
+                .expect("video encoder");
+        assert!(matches!(video_encoder.read_video().await, Err(WorkerError::InvalidConfig(_))));
+        assert!(matches!(video_encoder.write_encoded(&[0]).await, Err(WorkerError::InvalidConfig(_))));
+        assert!(matches!(video_encoder.write_audio(&[0i16; 960]).await, Err(WorkerError::InvalidConfig(_))));
+        assert!(matches!(video_encoder.read_audio_samples(960).await, Err(WorkerError::InvalidConfig(_))));
+
+        let mut video_decoder =
+            FfmpegWorker::spawn(WorkerMode::VideoDecode(VideoCodec::H261), video, WorkerConfig::default())
+                .await
+                .expect("video decoder");
+        assert!(matches!(video_decoder.write_video(&[0]).await, Err(WorkerError::InvalidConfig(_))));
+        assert!(matches!(video_decoder.read_encoded_audio().await, Err(WorkerError::InvalidConfig(_))));
+
+        let mut audio_encoder =
+            FfmpegWorker::spawn(WorkerMode::AudioEncode(AudioCodec::Aac), audio, WorkerConfig::default())
+                .await
+                .expect("audio encoder");
+        assert!(matches!(audio_encoder.read_video().await, Err(WorkerError::InvalidConfig(_))));
+        assert!(matches!(audio_encoder.read_encoded_video().await, Err(WorkerError::InvalidConfig(_))));
+        assert!(matches!(audio_encoder.write_video(&[0]).await, Err(WorkerError::InvalidConfig(_))));
+
+        let mut audio_decoder =
+            FfmpegWorker::spawn(WorkerMode::AudioDecode(AudioCodec::Aac), audio, WorkerConfig::default())
+                .await
+                .expect("audio decoder");
+        assert!(matches!(audio_decoder.write_video(&[0]).await, Err(WorkerError::InvalidConfig(_))));
+        assert!(matches!(audio_decoder.read_video().await, Err(WorkerError::InvalidConfig(_))));
+        assert!(matches!(audio_decoder.write_audio(&[0i16; 960]).await, Err(WorkerError::InvalidConfig(_))));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn hung_probe_times_out_and_kills_child() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir();
+        let script = dir.join(format!("vks-hang-ffmpeg-{}.sh", std::process::id()));
+        let pidfile = dir.join(format!("vks-hang-ffmpeg-{}.pid", std::process::id()));
+        std::fs::write(&script, format!("#!/bin/sh\necho $$ > {}\nsleep 30\n", pidfile.display())).expect("script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let started = Instant::now();
+        let result = FfmpegCapabilities::probe(&script).await;
+        assert!(matches!(result, Err(WorkerError::Timeout(_))), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(8));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if let Ok(pid) = std::fs::read_to_string(&pidfile) {
+            let pid = pid.trim();
+            let alive =
+                std::process::Command::new("kill").arg("-0").arg(pid).status().is_ok_and(|status| status.success());
+            assert!(!alive, "timed-out probe left ffmpeg pid {pid} alive");
+        }
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&pidfile);
+    }
+
+    #[tokio::test]
+    async fn h265_encoder_emits_annexb_nal_before_eof() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let slot = SlotConfig {
+            bitrate_bps: 400_000,
+            width: 176,
+            height: 144,
+            fps: 5,
+            audio_bitrate_bps: 64_000,
+            max_queue: 4,
+        };
+        let mut encoder = FfmpegWorker::spawn(WorkerMode::VideoEncode(VideoCodec::H265), slot, WorkerConfig::default())
+            .await
+            .expect("h265 encoder");
+        let frame = vec![16u8; 176 * 144 * 3 / 2];
+        encoder.write_video(&frame).await.expect("frame 1");
+        encoder.write_video(&frame).await.expect("frame 2");
+        let nal = tokio::time::timeout(Duration::from_secs(5), encoder.read_encoded_video())
+            .await
+            .expect("nal before EOF")
+            .expect("nal");
+        assert!(nal.len() > 4);
+        assert!(nal.starts_with(&[0, 0, 1]) || nal.starts_with(&[0, 0, 0, 1]), "not Annex-B: {nal:?}");
+        encoder.finish_input().await;
+        let mut rest = 0usize;
+        while let Ok(nal) = encoder.read_encoded_video().await {
+            assert!(nal.starts_with(&[0, 0, 1]) || nal.starts_with(&[0, 0, 0, 1]));
+            rest += 1;
+            if rest > 10_000 {
+                panic!("NAL loop did not terminate");
+            }
+        }
     }
 
     #[tokio::test]
