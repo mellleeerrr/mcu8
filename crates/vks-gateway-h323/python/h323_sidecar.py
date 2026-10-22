@@ -168,10 +168,9 @@ def codec_kind(data_type):
     if kind == "videoData" and codec[0] == "genericVideoCapability":
         ident = codec[1].get("capabilityIdentifier")
         if ident == ("standard", H264_OID):
-            # A baseline-compatible profile must be explicit when supplied.
-            profile = next((v["parameterValue"][1] for v in codec[1].get("collapsing", []) if v["parameterIdentifier"] == ("standard", 41)), 64)
-            if profile & 64:
-                return "video", None
+            # Принимаем любой H.264-профиль пира: наш baseline-encoder
+            # декодируется high/main, а отказ лишал вызов видео.
+            return "video", None
     return None, None
 
 
@@ -516,7 +515,9 @@ class Call:
             # video channel. Do not lose a working audio call to that.
             if self.audio_ready_at is None:
                 self.audio_ready_at = time.monotonic()
-            if time.monotonic() - self.audio_ready_at < 2.5:
+            # TrueConf открывает свою video-OLC с задержкой после нашего
+            # openLogicalChannel; 2.5 с обрывали видео до его прихода.
+            if time.monotonic() - self.audio_ready_at < 8.0:
                 return
             self.requested_video_rejected = True
             emit("video_unavailable", reason="no_incoming_video")

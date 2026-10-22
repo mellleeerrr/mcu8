@@ -949,17 +949,14 @@ impl GatewayManager {
                 // its declared maxBitRate (16 kbit/s is the encoder floor).
                 video_profile.bitrate_kbps = video_profile.bitrate_kbps.min((max_bitrate_100bps / 10).max(16));
             }
-            if let Some(bits) = session.remote_video_h264_profile_bits {
-                if bits & 64 == 0 {
-                    return Err(
-                        "Peer H.264 profile is not baseline-compatible (generic parameter 41 bit 6 is clear)".into()
-                    );
-                }
-            }
+            // Профиль пира — только информация: наш encoder отдаёт baseline,
+            // который декодируется любым H.264-профилем. Не отвергаем high/main.
             if let Some(level_idc) = session.remote_video_h264_level {
-                let level = video::h264_level_name(level_idc)
-                    .ok_or_else(|| format!("Peer advertised unsupported H.264 level_idc {level_idc}"))?;
-                video_profile.level = level.to_string();
+                // Неизвестный/кастомный level у пира не повод рвать вызов:
+                // encoder остаётся на уровне комнаты (не выше 4.0).
+                if let Some(level) = video::h264_level_name(level_idc) {
+                    video_profile.level = level.to_string();
+                }
             }
             let audio_port = session
                 .remote_audio_port
