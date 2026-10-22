@@ -9,7 +9,7 @@ VKS_CHROMIUM=/home/pro/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome 
 node tests/e2e/webrtc.js
 ```
 
-Result: 29/29 checks passed, 0 fatal; commit `3b7f905`, binary SHA-256 `debb60bbbc97…` pinned
+Result: 29/29 checks passed, 0 fatal; commit `34ec386`, binary SHA-256 `3780469ca3ea…` pinned
 in `result.json`, effective server env (`VKS_WEBRTC_TRANSPORT=1`, ports
 43000–43100) recorded there too. Two real Chromium peers through the
 authenticated /ws, real str0m answers, ICE-lite host candidates on
@@ -22,10 +22,10 @@ audio but zero video payload.
 
 Key stats (from `result.json`):
 
-- alice: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 601 pkts,
-  inbound video 471 pkts / 180 frames, 320x240.
-- bob: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 607 pkts,
-  inbound video 329 pkts / 181 frames, 320x240.
+- alice: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 613 pkts,
+  inbound video 473 pkts / 184 frames, 320x240.
+- bob: DTLS connected, `SRTP_AEAD_AES_256_GCM`, inbound audio 624 pkts,
+  inbound video 329 pkts / 186 frames, 320x240.
 - Third browser peer: explicitly rejected with `room_full` (`retryable=true`);
   a same-socket retry reaches `room_full` again, not `bad_state`, and the
   existing peers stay connected.
@@ -39,3 +39,8 @@ Legacy UI/API regression at the same HEAD: `tests/e2e/live.js` 233/233,
 
 Files: `result.json`, `alice-offer.sdp`, `alice-answer.sdp`, `bob-offer.sdp`,
 `bob-answer.sdp`, `metrics.txt`, `server-log-tail.txt.
+
+Mode-eviction coverage (separate pinned run, `TMPDIR=/var/tmp cargo test -p vks-admin evict`):
+`mode-eviction-tests.txt` — 5/5 passed, including per-room/global/settings eviction
+targeting and a regression test proving `Rooms::update` releases `state.rooms`
+before the admission/eviction hook (no ABBA deadlock with gateway announce).

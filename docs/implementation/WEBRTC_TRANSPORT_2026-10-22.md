@@ -99,7 +99,7 @@ signalling по `/ws` (Node `ws` с Bearer; media — в Chromium), реальн
 offer → реальный str0m answer → ICE/DTLS/SRTP → взаимные аудио/видео.
 Итог: **29/29 проверок**, оба пира `connected`,
 `dtlsState=connected`, `srtpCipher=SRTP_AEAD_AES_256_GCM`, входящие
-audio/video `bytesReceived > 0`, `framesDecoded` 180/181,
+audio/video `bytesReceived > 0`, `framesDecoded` 184/186,
 `frameWidth=320`, `frameHeight=240`; третий пир получает `room_full`;
 браузерный WebSocket с `?token=<JWT>` проходит ClientHello; page errors 0.
 В `result.json` пишутся commit, sha256 бинаря, env,

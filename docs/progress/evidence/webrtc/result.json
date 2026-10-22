@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-10-22T19:05:20.195Z",
-  "commit": "3b7f90526ab6d9c917d6413eecd2a4c24cf078b3",
-  "binary_sha256": "debb60bbbc976af52837a65e0c3c3a620fcdd11626524d118944e528d52b145f",
+  "generated_at": "2026-10-22T19:34:32.872Z",
+  "commit": "34ec386dd686ddc8dd588c07ee19360823429244",
+  "binary_sha256": "3780469ca3ea3cf7d8e4aeebfbf3b1a6b2aee6636990b6af8e187f4803ae65b0",
   "env": {
     "process": {
       "VKS_WEBRTC_TRANSPORT": null,
@@ -15,7 +15,7 @@
     }
   },
   "base": "http://127.0.0.1:8080",
-  "room_id": "506ffa3c-b08b-40a1-b673-45f86af52d3d",
+  "room_id": "c9e78024-dd4c-4257-8d8c-2e45408f0e16",
   "checks": [
     {
       "name": "auth: JWT issued",
@@ -25,7 +25,7 @@
     {
       "name": "room: created",
       "ok": true,
-      "detail": "506ffa3c-b08b-40a1-b673-45f86af52d3d"
+      "detail": "c9e78024-dd4c-4257-8d8c-2e45408f0e16"
     },
     {
       "name": "browser /ws: query-token WebSocket handshake",
@@ -35,7 +35,7 @@
     {
       "name": "alice: answer is real str0m SDP",
       "ok": true,
-      "detail": "v=0 | o=str0m-0.24.1 488563533971397831 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS 163101bc-a19c-49bc-8d17-0bed"
+      "detail": "v=0 | o=str0m-0.24.1 2802185224642855325 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS c8970ee7-4b36-4c6d-b2d3-5f2"
     },
     {
       "name": "alice: answer offers Opus+VP8 only",
@@ -45,7 +45,7 @@
     {
       "name": "bob: answer is real str0m SDP",
       "ok": true,
-      "detail": "v=0 | o=str0m-0.24.1 2129898254269418588 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS a2759f30-4a91-4a45-80ca-9f1"
+      "detail": "v=0 | o=str0m-0.24.1 3893057264004667672 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS bbf81f13-a553-44d2-bbec-ce9"
     },
     {
       "name": "bob: answer offers Opus+VP8 only",
@@ -80,12 +80,12 @@
     {
       "name": "audio_only: subscriber receives audio",
       "ok": true,
-      "detail": "{\"kind\":\"audio\",\"bytesReceived\":4203,\"packetsReceived\":130}"
+      "detail": "{\"kind\":\"audio\",\"bytesReceived\":4538,\"packetsReceived\":130}"
     },
     {
       "name": "audio_only: subscriber receives no video payload",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":0,\"packetsReceived\":179,\"framesDecoded\":0}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":0,\"packetsReceived\":176,\"framesDecoded\":0}"
     },
     {
       "name": "alice: connectionState connected",
@@ -95,7 +95,7 @@
     {
       "name": "alice: DTLS connected",
       "ok": true,
-      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":313470,\"bytesSent\":346833}"
+      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":332914,\"bytesSent\":350479}"
     },
     {
       "name": "alice: SRTP cipher negotiated",
@@ -105,17 +105,17 @@
     {
       "name": "alice: inbound audio RTP",
       "ok": true,
-      "detail": "[{\"kind\":\"audio\",\"bytesReceived\":12989,\"packetsReceived\":601},{\"kind\":\"video\",\"bytesReceived\":228882,\"packetsReceived\":471,\"framesDecoded\":180,\"frameWidth\":320,\"frameHeight\":240}]"
+      "detail": "[{\"kind\":\"audio\",\"bytesReceived\":13927,\"packetsReceived\":613},{\"kind\":\"video\",\"bytesReceived\":247044,\"packetsReceived\":473,\"framesDecoded\":184,\"frameWidth\":320,\"frameHeight\":240}]"
     },
     {
       "name": "alice: inbound video RTP",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":228882,\"packetsReceived\":471,\"framesDecoded\":180,\"frameWidth\":320,\"frameHeight\":240}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":247044,\"packetsReceived\":473,\"framesDecoded\":184,\"frameWidth\":320,\"frameHeight\":240}"
     },
     {
       "name": "alice: decoded video frames",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":228882,\"packetsReceived\":471,\"framesDecoded\":180,\"frameWidth\":320,\"frameHeight\":240}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":247044,\"packetsReceived\":473,\"framesDecoded\":184,\"frameWidth\":320,\"frameHeight\":240}"
     },
     {
       "name": "alice: outbound audio+video",
@@ -130,7 +130,7 @@
     {
       "name": "bob: DTLS connected",
       "ok": true,
-      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":306136,\"bytesSent\":305045}"
+      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":314655,\"bytesSent\":313363}"
     },
     {
       "name": "bob: SRTP cipher negotiated",
@@ -140,17 +140,17 @@
     {
       "name": "bob: inbound audio RTP",
       "ok": true,
-      "detail": "[{\"kind\":\"audio\",\"bytesReceived\":11642,\"packetsReceived\":607},{\"kind\":\"video\",\"bytesReceived\":239061,\"packetsReceived\":329,\"framesDecoded\":181,\"frameWidth\":320,\"frameHeight\":240}]"
+      "detail": "[{\"kind\":\"audio\",\"bytesReceived\":12773,\"packetsReceived\":624},{\"kind\":\"video\",\"bytesReceived\":246169,\"packetsReceived\":329,\"framesDecoded\":186,\"frameWidth\":320,\"frameHeight\":240}]"
     },
     {
       "name": "bob: inbound video RTP",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":239061,\"packetsReceived\":329,\"framesDecoded\":181,\"frameWidth\":320,\"frameHeight\":240}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":246169,\"packetsReceived\":329,\"framesDecoded\":186,\"frameWidth\":320,\"frameHeight\":240}"
     },
     {
       "name": "bob: decoded video frames",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":239061,\"packetsReceived\":329,\"framesDecoded\":181,\"frameWidth\":320,\"frameHeight\":240}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":246169,\"packetsReceived\":329,\"framesDecoded\":186,\"frameWidth\":320,\"frameHeight\":240}"
     },
     {
       "name": "bob: outbound audio+video",
