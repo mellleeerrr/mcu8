@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-10-22T17:56:17.656Z",
-  "commit": "30aef22e1f57346079ffe45af9b032cb87d0b62f",
+  "generated_at": "2026-10-22T18:03:01.883Z",
+  "commit": "088e3176555a4b869f1f6070eae4ca5780d91b24",
   "binary_sha256": "fde8ce7425db4a82bcd2fb4fb0cf60f9fd6d14a72459f741a1f43598e349f903",
   "env": {
     "process": {
@@ -15,7 +15,7 @@
     }
   },
   "base": "http://127.0.0.1:8080",
-  "room_id": "229bcd12-d898-4312-a6e2-a30aaf9f5990",
+  "room_id": "3e347c2c-304d-4ed0-95a2-66abc4393015",
   "checks": [
     {
       "name": "auth: JWT issued",
@@ -25,12 +25,17 @@
     {
       "name": "room: created",
       "ok": true,
-      "detail": "229bcd12-d898-4312-a6e2-a30aaf9f5990"
+      "detail": "3e347c2c-304d-4ed0-95a2-66abc4393015"
+    },
+    {
+      "name": "browser /ws: query-token WebSocket handshake",
+      "ok": true,
+      "detail": "79"
     },
     {
       "name": "alice: answer is real str0m SDP",
       "ok": true,
-      "detail": "v=0 | o=str0m-0.24.1 2566966056118801161 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS 645221c5-2ad9-4f92-9e39-237"
+      "detail": "v=0 | o=str0m-0.24.1 3720527646152150713 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS 69632de9-91d3-4516-afa0-56f"
     },
     {
       "name": "alice: answer offers Opus+VP8 only",
@@ -40,7 +45,7 @@
     {
       "name": "bob: answer is real str0m SDP",
       "ok": true,
-      "detail": "v=0 | o=str0m-0.24.1 3541038194055452186 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS 8cddc043-ef02-4b89-b683-095"
+      "detail": "v=0 | o=str0m-0.24.1 2868784804650985839 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 | a=extmap-allow-mixed | a=msid-semantic: WMS 2b578d55-f002-46e3-b4f4-9cb"
     },
     {
       "name": "bob: answer offers Opus+VP8 only",
@@ -75,12 +80,12 @@
     {
       "name": "audio_only: subscriber receives audio",
       "ok": true,
-      "detail": "{\"kind\":\"audio\",\"bytesReceived\":3705,\"packetsReceived\":130}"
+      "detail": "{\"kind\":\"audio\",\"bytesReceived\":4251,\"packetsReceived\":133}"
     },
     {
       "name": "audio_only: subscriber receives no video payload",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":0,\"packetsReceived\":188,\"framesDecoded\":0}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":0,\"packetsReceived\":181,\"framesDecoded\":0}"
     },
     {
       "name": "alice: connectionState connected",
@@ -90,7 +95,7 @@
     {
       "name": "alice: DTLS connected",
       "ok": true,
-      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":329964,\"bytesSent\":359829}"
+      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":354351,\"bytesSent\":392605}"
     },
     {
       "name": "alice: SRTP cipher negotiated",
@@ -100,17 +105,17 @@
     {
       "name": "alice: inbound audio RTP",
       "ok": true,
-      "detail": "[{\"kind\":\"audio\",\"bytesReceived\":14721,\"packetsReceived\":631},{\"kind\":\"video\",\"bytesReceived\":239014,\"packetsReceived\":478,\"framesDecoded\":189,\"frameWidth\":320,\"frameHeight\":240}]"
+      "detail": "[{\"kind\":\"audio\",\"bytesReceived\":14371,\"packetsReceived\":680},{\"kind\":\"video\",\"bytesReceived\":257723,\"packetsReceived\":531,\"framesDecoded\":204,\"frameWidth\":320,\"frameHeight\":240}]"
     },
     {
       "name": "alice: inbound video RTP",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":239014,\"packetsReceived\":478,\"framesDecoded\":189,\"frameWidth\":320,\"frameHeight\":240}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":257723,\"packetsReceived\":531,\"framesDecoded\":204,\"frameWidth\":320,\"frameHeight\":240}"
     },
     {
       "name": "alice: decoded video frames",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":239014,\"packetsReceived\":478,\"framesDecoded\":189,\"frameWidth\":320,\"frameHeight\":240}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":257723,\"packetsReceived\":531,\"framesDecoded\":204,\"frameWidth\":320,\"frameHeight\":240}"
     },
     {
       "name": "alice: outbound audio+video",
@@ -125,7 +130,7 @@
     {
       "name": "bob: DTLS connected",
       "ok": true,
-      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":324226,\"bytesSent\":317441}"
+      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":338536,\"bytesSent\":341202}"
     },
     {
       "name": "bob: SRTP cipher negotiated",
@@ -135,17 +140,17 @@
     {
       "name": "bob: inbound audio RTP",
       "ok": true,
-      "detail": "[{\"kind\":\"audio\",\"bytesReceived\":12973,\"packetsReceived\":637},{\"kind\":\"video\",\"bytesReceived\":254864,\"packetsReceived\":343,\"framesDecoded\":191,\"frameWidth\":320,\"frameHeight\":240}]"
+      "detail": "[{\"kind\":\"audio\",\"bytesReceived\":13641,\"packetsReceived\":688},{\"kind\":\"video\",\"bytesReceived\":264978,\"packetsReceived\":359,\"framesDecoded\":206,\"frameWidth\":320,\"frameHeight\":240}]"
     },
     {
       "name": "bob: inbound video RTP",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":254864,\"packetsReceived\":343,\"framesDecoded\":191,\"frameWidth\":320,\"frameHeight\":240}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":264978,\"packetsReceived\":359,\"framesDecoded\":206,\"frameWidth\":320,\"frameHeight\":240}"
     },
     {
       "name": "bob: decoded video frames",
       "ok": true,
-      "detail": "{\"kind\":\"video\",\"bytesReceived\":254864,\"packetsReceived\":343,\"framesDecoded\":191,\"frameWidth\":320,\"frameHeight\":240}"
+      "detail": "{\"kind\":\"video\",\"bytesReceived\":264978,\"packetsReceived\":359,\"framesDecoded\":206,\"frameWidth\":320,\"frameHeight\":240}"
     },
     {
       "name": "bob: outbound audio+video",
@@ -158,7 +163,7 @@
       "detail": ""
     }
   ],
-  "passed": 28,
+  "passed": 29,
   "failed": 0,
-  "total": 28
+  "total": 29
 }

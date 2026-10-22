@@ -86,11 +86,12 @@
 `tests/e2e/webrtc.js`: два Chromium-пира (fake camera/mic) с реальным
 signalling по `/ws` (Node `ws` с Bearer; media — в Chromium), реальный
 offer → реальный str0m answer → ICE/DTLS/SRTP → взаимные аудио/видео.
-Итог: **24/24 проверок**, оба пира `connected`,
+Итог: **29/29 проверок**, оба пира `connected`,
 `dtlsState=connected`, `srtpCipher=SRTP_AEAD_AES_256_GCM`, входящие
-audio/video `bytesReceived > 0`, `framesDecoded` 113/115,
+audio/video `bytesReceived > 0`, `framesDecoded` 189/191,
 `frameWidth=320`, `frameHeight=240`; третий пир получает `room_full`;
-page errors 0. В `result.json` пишутся commit, sha256 бинаря, env,
+браузерный WebSocket с `?token=<JWT>` проходит ClientHello; page errors 0.
+В `result.json` пишутся commit, sha256 бинаря, env,
 `metrics.txt` и хвост server-лога. Прежний UI/API live-E2E
 (`tests/e2e/live.js`) — **233/233**, но он не проверяет `/ws`/WebRTC и
 служит только регрессией UI/API.

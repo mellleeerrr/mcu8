@@ -320,6 +320,48 @@ async function collectStats(page) {
     });
     const context = await browser.newContext({ permissions: ['camera', 'microphone'] });
 
+    // Browser-reachable signalling entry: native WebSocket with ?token=,
+    // not just Node's ws client. Verifies handshake/ClientHello end to end.
+    {
+      const wsPage = await context.newPage();
+      await wsPage.goto(BASE + '/pnm/authorization', { waitUntil: 'domcontentloaded' });
+      const handshake = await wsPage.evaluate(async ({ jwt, room }) => {
+        const varint = value => {
+          const out = [];
+          while (value >= 0x80) { out.push((value & 0x7f) | 0x80); value = Math.floor(value / 128); }
+          out.push(value);
+          return out;
+        };
+        const bytes = text => Array.from(new TextEncoder().encode(String(text)));
+        const tag = (field, wire) => varint((field << 3) | wire);
+        const hello = [];
+        hello.push(...tag(1, 0), ...varint(1));
+        for (const [field, text] of [[2, 'browser-ws-e2e'], [3, 'e2e/1.0'], [4, 'playwright'], [6, room]]) {
+          const body = bytes(text);
+          hello.push(...tag(field, 2), ...varint(body.length), ...body);
+        }
+        const envelope = [...tag(1, 0), ...varint(1), ...tag(10, 2), ...varint(hello.length), ...hello];
+        const socket = new WebSocket(
+          (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?token=' + encodeURIComponent(jwt),
+        );
+        socket.binaryType = 'arraybuffer';
+        const reply = await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('browser ws handshake timeout')), 8000);
+          socket.onerror = () => { clearTimeout(timer); reject(new Error('browser ws error')); };
+          socket.onopen = () => socket.send(new Uint8Array(envelope).buffer);
+          socket.onmessage = event => {
+            if (event.data instanceof ArrayBuffer && event.data.byteLength > 0) {
+              clearTimeout(timer); resolve(event.data.byteLength);
+            }
+          };
+        });
+        socket.close();
+        return reply;
+      }, { jwt: token, room: roomId });
+      check('browser /ws: query-token WebSocket handshake', handshake > 0, String(handshake));
+      await wsPage.close();
+    }
+
     for (const name of ['alice', 'bob']) {
       const page = await context.newPage();
       page.on('pageerror', error => check(`pageerror ${name}`, false, String(error)));

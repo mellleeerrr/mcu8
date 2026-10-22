@@ -85,7 +85,7 @@ pub fn registry(config: &HandlerConfig) -> Option<Arc<WebRtcRoomRegistry>> {
                     tracing::error!(
                         candidate = %config.candidate_addr,
                         %error,
-                        "WebRTC: candidate_addr is not a valid IP; real transport disabled"
+                        "WebRTC: candidate_addr is not a valid IP; offers will fail closed"
                     );
                     return None;
                 }

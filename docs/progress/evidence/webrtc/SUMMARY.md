@@ -9,12 +9,14 @@ VKS_CHROMIUM=/home/pro/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome 
 node tests/e2e/webrtc.js
 ```
 
-Result: 28/28 checks passed, 0 fatal; commit `30aef22`, binary SHA-256 pinned
+Result: 29/29 checks passed, 0 fatal; commit `30aef22`, binary SHA-256 pinned
 in `result.json`, effective server env (`VKS_WEBRTC_TRANSPORT=1`, ports
 43000–43100) recorded there too. Two real Chromium peers through the
 authenticated /ws, real str0m answers, ICE-lite host candidates on
 192.168.1.93:43000/43001, DTLS-SRTP connected, inbound audio/video RTP and
-decoded video frames on both pages; a third peer is rejected as `room_full`
+decoded video frames on both pages; a native browser WebSocket with
+`/ws?token=<JWT>` completes the ClientHello handshake (not just Node `ws`);
+a third peer is rejected as `room_full`
 (retryable) and can retry on the same socket; an `audio_only` subscriber gets
 audio but zero video payload.
 

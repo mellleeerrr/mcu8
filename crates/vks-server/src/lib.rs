@@ -694,9 +694,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                 let mut replies = handler.handle(env);
 
                                 // Real WebRTC transport: replace the legacy hand-built
-                                // answer before it is sent. Failure keeps the legacy
-                                // answer as a deliberate fallback until the browser E2E
-                                // proves the str0m path on this deployment.
+                                // answer before it is sent. If the transport is enabled
+                                // but rejects the offer, fail closed with Payload::Error;
+                                // only an explicit VKS_WEBRTC_TRANSPORT=0 may use legacy.
                                 real_webrtc_peer = false;
                                 if let (Some(Payload::SdpOffer(ref offer)), Some(ref membership)) =
                                     (&payload_opt, &current_membership)
