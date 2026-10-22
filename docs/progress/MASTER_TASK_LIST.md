@@ -47,6 +47,15 @@ peer H.241 parse/clamp, profile-bits, Python CI) закрыта по коду и
 (1036/0/6 + 114/114 high/low); открыты live H.323 (T07) и call_string live
 proof с реальным терминалом. H.264/H.265 в browser SFU — T06b/T08.
 >
+> **T10a (UI/справочник) закрыт:** `a8c9d66`, ревью **9.5/10 APPROVED**
+> (`directory-db`). Одна SQLite, один configuration-document; `/api/v3/users` = 2 active,
+> `/api/v3/call_strings` = 2 canonical URI без дублей; vendor-алиасы коллекций
+> (11 trailing-slash + users/directory + detail) 200 и идентичны canonical;
+> startup-dedup canonical адресов + переписывание личных ссылок; рестарт сохраняет;
+> 274/0 admin, clippy/fmt чисто. **T10b (SQL-нормализация)** — открыта отдельно:
+> durable unique index `call_strings`, перенос addresses/directory из document,
+> миграция history `contact_id`, drop пустых legacy-таблиц.
+>
 > Правило цикла: перед задачей — агент «подводные камни»; после реализации — параллельное
 > code-review (оценка /10, обязательные правки); цикл не закрывается, пока хотя бы один
 > независимый ревьюер не поставит **≥9.5/10**. Затем — агент «условия задачи/элегантность»

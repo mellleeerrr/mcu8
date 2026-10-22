@@ -415,6 +415,13 @@ RR/SR, TWCC/REMB, pacer; тест через `tc netem loss 10%` (если ес�
 
 ## T10. Единый справочник и БД (P1)
 
+> **T10a (UI/справочник) закрыт 2026-10-22, 9.5/10 APPROVED (`directory-db`), HEAD `a8c9d66`.**
+> Одна SQLite, один configuration-document; UI-справочник показывает active-пользователей
+> и привязанный адрес, дублей canonical URI нет, рестарт сохраняет, vendor-алиасы 200,
+> startup-dedup адресов с переписыванием личных ссылок. **T10b** — SQL-нормализация
+> (`call_strings` + unique index, перенос directory, миграция history `contact_id`,
+> drop пустых legacy-таблиц) остаётся открытой.
+
 **Проблема.** Два контура (SQL `core_*` + JSON-документ), 4 записи call_strings на 3 URI (JSON-коллекция), UI-справочник показывает только 2 пользователей без
 адресов, пустые legacy-таблицы.
 
