@@ -370,6 +370,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_room_mode(proto_room_mode)
     .with_caps(caps);
 
+    // Codec worker probe is non-fatal by default: without it the gateway keeps
+    // the native profile and never advertises codecs it cannot bridge.
+    if let Err(error) = vks_server::transcoder_runtime::init().await {
+        config_exit(format!("transcoder required but unavailable: {error}"));
+    }
+
     if let Err(error) = vks_server::webrtc_runtime::preflight(&handler_config) {
         error!(%error, "WebRTC preflight failed");
         eprintln!("vks-server: WebRTC preflight failed: {error}");

@@ -38,6 +38,7 @@
 //! Tree: vks-core (MediaEngine port), vks-layout (geometry).
 
 pub mod audio_mixer;
+pub mod codec_worker;
 pub mod compositor;
 pub mod engine;
 pub mod frame;
@@ -46,6 +47,10 @@ pub mod vad;
 
 // Re-exports (flat API).
 pub use audio_mixer::{AudioMixer, SAMPLE_RATE_HZ};
+pub use codec_worker::{
+    AudioCodec, FfmpegCapabilities, FfmpegWorker, SlotConfig, VideoCodec, WorkerConfig, WorkerError, WorkerMode,
+    WorkerPool,
+};
 pub use compositor::{Compositor, CANVAS_SIZE};
 pub use engine::McuEngine;
 pub use frame::{CodecError, CompositeFrame, Frame, MockVideoDecoder, MockVideoEncoder, VideoDecoder, VideoEncoder};

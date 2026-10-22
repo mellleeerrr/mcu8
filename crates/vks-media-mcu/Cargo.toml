@@ -20,6 +20,7 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 uuid.workspace = true
+tokio.workspace = true
 vks-core = { path = "../vks-core" }
 vks-layout = { path = "../vks-layout" }
 # async-traits для MediaEngine-порта (vks-core использует async_trait).

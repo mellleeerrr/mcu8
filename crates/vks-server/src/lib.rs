@@ -42,6 +42,7 @@ use vks_signaling::handler::{HandlerConfig, SignalingHandler};
 
 use crate::frontend::{statics_rel_path, Frontend};
 
+pub mod transcoder_runtime;
 pub mod webrtc_runtime;
 
 /// Контекст для WebSocket-сигналинга (состояние приложения + конфигурация сессии + медиа-движки SFU/MCU + UDP-луп + сервисы M5).
