@@ -162,7 +162,7 @@ impl Rooms {
             }
         };
         let new_name = name.clone().unwrap_or(rec.name);
-        let mode_changed = mode.is_some_and(|m| Self::resolve_effective_mode(state, rec.mode) != m);
+        let override_changed = mode.is_some_and(|m| rec.mode != Some(m));
         let effective_mode = Self::resolve_effective_mode(state, mode.or(rec.mode));
         let (current_name, current_created_ms, opt_override) = (new_name, rec.created_ms, mode.or(rec.mode));
 
@@ -171,7 +171,7 @@ impl Rooms {
             cr.id = *id;
             cr.created_ms = current_created_ms;
             storage.upsert_room(&cr).await?;
-            if mode_changed {
+            if override_changed {
                 if let Some(m) = opt_override {
                     storage.set_room_mode_override(*id, m).await?;
                 }

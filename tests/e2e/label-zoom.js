@@ -62,10 +62,16 @@ const REVERT_CHECK = process.env.VKS_REVERT_CHECK === '1';
 const APPLY_CANDIDATE = process.env.VKS_APPLY_CANDIDATE === '1';
 // CSS-кандидат фикса (аватар убран + пересчёт центровки + страховка для плитки
 // с превью кадра MediaPreview 24×24, где аватара в DOM нет вовсе).
+// ВНИМАНИЕ: должен ТОЧНО совпадать с продом (client/pnm-frontend/deployed/pnm/index.html,
+// блок #prostor-pnm-overrides), иначе режим VKS_APPLY_CANDIDATE=1 проверяет не то,
+// что реально раздаётся. Страховка триггерится на НАЛИЧИЕ превью
+// (`:has(> .media-preview)`), а не на «нет аватара»: вариант с :not(:has(...))
+// ложно срабатывает, если аватар убрать из DOM, а не скрыть через display:none
+// (замерено: dy = -14.688px). Расхождение зафиксировано в регресс-аудите.
 const CANDIDATE_CSS = `
 .layout-grid-slot .layout-grid-slot__avatar { display: none; }
 .layout-grid-slot-content:has(.layout-grid-slot-dn) { transform: translateY(-1em); }
-.layout-grid-slot-content:has(.layout-grid-slot-dn):not(:has(.layout-grid-slot__avatar)) { transform: translateY(calc(-1em - 12px - 0.335em)); }
+.layout-grid-slot-content:has(.layout-grid-slot-dn):has(> .media-preview) { transform: translateY(calc(-1em - 12px - 0.335em)); }
 `;
 // Откат фикса для самопроверки харнесса.
 const REVERT_CSS = `
@@ -129,6 +135,15 @@ async function api(token, method, urlPath, body) {
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch { /* not json */ }
   return { status: response.status, json, text };
+}
+
+/** Вертикальный сдвиг из computed transform: 'none' → 0, matrix(a,b,c,d,tx,ty) → ty. */
+function parseTranslateY(transform) {
+  if (!transform || transform === 'none') return 0;
+  const matrix = String(transform).match(/matrix\(([^)]+)\)/);
+  if (!matrix) return 0;
+  const parts = matrix[1].split(',').map(part => parseFloat(part));
+  return Number.isFinite(parts[5]) ? parts[5] : 0;
 }
 
 /** Имя файла скриншота: «5 +» → «05-5-plus». */
@@ -369,6 +384,7 @@ async function simulatePreviewTile(page, position) {
     if (!content || !label) return { simulated: false, reason: 'no content/label in the tile' };
     const avatar = content.querySelector('.layout-grid-slot__avatar');
     const previous = avatar || content.firstElementChild;
+    const normalTransform = getComputedStyle(content).transform;
     const preview = document.createElement('div');
     preview.className = 'media-preview';
     preview.style.width = '24px';
@@ -384,6 +400,11 @@ async function simulatePreviewTile(page, position) {
       dx: +((lr.left + lr.width / 2) - (tr.left + tr.width / 2)).toFixed(3),
       labelVsContentDy: +((lr.top + lr.height / 2) - (cr.top + cr.height / 2)).toFixed(3),
       contentTransform: getComputedStyle(content).transform,
+      // Сдвиг обычной плитки (до подмены аватара на превью) — с ним сравнивается
+      // сдвиг превью-плитки: разница ≈ 12px + .335em доказывает, что страховка
+      // превью реально работает, а не просто присутствует в CSS.
+      normalTransform: normalTransform,
+      slotFontSizePx: parseFloat(getComputedStyle(element).fontSize),
     };
     if (previous) preview.replaceWith(previous); else preview.remove();
     return result;
@@ -603,6 +624,17 @@ const readCounter = element => {
         `top+=${measurement.labelTopVsTileTop.toFixed(1)} bottom+=${measurement.labelBottomVsTileBottom.toFixed(1)}`);
       check(`size ${name}: label does not stick out horizontally`, measurement.labelInsideTileX,
         `left+=${measurement.labelLeftVsTileLeft.toFixed(1)} right+=${measurement.labelRightVsTileRight.toFixed(1)}`);
+      // Подпись по вертикали обрезаться НЕ должна (вендор не даёт там ellipsis),
+      // а по горизонтали обрезка длинного имени — штатное поведение вендора
+      // (nowrap + overflow:hidden + text-overflow:ellipsis): допустима, но только
+      // через ellipsis и без выхода за плитку (это проверяет labelInsideTileX).
+      check(`size ${name}: label does not overflow vertically`, !measurement.overflowY,
+        `scrollHeight=${measurement.scrollHeight} clientHeight=${measurement.clientHeight} `
+        + `(label "${measurement.labelText}")`);
+      check(`size ${name}: horizontal clipping uses the vendor ellipsis`,
+        !measurement.overflowX || measurement.labelTextOverflow === 'ellipsis',
+        `overflowX=${measurement.overflowX} scrollWidth=${measurement.scrollWidth} `
+        + `clientWidth=${measurement.clientWidth} textOverflow=${measurement.labelTextOverflow}`);
       // --- аватар участника в плитке НЕ отображается -----------------------------
       // Принимается любой механизм скрытия: display:none, visibility:hidden,
       // opacity:0, нулевой bbox, обрезка/вынос из плитки, отсутствие в DOM.
@@ -611,6 +643,14 @@ const readCounter = element => {
         measurement.identity.length
           ? measurement.identity.map(item => `${item.cls}[${item.reason || 'VISIBLE'}]`).join('; ')
           : 'no identity element in the tile content (removed from DOM)');
+      // Аватар не просто невидим, а ВНЕ ПОТОКА: его бокс должен иметь нулевую
+      // площадь. Иначе «скрытие» оставляет дыру 2em (visibility:hidden,
+      // opacity:0, скрытие только внутреннего .tc-avatar) и подпись уезжает.
+      check(`size ${name}: tile avatar takes no space in the flow`,
+        !measurement.hasAvatar || (measurement.avatarW === 0 && measurement.avatarH === 0),
+        measurement.hasAvatar
+          ? `avatarBox=${measurement.avatarW}x${measurement.avatarH} (ожидается 0x0)`
+          : 'no avatar element in the tile');
       // Ничто не должно отжимать подпись вниз внутри блока контента: если аватар
       // убран из потока — 0 em; если оставлен (visibility/opacity) — 1.335 em.
       // Проверка применима только к ветке с аватаром: в ветке с превью кадра
@@ -674,6 +714,24 @@ const readCounter = element => {
         ? `dy=${previewSim.dy} dx=${previewSim.dx} labelVsContentDy=${previewSim.labelVsContentDy} `
           + `transform=${previewSim.contentTransform} hadAvatarElement=${previewSim.hadAvatarElement}`
         : `not simulated: ${previewSim.reason}`);
+    // Страховка превью должна быть ЖИВОЙ: сдвиг превью-плитки отличается от
+    // сдвига обычной ровно на 12px + .335em (половина превью 24px + половина
+    // gap .67em). Если разницы нет — правило мертво (например, переименован
+    // класс .media-preview), и превью-плитка поедет на +14.7..+16px.
+    if (previewSim.simulated) {
+      const normalTy = parseTranslateY(previewSim.normalTransform);
+      const previewTy = parseTranslateY(previewSim.contentTransform);
+      const expectedDelta = 12 + 0.335 * previewSim.slotFontSizePx;
+      check('preview tile: the preview guard shifts the preview tile separately',
+        Math.abs(Math.abs(previewTy - normalTy) - expectedDelta) <= 1.0,
+        `normalTransform=${previewSim.normalTransform} (ty=${normalTy}) `
+        + `previewTransform=${previewSim.contentTransform} (ty=${previewTy}) `
+        + `|delta|=${Math.abs(previewTy - normalTy).toFixed(2)}px expected=${expectedDelta.toFixed(2)}px `
+        + `font=${previewSim.slotFontSizePx}px`);
+    } else {
+      check('preview tile: the preview guard shifts the preview tile separately', false,
+        previewSim.reason || 'simulation not possible');
+    }
     if (!previewSim.simulated) {
       check('preview tile: simulation is possible', false, previewSim.reason || 'unknown', 'known-issue');
     }

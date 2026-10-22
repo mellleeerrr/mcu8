@@ -645,9 +645,17 @@ impl AppState {
             if let Ok(Some(settings_json)) = storage.get_settings().await {
                 if let Ok(mut loaded) = serde_json::from_str::<crate::settings::Settings>(&settings_json) {
                     loaded.codecs.migrate_legacy();
-                    let mut current = self.settings.lock().map_err(|e| e.to_string())?;
-                    *current = loaded.clone();
-                    self.mode.lock().map_err(|e| e.to_string())?.global_mode = loaded.default_mode;
+                    let previous_mode = {
+                        let mut current = self.settings.lock().map_err(|e| e.to_string())?;
+                        *current = loaded.clone();
+                        let mut mode = self.mode.lock().map_err(|e| e.to_string())?;
+                        let previous = mode.global_mode;
+                        mode.global_mode = loaded.default_mode;
+                        previous
+                    };
+                    // A reload may change the runtime mode; announce and evict
+                    // real peers exactly like an explicit global-mode switch.
+                    crate::mode::ModeService::announce_global_mode(self, previous_mode, loaded.default_mode);
                 }
             }
 

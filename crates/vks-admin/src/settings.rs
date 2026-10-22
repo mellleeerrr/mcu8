@@ -333,11 +333,13 @@ impl SettingsService {
             }
             Err(error) => {
                 *state.settings.lock().expect("settings store poisoned") = previous;
-                state.mode.lock().expect("mode store poisoned").global_mode = previous_mode;
-                // Offers admitted during the persist window saw the transient
-                // mode; re-evict if the committed mode is MCU again.
-                if mode_changed && previous_mode == RoomMode::Mcu {
-                    crate::mode::ModeService::announce_global_mode(state, next.default_mode, previous_mode);
+                if mode_changed {
+                    state.mode.lock().expect("mode store poisoned").global_mode = previous_mode;
+                    // Offers admitted during the persist window saw the transient
+                    // mode; re-evict if the committed mode is MCU again.
+                    if previous_mode == RoomMode::Mcu {
+                        crate::mode::ModeService::announce_global_mode(state, next.default_mode, previous_mode);
+                    }
                 }
                 Err(error)
             }
