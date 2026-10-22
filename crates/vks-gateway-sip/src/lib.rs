@@ -28,6 +28,7 @@ pub mod g722;
 pub mod g7231;
 pub mod g726;
 pub mod g728;
+pub mod h265;
 pub mod opus;
 pub mod rtp_bridge;
 pub mod sip_message;
