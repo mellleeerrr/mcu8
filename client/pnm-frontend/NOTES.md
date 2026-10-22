@@ -109,3 +109,17 @@ cd client/pnm-frontend/deployed/pnm && sha256sum -c ../../MANIFEST.sha256
 `LICENSE.txt` в рантайме — проприетарная лицензия TrueConf MCU; бренд «TrueConf» и футер «АО «ТКС»»
 присутствуют в UI. Решение о правомерности использования кода в продукте VKS — за командой
 (см. ADR-0027, риск R2 плана `docs/progress/archive/FRONTEND_PORT_PLAN.md`).
+
+## T11b: Chart.js v4 в `index3.bundle` (2026-10-22)
+
+В бандле 2.2.1.66 графики статистики собраны под Chart.js v2 (`yAxes`/`xAxes`,
+`gridLines`, `fontSize`, `legend.labels.fontColor`), а в комплекте Chart.js v4:
+консоль давала `Invalid scale configuration for scale: yAxes/xAxes/responsive`,
+оси и легенда не рисовались. Правка in-place в
+`deployed/pnm/chunks/index3.bundle-2.2.1.66.js`:
+`yAxes/xAxes` → `y/x`, `gridLines` → `grid`, `fontSize` → `font.size`,
+`legend.labels.fontColor` → `plugins.legend.labels.color`; ошибочно вложенные
+`responsive`/`maintainAspectRatio` вынесены из `scales` в корень options.
+Проверено live: `/pnm/administration/statistics` — 0 console errors, 6/6
+виджетов рисуются, оси 0..8% / 150 / Gb корректны. Файл ревалидируется
+(`Cache-Control: no-cache`), поэтому cache-bust не требуется.
