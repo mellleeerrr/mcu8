@@ -448,6 +448,7 @@ impl Sdp {
             media: Vec::new(),
         };
         let bundle_port = profile.host_candidate.port.max(9);
+        let mut answer_maps: Vec<RtpMap> = Vec::new();
         for (i, media) in self.media.iter().enumerate() {
             let direction = match media.direction.as_deref() {
                 Some("sendonly") => "recvonly",
@@ -455,15 +456,41 @@ impl Sdp {
                 Some("inactive") => "inactive",
                 _ => "sendrecv",
             };
-            let port = if media.port == 0 { 0 } else { bundle_port };
+            // Answer is a subset of the offer: only SFU codecs of this media
+            // kind, reusing the offer's payload type for the same codec. A
+            // codec the browser did not offer is never announced (and an
+            // m-line with no common codec is rejected with port 0).
+            let mut selected: Vec<RtpMap> = Vec::new();
+            for map in &profile.rtp_maps {
+                let kind = match map.codec.to_ascii_lowercase().as_str() {
+                    "opus" | "pcmu" | "pcma" | "g722" => MediaKind::Audio,
+                    _ => MediaKind::Video,
+                };
+                if kind != media.kind {
+                    continue;
+                }
+                if let Some(offered) = media.rtp_maps.iter().find(|o| o.codec.eq_ignore_ascii_case(&map.codec)) {
+                    let mut selected_map = map.clone();
+                    selected_map.payload = offered.payload;
+                    if !selected.iter().any(|m| m.payload == selected_map.payload) {
+                        selected.push(selected_map);
+                    }
+                }
+            }
+            let port = if media.port == 0 || selected.is_empty() { 0 } else { bundle_port };
+            for map in &selected {
+                if !answer_maps.iter().any(|m| m.payload == map.payload) {
+                    answer_maps.push(map.clone());
+                }
+            }
             let m = Media {
                 kind: media.kind,
                 port,
-                payload_types: profile.rtp_maps.iter().map(|r| r.payload).collect(),
+                payload_types: selected.iter().map(|r| r.payload).collect(),
                 mid: media.mid.clone().or_else(|| Some(i.to_string())),
                 msid: Some(format!("sfu-out {i}")),
                 ssrcs: vec![format!("ssrc-sfu-{i}")],
-                rtp_maps: profile.rtp_maps.clone(),
+                rtp_maps: selected,
                 ice_ufrag: Some(profile.ufrag.clone()),
                 ice_pwd: Some(profile.pwd.clone()),
                 fingerprint: Some(profile.fingerprint.clone()),
@@ -484,7 +511,7 @@ impl Sdp {
         // BUNDLE group из настоящих mids и объявление RFC 8445 ice-lite.
         let mids: Vec<String> = answer.media.iter().map(|m| m.mid.clone().unwrap_or_else(|| "0".into())).collect();
         answer.session_attrs = vec![format!("group:BUNDLE {}", mids.join(" ")), "ice-lite".to_string()];
-        (answer, profile.rtp_maps.clone())
+        (answer, answer_maps)
     }
 
     /// Добавляет ICE-candidate в каждую m-line (ICE-lite: host-only).
@@ -607,8 +634,8 @@ mod tests {
         assert_eq!(answer.media[0].kind, MediaKind::Audio);
         assert_eq!(answer.media[1].kind, MediaKind::Video);
         // SFU payload types подставлены в обе m-lines (SFU-профиль).
-        assert_eq!(answer.media[0].payload_types, vec![111, 96]);
-        assert_eq!(answer.media[1].payload_types, vec![111, 96]);
+        assert_eq!(answer.media[0].payload_types, vec![111]);
+        assert_eq!(answer.media[1].payload_types, vec![96]);
         // ICE candidates присутствуют.
         assert_eq!(answer.media[0].ice_ufrag.as_deref(), Some("sfuufrag"));
         assert_eq!(answer.media[1].ice_pwd.as_deref(), Some("sfupwd"));
@@ -622,6 +649,23 @@ mod tests {
         assert!(answer.media[0].fmtp.is_empty());
         assert_eq!(answer.media[1].b_as, Some(2048));
         assert!(answer.media[1].fmtp.iter().any(|v| v.starts_with("96 ")));
+    }
+
+    #[test]
+    fn sfu_answer_reuses_offer_payload_types_and_keeps_cross_kind_out() {
+        let mut offer = two_line_offer();
+        offer.media[0].payload_types = vec![120];
+        offer.media[0].rtp_maps[0].payload = 120;
+        offer.media[1].payload_types = vec![100];
+        offer.media[1].rtp_maps[0].payload = 100;
+        let (answer, maps) = offer.sfu_answer(&sfu_profile());
+        assert_eq!(answer.media[0].payload_types, vec![120]);
+        assert_eq!(answer.media[1].payload_types, vec![100]);
+        assert!(answer.media[0].rtp_maps.iter().all(|m| m.codec == "opus"));
+        assert!(answer.media[1].rtp_maps.iter().all(|m| m.codec == "vp8"));
+        assert_eq!(maps.len(), 2);
+        assert!(maps.iter().any(|m| m.payload == 120 && m.codec == "opus"));
+        assert!(maps.iter().any(|m| m.payload == 100 && m.codec == "vp8"));
     }
 
     #[test]
@@ -655,7 +699,7 @@ mod tests {
         assert_eq!(parsed.media.len(), 2);
         assert!(parsed.session_attrs.iter().any(|a| a.starts_with("group:BUNDLE")));
         assert!(parsed.session_attrs.iter().any(|a| a == "ice-lite"));
-        assert_eq!(parsed.media[0].payload_types, vec![111, 96]);
+        assert_eq!(parsed.media[0].payload_types, vec![111]);
     }
 
     #[test]

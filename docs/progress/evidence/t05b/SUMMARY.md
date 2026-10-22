@@ -40,6 +40,17 @@ H.323-часть и per-media `b=AS` реализованы и покрыты un
 failed / 6 ignored**; `clippy -D warnings` и `fmt --check` чисто; Python
 sidecar 22/22 OK.
 
+## T05b-2 (в работе)
+- SFU answer теперь является подмножеством offer: RTP maps фильтруются по
+  kind, payload type переиспользуется из offer, cross-kind maps не попадают
+  в m-line, `SdpAnswer.rtp_map` содержит только выбранные maps; m-line без
+  общего кодека получает port 0. Тест: offer opus 120/vp8 100 → answer
+  120/100, audio без vp8, video без opus. Гейты: **1026 passed / 0 failed /
+  6 ignored**, clippy/fmt чисто.
+- Осталось: per-room профиль из `PATCH` комнаты/контакта в SFU answer,
+  H.264 в SFU (или явный отказ), peer H.241 clamp, packetization/profile
+  в sidecar, call_string live proof, Python CI, live H.323/T07.
+
 ## Ограничения / следующие шаги
 - SFU: нет per-room инъекции (env глобальный), H.264 отсутствует в
   `vks-media-sfu` RTP map; answer не фильтрует RTP maps по kind и не
