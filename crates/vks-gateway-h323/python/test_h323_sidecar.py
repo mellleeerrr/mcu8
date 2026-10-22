@@ -200,8 +200,10 @@ class ContractTests(unittest.TestCase):
         table = {entry['capabilityTableEntryNumber']: entry['capability'] for entry in capabilities['capabilityTable']}
         self.assertEqual(table[1], ('receiveAndTransmitAudioCapability', ('g722-64k', 20)))
         self.assertEqual(table[2], ('receiveAndTransmitAudioCapability', ('g711Ulaw64k', 20)))
-        self.assertEqual(table[3][1], h.video_capability())
-        self.assertEqual(capabilities['capabilityDescriptors'][0]['simultaneousCapabilities'], [[1, 2], [3]])
+        self.assertEqual(table[3], ('receiveAndTransmitAudioCapability', ('g711Alaw64k', 20)))
+        self.assertEqual(table[4][1][0], 'g7231')
+        self.assertEqual(table[5][1], h.video_capability())
+        self.assertEqual(capabilities['capabilityDescriptors'][0]['simultaneousCapabilities'], [[1, 2, 3, 4], [5]])
         packetization = capabilities['multiplexCapability'][1]['mediaPacketizationCapability']
         self.assertEqual(packetization['rtpPayloadType'][0]['payloadDescriptor'], ('oid', h.H264_NON_INTERLEAVED))
         self.assertEqual(h.codec_kind(('videoData', h.video_capability())), ('video', None))
@@ -209,8 +211,123 @@ class ContractTests(unittest.TestCase):
     def test_symmetric_audio_selection_prefers_g722_and_rejects_asymmetry(self):
         self.assertEqual(h.select_audio_codec({'G722', 'G711U'}, {'G722', 'G711U'}), 'G722')
         self.assertEqual(h.select_audio_codec({'G711U'}, {'G711U', 'G722'}), 'G711U')
+        self.assertEqual(h.select_audio_codec({'G723', 'G711U'}, {'G723', 'G711U'}), 'G711U')
+        self.assertEqual(h.select_audio_codec({'G723', 'G711A'}, {'G723', 'G711A'}), 'G711A')
+        self.assertEqual(h.select_audio_codec({'G711A'}, {'G711A'}), 'G711A')
         self.assertIsNone(h.select_audio_codec({'G722'}, {'G711U'}))
         self.assertIsNone(h.select_audio_codec(set(), set()))
+
+    def test_native_audio_data_types_use_static_payloads(self):
+        cases = {
+            'G722': ('g722-64k', 9),
+            'G723': ('g7231', 4),
+            'G711U': ('g711Ulaw64k', 0),
+            'G711A': ('g711Alaw64k', 8),
+        }
+        for codec, (key, pt) in cases.items():
+            data_type = h.audio_data_type(codec)
+            self.assertEqual(data_type[0], 'audioData')
+            self.assertEqual(data_type[1][0], key)
+            self.assertEqual(h.audio_payload_type(codec), pt)
+            self.assertEqual(h.codec_kind(data_type), ('audio', pt))
+
+    def test_peer_g723_with_multi_frame_sdu_is_not_selected(self):
+        call = self.call()
+        call.control = FakeSocket()
+        model = h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage
+
+        def feed(g723_max):
+            caps = call.capability_set()
+            caps['capabilityTable'] = [
+                {'capabilityTableEntryNumber': 1, 'capability': ('receiveAndTransmitAudioCapability', ('g7231', {'maxAl-sduAudioFrames': g723_max, 'silenceSuppression': False}))},
+                {'capabilityTableEntryNumber': 2, 'capability': ('receiveAndTransmitAudioCapability', ('g711Ulaw64k', 20))},
+            ]
+            caps['capabilityDescriptors'][0]['simultaneousCapabilities'] = [[1, 2]]
+            with contextlib.redirect_stdout(io.StringIO()):
+                call.on_control(h.encode(model, ('request', ('terminalCapabilitySet', caps))))
+
+        feed(2)
+        self.assertEqual(call.audio_candidates, ['G711U'])
+        feed(1)
+        self.assertEqual(call.audio_candidates, ['G711U', 'G723'])
+
+    def test_tcs_descriptors_limit_usable_capability_entries(self):
+        call = self.call()
+        call.control = FakeSocket()
+        caps = call.capability_set()
+        caps['capabilityTable'] = [
+            {'capabilityTableEntryNumber': 1, 'capability': ('receiveAndTransmitAudioCapability', ('g722-64k', 20))},
+            {'capabilityTableEntryNumber': 2, 'capability': ('receiveAndTransmitAudioCapability', ('g711Alaw64k', 20))},
+        ]
+        caps['capabilityDescriptors'][0]['simultaneousCapabilities'] = [[1]]
+        with contextlib.redirect_stdout(io.StringIO()):
+            call.on_control(h.encode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, ('request', ('terminalCapabilitySet', caps))))
+        self.assertEqual(call.audio_candidates, ['G722'])
+
+    def test_receive_only_peer_is_explicitly_rejected(self):
+        call = self.call()
+        call.control = FakeSocket()
+        caps = call.capability_set()
+        caps['capabilityTable'] = [
+            {'capabilityTableEntryNumber': 1, 'capability': ('receiveAudioCapability', ('g722-64k', 20))},
+        ]
+        caps['capabilityDescriptors'][0]['simultaneousCapabilities'] = [[1]]
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(h.ProtocolError, 'two-way'):
+            call.on_control(h.encode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, ('request', ('terminalCapabilitySet', caps))))
+
+    def test_peer_selected_incoming_pt_adopts_codec_and_reopens_outgoing(self):
+        call = self.call()
+        call.control = FakeSocket()
+        call.audio_codec = 'G722'
+        call.audio_fallback_channel = 3
+        call.remote_audio = None
+        call.incoming_audio = False
+        params = {
+            'forwardLogicalChannelNumber': 1,
+            'forwardLogicalChannelParameters': {
+                'dataType': ('audioData', ('g711Alaw64k', 20)),
+                'multiplexParameters': ('h2250LogicalChannelParameters', {'sessionID': 1}),
+            },
+        }
+        with contextlib.redirect_stdout(io.StringIO()): call.on_open(params)
+        self.assertEqual(call.audio_codec, 'G711A')
+        self.assertEqual(call.audio_rx_pt, 8)
+        self.assertTrue(call.incoming_audio)
+        opened = h.decode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, call.control.sent[-2][4:])
+        self.assertEqual(opened[1][1]['forwardLogicalChannelNumber'], 3)
+        self.assertEqual(opened[1][1]['forwardLogicalChannelParameters']['dataType'][1][0], 'g711Alaw64k')
+
+    def test_duplicate_incoming_audio_olc_is_rejected(self):
+        call = self.call()
+        call.control = FakeSocket()
+        call.incoming_audio = True
+        params = {
+            'forwardLogicalChannelNumber': 1,
+            'forwardLogicalChannelParameters': {
+                'dataType': ('audioData', ('g722-64k', 20)),
+                'multiplexParameters': ('h2250LogicalChannelParameters', {'sessionID': 1}),
+            },
+        }
+        with contextlib.redirect_stdout(io.StringIO()): call.on_open(params)
+        reject = h.decode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, call.control.sent[-1][4:])
+        self.assertEqual(reject[1][0], 'openLogicalChannelReject')
+
+    def test_audio_fallback_walks_down_the_native_preference_chain(self):
+        call = self.call()
+        call.control = FakeSocket()
+        call.audio_codec = 'G722'
+        call.audio_candidates = ['G722', 'G711U', 'G723']
+        call.remote_audio_rx = {'G722', 'G711U', 'G723'}
+        call.remote_audio_tx = {'G722', 'G711U', 'G723'}
+        call.requested_channels[1] = 'audio'
+        model = h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage
+        for channel, expected in [(1, 'G711U'), (3, 'G723')]:
+            reject = {'forwardLogicalChannelNumber': channel, 'cause': ('dataTypeNotSupported', 0)}
+            with contextlib.redirect_stdout(io.StringIO()):
+                call.on_control(h.encode(model, ('response', ('openLogicalChannelReject', reject))))
+            self.assertEqual(call.audio_codec, expected)
+            opened = h.decode(model, call.control.sent[-1][4:])[1][1]
+            self.assertEqual(opened['forwardLogicalChannelParameters']['dataType'][1][0], h.audio_data_type(expected)[1][0])
 
     def test_g722_outgoing_olc_uses_static_pt9_and_ack_keeps_it_symmetric(self):
         call = self.call()
@@ -246,7 +363,7 @@ class ContractTests(unittest.TestCase):
         request = h.decode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, call.control.sent[-1][4:])
         data_type = request[1][1]['forwardLogicalChannelParameters']['dataType']
         self.assertEqual(data_type, ('audioData', ('g711Ulaw64k', 20)))
-        self.assertTrue(call.audio_fallback_tried)
+        self.assertEqual(call.audio_channel, 3)
 
     def test_fallback_requires_g711_in_both_peer_directions(self):
         for rx, tx, expect_error in [

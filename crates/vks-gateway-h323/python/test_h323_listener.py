@@ -68,9 +68,71 @@ class InboundContractTests(unittest.TestCase):
         table = {entry["capabilityTableEntryNumber"]: entry["capability"] for entry in caps["capabilityTable"]}
         self.assertEqual(table[1], ("receiveAndTransmitAudioCapability", ("g722-64k", 20)))
         self.assertEqual(table[2], ("receiveAndTransmitAudioCapability", ("g711Ulaw64k", 20)))
-        self.assertEqual(caps["capabilityDescriptors"][0]["simultaneousCapabilities"], [[1, 2]])
+        self.assertEqual(table[3], ("receiveAndTransmitAudioCapability", ("g711Alaw64k", 20)))
+        self.assertEqual(table[4][1][0], "g7231")
+        self.assertEqual(caps["capabilityDescriptors"][0]["simultaneousCapabilities"], [[1, 2, 3, 4]])
         self.assertEqual(listener.select_audio_codec({"G722", "G711U"}, {"G722", "G711U"}), "G722")
         self.assertIsNone(listener.select_audio_codec({"G722"}, {"G711U"}))
+
+    def test_incoming_g723_with_multi_frame_sdu_is_rejected(self):
+        call = object.__new__(listener.InboundCall)
+        call.config = {"local_ip": "127.0.0.1", "audio_port": 41002}
+        call.audio_codec = "G723"
+        call.incoming_audio = False
+        call.rejected = []
+        call.reject_open = lambda number, cause: call.rejected.append(number)
+        params = {
+            "forwardLogicalChannelNumber": 7,
+            "forwardLogicalChannelParameters": {
+                "dataType": ("audioData", ("g7231", {"maxAl-sduAudioFrames": 2, "silenceSuppression": False})),
+                "multiplexParameters": ("h2250LogicalChannelParameters", {"sessionID": 1}),
+            },
+        }
+        call.on_open(params)
+        self.assertEqual(call.rejected, [7])
+
+    def test_duplicate_incoming_audio_olc_is_rejected(self):
+        call = object.__new__(listener.InboundCall)
+        call.config = {"local_ip": "127.0.0.1", "audio_port": 41002}
+        call.audio_codec = "G722"
+        call.incoming_audio = True
+        call.rejected = []
+        call.reject_open = lambda number, cause: call.rejected.append(number)
+        params = {
+            "forwardLogicalChannelNumber": 1,
+            "forwardLogicalChannelParameters": {
+                "dataType": ("audioData", ("g722-64k", 20)),
+                "multiplexParameters": ("h2250LogicalChannelParameters", {"sessionID": 1}),
+            },
+        }
+        call.on_open(params)
+        self.assertEqual(call.rejected, [1])
+
+    def test_audio_reject_opens_next_candidate_on_channel_three(self):
+        call = object.__new__(listener.InboundCall)
+        call.wire = lambda *args, **kwargs: None
+        call.request_window = 0.0
+        call.received_requests = 0
+        call.requested_channels = {1: "audio"}
+        call.audio_channel = 1
+        call.requested_audio_codec = {1: "G722"}
+        call.remote_audio = None
+        call.incoming_audio = False
+        call.audio_candidates = ["G722", "G711U"]
+        call.remote_audio_rx = {"G722", "G711U"}
+        call.remote_audio_tx = {"G722", "G711U"}
+        call.audio_fallback_channel = 3
+        call.audio_codec = "G722"
+        call.config = {"audio_port": 41002}
+        call.opened = []
+        call.open_outgoing = lambda number, kind, port: call.opened.append((number, kind))
+        packet = listener.encode(
+            listener.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage,
+            ("response", ("openLogicalChannelReject", {"forwardLogicalChannelNumber": 1, "cause": ("dataTypeNotSupported", 0)})),
+        )
+        call.on_control(packet)
+        self.assertEqual(call.opened, [(3, "audio")])
+        self.assertEqual(call.audio_codec, "G711U")
 
     def test_incoming_g722_olc_is_acked_with_pt9_and_local_ports(self):
         call = object.__new__(listener.InboundCall)

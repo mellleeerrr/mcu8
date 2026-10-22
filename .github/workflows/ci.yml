@@ -58,7 +58,7 @@ jobs:
         run: python -m pip install --require-hashes -r crates/vks-gateway-h323/python/requirements.lock
       - name: Unit tests (ASN.1 / Q.931 / H.245 contracts)
         working-directory: crates/vks-gateway-h323/python
-        run: python -m unittest -v test_h323_sidecar
+        run: python -m unittest -v test_h323_sidecar test_h323_listener
 
   deny:
     name: cargo-deny

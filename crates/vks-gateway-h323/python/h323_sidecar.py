@@ -20,6 +20,17 @@ import time
 import uuid
 from dataclasses import dataclass
 
+from h323_audio import (
+    AUDIO_CODECS,
+    audio_capability_entries,
+    audio_codec_for_payload,
+    audio_data_type,
+    audio_payload_type,
+    peer_transmits_g723,
+    select_audio_candidates,
+    select_audio_codec,
+)
+
 MAX_FRAME = 65535
 MAX_COMMAND = 4096
 H264_OID = (0, 0, 8, 241, 0, 0, 1)
@@ -159,19 +170,6 @@ def h241_video_parameters(capability):
     return result
 
 
-AUDIO_CODECS = {"g722-64k": ("G722", 9), "g711Ulaw64k": ("G711U", 0)}
-
-
-def select_audio_codec(peer_rx, peer_tx):
-    """One symmetric codec only: G.722 when both directions support it."""
-    usable = set(peer_rx) & set(peer_tx)
-    if "G722" in usable:
-        return "G722"
-    if "G711U" in usable:
-        return "G711U"
-    return None
-
-
 def codec_kind(data_type):
     kind, codec = data_type
     if kind == "audioData" and codec[0] in AUDIO_CODECS:
@@ -255,9 +253,12 @@ class Call:
         self.audio_tx_pt = 0
         self.audio_rx_pt = 0
         self.audio_codec = "G711U"
+        self.audio_candidates = []
         self.remote_audio_rx = set()
         self.remote_audio_tx = set()
-        self.audio_fallback_tried = False
+        self.audio_fallback_channel = 3
+        self.audio_channel = None
+        self.requested_audio_codec = {}
         self.video_tx_pt = None
         self.video_rx_pt = None
         self.incoming_audio = False
@@ -317,13 +318,14 @@ class Call:
 
     def capability_set(self):
         entries = [
-            {"capabilityTableEntryNumber": 1, "capability": ("receiveAndTransmitAudioCapability", ("g722-64k", 20))},
-            {"capabilityTableEntryNumber": 2, "capability": ("receiveAndTransmitAudioCapability", ("g711Ulaw64k", 20))},
+            {"capabilityTableEntryNumber": number, "capability": capability}
+            for number, capability in audio_capability_entries()
         ]
-        simultaneous = [[1, 2]]
+        simultaneous = [list(range(1, len(entries) + 1))]
         if self.config.video_port is not None:
-            entries.append({"capabilityTableEntryNumber": 3, "capability": ("receiveAndTransmitVideoCapability", video_capability(self.config))})
-            simultaneous.append([3])
+            video_number = len(entries) + 1
+            entries.append({"capabilityTableEntryNumber": video_number, "capability": ("receiveAndTransmitVideoCapability", video_capability(self.config))})
+            simultaneous.append([video_number])
         distribution = {"centralizedControl": False, "distributedControl": False, "centralizedAudio": False, "distributedAudio": False, "centralizedVideo": False, "distributedVideo": False}
         multipoint = {"multicastCapability": False, "multiUniCastConference": False, "mediaDistributionCapability": [distribution]}
         packetization = {"h261aVideoPacketization": False}
@@ -382,7 +384,7 @@ class Call:
 
     def open_outgoing(self, number, kind, local_port):
         if kind == "audio":
-            data_type = ("audioData", (("g722-64k" if self.audio_codec == "G722" else "g711Ulaw64k"), 20))
+            data_type = audio_data_type(self.audio_codec)
         else:
             data_type = ("videoData", video_capability(self.config))
         params = {"sessionID": 1 if kind == "audio" else 2, "mediaControlChannel": h245_address(self.config.local_ip, local_port + 1)}
@@ -392,6 +394,9 @@ class Call:
             params["dynamicRTPPayloadType"] = 96
             params["mediaPacketization"] = ("rtpPayloadType", {"payloadDescriptor": ("oid", H264_NON_INTERLEAVED), "payloadType": 96})
         self.requested_channels[number] = kind
+        if kind == "audio":
+            self.audio_channel = number
+            self.requested_audio_codec[number] = self.audio_codec
         self.send_control(("request", ("openLogicalChannel", {"forwardLogicalChannelNumber": number, "forwardLogicalChannelParameters": {"dataType": data_type, "multiplexParameters": ("h2250LogicalChannelParameters", params)}})))
 
     def reject_open(self, number, cause, kind):
@@ -412,7 +417,7 @@ class Call:
             or not mux
             or mux[0] != "h2250LogicalChannelParameters"
             or (kind == "video" and self.config.video_port is None)
-            or (kind == "audio" and pt != (9 if self.audio_codec == "G722" else 0))
+            or (kind == "audio" and audio_codec_for_payload(pt) is None)
         ):
             self.reject_open(number, "dataTypeNotSupported", kind)
             return
@@ -438,9 +443,26 @@ class Call:
             self.video_rx_pt = pt
             self.incoming_video = True
         else:
-            if media.get("dynamicRTPPayloadType") is not None:
+            if self.incoming_audio or media.get("dynamicRTPPayloadType") is not None:
                 self.reject_open(number, "dataTypeNotSupported", kind)
                 return
+            if fw["dataType"][1][0] == "g7231" and (
+                not peer_transmits_g723(fw["dataType"][1]) or fw["dataType"][1][1].get("silenceSuppression") is not False
+            ):
+                self.reject_open(number, "dataTypeNotSupported", kind)
+                return
+            incoming_codec = audio_codec_for_payload(pt)
+            if incoming_codec is None or (incoming_codec != self.audio_codec and self.remote_audio is not None):
+                self.reject_open(number, "dataTypeNotSupported", kind)
+                return
+            if incoming_codec != self.audio_codec:
+                # The peer picked another common codec for its TX; adopt it and
+                # replace the still-pending outgoing OLC so both directions use
+                # one codec (the bridge is single-codec).
+                self.audio_codec = incoming_codec
+                self.audio_candidates = [incoming_codec]
+                self.open_outgoing(self.audio_fallback_channel, "audio", self.config.audio_port)
+                self.audio_fallback_channel += 1
             self.audio_rx_pt = pt
             self.incoming_audio = True
         self.send_control(("response", ("openLogicalChannelAck", {"forwardLogicalChannelNumber": number, "forwardMultiplexAckParameters": ("h2250LogicalChannelAckParameters", ack)})))
@@ -471,10 +493,12 @@ class Call:
                 return
             remote = (self.config.target_ip, port)
         if kind == "audio":
+            if (self.audio_channel is not None and number != self.audio_channel) or self.remote_audio is not None:
+                return
             if value.get("dynamicRTPPayloadType") is not None:
                 raise ProtocolError("Peer acknowledged a dynamic audio PT for a static OLC")
             self.remote_audio = remote
-            self.audio_tx_pt = 9 if self.audio_codec == "G722" else 0
+            self.audio_tx_pt = audio_payload_type(self.requested_audio_codec.get(number, self.audio_codec))
         else:
             pt = value.get("dynamicRTPPayloadType", 96)
             if not 96 <= pt <= 127:
@@ -494,6 +518,11 @@ class Call:
             raise ProtocolError("Excessive H.245 message rate")
         if category == "request":
             if name == "terminalCapabilitySet":
+                if self.channels_opened:
+                    # A revised TCS after OLC setup cannot change the already
+                    # ACKed single-codec bridge; acknowledge and keep state.
+                    self.send_control(("response", ("terminalCapabilitySetAck", {"sequenceNumber": params["sequenceNumber"]})))
+                    return
                 capabilities = [entry.get("capability") for entry in params.get("capabilityTable", [])]
                 self.remote_h264 = any(cap and cap[0] in ("receiveVideoCapability", "receiveAndTransmitVideoCapability") and codec_kind(("videoData", cap[1]))[0] == "video" for cap in capabilities)
                 for cap in capabilities:
@@ -504,7 +533,13 @@ class Call:
                             break
                 self.remote_audio_rx = set()
                 self.remote_audio_tx = set()
+                referenced = set()
+                for descriptor in params.get("capabilityDescriptors", []):
+                    for alternative in descriptor.get("simultaneousCapabilities", []):
+                        referenced.update(alternative)
                 for entry in params.get("capabilityTable", []):
+                    if referenced and entry.get("capabilityTableEntryNumber") not in referenced:
+                        continue
                     capability = entry.get("capability")
                     if not capability or capability[0] not in ("receiveAudioCapability", "transmitAudioCapability", "receiveAndTransmitAudioCapability"):
                         continue
@@ -515,11 +550,14 @@ class Call:
                     if capability[0] in ("receiveAudioCapability", "receiveAndTransmitAudioCapability"):
                         self.remote_audio_rx.add(codec)
                     if capability[0] in ("transmitAudioCapability", "receiveAndTransmitAudioCapability"):
+                        if codec == "G723" and not peer_transmits_g723(payload):
+                            continue
                         self.remote_audio_tx.add(codec)
-                selected = select_audio_codec(self.remote_audio_rx, self.remote_audio_tx)
-                if selected is None:
-                    raise ProtocolError("No common symmetric H.323 audio codec")
-                self.audio_codec = selected
+                candidates = select_audio_candidates(self.remote_audio_rx, self.remote_audio_tx)
+                if not candidates:
+                    raise ProtocolError("No common symmetric H.323 audio codec (two-way audio is required)")
+                self.audio_candidates = candidates
+                self.audio_codec = candidates[0]
                 self.remote_tcs_seen = True
                 self.remote_video_known = True
                 self.send_control(("response", ("terminalCapabilitySetAck", {"sequenceNumber": params["sequenceNumber"]})))
@@ -555,15 +593,27 @@ class Call:
             elif name == "openLogicalChannelAck":
                 self.on_ack(params)
             elif name == "openLogicalChannelReject":
-                kind = self.requested_channels.get(params["forwardLogicalChannelNumber"])
+                number = params["forwardLogicalChannelNumber"]
+                kind = self.requested_channels.get(number)
                 if kind == "audio":
-                    if self.audio_codec == "G722" and not self.audio_fallback_tried and not self.incoming_audio:
-                        self.audio_fallback_tried = True
-                        self.audio_codec = "G711U"
-                        if "G711U" not in (self.remote_audio_rx & self.remote_audio_tx):
-                            raise ProtocolError("Peer rejected G.722 audio and cannot receive G.711")
-                        self.open_outgoing(3, "audio", self.config.audio_port)
+                    cause = params.get("cause", (None, 0))[0]
+                    if cause not in ("dataTypeNotSupported", "inconsistentParameters"):
+                        raise ProtocolError(f"Peer rejected the audio channel with terminal cause {cause}")
+                    if (self.audio_channel is not None and number != self.audio_channel) or self.remote_audio is not None:
                         return
+                    self.requested_channels.pop(number, None)
+                    if not self.incoming_audio:
+                        candidates = self.audio_candidates or select_audio_candidates(self.remote_audio_rx, self.remote_audio_tx)
+                        rejected = self.requested_audio_codec.pop(number, self.audio_codec)
+                        try:
+                            next_index = candidates.index(rejected) + 1
+                        except ValueError:
+                            next_index = len(candidates)
+                        if next_index < len(candidates):
+                            self.audio_codec = candidates[next_index]
+                            self.open_outgoing(self.audio_fallback_channel, "audio", self.config.audio_port)
+                            self.audio_fallback_channel += 1
+                            return
                     raise ProtocolError("Peer rejected the negotiated audio channel")
                 if kind != "video":
                     return

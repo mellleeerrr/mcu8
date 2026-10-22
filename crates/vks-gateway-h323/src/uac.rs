@@ -136,9 +136,11 @@ impl ConnectedMedia {
         if self.remote_ip.parse::<Ipv4Addr>().ok().as_ref() != Some(target.ip()) || self.remote_audio_port == 0 {
             return Err("sidecar returned an invalid audio endpoint".into());
         }
-        // The single-codec H.323 bridge supports symmetric static PT0 (G.711U)
-        // and PT9 (G.722); asymmetric PTs would desynchronise the RTP bridge.
-        let symmetric = matches!((self.remote_audio_payload_type, self.local_audio_payload_type), (0, 0) | (9, 9));
+        // The single-codec H.323 bridge supports symmetric static G.711U (0),
+        // G.723.1 (4), G.711A (8) and G.722 (9); asymmetric PTs would
+        // desynchronise the RTP bridge. G.728 is SIP-only for now.
+        let (remote_pt, local_pt) = (self.remote_audio_payload_type, self.local_audio_payload_type);
+        let symmetric = remote_pt == local_pt && crate::H323_NATIVE_AUDIO_PTS.contains(&remote_pt);
         if !symmetric {
             return Err("sidecar negotiated an asymmetric or unsupported audio codec".into());
         }
@@ -665,8 +667,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn symmetric_g723_and_pcma_are_accepted() {
+        for pt in [4u8, 8] {
+            let event = format!(
+                "import json,sys\nc=json.loads(sys.stdin.readline())\ne=dict(event='connected',call_id=c['call_id'],call_ref=c['call_ref'],remote_ip=c['target_ip'],remote_audio_port=3230,remote_audio_payload_type={pt},local_audio_payload_type={pt},remote_video_ip=None,remote_video_port=None,remote_video_payload_type=None,local_video_payload_type=None)\nprint(json.dumps(e),flush=True)\n"
+            );
+            let session = H323UacClient::new("127.0.0.1")
+                .dial_command(
+                    "h323:127.0.0.1",
+                    41000,
+                    None,
+                    Duration::from_secs(2),
+                    H323VideoProfile::default(),
+                    python(&event),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("symmetric PT{pt} must be accepted: {error}"));
+            assert_eq!(session.remote_audio_payload_type, pt);
+            let _ = session.hangup().await;
+        }
+    }
+
+    #[tokio::test]
     async fn asymmetric_or_foreign_audio_pt_is_rejected() {
-        for (tx, rx) in [(9u8, 0u8), (0, 9), (8, 8)] {
+        for (tx, rx) in [(9u8, 0u8), (0, 9), (16, 16), (8, 0), (15, 15)] {
             let event = format!(
                 "import json,sys\nc=json.loads(sys.stdin.readline())\ne=dict(event='connected',call_id=c['call_id'],call_ref=c['call_ref'],remote_ip=c['target_ip'],remote_audio_port=3230,remote_audio_payload_type={tx},local_audio_payload_type={rx},remote_video_ip=None,remote_video_port=None,remote_video_payload_type=None,local_video_payload_type=None)\nprint(json.dumps(e),flush=True)\n"
             );

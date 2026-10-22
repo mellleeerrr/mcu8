@@ -59,6 +59,7 @@ sudo install -d -m 0755 /opt/vks/share/vks-mcu
 sudo install -d -m 0750 /etc/vks
 sudo install -m 0644 crates/vks-gateway-h323/python/h323_sidecar.py \
   crates/vks-gateway-h323/python/h323_listener.py \
+  crates/vks-gateway-h323/python/h323_audio.py \
   crates/vks-gateway-h323/python/h323_asn.py /opt/vks/share/vks-mcu/
 sudo install -m 0644 crates/vks-gateway-h323/python/requirements.lock /opt/vks/share/vks-mcu/
 sudo install -m 0755 target/release/vks-server /opt/vks/bin/vks-server

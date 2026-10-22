@@ -27,8 +27,9 @@ python3 crates/vks-gateway-h323/python/install_runtime.py
 `VKS_H323_PYTHON` overrides the Python executable. By default the UAC checks
 `$HOME/.local/share/vks-mcu/h323-venv/bin/python3`, then uses `python3`.
 `VKS_H323_HELPER` overrides the helper path. Source-tree builds use
-`<crate>/python/h323_sidecar.py`; a binary deployment must include that helper and
-`h323_asn.py` and point the environment variable to the installed helper.
+`<crate>/python/h323_sidecar.py`; a binary deployment must include that helper,
+`h323_listener.py`, `h323_audio.py` and `h323_asn.py`, and point the environment
+variable to the installed helper.
 See [codec provenance](python/PROVENANCE.md) for separate dependency licensing,
 input schemas, regeneration and protocol references.
 

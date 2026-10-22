@@ -25,6 +25,9 @@
 //!
 //! Dependency tree: vks-core, vks-common (ARCHITECTURE §3).
 
+/// Symmetric static RTP payload types the H.323 single-codec bridge supports.
+pub const H323_NATIVE_AUDIO_PTS: &[u8] = &[0, 4, 8, 9];
+
 pub mod call;
 pub mod codec;
 pub mod ffi;
