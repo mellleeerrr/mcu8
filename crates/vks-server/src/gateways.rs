@@ -3060,7 +3060,7 @@ async fn serve_h323_uas_session(
                     "audio_rx_payload_type": audio_payload_type,
                     "audio_tx_payload_type": audio_payload_type,
                     "audio_clock_rate": 8000,
-                    "audio_sample_rate": if audio_payload_type == 9 { 16000 } else { 8000 },
+                    "audio_sample_rate": audio_sample_rate(audio_payload_type),
                     "video_codec": if has_video { Some("H264") } else { None },
                     "video_payload_type": video_remote.map(|(_, _, tx, _)| tx),
                     "video_tx_payload_type": video_remote.map(|(_, _, tx, _)| tx),

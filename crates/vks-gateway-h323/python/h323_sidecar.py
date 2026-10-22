@@ -25,10 +25,11 @@ from h323_audio import (
     audio_capability_entries,
     audio_codec_for_payload,
     audio_data_type,
+    audio_capabilities_from_tcs,
+    can_adopt_audio_codec,
     audio_payload_type,
+    next_audio_candidate,
     peer_transmits_g723,
-    select_audio_candidates,
-    select_audio_codec,
 )
 
 MAX_FRAME = 65535
@@ -254,8 +255,6 @@ class Call:
         self.audio_rx_pt = 0
         self.audio_codec = "G711U"
         self.audio_candidates = []
-        self.remote_audio_rx = set()
-        self.remote_audio_tx = set()
         self.audio_fallback_channel = 3
         self.audio_channel = None
         self.requested_audio_codec = {}
@@ -265,14 +264,12 @@ class Call:
         self.incoming_video = False
         self.remote_h264 = False
         self.remote_h241 = {}
-        self.remote_video_known = False
         self.requested_channels = {}
         self.requested_video_rejected = False
         self.audio_ready_at = None
         self.received_requests = 0
         self.request_window = time.monotonic()
         self.remote_tcs_seen = False
-        self.last_rtt = time.monotonic()
 
     def wire(self, direction, protocol, data, **fields):
         if self.config.trace:
@@ -417,7 +414,6 @@ class Call:
             or not mux
             or mux[0] != "h2250LogicalChannelParameters"
             or (kind == "video" and self.config.video_port is None)
-            or (kind == "audio" and audio_codec_for_payload(pt) is None)
         ):
             self.reject_open(number, "dataTypeNotSupported", kind)
             return
@@ -454,7 +450,7 @@ class Call:
                 self.reject_open(number, "dataTypeNotSupported", kind)
                 return
             incoming_codec = audio_codec_for_payload(pt)
-            if incoming_codec is None or (incoming_codec != self.audio_codec and self.remote_audio is not None):
+            if not can_adopt_audio_codec(incoming_codec, self.audio_candidates, self.audio_codec, self.remote_audio is not None):
                 self.reject_open(number, "dataTypeNotSupported", kind)
                 return
             if incoming_codec != self.audio_codec:
@@ -533,35 +529,12 @@ class Call:
                         if parameters:
                             self.remote_h241 = parameters
                             break
-                self.remote_audio_rx = set()
-                self.remote_audio_tx = set()
-                referenced = set()
-                for descriptor in params.get("capabilityDescriptors", []):
-                    for alternative in descriptor.get("simultaneousCapabilities", []):
-                        referenced.update(alternative)
-                for entry in params.get("capabilityTable", []):
-                    if referenced and entry.get("capabilityTableEntryNumber") not in referenced:
-                        continue
-                    capability = entry.get("capability")
-                    if not capability or capability[0] not in ("receiveAudioCapability", "transmitAudioCapability", "receiveAndTransmitAudioCapability"):
-                        continue
-                    payload = capability[1]
-                    if not isinstance(payload, tuple) or not payload or payload[0] not in AUDIO_CODECS:
-                        continue
-                    codec = AUDIO_CODECS[payload[0]][0]
-                    if capability[0] in ("receiveAudioCapability", "receiveAndTransmitAudioCapability"):
-                        self.remote_audio_rx.add(codec)
-                    if capability[0] in ("transmitAudioCapability", "receiveAndTransmitAudioCapability"):
-                        if codec == "G723" and not peer_transmits_g723(payload):
-                            continue
-                        self.remote_audio_tx.add(codec)
-                candidates = select_audio_candidates(self.remote_audio_rx, self.remote_audio_tx)
+                candidates = audio_capabilities_from_tcs(params)
                 if not candidates:
                     raise ProtocolError("No common symmetric H.323 audio codec (two-way audio is required)")
                 self.audio_candidates = candidates
                 self.audio_codec = candidates[0]
                 self.remote_tcs_seen = True
-                self.remote_video_known = True
                 self.send_control(("response", ("terminalCapabilitySetAck", {"sequenceNumber": params["sequenceNumber"]})))
                 emit("capabilities", h264=self.remote_h264, entries=len(capabilities), **self.remote_h241)
             elif name == "masterSlaveDetermination":
@@ -605,14 +578,10 @@ class Call:
                         raise ProtocolError(f"Peer rejected the audio channel with terminal cause {cause}")
                     self.requested_channels.pop(number, None)
                     if not self.incoming_audio:
-                        candidates = self.audio_candidates or select_audio_candidates(self.remote_audio_rx, self.remote_audio_tx)
                         rejected = self.requested_audio_codec.pop(number, self.audio_codec)
-                        try:
-                            next_index = candidates.index(rejected) + 1
-                        except ValueError:
-                            next_index = len(candidates)
-                        if next_index < len(candidates):
-                            self.audio_codec = candidates[next_index]
+                        next_codec = next_audio_candidate(self.audio_candidates, rejected)
+                        if next_codec is not None:
+                            self.audio_codec = next_codec
                             self.open_outgoing(self.audio_fallback_channel, "audio", self.config.audio_port)
                             self.audio_fallback_channel += 1
                             return

@@ -21,9 +21,11 @@ outbound sidecar и inbound listener. G.728 в H.323 **не включён**: н
   аудиослот-альтернатива + видео). Без видео — `[[1,2,3,4]]`.
 - Выбор: пересечение peer rx/tx, первый кандидат в порядке предпочтения.
   OLC использует static PT (9/0/8/4) и не выставляет
-  `dynamicRTPPayloadType`; входящий OLC принимается только для выбранного
-  PT; ACK даёт `audio_tx_pt` выбранного кодека; connected отдаёт
-  симметричные remote/local PT.
+  `dynamicRTPPayloadType`; входящий OLC принимается для любого native PT:
+  если peer выбрал другой кодек из `audio_candidates` до ACK нашего
+  канала, кодек adopt-ится и outgoing OLC переоткрывается на канале 3+,
+  иначе OLC отклоняется и выбранный кодек сохраняется; ACK даёт `audio_tx_pt` кодека этого канала;
+  connected отдаёт симметричные remote/local PT.
 - Отказ OLC: перебор оставшихся кандидатов на каналах 3,4,… пока не открыт
   входящий аудиоканал; при исчерпании — terminal failure. Учитывается только
   reject текущего `audio_channel`, PT берётся из `requested_audio_codec`
@@ -48,7 +50,7 @@ outbound sidecar и inbound listener. G.728 в H.323 **не включён**: н
   -- -D warnings` — OK.
 - `cargo test --workspace --lib` — 16/16 бинарей green, 0 failed
   (server 83+3, H.323 51, SIP 90+1, admin 281 и т.д.).
-- H.323 Python — **52 tests OK**; новые: capability-записи и simultaneous,
+- H.323 Python — **54 tests OK**; новые: capability-записи и simultaneous,
   data type/PT для G722/G723/G711U/G711A, предпочтение G711/G711A,
   многошаговый fallback G722→G711U→G723 (sidecar и listener), peer G723
   maxAl=2 не выбирается/отклоняется, повторный входящий audio OLC
@@ -57,7 +59,8 @@ outbound sidecar и inbound listener. G.728 в H.323 **не включён**: н
   one-way TCS даёт явную ошибку «two-way audio is required», stale reject
   старого канала игнорируется, TCS после открытия каналов только ACK-ается,
   mux-level silenceSuppression=True для G.723 отклоняется, listener
-  peer-selected adoption покрыт тестом, UAC accept PT4/8.
+  peer-selected adoption покрыт тестом, native PT вне candidates
+  отклоняется, UAC accept PT4/8.
 - deploy/README, crate README и PROVENANCE включают `h323_audio.py`;
   CI запускает `test_h323_sidecar test_h323_listener`.
 - SIP-путь не затронут: allowlist payload types разделён по протоколу

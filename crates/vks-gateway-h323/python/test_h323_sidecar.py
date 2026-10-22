@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import h323_sidecar as h
+import h323_audio as audio
 
 ALERTING = bytes.fromhex('0802b157017e0067052380060008914a000522c0b500233127506f6c79636f6d205265616c50726573656e6365204465736b746f7020666f722057696e646f77730a332e352e302e353935383201b0d8001100000102030405060708090a0b0c0d0e0f010001800100014010800100')
 CONNECT = bytes.fromhex('0802b15707280770726f73746f727e007e0522c0060008914a000500c0a801840cad22c0b500233127506f6c79636f6d205265616c50726573656e6365204465736b746f7020666f722057696e646f77730a332e352e302e353935383200000102030405060708090a0b0c0d0e0f1d0cc01100000102030405060708090a0b0c0d0e0f010001800100014010800100')
@@ -67,6 +68,7 @@ class ContractTests(unittest.TestCase):
     def test_real_polycom_incoming_olc_ack_uses_our_audio_pair(self):
         call = self.call()
         call.control = FakeSocket()
+        call.audio_candidates = ['G711U']
         with contextlib.redirect_stdout(io.StringIO()): call.on_control(INCOMING_OLC)
         self.assertTrue(call.incoming_audio)
         ack = h.decode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, call.control.sent[-1][4:])
@@ -209,13 +211,13 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(h.codec_kind(('videoData', h.video_capability())), ('video', None))
 
     def test_symmetric_audio_selection_prefers_g722_and_rejects_asymmetry(self):
-        self.assertEqual(h.select_audio_codec({'G722', 'G711U'}, {'G722', 'G711U'}), 'G722')
-        self.assertEqual(h.select_audio_codec({'G711U'}, {'G711U', 'G722'}), 'G711U')
-        self.assertEqual(h.select_audio_codec({'G723', 'G711U'}, {'G723', 'G711U'}), 'G711U')
-        self.assertEqual(h.select_audio_codec({'G723', 'G711A'}, {'G723', 'G711A'}), 'G711A')
-        self.assertEqual(h.select_audio_codec({'G711A'}, {'G711A'}), 'G711A')
-        self.assertIsNone(h.select_audio_codec({'G722'}, {'G711U'}))
-        self.assertIsNone(h.select_audio_codec(set(), set()))
+        self.assertEqual(audio.select_audio_candidates({'G722', 'G711U'}, {'G722', 'G711U'})[0], 'G722')
+        self.assertEqual(audio.select_audio_candidates({'G711U'}, {'G711U', 'G722'})[0], 'G711U')
+        self.assertEqual(audio.select_audio_candidates({'G723', 'G711U'}, {'G723', 'G711U'})[0], 'G711U')
+        self.assertEqual(audio.select_audio_candidates({'G723', 'G711A'}, {'G723', 'G711A'})[0], 'G711A')
+        self.assertEqual(audio.select_audio_candidates({'G711A'}, {'G711A'})[0], 'G711A')
+        self.assertEqual(audio.select_audio_candidates({'G722'}, {'G711U'}), [])
+        self.assertEqual(audio.select_audio_candidates(set(), set()), [])
 
     def test_native_audio_data_types_use_static_payloads(self):
         cases = {
@@ -279,6 +281,7 @@ class ContractTests(unittest.TestCase):
         call = self.call()
         call.control = FakeSocket()
         call.audio_codec = 'G722'
+        call.audio_candidates = ['G722', 'G711A']
         call.audio_fallback_channel = 3
         call.remote_audio = None
         call.incoming_audio = False
@@ -343,6 +346,26 @@ class ContractTests(unittest.TestCase):
         reject = h.decode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, call.control.sent[-1][4:])
         self.assertEqual(reject[1][0], 'openLogicalChannelReject')
 
+    def test_peer_selected_native_codec_outside_candidates_is_rejected(self):
+        call = self.call()
+        call.control = FakeSocket()
+        call.audio_codec = 'G722'
+        call.audio_candidates = ['G722']
+        call.remote_audio = None
+        call.incoming_audio = False
+        params = {
+            'forwardLogicalChannelNumber': 1,
+            'forwardLogicalChannelParameters': {
+                'dataType': ('audioData', ('g711Alaw64k', 20)),
+                'multiplexParameters': ('h2250LogicalChannelParameters', {'sessionID': 1}),
+            },
+        }
+        with contextlib.redirect_stdout(io.StringIO()): call.on_open(params)
+        self.assertEqual(call.audio_codec, 'G722')
+        self.assertFalse(call.incoming_audio)
+        reject = h.decode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, call.control.sent[-1][4:])
+        self.assertEqual(reject[1][0], 'openLogicalChannelReject')
+
     def test_duplicate_incoming_audio_olc_is_rejected(self):
         call = self.call()
         call.control = FakeSocket()
@@ -363,8 +386,6 @@ class ContractTests(unittest.TestCase):
         call.control = FakeSocket()
         call.audio_codec = 'G722'
         call.audio_candidates = ['G722', 'G711U', 'G723']
-        call.remote_audio_rx = {'G722', 'G711U', 'G723'}
-        call.remote_audio_tx = {'G722', 'G711U', 'G723'}
         call.requested_channels[1] = 'audio'
         model = h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage
         for channel, expected in [(1, 'G711U'), (3, 'G723')]:
@@ -396,8 +417,7 @@ class ContractTests(unittest.TestCase):
         call = self.call()
         call.control = FakeSocket()
         call.audio_codec = 'G722'
-        call.remote_audio_rx = {'G722', 'G711U'}
-        call.remote_audio_tx = {'G722', 'G711U'}
+        call.audio_candidates = ['G722', 'G711U']
         call.requested_channels[1] = 'audio'
         reject = {'forwardLogicalChannelNumber': 1, 'cause': ('dataTypeNotSupported', 0)}
         model = h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage
@@ -420,7 +440,7 @@ class ContractTests(unittest.TestCase):
             call = self.call()
             call.control = FakeSocket()
             call.audio_codec = 'G722'
-            call.remote_audio_rx, call.remote_audio_tx = rx, tx
+            call.audio_candidates = [c for c in ('G722', 'G711U', 'G711A', 'G723') if c in rx and c in tx]
             call.requested_channels[1] = 'audio'
             model = h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage
             reject = {'forwardLogicalChannelNumber': 1, 'cause': ('dataTypeNotSupported', 0)}
@@ -454,6 +474,7 @@ class ContractTests(unittest.TestCase):
         call = self.call()
         call.control = FakeSocket()
         call.audio_codec = 'G722'
+        call.audio_candidates = ['G722']
         params = {
             'forwardLogicalChannelNumber': 1,
             'forwardLogicalChannelParameters': {
@@ -551,9 +572,6 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(default[1]['collapsing'][1]['parameterValue'][1], 71)
 
 
-if __name__ == '__main__': unittest.main()
-
-
 class H241PeerParametersTest(unittest.TestCase):
     def test_peer_parameters_are_extracted_and_clamped_by_gateway(self):
         capability = ("genericVideoCapability", {
@@ -571,3 +589,7 @@ class H241PeerParametersTest(unittest.TestCase):
         self.assertEqual(h.h241_video_parameters(("genericVideoCapability", {
             "capabilityIdentifier": ("standard", ("oid", b"other")), "maxBitRate": 5120})), {})
         self.assertEqual(h.h241_video_parameters(None), {})
+
+
+if __name__ == '__main__':
+    unittest.main()

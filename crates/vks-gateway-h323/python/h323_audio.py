@@ -22,9 +22,39 @@ def select_audio_candidates(peer_rx, peer_tx):
     return [codec for codec in AUDIO_PREFERENCE if codec in usable]
 
 
-def select_audio_codec(peer_rx, peer_tx):
-    candidates = select_audio_candidates(peer_rx, peer_tx)
-    return candidates[0] if candidates else None
+def audio_capabilities_from_tcs(params):
+    """Return the symmetric native audio candidates from an H.245 TCS request."""
+    referenced = set()
+    for descriptor in params.get("capabilityDescriptors", []):
+        for alternative in descriptor.get("simultaneousCapabilities", []):
+            referenced.update(alternative)
+    peer_rx, peer_tx = set(), set()
+    for entry in params.get("capabilityTable", []):
+        if referenced and entry.get("capabilityTableEntryNumber") not in referenced:
+            continue
+        capability = entry.get("capability")
+        if not capability or capability[0] not in (
+            "receiveAudioCapability",
+            "transmitAudioCapability",
+            "receiveAndTransmitAudioCapability",
+        ):
+            continue
+        payload = capability[1]
+        if not isinstance(payload, tuple) or not payload or payload[0] not in AUDIO_CODECS:
+            continue
+        codec = AUDIO_CODECS[payload[0]][0]
+        if capability[0] in ("receiveAudioCapability", "receiveAndTransmitAudioCapability"):
+            peer_rx.add(codec)
+        if capability[0] in ("transmitAudioCapability", "receiveAndTransmitAudioCapability"):
+            if codec == "G723" and not peer_transmits_g723(payload):
+                continue
+            peer_tx.add(codec)
+    return select_audio_candidates(peer_rx, peer_tx)
+
+
+def can_adopt_audio_codec(codec, candidates, selected, remote_audio_is_set):
+    """A peer may pick only a codec we both advertised and the bridge can use."""
+    return codec in candidates and (codec == selected or not remote_audio_is_set)
 
 
 def audio_choice(codec):
@@ -50,6 +80,14 @@ def audio_capability_entries():
     return [(index + 1, audio_capability(codec)) for index, codec in enumerate(AUDIO_PREFERENCE)]
 
 
+def next_audio_candidate(candidates, rejected):
+    try:
+        index = candidates.index(rejected) + 1
+    except ValueError:
+        return None
+    return candidates[index] if index < len(candidates) else None
+
+
 def audio_payload_type(codec):
     for _, (name, payload_type) in AUDIO_CODECS.items():
         if name == codec:
@@ -66,4 +104,6 @@ def audio_codec_for_payload(payload_type):
 
 def peer_transmits_g723(choice):
     """G.723.1 is only safe when the peer sends one 30 ms SDU per packet."""
-    return isinstance(choice, tuple) and choice[0] == "g7231" and isinstance(choice[1], dict) and choice[1].get("maxAl-sduAudioFrames") == 1
+    if not isinstance(choice, tuple) or choice[0] != "g7231" or not isinstance(choice[1], dict):
+        return False
+    return choice[1].get("maxAl-sduAudioFrames") == 1

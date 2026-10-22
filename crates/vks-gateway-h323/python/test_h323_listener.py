@@ -3,6 +3,7 @@ import unittest
 
 import ipaddress
 import h323_listener as listener
+import h323_audio as audio
 from h323_listener import asn
 
 
@@ -71,8 +72,8 @@ class InboundContractTests(unittest.TestCase):
         self.assertEqual(table[3], ("receiveAndTransmitAudioCapability", ("g711Alaw64k", 20)))
         self.assertEqual(table[4][1][0], "g7231")
         self.assertEqual(caps["capabilityDescriptors"][0]["simultaneousCapabilities"], [[1, 2, 3, 4]])
-        self.assertEqual(listener.select_audio_codec({"G722", "G711U"}, {"G722", "G711U"}), "G722")
-        self.assertIsNone(listener.select_audio_codec({"G722"}, {"G711U"}))
+        self.assertEqual(audio.select_audio_candidates({"G722", "G711U"}, {"G722", "G711U"})[0], "G722")
+        self.assertEqual(audio.select_audio_candidates({"G722"}, {"G711U"}), [])
 
     def test_incoming_g723_with_multi_frame_sdu_is_rejected(self):
         call = object.__new__(listener.InboundCall)
@@ -95,6 +96,7 @@ class InboundContractTests(unittest.TestCase):
         call = object.__new__(listener.InboundCall)
         call.config = {"local_ip": "127.0.0.1", "audio_port": 41002}
         call.audio_codec = "G722"
+        call.audio_candidates = ["G722", "G711A"]
         call.audio_fallback_channel = 3
         call.remote_audio = None
         call.incoming_audio = False
@@ -113,6 +115,32 @@ class InboundContractTests(unittest.TestCase):
         self.assertEqual(call.audio_codec, "G711A")
         self.assertEqual(call.local_audio_pt, 8)
         self.assertEqual(call.ack[-2], (3, "audio"))
+
+    def test_peer_selected_native_codec_outside_candidates_is_rejected(self):
+        call = object.__new__(listener.InboundCall)
+        call.config = {"local_ip": "127.0.0.1", "audio_port": 41002}
+        call.audio_codec = "G722"
+        call.audio_candidates = ["G722"]
+        call.remote_audio = None
+        call.incoming_audio = False
+        call.incoming_channels = {}
+        call.audio_fallback_channel = 3
+        call.opened = []
+        call.open_outgoing = lambda number, kind, port: call.opened.append((number, kind))
+        call.rejected = []
+        call.reject_open = lambda number, cause: call.rejected.append(number)
+        params = {
+            "forwardLogicalChannelNumber": 1,
+            "forwardLogicalChannelParameters": {
+                "dataType": ("audioData", ("g711Alaw64k", 20)),
+                "multiplexParameters": ("h2250LogicalChannelParameters", {"sessionID": 1}),
+            },
+        }
+        call.on_open(params)
+        self.assertEqual(call.audio_codec, "G722")
+        self.assertFalse(call.incoming_audio)
+        self.assertEqual(call.rejected, [1])
+        self.assertEqual(call.opened, [])
 
     def test_duplicate_incoming_audio_olc_is_rejected(self):
         call = object.__new__(listener.InboundCall)
@@ -133,7 +161,6 @@ class InboundContractTests(unittest.TestCase):
 
     def test_audio_reject_opens_next_candidate_on_channel_three(self):
         call = object.__new__(listener.InboundCall)
-        call.wire = lambda *args, **kwargs: None
         call.request_window = 0.0
         call.received_requests = 0
         call.requested_channels = {1: "audio"}
@@ -142,8 +169,6 @@ class InboundContractTests(unittest.TestCase):
         call.remote_audio = None
         call.incoming_audio = False
         call.audio_candidates = ["G722", "G711U"]
-        call.remote_audio_rx = {"G722", "G711U"}
-        call.remote_audio_tx = {"G722", "G711U"}
         call.audio_fallback_channel = 3
         call.audio_codec = "G722"
         call.config = {"audio_port": 41002}
@@ -161,6 +186,8 @@ class InboundContractTests(unittest.TestCase):
         call = object.__new__(listener.InboundCall)
         call.config = {"local_ip": "192.168.1.93", "audio_port": 41002}
         call.audio_codec = "G722"
+        call.audio_candidates = ["G722"]
+        call.remote_audio = None
         call.incoming_channels = {}
         call.local_audio_pt = 0
         call.incoming_audio = False
