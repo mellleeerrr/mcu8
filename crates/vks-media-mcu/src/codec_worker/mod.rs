@@ -68,7 +68,6 @@ impl AudioCodec {
         }
     }
 
-    
     /// FFmpeg encoder name, if the host can encode this codec.
     #[must_use]
     pub const fn ffmpeg_encoder(self) -> Option<&'static str> {

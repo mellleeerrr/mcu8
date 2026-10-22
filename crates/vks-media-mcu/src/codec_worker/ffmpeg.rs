@@ -1423,33 +1423,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn hung_probe_times_out_and_kills_child() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir();
-        let script = dir.join(format!("vks-hang-ffmpeg-{}.sh", std::process::id()));
         let pidfile = dir.join(format!("vks-hang-ffmpeg-{}.pid", std::process::id()));
-        std::fs::write(&script, format!("#!/bin/sh\nsleep 30 &\necho \"$$ $!\" > {}\nwait\n", pidfile.display()))
-            .expect("script");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // Сценарий передаётся аргументом `sh -c`, а не отдельным исполняемым
+        // файлом: запись файла и его exec в одном процессе дают ETXTBSY
+        // («Text file busy»), если параллельный поток успел отfork'иться
+        // ребёнка, унаследовавшего открытый на запись дескриптор.
+        let script = format!("sleep 30 & echo \"$$ $!\" > {} ; wait", pidfile.display());
         let started = Instant::now();
-        let result = FfmpegCapabilities::probe(&script).await;
-        if let Err(WorkerError::Spawn(ref e)) = result {
-            if e.raw_os_error() == Some(26) {
-                eprintln!("DIAG: ETXTBSY on {script:?}");
-                for pid_dir in std::fs::read_dir("/proc").unwrap() {
-                    let pid_dir = pid_dir.unwrap();
-                    let Ok(fds) = std::fs::read_dir(pid_dir.path().join("fd")) else { continue };
-                    for fd in fds {
-                        let fd = fd.unwrap();
-                        if let Ok(link) = std::fs::read_link(fd.path()) {
-                            if link.to_string_lossy().contains("vks-hang") {
-                                eprintln!("DIAG: holder pid={} fd={} -> {}", pid_dir.path().display(), fd.path().display(), link.display());
-                            }
-                        }
-                    }
-                }
-                eprintln!("DIAG: stat={:?}", std::fs::metadata(&script).map(|m| m.len()));
-            }
-        }
+        let mut command = command(std::path::Path::new("/bin/sh"));
+        command.arg("-c").arg(&script);
+        let result = run_bounded(command).await;
         assert!(matches!(result, Err(WorkerError::Timeout(_))), "{result:?}");
         assert!(started.elapsed() < Duration::from_secs(8));
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1463,7 +1447,6 @@ mod tests {
                 .is_ok_and(|status| status.success());
             assert!(!alive, "timed-out probe left pid {pid} alive (process group not killed)");
         }
-        let _ = std::fs::remove_file(&script);
         let _ = std::fs::remove_file(&pidfile);
     }
 
