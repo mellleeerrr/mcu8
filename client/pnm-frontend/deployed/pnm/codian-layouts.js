@@ -175,6 +175,15 @@
     if (key === adoptPending) return;
     adoptPending = key;
     selectConstructor('vks_' + (constructorSide === 'grid' ? 'grid' : 'pin_' + constructorSide) + '_' + count);
+    // Вендорский обработчик чипа пишет preset после нашего колбэка — добиваем.
+    setTimeout(function () {
+      var now = layoutEditor() && layoutEditor().modifiedValue || {};
+      var cur = typeof now.preset === 'string' ? now.preset : '';
+      if (modeTileEngaged && now.mode === 'manual' && cur.indexOf('vks_') !== 0) {
+        var n2 = currentCount();
+        if (n2 > 0) selectConstructor('vks_' + (constructorSide === 'grid' ? 'grid' : 'pin_' + constructorSide) + '_' + n2);
+      }
+    }, 120);
   }
 
   function round(value) {
@@ -679,6 +688,12 @@
     var editor = layoutEditor();
     if (!editor) return;
     modeTileEngaged = true;
+    // N/имя фиксируем ДО mode='manual': после переключения вендор подставляет
+    // свой fallback (size=25), и currentCount() уже не равен исходному N.
+    var startValue = editor.modifiedValue || {};
+    var startCount = currentCount();
+    var startName = startValue.displayName || '';
+    var startSide = constructorSide;
     // Вендорский `mode` — свойство редактора (reactivity store), не поле формы:
     // `editValueField('mode')` пишет в черновик раскладки и портит payload.
     try {
@@ -692,8 +707,18 @@
     // режима (слоты появляются не сразу) один раз подставляем vks_grid_<N>.
     // Тихий fallback на 1 окно запрещён: при N=0 остаёмся на вендорском preset.
     var attempts = 0;
-    var beforeValue = editor.modifiedValue || {};
-    var keepName = beforeValue.displayName || '';
+    var keepName = startName;
+    function family() {
+      return 'vks_' + (startSide === 'grid' ? 'grid' : 'pin_' + startSide) + '_';
+    }
+    if (startCount > 0) {
+      try {
+        if (keepName) editor.editValueField('displayName', keepName);
+        editor.editValueField('type', 'individual');
+      } catch (e) { /* поля недоступны — останутся вендорские */ }
+      selectConstructor(family() + startCount);
+      return;
+    }
     function adopt() {
       if (!modeTileEngaged) return;
       var value = editor.modifiedValue || {};
