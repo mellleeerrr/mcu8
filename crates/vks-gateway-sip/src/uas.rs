@@ -442,7 +442,9 @@ fn aac_fmtp_parameters_bridgeable(parameters: &[(String, String)]) -> bool {
         }
         match key.as_str() {
             "object" => object_ok &= value == "2",
-            "cpresent" => cpresent_ok &= value != "0",
+            // RFC 3016 defines cpresent as 0 or 1; only 1 is bridgeable
+            // in-band, and anything non-canonical must fail closed.
+            "cpresent" => cpresent_ok &= value == "1",
             "sbr" => {
                 let disabled = value.eq_ignore_ascii_case("0") || value.eq_ignore_ascii_case("false");
                 sbr_ok &= disabled;
@@ -1064,5 +1066,9 @@ a=rtpmap:113 MP4A-LATM/90000\r\n";
         }
         let legal = format!("{base}a=fmtp:113 object=2;cpresent=1;bitrate=64000;config=40002420\r\n");
         assert!(negotiate_with(&legal, true).is_some(), "legal in-band offer must pass");
+        for weird in ["00", "false", "01", "true"] {
+            let fmtp = format!("{base}a=fmtp:113 object=2;cpresent={weird}\r\n");
+            assert!(negotiate_with(&fmtp, true).is_none(), "non-canonical cpresent={weird} must be refused");
+        }
     }
 }

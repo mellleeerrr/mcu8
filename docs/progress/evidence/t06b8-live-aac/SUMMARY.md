@@ -1,9 +1,11 @@
 # T06b-8 live AAC-LATM proof (2026-10-23 07:11–07:13 MSK)
 
-Environment: host 192.168.1.93, release binary `4f551af9edcf27ce`
-(HEAD `08ecd1a` + H.263+ parent), service restarted with
-`VKS_AAC_LATM_LEGAL_ACCEPTED=1`; `/readyz=200`, log:
-`gateway audio codec availability ... aac_latm=true aac_latm_legal=true`.
+Environment: host 192.168.1.93. The first (single-peer and two-peer) runs used
+release binary `4f551af9edcf27ce` (HEAD `08ecd1a`); the decisive attribution
+run used `90672b97a2579f3f` (HEAD `cc93100`). Each run temporarily set
+`VKS_AAC_LATM_LEGAL_ACCEPTED=1` and restarted the service; `/readyz=200`, log:
+`gateway audio codec availability ... aac_latm=true aac_latm_legal=true` at
+04:10:01Z and 04:50:47Z.
 
 Test rig: `/var/tmp/aac_uas.py` — minimal UDP SIP UAS on port 5090 that
 answers the MCU offer with AAC-LATM only:
@@ -94,7 +96,7 @@ A follow-up lab run used UAS1 (port 5091) = 440 Hz tone and UAS2 (port 5092)
 confirmed MP4A-LATM, two bridges started).
 
 - UAS2, which sent only silence, decoded `samples=122880 rms=0.0884
-  nonzero=122852`, measured frequency 443.8 Hz (`uas-attrib-silent.log`,
+  nonzero=122852`, frequency ~440 Hz (FFT peak 440.9 Hz; `uas-attrib-silent.log`,
   `uas-attrib-440.latm`): it hears UAS1's tone through the MCU mixer, so this
   is cross-forwarding, not its own loopback.
 - UAS1, which sent the 440 Hz tone, decoded `samples=122880 rms=0.0000
@@ -111,9 +113,7 @@ This supersedes the ambiguous same-tone paragraph above.
   RTCP (its `rx pts={72,113}`).
 - The first single-peer run could only prove framing/timeline (RMS 0);
   the two-peer run above proves audible end-to-end audio.
-- Legal opt-in was enabled only for this lab test; default is off and was
-  restored after the run (`aac_latm=false aac_latm_legal=false` at
-  04:14:33Z, `VKS_AAC` unset, both lab conferences deleted).
-- Legal opt-in was enabled only for this lab test; default is off and was
-  restored after the run.
+- Legal opt-in was enabled only for these lab tests; default is off and was
+  restored after each run (`aac_latm=false aac_latm_legal=false` at
+  04:14:33Z and 04:52:14Z, `VKS_AAC` unset, lab conferences deleted).
 - `cpresent=0`/config-only peers remain unsupported (explicit 488).

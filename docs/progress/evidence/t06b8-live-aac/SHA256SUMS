@@ -1,5 +1,10 @@
+22112b85477d660c16bf396986c9950430e75373b6ca610d19bad53b5ec55df1  docs/progress/evidence/t06b8-live-aac/server.log
+6669ea480dab5bdb9fbe6332d8021b7753a73919b5b0bb214748525cfc5f74a6  docs/progress/evidence/t06b8-live-aac/SHA256SUMS
+b6aa4ca5b93b4eca4a04fa5a825a42f14be878180bb44526bef5adb7afb03320  docs/progress/evidence/t06b8-live-aac/SUMMARY.md
+0f9e651baaa3a6ebbf6564679301f56e08b066b62b4319d037bb12f533c826e1  docs/progress/evidence/t06b8-live-aac/uas-5091.log
+cc972301918fe035a521f66a3669d1980991fbd460786f69765b7396025f70cc  docs/progress/evidence/t06b8-live-aac/uas-5092.log
 be121295316e5e09c73bdfe649853bf2de6b9a7cdc3bddc6ca90caecf7c6f1f5  docs/progress/evidence/t06b8-live-aac/uas-5092-rx.latm
 662cfd591ca39c217ab7299790da8fe18d130c0003af8ac31f672e4cbb75a649  docs/progress/evidence/t06b8-live-aac/uas-attrib-440.latm
-0f9e651baaa3a6ebbf6564679301f56e08b066b62b4319d037bb12f533c826e1  docs/progress/evidence/t06b8-live-aac/uas-5091.log
 bee08b30d1dae75215f3c2c6a6d4d68f4c66ed9251046050a7a798d0fe2ef8ca  docs/progress/evidence/t06b8-live-aac/uas-attrib-440.log
 c15a15ef413d8432231cb2e40c3a52f451815159f34a4ee7249e308bd7eb3e3f  docs/progress/evidence/t06b8-live-aac/uas-attrib-silent.log
+e7b9ca9e353a327bdd0b1629ca3f1513d38179f510a0aa034d2e3b1c4749a00a  docs/progress/evidence/t06b8-live-aac/uas.log

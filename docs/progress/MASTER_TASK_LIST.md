@@ -174,7 +174,7 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > Осталось: живой вызов с H265-терминалом (терминал отвечает H264 — interop-ограничение железа),
 > AAC-LATM мост, затем SDP readiness gate. H.261/H.263 по-прежнему без пейлоадеров и не объявляются.
 >
-> **T06b-8 (AAC-LATM аудио-мост) — в работе, задача `task-2`; pitfalls/design зафиксированы:**
+> **T06b-8 (AAC-LATM аудио-мост) — ЗАКРЫТА, APPROVE 9.5/10 (2026-10-23), задача `task-2`; pitfalls/design зафиксированы:**
 > Проверено на FFmpeg 8.0.1: `-f latm` даёт LOAS-поток ровно 1024 samples/кадр (48 кадров на 1 с),
 > 3-байтовый sync/len, первый кадр несёт StreamMuxConfig (`useSameStreamMux=0`), последующие —
 > `useSameStreamMux=1`; `-f loas` декодирует обратно 48 кГц. RTP: один `audioMuxElement` на пакет,
@@ -261,8 +261,12 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > fail-closed (SBR=true/TRUE, дубли `object=8;object=2`, `cpresent=0;cpresent=1`), добавлен
 > encoder-liveness (3 с без принятого PCM → teardown), evidence дополнен диалогом 5092,
 > сырым LATM и sha256, формулировки SUMMARY уточнены; UAS-fmtp переведён на построчный
-> разбор всех `a=fmtp` строк с fail-closed AND (тесты на первый параметр и две строки).
-> Осталось: повторное ревью ≥9.5.
+> разбор всех `a=fmtp` строк с fail-closed AND (тесты на первый параметр и две строки),
+> `cpresent` принимает только `1` (неканонические 00/false отвергаются).
+> **Финальное ревью: APPROVE 9.5/10, P0/P1 нет.** Live-доказательство: 440 Гц против тишины —
+> тихий пир декодировал 440 Гц (rms 0.0884), источник тона — тишину (нет self-loop).
+> Остаточные P2 (unit-тесты encoder-liveness/pacing, preflight TOCTOU, a=rtcp, inbound DTMF,
+> точный префикс `a=fmtp` для неканонического SDP) — техдолг, закрытие не блокируют.
 > (`WorkerPool::try_reserve(2)`) для двух прямых FFmpeg-процессов. **Live-бинарь `3caa7546`:
 > legal-гейт enforced — `aac_latm=false`, API AAC supported=false** (включается только
 > `VKS_AAC_LATM_LEGAL_ACCEPTED=1`). Осталось до 9.5: RTP-level AAC-тест (16:15/marker/timestamp/
