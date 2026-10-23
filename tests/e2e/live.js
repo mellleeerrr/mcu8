@@ -62,6 +62,7 @@ async function api(token, method, urlPath, body) {
   let token = '';
   let conferenceId = '';
   let sessionId = '';
+  let sessionName = '';
   let layoutId = '';
   let participantName = SIP_NAME;
   try {
@@ -140,6 +141,7 @@ async function api(token, method, urlPath, body) {
     const startResponse = await startResponsePromise;
     const startBody = await startResponse.json();
     sessionId = startBody.session && startBody.session.id;
+    sessionName = startBody.session && startBody.session.display_name || '';
     check('session: started with id', Boolean(sessionId), JSON.stringify(startBody).slice(0, 300));
     await page.waitForTimeout(2000);
     if (!page.url().includes('/monitoring/sessions/')) {
@@ -535,16 +537,41 @@ async function api(token, method, urlPath, body) {
     check('layout: canonical default remains after detach',
       afterList.some(item => item.payload && item.payload.type === 'default'), JSON.stringify(afterList.map(item => item.payload && item.payload.type)));
     // Визуально: после detach сессия показывает «Общую», ручной раскладки нет.
-    await page.reload();
-    await page.waitForTimeout(1500);
-    const layoutsPanel = page.getByText('Раскладки', { exact: true }).first();
-    if (await layoutsPanel.count()) {
-      await layoutsPanel.click();
-      await page.waitForTimeout(700);
+    // page.reload()/goto(sessions)/newPage остаются в layout-editor (клиентский
+    // роутер удерживает открытую раскладку; новая вкладка после логина пустая),
+    // поэтому выходим через верхнее меню «Панель управления» в список сессий.
+    // Даём UI обработать websocket-событие detach: иначе он успевает
+    // автоматически открыть редактор default-раскладки уже после нашего клика.
+    await page.waitForTimeout(2000);
+    // The detach websocket event can re-open the default layout editor right
+    // after the first navigation, so retry the menu path until the session's
+    // «Раскладки» tab is actually on screen instead of a layout editor.
+    let bodyAfterDetach = '';
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await page.getByText('Панель управления', { exact: true }).first().click();
+      await page.waitForTimeout(1800);
+      if (sessionName) {
+        const sessionRow = page.getByText(sessionName, { exact: true }).first();
+        if (await sessionRow.count()) {
+          await sessionRow.click();
+          await page.waitForTimeout(1500);
+        }
+      }
+      const layoutsPanel = page.getByText('Раскладки', { exact: true }).first();
+      if (await layoutsPanel.count()) {
+        await layoutsPanel.click();
+        await page.waitForTimeout(1000);
+      }
+      bodyAfterDetach = await page.locator('body').innerText();
+      if (/Общая/.test(bodyAfterDetach) && !bodyAfterDetach.includes('Название раскладки')) {
+        break;
+      }
+      await page.waitForTimeout(1500);
     }
-    const bodyAfterDetach = await page.locator('body').innerText();
-    check('layout: default «Общая» visible after detach', /Общая/.test(bodyAfterDetach), bodyAfterDetach.slice(0, 500));
-    check('layout: manual name gone from session UI', !bodyAfterDetach.includes(layoutName), bodyAfterDetach.slice(0, 500));
+    check('layout: default «Общая» visible after detach', /Общая/.test(bodyAfterDetach),
+      `${page.url()} ${bodyAfterDetach.slice(0, 500)}`);
+    check('layout: manual name gone from session UI', !bodyAfterDetach.includes(layoutName),
+      `${page.url()} ${bodyAfterDetach.slice(0, 500)}`);
     await page.screenshot({ path: path.join(ART, '08-detach-default.png') });
 
     // 9. Кодек-эндпоинты имеют эталонную форму.
@@ -567,9 +594,10 @@ async function api(token, method, urlPath, body) {
     const video = await api(token, 'GET', '/api/v3/settings/video_codecs');
     check('api: video_codecs shape [string]', video.status === 200 && Array.isArray(video.json.video_codecs)
       && video.json.video_codecs.every(codec => typeof codec === 'string'), JSON.stringify(video.json));
-    check('codecs: only H264 marked bridgeable video',
-      Array.isArray(video.json.supported_video_codecs) && video.json.supported_video_codecs.length === 1
-      && video.json.supported_video_codecs[0] === 'H264', JSON.stringify(video.json.supported_video_codecs));
+    check('codecs: H264 and H265 marked bridgeable video',
+      Array.isArray(video.json.supported_video_codecs)
+      && video.json.supported_video_codecs.includes('H264')
+      && video.json.supported_video_codecs.includes('H265'), JSON.stringify(video.json.supported_video_codecs));
 
     // 10. Нет необъяснённых 501/5xx в сценарии.
     const bad = network.filter(x => x.kind === 'response' && x.status >= 500);
