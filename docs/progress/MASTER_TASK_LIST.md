@@ -152,7 +152,7 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > IRAP/parameter-set helpers; типы 0–47 принимаются, 48–63 (включая PACI) отвергаются, FuType 0 (TRAIL_N)
 > поддержан. `aac_latm.rs` — LOAS strip/re-add (13-бит длина), `cpresent=1` SMC-детектор, точный
 > 90 кГц `LatmRtpClock` (1920 тика/кадр @48k, дробный аккумулятор @44.1k). В x265 добавлены
-> `aud=1:repeat-headers=1`. 24 h265 + 7 aac тестов, crate **119 passed**, fmt/clippy/doc чисто.
+> `aud=1:repeat-headers=1`. 24 h265 + 7 aac тестов + интеграционный `x265_annexb_survives_rfc7798_packetization` (реальный x265 → AUD/VPS/SPS/PPS/IRAP → пакеты → побайтовая сборка), crate **119 passed**, workspace **1204 passed / 0 failed**, fmt/clippy/doc чисто.
 > Модули ещё **не подключены** к SDP/мосту; PT113/H265 по-прежнему не объявляются в native-профиле.
 > Следующий этап — worker-actor + H.265 видео-мост, затем AAC-LATM аудио-мост и SDP-гейт по probe.
 >
