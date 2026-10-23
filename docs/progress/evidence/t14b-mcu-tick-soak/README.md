@@ -6,80 +6,89 @@
 inside `RoomState::tick_audio_at` / `tick_video_at`: audio mix + mix-minus + VAD,
 or video `slot_rects` + `Compositor::compose`. It excludes RTP/jitter/loss, SIP
 and H.323 signalling, decode/encode, `resize_i420`, WebRTC fan-out, the
-composite clone, input cloning before the throttle, lock wait and the live DB.
+composite hand-off, input cloning before the throttle, lock wait and the live DB.
 The audio number is therefore an **audio engine-work** p99, not end-to-end
 latency. The histogram is opt-in (`VKS_MCU_TICK_METRICS=1`, default off); with
-the flag unset the family is absent from `/metrics` (covered by
-`crates/vks-common/tests/metrics_default_off.rs`), and startup materialises
-zero-count children instead of a synthetic `observe(0.0)` sample.
+the flag unset the family is absent from `/metrics`. At startup with the flag on,
+both phases exist at count=0/sum=0 — no synthetic `observe(0.0)` sample.
 
 ## Harness
 
 `crates/vks-media-mcu/tests/mcu_tick_soak.rs` is a release-only `#[ignore]`
-test. It creates one MCU room, bridges four participants with audio+video
-tracks, feeds 960-sample near-full-scale PCM (exercises the mixer's `tanh`
-soft-clip), sets four 1280×720 I420 frames once, and drives the real engine
-from the **wall clock**: audio once per 20 ms plus one same-instant duplicate
-call (must be throttled and must not be recorded), video every 33 ms. A 3 s
-warm-up is discarded. The report is written before the gates so a failure still
-leaves diagnostics. Gates assert: histogram count equals successful ticks;
-throttled video attempts equal `stats().frames_dropped`; an admin
-`clear_participant_frame` rebuild records no tick; audio ≥45 ticks/s and video
-≥28 fps; exact audio `le=2 ms` ratio ≥0.99; exact video `le=33 ms` ratio ≥0.99.
-An empty histogram or a debug build fails hard.
+test (it compiles in debug and exits early, so `cargo test --workspace` stays
+green). One room, four participants, real **1280×720 I420** frames with 2-D luma
+and per-axis chroma gradients, feeding 960-sample near-full-scale PCM (exercises
+the mixer's `tanh` soft-clip). The measured window has two **sequential**
+phases: audio alone at 20 ms, then video alone at 34 ms. They are not concurrent
+because today's global room mutex would let a 16 ms compose block the audio tick;
+per-room actors and multi-room concurrency are S20. A 3 s warm-up is discarded.
+
+Each period makes one deliberate **same-timestamp duplicate** call that must be
+throttled. The report counts attempts, first successes, throttled calls,
+`second_call_successes` (must be 0), histogram count and engine
+`frames_dropped` (video), so the throttle/drop gates are not vacuous. After the
+windows, `clear_participant_frame` + `unbridge_participant` are invoked and the
+histogram count must not change. The report is written before assertions so a
+failure still leaves diagnostics; an empty histogram fails hard.
 
 ```bash
-# from the repository root
+# from the repository root; for git_dirty=false run from a clean worktree at the
+# recorded commit (the shared checkout can have concurrent edits):
+git worktree add --detach /var/tmp/vks-t14b-clean <commit>
+cd /var/tmp/vks-t14b-clean
+CARGO_TARGET_DIR="$OLDPWD/target" \
 VKS_MCU_TICK_METRICS=1 VKS_SOAK_SECONDS=60 VKS_SOAK_WARMUP=3 \
-  VKS_SOAK_OUT="$PWD/docs/progress/evidence/t14b-mcu-tick-soak/soak-60s-4p.json" \
+VKS_SOAK_PARTICIPANTS=4 VKS_SOAK_OUT="$OLDPWD/docs/progress/evidence/t14b-mcu-tick-soak/soak-60s-4p.json" \
   cargo test --release -p vks-media-mcu --test mcu_tick_soak -- --ignored --nocapture
 ```
 
-Env: `VKS_SOAK_SECONDS` (5..=3600, default 20), `VKS_SOAK_WARMUP` (default 2),
+Env: `VKS_SOAK_SECONDS` (5..=3600, default 20), `VKS_SOAK_WARMUP` (default 3),
 `VKS_SOAK_PARTICIPANTS` (1..=32, default 4), `VKS_SOAK_OUT` (default
 `target/t14b-mcu-tick-soak.json`). Invalid values fail instead of silently
 falling back.
 
-## Result — 60 s window (57.0 s measured), 4 participants, release
+## Result — 60 s window (30 s per phase), 4 participants, release
 
-Run `aadd264`, dirty=false, Intel Xeon E5-2699 v3, rustc 1.94.0. Full machine
-report: [`soak-60s-4p.json`](soak-60s-4p.json).
+Run `dce2add`, clean worktree (`git_dirty=false`), Intel Xeon E5-2699 v3,
+rustc 1.94.0. Machine report: [`soak-60s-4p.json`](soak-60s-4p.json).
 
-| phase | samples | exact `le=2ms` | p99 bucket (estimate) | mean |
-|---|---:|---:|---:|---:|
-| audio engine work | 2566 | **1.000** | (0.1, 0.25] ms (0.249 ms) | 0.130 ms |
-| video compose | 1720 | 0.000 | (10, 20] ms (19.6 ms) | 9.87 ms |
+| phase | samples | exact `le=2ms` | p99 bucket (estimate) | mean | rate |
+|---|---:|---:|---:|---:|---:|
+| audio engine work | 1500 | **1.000** | (0.25, 0.5] ms (0.279 ms) | 0.139 ms | 50.0 Hz |
+| video compose (I420) | 883 | 0.000 | (20, 33] ms (27.8 ms) | 15.49 ms | 29.43 fps |
 
-Video effective render cadence **30.17 fps**, exact `le=33 ms` ratio **1.000**,
-`frames_dropped` delta 0. Audio exact `le=2 ms` ratio **1.000**.
+Video exact `le=33 ms` ratio **1.000**, engine `frames_dropped` delta 883 (all
+883 are the deliberate duplicate/throttle probes; first successes 883), audio
+exact `le=2 ms` ratio **1.000**, admin rebuild recorded ticks 0.
 
 **Verdict:** the audio engine-work p99 ≤2 ms SLO is met with a wide margin. Video
-compose is within the 33 ms frame budget but **not** within 2 ms; its p99 is only
-known to be in (10, 20] ms because that is the histogram bucket width. The
-video 2 ms target is deferred to S20 (SIMD/zero-copy/parallel tiles and
+compose fits the 33 ms frame budget in this workload but **not** the 2 ms target;
+its p99 is only known to be in (20, 33] ms because that is the histogram bucket
+width. The video 2 ms target is deferred to S20 (SIMD/zero-copy/parallel tiles,
 per-room actors). No claim is made that the full media tick meets 2 ms.
 
 Compositor work in this slice: exact integer nearest-neighbour mapping
-(`fx = dx*fw/dw` via incremental quotient/remainder instead of per-pixel `f64`
-division), integer letterbox geometry, row slices, single-allocation canvas.
-Golden gradient/letterbox tests pin the mapping. This reduced compose cost
-substantially, but no archived "before" JSON is claimed here: the measurement
-above is a single reproducible after-state run.
+(`fx = floor(dx*fw/dw)` via incremental quotient/remainder), integer letterbox
+geometry, row slices, single-allocation canvas. Golden tests pin 2-D luma,
+per-axis chroma and PiP letterbox-bar behaviour. No archived "before" JSON is
+claimed; this is a single reproducible after-state measurement.
 
 ## Honest limits
 
 - In-process engine only: no RTP/jitter/loss/PLC, SIP/H.323, decode/encode,
   `resize_i420`, WebRTC fan-out, live DB or network.
-- One room in one process: no contention on the global `rooms` mutex between
-  rooms, no allocator/page-fault pressure or CPU frequency scaling at 6–8 rooms.
-  Lock wait and input cloning happen **outside** the histogram by design.
+- One room in one process; audio and video measured **sequentially**. The global
+  `rooms` mutex, allocator/page-fault pressure and 6–8-room contention are not
+  measured; S20 owns per-room actors and the multi-room p99.
 - Audio load is four participants; the signal is near full scale but not a
   stress corpus.
-- 2566/1720 samples are enough for the exact rank gates, not for a precise p99
-  point estimate; the report labels the estimate and its bucket interval.
+- 1500/883 samples support the exact rank gates, not a precise p99 point; the
+  report labels the estimate and its bucket interval.
 - This artifact does not prove that `/metrics` was scraped on the live service.
-  The live service currently has no active media rooms, so a live API-only soak
-  would record zero samples; the default-off behaviour is verified separately.
+  The live service currently has no active media rooms, so an API-only live soak
+  would record zero samples; default-off absence is covered by
+  `crates/vks-common/tests/metrics_default_off.rs`, and the env-on zero-count
+  startup by `crates/vks-common/tests/metrics_tick_zero.rs`.
 
 ## 24–72 h procedure
 
@@ -101,14 +110,14 @@ above is a single reproducible after-state run.
    Repeat with `phase="video",le="0.033"` for the frame-budget gate.
 4. Watch `_count` growth against expected tick cadence, 5xx/WS error rate,
    RSS/fd slope, and count `media_bridge_dead` terminations in the log.
-5. Keep the flag off by default until the canary accepts the overhead (two
-   `Instant::now` calls + atomic observes per successful tick).
+5. Keep the flag off by default until the canary accepts the overhead (one
+   `Instant::now` + histogram observe per successful phase tick).
 
 ### B. Engine-only (this harness)
 
 Run the command above with `VKS_SOAK_SECONDS=259200` (72 h) for a long engine
-soak; snapshot the JSON periodically. This path has no `/metrics` endpoint and
-no server process, so RSS/fd and Prometheus scraping belong to procedure A.
+soak and snapshot the JSON periodically. This path has no `/metrics` endpoint
+and no server process, so RSS/fd and Prometheus scraping belong to procedure A.
 
 ## Artifacts
 

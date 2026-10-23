@@ -2,22 +2,33 @@
   "admin_rebuild_recorded_ticks": 0,
   "arch": "x86_64",
   "audio": {
-    "attempts": 5132,
-    "histogram_count": 2566,
+    "attempts": 3000,
+    "effective_hz": 49.99980618908459,
+    "first_successes": 1500,
+    "histogram_count": 1500,
     "le_2ms_ratio": 1.0,
-    "mean_seconds": 0.00013307559625876894,
+    "mean_seconds": 0.0001389761453333332,
     "p99_bucket_seconds": [
-      0.0001,
-      0.00025
+      0.00025,
+      0.0005
     ],
-    "p99_seconds_estimate": 0.00024935039370078743,
-    "successful_ticks": 2566,
-    "sum_seconds": 0.3414719800000011
+    "p99_seconds_estimate": 0.00027941176470588236,
+    "second_call_successes": 0,
+    "successful_ticks": 1500,
+    "sum_seconds": 0.2084642179999998,
+    "throttled": 1500
   },
-  "command": "VKS_MCU_TICK_METRICS=1 cargo test --release -p vks-media-mcu --test mcu_tick_soak -- --ignored --nocapture",
+  "audio_measured_seconds": 30.000116287,
+  "audio_window_seconds": 30,
+  "command": "VKS_MCU_TICK_METRICS=1 VKS_SOAK_SECONDS=60 VKS_SOAK_WARMUP=3 VKS_SOAK_PARTICIPANTS=4 VKS_SOAK_OUT=/home/pro/Рабочий стол/mcu/docs/progress/evidence/t14b-mcu-tick-soak/soak-60s-4p.json cargo test --release -p vks-media-mcu --test mcu_tick_soak -- --ignored --nocapture",
   "cpu_model": "Intel(R) Xeon(R) CPU E5-2699 v3 @ 2.30GHz",
+  "frame": {
+    "format": "I420",
+    "height": 720,
+    "width": 1280
+  },
   "git_dirty": false,
-  "git_sha": "aadd264296adfc040dcd60fe147446d249da1d7e",
+  "git_sha": "dce2add3dc7e27b7da92c436a756d2a817ba2674",
   "histogram_buckets_seconds": [
     0.000025,
     0.00005,
@@ -37,8 +48,7 @@
     0.05,
     0.1
   ],
-  "measured_seconds": 57.0,
-  "notes": "In-process engine only: no RTP, SIP, decode/encode, resize_i420, WebRTC fan-out or live DB. Single room, so no rooms-mutex contention between rooms.",
+  "notes": "In-process engine only: no RTP, SIP, decode/encode, resize_i420, WebRTC fan-out or live DB. Audio and video are measured in separate sequential windows in one room: today's global room mutex would let video compose block the audio tick, and per-room actors/multi-room concurrency are S20. Frames are real 1280x720 I420. Each period makes one deliberate same-timestamp duplicate call that must be throttled; video throttles increment engine frames_dropped.",
   "participants": 4,
   "profile": "release",
   "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
@@ -50,20 +60,25 @@
     "video_compose_p99_le_33ms_budget": true
   },
   "video": {
-    "attempts": 1719,
-    "effective_fps": 30.157894736842106,
-    "engine_frames_dropped_delta": 0,
-    "histogram_count": 1719,
+    "attempts": 1766,
+    "effective_fps": 29.430909289844706,
+    "engine_frames_dropped_delta": 883,
+    "first_successes": 883,
+    "histogram_count": 883,
     "le_2ms_ratio": 0.0,
     "le_33ms_ratio": 1.0,
-    "mean_seconds": 0.009964289655032,
+    "mean_seconds": 0.015485937698754242,
     "p99_bucket_seconds": [
-      0.01,
-      0.02
+      0.02,
+      0.033
     ],
-    "p99_seconds_estimate": 0.019698581560283687,
-    "successful_ticks": 1719,
-    "sum_seconds": 17.12861391700001
+    "p99_seconds_estimate": 0.027800000000000002,
+    "second_call_successes": 0,
+    "successful_ticks": 883,
+    "sum_seconds": 13.674082987999995,
+    "throttled": 883
   },
+  "video_measured_seconds": 30.002470916,
+  "video_window_seconds": 30,
   "warmup_seconds": 3
 }
