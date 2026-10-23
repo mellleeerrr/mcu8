@@ -132,6 +132,10 @@ impl Compositor {
                 }
             }
         }
+        // Chroma is sampled at half resolution; layout rects use even origins, so
+        // this is exact for every room layout. An odd origin would share the
+        // boundary chroma column with the letterbox bar (nearest 2x2 block) — not
+        // reachable from the layout tables, kept as a documented limitation.
         if canvas.data.len() == cw * ch * 3 / 2 {
             let is_yuv = frame.is_yuv420p();
             let source_pixels = fw * fh;
@@ -308,7 +312,6 @@ mod tests {
         let out = Compositor.compose(&frames, &rects);
         assert_eq!((out.width, out.height), (CANVAS_WIDTH, CANVAS_HEIGHT));
         // Each frame occupies exactly its 960×540 tile, fully filled.
-        let tile_pixels = 960 * 540;
         for (i, &val) in [10u8, 20u8].iter().enumerate() {
             let (tx, ty) = if i == 0 { (0u32, 0u32) } else { (960, 0) };
             let mut all_match = true;
@@ -321,7 +324,6 @@ mod tests {
                 }
             }
             assert!(all_match, "tile {i} must be uniformly filled with {val}");
-            assert_eq!(tile_pixels, 960 * 540);
         }
         // Unassigned tiles (bottom row) stay black.
         for py in 540u32..1080 {
