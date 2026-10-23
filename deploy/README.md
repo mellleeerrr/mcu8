@@ -47,6 +47,10 @@ the Rust supervisor owns the process group and reaps/terminates the whole tree
 on shutdown. H.323 is plaintext and unauthenticated: do not expose 1720 to the
 Internet, use a firewall/allowlist, and keep room aliases/PINs private.
 
+The local `systemd/vks-mcu.service` dev unit intentionally contains **no**
+`VKS_H323_UAS_ALLOW`/limit variables (T8): they come only from the env file or a
+drop-in, otherwise the unit would silently override the single source.
+
 ## Inbound SIP UAS
 
 Inbound SIP (UDP 5060) is **off by default** (`VKS_SIP_UAS_ENABLED=0`): it
