@@ -100,6 +100,10 @@
   var constructorCount = 0;
   var constructorSide = 'grid'; // grid | l | r | t | b (последняя выбранная схема)
   var adoptPending = '';
+  // Целевой preset конструктора: вендор после mode='manual' асинхронно
+  // сбрасывает preset на preset_equal_25, поэтому цель переутверждаем
+  // в schedule(), пока пользователь не выберет другое число окон.
+  var constructorTarget = '';
   var constructorState = 'idle'; // idle | loading | ready | failed
   var constructorSlots = Object.create(null);
 
@@ -178,6 +182,15 @@
     }
   }
 
+  /* Явный выбор числа окон в вендорском счётчике отменяет цель конструктора:
+   * дальше reAdopt подхватывает новое N из слотов. */
+  function onChipPointer(event) {
+    var target = event.target;
+    if (!target || typeof target.closest !== 'function') return;
+    if (!target.closest('.layout-size-range-selector-item')) return;
+    constructorTarget = '';
+  }
+
   /* Вендорские чипы «Количество видеоокон»/пресеты ставят свой preset поверх
    * нашего. Пока «Конструктор» активен, возвращаем vks_<side>_<N> с новым N:
    * иначе сохранится вендорский preset, а карточки останутся без active. */
@@ -189,6 +202,12 @@
     if (value.mode !== 'manual') return;
     var preset = typeof value.preset === 'string' ? value.preset : '';
     if (preset.indexOf('vks_') === 0) return;
+    // Вендор после mode='manual' ставит свой дефолт preset_equal_25 уже после
+    // нашего выбора — возвращаем цель (исходное N из auto/ручной раскладки).
+    if (constructorTarget && preset === 'preset_equal_25') {
+      selectConstructor(constructorTarget);
+      return;
+    }
     var count = currentCount();
     if (!(count > 0)) return;
     var key = preset + ':' + count;
@@ -742,7 +761,8 @@
         if (keepName) editor.editValueField('displayName', keepName);
         editor.editValueField('type', 'individual');
       } catch (e) { /* поля недоступны — останутся вендорские */ }
-      selectConstructor(family() + startCount);
+      constructorTarget = family() + startCount;
+      selectConstructor(constructorTarget);
       return;
     }
     function adopt() {
@@ -758,7 +778,8 @@
           if (keepName) editor.editValueField('displayName', keepName);
           editor.editValueField('type', 'individual');
         } catch (e) { /* поля недоступны — сохранение увидит вендорские значения */ }
-        selectConstructor('vks_grid_' + count);
+        constructorTarget = 'vks_grid_' + count;
+        selectConstructor(constructorTarget);
         return;
       }
       if (attempts++ < 40) setTimeout(adopt, 50);
