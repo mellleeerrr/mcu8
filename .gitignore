@@ -39,7 +39,9 @@ vks_server.log
 deploy/vks.env
 __pycache__/
 
-# Живые E2E-артефакты (скриншоты/trace/network) — генерируются заново
+# Живые E2E-артефакты (скриншоты/trace/network) — генерируются заново.
+# По умолчанию пишутся ВНЕ репозитория ($XDG_STATE_HOME/vks/artifacts);
+# каталог ниже — только если VKS_ARTIFACTS/VKS_ARTIFACTS_ROOT указывают внутрь.
 /artifacts/
 node_modules/
 tests/e2e/node_modules/

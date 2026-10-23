@@ -256,7 +256,11 @@ impl RoomState {
             }
         }
         self.last_audio_ms = Some(now_ms);
+        let started = vks_common::metrics::mcu_tick_metrics_enabled().then(std::time::Instant::now);
         self.process_audio(audio_inputs);
+        if let Some(started) = started {
+            vks_common::metrics::observe_mcu_tick(vks_common::metrics::McuTickPhase::Audio, started.elapsed());
+        }
         true
     }
 
@@ -271,7 +275,11 @@ impl RoomState {
         self.last_render_ms = Some(now_ms);
         let applied_at = *self.layout_applied_at_ms.get_or_insert(now_ms);
         self.elapsed_ms = now_ms.saturating_sub(applied_at);
+        let started = vks_common::metrics::mcu_tick_metrics_enabled().then(std::time::Instant::now);
         self.process_video(frames);
+        if let Some(started) = started {
+            vks_common::metrics::observe_mcu_tick(vks_common::metrics::McuTickPhase::Video, started.elapsed());
+        }
         true
     }
 

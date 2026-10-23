@@ -10,8 +10,8 @@
 //! в текстовом формате Prometheus для `/metrics`.
 
 use prometheus::{
-    register_histogram_vec, register_int_counter_vec, register_int_gauge_vec, HistogramVec, IntCounterVec, IntGaugeVec,
-    Opts, Registry,
+    register_histogram_vec, register_int_counter_vec, register_int_gauge_vec, Histogram, HistogramOpts, HistogramVec,
+    IntCounterVec, IntGaugeVec, Opts, Registry,
 };
 use std::sync::LazyLock;
 
@@ -121,6 +121,62 @@ pub static HTTP_REQUESTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
         .expect("vks_http_requests_total must register once")
 });
 
+/// Buckets for the MCU tick histogram: fine below the 2 ms SLO boundary so the
+/// exact `le="0.002"` ratio is meaningful, coarse above it for diagnosis.
+pub const MCU_TICK_BUCKETS: &[f64] = &[
+    0.000_025, 0.000_05, 0.000_1, 0.000_25, 0.000_5, 0.000_75, 0.001, 0.001_5, 0.002, 0.003, 0.005, 0.007_5, 0.01,
+    0.02, 0.05, 0.1,
+];
+
+/// MCU engine tick work: audio mix or video compose, excluding RTP/network,
+/// input cloning and composite cloning. Only registered when
+/// `VKS_MCU_TICK_METRICS=1` so a default deployment pays nothing.
+pub static MCU_TICK_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!(
+        "vks_mcu_tick_duration_seconds",
+        "MCU engine tick work duration (audio mix or video compose)",
+        &["phase"],
+        MCU_TICK_BUCKETS.to_vec()
+    )
+    .expect("vks_mcu_tick_duration_seconds must register once")
+});
+
+static MCU_TICK_AUDIO: LazyLock<Histogram> = LazyLock::new(|| MCU_TICK_DURATION.with_label_values(&["audio"]));
+static MCU_TICK_VIDEO: LazyLock<Histogram> = LazyLock::new(|| MCU_TICK_DURATION.with_label_values(&["video"]));
+
+/// Phases of the MCU tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McuTickPhase {
+    Audio,
+    Video,
+}
+
+/// Env-gated tick instrumentation (`VKS_MCU_TICK_METRICS=1`), read once.
+#[must_use]
+pub fn mcu_tick_metrics_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| match std::env::var("VKS_MCU_TICK_METRICS").as_deref() {
+        Ok("1" | "true" | "TRUE" | "on" | "yes") => true,
+        _ => false,
+    })
+}
+
+/// Records one successful tick. Call only after the phase actually ran.
+pub fn observe_mcu_tick(phase: McuTickPhase, elapsed: std::time::Duration) {
+    match phase {
+        McuTickPhase::Audio => MCU_TICK_AUDIO.observe(elapsed.as_secs_f64()),
+        McuTickPhase::Video => MCU_TICK_VIDEO.observe(elapsed.as_secs_f64()),
+    }
+}
+
+/// Материализует историю тиков, если она включена.
+pub fn init_mcu_tick_metrics() {
+    if mcu_tick_metrics_enabled() {
+        MCU_TICK_AUDIO.observe(0.0);
+        MCU_TICK_VIDEO.observe(0.0);
+    }
+}
+
 /// Гистограмма длительности HTTP-запросов по классу маршрута.
 pub static HTTP_REQUEST_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!("vks_http_request_duration_seconds", "HTTP request duration in seconds", &["class"])
@@ -177,6 +233,7 @@ pub fn init_default() {
             }
         }
         CODEC_WORKER_POOL_SIZE.set(0);
+        init_mcu_tick_metrics();
     });
 }
 
@@ -303,6 +360,21 @@ pub fn new_registry() -> Registry {
             .expect("HistogramVec::new vks_http_request_duration_seconds"),
         ),
         "vks_http_request_duration_seconds",
+    );
+    register(
+        &mut registry,
+        Box::new(
+            prometheus::HistogramVec::new(
+                HistogramOpts::new(
+                    "vks_mcu_tick_duration_seconds",
+                    "MCU engine tick work duration (audio mix or video compose)",
+                )
+                .buckets(MCU_TICK_BUCKETS.to_vec()),
+                &["phase"],
+            )
+            .expect("HistogramVec::new vks_mcu_tick_duration_seconds"),
+        ),
+        "vks_mcu_tick_duration_seconds",
     );
     register(
         &mut registry,
@@ -575,6 +647,7 @@ mod tests {
         API_V3_REQUESTS.with_label_values(&["login"]).inc();
         LOGIN_ATTEMPTS.with_label_values(&["ok"]).inc();
         FRONTEND_DENIED.with_label_values(&["not_found"]).inc();
+        MCU_TICK_DURATION.with_label_values(&["audio"]).observe(0.0005);
 
         let families = prometheus::gather();
         let names: std::collections::BTreeSet<_> = families.iter().map(|f| f.name().to_string()).collect();
@@ -592,6 +665,7 @@ mod tests {
             "vks_api_v3_requests_total",
             "vks_login_attempts_total",
             "vks_frontend_denied_total",
+            "vks_mcu_tick_duration_seconds",
         ] {
             assert!(names.contains(expected), "new_registry must expose {expected} (got: {names:?})");
         }

@@ -17,6 +17,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { chromium } = require('playwright');
+const { artifactsDir } = require('./paths');
 
 const BASE = process.env.VKS_BASE_URL || 'http://127.0.0.1:8080';
 const LOGIN = process.env.VKS_LOGIN || 'admin';
@@ -27,7 +28,7 @@ const VIDEO_LOW = process.env.VKS_VIDEO_LOW === '1';
 const VIDEO_WIDTH = VIDEO_LOW ? 640 : 1920;
 const VIDEO_HEIGHT = VIDEO_LOW ? 360 : 1080;
 const VIDEO_BITRATE = VIDEO_LOW ? 512 : 4096;
-const ART = path.resolve(process.env.VKS_ARTIFACTS || 'artifacts/e2e');
+const ART = artifactsDir('e2e');
 const CHROMIUM = process.env.VKS_CHROMIUM
   || '/home/pro/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome';
 

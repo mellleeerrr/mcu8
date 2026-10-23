@@ -25,6 +25,10 @@ uuid.workspace = true
 tokio.workspace = true
 vks-core = { path = "../vks-core" }
 vks-layout = { path = "../vks-layout" }
+# Tick histograms live in the shared metrics registry; no cycle (vks-common is
+# standalone). Gated at runtime by VKS_MCU_TICK_METRICS, so default cost is one
+# cached bool load per successful tick.
+vks-common = { path = "../vks-common" }
 # async-traits для MediaEngine-порта (vks-core использует async_trait).
 async-trait = "0.1"
 

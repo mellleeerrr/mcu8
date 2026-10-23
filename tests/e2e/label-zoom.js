@@ -42,13 +42,14 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
+const { artifactsDir } = require('./paths');
 
 const BASE = process.env.VKS_BASE_URL || 'http://127.0.0.1:8080';
 const LOGIN = process.env.VKS_LOGIN || 'admin';
 const PASSWORD = process.env.VKS_PASSWORD || 'admin_password';
 const CONFERENCE_ID = process.env.VKS_CONFERENCE_ID || '49b599d7-b5cd-45a7-8999-47a28c453a92';
 const PARTICIPANT = process.env.VKS_PARTICIPANT || 'T12b Label Probe';
-const ART = path.resolve(process.env.VKS_ARTIFACTS || 'artifacts/e2e-label-zoom');
+const ART = artifactsDir('e2e-label-zoom');
 const CHROMIUM = process.env.VKS_CHROMIUM
   || '/home/pro/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome';
 // Строгий режим (исторический): после фикса счётчиков (e81811f) проверка

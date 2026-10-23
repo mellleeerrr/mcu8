@@ -14,6 +14,7 @@
 'use strict';
 
 const path = require('node:path');
+const { artifactsDir } = require('./paths');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
@@ -24,7 +25,7 @@ const BASE = process.env.VKS_BASE_URL || 'http://127.0.0.1:8080';
 const WS_URL = BASE.replace(/^http/, 'ws') + '/ws';
 const LOGIN = process.env.VKS_LOGIN || 'admin';
 const PASSWORD = process.env.VKS_PASSWORD || 'admin_password';
-const ART = path.resolve(process.env.VKS_ARTIFACTS || 'artifacts/e2e-webrtc');
+const ART = artifactsDir('e2e-webrtc');
 const CHROMIUM = process.env.VKS_CHROMIUM
   || '/home/pro/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome';
 const RUN_SECONDS = Number(process.env.VKS_WEBRTC_RUN_SECONDS || 6);

@@ -25,7 +25,9 @@ VKS_SIP_URI=sip:probe-e2e@192.168.1.132 \
 npm test
 ```
 
-Artifacts go to `VKS_ARTIFACTS` (default `artifacts/e2e`): `result.json`,
+Artifacts go to `VKS_ARTIFACTS` (default: `$XDG_STATE_HOME/vks/artifacts/e2e`,
+fallback `~/.local/state/vks/artifacts/e2e` — **outside the repository**; set
+`VKS_ARTIFACTS_ROOT` to move the whole root): `result.json`,
 `network.json`, screenshots, `trace.zip`. The script creates and removes its
 own test rooms; it requires the live server and the remote SIP terminal.
 Set `VKS_PASSWORD` for non-dev configs.
@@ -82,7 +84,7 @@ VKS_REVERT_CHECK=1 node tests/e2e/label-zoom.js         # ожидается exi
 
 Переменные: `VKS_CONFERENCE_ID` (по умолчанию — комната с контактом
 «T12b Label Probe»), `VKS_PARTICIPANT`, `VKS_ARTIFACTS` (по умолчанию
-`artifacts/e2e-label-zoom`), `VKS_CHROMIUM`, `VKS_APPLY_CANDIDATE`,
+`$XDG_STATE_HOME/vks/artifacts/e2e-label-zoom`), `VKS_CHROMIUM`, `VKS_APPLY_CANDIDATE`,
 `VKS_REVERT_CHECK`. Коды выхода: `0` — все проверки прошли, `1` — провалена
 проверка, `2` — прогон упал (логин/страница/нет контакта в комнате).
 Скрипт ничего не пишет в живую БД: «Создать» не нажимается, единственный
@@ -285,7 +287,7 @@ VKS_CLIP_CHECK=1 node tests/e2e/audio-in-layouts.js        # ожидается 
 
 Переменные: `VKS_CONFERENCE_ID`, `VKS_SESSION_ID` (по умолчанию — тот же UUID),
 `VKS_PARTICIPANT`, `VKS_ARTIFACTS` (по умолчанию
-`artifacts/e2e-audio-in-layouts`), `VKS_CHROMIUM`, `VKS_CHECKS_SELFTEST`
+`$XDG_STATE_HOME/vks/artifacts/e2e-audio-in-layouts`), `VKS_CHROMIUM`, `VKS_CHECKS_SELFTEST`
 (алиас `VKS_SIMULATE_FIX`), `VKS_REVERT_CHECK`, `VKS_CLIP_CHECK`. Коды выхода:
 `0` — все проверки прошли, `1` — провалена проверка, `2` — прогон упал
 (логин/страница).
