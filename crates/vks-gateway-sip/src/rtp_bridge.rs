@@ -499,14 +499,6 @@ fn push_video_attrs(sdp: &mut String, codecs: &[&OfferCodec], video: &VideoSdpPr
 /// магическому PT 98: нумерация payload type может измениться.
 /// Availability gate for offered video entries. H.264/H.265 need a working
 /// FFmpeg bridge; H.261/H.263 stay lab-only until their payloaders exist.
-fn video_codec_available_for_offer(name: &str) -> bool {
-    offer_video_enabled(
-        name,
-        vks_common::codec_capabilities::video_codec_available("H264"),
-        vks_common::codec_capabilities::video_codec_available("H265"),
-    )
-}
-
 fn offer_video_enabled(name: &str, h264: bool, h265: bool) -> bool {
     match name.to_ascii_uppercase().as_str() {
         "H264" => h264,

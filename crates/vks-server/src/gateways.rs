@@ -1332,7 +1332,7 @@ impl GatewayManager {
             if let Err(error) = start {
                 // A codec/FFmpeg failure must not kill an already working
                 // audio call. Downgrade this participant to audio-only.
-                tracing::warn!(pid = %pid_str, %error, "H.264 bridge unavailable; continuing audio-only");
+                tracing::warn!(pid = %pid_str, codec = video_profile.codec.name(), %error, "video bridge unavailable; continuing audio-only");
                 mcu.unbridge_participant(room_id, participant);
                 mcu.bridge_participant(
                     room_id,
@@ -1341,6 +1341,15 @@ impl GatewayManager {
                 );
                 has_video = false;
                 video_lease.take();
+                if let Ok(mut registry) = self.registry.lock() {
+                    if let Some(session) = registry.by_participant.get_mut(&pid_str) {
+                        session.media_details["video_codec"] = serde_json::Value::Null;
+                        session.media_details["video_tx_payload_type"] = serde_json::Value::Null;
+                        session.media_details["video_rx_payload_type"] = serde_json::Value::Null;
+                        session.media_details["video_clock_rate"] = serde_json::Value::Null;
+                        session.media_details["video_codec_running"] = serde_json::Value::Bool(false);
+                    }
+                }
             } else if let Some(lease) = video_lease.as_mut() {
                 lease.disarm();
             }
