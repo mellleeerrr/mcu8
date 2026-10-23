@@ -174,6 +174,22 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > Осталось: живой вызов с H265-терминалом (терминал отвечает H264 — interop-ограничение железа),
 > AAC-LATM мост, затем SDP readiness gate. H.261/H.263 по-прежнему без пейлоадеров и не объявляются.
 >
+> **T06b-8 (AAC-LATM аудио-мост) — в работе, задача `task-2`; pitfalls/design зафиксированы:**
+> Проверено на FFmpeg 8.0.1: `-f latm` даёт LOAS-поток ровно 1024 samples/кадр (48 кадров на 1 с),
+> 3-байтовый sync/len, первый кадр несёт StreamMuxConfig (`useSameStreamMux=0`), последующие —
+> `useSameStreamMux=1`; `-f loas` декодирует обратно 48 кГц. RTP: один `audioMuxElement` на пакет,
+> 90 кГц, +1920 тика/кадр, marker=1, PT113 последним; `a=ptime:20` для AAC не писать.
+> Архитектурный вывод: у каждого SIP-участника свой энкодер, стартующий при входе, поэтому late-join
+> SMC-replay не нужен; потеря первого (SMC) пакета на входящем направлении невосстановима без
+> re-INVITE — задокументировать. 50 Гц PCM tick (960 samples) vs 1024-sample AAC: 16 тиков = 15 кадров,
+> поэтому PCM копить в 1024-сэмпловые блоки, а не отправлять один кадр на тик; worker читать
+> неблокирующе/отдельной задачей, иначе 20 мс тик встанет на FFmpeg pipe.
+> Срезы: (1) probe `aac` encoder + `aac_latm` decoder и availability без объявления в offer;
+> (2) outbound task encode→strip_loas→RTP; (3) inbound RTP→add_loas→decode→PCM в микс;
+> (4) SDP PT113/fmtp/config + answer mirror; (5) loopback-тест и live-вызов .132.
+> Нельзя: `-flags low_delay`/`-avioflags direct` (ломали AAC), забыть `-probesize 32 -analyzeduration 0`
+> перед `-i`, ждать EOF для получения кадров, блокировать основной аудио-цикл чтением stdout.
+>
 > **T06b-5 (изолированные FFmpeg-воркеры: фундамент) закрыт `212649b`, ревью 9.5/10 APPROVED (r6, независимый):**
 > `codec_worker` — один долгоживущий FFmpeg на кодек/направление, `FfmpegCapabilities` probe
 > (`aac`/`aac_latm`/`g729` decode, H.261/H.263/H.265), bounded `WorkerPool`, per-slot
