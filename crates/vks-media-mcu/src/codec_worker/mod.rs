@@ -14,6 +14,7 @@
 //! silently degrading.
 
 pub mod ffmpeg;
+pub mod latm;
 
 pub use ffmpeg::{FfmpegCapabilities, FfmpegWorker, WorkerConfig, WorkerError, WorkerMode, WorkerPool, WorkerStats};
 

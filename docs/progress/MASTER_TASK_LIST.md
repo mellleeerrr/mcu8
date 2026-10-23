@@ -203,7 +203,11 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > `has_audio_latm_bridge`, `audio_codec_available` default=false, startup-публикация; live-бинарь
 > `e8285df5` логирует `aac_latm=true`, SDP всё ещё не объявляет**); 2) outbound encode-only за флагом;
 > 3) inbound cpresent=1; 4) cpresent=0/config, PLC, pool preflight, 44.1/32, soak; 5) включение после
-> legal + live .132.
+> legal + live .132. **Slice 2a готов:** `vks_media_mcu::codec_worker::latm::LatmEncoder` — долгоживущий
+> FFmpeg (`s16le` 48k → `aac` → `latm`), раздельные stdin/stdout-задачи, bounded-очереди, LOAS-заголовок
+> снимается, `-smc-interval 1`, обязательные `-probesize 32 -analyzeduration 0` (без них live-труба
+> буферизует ~5 МБ и первый кадр не приходит), запрещённые `low_delay`/`nobuffer`/`avioflags direct`
+> зафиксированы тестом; реальный тест 16×960 → 15–17 кадров, первый с SMC, ≤1200 B. Workspace 1225.
 > Нельзя: `-flags low_delay`/`-avioflags direct`/`-fflags nobuffer` (ломали AAC), забыть
 > `-probesize 32 -analyzeduration 0` перед `-i`, ждать EOF для кадров, блокировать аудио-цикл чтением stdout,
 > объявлять native AAC без worker/packetizer/probe, резать кадр по MTU вместо drop+metric, писать `ptime:20`
