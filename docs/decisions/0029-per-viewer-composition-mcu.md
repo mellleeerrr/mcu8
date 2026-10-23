@@ -132,10 +132,12 @@ compose mean 9.83 мс, p99 19.7 мс, `le_2ms_ratio = 0.0`, `le_33ms_ratio = 1.
   обязателен в фазе 2.
 
 ### Что нужно сделать для реализации
-- [ ] Фаза 0: ADR-0029 (этот документ) + `vks-layout/src/viewer.rs` +
+- [x] Фаза 0: ADR-0029 (этот документ) + `vks-layout/src/viewer.rs` +
       `McuEngine::frame_for_viewer` + egress на `Arc<Frame>`; критерий:
       побайтовое равенство с текущим композитом, `Arc::ptr_eq` для двух
-      зрителей.
+      зрителей. Сделано: композит — `Arc<Frame>` (копии 3 МиБ на вызов ушли),
+      `frame_for_viewer`/`tick_video_for_viewer`, egress спрашивает кадр для
+      получателя, `vks-layout/src/viewer.rs` — чистый `plan_viewer`.
 - [ ] Фаза 1: тайл-кейш; критерий: побайтовое равенство с эталонным
       `Compositor::compose`, число масштабирований == число `TileKey`,
       soak: V=10 ≤ 1.5 × V=1.

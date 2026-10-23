@@ -16,6 +16,7 @@
 //! - [`preset`] — вендорные пресеты PNM: id, схемы и геометрия слотов.
 //! - [`codian`] — 52 раскладки Codian MCU 4200 + 2 кастомные.
 //! - [`roles`] — роли окон (default/fixed/active/rolling) и назначение участников.
+//! - [`viewer`] — план раскладки для зрителя (ADR-0029, §2 Codian).
 //!
 //! ## Инварианты
 //! - Все rect в пикселях на canvas (общая валюта MCU/клиента).
@@ -34,6 +35,7 @@ mod grid;
 pub mod preset;
 mod rect;
 pub mod roles;
+pub mod viewer;
 
 pub use codian::{CodianScheme, Pip, Region};
 pub use core::{Layout, LayoutError, LayoutKind, NormalizedLayout, NormalizedSlot, ParticipantId, Slot, SlotId};
@@ -44,3 +46,4 @@ pub use preset::{
 };
 pub use rect::{Canvas, NormalizedRect, Rect};
 pub use roles::{assign_by_role, RotationState, SlotRole};
+pub use viewer::{plan_viewer, PlanCell, SelfViewPolicy, ViewerContext, ViewerPlan};
