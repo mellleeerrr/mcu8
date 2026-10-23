@@ -3,6 +3,9 @@
 ## Files
 
 - `systemd/vks-mcu-prod.service` — hardened system-level unit, `DynamicUser=yes`.
+- `systemd/vks-mcu.service` — dev-only user unit for a local stand (`%h/mcu`);
+  machine-specific values (`VKS_CANDIDATE_ADDR`, allowlist) задаются
+  `systemctl --user set-environment` или drop-in, а не в репозитории.
 - `vks.env.example` — secrets template; copy to `/etc/vks/vks.env` mode `0600`
   (owner `root`, readable by systemd before privileges drop).
 - `../configs/prod.example.toml` — copy to `/etc/vks/server.toml`, mode `0600`.
@@ -32,24 +35,34 @@ directory (verified on systemd 259).
 ## Inbound H.323 UAS
 
 `h323_listener.py` is installed next to the outbound sidecar. Inbound H.323 is
-disabled by default (`VKS_H323_UAS_ENABLED=0` in the sample env); enable it
-explicitly and restrict source networks:
-
-```bash
-VKS_H323_UAS_ENABLED=1
-VKS_H323_UAS_HELPER=/opt/vks/share/vks-mcu/h323_listener.py
-VKS_H323_UAS_ALLOW=192.168.0.0/16,127.0.0.1/32
-VKS_H323_UAS_MAX_CALLS=20
-VKS_H323_UAS_MAX_PER_IP=8
-VKS_H323_UAS_MAX_CHILDREN=64
-```
-
-Then edit `/etc/vks/vks.env`: set `VKS_H323_UAS_ENABLED=1`, narrow
-`VKS_H323_UAS_ALLOW` to your LAN, and restart. Open TCP 1720 only from those
-networks. The listener forks one child per call;
+disabled by default (`VKS_H323_UAS_ENABLED=0` in the sample env). The single
+source of truth for the variables is `vks.env.example`: set
+`VKS_H323_UAS_ENABLED=1`, `VKS_H323_UAS_HELPER`, and an explicit narrow
+`VKS_H323_UAS_ALLOW` (the sample defaults to loopback-only `127.0.0.1/32`;
+widen it to your LAN CIDRs, never `0.0.0.0/0`). Limits:
+`VKS_H323_UAS_MAX_CALLS` / `VKS_H323_UAS_MAX_PER_IP` /
+`VKS_H323_UAS_MAX_CHILDREN`. Then edit `/etc/vks/vks.env` and restart. Open TCP
+1720 only from those networks. The listener forks one child per call;
 the Rust supervisor owns the process group and reaps/terminates the whole tree
 on shutdown. H.323 is plaintext and unauthenticated: do not expose 1720 to the
 Internet, use a firewall/allowlist, and keep room aliases/PINs private.
+
+## Inbound SIP UAS
+
+Inbound SIP (UDP 5060) is **off by default** (`VKS_SIP_UAS_ENABLED=0`): it
+accepts unauthenticated plaintext INVITEs. Enabling it is an explicit
+deployment decision:
+
+```bash
+VKS_SIP_UAS_ENABLED=1
+VKS_SIP_UAS_BIND=0.0.0.0:5060   # сузьте до LAN-интерфейса
+VKS_SIP_UAS_MAX_CALLS=64
+```
+
+**Release note:** у SIP UAS нет реализованного IP-allowlist и digest-auth
+(в отличие от H.323 UAS); защита — firewall/NAT, лимит `VKS_SIP_UAS_MAX_CALLS`
+и token bucket 20 burst / 10 rps на IP. Не выставляйте 5060 в Интернет;
+`candidate_addr` анонсируется в SDP, TLS/регистрация не поддерживаются.
 
 ## WebRTC media
 

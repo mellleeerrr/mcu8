@@ -124,6 +124,34 @@ H.323-allowlist трижды (конфликт) — свести к одному
 Критерии: каждый конфиг прочитан cat; 0 противоречий; чистый запуск default.toml
 ≠78, TEST-NET → 78.
 
+Выполнено (2026-10-24):
+- прочитаны cat: Cargo.toml (workspace + 16 crate-манифестов), rust-toolchain.toml,
+  .cargo/config.toml, .gitignore, configs/*.toml, deploy/** (README, оба unit,
+  vks.env.example), .github/workflows/ci.yml;
+- default.toml: комментарий про preflight приведён к факту (поле читается только
+  при VKS_WEBRTC_TRANSPORT=1; при выключенном — legacy SDP), убран хардкод IP
+  стенда из комментария;
+- H.323-allowlist: единственный источник значений — deploy/vks.env.example
+  (безопасный loopback-only 127.0.0.1/32); deploy/README больше не дублирует
+  конкретные CIDR (ссылается на переменные и «сузьте до LAN»); dev-юнит
+  помечен DEV override;
+- dev-IP и все машинные пути вынесены из deploy/systemd/vks-mcu.service:
+  `%h/mcu`, candidate/allowlist — через `systemctl --user set-environment`
+  или drop-in (описано в deploy/README); systemd-analyze verify — 0;
+- SIP UAS release-note: deploy/README + vks.env.example честно фиксируют, что
+  входящий SIP off by default, без auth/TLS и без IP-allowlist (только
+  firewall, VKS_SIP_UAS_MAX_CALLS и token bucket 20/10 rps);
+- README: ADR 0001–0031, тесты 1302 (0 сбоев, 8 ignored) по фактическому
+  прогону, candidate/TEST-NET уточнены (RFC 5737, exit 78 при включённом WebRTC);
+- пустые `[features] default = []` удалены (vks-admin, vks-gateway-sip);
+  дубли dev-dependencies tokio удалены (admin/h323/sip/storage), sha2/subtle/
+  serde_json переведены на workspace-наследование;
+- .work-tmp почищен (47 МБ → 9 МБ; agents-отчёты удалены), /tmp освобождён
+  от старых reviewer-чекаутов и playwright-профилей;
+- критерии проверены: чистый запуск default.toml с изолированной SQLite —
+  exit 124 (timeout, сервер жив, не 78); TEST-NET candidate при
+  VKS_WEBRTC_TRANSPORT=1 — exit 78 с «documentation (TEST-NET) address».
+
 ## T7. Admin auth и контракт
 Роль-гейт `GET /conferences/{id}` и `/ui/conferences/{id}` (Viewer без PIN),
 списки с ролевым гейтом, `PATCH /profile` и `/sessions/{id}` (501→200/405 в

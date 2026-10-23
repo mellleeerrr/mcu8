@@ -12,9 +12,10 @@ server_name = "vks-mcu"
 listen_addr = "0.0.0.0:8080"
 media_listen_addr = "0.0.0.0:40000"
 # WebRTC/шлюзовый Candidate IP announced in SDP.
-# Пусто = fail-closed: preflight отвергает пусто и TEST-NET (RFC 5737), чтобы
-# «валидный, но недостижимый» IP не ломал медиа молча. На стенде задаётся
-# переменной VKS_CANDIDATE_ADDR=192.168.1.93 (см. deploy/vks.env.example).
+# Используется только при VKS_WEBRTC_TRANSPORT=1: тогда preflight отвергает
+# пустое значение, TEST-NET (RFC 5737), loopback/unspecified и невалидный
+# IP (exit 78). При выключенном транспорте (dev-дефолт) поле не читается —
+# остаётся legacy SDP. Значение стенда задаётся в deploy/vks.env.example.
 candidate_addr = ""
 
 # Authentication & Identity (ADR-0009 / ADR-0022)

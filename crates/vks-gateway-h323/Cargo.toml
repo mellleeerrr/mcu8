@@ -27,5 +27,3 @@ vks-common = { path = "../vks-common" }
 tokio = { workspace = true }
 libc = { workspace = true }
 
-[dev-dependencies]
-tokio = { workspace = true }

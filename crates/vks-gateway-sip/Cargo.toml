@@ -28,8 +28,3 @@ rusty-opus = "=1.0.2"
 oxideav-g728 = "=0.0.8"
 oxideav-g7231 = "=0.0.9"
 
-[features]
-default = []
-
-[dev-dependencies]
-tokio = { workspace = true }

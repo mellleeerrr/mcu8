@@ -1,15 +1,21 @@
 # DEV ONLY: user-level unit для локального стенда. Не устанавливайте
 # system-wide: запускает release-бинарь от текущего пользователя и пишет
 # dev-лог в репозиторий. Production — vks-mcu-prod.service.
+#
+# Candidate IP и allowlist стенда задаются вне юнита, чтобы не хардкодить
+# адрес машины в репозитории:
+#   systemctl --user set-environment VKS_CANDIDATE_ADDR=<IP стенда>
+# или drop-in ~/.config/systemd/user/vks-mcu.service.d/dev.conf с Environment=.
 [Unit]
 Description=VKS MCU local stand (PROSTOR UI, SIP/H.323, SQLite)
-Documentation=file:///home/pro/mcu/docs/progress/MASTER_TASK_LIST.md
+Documentation=file://%h/mcu/docs/progress/MASTER_TASK_LIST.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/pro/mcu
+WorkingDirectory=%h/mcu
+# DEV override: inbound H.323 слушает LAN стенда.
 Environment=VKS_H323_UAS_ENABLED=1
 Environment=VKS_H323_UAS_ALLOW=127.0.0.1/32,192.168.1.0/24
 Environment=VKS_H323_UAS_MAX_CALLS=20
@@ -18,12 +24,10 @@ Environment=VKS_H323_UAS_MAX_PER_IP=20
 Environment=VKS_WEBRTC_TRANSPORT=1
 # DEV ONLY: входящий SIP на стенде (в шаблоне по умолчанию выключен).
 Environment=VKS_SIP_UAS_ENABLED=1
-# DEV ONLY: IP этого стенда. В prod-юните значение задаётся через EnvironmentFile.
-Environment=VKS_CANDIDATE_ADDR=192.168.1.93
 # Firewall/NAT must open this UDP range; empty = ephemeral ports.
 Environment=VKS_WEBRTC_PORT_MIN=43000
 Environment=VKS_WEBRTC_PORT_MAX=43100
-ExecStart=/home/pro/mcu/target/release/vks-server --config /home/pro/mcu/configs/default.toml
+ExecStart=%h/mcu/target/release/vks-server --config %h/mcu/configs/default.toml
 Restart=on-failure
 RestartSec=2
 # exit 78 (EX_CONFIG) — ошибка конфигурации: перезапуск не поможет, не зацикливаемся.
@@ -32,8 +36,8 @@ KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=30
 LimitNOFILE=65536
-StandardOutput=append:/home/pro/mcu/vks_server.log
-StandardError=append:/home/pro/mcu/vks_server.log
+StandardOutput=append:%h/mcu/vks_server.log
+StandardError=append:%h/mcu/vks_server.log
 
 [Install]
 WantedBy=default.target

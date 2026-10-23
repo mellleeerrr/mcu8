@@ -34,10 +34,12 @@ cargo build --release -p vks-server
    export VKS_DATABASE_URL='postgres://vks:<пароль>@db.internal:5432/vks'
    VKS_CONFIG_PATH=/etc/vks/server.toml ./target/release/vks-server
    ```
-3. `candidate_addr` должен быть публичным **IPv4** (SDP за NAT; DNS-имя не
-   принимается), БД —
-   PostgreSQL; TLS/reverse-proxy и ограничение доступа к `/pnm/` — на уровне
-   инфраструктуры.
+3. При `VKS_WEBRTC_TRANSPORT=1` `candidate_addr` должен быть публичным
+   **IPv4** (SDP за NAT; DNS-имя не принимается): preflight отвергает пусто,
+   TEST-NET (RFC 5737), loopback/unspecified и невалидный IP с exit 78. При
+   выключенном транспорте (по умолчанию) поле не используется — остаётся
+   legacy SDP. БД — PostgreSQL; TLS/reverse-proxy и ограничение доступа к
+   `/pnm/` — на уровне инфраструктуры.
 4. Production fail-closed: `configs/prod.example.toml` содержит
    `allow_insecure_defaults = false`. Без сильного `VKS_JWT_SECRET` (≥32 байта)
    сервер завершается с кодом 78; для новой БД и для разовой ротации слабого
@@ -54,7 +56,7 @@ cargo build --release -p vks-server
 |---|---|
 | [`docs/PROJECT_RULES.md`](docs/PROJECT_RULES.md) | обязательные правила разработки |
 | [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) | архитектура, инварианты, стек |
-| [`docs/decisions/DECISIONS.md`](docs/decisions/DECISIONS.md) | реестр ADR (0001–0027) |
+| [`docs/decisions/DECISIONS.md`](docs/decisions/DECISIONS.md) | реестр ADR (0001–0031) |
 | [`docs/progress/MASTER_TASK_LIST.md`](docs/progress/MASTER_TASK_LIST.md) | **единственный живой трекер** задач и приёмки |
 | [`docs/progress/evidence/`](docs/progress/evidence/) | воспроизводимые evidence-прогоны (summary.json + PNG) |
 | [`docs/rules/`](docs/rules/) | backend/frontend/code-style стандарты |
@@ -78,6 +80,6 @@ cargo build --release -p vks-server
 в приёмку T1–T3.
 
 - Workspace: Rust 2021, MSRV 1.94, 16 крейтов.
-- Тесты: `970` (`cargo test --workspace --all-targets`, 0 сбоев, 6 ignored).
+- Тесты: `1302` (`cargo test --workspace --all-targets`, 0 сбоев, 8 ignored).
 - `cargo fmt --check` и `cargo clippy --workspace --all-targets -- -D warnings` —
   0 замечаний.
