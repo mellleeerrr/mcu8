@@ -1,14 +1,12 @@
 //! WebSocket транспорт (SIGNALING_PROTOCOL — основной, R5).
 //!
 //! Эта волна — **абстракция + mock**: трейт `WsSession` (порт) и
-//! in-memory `MockWs` для тестов handler. Реальный `tokio-tungstenite`
-//! подключается опционально (feature `ws`) — базовый билд остаётся
-//! без I/O (модель mock-портов, CODE_STYLE §4).
+//! in-memory `MockWs` для тестов handler; реального I/O в базовом билде нет
+//! (модель mock-портов, CODE_STYLE §4).
 
 /// Транспорт-порт для WebSocket (обёртка над байтовыми `Envelope`-фреймами).
 ///
-/// Реализации: `MockWs` (in-memory, тесты) и future `TungsteniteSession`
-/// (feature `ws`, реальный WS/WSS-стек).
+/// Реализация: `MockWs` (in-memory, тесты).
 pub trait WsSession {
     /// Отправляет байты `Envelope` (один WS-binary-фрейм).
     fn send(&mut self, bytes: Vec<u8>);
@@ -75,74 +73,6 @@ impl WsSession for MockWs {
 
     fn is_closed(&self) -> bool {
         self.closed
-    }
-}
-
-#[cfg(feature = "ws")]
-pub mod tungstenite_impl {
-    use super::WsSession;
-
-    /// Заглушка реального WS-стек'а (feature `ws`, `tokio-tungstenite`).
-    ///
-    /// В этой волне — только интерфейс: держит uri и реализует порт
-    /// как no-op (реальный `connect_async` + read/write придёт вместе
-    /// с tokio-tungstenite в фазе 2).
-    pub struct TungsteniteSession {
-        uri: String,
-        closed: bool,
-    }
-
-    impl TungsteniteSession {
-        #[must_use]
-        pub fn new(uri: impl Into<String>) -> Self {
-            Self { uri: uri.into(), closed: false }
-        }
-
-        #[must_use]
-        pub fn uri(&self) -> &str {
-            &self.uri
-        }
-    }
-
-    impl WsSession for TungsteniteSession {
-        fn send(&mut self, _bytes: Vec<u8>) {
-            if !self.closed {
-                tracing::debug!(uri = %self.uri, "tungstenite send (stub)");
-            }
-        }
-
-        fn recv(&mut self) -> Option<Vec<u8>> {
-            if self.closed {
-                None
-            } else {
-                tracing::debug!(uri = %self.uri, "tungstenite recv (stub, waiting)");
-                None
-            }
-        }
-
-        fn close(&mut self) {
-            self.closed = true;
-        }
-
-        fn is_closed(&self) -> bool {
-            self.closed
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn tungstenite_session_stub_send_recv_close() {
-            let mut s = TungsteniteSession::new("ws://localhost:3080/signaling");
-            assert!(!s.is_closed());
-            assert!(s.recv().is_none());
-            s.send(vec![4, 5, 6]);
-            s.close();
-            assert!(s.is_closed());
-            assert!(s.recv().is_none());
-        }
     }
 }
 

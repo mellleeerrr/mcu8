@@ -8,13 +8,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "VKS signaling: session FSM, envelope codec, reconnect/backoff (WS/WSS + WebTransport later)"
-
-[features]
-# Реальные WS/WebTransport-стёки (фаза 2, когда появятся tokio-tungstenite /
-# wtransport в workspace). Сейчас — no-op заглушки, включаются фичами.
-ws = []
-wtransport = []
+description = "VKS signaling: session FSM, envelope codec, SDP, WS/WebTransport ports (mocks)"
 
 [dependencies]
 thiserror.workspace = true
@@ -22,6 +16,3 @@ tracing.workspace = true
 prost.workspace = true
 uuid.workspace = true
 vks-proto = { path = "../vks-proto" }
-
-[dev-dependencies]
-proptest.workspace = true

@@ -9,15 +9,14 @@ use std::sync::RwLock;
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
-use crate::rows::{now, ApiKey, AuditEntry, Layout, Room, RoomMode, User};
+use crate::rows::{now, ApiKey, AuditEntry, Room, RoomMode, User};
 
-/// In-memory хранилище: пользователи, комнаты, layouts, api-ключи, audit.
+/// In-memory хранилище: пользователи, комнаты, api-ключи, audit.
 #[derive(Debug, Default)]
 pub struct MemoryStorage {
     users: RwLock<HashMap<Uuid, User>>,
     rooms: RwLock<HashMap<Uuid, Room>>,
     room_mode_override: RwLock<HashMap<Uuid, RoomMode>>,
-    layouts: RwLock<HashMap<Uuid, Layout>>,
     api_keys: RwLock<HashMap<Uuid, ApiKey>>,
     audit: RwLock<Vec<AuditEntry>>,
     core_participants: RwLock<HashMap<vks_core::participant::ParticipantId, vks_core::participant::Participant>>,
@@ -149,24 +148,6 @@ impl MemoryStorage {
         self.rooms.write().unwrap().remove(&id).map(|_| ()).ok_or_else(|| Error::NotFound(format!("room {id}")))
     }
 
-    // --- layouts ---
-
-    /// Сохраняет layout комнаты (insert или replace по `id`).
-    pub fn insert_layout(&self, layout: Layout) -> Result<()> {
-        self.layouts.write().unwrap().insert(layout.id, layout);
-        Ok(())
-    }
-
-    /// Возвращает layout по `id`.
-    pub fn get_layout(&self, id: Uuid) -> Result<Layout> {
-        self.layouts.read().unwrap().get(&id).cloned().ok_or_else(|| Error::NotFound(format!("layout {id}")))
-    }
-
-    /// Layouts для комнаты.
-    pub fn list_layouts(&self, room_id: Uuid) -> Vec<Layout> {
-        self.layouts.read().unwrap().values().filter(|l| l.room_id == room_id).cloned().collect()
-    }
-
     // --- api_keys ---
 
     /// Сохраняет API-ключ (insert или replace по `id`).
@@ -212,11 +193,6 @@ impl MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rows::Tile;
-
-    fn test_tile() -> Tile {
-        Tile { x: 0, y: 0, width: 100, height: 100 }
-    }
 
     #[test]
     fn user_crud_roundtrip() {
@@ -257,18 +233,6 @@ mod tests {
         // Delete.
         storage.delete_room(id).unwrap();
         assert!(storage.get_room(id).is_err());
-    }
-
-    #[test]
-    fn layout_crud_roundtrip() {
-        let storage = MemoryStorage::new();
-        let room_id = Uuid::new_v4();
-        let layout = Layout { id: Uuid::new_v4(), room_id, width: 1920, height: 1080, tiles: vec![test_tile()] };
-        storage.insert_layout(layout.clone()).unwrap();
-        assert_eq!(storage.get_layout(layout.id).unwrap(), layout);
-        assert_eq!(storage.list_layouts(room_id).len(), 1);
-        assert_eq!(storage.list_layouts(Uuid::new_v4()).len(), 0);
-        assert!(storage.get_layout(Uuid::new_v4()).is_err());
     }
 
     #[test]

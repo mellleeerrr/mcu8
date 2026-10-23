@@ -1,7 +1,7 @@
 //! SQLite backend (single-node, ADR-0008) на `sqlx::SqlitePool` (runtime API).
 //!
 //! Инициализация запускает migrations из `migrations/` (`sqlx::migrate!`).
-//! CRUD: users, rooms (+ room_mode_override), layouts, api_keys, audit
+//! CRUD: users, rooms (+ room_mode_override), api_keys, audit
 //! (append-only).
 
 use std::str::FromStr;
@@ -12,7 +12,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::error::Result;
-use crate::rows::{now, ApiKey, AuditEntry, Layout, Room, RoomMode, Tile, User};
+use crate::rows::{now, ApiKey, AuditEntry, Room, RoomMode, User};
 
 const POOL_SIZE: u32 = 50;
 /// Timeout запроса (BACKEND_RULES §5.1).
@@ -51,16 +51,6 @@ struct RoomRow {
 struct RoomModeOverrideRow {
     room_id: Uuid,
     mode: String,
-}
-
-/// Строка layouts (raw, для `FromRow`).
-#[derive(sqlx::FromRow)]
-struct LayoutRow {
-    id: Uuid,
-    room_id: Uuid,
-    width: i32,
-    height: i32,
-    tiles: String,
 }
 
 /// Строка api_keys (raw, для `FromRow`).
@@ -252,51 +242,6 @@ impl SqliteStorage {
         Ok(())
     }
 
-    // --- layouts ---
-
-    /// Вставляет или обновляет layout.
-    pub async fn insert_layout(&self, layout: &Layout) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO layouts (id, room_id, width, height, tiles)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (id) DO UPDATE SET room_id = $2, width = $3, height = $4, tiles = $5",
-        )
-        .bind(layout.id)
-        .bind(layout.room_id)
-        .bind(layout.width)
-        .bind(layout.height)
-        .bind(serde_json::to_string(&layout.tiles)?)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Возвращает layout по `id`.
-    pub async fn get_layout(&self, id: Uuid) -> Result<Layout> {
-        let row: Option<LayoutRow> =
-            sqlx::query_as("SELECT id, room_id, width, height, tiles FROM layouts WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?;
-        let row = row.ok_or_else(|| crate::Error::NotFound(format!("layout {id}")))?;
-        Ok(Self::layout_from_row(row))
-    }
-
-    /// Layouts для комнаты.
-    pub async fn list_layouts(&self, room_id: Uuid) -> Result<Vec<Layout>> {
-        let rows: Vec<LayoutRow> =
-            sqlx::query_as("SELECT id, room_id, width, height, tiles FROM layouts WHERE room_id = $1")
-                .bind(room_id)
-                .fetch_all(&self.pool)
-                .await?;
-        Ok(rows.into_iter().map(Self::layout_from_row).collect())
-    }
-
-    fn layout_from_row(row: LayoutRow) -> Layout {
-        let tiles: Vec<Tile> = serde_json::from_str(&row.tiles).unwrap_or_default();
-        Layout { id: row.id, room_id: row.room_id, width: row.width, height: row.height, tiles }
-    }
-
     // --- api_keys ---
 
     /// Вставляет или обновляет API-ключ.
@@ -413,10 +358,6 @@ mod tests {
         SqliteStorage::init("sqlite::memory:?cache=shared").await.unwrap()
     }
 
-    fn tile() -> Tile {
-        Tile { x: 1, y: 2, width: 3, height: 4 }
-    }
-
     #[tokio::test]
     async fn user_roundtrip() {
         let storage = test_storage().await;
@@ -449,19 +390,6 @@ mod tests {
         assert!(storage.list_rooms().await.unwrap().iter().any(|r| r.id == id));
         storage.delete_room(id).await.unwrap();
         assert!(storage.get_room(id).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn layout_roundtrip() {
-        let storage = test_storage().await;
-        let room_id = Uuid::new_v4();
-        storage.insert_room(room_id, &format!("l{}", Uuid::new_v4().simple()), RoomMode::Sfu).await.unwrap();
-        let layout = Layout { id: Uuid::new_v4(), room_id, width: 1920, height: 1080, tiles: vec![tile()] };
-        storage.insert_layout(&layout).await.unwrap();
-        assert_eq!(storage.get_layout(layout.id).await.unwrap(), layout);
-        let listed = storage.list_layouts(room_id).await.unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0], layout);
     }
 
     #[tokio::test]

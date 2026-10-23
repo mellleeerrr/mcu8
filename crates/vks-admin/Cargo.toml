@@ -22,7 +22,6 @@ serde.workspace = true
 serde_json.workspace = true
 axum.workspace = true
 futures-util = "0.3"
-tower = { version = "0.5", features = ["util"] }
 async-trait = "0.1"
 tokio = { workspace = true, features = ["full"] }
 bytes.workspace = true
@@ -34,6 +33,7 @@ chrono-tz = "0.10.4"
 default = []
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 tokio.workspace = true
 tokio-tungstenite = "0.29"
 vks-storage = { path = "../vks-storage" }

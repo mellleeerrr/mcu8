@@ -249,25 +249,6 @@ impl Layout {
     pub fn slot_mut(&mut self, id: SlotId) -> Option<&mut Slot> {
         self.slots.iter_mut().find(|s| s.id == id)
     }
-
-    /// Суммарная площадь всех слотов (px²).
-    pub fn total_area(&self) -> u64 {
-        self.slots.iter().map(|s| s.rect.area()).sum()
-    }
-
-    /// True, если два слота пересекаются (положительная площадь).
-    /// Для grid-раскладок инвариант: `false` для любой пары.
-    pub fn any_overlap(&self) -> bool {
-        let slots = &self.slots;
-        for i in 0..slots.len() {
-            for j in (i + 1)..slots.len() {
-                if slots[i].rect.intersects(&slots[j].rect) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
 }
 
 /// Ошибки работы с раскладкой (валидация, apply).
@@ -324,18 +305,6 @@ mod tests {
         let s = l.slot_mut(SlotId::new(1)).unwrap();
         s.rect.x = 99;
         assert_eq!(l.slot(SlotId::new(1)).unwrap().rect.x, 99);
-    }
-
-    #[test]
-    fn layout_total_area_and_overlap() {
-        let l =
-            Layout { version: 1, kind: LayoutKind::Grid, slots: vec![slot(0, 0, 0, 10, 10), slot(1, 10, 0, 10, 10)] };
-        assert_eq!(l.total_area(), 200);
-        assert!(!l.any_overlap());
-
-        let l2 =
-            Layout { version: 1, kind: LayoutKind::Custom, slots: vec![slot(0, 0, 0, 10, 10), slot(1, 5, 0, 10, 10)] };
-        assert!(l2.any_overlap());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Типизированные строки хранилища (users/rooms/layouts/keys/audit).
+//! Типизированные строки хранилища (users/rooms/keys/audit).
 //!
 //! Crate пока не зависит от `vks-core` (порт `Storage` строится параллельно
 //! в отдельном крейте), поэтому свои доменные типы живут здесь. Когда
@@ -34,34 +34,6 @@ pub struct Room {
     pub mode: RoomMode,
     /// Момент создания.
     pub created_at: Uuid,
-}
-
-/// Раскладка (layout) комнаты: канвас + прямоугольники тайлов.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Layout {
-    /// Уникальный идентификатор.
-    pub id: Uuid,
-    /// Идентификатор комнаты.
-    pub room_id: Uuid,
-    /// Ширина канваса, px.
-    pub width: i32,
-    /// Высота канваса, px.
-    pub height: i32,
-    /// Прямоугольники тайлов (x, y, w, h).
-    pub tiles: Vec<Tile>,
-}
-
-/// Прямоугольник тайла в layout.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Tile {
-    /// X, px.
-    pub x: i32,
-    /// Y, px.
-    pub y: i32,
-    /// Ширина, px.
-    pub width: i32,
-    /// Высота, px.
-    pub height: i32,
 }
 
 /// API-ключ (хранится только hash + prefix, см. CODE_STYLE §3: не логировать key).

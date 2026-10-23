@@ -1,0 +1,28 @@
+{
+  "task": "T5a",
+  "base_commit": "4c36a6c",
+  "diff": {"files": 12, "insertions": 17, "deletions": 552, "lockfile_deletions": 118},
+  "tests": {
+    "workspace_before": {"passed": 1308, "failed": 0},
+    "workspace_after": {"passed": 1301, "failed": 0},
+    "removed_running_tests": 7,
+    "removed_feature_gated_tests": 2,
+    "crates": {"vks-signaling": [48, 44], "vks-layout": [77, 76], "vks-storage": [25, 23]}
+  },
+  "gates": {"fmt": 0, "clippy_warnings": 0, "wasm_sdk": 0},
+  "removed_pub_api": [
+    "vks_signaling::reconnect (module)",
+    "vks_signaling::{Backoff, ResumeNonce}",
+    "vks_signaling::ws::tungstenite_impl (feature ws)",
+    "vks_signaling::wt::wtransport_impl (feature wtransport)",
+    "vks_storage::rows::{Layout, Tile}",
+    "vks_storage::rows::LayoutRow (private)",
+    "MemoryStorage/SqliteStorage/PostgresStorage::{insert_layout, get_layout, list_layouts}",
+    "vks_layout::Layout::{total_area, any_overlap}"
+  ],
+  "kept_by_decision": [
+    "core_layouts trait half (T5b)", "core_adapter.rs", "viewer.rs/plan_viewer",
+    "frame_for_viewer/set_self_view", "SlotRole/Codian/assign_by_role/RotationState",
+    "webrtc_glue", "ws/wt traits and mocks", "subtle/sha2", "CONFIGURATION_KEY (T6)"
+  ]
+}

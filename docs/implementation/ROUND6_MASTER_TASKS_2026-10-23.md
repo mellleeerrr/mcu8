@@ -79,6 +79,19 @@ Storage), ветку self-view (до ADR-0029), `wasm-sdk` CI (job поймал 
 `gateway_video.rs:644` hot-path, публичный API admin.
 Критерии: clippy --all-features, тесты, grep без ссылок, LOC −≈980.
 
+### Статус T5a (выполнено)
+- [x] T5a — удалено 552 строки (12 файлов, +17/−552; Cargo.lock −118):
+  `vks-signaling/reconnect.rs` (166, + `pub use Backoff/ResumeNonce`),
+  no-op заглушки `tungstenite_impl`/`wtransport_impl` + фичи `ws`/`wtransport`,
+  dev-dep `proptest`; legacy standalone `layouts` в `vks-storage` (rows
+  `Layout`/`Tile`, `LayoutRow`, insert/get/list в memory/sqlite/postgres, 2 теста);
+  `Layout::total_area/any_overlap` (+тест); `tower` → dev-deps `vks-admin`;
+  sqlx `_unstable-all-types`. Гейты: fmt 0, clippy -D warnings 0, workspace
+  tests 1308→1301 passed/0 failed (7 запускавшихся тестов удалено; ещё 2
+  feature-gated), wasm-sdk 0. Evidence: `docs/progress/evidence/r6-t5a/`.
+  Перечень снятых `pub use` — в `result.json`. T5b (core_layouts trait-половина)
+  — после T10b; T5c (viewer/self-view/webrtc_glue) — только по отдельному решению.
+
 ### Решения по T5 (после анализа подводных камней, HEAD 82d93b8)
 T5 делится на T5a (сейчас) / T5b (после T10b) / T5c (только по отдельному решению):
 - T5a ≈ 490 LOC, только реально мёртвое: `vks-signaling/reconnect.rs` + re-export

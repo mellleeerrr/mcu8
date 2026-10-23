@@ -1,14 +1,11 @@
 //! WebTransport/QUIC транспорт (SIGNALING_PROTOCOL — второй обязательный, R5).
 //!
 //! Эта волна — **абстракция + mock**: трейт `WebTransportSession` (порт)
-//! и in-memory `MockWt` для тестов handler. Реальный QUIC-стек (`wtransport`)
-//! подключается опционально (feature `wtransport`) — базовый билд
-//! остаётся без I/O.
+//! и in-memory `MockWt` для тестов handler; реального I/O в базовом билде нет.
 
 /// Транспорт-порт для WebTransport/QUIC (обёртка над байтовыми `Envelope`-фреймами).
 ///
-/// Реализации: `MockWt` (in-memory, тесты) и future `WtSession`
-/// (feature `wtransport`, реальный QUIC-стек).
+/// Реализация: `MockWt` (in-memory, тесты).
 pub trait WebTransportSession {
     /// Отправляет байты `Envelope` (один QUIC-datagram-фрейм).
     fn send(&mut self, bytes: Vec<u8>);
@@ -75,75 +72,6 @@ impl WebTransportSession for MockWt {
 
     fn is_closed(&self) -> bool {
         self.closed
-    }
-}
-
-#[cfg(feature = "wtransport")]
-pub mod wtransport_impl {
-    use super::WebTransportSession;
-
-    /// Заглушка реального QUIC-стек'а (feature `wtransport`).
-    ///
-    /// В этой волне — только интерфейс: держит endpoint/uri и реализует
-    /// порт как no-op (реальное QUIC-hello + 0-RTT придёт вместе со
-    /// стр0m/QUIC-стек'ом в фазе 2, когда появится `wtransport` crate
-    /// в workspace).
-    pub struct WtSession {
-        endpoint: String,
-        closed: bool,
-    }
-
-    impl WtSession {
-        #[must_use]
-        pub fn new(endpoint: impl Into<String>) -> Self {
-            Self { endpoint: endpoint.into(), closed: false }
-        }
-
-        #[must_use]
-        pub fn endpoint(&self) -> &str {
-            &self.endpoint
-        }
-    }
-
-    impl WebTransportSession for WtSession {
-        fn send(&mut self, _bytes: Vec<u8>) {
-            if !self.closed {
-                tracing::debug!(endpoint = %self.endpoint, "wtransport send (stub)");
-            }
-        }
-
-        fn recv(&mut self) -> Option<Vec<u8>> {
-            if self.closed {
-                None
-            } else {
-                tracing::debug!(endpoint = %self.endpoint, "wtransport recv (stub, waiting)");
-                None
-            }
-        }
-
-        fn close(&mut self) {
-            self.closed = true;
-        }
-
-        fn is_closed(&self) -> bool {
-            self.closed
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn wt_session_stub_send_recv_close() {
-            let mut s = WtSession::new("wt://example.com:443");
-            assert!(!s.is_closed());
-            assert!(s.recv().is_none());
-            s.send(vec![1, 2, 3]);
-            s.close();
-            assert!(s.is_closed());
-            assert!(s.recv().is_none());
-        }
     }
 }
 
