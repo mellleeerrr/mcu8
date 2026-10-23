@@ -187,8 +187,24 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > Срезы: (1) probe `aac` encoder + `aac_latm` decoder и availability без объявления в offer;
 > (2) outbound task encode→strip_loas→RTP; (3) inbound RTP→add_loas→decode→PCM в микс;
 > (4) SDP PT113/fmtp/config + answer mirror; (5) loopback-тест и live-вызов .132.
-> Нельзя: `-flags low_delay`/`-avioflags direct` (ломали AAC), забыть `-probesize 32 -analyzeduration 0`
-> перед `-i`, ждать EOF для получения кадров, блокировать основной аудио-цикл чтением stdout.
+> Pitfalls-аудит (read-only, FFmpeg 8.0.1) подтвердил 6 P0: (1) 52 пакета/с и timestamp на тик дают +6.7 %
+> дрейф — считать samples_in/frames_sent, 15 кадров на 16 тиков, timestamp только на кадр; (2) SMC/cpresent:
+> `-smc-interval 1` + кэш SMC-префикса (не первого data-кадра), `cpresent=0` требует разбора `config=` и
+> синтетического config-only LOAS, чужой SMC запрещён; (3) блокирующие read/write в 20 мс select! ломают
+> RTP/RTCP/DTMF и теряют байты при отмене — только отдельные задачи + bounded-каналы, как в video; (4) clock:
+> FFmpeg RTP LATM может отдать 48000/1 и шаг 1024 — clock обязан ехать в OfferCodec/NegotiatedMedia/
+> InboundMedia/RtpBridgeSession, `LatmRtpClock` должен считать шаг от clock; (5) advertise-then-refuse:
+> `AudioBridgeCodec::new(113)` сейчас None, `audio_codec_running` уже true → «connected без звука»; нужен
+> preflight пула воркеров до 200 OK/ACK и audio availability; (6) **юридический гейт**: патенты AAC-LATM
+> (до ~2028/2031) — сознательный 488 в T06b-2b, FFmpeg-процесс не снимает патентные требования; включать
+> native AAC только после legal sign-off, по умолчанию оставить 488/fallback.
+> Срезы: 0) математика 16:15/clock/marker без SDP; 1) `-smc-interval 1` + probe muxer latm/demuxer loas +
+> audio availability; 2) outbound encode-only за флагом; 3) inbound cpresent=1; 4) cpresent=0/config, PLC,
+> pool preflight, 44.1/32, soak; 5) включение после legal + live .132.
+> Нельзя: `-flags low_delay`/`-avioflags direct`/`-fflags nobuffer` (ломали AAC), забыть
+> `-probesize 32 -analyzeduration 0` перед `-i`, ждать EOF для кадров, блокировать аудио-цикл чтением stdout,
+> объявлять native AAC без worker/packetizer/probe, резать кадр по MTU вместо drop+metric, писать `ptime:20`
+> для AAC (кадр 21.33 мс), считать `decoded_samples_48k=1024` для 44.1/32 кГц.
 >
 > **T06b-5 (изолированные FFmpeg-воркеры: фундамент) закрыт `212649b`, ревью 9.5/10 APPROVED (r6, независимый):**
 > `codec_worker` — один долгоживущий FFmpeg на кодек/направление, `FfmpegCapabilities` probe
