@@ -347,7 +347,7 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     let participants = env_usize("VKS_SOAK_PARTICIPANTS", 4);
     assert!((5..=604_800).contains(&seconds), "VKS_SOAK_SECONDS must be 5..=604800, got {seconds}");
     assert!(warmup >= 1 && warmup < seconds, "VKS_SOAK_WARMUP must be >=1 and < seconds");
-    assert!((1..=32).contains(&participants), "VKS_SOAK_PARTICIPANTS must be 1..=32");
+    assert!((2..=32).contains(&participants), "VKS_SOAK_PARTICIPANTS must be 2..=32");
     let out = std::env::var("VKS_SOAK_OUT").unwrap_or_else(|_| "target/t14b-mcu-tick-soak.json".into());
     assert!(!out.trim().is_empty(), "VKS_SOAK_OUT must not be empty");
 
@@ -458,8 +458,9 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     let audio_hz = audio.first_successes as f64 / audio_measured_seconds;
     let effective_video_fps = video.first_successes as f64 / video_measured_seconds;
     // Conservative wall-clock lower bound on scheduled periods in the measured
-    // window (the t=0 slot is omitted). A skipped period consumes one slot of the
-    // 1% budget: up to 1% may be lost, more than 1% fails.
+    // window (the t=0 slot is omitted and the bound is floored). A skipped period
+    // consumes one slot of the 1% budget: roughly more than 1% fails, while edge
+    // rounding can hide a single slot.
     let audio_scheduled = (audio_measured_seconds * 1000.0 / AUDIO_PERIOD_MS as f64).floor() as u64;
     let video_scheduled = (video_measured_seconds * 1000.0 / VIDEO_PERIOD_MS as f64).floor() as u64;
 
@@ -529,8 +530,9 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     assert_eq!(audio.second_call_successes, 0, "same-timestamp audio duplicate must be throttled");
     assert_eq!(video.second_call_successes, 0, "same-timestamp video duplicate must be throttled");
     // Wall-clock period-loss gate: a skipped slot lowers first successes while
-    // `scheduled` stays fixed. Up to 1% is allowed for OS scheduling jitter; a
-    // larger loss fails here.
+    // `scheduled` stays fixed. Up to 1% is allowed for OS scheduling jitter; the
+    // floored lower bound rejects a clearly larger loss (edge rounding can hide a
+    // single slot).
     assert!(
         audio.first_successes * 100 >= audio_scheduled * 99,
         "audio lost more than 1% of scheduled periods: {} of {audio_scheduled}",

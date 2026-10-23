@@ -133,8 +133,8 @@ pub const MCU_TICK_BUCKETS: &[f64] = &[
 /// input cloning and composite cloning. It is registered lazily like the other
 /// collectors. Only `init_default()` (through `init_mcu_tick_metrics`, and only
 /// when the env flag is on) creates the zero-count children; the env-gated
-/// `observe_mcu_tick` records samples. A default deployment pays nothing and
-/// exposes no samples.
+/// `observe_mcu_tick` records samples. A default deployment pays one cached
+/// branch check per tick and exposes no samples.
 static MCU_TICK_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!(
         "vks_mcu_tick_duration_seconds",

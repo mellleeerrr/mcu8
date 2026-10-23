@@ -115,10 +115,12 @@ impl Compositor {
                 }
             }
         }
-        // Chroma is sampled at half resolution; layout rects use even origins, so
-        // this is exact for every room layout. An odd origin would share the
-        // boundary chroma column with the letterbox bar (nearest 2x2 block) — not
-        // reachable from the layout tables, kept as a documented limitation.
+        // Chroma is half-resolution. Layout rects can have odd origins or widths
+        // (Focus strips with 8+ participants, 7x7 presets, crossfade intermediate
+        // rects), so the boundary chroma column is shared with the letterbox or
+        // neighbouring sample and nearest 2x2 siting can bleed by one chroma
+        // sample. The 4-participant 2x2 soak uses even tiles and does not exercise
+        // this; no chroma correction is applied.
         if canvas.data.len() == cw * ch * 3 / 2 {
             let is_yuv = frame.is_yuv420p();
             let source_pixels = fw * fh;

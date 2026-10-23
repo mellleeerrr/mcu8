@@ -20,7 +20,7 @@ green). One room, four participants, real **1280×720 I420** frames with 2-D lum
 non-constant U/V planes, feeding 960-sample near-full-scale PCM (exercises
 the mixer's `tanh` soft-clip). The measured window has two **sequential**
 phases: audio alone at 20 ms, then video alone at 34 ms. They are not concurrent
-because today's global room mutex would let a 15–27 ms compose block the audio tick;
+because today's global room mutex would let a 17–32 ms compose block the audio tick;
 per-room actors and multi-room concurrency are S20. A 3 s warm-up is discarded.
 
 Run timing gates on an idle or pinned host: the wall-clock loss gate is
@@ -45,7 +45,7 @@ VKS_SOAK_PARTICIPANTS=4 VKS_SOAK_OUT="$OLDPWD/docs/progress/evidence/t14b-mcu-ti
 ```
 
 Env: `VKS_SOAK_SECONDS` (5..=604800, default 20), `VKS_SOAK_WARMUP` (default 3),
-`VKS_SOAK_PARTICIPANTS` (1..=32, default 4), `VKS_SOAK_OUT` (default
+`VKS_SOAK_PARTICIPANTS` (2..=32, default 4), `VKS_SOAK_OUT` (default
 `target/t14b-mcu-tick-soak.json`). Invalid values fail instead of silently
 falling back.
 
@@ -65,9 +65,13 @@ Video exact `le=33 ms` ratio **1.000**, engine `frames_dropped` delta 883 (all
 883 are the deliberate duplicate/throttle probes; first successes 883), audio
 exact `le=2 ms` ratio **1.000**, admin rebuilds rendered 2 frames and recorded
 0 ticks. 1489 of 1500 wall-clock audio periods produced their first tick (99.3%);
-the 11 losses are scheduling jitter inside the 1% period-loss budget on this
-shared host, and the audio histogram count equals the tick count (1489). The
-wall-clock gate is deliberately load-sensitive: a busier host can fail it.
+the 11 losses are first attempts rejected by the engine's 18 ms audio throttle
+when the loop woke a millisecond early (the period itself still executed, and
+`missed_periods` is 0), not skipped wall-clock slots. They are inside the 1%
+period-loss budget on this shared host, and the audio histogram count equals the
+tick count (1489). The wall-clock gate is deliberately load-sensitive: a busier
+host can fail it, and its floored lower bound can hide a single edge-rounding
+slot.
 
 **Verdict:** the audio engine-work p99 ≤2 ms SLO is met with a wide margin. Video
 compose fits the 33 ms frame budget in this workload but **not** the 2 ms target;
@@ -79,7 +83,8 @@ Compositor work in this slice: exact integer nearest-neighbour mapping
 (`fx = floor(dx*fw/dw)` via incremental quotient/remainder), integer letterbox
 geometry, row slices, single-allocation canvas. Golden tests pin 2-D luma,
 non-constant U/V planes and PiP letterbox-bar behaviour. The timer wraps only
-`process_video`; the harness's 34 ms idle gap is not measured. Frames are static
+`process_video`; the harness's 34 ms period (and the longer interval since the
+previous video tick) is not measured. Frames are static
 and warmed during the warm-up window, but a long idle gap can still leave
 cold-cache/page-fault effects in the first frames. The 33 ms figure is a budget
 margin for this harness, not a warm-cache per-frame cost; no back-to-back
