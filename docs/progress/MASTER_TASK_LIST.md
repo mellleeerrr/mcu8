@@ -211,8 +211,12 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > **Slice 2b готов:** `LatmDecoder` — второй долгоживущий FFmpeg (`loas` → `s16le` 48k), такие же
 > раздельные задачи, bounded-очереди, выдача 960-сэмпловых PCM-блоков; реальный loopback
 > 1 с тона → AAC-LATM RTP-payload → LOAS → decode даёт ≥44.1k сэмплов и RMS > 0.02. Workspace 1226.
-> Осталось: подключение пары к `run_audio_bridge` (16:15, marker=1, timestamp 1920/1024, prefill),
-> SDP PT113/fmtp, UAS cpresent=1, затем cpresent=0/config, pool preflight и live `.132`.
+> **Slice 3a готов:** `gateway_aac::run_aac_bridge` — отдельный цикл для AAC: вход LOAS→латентный
+> декодер→PCM-очередь→MCU-микс, выход MCU→энкодер→RTP с marker=1, 90 кГц timestamp по кадру,
+> sequence/SSRC/RTCP SR, conceal на sequence-gap, bounded-очереди, контроли mute/gain; диспетчеризация
+> в `run_audio_bridge` по PT113/каноническому имени. Workspace 1227. DTMF для AAC пока drain+один warning.
+> Осталось: SDP PT113/fmtp (native только при availability+preflight пула), UAS cpresent=1,
+> затем cpresent=0/config, live `.132`.
 > Нельзя: `-flags low_delay`/`-avioflags direct`/`-fflags nobuffer` (ломали AAC), забыть
 > `-probesize 32 -analyzeduration 0` перед `-i`, ждать EOF для кадров, блокировать аудио-цикл чтением stdout,
 > объявлять native AAC без worker/packetizer/probe, резать кадр по MTU вместо drop+metric, писать `ptime:20`

@@ -18,6 +18,8 @@ use vks_proto::signaling::signaling_message::Payload;
 use vks_proto::signaling::{ParticipantJoined, ParticipantLeft, SignalingMessage};
 use vks_signaling::Envelope;
 
+#[path = "gateway_aac.rs"]
+mod aac;
 #[path = "gateway_audio.rs"]
 mod audio;
 #[path = "gateway_video.rs"]

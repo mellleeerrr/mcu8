@@ -194,6 +194,12 @@ impl AudioBridgeCodec {
 }
 
 pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
+    // AAC-LC is a 1024-sample/90 kHz codec on a 960-sample mixer tick and needs
+    // a pair of FFmpeg workers; it cannot share the synchronous sample path.
+    if super::aac::is_aac_audio(session.audio_payload_type, session.audio_codec) {
+        super::aac::run_aac_bridge(session).await;
+        return;
+    }
     let Some(target) = session
         .remote_media_ip
         .parse::<std::net::IpAddr>()
