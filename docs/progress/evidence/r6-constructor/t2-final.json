@@ -1,0 +1,94 @@
+{
+ "s1": {
+  "mode": [
+   "layout-mode-selector-auto"
+  ],
+  "ctor": [],
+  "dw": [],
+  "size": null
+ },
+ "p1": [
+  "{\"display_name\":\"Codian 07 — 13 окон\",\"payload\":{\"mode\":\"manual\",\"preset\":\"vks_grid_9\",\"type\":\"individual\",\"slots\":[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"ro",
+  "{\"preset\":\"vks_grid_9\",\"width\":887,\"height\":499}",
+  "{\"preset\":\"vks_grid_9\",\"width\":320,\"height\":180}",
+  "{\"preset\":\"vks_pin_l_9\",\"width\":320,\"height\":180}",
+  "{\"preset\":\"vks_pin_r_9\",\"width\":320,\"height\":180}",
+  "{\"preset\":\"vks_pin_t_9\",\"width\":320,\"height\":180}",
+  "{\"preset\":\"vks_pin_b_9\",\"width\":320,\"height\":180}"
+ ],
+ "p2": [
+  "{\"display_name\":\"Codian 07 — 13 окон\",\"payload\":{\"mode\":\"manual\",\"preset\":\"vks_grid_9\",\"type\":\"individual\",\"slots\":[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"ro",
+  "{\"preset\":\"vks_grid_9\",\"width\":887,\"height\":499}",
+  "{\"preset\":\"vks_grid_9\",\"width\":320,\"height\":180}",
+  "{\"preset\":\"vks_pin_l_9\",\"width\":320,\"height\":180}",
+  "{\"preset\":\"vks_pin_r_9\",\"width\":320,\"height\":180}",
+  "{\"preset\":\"vks_pin_t_9\",\"width\":320,\"height\":180}",
+  "{\"preset\":\"vks_pin_b_9\",\"width\":320,\"height\":180}"
+ ],
+ "s2": {
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_25"
+  ],
+  "dw": [
+   "25",
+   "25",
+   "25",
+   "25",
+   "25"
+  ],
+  "size": null
+ },
+ "s3": {
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_9"
+  ],
+  "dw": [
+   "9",
+   "9",
+   "9",
+   "9",
+   "9"
+  ],
+  "size": null
+ },
+ "p3": [
+  "{\"display_name\":\"Codian 07 — 13 окон\",\"payload\":{\"mode\":\"manual\",\"preset\":\"vks_grid_9\",\"type\":\"individual\",\"slots\":[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"ro",
+  "{\"preset\":\"vks_grid_9\",\"width\":887,\"height\":499}",
+  "{\"preset\":\"vks_grid_9\",\"width\":320,\"height\":180}",
+  "{\"preset\":\"vks_pin_l_9\",\"width\":320,\"height\":180}",
+  "{\"preset\":\"vks_pin_r_9\",\"width\":320,\"height\":180}",
+  "{\"preset\":\"vks_pin_t_9\",\"width\":320,\"height\":180}",
+  "{\"preset\":\"vks_pin_b_9\",\"width\":320,\"height\":180}"
+ ],
+ "s4": {
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_9"
+  ],
+  "dw": [
+   "9",
+   "9",
+   "9",
+   "9",
+   "9"
+  ],
+  "size": null
+ },
+ "errs": [
+  "Operation canceled",
+  "Operation canceled"
+ ],
+ "summary": {
+  "p0_1_chip": "fixed: active vks_grid_9 + dw=9 after chip 9",
+  "p0_2_name_type": "fixed: PATCH display_name + type=individual",
+  "p0_N_at_tile": "OPEN: start N resolved as 25 instead of source 9/13; next: read authoritative count from initial GET video_layouts response / vendor map before switch"
+ }
+}

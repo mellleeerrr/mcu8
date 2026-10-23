@@ -175,15 +175,6 @@
     if (key === adoptPending) return;
     adoptPending = key;
     selectConstructor('vks_' + (constructorSide === 'grid' ? 'grid' : 'pin_' + constructorSide) + '_' + count);
-    // Вендорский обработчик чипа пишет preset после нашего колбэка — добиваем.
-    setTimeout(function () {
-      var now = layoutEditor() && layoutEditor().modifiedValue || {};
-      var cur = typeof now.preset === 'string' ? now.preset : '';
-      if (modeTileEngaged && now.mode === 'manual' && cur.indexOf('vks_') !== 0) {
-        var n2 = currentCount();
-        if (n2 > 0) selectConstructor('vks_' + (constructorSide === 'grid' ? 'grid' : 'pin_' + constructorSide) + '_' + n2);
-      }
-    }, 120);
   }
 
   function round(value) {
@@ -691,7 +682,18 @@
     // N/имя фиксируем ДО mode='manual': после переключения вендор подставляет
     // свой fallback (size=25), и currentCount() уже не равен исходному N.
     var startValue = editor.modifiedValue || {};
+    var startPreset = typeof startValue.preset === 'string' ? startValue.preset : '';
     var startCount = currentCount();
+    if (!(startCount > 0)) {
+      // Хвост нашего/вендорского preset'а — надёжный размер (codian_* исключён).
+      var tail = /^(?:vks_|preset_)/.test(startPreset) ? /_(\d+)$/.exec(startPreset) : null;
+      if (tail) startCount = Number(tail[1]);
+    }
+    if (!(startCount > 0)) {
+      var chip = document.querySelector('.layout-size-range-selector-item--active');
+      if (chip) startCount = parseInt(chip.textContent, 10) || 0;
+    }
+    if (!(startCount > 0)) startCount = Number(startValue.size) || 0;
     var startName = startValue.displayName || '';
     var startSide = constructorSide;
     // Вендорский `mode` — свойство редактора (reactivity store), не поле формы:
@@ -807,6 +809,7 @@
         if (catalogState === 'idle') loadCatalog();
         if (catalogState === 'ready') ensureGroup();
         if (catalogState === 'ready') ensureConstructor();
+        reAdopt();
       } catch (e) {
         /* вендорская страница важнее нашей группы, но поломка не должна быть невидимой */
         console.warn('codian-layouts: группа Codian не вставлена', e);
