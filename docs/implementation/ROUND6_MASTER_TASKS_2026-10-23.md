@@ -324,7 +324,22 @@ error перечисляет grid, release-note SIP UAS, «970→факт».
   Live evidence `t13-a11y-and-clamp.json`/`.png`: AX-имена на button,
   outline-классы, typing 100 с сохранением фокуса (trace 1→10→100,
   `vks_grid_100`), 0/−5/empty→`vks_grid_1`, 42→`vks_grid_42`, focus сохранён.
-  Осталось: финальное ревью T13.2 (цель ≥9.5) и коммит.
+  Финальное ревью T13.2 (`91dd55c`): 9.3/10, P0/P1 нет; P2 — клик
+  «Ручная настройка» после конструктора не выходил из него (preset оставался
+  vks_*, наш тайл снова active; pre-existing T13.1). Исправлено в T13.3:
+  - document-level capture-listener на вендорские тайлы auto/dynamic/manual:
+    сбрасывает modeTileEngaged/pendingAdopt; для manual — явный
+    `preset_equal_25`/`individual` (вендорский дефолт);
+  - с wrapper-div счётчика сняты aria-label/title (дублировали имя кнопки как
+    named generic в AX) — атрибуты только на `<button>`;
+  - evidence `t13-manual-tile-exit.json`/`.png`: ctor-100 → тайл «Ручная
+    настройка» → `preset_equal_25/manual/25`, active tile manual, ctor active
+    нет; возврат в конструктор → `vks_grid_25`; 0+blur → `vks_grid_1`,
+    active=false. `t13-a11y-and-clamp.json` перегенерирован (wrapper aria=null).
+  Известное ограничение (P3, не регрессия T13.3): у `vks_pin_*_100` 99
+  миниатюр — полосы 144×7 (1 крупное окно + лента), документированный 16:9
+  действует для pin до 16 окон; контракт T13 — количество/перестройка/save.
+  Осталось: ре-ревью T13.3 (цель ≥9.5).
 
 Из T2 (P1): session-route тест «auto→Конструктор не дёргает POST
 /api/v3/ui/video_layouts/mode» (в конференц-редакторе switchLayoutMode нет,

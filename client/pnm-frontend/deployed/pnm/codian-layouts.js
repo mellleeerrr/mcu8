@@ -623,10 +623,8 @@
     var container = document.createElement('div');
     container.className = 'tc-button-container tc-button-container--base counter__button';
     container.setAttribute('data-counter-action', action);
-    if (ariaLabel) {
-      container.setAttribute('aria-label', ariaLabel);
-      container.setAttribute('title', ariaLabel);
-    }
+    // aria/title — только на button: named generic-wrapper дублирует имя в
+    // AX-дереве (aria-label на generic-роли не имеет смысла).
     var button = document.createElement('button');
     button.type = 'button';
     button.className = 'tc-button mdc-button mdc-button--text' + (icon ? ' tc-button--icon' : '');
@@ -1107,6 +1105,31 @@
     tile.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
 
+  /* Вендорский тайл режима (manual/auto/dynamic) — явный выход из конструктора.
+   * В manual-режиме клик по тайлу не меняет store, поэтому preset оставался
+   * vks_* и наш тайл снова становился active: клик «Ручная настройка» после
+   * конструктора был no-op. Сбрасываем engaged/pending и, для manual,
+   * возвращаем вендорский дефолт (preset_equal_25/individual), как у вендора. */
+  function onVendorModeClick(event) {
+    var target = event.target;
+    if (!target || !target.closest) return;
+    var tile = target.closest(
+      '[data-qa="layout-mode-selector-manual"], [data-qa="layout-mode-selector-auto"], [data-qa="layout-mode-selector-dynamic"]'
+    );
+    if (!tile) return;
+    modeTileEngaged = false;
+    pendingAdopt = null;
+    if (tile.getAttribute('data-qa') !== 'layout-mode-selector-manual') return;
+    var editor = layoutEditor();
+    if (!editor || typeof editor.editValueField !== 'function') return;
+    try {
+      editor.editValueField('preset', 'preset_equal_25');
+      editor.editValueField('type', 'individual');
+    } catch (e) {
+      /* вендор сам выставит дефолт manual */
+    }
+  }
+
   function ensureModeTile() {
     var selector = document.querySelector(MODE_SELECTOR);
     if (!selector) return;
@@ -1232,6 +1255,9 @@
 
   function start() {
     if (observer) return;
+    if (document && typeof document.addEventListener === 'function') {
+      document.addEventListener('click', onVendorModeClick, true);
+    }
     watchSaves();
     watchSaveButton();
     observer = new MutationObserver(function () { schedule(); });

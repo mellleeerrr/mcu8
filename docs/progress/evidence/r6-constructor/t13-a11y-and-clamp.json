@@ -32,7 +32,7 @@
   "btns": [
    {
     "action": "min",
-    "wrapAria": "Минимальное количество видеокон (1)",
+    "wrapAria": null,
     "btnAria": "Минимальное количество видеокон (1)",
     "btnTitle": "Минимальное количество видеокон (1)",
     "iconAriaHidden": null,
@@ -40,7 +40,7 @@
    },
    {
     "action": "dec",
-    "wrapAria": "Уменьшить количество видеокон",
+    "wrapAria": null,
     "btnAria": "Уменьшить количество видеокон",
     "btnTitle": "Уменьшить количество видеокон",
     "iconAriaHidden": "true",
@@ -48,7 +48,7 @@
    },
    {
     "action": "inc",
-    "wrapAria": "Увеличить количество видеокон",
+    "wrapAria": null,
     "btnAria": "Увеличить количество видеокон",
     "btnTitle": "Увеличить количество видеокон",
     "iconAriaHidden": "true",
@@ -56,7 +56,7 @@
    },
    {
     "action": "max",
-    "wrapAria": "Максимальное количество видеокон (100)",
+    "wrapAria": null,
     "btnAria": "Максимальное количество видеокон (100)",
     "btnTitle": "Максимальное количество видеокон (100)",
     "iconAriaHidden": null,
@@ -117,7 +117,7 @@
   "btns": [
    {
     "action": "min",
-    "wrapAria": "Минимальное количество видеокон (1)",
+    "wrapAria": null,
     "btnAria": "Минимальное количество видеокон (1)",
     "btnTitle": "Минимальное количество видеокон (1)",
     "iconAriaHidden": null,
@@ -125,7 +125,7 @@
    },
    {
     "action": "dec",
-    "wrapAria": "Уменьшить количество видеокон",
+    "wrapAria": null,
     "btnAria": "Уменьшить количество видеокон",
     "btnTitle": "Уменьшить количество видеокон",
     "iconAriaHidden": "true",
@@ -133,7 +133,7 @@
    },
    {
     "action": "inc",
-    "wrapAria": "Увеличить количество видеокон",
+    "wrapAria": null,
     "btnAria": "Увеличить количество видеокон",
     "btnTitle": "Увеличить количество видеокон",
     "iconAriaHidden": "true",
@@ -141,7 +141,7 @@
    },
    {
     "action": "max",
-    "wrapAria": "Максимальное количество видеокон (100)",
+    "wrapAria": null,
     "btnAria": "Максимальное количество видеокон (100)",
     "btnTitle": "Максимальное количество видеокон (100)",
     "iconAriaHidden": null,
@@ -188,7 +188,7 @@
   "btns": [
    {
     "action": "min",
-    "wrapAria": "Минимальное количество видеокон (1)",
+    "wrapAria": null,
     "btnAria": "Минимальное количество видеокон (1)",
     "btnTitle": "Минимальное количество видеокон (1)",
     "iconAriaHidden": null,
@@ -196,7 +196,7 @@
    },
    {
     "action": "dec",
-    "wrapAria": "Уменьшить количество видеокон",
+    "wrapAria": null,
     "btnAria": "Уменьшить количество видеокон",
     "btnTitle": "Уменьшить количество видеокон",
     "iconAriaHidden": "true",
@@ -204,7 +204,7 @@
    },
    {
     "action": "inc",
-    "wrapAria": "Увеличить количество видеокон",
+    "wrapAria": null,
     "btnAria": "Увеличить количество видеокон",
     "btnTitle": "Увеличить количество видеокон",
     "iconAriaHidden": "true",
@@ -212,7 +212,7 @@
    },
    {
     "action": "max",
-    "wrapAria": "Максимальное количество видеокон (100)",
+    "wrapAria": null,
     "btnAria": "Максимальное количество видеокон (100)",
     "btnTitle": "Максимальное количество видеокон (100)",
     "iconAriaHidden": null,
@@ -259,7 +259,7 @@
   "btns": [
    {
     "action": "min",
-    "wrapAria": "Минимальное количество видеокон (1)",
+    "wrapAria": null,
     "btnAria": "Минимальное количество видеокон (1)",
     "btnTitle": "Минимальное количество видеокон (1)",
     "iconAriaHidden": null,
@@ -267,7 +267,7 @@
    },
    {
     "action": "dec",
-    "wrapAria": "Уменьшить количество видеокон",
+    "wrapAria": null,
     "btnAria": "Уменьшить количество видеокон",
     "btnTitle": "Уменьшить количество видеокон",
     "iconAriaHidden": "true",
@@ -275,7 +275,7 @@
    },
    {
     "action": "inc",
-    "wrapAria": "Увеличить количество видеокон",
+    "wrapAria": null,
     "btnAria": "Увеличить количество видеокон",
     "btnTitle": "Увеличить количество видеокон",
     "iconAriaHidden": "true",
@@ -283,7 +283,7 @@
    },
    {
     "action": "max",
-    "wrapAria": "Максимальное количество видеокон (100)",
+    "wrapAria": null,
     "btnAria": "Максимальное количество видеокон (100)",
     "btnTitle": "Максимальное количество видеокон (100)",
     "iconAriaHidden": null,
@@ -330,7 +330,7 @@
   "btns": [
    {
     "action": "min",
-    "wrapAria": "Минимальное количество видеокон (1)",
+    "wrapAria": null,
     "btnAria": "Минимальное количество видеокон (1)",
     "btnTitle": "Минимальное количество видеокон (1)",
     "iconAriaHidden": null,
@@ -338,7 +338,7 @@
    },
    {
     "action": "dec",
-    "wrapAria": "Уменьшить количество видеокон",
+    "wrapAria": null,
     "btnAria": "Уменьшить количество видеокон",
     "btnTitle": "Уменьшить количество видеокон",
     "iconAriaHidden": "true",
@@ -346,7 +346,7 @@
    },
    {
     "action": "inc",
-    "wrapAria": "Увеличить количество видеокон",
+    "wrapAria": null,
     "btnAria": "Увеличить количество видеокон",
     "btnTitle": "Увеличить количество видеокон",
     "iconAriaHidden": "true",
@@ -354,7 +354,7 @@
    },
    {
     "action": "max",
-    "wrapAria": "Максимальное количество видеокон (100)",
+    "wrapAria": null,
     "btnAria": "Максимальное количество видеокон (100)",
     "btnTitle": "Максимальное количество видеокон (100)",
     "iconAriaHidden": null,
@@ -401,7 +401,7 @@
   "btns": [
    {
     "action": "min",
-    "wrapAria": "Минимальное количество видеокон (1)",
+    "wrapAria": null,
     "btnAria": "Минимальное количество видеокон (1)",
     "btnTitle": "Минимальное количество видеокон (1)",
     "iconAriaHidden": null,
@@ -409,7 +409,7 @@
    },
    {
     "action": "dec",
-    "wrapAria": "Уменьшить количество видеокон",
+    "wrapAria": null,
     "btnAria": "Уменьшить количество видеокон",
     "btnTitle": "Уменьшить количество видеокон",
     "iconAriaHidden": "true",
@@ -417,7 +417,7 @@
    },
    {
     "action": "inc",
-    "wrapAria": "Увеличить количество видеокон",
+    "wrapAria": null,
     "btnAria": "Увеличить количество видеокон",
     "btnTitle": "Увеличить количество видеокон",
     "iconAriaHidden": "true",
@@ -425,7 +425,7 @@
    },
    {
     "action": "max",
-    "wrapAria": "Максимальное количество видеокон (100)",
+    "wrapAria": null,
     "btnAria": "Максимальное количество видеокон (100)",
     "btnTitle": "Максимальное количество видеокон (100)",
     "iconAriaHidden": null,
