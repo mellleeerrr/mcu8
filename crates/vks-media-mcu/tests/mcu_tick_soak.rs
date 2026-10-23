@@ -149,7 +149,7 @@ fn sine_pcm() -> Vec<f32> {
 #[test]
 #[ignore = "release-only timing gate: cargo test --release -p vks-media-mcu --test mcu_tick_soak -- --ignored"]
 fn mcu_tick_soak_audio_slo_and_video_budget() {
-    assert!(!cfg!(debug_assertions), "timing gates require --release");
+    const { assert!(!cfg!(debug_assertions), "timing gates require --release") };
     // This integration-test binary has exactly one test, so setting the env here
     // is safe; `mcu_tick_metrics_enabled()` is a process-wide `OnceLock` and the
     // first read must happen after this line.
