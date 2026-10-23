@@ -1331,7 +1331,7 @@ mod tests {
             frame.data.get(offset).copied().unwrap_or_default()
         };
         let (ox, oy) = (own.x + own.w / 4, own.y + own.h / 4);
-        assert_eq!(pixel(&personal, ox, oy), 16, "ячейка зрителя в общей сетке освобождена");
+        assert_eq!(pixel(&personal, ox, oy), 0, "grayscale canvas: освобождённая ячейка залита 0");
         let (lx, ly) = (lowest.x + lowest.w / 4, lowest.y + lowest.h / 4);
         assert_eq!(pixel(&personal, lx, ly), 10, "камера зрителя в ячейке низшего приоритета");
         // У второго зрителя его камера осталась в общей сетке.
