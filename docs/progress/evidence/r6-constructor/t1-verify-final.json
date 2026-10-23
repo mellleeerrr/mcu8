@@ -1,0 +1,37 @@
+{
+ "initial": {
+  "cards": 59,
+  "badges": 59,
+  "badCount": 0,
+  "bad": []
+ },
+ "c1": "clicked",
+ "after1": {
+  "cards": 59,
+  "badges": 59,
+  "badCount": 0,
+  "bad": []
+ },
+ "c25": "clicked",
+ "after25": {
+  "cards": 59,
+  "badges": 59,
+  "badCount": 0,
+  "bad": []
+ },
+ "tileClick": "clicked",
+ "afterTile": {
+  "cards": 59,
+  "badges": 59,
+  "badCount": 0,
+  "bad": []
+ },
+ "st": {
+  "ctorCards": 5,
+  "active": [
+   "vks_grid_25"
+  ],
+  "tileActive": true
+ },
+ "errors": []
+}
