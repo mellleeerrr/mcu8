@@ -275,34 +275,19 @@ html.theme-dark .main svg.main-blank__image {
 }
 /* Hide vendor decorative underlay in dark mode (otherwise it renders as a
    bright gradient on top of the inverted background). */
- html.theme-dark .main .main__background {
+html.theme-dark .main .main__background {
   display: none !important;
 }
 
-/* Task 3: cancel inherited inversion on floating surfaces and restyle them.
-   Filter cancellation is approximate because the root uses invert(85%);
-   direct colors are therefore intentionally dark. */
+/* Canonical Task 3 surface theme. Surfaces that inherit the root filter
+   cancel it once and then take one shared token set. Portals outside .main
+   receive the same tokens directly, without cancellation. */
 html.theme-dark .main .mdc-menu-surface,
 html.theme-dark .main .tc-context-menu,
 html.theme-dark .main .notification-center__menu,
 html.theme-dark .main .header-profile__menu,
 html.theme-dark .main .bookmarks-drawer,
-html.theme-dark .main .notifier__container {
-  filter: invert(100%) hue-rotate(180deg);
-  background-color: #1f2328 !important;
-  color: #e7e9ec !important;
-  border: 1px solid #2b3138 !important;
-  box-shadow: 0 4px 16px rgba(0,0,0,.4) !important;
-}
-html.theme-dark .main-route--monitoring-sessions :focus-visible,
-html.theme-dark .main *:focus-visible {
-  outline: 2px solid #7dd3fc;
-  outline-offset: 2px;
-}
-
-/* Task 3 deeper surface tokens: header/cards/list cancel inversion once,
-   then use a consistent dark palette. This reduces dependence on the
-   outer hue-shift for text in the primary viewport components. */
+html.theme-dark .main .notifier__container,
 html.theme-dark .main .main-large-header,
 html.theme-dark .main .main-card,
 html.theme-dark .main .main-card-content,
@@ -310,38 +295,52 @@ html.theme-dark .main .main-list-content,
 html.theme-dark .main .monitoring-list-item,
 html.theme-dark .main .tc-list-container {
   filter: invert(100%) hue-rotate(180deg);
-  background-color: #1b2026 !important;
-  color: #e7e9ec !important;
-  border: 1px solid #27303a !important;
-}
-
-/* Portal inventory for teleported surfaces (root-level, outside .main). */
-html.theme-dark .mdc-dialog,
-html.theme-dark .mdc-dialog__surface,
-html.theme-dark .tc-modal,
-html.theme-dark .tc-modal-wrapper,
-html.theme-dark .tc-modal__content {
-  background-color: #1b2026 !important;
-  color: #e7e9ec !important;
-  border: 1px solid #27303a !important;
-  box-shadow: 0 8px 32px rgba(0,0,0,.45) !important;
-}
-
-/* Task 3 refined: portaled floating surfaces outside .main receive direct
-   dark tokens (no filter cancellation needed because the root filter only
-   affects .main descendants). */
-html.theme-dark .mdc-menu-surface,
-html.theme-dark .tc-context-menu,
-html.theme-dark .notification-center__menu,
-html.theme-dark .header-profile__menu,
-html.theme-dark .bookmarks-drawer,
-html.theme-dark .notifier__container {
   background-color: #1f2328 !important;
   color: #e7e9ec !important;
   border: 1px solid #2b3138 !important;
   box-shadow: 0 4px 16px rgba(0,0,0,.4) !important;
 }
 
+html.theme-dark .mdc-menu-surface,
+html.theme-dark .tc-context-menu,
+html.theme-dark .notification-center__menu,
+html.theme-dark .header-profile__menu,
+html.theme-dark .bookmarks-drawer,
+html.theme-dark .notifier__container,
+html.theme-dark .mdc-dialog,
+html.theme-dark .mdc-dialog__scrim,
+html.theme-dark .mdc-dialog__backdrop,
+html.theme-dark .mdc-snackbar__surface,
+html.theme-dark .mdc-tooltip__surface,
+html.theme-dark .mdc-dialog__surface,
+html.theme-dark .mdc-snackbar,
+html.theme-dark .mdc-tooltip,
+html.theme-dark .tc-modal,
+html.theme-dark .tc-modal-wrapper,
+html.theme-dark .tc-modal__content {
+  background-color: #1f2328 !important;
+  color: #e7e9ec !important;
+  border: 1px solid #2b3138 !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,.4) !important;
+}
+
+html.theme-dark .main .main-large-header img,
+html.theme-dark .main .main-large-header picture,
+html.theme-dark .main .main-large-header video,
+html.theme-dark .main .main-card img,
+html.theme-dark .main .main-card picture,
+html.theme-dark .main .main-card video,
+html.theme-dark .main .main-list-content img,
+html.theme-dark .main .main-list-content picture,
+html.theme-dark .main .main-list-content video {
+  filter: invert(100%) hue-rotate(180deg) !important;
+  background-color: transparent;
+}
+html.theme-dark .main-route--monitoring-sessions :focus-visible,
+html.theme-dark .main *:focus-visible {
+  outline: 2px solid #7dd3fc !important;
+  outline-offset: 2px !important;
+}
 </style>
 </head>
 <body>
