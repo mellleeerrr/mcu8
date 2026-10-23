@@ -13,15 +13,18 @@
 | r6-hygiene-deadcode (dead-code-scout) | мёртвый код/лишние абстракции, доказать grep | удаляемо ≈980 LOC: reconnect.rs 166, webrtc_glue.rs 170, ws/wt 187, core_layouts-половина 150, vks-layout мёртвое 113, frame_for_viewer 48, manifest-мелочи; НЕ мёртв: subtle/sha2, core_adapter, 54 Codian (каталог с сервера) | сам себя опроверг по core_adapter; спорил с моим предположением, что SDK — мусор | Принял его доказательства; решения: core_layouts — удалять, SDK оставить (артефакт спецификации) + wasm-CI оставить, self-view до ADR-0029 |
 | r6-t1-pitfalls (preset-grammar-warden) | подводные камни T1 до реализации | отчёт не доставлен (сбой агента) | — | Проанализировал сам: badge — ребёнок карточки после иконки (подтверждено бандлом `LayoutPresetSelector`: `Ix={key:0,class:"layout-scheme-selector-item__badge"}`), CSS absolute 24×24 из index7, дублей нет |
 | r6-t1-review-elegance | оценка T1 1–10 | 9/10; P0 нет; P1: aria-label без числа, data-windows в helper; «после P1 — 9.5» | настаивал на P1 до commit | Принял: aria-label с числом, data-windows в appendBadge; перепроверено live 59/59 → 9.5 по условию ревьюера |
-| r6-t1-review-bug, r6-t2-review-bug, r6-t2-review-elegance, r6-t2-review-short | код-ревью T1/T2 | не ответили (сессии субагентов падают в этом окружении) | — | Зафиксировано как ограничение; T2 закрыт self-review Lead (P0 нет) + live-проверкой, внешнее ревью — в бэклог T12 |
+| r6-t1-review-bug | оценка T1 1–10 | 9/10 (код 9.5): P0 — манифест без theme-toggle; P1 — переименование, идемпотентность, aria-hidden, свежий live | требовал не закрывать T1 до P0 | Принял всё: P0 закрыт (`70fff8e`, 214/214), P1 применены; по условию ревьюера — 9.5 |
+| r6-t2-review-bug, r6-t2-review-elegance, r6-t2-review-short | код-ревью T2 | не ответили (сессии субагентов падают) | — | T2 закрыт self-review Lead 9/10 (P0 нет) + live: sectionBeforeGroup, 5 карточек, activePreset=vks_grid_25, сохранение/переоткрытие; внешнее ревью — в бэклог T12 |
 | r6-regressions-bugs (regression-hunter) | независимые регрессии/баги R5.1 | отчёт не доставлен (сбой); прошлый `r5-regressions` подтвердил: R4-регрессий в прод-коде нет, wasm и gap закрыты `7841ecc` | — | Учтено; повтор в следующем раунде |
 | r6-config-conflicts (webrtc-bridge-auditor) | полный cat конфигов, конфликты/директории | отчёт не доставлен (сбой); прошлые данные: TEST-NET-пример, README:81 «970 тестов» vs 1306, README:58 реестр до 0027 vs 0028, allowlist H.323 трижды, dev-IP в unit | — | Перенесено в T6 с конкретикой; повтор в следующем раунде |
 
 ## Сделано
 
-- **T1** `c36f973`: бейдж числа окон на всех 59 карточках (54 Codian + 5
-  конструктора), вендорский класс/CSS, aria-label с числом, единый источник
-  `data-windows`; live: 59/59, 0 ошибок; манифест согласован.
+- **T1** `c36f973` + `70fff8e`: бейдж числа окон на всех 59 карточках (54 Codian
+  + 5 конструктора), вендорский класс/CSS, aria-label с числом, aria-hidden
+  бейджа, идемпотентный setCardCount; MANIFEST 214/214; свежий live: 59/59
+  карточек, 25→1→25 и клик «Конструктор» — 0 дефектов, 0 ошибок.
+  Ревью: elegance 9→9.5, bug 9→9.5 после P0, short 9/P0 нет — задача закрыта.
 - **T2** `472e444`: «Конструктор» показывает наш конструктор первым и
   переключает preset на `vks_grid_<N>`; live: 5 карточек, activePreset
   `vks_grid_25`, переоткрытие сохраняет `vks_*`.
