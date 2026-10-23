@@ -1199,12 +1199,22 @@ fn h265_video(media: &SdpMedia, payload: u8) -> bool {
     let Some(map) = media.maps.get(&payload) else {
         return false;
     };
-    (96..=127).contains(&payload)
+    if !((96..=127).contains(&payload)
         && (map.name.eq_ignore_ascii_case("H265") || map.name.eq_ignore_ascii_case("HEVC"))
-        && map.clock == 90000
-        && h265_don_compatible(
-            media.fmtp.get(&payload).and_then(|fmtp| fmtp.get("sprop-max-don-diff")).map(String::as_str),
-        )
+        && map.clock == 90000)
+    {
+        return false;
+    }
+    let fmtp = media.fmtp.get(&payload);
+    // Our H.265 sender is Main profile/Main tier; an answer that pins another
+    // configuration under the same PT cannot be mirrored.
+    if fmtp.and_then(|parameters| parameters.get("profile-id")).is_some_and(|value| value != "1") {
+        return false;
+    }
+    if fmtp.and_then(|parameters| parameters.get("tier-flag")).is_some_and(|value| value != "0") {
+        return false;
+    }
+    h265_don_compatible(fmtp.and_then(|parameters| parameters.get("sprop-max-don-diff")).map(String::as_str))
 }
 
 /// Resolves one remote video payload to a codec this bridge can carry.
@@ -1387,6 +1397,20 @@ m=video 5006 RTP/AVP 125\r\na=rtpmap:125 HEVC/90000\r\na=fmtp:125 profile-id=1\r
         assert!(h265_don_compatible(Some("0")));
         assert!(!h265_don_compatible(Some("1")));
         assert!(!h265_don_compatible(Some("garbage")));
+    }
+
+    #[test]
+    fn answer_with_other_h265_profile_or_tier_is_not_selected() {
+        let offer = build_offer(CodecProfile::Native, "127.0.0.1", 41000, Some(41002));
+        for fmtp in ["profile-id=2", "profile-id=1;tier-flag=1"] {
+            let answer = format!(
+                "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\n\
+m=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+m=video 5006 RTP/AVP 99\r\na=rtpmap:99 H265/90000\r\na=fmtp:99 {fmtp}\r\n"
+            );
+            let media = negotiate_media(&offer, &answer).expect("audio still negotiates");
+            assert_eq!(media.video_codec, None, "{fmtp} must not be selected");
+        }
     }
 
     #[test]

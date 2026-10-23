@@ -43,6 +43,9 @@ pub struct InboundMedia {
     /// Negotiated video codec name (`H264`/`H265`), mirroring
     /// [`InboundMedia::video_payload_type`].
     pub video_codec: Option<&'static str>,
+    /// Exact `a=fmtp` to mirror in the answer for the selected video payload;
+    /// RFC 6184/7798 require the same profile/packetization configuration.
+    pub video_fmtp: Option<String>,
     pub remote_ip: String,
     pub remote_audio_port: u16,
     pub remote_video_port: Option<u16>,
@@ -208,7 +211,7 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
             vks_common::codec_capabilities::video_codec_available("H265"),
         )
     });
-    let video_payload_type = video_codec.map(|(payload, _)| payload);
+    let video_payload_type = video_codec.as_ref().map(|selected| selected.payload);
     let remote_video_port = video.and_then(media_port);
     let audio_ip = section_ip(audio, &session_ip);
     if audio_ip.is_empty() {
@@ -223,7 +226,8 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
         audio_fmtp: bridge_audio.fmtp,
         audio_ptime_ms: bridge_audio.ptime_ms,
         video_payload_type,
-        video_codec: video_codec.map(|(_, codec)| codec),
+        video_codec: video_codec.as_ref().map(|selected| selected.codec),
+        video_fmtp: video_codec.map(|selected| selected.fmtp),
         remote_ip: audio_ip,
         remote_audio_port: audio_port,
         remote_video_port,
@@ -260,9 +264,11 @@ pub fn build_answer(
     }
     if media.video_offered {
         if let (Some(port), Some(payload)) = (video_port, media.video_payload_type) {
-            let (name, fmtp) = match media.video_codec {
-                Some("H265") => ("H265", "profile-id=1"),
-                _ => ("H264", "packetization-mode=1;profile-level-id=42e01f"),
+            let (name, fmtp) = match (media.video_codec, media.video_fmtp.as_deref()) {
+                (Some("H265"), Some(fmtp)) => ("H265", fmtp.to_string()),
+                (Some("H265"), None) => ("H265", "profile-id=1".to_string()),
+                (_, Some(fmtp)) => ("H264", fmtp.to_string()),
+                _ => ("H264", "packetization-mode=1;profile-level-id=42e01f".to_string()),
             };
             sdp.push_str(&format!(
                 "m=video {port} RTP/AVP {payload}\r\na=rtpmap:{payload} {name}/90000\r\na=fmtp:{payload} {fmtp}\r\n"
@@ -487,69 +493,122 @@ fn declared_payloads(section: &str) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-fn rtpmap_h265(section: &str) -> Option<u8> {
-    let declared = declared_payloads(section);
-    section.lines().find_map(|line| {
-        let rest = line.trim().strip_prefix("a=rtpmap:")?;
-        let (payload, encoding) = rest.split_once(' ')?;
-        let payload: u8 = payload.parse().ok()?;
-        let (name, clock) = encoding.split_once('/')?;
-        ((96..=127).contains(&payload)
-            && declared.contains(&payload)
-            && (name.eq_ignore_ascii_case("H265") || name.eq_ignore_ascii_case("HEVC"))
-            && clock == "90000")
-            .then_some(payload)
-    })
+/// Video payload selected for the answer, including the fmtp that must be
+/// mirrored to keep profile/packetization symmetric with the offer.
+#[derive(Debug)]
+struct VideoSelection {
+    payload: u8,
+    codec: &'static str,
+    fmtp: String,
 }
 
-/// `sprop-max-don-diff=0` means "no DONL" and works with the DON-less
-/// depacketizer; positive or unparsable values must not be answered.
-fn fmtp_allows_h265(section: &str, payload: u8) -> bool {
-    let prefix = format!("a=fmtp:{payload} ");
-    for line in section.lines().map(str::trim) {
-        let Some(parameters) = line.strip_prefix(&prefix) else { continue };
-        for parameter in parameters.split(';') {
-            let Some((key, value)) = parameter.trim().split_once('=') else { continue };
-            if key.trim().eq_ignore_ascii_case("sprop-max-don-diff") {
-                return value.trim().parse::<u32>().is_ok_and(|difference| difference == 0);
-            }
-        }
-    }
-    true
-}
-
-/// Picks the first video codec the host can actually bridge, honouring the
-/// peer's payload order within each codec family.
-fn select_video(section: &str, h264: bool, h265: bool) -> Option<(u8, &'static str)> {
+/// Picks the first video codec the host can actually bridge *and* whose SDP
+/// configuration our sender implements, honouring the peer's payload order.
+fn select_video(section: &str, h264: bool, h265: bool) -> Option<VideoSelection> {
     if h264 {
-        if let Some(payload) = h264_payload(section) {
-            return Some((payload, "H264"));
+        if let Some(selected) = h264_payload(section) {
+            return Some(selected);
         }
     }
     if h265 {
-        if let Some(payload) = h265_payload(section) {
-            return Some((payload, "H265"));
+        if let Some(selected) = h265_payload(section) {
+            return Some(selected);
         }
     }
     None
 }
 
-fn h265_payload(section: &str) -> Option<u8> {
-    rtpmap_h265(section).filter(|payload| fmtp_allows_h265(section, *payload))
+fn video_payloads(section: &str, codec_name: &str) -> Vec<u8> {
+    let declared = declared_payloads(section);
+    section
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("a=rtpmap:")?;
+            let (payload, encoding) = rest.split_once(' ')?;
+            let payload: u8 = payload.parse().ok()?;
+            let (name, clock) = encoding.split_once('/')?;
+            (declared.contains(&payload)
+                && (96..=127).contains(&payload)
+                && name.eq_ignore_ascii_case(codec_name)
+                && clock == "90000")
+                .then_some(payload)
+        })
+        .collect()
 }
 
-fn h264_payload(section: &str) -> Option<u8> {
-    let declared = declared_payloads(section);
-    section.lines().find_map(|line| {
-        let rest = line.trim().strip_prefix("a=rtpmap:")?;
-        let (payload, encoding) = rest.split_once(' ')?;
-        let payload: u8 = payload.parse().ok()?;
-        let (name, clock) = encoding.split_once('/')?;
-        (declared.contains(&payload)
-            && (96..=127).contains(&payload)
-            && name.eq_ignore_ascii_case("H264")
-            && clock == "90000")
-            .then_some(payload)
+/// Parameter map from every `a=fmtp:<payload>` line (last value wins).
+fn fmtp_parameters(section: &str, payload: u8) -> Vec<(String, String)> {
+    let prefix = format!("a=fmtp:{payload} ");
+    let mut parameters: Vec<(String, String)> = Vec::new();
+    for line in section.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix(&prefix) else { continue };
+        for parameter in rest.split(';') {
+            let Some((key, value)) = parameter.trim().split_once('=') else { continue };
+            let key = key.trim().to_ascii_lowercase();
+            let value = value.trim().to_string();
+            if let Some(existing) = parameters.iter_mut().find(|(name, _)| *name == key) {
+                existing.1 = value;
+            } else {
+                parameters.push((key, value));
+            }
+        }
+    }
+    parameters
+}
+
+fn fmtp_get<'a>(parameters: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    parameters.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| value.as_str())
+}
+
+fn h264_payload(section: &str) -> Option<VideoSelection> {
+    // Our sender emits FU-A (packetization-mode=1) and Baseline profile. RFC
+    // 6184 §8.2.2 forbids echoing the offer's PT with a different config, so
+    // reject offers without an explicit mode=1 baseline fmtp.
+    video_payloads(section, "H264").into_iter().find_map(|payload| {
+        let parameters = fmtp_parameters(section, payload);
+        if fmtp_get(&parameters, "packetization-mode") != Some("1") {
+            return None;
+        }
+        let profile_level_id = fmtp_get(&parameters, "profile-level-id")?;
+        let bytes = parse_profile_level_id(profile_level_id)?;
+        // Baseline profile (66) and level >= 3.1 (our minimum bridge profile).
+        if bytes[0] != 66 || bytes[2] < 31 {
+            return None;
+        }
+        Some(VideoSelection {
+            payload,
+            codec: "H264",
+            fmtp: format!("packetization-mode=1;profile-level-id={profile_level_id}"),
+        })
+    })
+}
+
+fn parse_profile_level_id(value: &str) -> Option<[u8; 3]> {
+    let hex = value.trim();
+    if hex.len() != 6 {
+        return None;
+    }
+    let mut bytes = [0u8; 3];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
+}
+
+fn h265_payload(section: &str) -> Option<VideoSelection> {
+    video_payloads(section, "H265").into_iter().find_map(|payload| {
+        let parameters = fmtp_parameters(section, payload);
+        // Main profile, main tier only; profile-id defaults to 1 per RFC 7798.
+        if fmtp_get(&parameters, "profile-id").is_some_and(|value| value != "1") {
+            return None;
+        }
+        if fmtp_get(&parameters, "tier-flag").is_some_and(|value| value != "0") {
+            return None;
+        }
+        if fmtp_get(&parameters, "sprop-max-don-diff").is_some_and(|value| value.parse::<u32>().ok() != Some(0)) {
+            return None;
+        }
+        Some(VideoSelection { payload, codec: "H265", fmtp: "profile-id=1".to_string() })
     })
 }
 
@@ -584,19 +643,52 @@ Content-Type: application/sdp\r\nContent-Length: %LEN%\r\n\r\n%SDP%";
         format!("{}\r\n\r\n{}", head.replace("Content-Length: 0", &format!("Content-Length: {len}")), offer)
     }
 
-    const OFFER: &str = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\nm=video 5006 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
+    const OFFER: &str = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\nm=video 5006 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
+
+    #[test]
+    fn incompatible_video_fmtp_is_not_answered() {
+        let base = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+        let video = |fmtp: &str| format!("{base}m=video 5006 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n{fmtp}");
+        // Default packetization-mode is 0; our sender emits FU-A (mode 1).
+        assert_eq!(negotiate(&video("")).unwrap().video_codec, None);
+        assert_eq!(
+            negotiate(&video("a=fmtp:96 packetization-mode=0;profile-level-id=42e01f\r\n")).unwrap().video_codec,
+            None
+        );
+        assert_eq!(
+            negotiate(&video("a=fmtp:96 packetization-mode=2;profile-level-id=42e01f\r\n")).unwrap().video_codec,
+            None
+        );
+        // High profile (idc 100) and level below our 3.1 bridge profile.
+        assert_eq!(
+            negotiate(&video("a=fmtp:96 packetization-mode=1;profile-level-id=64001f\r\n")).unwrap().video_codec,
+            None
+        );
+        assert_eq!(
+            negotiate(&video("a=fmtp:96 packetization-mode=1;profile-level-id=42e01e\r\n")).unwrap().video_codec,
+            None
+        );
+        let valid = negotiate(&video("a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n")).unwrap();
+        assert_eq!(valid.video_codec, Some("H264"));
+        assert_eq!(valid.video_fmtp.as_deref(), Some("packetization-mode=1;profile-level-id=42e01f"));
+        let h265 = |fmtp: &str| format!("{base}m=video 5006 RTP/AVP 125\r\na=rtpmap:125 H265/90000\r\n{fmtp}");
+        assert_eq!(negotiate(&h265("a=fmtp:125 profile-id=2\r\n")).unwrap().video_codec, None);
+        assert_eq!(negotiate(&h265("a=fmtp:125 profile-id=1;tier-flag=1\r\n")).unwrap().video_codec, None);
+        assert_eq!(negotiate(&h265("")).unwrap().video_codec, Some("H265"));
+    }
 
     #[test]
     fn video_selection_follows_host_availability() {
-        let both = "m=video 5006 RTP/AVP 96 125\r\na=rtpmap:96 H264/90000\r\na=rtpmap:125 H265/90000\r\n";
-        assert_eq!(select_video(both, true, true), Some((96, "H264")));
-        assert_eq!(select_video(both, false, true), Some((125, "H265")));
-        assert_eq!(select_video(both, true, false), Some((96, "H264")));
-        assert_eq!(select_video(both, false, false), None);
-        let h264_only = "m=video 5006 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
-        assert_eq!(select_video(h264_only, false, true), None);
-        let h265_only = "m=video 5006 RTP/AVP 125\r\na=rtpmap:125 H265/90000\r\n";
-        assert_eq!(select_video(h265_only, true, true), Some((125, "H265")));
+        let both = "m=video 5006 RTP/AVP 96 125\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\na=rtpmap:125 H265/90000\r\na=fmtp:125 profile-id=1\r\n";
+        let h264_only = "m=video 5006 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
+        let h265_only = "m=video 5006 RTP/AVP 125\r\na=rtpmap:125 H265/90000\r\na=fmtp:125 profile-id=1\r\n";
+        let pick = |section, h264, h265| select_video(section, h264, h265).map(|s| (s.payload, s.codec));
+        assert_eq!(pick(both, true, true), Some((96, "H264")));
+        assert_eq!(pick(both, false, true), Some((125, "H265")));
+        assert_eq!(pick(both, true, false), Some((96, "H264")));
+        assert_eq!(pick(both, false, false), None);
+        assert_eq!(pick(h264_only, false, true), None);
+        assert_eq!(pick(h265_only, true, true), Some((125, "H265")));
     }
 
     #[test]

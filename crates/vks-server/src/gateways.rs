@@ -131,6 +131,7 @@ fn h323_audio_native(name: &str) -> bool {
 
 fn h323_video_native(name: &str) -> bool {
     H323_VIDEO.iter().any(|codec| codec.eq_ignore_ascii_case(name))
+        && vks_common::codec_capabilities::video_codec_available("H264")
 }
 
 #[cfg(test)]
@@ -2480,9 +2481,9 @@ async fn serve_sip_uas_on(
                             "OPUS" => 48_000,
                             _ => 8_000,
                         },
-                        "video_codec": media.video_payload_type.and(media.video_codec),
-                        "video_payload_type": media.video_payload_type,
-                        "video_clock_rate": media.video_payload_type.map(|_| 90000u32),
+                        "video_codec": answer_video_port.and(media.video_codec),
+                        "video_payload_type": answer_video_port.and(media.video_payload_type),
+                        "video_clock_rate": answer_video_port.map(|_| 90000u32),
                         "answer_audio_port": audio_pair.rtp_port,
                         "answer_video_port": answer_video_port,
                     });
