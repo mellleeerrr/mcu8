@@ -93,6 +93,15 @@ pub fn is_native_audio_variant(name: &str, bitrate: Option<u32>) -> bool {
     is_native_audio(name)
 }
 
+/// Audio codec the SIP gateway can actually bridge: the native sample codecs
+/// plus AAC-LATM once its FFmpeg workers were probed. H.323 callers must not
+/// use this (its single-codec matrix stays G.711/G.722/G.723.1).
+#[must_use]
+pub fn is_supported_audio_variant(name: &str, bitrate: Option<u32>) -> bool {
+    is_native_audio_variant(name, bitrate)
+        || (matches!(normalize(name).as_str(), "AAC" | "MP4ALATM") && audio_codec_available("MP4A-LATM"))
+}
+
 /// Мостится ли видеокодек native-профилем *и* доступен ли его мост на хосте.
 /// `H264-HIGH` не входит в native-список (это отдельная конфигурация).
 #[must_use]
@@ -181,6 +190,16 @@ mod tests {
         assert!(native_video_with("H265", false, true));
         assert!(!native_video_with("H264", false, true));
         assert!(!native_video_with("H261", true, true));
+    }
+
+    #[test]
+    fn supported_audio_variant_tracks_the_aac_probe() {
+        assert!(is_supported_audio_variant("G722", None));
+        assert!(is_supported_audio_variant("G726", Some(32)));
+        assert!(!is_supported_audio_variant("G726", Some(20)));
+        assert!(!is_supported_audio_variant("AAC", None));
+        assert!(audio_codec_available_with("AAC", true));
+        assert!(!is_supported_audio_variant("AAC", None), "global probe is off in tests");
     }
 
     #[test]

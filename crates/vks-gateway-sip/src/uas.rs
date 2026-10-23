@@ -183,6 +183,10 @@ fn hex(byte: u8) -> Option<u8> {
 /// (PCMU/PCMA/G722/G726); динамический PT сохраняется, кодек едет отдельно.
 /// Видео — H.264, иначе H.265, если его мост доступен на хосте.
 pub fn negotiate(offer: &str) -> Option<InboundMedia> {
+    negotiate_with(offer, vks_common::codec_capabilities::audio_codec_available("MP4A-LATM"))
+}
+
+fn negotiate_with(offer: &str, aac_available: bool) -> Option<InboundMedia> {
     let session_ip = media_ip(offer).unwrap_or_default();
     let audio = media_section(offer, "audio")?;
     if media_proto(audio) != Some("RTP/AVP") {
@@ -198,7 +202,7 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
     // the peer's number but carry the codec identity separately.
     let (audio_payload_type, bridge_audio) = audio_payload_order(audio)
         .into_iter()
-        .find_map(|payload| bridgeable_audio(audio, payload).map(|codec| (payload, codec)))?;
+        .find_map(|payload| bridgeable_audio(audio, payload, aac_available).map(|codec| (payload, codec)))?;
     let video_section = media_section(offer, "video");
     let video_offered = video_section.is_some();
     let video = video_section
@@ -410,7 +414,7 @@ impl BridgeableAudio {
 /// transcoder.  Static PTs 0/8/9 may omit rtpmap; dynamic PTs (including our
 /// 107-110) must declare a matching name+clock, otherwise a hostile offer
 /// could claim PCMU while sending G.726.
-fn bridgeable_audio(section: &str, payload: u8) -> Option<BridgeableAudio> {
+fn bridgeable_audio(section: &str, payload: u8, aac_available: bool) -> Option<BridgeableAudio> {
     let static_codec = match payload {
         0 => Some("PCMU"),
         8 => Some("PCMA"),
@@ -445,7 +449,7 @@ fn bridgeable_audio(section: &str, payload: u8) -> Option<BridgeableAudio> {
         let (name, clock, channels) = declared_codec(section, payload)?;
         let name = name.trim().to_ascii_uppercase().replace(['.', '-', '_'], "");
         if name == "MP4ALATM" {
-            if !vks_common::codec_capabilities::audio_codec_available("MP4A-LATM") {
+            if !aac_available {
                 return None;
             }
             // Slice 3 supports in-band SMC (cpresent=1) only: a config-only
@@ -943,5 +947,28 @@ a=rtpmap:96 opus/8000/2\r\n";
         let raw = invite(OFFER).replace("4d313d01-8300-450c-ab08-28c8a00f9f25", "room%2D1;transport=udp");
         let request = UasRequest::parse(&raw).unwrap();
         assert_eq!(request.target_user().as_deref(), Some("room-1"));
+    }
+
+    #[test]
+    fn inbound_aac_latm_cpresent1_is_answered_without_ptime() {
+        let offer = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP 113 101\r\n\
+a=rtpmap:113 MP4A-LATM/90000\r\na=fmtp:113 profile-level-id=1;object=2;cpresent=1\r\n\
+a=rtpmap:101 telephone-event/8000\r\n";
+        assert!(negotiate(offer).is_none(), "probe off must refuse AAC");
+        let media = negotiate_with(offer, true).expect("cpresent=1 accepted");
+        assert_eq!(media.audio_codec, "MP4A-LATM");
+        assert_eq!(media.audio_clock_rate, 90_000);
+        let answer = build_answer("192.168.1.93", 1, 41000, None, &media);
+        assert!(answer.contains("a=rtpmap:113 MP4A-LATM/90000"), "{answer}");
+        assert!(answer.contains("cpresent=1"), "{answer}");
+        assert!(!answer.contains("a=ptime"), "21.33 ms frames cannot promise ptime:20: {answer}");
+
+        let config_only = offer.replace("cpresent=1", "cpresent=0").replace(
+            "profile-level-id=1;object=2;cpresent=0",
+            "profile-level-id=1;object=2;cpresent=0;config=40002420",
+        );
+        assert!(negotiate_with(&config_only, true).is_none(), "cpresent=0 needs config support");
+        let bad_clock = offer.replace("MP4A-LATM/90000", "MP4A-LATM/48000");
+        assert!(negotiate_with(&bad_clock, true).is_none(), "48 kHz clock is not bridged yet");
     }
 }

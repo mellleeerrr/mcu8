@@ -109,21 +109,24 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
     let mut incoming = [0u8; 2048];
     let mut recv_errors = 0u8;
     let mut rejected_logs = 0u8;
-    let mut dtmf_warned = false;
+    let mut dtmf = VecDeque::<u8>::new();
+    let mut dtmf_active: Option<(u8, usize, u32)> = None;
+    let mut dtmf_gap = 0u8;
+    let mut dtmf_timestamp = 0u32;
 
     while !session.cancel_flag.load(Relaxed) {
         tokio::select! {
             Some(digits) = session.dtmf_rx.recv() => {
-                // RFC 4733 events use their own 8 kHz timestamp domain; mixing
-                // them into the AAC audio timeline would desynchronise it.
-                // Keep the queue drained until event support lands.
-                if !dtmf_warned {
-                    dtmf_warned = true;
-                    tracing::warn!(
-                        participant = %session.participant_id_str,
-                        digits = digits.len(),
-                        "DTMF over the AAC-LATM bridge is not implemented yet"
-                    );
+                for character in digits.chars().take(32) {
+                    let event = match character {
+                        '0'..='9' => character as u8 - b'0',
+                        '*' => 10,
+                        '#' => 11,
+                        'A'..='D' => character as u8 - b'A' + 12,
+                        'a'..='d' => character as u8 - b'a' + 12,
+                        _ => continue,
+                    };
+                    if dtmf.len() < 128 { dtmf.push_back(event); }
                 }
             }
             result = session.rtp_socket.recv_from(&mut incoming) => {
@@ -239,6 +242,43 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                         sequence = sequence.wrapping_add(1);
                     }
                 }
+                // RFC 4733 events keep their own 8 kHz clock; do not advance the
+                // AAC audio timestamp while sending them.
+                if let Some(payload_type) = session.dtmf_payload_type {
+                    if dtmf_gap > 0 {
+                        dtmf_gap -= 1;
+                    } else {
+                        if dtmf_active.is_none() {
+                            dtmf_active = dtmf.pop_front().map(|event| (event, 0, dtmf_timestamp));
+                        }
+                        if let Some((event, step, started)) = dtmf_active {
+                            let duration = [160u16, 320, 480, 480, 480][step];
+                            let mut event_packet = [0u8; 16];
+                            vks_gateway_sip::write_rtp_header(
+                                &mut event_packet[..12],
+                                payload_type,
+                                sequence,
+                                started,
+                                ssrc,
+                                step == 0,
+                            );
+                            sequence = sequence.wrapping_add(1);
+                            event_packet[12] = event;
+                            event_packet[13] = if step >= 2 { 0x8a } else { 0x0a };
+                            event_packet[14..].copy_from_slice(&duration.to_be_bytes());
+                            let _ = session.rtp_socket.send_to(&event_packet, egress).await;
+                            if step == 4 {
+                                dtmf_active = None;
+                                dtmf_gap = 2;
+                            } else {
+                                dtmf_active = Some((event, step + 1, started));
+                            }
+                        }
+                    }
+                } else {
+                    dtmf.clear();
+                }
+                dtmf_timestamp = dtmf_timestamp.wrapping_add(160);
                 if last_rtcp.elapsed() >= Duration::from_secs(5) {
                     if let Some(socket) = &session.rtcp_socket {
                         let report = super::audio::rtcp_sender_report(

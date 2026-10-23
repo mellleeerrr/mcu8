@@ -149,10 +149,10 @@ fn ensure_bridgeable_codec_selection_for(
     audio: Option<&serde_json::Value>,
     video: Option<&serde_json::Value>,
 ) -> Result<(), String> {
-    use vks_common::codec_capabilities::{is_native_audio_variant, is_native_video, NATIVE_AUDIO, NATIVE_VIDEO};
+    use vks_common::codec_capabilities::{is_native_video, is_supported_audio_variant, NATIVE_AUDIO, NATIVE_VIDEO};
     let audio_supported: &[&str] = if h323 { H323_AUDIO } else { NATIVE_AUDIO };
     let audio_native: fn(&str) -> bool =
-        if h323 { h323_audio_native } else { |name| is_native_audio_variant(name, None) };
+        if h323 { h323_audio_native } else { |name| is_supported_audio_variant(name, None) };
     let video_supported: &[&str] = if h323 { H323_VIDEO } else { NATIVE_VIDEO };
     let video_native: fn(&str) -> bool = if h323 { h323_video_native } else { is_native_video as fn(&str) -> bool };
     for (kind, value, supported, native) in

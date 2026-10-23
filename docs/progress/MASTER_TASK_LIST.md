@@ -220,8 +220,13 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > AAC лишь при availability; UAS принимает cpresent=1, отвергает clock≠90000/cpresent=0 (488, а не
 > «200 OK и тишина»), answer без `a=ptime:20`; метаданные PT113 (name/48k sample rate/90k clock),
 > `bridgeable_audio_pts` и **preflight пула ≥2 воркеров до 200 OK**. Workspace 1229, live-бинарь
-> `73473c49` поднят, `/readyz=200`, лог `aac_latm=true`. Осталось: UAS wire-тест cpresent=1,
-> cpresent=0/config, DTMF, live `.132`, независимые ревью.
+> `73473c49` поднят, `/readyz=200`, лог `aac_latm=true`.
+> **Slice 3c:** UAS wire-тест cpresent=1 (answer без ptime, отказ для cpresent=0/48000-clock),
+> outbound DTMF RFC4733 на отдельном 8 кГц таймлайне (sequence общий), `is_supported_audio_variant`
+> публикует AAC в `/api/v3/settings/audio_codecs`. **Live E2E: 233/233, failure=null**
+> (`/var/tmp/vks-e2e-aac/result.json`, бинарь `0096ff90`); `.132` выбрал G722 по своему порядку —
+> AAC-live не доказан, это regression proof. Live API на бинаре `0f8402`: AAC supported=true.
+> Workspace 1231. Осталось: cpresent=0/config, AAC-только live-вызов, независимые ревью, legal-гейт.
 > Нельзя: `-flags low_delay`/`-avioflags direct`/`-fflags nobuffer` (ломали AAC), забыть
 > `-probesize 32 -analyzeduration 0` перед `-i`, ждать EOF для кадров, блокировать аудио-цикл чтением stdout,
 > объявлять native AAC без worker/packetizer/probe, резать кадр по MTU вместо drop+metric, писать `ptime:20`
