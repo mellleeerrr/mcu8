@@ -6,8 +6,6 @@
 
 use thiserror::Error;
 
-use crate::recording::{Segment, SegmentKind};
-
 /// Ошибки записи медиаконтейнера.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ContainerError {
@@ -117,16 +115,6 @@ impl PlayableContainerWriter {
         self.media_data.extend_from_slice(data);
         self.duration_ms = self.duration_ms.max(timestamp_ms);
         Ok(())
-    }
-
-    /// Записывает сегмент сессии записи в контейнер.
-    pub fn write_segment(&mut self, segment: &Segment, sample_data: &[u8]) -> Result<(), ContainerError> {
-        match segment.kind {
-            SegmentKind::CompositeVideo | SegmentKind::TrackTrack => {
-                self.write_video_frame(segment.duration_ms, true, sample_data)
-            }
-            SegmentKind::Audio => self.write_audio_frame(segment.duration_ms, sample_data),
-        }
     }
 
     /// Записывает видео-сэмпл (алиас для write_video_frame).

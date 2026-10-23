@@ -72,9 +72,6 @@ fn track_matches_subscription(req: &SubscribeRequest, track: &MediaTrack) -> boo
         && (req.track_ids.is_empty() || req.track_ids.contains(&track.id))
 }
 
-/// Запись в индексе SSRC: (комната, паблишер, трек).
-pub type SsrcTrackTarget = (RoomId, ParticipantId, TrackId);
-
 /// SFU engine (impl [`MediaEngine`]).
 #[derive(Debug)]
 pub struct SfuEngine {
@@ -119,12 +116,6 @@ impl SfuEngine {
         if let Some(state) = self.rooms.lock().unwrap().get_mut(&room) {
             state.subscriber_payload_types.entry(subscriber).or_default().insert(kind, payload_type & 0x7f);
         }
-    }
-
-    /// Текущий spatial layer для подписчика (None если нет).
-    pub fn subscriber_layer(&self, room: RoomId, subscriber: ParticipantId) -> Option<SimulcastLayer> {
-        let g = self.rooms.lock().unwrap();
-        g.get(&room)?.subscribers.get(&subscriber).map(|s| s.simulcast.current())
     }
 
     /// Текущий congestion level для подписчика.

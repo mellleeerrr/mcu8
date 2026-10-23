@@ -1160,11 +1160,6 @@ pub(crate) fn native_stop_reason(reason: &str) -> &'static str {
     }
 }
 
-/// Сериализует снимок участника в формат абонента PNM UI.
-pub fn participant_to_abonent_json(p: &crate::hub::ParticipantSnapshot) -> Value {
-    participant_to_abonent_json_with_settings(p, None)
-}
-
 /// Сериализует запись строки вызова (in-flight или standby) в формат абонента.
 pub fn call_record_to_abonent_json(r: &super::call_strings::CallStringRecord, state_str: &str) -> Value {
     let uri = if r.uri.contains(':') { r.uri.clone() } else { format!("sip:{}", r.uri) };

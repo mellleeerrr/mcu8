@@ -61,11 +61,6 @@ impl Readiness {
         Self { db, media, cluster: true, gateway: true }
     }
 
-    /// Создаёт полный readiness из всех компонентов.
-    pub fn with_components(db: bool, media: bool, cluster: bool, gateway: bool) -> Self {
-        Self { db, media, cluster, gateway }
-    }
-
     /// Все зависимости OK (тестовый хелпер).
     pub fn all_ok() -> Self {
         Self { db: true, media: true, cluster: true, gateway: true }

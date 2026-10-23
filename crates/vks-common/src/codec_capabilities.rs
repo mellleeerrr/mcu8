@@ -129,7 +129,11 @@ fn native_video_with(name: &str, h264: bool, h265: bool) -> bool {
     }
 }
 
-fn truthy(value: Option<&str>) -> bool {
+/// True, если значение — «истина» в смысле env-переменных.
+///
+/// Единая трактовка `1`/`true`/`TRUE`/`yes`/`on` для всех флагов проекта.
+#[must_use]
+pub fn truthy(value: Option<&str>) -> bool {
     matches!(value.map(str::trim), Some("1" | "true" | "TRUE" | "yes" | "on"))
 }
 

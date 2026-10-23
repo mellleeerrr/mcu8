@@ -111,18 +111,15 @@ pub fn plan_viewer(context: &ViewerContext, viewer: ParticipantId) -> ViewerPlan
     let self_view_enabled = publishes && context.self_view == SelfViewPolicy::LowestPriorityCell;
 
     // Ячейка самопросмотра — низший приоритет, то есть последняя.
-    let self_view_slot = self_view_enabled.then(|| context.cells.len().saturating_sub(1)).filter(|_| !context.cells.is_empty());
+    let self_view_slot =
+        self_view_enabled.then(|| context.cells.len().saturating_sub(1)).filter(|_| !context.cells.is_empty());
     let shared_len = if self_view_slot.is_some() { context.cells.len() - 1 } else { context.cells.len() };
 
     // Участники, занимающие общие ячейки, — по приходу. Зритель исключён
     // только когда его камера уходит в самопросмотр: иначе он занимает
     // обычную ячейку, как все.
-    let occupants: Vec<ParticipantId> = context
-        .participants
-        .iter()
-        .copied()
-        .filter(|pid| !self_view_enabled || *pid != viewer)
-        .collect();
+    let occupants: Vec<ParticipantId> =
+        context.participants.iter().copied().filter(|pid| !self_view_enabled || *pid != viewer).collect();
 
     let mut cells: Vec<PlanCell> = Vec::with_capacity(shared_len);
     for (index, cell) in context.cells.iter().take(shared_len).enumerate() {

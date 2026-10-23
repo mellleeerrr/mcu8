@@ -309,18 +309,6 @@ impl WebRtcPeer {
         self.drain()
     }
 
-    /// Write one encoded frame using the first negotiated payload for `mid`.
-    pub fn write_media_auto(
-        &mut self,
-        mid: Mid,
-        wallclock: Instant,
-        rtp_time: MediaTime,
-        data: impl Into<Arc<[u8]>>,
-    ) -> Result<Vec<WebRtcAction>, WebRtcError> {
-        let pt = self.payload_type(mid).ok_or(WebRtcError::UnknownMid)?;
-        self.write_media(mid, pt, wallclock, rtp_time, data)
-    }
-
     /// Configure the desired egress bitrate for BWE (bit/s).
     pub fn set_desired_bitrate(&mut self, bps: u64) {
         self.rtc.bwe().set_desired_bitrate(str0m::bwe::Bitrate::bps(bps));

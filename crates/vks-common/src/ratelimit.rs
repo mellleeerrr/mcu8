@@ -75,11 +75,6 @@ impl RateLimiter {
         Self::new(ADMIN_PER_MIN, 10.0)
     }
 
-    /// Создаёт limiter для WS frames (16KB/frame, 1000 frames/s).
-    pub fn ws_frames() -> Self {
-        Self::new(WS_FRAME_MAX_BYTES, 1000.0)
-    }
-
     /// Allow a request for `key` at `now_tick`.
     ///
     /// - First call for key: creates bucket with full capacity → allow.

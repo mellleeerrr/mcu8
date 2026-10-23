@@ -162,9 +162,6 @@ impl PartialOrd for Role {
 }
 
 impl Role {
-    /// Все роли в порядке убывания полномочий.
-    pub const ALL: [Role; 4] = [Role::Operator, Role::Moderator, Role::Participant, Role::Viewer];
-
     /// Имя роли (для логов и wire-форматов).
     pub fn as_str(&self) -> &'static str {
         match self {

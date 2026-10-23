@@ -30,8 +30,6 @@ pub const NAL_VPS: u8 = 32;
 pub const NAL_SPS: u8 = 33;
 /// HEVC NAL unit type: PPS.
 pub const NAL_PPS: u8 = 34;
-/// HEVC NAL unit type: access unit delimiter.
-pub const NAL_AUD: u8 = 35;
 
 const NAL_AP: u8 = 48;
 const NAL_FU: u8 = 49;

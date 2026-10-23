@@ -67,8 +67,7 @@ struct BusState {
     seen_order: std::collections::VecDeque<String>,
     /// DLQ: темы → сообщения.
     dlq: HashMap<String, Vec<Msg>>,
-    /// Счётчики для metрик (vks_bus_published_total и т.п.).
-    published: u64,
+    /// Счётчики для metрик (vks_bus_duplicate_total и т.п.).
     duplicates: u64,
     dlq_messages: u64,
 }
@@ -85,7 +84,6 @@ impl Bus {
                 seen_ids: HashSet::new(),
                 seen_order: std::collections::VecDeque::new(),
                 dlq: HashMap::new(),
-                published: 0,
                 duplicates: 0,
                 dlq_messages: 0,
             })),
@@ -123,7 +121,6 @@ impl Bus {
         let has_subscribers = st.subscribers.get(&topic).map(|v| !v.is_empty()).unwrap_or(false);
         if has_subscribers {
             st.topics.entry(topic.clone()).or_default().push(msg.clone());
-            st.published += 1;
             return PublishResult::Delivered;
         }
 
@@ -136,7 +133,6 @@ impl Bus {
         }
 
         st.topics.entry(topic).or_default().push(msg);
-        st.published += 1;
         PublishResult::Delivered
     }
 
@@ -179,11 +175,6 @@ impl Bus {
     pub fn has_id(&self, id: &str) -> bool {
         let st = self.state.lock().unwrap();
         st.seen_ids.contains(id)
-    }
-
-    /// Счётчик опубликованных (не дубликатов).
-    pub fn published_count(&self) -> u64 {
-        self.state.lock().unwrap().published
     }
 
     /// Счётчик проигнорированных дубликатов.

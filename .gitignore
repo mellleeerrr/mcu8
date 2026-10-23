@@ -18,8 +18,6 @@ client/pnm-frontend/archive/
 *.log
 # логи приёмки/смоука — часть evidence и коммитятся
 !docs/progress/evidence/**/*.log
-vks-server.log
-vks_server.log
 
 # SQLite local runtime database
 *.db

@@ -68,11 +68,6 @@ impl Rect {
         Self { x, y, w, h }
     }
 
-    /// Нулевой rect в точке (x, y).
-    pub fn point(x: u32, y: u32) -> Self {
-        Self { x, y, w: 0, h: 0 }
-    }
-
     /// Площадь в пикселях (u64 против overflow).
     pub fn area(&self) -> u64 {
         u64::from(self.w) * u64::from(self.h)

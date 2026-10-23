@@ -73,6 +73,11 @@ struct RoomState {
     /// Last composed frame, per subscriber (mock: the same composite for
     /// every subscriber).
     composite: Arc<Frame>,
+    /// Кадры участников по слотам (последний тик) — нужны персональной
+    /// сборке кадра для самопросмотра (ADR-0029, фаза 2).
+    frames: BTreeMap<u32, Arc<Frame>>,
+    /// Самопросмотр включён в комнате (ADR-0029, фаза 2; по умолчанию выключен).
+    self_view: bool,
     /// Audio mix of the current frame (full mix for recording/monitoring).
     mixed_audio: Vec<f32>,
     /// Per-participant N-1 mix-minus audio (without self-echo).
@@ -104,6 +109,8 @@ impl RoomState {
             last_render_ms: None,
             last_audio_ms: None,
             stats: McuRenderStats::default(),
+            frames: BTreeMap::new(),
+            self_view: false,
             composite: Arc::new(Frame::new(
                 CANVAS_SIZE.0,
                 CANVAS_SIZE.1,
@@ -295,6 +302,9 @@ impl RoomState {
         let t0 = std::time::Instant::now();
         let rects = self.slot_rects();
         self.composite = Arc::new(Compositor.compose(frames, &rects));
+        // Кадры сохраняются для персональной сборки (самопросмотр): сам композит
+        // уже собран, а личная дельта нужна отдельно.
+        self.frames.clone_from(frames);
         self.stats.last_duration_us = t0.elapsed().as_micros() as u64;
         self.stats.frames_rendered += 1;
     }
@@ -567,12 +577,66 @@ impl McuEngine {
 
     /// Кадр для конкретного зрителя.
     ///
-    /// Фаза 0 ADR-0029: персональной дельты ещё нет ⇒ зритель получает
-    /// **тот же** `Arc<Frame>`, что и все остальные (нулевые копии; байты
-    /// не меняются). Дальше зритель с отклонениями получит персональную
-    /// сборку из тайлов, а зритель без отклонений — по-прежнему общий `Arc`.
-    pub fn frame_for_viewer(&self, room: RoomId, _viewer: ParticipantId) -> Option<Arc<Frame>> {
-        self.composite_frame(room)
+    /// Фаза 2 ADR-0029 («Continuous Presence»): по умолчанию самопросмотр
+    /// выключен, и зритель получает **тот же** `Arc<Frame>`, что и все
+    /// остальные (нулевые копии; байты не меняются). Когда самопросмотр
+    /// включён, персональный кадр собирается из общего: ячейка зрителя в
+    /// общей сетке освобождается, а его камера рисуется в ячейку низшего
+    /// приоритета (последнюю по z-порядку) — ровно то правило, что описано
+    /// в спецификации Codian §2 («собственный видеопоток смотрящего не
+    /// учитывается в сетке, самопросмотр — низший приоритет»).
+    pub fn frame_for_viewer(&self, room: RoomId, viewer: ParticipantId) -> Option<Arc<Frame>> {
+        let g = self.rooms.lock().unwrap();
+        let state = g.get(&room)?;
+        let base = state.composite.clone();
+        if !state.self_view {
+            return Some(base);
+        }
+        let rects = state.slot_rects();
+        // Ячейка зрителя в общей сетке.
+        // Идентификаторы участников в раскладке и в ядре — разные типы с одним
+        // UUID, поэтому сравниваем по нему.
+        let viewer_uuid = viewer.as_uuid().as_u128();
+        let own_slot = state
+            .current_layout
+            .slots
+            .iter()
+            .find(|slot| slot.participant_id.map(|pid| pid.as_u128()) == Some(viewer_uuid))
+            .map(|s| s.id.as_u32());
+        let Some(own_slot) = own_slot else { return Some(base) };
+        // Ячейка самопросмотра — низший приоритет: последняя по (z, id).
+        let Some(self_slot) = state
+            .current_layout
+            .slots
+            .iter()
+            .max_by_key(|slot| (slot.z_index, slot.id.as_u32()))
+            .map(|slot| slot.id.as_u32())
+        else {
+            return Some(base);
+        };
+        if self_slot == own_slot {
+            // Зритель уже стоит в ячейке низшего приоритета — дельта пуста.
+            return Some(base);
+        }
+        let Some(own_rect) = rects.get(&own_slot) else { return Some(base) };
+        let Some(self_rect) = rects.get(&self_slot) else { return Some(base) };
+        let mut canvas = Frame::new(base.width, base.height, base.data.clone());
+        Compositor::clear(&mut canvas, own_rect);
+        if let Some(camera) = state.frames.get(&own_slot) {
+            Compositor::blit(&mut canvas, camera, self_rect);
+        }
+        Some(Arc::new(canvas))
+    }
+
+    /// Включает самопросмотр в комнате (ADR-0029, фаза 2).
+    ///
+    /// По умолчанию выключен: общий кадр не меняется, поведение комнаты
+    /// остаётся прежним до явного включения.
+    pub fn set_self_view(&self, room: RoomId, enabled: bool) {
+        let mut g = self.rooms.lock().unwrap();
+        if let Some(state) = g.get_mut(&room) {
+            state.self_view = enabled;
+        }
     }
 
     /// Returns the rendering and backpressure stats of a room (M3.6).
@@ -1078,6 +1142,75 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&first, &second), "зрители делят один кадр");
         assert!(std::sync::Arc::ptr_eq(&first, &composite), "кадр зрителя — общий композит");
         assert_eq!(first.data, composite.data, "байты не изменились");
+    }
+
+    /// ADR-0029, фаза 2: самопросмотр выключен по умолчанию — поведение
+    /// комнаты не меняется, зритель получает общий `Arc<Frame>`.
+    #[tokio::test]
+    async fn self_view_is_off_by_default() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(1);
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.set_frame(rid, 0, Frame::filled(320, 180, 10));
+        for _ in 0..12 {
+            e.tick(rid);
+        }
+        let composite = e.composite_frame(rid).expect("composite");
+        let personal = e.frame_for_viewer(rid, a).expect("кадр для зрителя");
+        assert!(std::sync::Arc::ptr_eq(&personal, &composite), "без самопросмотра кадр общий");
+    }
+
+    /// ADR-0029, фаза 2 («Continuous Presence»): при включённом самопросмотре
+    /// зритель видит свою камеру в ячейке низшего приоритета, а его ячейка в
+    /// общей сетке освобождена (у другого зрителя она остаётся).
+    #[tokio::test]
+    async fn self_view_moves_the_viewer_to_the_lowest_priority_cell() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        use vks_core::ports::media_engine::LayoutSlot;
+
+        let a = p(1);
+        let b = p(2);
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.add_publisher(rid, b, vec![video_track(b)]).await.unwrap();
+        e.set_frame(rid, 0, Frame::filled(320, 180, 10));
+        e.set_frame(rid, 1, Frame::filled(320, 180, 200));
+        // Две ячейки 960×540: слот 0 — крупный, слот 1 — низший приоритет.
+        let geometry = (0..2)
+            .map(|slot| LayoutSlot { slot, x: slot * 960, y: 0, width: 960, height: 540, z_order: slot })
+            .collect();
+        let mut assignments = std::collections::BTreeMap::new();
+        assignments.insert(a, 0);
+        assignments.insert(b, 1);
+        let layout = LayoutDescriptor { layout_id: "custom".into(), version: 1, assignments, geometry };
+        e.apply_layout(rid, layout).await.unwrap();
+        for _ in 0..12 {
+            e.tick(rid);
+        }
+        let rects = e.slot_rects(rid).expect("слоты комнаты");
+        let own = *rects.get(&0).expect("слот 0");
+        let lowest = *rects.get(&1).expect("слот 1");
+        e.set_self_view(rid, true);
+
+        let personal = e.frame_for_viewer(rid, a).expect("персональный кадр");
+        let other = e.frame_for_viewer(rid, b).expect("персональный кадр второго");
+        assert!(!std::sync::Arc::ptr_eq(&personal, &other), "у зрителей разные кадры");
+        // Ячейка зрителя в общей сетке зачёркнута, его камера — в последней ячейке.
+        let cw = CANVAS_SIZE.0 as usize;
+        let pixel = |frame: &Frame, x: u32, y: u32| -> u8 {
+            let offset = y as usize * cw + x as usize;
+            frame.data.get(offset).copied().unwrap_or_default()
+        };
+        let (ox, oy) = (own.x + own.w / 4, own.y + own.h / 4);
+        assert_eq!(pixel(&personal, ox, oy), 16, "ячейка зрителя в общей сетке освобождена");
+        let (lx, ly) = (lowest.x + lowest.w / 4, lowest.y + lowest.h / 4);
+        assert_eq!(pixel(&personal, lx, ly), 10, "камера зрителя в ячейке низшего приоритета");
+        // У второго зрителя его камера осталась в общей сетке.
+        let (bx, by) = (own.x + own.w / 4, own.y + own.h / 4);
+        assert_eq!(pixel(&other, bx, by), 10, "у другого зрителя камера на месте");
     }
 
     /// ADR-0029, фаза 0: egress-запрос кадра для зрителя продвигает конвейер

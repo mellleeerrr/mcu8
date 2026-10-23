@@ -1,52 +1,44 @@
 //! Сборка .proto через prost-build.
 //!
-//! Использует `protobuf-src`: компилирует собственный `protoc` в `OUT_DIR`
-//! при первой сборке, чтобы НЕ требовать системного `protoc`
-//! (кросс-платформенно: Linux/macOS/CI).
+//! protoc берётся из крейта `protoc-bin-vendored`: готовый бинарь лежит в реестре
+//! cargo, а не в `$OUT_DIR` воркспейса, поэтому сборка не зависит от пробелов в
+//! пути (`protobuf-src`/autotools/libtool зависели: libtool режет `$PWD` по пробелу).
 //!
-//! Основание: docs/DEVELOPMENT_PLAN.md Фаза 0 (build.rs — prost-build).
+//! Системный protoc переопределяется переменной `PROTOC` (соглашение prost-build):
+//! `PROTOC=/usr/bin/protoc cargo build`.
+//!
+//! Основание: docs/DEVELOPMENT_PLAN.md Фаза 0 (build.rs — prost-build); ADR-0031.
+
+use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let proto_dir = "proto";
-    let protos = ["media.proto", "signaling.proto", "cluster.proto", "admin.proto"];
+    const PROTO_DIR: &str = "proto";
+    const PROTOS: [&str; 4] = ["media.proto", "signaling.proto", "cluster.proto", "admin.proto"];
 
-    #[cfg(feature = "vendored-protoc")]
-    let (protoc, include) = (protobuf_src::protoc(), protobuf_src::include());
-
-    #[cfg(not(feature = "vendored-protoc"))]
-    let (protoc, include) = {
-        let protoc = std::env::var("PROTOC")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("protoc"));
-        let include = std::env::var("PROTOC_INCLUDE").map(std::path::PathBuf::from).unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            let cargo_inc = std::path::PathBuf::from(home).join(".cargo/include");
-            if cargo_inc.exists() {
-                cargo_inc
-            } else {
-                std::path::PathBuf::from("proto")
-            }
-        });
-        (protoc, include)
+    // Системный protoc — если задан; иначе герметичный из крейта.
+    let protoc: PathBuf = match std::env::var_os("PROTOC") {
+        Some(p) => p.into(),
+        None => protoc_bin_vendored::protoc_bin_path()?,
     };
+
+    // Include с well-known типами нужен, только если .proto будут импортировать
+    // google/protobuf/*; prost-build читает его только из переменной окружения.
+    // NB: в edition 2024 `set_var` станет unsafe — тогда обернуть в unsafe-блок.
+    if let Ok(include) = protoc_bin_vendored::include_path() {
+        std::env::set_var("PROTOC_INCLUDE", include);
+    }
 
     let mut config = prost_build::Config::new();
     config.protoc_executable(&protoc);
-    config.protoc_arg("--experimental_allow_proto3_optional");
     config.compile_well_known_types();
 
-    let out = std::env::var("OUT_DIR").unwrap();
+    let out = std::env::var("OUT_DIR")?;
     config.out_dir(&out);
-
     // Компилируем все .proto (import'ят друг друга: signaling→media, admin→media).
-    // `includes` — директории, доступные для `import` (тут только proto/).
-    config.compile_protos(&protos, &[proto_dir])?;
+    config.compile_protos(&PROTOS, &[PROTO_DIR])?;
 
-    // Передаём путь к protoc + include-директории (для debug/дебага).
     println!("cargo:rustc-env=PROTOC_PATH={}", protoc.display());
-    println!("cargo:rustc-env=PROTOC_INCLUDE={}", include.display());
-    // Re-run при изменении .proto.
-    println!("cargo:rerun-if-changed=proto");
+    println!("cargo:rerun-if-changed={PROTO_DIR}");
 
     Ok(())
 }

@@ -88,10 +88,6 @@ impl MockLdapClient {
     pub fn new() -> Self {
         Self::default()
     }
-
-    pub fn with_accepted_password(pw: impl Into<String>) -> Self {
-        Self { last_dn: std::sync::Mutex::new(None), accept: std::sync::Mutex::new(Some(pw.into())) }
-    }
 }
 
 #[async_trait]

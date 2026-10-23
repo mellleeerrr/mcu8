@@ -208,7 +208,7 @@ fn validate_call_string_uri(uri: &str) -> Result<(), String> {
     if uri.is_empty() || uri.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err("uri is invalid".to_string());
     }
-    let canonical = super::super::call_strings::canonical_uri(uri);
+    let canonical = vks_common::uri::canonical_uri(uri);
     let rest = canonical.split_once(':').map(|(_, rest)| rest).unwrap_or_default();
     if rest.trim().is_empty() || rest == ":" {
         return Err("uri is invalid".to_string());

@@ -8,8 +8,6 @@ use std::net::Ipv4Addr;
 use vks_common::Error;
 
 pub const TPKT_VERSION: u8 = 3;
-pub const Q931_PROTOCOL_DISCRIMINATOR: u8 = 0x08;
-pub const H225_PROTOCOL_DISCRIMINATOR: u8 = 0x05;
 pub const MSG_ALERTING: u8 = 0x01;
 pub const MSG_CALL_PROCEEDING: u8 = 0x02;
 pub const MSG_CONNECT: u8 = 0x07;

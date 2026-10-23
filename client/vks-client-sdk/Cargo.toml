@@ -20,8 +20,6 @@ uuid.workspace = true
 serde.workspace = true
 async-trait = "0.1"
 ulid.workspace = true
-bytes = { workspace = true }
-prost = { workspace = true }
 vks-common = { path = "../../crates/vks-common" }
 vks-layout = { path = "../../crates/vks-layout" }
 vks-proto = { path = "../../crates/vks-proto" }

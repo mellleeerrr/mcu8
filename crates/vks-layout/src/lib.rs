@@ -1,8 +1,7 @@
 //! `vks-layout` — движок раскладок (используется и MCU-сервером, и клиентом).
 //!
 //! Фаза 4 (DEVELOPMENT_PLAN.md): самодостаточное ядро — модель раскладки
-//! (slots, participants, focus) + математика расстановки (grid/focus/speaker)
-//! + рендерер (план композиции `DrawCommand`).
+//! (slots, participants, focus) + математика расстановки (grid/focus/speaker).
 //!
 //! Нет canvas/GL — чистая геометрия, полностью тестируемая.
 //!

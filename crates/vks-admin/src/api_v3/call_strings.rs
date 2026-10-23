@@ -178,9 +178,8 @@ pub fn conflict_error(description: &str) -> Response {
 
 /// Канонизирует адрес абонента, гарантируя наличие схемы протокола (`sip:` по умолчанию).
 /// T10: политика живёт в `vks_common::uri`, чтобы API и дедупликация не расходились.
-pub fn canonical_uri(raw: &str) -> String {
-    vks_common::uri::canonical_uri(raw)
-}
+/// Ре-экспорт, а не обёртка: реализация одна, а вызовы из других модулей
+/// (`api_v3::directory::addresses`) остаются рабочими.
 
 /// One call intent can have several attempts; stale completions cannot replace a retry.
 #[derive(Debug, Clone)]
@@ -513,7 +512,7 @@ pub async fn create_conference_call_string(
     if raw_uri.is_empty() {
         return validation_error("invalid.uri", "uri");
     }
-    let uri = canonical_uri(raw_uri);
+    let uri = vks_common::uri::canonical_uri(raw_uri);
     let cs_id = body.id.unwrap_or_else(|| format!("cs-{}", Uuid::new_v4()));
     let now = now_unix_sec();
 
@@ -645,7 +644,7 @@ pub async fn create_session_call_string(
     if raw_uri.is_empty() {
         return validation_error("invalid.uri", "uri");
     }
-    let uri = canonical_uri(raw_uri);
+    let uri = vks_common::uri::canonical_uri(raw_uri);
     let display_name = vks_common::sanitize_label_or(body.display_name.as_deref().unwrap_or_default(), raw_uri);
     let cs_id = body.id.unwrap_or_else(|| format!("cs-{}", Uuid::new_v4()));
     let now = now_unix_sec();
@@ -704,7 +703,7 @@ pub async fn create_session_call_string_standby(
     if raw_uri.is_empty() {
         return validation_error("invalid.uri", "uri");
     }
-    let uri = canonical_uri(raw_uri);
+    let uri = vks_common::uri::canonical_uri(raw_uri);
     let display_name = vks_common::sanitize_label_or(body.display_name.as_deref().unwrap_or_default(), raw_uri);
     let cs_id = body.id.unwrap_or_else(|| format!("cs-{}", Uuid::new_v4()));
     let now = now_unix_sec();
@@ -789,7 +788,7 @@ pub async fn invite_session_call_strings_list(
         }
         let record = CallStringRecord {
             id: item.id.unwrap_or_else(|| format!("cs-{}", Uuid::new_v4())),
-            uri: canonical_uri(&raw),
+            uri: vks_common::uri::canonical_uri(&raw),
             display_name: item
                 .display_name
                 .map(|name| vks_common::sanitize_label_or(&name, &raw))
@@ -1048,7 +1047,7 @@ fn address_fields(body: &Value) -> Result<(String, String, Option<Value>), (&'st
     if raw.is_empty() {
         return Err(("uri is required", "uri"));
     }
-    let uri = canonical_uri(raw);
+    let uri = vks_common::uri::canonical_uri(raw);
     let (protocol, address) = uri.split_once(':').unwrap_or_default();
     if !matches!(protocol, "sip" | "h323" | "rtsp" | "vnc" | "media" | "file") {
         return Err(("uri protocol must be sip, h323, rtsp, vnc, media or file", "uri"));
@@ -1094,8 +1093,10 @@ pub async fn create_call_string(
     };
     let mut resources = state.api_v3.resources.lock().await;
     let previous = resources.clone();
-    let existing_id =
-        resources.addresses.iter().find_map(|(id, address)| (canonical_uri(&address.uri) == uri).then(|| id.clone()));
+    let existing_id = resources
+        .addresses
+        .iter()
+        .find_map(|(id, address)| (vks_common::uri::canonical_uri(&address.uri) == uri).then(|| id.clone()));
     let record = if let Some(id) = existing_id {
         let Some(current) = resources.addresses.get(&id).cloned() else {
             return error_json(500, "Address book state changed during update");

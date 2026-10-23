@@ -70,7 +70,7 @@ impl Compositor {
     /// sampler truncated `dx / s` and could pick a source column one to the left;
     /// the horizontal index is now advanced incrementally, so no division runs
     /// per pixel and the mapping is exactly `floor(dx*fw/dw)`.
-    fn blit(canvas: &mut Frame, frame: &Frame, rect: &PixelRect) {
+    pub fn blit(canvas: &mut Frame, frame: &Frame, rect: &PixelRect) {
         let (cw, ch) = (CANVAS_WIDTH as usize, CANVAS_HEIGHT as usize);
         // Visible region = intersection of `rect` with the canvas [0..W]×[0..H].
         let right = (rect.x.saturating_add(rect.w) as usize).min(cw);
@@ -154,6 +154,44 @@ impl Compositor {
                             rem -= chroma_dw.max(1);
                             fx += 1;
                         }
+                    }
+                }
+            }
+        }
+    }
+    /// Затирает `rect` фоном канваса (luma 16 / chroma 128 для YUV, 0 для
+    /// серого). Используется персональной сборкой: ячейка зрителя в общей
+    /// сетке освобождается под самопросмотр.
+    pub fn clear(canvas: &mut Frame, rect: &PixelRect) {
+        let (cw, ch) = (CANVAS_WIDTH as usize, CANVAS_HEIGHT as usize);
+        let right = (rect.x.saturating_add(rect.w) as usize).min(cw);
+        let bottom = (rect.y.saturating_add(rect.h) as usize).min(ch);
+        let rx = (rect.x as usize).min(cw);
+        let ry = (rect.y as usize).min(ch);
+        let rw = right.saturating_sub(rx);
+        let rh = bottom.saturating_sub(ry);
+        if rw == 0 || rh == 0 {
+            return;
+        }
+        for row in ry..ry + rh {
+            let offset = row * cw + rx;
+            if let Some(line) = canvas.data.get_mut(offset..offset + rw) {
+                line.fill(16);
+            }
+        }
+        // YUV-канвас: хроматическая плоскость вдвое меньше по каждой оси.
+        if canvas.data.len() == cw * ch * 3 / 2 {
+            let chroma_right = (right / 2).min(cw / 2);
+            let chroma_bottom = (bottom / 2).min(ch / 2);
+            let chroma_rx = rx / 2;
+            let chroma_ry = ry / 2;
+            for plane in 0..2 {
+                let plane_offset = cw * ch + plane * (cw * ch / 4);
+                for row in chroma_ry..chroma_bottom {
+                    let offset = plane_offset + row * (cw / 2) + chroma_rx;
+                    let width = chroma_right.saturating_sub(chroma_rx);
+                    if let Some(line) = canvas.data.get_mut(offset..offset + width) {
+                        line.fill(128);
                     }
                 }
             }

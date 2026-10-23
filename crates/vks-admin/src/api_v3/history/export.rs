@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::state::{now_unix_ms, AppState};
 
 use super::HistorySession;
+use crate::util::csv_escape;
 
 /// Имя файла из display_name: только безопасные символы (без `/` и `..`).
 pub(super) fn sanitize_filename(name: &str) -> String {
@@ -96,17 +97,6 @@ pub(super) fn build_history_csv(
         ));
     }
     text.into_bytes()
-}
-
-pub(super) fn csv_escape(value: &str) -> String {
-    // CSV-инъекция: ведущие =/+/-/@/TAB/CR Excel выполняет как формулу.
-    let value =
-        if value.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{value}") } else { value.to_string() };
-    if value.contains([';', '"', '\n', '\r']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value
-    }
 }
 
 /// ZIP (method store, как у vendor) с единственным CSV внутри.

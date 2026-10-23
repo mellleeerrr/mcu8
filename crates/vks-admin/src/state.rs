@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use vks_core::{RoomId, RoomMode, User, UserId};
+use vks_core::{RoomId, RoomMode, UserId};
 
 pub use crate::handlers::SharedState;
 
@@ -423,11 +423,6 @@ impl AppState {
         let _ = self.revocation_tx.send(RevocationNotice { user_id: user_id.into(), generation });
     }
 
-    /// Рассылает сигнальное сообщение всем участникам комнаты.
-    pub fn broadcast_room(&self, room: &RoomId, sender_pid: Option<&str>, payload: bytes::Bytes) {
-        self.room_hub.broadcast(room, sender_pid, payload);
-    }
-
     /// Унифицированная валидация JWT access-токена (fail-closed, ADR-0009 / ADR-0021 / M1.2).
     ///
     /// Проверяет:
@@ -714,16 +709,6 @@ impl AppState {
             }
         }
         Ok(())
-    }
-
-    /// Пользователь в доменном виде (vks_core::User).
-    pub fn domain_user(&self, id: &UserId) -> Option<User> {
-        self.users.lock().expect("users store poisoned").get(id).map(|u| User {
-            id: u.id,
-            username: u.username.clone(),
-            role: u.role,
-            groups: Vec::new(),
-        })
     }
 }
 

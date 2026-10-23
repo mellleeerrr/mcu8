@@ -514,11 +514,6 @@ impl FfmpegWorker {
         Ok(())
     }
 
-    /// Reads one 20 ms mono PCM frame.
-    pub async fn read_audio(&mut self) -> Result<Vec<i16>, WorkerError> {
-        self.read_audio_samples(super::AUDIO_FRAME_SAMPLES).await
-    }
-
     /// Reads exactly `samples` mono `s16le` PCM samples.
     pub async fn read_audio_samples(&mut self, samples: usize) -> Result<Vec<i16>, WorkerError> {
         self.require_audio_decode()?;

@@ -10,14 +10,11 @@ license.workspace = true
 authors.workspace = true
 description = "VKS wire protocol (protobuf/prost): signaling, media, cluster, admin"
 
-[features]
-default = []
-vendored-protoc = ["dep:protobuf-src"]
-
 [dependencies]
 prost.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true
-# Компилирует собственный protoc при сборке (опционально через feature vendored-protoc)
-protobuf-src = { version = "1", optional = true }
+# protoc из крейта: герметично (без сети), работает в пути с пробелом (ADR-0031).
+# Системный protoc переопределяется переменной PROTOC.
+protoc-bin-vendored = "3.3"

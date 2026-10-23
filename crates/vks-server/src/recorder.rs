@@ -49,12 +49,6 @@ impl RecorderManager {
         guard.contains_key(room_id)
     }
 
-    /// Список комнат с активной записью.
-    pub fn active_recordings(&self) -> Vec<RoomId> {
-        let guard = self.sessions.lock().unwrap();
-        guard.keys().copied().collect()
-    }
-
     /// Сохраняет готовый медиаконтейнер записи в хранилище артефактов.
     pub fn save_container(&self, record_id: &str, data: Vec<u8>) {
         self.containers.lock().unwrap().insert(record_id.to_string(), data);

@@ -8,16 +8,13 @@
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use vks_common::codec_capabilities::truthy;
 
 use tracing::{info, warn};
 use vks_media_mcu::{AudioCodec, FfmpegCapabilities, VideoCodec, WorkerPool};
 
 static CAPABILITIES: OnceLock<Option<FfmpegCapabilities>> = OnceLock::new();
 static POOL: OnceLock<WorkerPool> = OnceLock::new();
-
-fn truthy(value: Option<&str>) -> bool {
-    matches!(value.map(str::trim), Some("1" | "true" | "TRUE" | "yes" | "on"))
-}
 
 /// Probes FFmpeg once at startup and publishes the worker pool.
 ///

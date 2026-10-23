@@ -118,11 +118,6 @@ impl Event {
     pub fn new(kind: EventKind, subject: impl Into<String>, payload: Value) -> Self {
         Self { id: EventId::new(), kind, subject: subject.into(), payload }
     }
-
-    /// Создаёт событие с фиксированным id (для детерминированных тестов).
-    pub fn with_id(id: EventId, kind: EventKind, subject: impl Into<String>, payload: Value) -> Self {
-        Self { id, kind, subject: subject.into(), payload }
-    }
 }
 
 /// Метаданные подписки.

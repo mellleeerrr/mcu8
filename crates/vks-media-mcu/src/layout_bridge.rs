@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use vks_layout::{Layout, Rect};
+use vks_layout::Layout;
 
 /// Default crossfade window (ms) per DEVELOPMENT_PLAN (300 ms).
 pub const CROSSFADE_MS: u64 = 300;
@@ -52,11 +52,6 @@ impl PixelRect {
     /// Zero rect.
     pub fn empty() -> Self {
         Self::new(0, 0, 0, 0)
-    }
-
-    /// Converts to a [`vks_layout::Rect`].
-    pub fn to_rect(&self) -> Rect {
-        Rect::new(self.x, self.y, self.w, self.h)
     }
 }
 
@@ -160,7 +155,7 @@ impl LayoutBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vks_layout::{LayoutKind, Slot};
+    use vks_layout::{LayoutKind, Rect, Slot};
 
     fn layout_v1() -> Layout {
         let mut l = Layout::new(LayoutKind::Grid);

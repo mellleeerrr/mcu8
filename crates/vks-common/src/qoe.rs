@@ -75,24 +75,6 @@ impl QoeAggregator {
         Some(all.iter().map(|r| r.mos).sum::<f64>() / all.len() as f64)
     }
 
-    /// Mean jitter, ms.
-    pub fn mean_jitter(&self) -> Option<f64> {
-        let all = self.all_reports();
-        if all.is_empty() {
-            return None;
-        }
-        Some(all.iter().map(|r| r.jitter_ms).sum::<f64>() / all.len() as f64)
-    }
-
-    /// Mean packet loss, %.
-    pub fn mean_loss(&self) -> Option<f64> {
-        let all = self.all_reports();
-        if all.is_empty() {
-            return None;
-        }
-        Some(all.iter().map(|r| r.loss_pct).sum::<f64>() / all.len() as f64)
-    }
-
     /// Процент reports с MOS > threshold.
     pub fn mos_above_threshold_pct(&self, threshold: f64) -> f64 {
         let all = self.all_reports();

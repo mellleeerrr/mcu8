@@ -129,10 +129,6 @@ impl UasRequest {
         }
         Some(percent_decode(user))
     }
-
-    pub fn is_retransmission_key(&self, other: &Self) -> bool {
-        self.call_id == other.call_id && self.cseq == other.cseq && self.method == other.method
-    }
 }
 
 fn split_head_body(buf: &str) -> (&str, &str) {

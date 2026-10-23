@@ -140,12 +140,6 @@ impl RoomHub {
         }
     }
 
-    /// Closes all subscriptions in a room (e.g. when room is deleted).
-    pub fn close_room(&self, room_id: &RoomId) {
-        let mut map = self.channels.write().expect("RoomHub lock poisoned");
-        map.remove(room_id);
-    }
-
     /// Finds which room contains the given participant_id, returning (RoomId, ParticipantSnapshot).
     pub fn find_participant_room(&self, participant_id: &str) -> Option<(RoomId, ParticipantSnapshot)> {
         let map = self.channels.read().expect("RoomHub lock poisoned");

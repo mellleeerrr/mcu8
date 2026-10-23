@@ -72,15 +72,14 @@
 
 | Источник | Объём | Роль |
 |---|---|---|
-| `MANUAL_PRESETS` + `MANUAL_SCHEMES` | 65 id | вендорные TrueConf manual-пресеты, 1:1 с эталоном 1280×720 (879 слотов) |
-| `BUILTIN_GRIDS` | 6 custom-схем | `video_layout_grids` редактора |
-| `catalog()` | 58 пресетов | admin-каталог `/api/v3/video_layout_grids` |
-| `expected_slot_count()` | ~70 строк `match` | **дублирует** `MANUAL_SCHEMES` |
-| Codian MCU 4200 | **0 из 52** + **0 из 2** | **нет** |
+| `MANUAL_SCHEMES` | 65 id | вендорные TrueConf manual-пресеты, 1:1 с эталоном 1280×720 (879 слотов) |
+| `BUILTIN_GRIDS` | 6 custom-схем | `video_layout_grids` редактора (`GET /api/v3/video_layout_grids`) |
+| Итого по `preset.rs` | **65 ручных пресетов, 6 пользовательских схем** | единый источник правды; `catalog()` и `expected_slot_count()` удалены (`73c022b`) |
+| Codian MCU 4200 | **54 из 54** (52 вендорных + 2 кастомные) | `codian.rs`, `CODIAN_SCHEMES` |
 
-**Главный вывод baseline:** в `vks-layout/src/preset.rs` сосуществуют **четыре** источника
-правды о том, «какие раскладки существуют». Добавление 52 пресетов Codian превратит их
-в пять. Это и есть главный риск элегантности — задача **C-series**.
+**Главный вывод (после чистки `73c022b`):** источники правды о том, «какие раскладки
+существуют», схлопнулись до одного на пресет (`MANUAL_SCHEMES` + `BUILTIN_GRIDS`) и одного
+на Codian (`CODIAN_SCHEMES` в `codian.rs`).
 
 ---
 

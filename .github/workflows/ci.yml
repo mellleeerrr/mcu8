@@ -1,6 +1,12 @@
 # CI для workspace VKS.
 # Основание: docs/DEVELOPMENT_PLAN.md (Фаза 0):
-#   cargo fmt --check / clippy / test / deny / build --release.
+#   cargo fmt --check / check / clippy / test / deny / doc / build --release.
+#
+# Сборка: protoc герметичный (крейт `protoc-bin-vendored`, ADR-0031) —
+# системный protoc не требуется ни в одном джобе.
+#
+# Образ пиним (`ubuntu-24.04`): `ubuntu-latest` — движущаяся цель, в ноябре
+# 2026 переезжает на 26.04, а 22.04 уходит в депрекейшн (с 2026-09-17).
 name: CI
 
 on:
@@ -12,11 +18,12 @@ env:
   CARGO_TERM_COLOR: always
   # Фиксируем версию под rust-toolchain.toml (MSRV 1.94.0, ADR-0024).
   RUST_TOOLCHAIN: 1.94.0
+  RUST_BACKTRACE: 1
 
 jobs:
   fmt:
     name: rustfmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -25,30 +32,160 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  check:
+    name: check (all features)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-check-${{ hashFiles('**/Cargo.lock') }}
+      # --locked: CI не имеет права молча обновить Cargo.lock.
+      # --all-features: компилирует oxideav/rvoip/str0m/openapi — раньше эти фичи
+      # не компилировались ни в одном шаге CI.
+      - run: cargo check --workspace --all-features --all-targets --locked
+
   clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+      - run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
 
   test:
     name: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - run: cargo test --workspace
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-${{ hashFiles('**/Cargo.lock') }}
+      # --no-fail-fast: падение одного тестового бинарника не прячет остальные.
+      # Фичи: default — полный набор тестов зелёный. Все фичи компилируются
+      # жёстко в джобах check/clippy (--all-features --all-targets).
+      - run: cargo test --workspace --locked --no-fail-fast
+
+  test-external:
+    name: test (feature-gated crates, soft)
+    runs-on: ubuntu-24.04
+    # Не блокирует: эти крейты под фичами (rvoip/str0m/oxideav) могут требовать
+    # сеть, SIP-сервер или реальные устройства. Джоб показывает реальный список
+    # внешних зависимостей, но не роняет первый запуск CI. Компиляция всех фич
+    # жёстко гейтится в джобах check/clippy (--all-features --all-targets).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-external-${{ hashFiles('**/Cargo.lock') }}
+      # SIP-шлюз (rvoip) — может требовать SIP-сервер/сеть.
+      - run: cargo test -p vks-gateway-sip --features rvoip --locked --no-fail-fast
+      # SFU-транспорт (str0m) — может требовать сеть/ICE.
+      - run: cargo test -p vks-media-sfu --features str0m --locked --no-fail-fast
+      # MCU-композитор (oxideav) — требует GPU/видеоустройств.
+      - run: cargo test -p vks-media-mcu --features oxideav --locked --no-fail-fast
+      # OpenAPI-схемы (utoipa) — внешних зависимостей нет, но фича выключена по умолчанию.
+      - run: cargo test -p vks-admin --features openapi --locked --no-fail-fast
+
+  test-serial:
+    name: test (--test-threads=1)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-serial-${{ hashFiles('**/Cargo.lock') }}
+      # Однопоточный прогон: ловит гонки через порядок выполнения.
+      # ThreadSanitizer требует nightly — поэтому так, а не TSAN.
+      - run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1
+
+  path-with-spaces:
+    name: build (path with spaces)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Checkout в каталог с пробелом — ровно то, что ломало
+          # protobuf-src/autotools/libtool (ADR-0031).
+          path: vks build with spaces
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            vks build with spaces/target
+          key: cargo-spaces-${{ hashFiles('**/Cargo.lock') }}
+      - name: Сборка в пути с пробелом
+        working-directory: vks build with spaces
+        run: cargo build --workspace --locked
+      - name: Тесты протокола в пути с пробелом
+        working-directory: vks build with spaces
+        run: cargo test -p vks-proto --locked
+
+  doc:
+    name: rustdoc
+    runs-on: ubuntu-24.04
+    # Не блокирует: ~30 предсуществующих битых intra-doc-ссылок в 10 крейтах
+    # (vks-admin, vks-client-sdk, vks-cluster, vks-common, vks-gateway-h323,
+    # vks-layout, vks-media-mcu, vks-media-sfu, vks-recorder, vks-storage).
+    # Сборка доков проходит; гейт станет жёстким после починки ссылок.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # PROJECT_RULES §2.3: rustdoc обязателен для vks-core/vks-proto/vks-auth/
+      # vks-storage — ловим битые intra-doc-ссылки.
+      - run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: "-D warnings"
 
   sidecar:
     name: h323 sidecar (python)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -62,7 +199,7 @@ jobs:
 
   deny:
     name: cargo-deny
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       # @v2 пиннит cargo-deny 0.20.2 (Dockerfile ветки v2) — та же версия проверена
@@ -71,21 +208,29 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+          args: --all-features --locked
 
   build:
     name: build (release)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - run: cargo build --release
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-release-${{ hashFiles('**/Cargo.lock') }}
+      - run: cargo build --workspace --release --locked
 
   # E2E (chromiumoxide) добавляется в фазе 8 (ADR-0020).
   # e2e:
   #   needs: [build]
-  #   runs-on: ubuntu-latest
+  #   runs-on: ubuntu-24.04
   #   steps:
   #     - uses: actions/checkout@v4
   #     - run: cargo run -p vks-e2e

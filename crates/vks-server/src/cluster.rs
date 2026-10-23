@@ -103,12 +103,6 @@ impl ClusterManager {
         owner.acquire_lease(room_id, &self.node_id, now_tick, ttl_ticks)
     }
 
-    /// Продлевает лиз владения комнатой.
-    pub fn renew_room(&self, room_id: &str, now_tick: u64, ttl_ticks: u64) -> LeaseResult {
-        let mut owner = self.owner.lock().unwrap();
-        owner.renew_lease(room_id, &self.node_id, now_tick, ttl_ticks)
-    }
-
     /// Освобождает владение комнатой.
     pub fn release_room(&self, room_id: &str) -> bool {
         let mut owner = self.owner.lock().unwrap();

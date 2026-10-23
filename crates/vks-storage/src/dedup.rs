@@ -22,6 +22,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use vks_common::layout_defaults::is_canonical_default;
 
 /// Ключ configuration-document с определениями PNM.
 pub const CONFIGURATION_KEY: &str = "pnm-definitions-v1";
@@ -514,15 +515,6 @@ fn ensure_active_layouts(document: &mut Value) {
     } else {
         resources.insert("active_layouts".to_string(), serde_json::to_value(active).unwrap_or_else(|_| json!({})));
     }
-}
-
-/// Ровно тот payload, который сервер считает канонической «Общей»
-/// (`vks-admin::canonical_default_payload`). Должен совпадать с точностью до
-/// полей: иначе dedup и runtime выберут разные canonical.
-fn is_canonical_default(layout: &Value) -> bool {
-    layout["payload"]
-        == json!({"mode":"auto", "preset":"preset_default_13", "type":"default", "slots":[],
-            "size":13, "autoscroll":0})
 }
 
 /// Возвращает id канонической default-раскладки (для починки

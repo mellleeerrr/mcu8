@@ -7,7 +7,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "VKS layout engine: Layout, presets, MCU/client renderers"
+description = "VKS layout engine: Layout, presets, grid/focus geometry"
 
 [dependencies]
 thiserror.workspace = true

@@ -109,21 +109,6 @@ impl JwtIssuer {
         self.issue_with_gen_and_iat(user_id, room_id, 1, now_unix())
     }
 
-    /// Issue a token for `user_id` with an explicit `iat` timestamp.
-    pub fn issue_with_iat(&self, user_id: &str, room_id: Option<&str>, iat: i64) -> Result<String, JwtError> {
-        self.issue_with_gen_and_iat(user_id, room_id, 1, iat)
-    }
-
-    /// Issue a token for `user_id` with monotonic generation counter (M1.2).
-    pub fn issue_with_generation(
-        &self,
-        user_id: &str,
-        room_id: Option<&str>,
-        generation: u64,
-    ) -> Result<String, JwtError> {
-        self.issue_with_gen_and_iat(user_id, room_id, generation, now_unix())
-    }
-
     /// Issue a token for `user_id` with explicit generation and iat timestamp.
     pub fn issue_with_gen_and_iat(
         &self,
@@ -301,16 +286,6 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains(&claims.jti), "jti missing from: {msg}");
         assert!(!msg.contains(&token), "full token leaked");
-    }
-
-    #[test]
-    fn monotonic_generation_roundtrip() {
-        let a = issuer("gen-secret");
-        let token = a.issue_with_generation("operator-1", Some("room-42"), 7).unwrap();
-        let v = a.verify(&token).unwrap();
-        assert_eq!(v.user_id, "operator-1");
-        assert_eq!(v.room_id.as_deref(), Some("room-42"));
-        assert_eq!(v.generation, 7);
     }
 
     #[test]

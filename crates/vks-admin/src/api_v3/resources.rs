@@ -17,6 +17,7 @@ use super::{
     sessions::{check_permission, find_room},
 };
 use crate::{auth_middleware::AuthContext, state::SharedState};
+use vks_common::layout_defaults::{canonical_default_payload, is_canonical_default};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -548,15 +549,6 @@ fn layout_contains_abonent(layout: &Value, abonent_id: &str) -> bool {
 /// Канонический payload «Общей» раскладки: ровно то, что создаёт
 /// `normalize_resource` для `type=default`. Legacy `type=default` с ручными
 /// слотами/пресетом каноническим не считается и не переиспользуется.
-pub(crate) fn canonical_default_payload() -> Value {
-    json!({"mode":"auto", "preset":"preset_default_13", "type":"default", "slots":[],
-        "size":13, "autoscroll":0})
-}
-
-fn is_canonical_default(layout: &Value) -> bool {
-    layout["payload"] == canonical_default_payload()
-}
-
 pub(crate) fn resolve_layout_alias(resources: &ResourceState, scope_key: &str, id: &str) -> String {
     let mut current = id.to_string();
     for _ in 0..8 {
@@ -2108,11 +2100,6 @@ pub async fn get_grid(Path(id): Path<String>) -> Response {
         Some(grid) => Json(json!({"grid":grid})).into_response(),
         None => error_json(404, "Grid not found"),
     }
-}
-
-pub async fn smtp() -> Response {
-    Json(json!({"smtp":{"enabled":false,"enable":false,"host":"","port":25,"username":"","password":"","sender":""}}))
-        .into_response()
 }
 
 pub async fn user(

@@ -73,17 +73,6 @@ impl AudioCodec {
         }
     }
 
-    /// PCM samples one decoded codec frame expands to at 48 kHz.
-    #[must_use]
-    pub const fn decoded_samples_48k(self) -> usize {
-        match self {
-            // AAC-LC: 1024 samples at its native rate, resampled to 48 kHz.
-            Self::Aac | Self::AacLatm => 1024,
-            // G.729: 80 samples / 10 ms at 8 kHz -> 480 at 48 kHz.
-            Self::G729 => 480,
-        }
-    }
-
     /// FFmpeg encoder name, if the host can encode this codec.
     #[must_use]
     pub const fn ffmpeg_encoder(self) -> Option<&'static str> {

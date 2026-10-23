@@ -32,6 +32,7 @@ use crate::state::{now_unix_ms, SharedState};
 use vks_core::ports::storage::RecordEntry;
 
 use super::error_json;
+use crate::util::csv_escape;
 
 const PAGE_DEFAULT: usize = 20;
 const PAGE_MAX: usize = 200;
@@ -327,16 +328,6 @@ fn format_local_datetime(epoch: i64, timezone: &str) -> String {
         .parse::<chrono_tz::Tz>()
         .map(|tz| utc.with_timezone(&tz).format("%d.%m.%Y %H:%M:%S").to_string())
         .unwrap_or_else(|_| utc.format("%d.%m.%Y %H:%M:%S").to_string())
-}
-
-fn csv_escape(value: &str) -> String {
-    let value =
-        if value.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{value}") } else { value.to_string() };
-    if value.contains([';', '"', '\n', '\r']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value
-    }
 }
 
 // ---------- network interfaces ----------

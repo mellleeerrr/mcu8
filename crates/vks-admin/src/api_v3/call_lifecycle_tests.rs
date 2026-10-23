@@ -6,6 +6,7 @@ use super::*;
 use crate::api_v3::tests::json_body as response_json;
 use crate::auth_middleware::AuthType;
 use crate::state::{AppState, OutboundDialer};
+use vks_common::uri::canonical_uri;
 
 #[derive(Default)]
 struct PendingDialer {

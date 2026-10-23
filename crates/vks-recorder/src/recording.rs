@@ -341,12 +341,6 @@ impl RecordingSession {
         self.state
     }
 
-    /// Количество накопленных сегментов.
-    #[must_use]
-    pub const fn segment_count(&self) -> usize {
-        self.segments.len()
-    }
-
     /// Комната сессии.
     #[must_use]
     pub const fn room_id(&self) -> Uuid {

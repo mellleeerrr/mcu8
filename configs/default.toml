@@ -12,7 +12,8 @@ server_name = "vks-mcu"
 listen_addr = "0.0.0.0:8080"
 media_listen_addr = "0.0.0.0:40000"
 # WebRTC Candidate IP announced in SDP (defaults to detected IP or VKS_CANDIDATE_ADDR)
-candidate_addr = "192.168.1.93"
+# Плейсхолдер из RFC 5737 (TEST-NET-3): замените на реальный IP своей сети.
+candidate_addr = "203.0.113.10"
 
 # Authentication & Identity (ADR-0009 / ADR-0022)
 # Supported auth_provider strategies: "local" | "ldap" | "oidc"

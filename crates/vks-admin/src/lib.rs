@@ -23,6 +23,7 @@ pub mod rooms;
 pub mod settings;
 pub mod state;
 pub mod users;
+pub(crate) mod util;
 
 // Re-exports for convenience (flat API).
 pub use async_trait::async_trait;

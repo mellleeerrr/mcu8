@@ -283,20 +283,6 @@ impl SettingsService {
         next
     }
 
-    /// Устанавливает новые настройки с сохранением в персистентное хранилище (M1.5).
-    ///
-    /// Persist сериализуется `settings_persist`: два параллельных PATCH не
-    /// должны записать в хранилище более старое состояние после нового.
-    pub async fn set_async(state: &crate::state::AppState, next: Settings) -> Settings {
-        match Self::try_set_async(state, next).await {
-            Ok(settings) => settings,
-            Err(error) => {
-                tracing::warn!(%error, "failed to persist settings to storage");
-                Self::get(state)
-            }
-        }
-    }
-
     /// Полная замена настроек с fallible persist: `/api/v1/settings` должен
     /// вернуть 503, если storage не сохранил документ, а память — откатиться.
     pub async fn try_set_async(state: &crate::state::AppState, next: Settings) -> Result<Settings, String> {
