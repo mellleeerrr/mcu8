@@ -38,12 +38,7 @@
 - **Мастер-план** выровнен после ревью 6/10 (done/todo, вне скоупа, split T10,
   evidence-критерий).
 
-## Осталось (порядок)
-
-T3 (gap/margin, «Окон»), затем T4a-commit, T5/T6 (чистка ≈980 LOC и конфигов),
-T7/T8/T9 (auth, шлюзы, PG/CI), T10a/b/c (proto/id-only/потребитель), T11/T12
-(evidence/golden, тесты/CI). Для каждой — pitfall-агент → реализация →
-2 ревьюера ≥9.5 → commit.
+## Осталось (порядок; историческая запись, см. «Итог» ниже)
 
 ## Ограничения/риски
 
@@ -56,3 +51,30 @@ T7/T8/T9 (auth, шлюзы, PG/CI), T10a/b/c (proto/id-only/потребител
   падает) — внешние оценки T2 и повторные регрессии/конфиги в бэклоге.
 - qwen3.8-27b-uncensored-code недоступна (нет endpoint): совместная работа
   начнётся после `QWEN_BASE_URL`.
+
+
+## Итог R6 (2026-10-24)
+
+Закрыты (коммиты/review): T1 `c36f973`/`3c6124c` (9.5), T2 `ebce17a`/`f2546d4`
+(9.5 ПРИНИМАЮ), T3 решением (вендорский ряд 1..64 + API g/m), T4a `c36f973`
+(мост готов, endpoint не найден), T5a `66af883` (−552 LOC), T6 `7190361`
+(конфиги/allowlist/dev-IP/release-note), T7 `d7ddd4e` (RBAC/PATCH/409),
+T8 `12f2983`+`fc8d165` (abonent_id/статус/allowlist), T9 `840ff9c` (PG+CI),
+T10b `f9b0a1b` (id-only apply), T11 `9eb2f4e` (golden/спека 43/46),
+T12 `9efd5be` (create_room-adopt/calculate/G722), T13 `ef0019f`→`91dd55c`→
+`0a495b4`→`806d6ad` (T13.4 **9.6/10 ПРИНИМАЮ**: счётчик 1..100, a11y/outline,
+кламп, выход из конструктора без потери Codian-схемы).
+
+Отложены/открыты с решениями:
+- T4b — вне R6; T5b — снята зависимость (T10b сделал id-only apply без
+  trait-половины core_layouts), удаление после появления потребителя;
+  T5c — только по отдельному решению владельца (self-view/SDK задел R7).
+- T10a/T10c — ОТКРЫТЫ: proto-поля `layout_id/preset/mode` + `LayoutModeChanged`
+  и прод-потребитель LayoutChanged в PNM WS/SDK; это контрактное изменение
+  (proto+клиенты), не входит в мандат владельца п.7 (конструктор) и требует
+  отдельного ADR/раунда.
+
+Гейты финального HEAD `3cc9f2d`: `cargo fmt --all -- --check` 0;
+`cargo clippy --workspace --all-features --all-targets --locked -D warnings` 0;
+`cargo test --workspace --all-targets --locked` — **1317 passed, 0 failed,
+8 ignored**; MANIFEST 214/214; live JS=git; рабочее дерево чистое.
