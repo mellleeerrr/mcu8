@@ -20,7 +20,7 @@ green). One room, four participants, real **1280×720 I420** frames with 2-D lum
 non-constant U/V planes, feeding 960-sample near-full-scale PCM (exercises
 the mixer's `tanh` soft-clip). The measured window has two **sequential**
 phases: audio alone at 20 ms, then video alone at 34 ms. They are not concurrent
-because today's global room mutex would let a 17–32 ms compose block the audio tick;
+because today's global room mutex would let a 16–20 ms compose block the audio tick;
 per-room actors and multi-room concurrency are S20. A 3 s warm-up is discarded.
 
 Run timing gates on an idle or pinned host: the wall-clock loss gate is
@@ -51,25 +51,25 @@ falling back.
 
 ## Result — 60 s window (30 s per phase), 4 participants, release
 
-Run `97d88c6`, clean worktree (`git_dirty=false`), Intel Xeon E5-2699 v3,
+Run `3690699`, clean worktree (`git_dirty=false`), Intel Xeon E5-2699 v3,
 rustc 1.94.0. Machine report: [`soak-60s-4p.json`](soak-60s-4p.json). Reproducers
 should write `VKS_SOAK_OUT` to `/tmp`; the command above overwrites the canonical
 artifact.
 
 | phase | samples | exact `le=2ms` | p99 bucket (estimate) | mean | rate |
 |---|---:|---:|---:|---:|---:|
-| audio engine work | 1496 | **1.000** | (0.25, 0.5] ms (0.476 ms) | 0.180 ms | 49.87 Hz |
-| video compose (I420) | 883 | 0.000 | (20, 33] ms (31.5 ms) | 17.72 ms | 29.43 fps |
+| audio engine work | 1492 | **1.000** | (0.25, 0.5] ms (0.387 ms) | 0.161 ms | 49.73 Hz |
+| video compose (I420) | 883 | 0.000 | (10, 20] ms (20.0 ms) | 16.02 ms | 29.43 fps |
 
 Video exact `le=33 ms` ratio **1.000**, engine `frames_dropped` delta 883 (all
 883 are the deliberate duplicate/throttle probes; first successes 883), audio
 exact `le=2 ms` ratio **1.000**, admin rebuilds rendered 2 frames and recorded
-0 ticks. 1496 of 1500 wall-clock audio periods produced their first tick (99.7%);
-the 4 losses are first attempts rejected by the engine's 18 ms audio throttle
+0 ticks. 1492 of 1500 wall-clock audio periods produced their first tick (99.5%);
+the 8 losses are first attempts rejected by the engine's 18 ms audio throttle
 when the loop woke a millisecond early (the period itself still executed, and
 `missed_periods` is 0), not skipped wall-clock slots. They are inside the 1%
 period-loss budget on this shared host, and the audio histogram count equals the
-tick count (1496). The wall-clock gate is deliberately load-sensitive: a busier
+tick count (1492). The wall-clock gate is deliberately load-sensitive: a busier
 host can fail it, and its floored lower bound can hide a single edge-rounding
 slot.
 
@@ -100,7 +100,7 @@ claimed; this is a single reproducible after-state measurement.
   measured; S20 owns per-room actors and the multi-room p99.
 - Audio load is four participants; the signal is near full scale but not a
   stress corpus.
-- 1496/883 samples support the exact rank gates, not a precise p99 point; the
+- 1492/883 samples support the exact rank gates, not a precise p99 point; the
   report labels the estimate and its bucket interval.
 - This artifact does not prove that `/metrics` was scraped on the live service;
   procedure A below is how to obtain one. Default-off absence is covered by
