@@ -527,10 +527,13 @@ fn video_payloads(section: &str, codec_name: &str) -> Vec<u8> {
             let (payload, encoding) = rest.split_once(' ')?;
             let payload: u8 = payload.parse().ok()?;
             let (name, clock) = encoding.split_once('/')?;
-            (declared.contains(&payload)
-                && (96..=127).contains(&payload)
-                && name.eq_ignore_ascii_case(codec_name)
-                && clock == "90000")
+            let matches_codec = if codec_name.eq_ignore_ascii_case("H265") {
+                // HEVC is the pre-RFC 7798 alias still emitted by some peers.
+                name.eq_ignore_ascii_case("H265") || name.eq_ignore_ascii_case("HEVC")
+            } else {
+                name.eq_ignore_ascii_case(codec_name)
+            };
+            (declared.contains(&payload) && (96..=127).contains(&payload) && matches_codec && clock == "90000")
                 .then_some(payload)
         })
         .collect()
@@ -644,6 +647,16 @@ Content-Type: application/sdp\r\nContent-Length: %LEN%\r\n\r\n%SDP%";
     }
 
     const OFFER: &str = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\nm=video 5006 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
+
+    #[test]
+    fn hevc_alias_is_selected_for_h265() {
+        let base = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+        let offer = format!("{base}m=video 5006 RTP/AVP 125\r\na=rtpmap:125 HEVC/90000\r\na=fmtp:125 profile-id=1\r\n");
+        let media = negotiate(&offer).unwrap();
+        assert_eq!(media.video_codec, Some("H265"));
+        let answer = build_answer("192.168.1.93", 7, 41000, Some(41002), &media);
+        assert!(answer.contains("m=video 41002 RTP/AVP 125"), "{answer}");
+    }
 
     #[test]
     fn incompatible_video_fmtp_is_not_answered() {

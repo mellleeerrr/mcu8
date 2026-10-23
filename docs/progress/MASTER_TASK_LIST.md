@@ -166,7 +166,7 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > публикуется из startup FFmpeg probe, и offer/UAS фильтруют кодеки без моста; H.323 остаётся H.264-only.
 > Входящий UAS зеркалит fmtp оффера: H.264 — только packetization-mode=1, baseline, level ≥3.1 с тем же
 > profile-level-id в ответе; H.265 — Main/Main, DON=0/отсутствие; несовместимый fmtp → `m=video 0`.
-> Исходящий UAC также отвергает H.265 с чужим profile-id/tier. Workspace **1217 passed**, clippy/fmt чисто.
+> Исходящий UAC также отвергает H.265 с чужим profile-id/tier. Workspace **1218 passed**, clippy/fmt чисто; UAS принимает HEVC как alias H.265.
 > Inbound UAS также принимает H265-only оффер: `InboundMedia.video_codec`, answer с `H265/90000` и
 > `profile-id=1`, inbound-мост поднимает H265-профиль (`uas::tests::h265_only_offer_is_answered_with_h265`).
 > Осталось: live-вызов с H265-терминалом, AAC-LATM мост, затем SDP readiness gate.

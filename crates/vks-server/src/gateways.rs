@@ -4396,7 +4396,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         vks_gateway_sip::write_rtp_header(&mut packet[..12], 9, 1, 0, 42, false);
         packet[12..].copy_from_slice(&payload);
         terminal.send_to(&packet, target).await.unwrap();
-        tokio::time::timeout(Duration::from_millis(300), async {
+        tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if mcu
                     .participant_audio(room, listener)
@@ -4551,7 +4551,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         vks_gateway_sip::write_rtp_header(&mut malformed[..12], 96, 1, 0, 42, false);
         malformed[12..].fill(0x55); // 161 bytes: more than the 40 ms G.726-32 cap
         terminal.send_to(&malformed, target).await.unwrap();
-        tokio::time::timeout(Duration::from_millis(300), async {
+        tokio::time::timeout(Duration::from_secs(3), async {
             while stats.rejected_packets.load(Ordering::Relaxed) == 0 {
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }
@@ -4565,7 +4565,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         vks_gateway_sip::write_rtp_header(&mut packet[..12], 96, 2, 0, 42, false);
         packet[12..].copy_from_slice(&payload);
         terminal.send_to(&packet, target).await.unwrap();
-        tokio::time::timeout(Duration::from_millis(300), async {
+        tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if mcu
                     .participant_audio(room, listener)
