@@ -51,22 +51,23 @@ falling back.
 
 ## Result — 60 s window (30 s per phase), 4 participants, release
 
-Run `c407b43`, clean worktree (`git_dirty=false`), Intel Xeon E5-2699 v3,
+Run `9a80005`, clean worktree (`git_dirty=false`), Intel Xeon E5-2699 v3,
 rustc 1.94.0. Machine report: [`soak-60s-4p.json`](soak-60s-4p.json). Reproducers
 should write `VKS_SOAK_OUT` to `/tmp`; the command above overwrites the canonical
 artifact.
 
 | phase | samples | exact `le=2ms` | p99 bucket (estimate) | mean | rate |
 |---|---:|---:|---:|---:|---:|
-| audio engine work | 1497 | **1.000** | (0.25, 0.5] ms (0.422 ms) | 0.168 ms | 49.90 Hz |
-| video compose (I420) | 883 | 0.000 | (20, 33] ms (25.0 ms) | 16.46 ms | 29.43 fps |
+| audio engine work | 1489 | **1.000** | (0.25, 0.5] ms (0.475 ms) | 0.179 ms | 49.63 Hz |
+| video compose (I420) | 883 | 0.000 | (20, 33] ms (32.0 ms) | 17.36 ms | 29.43 fps |
 
 Video exact `le=33 ms` ratio **1.000**, engine `frames_dropped` delta 883 (all
 883 are the deliberate duplicate/throttle probes; first successes 883), audio
 exact `le=2 ms` ratio **1.000**, admin rebuilds rendered 2 frames and recorded
-0 ticks. 1497 of 1500 wall-clock audio periods produced their first tick (99.8%);
-the 3 losses are scheduling jitter inside the 1% period-loss budget, and the
-audio histogram count equals the tick count (1497).
+0 ticks. 1489 of 1500 wall-clock audio periods produced their first tick (99.3%);
+the 11 losses are scheduling jitter inside the 1% period-loss budget on this
+shared host, and the audio histogram count equals the tick count (1489). The
+wall-clock gate is deliberately load-sensitive: a busier host can fail it.
 
 **Verdict:** the audio engine-work p99 ≤2 ms SLO is met with a wide margin. Video
 compose fits the 33 ms frame budget in this workload but **not** the 2 ms target;
@@ -94,7 +95,7 @@ claimed; this is a single reproducible after-state measurement.
   measured; S20 owns per-room actors and the multi-room p99.
 - Audio load is four participants; the signal is near full scale but not a
   stress corpus.
-- 1497/883 samples support the exact rank gates, not a precise p99 point; the
+- 1489/883 samples support the exact rank gates, not a precise p99 point; the
   report labels the estimate and its bucket interval.
 - This artifact does not prove that `/metrics` was scraped on the live service;
   procedure A below is how to obtain one. Default-off absence is covered by

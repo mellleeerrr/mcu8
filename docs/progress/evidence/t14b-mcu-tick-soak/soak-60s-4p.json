@@ -15,84 +15,84 @@
       ],
       [
         0.0001,
-        9
+        49
       ],
       [
         0.00025,
-        1452
+        1347
       ],
       [
         0.0005,
-        1497
+        1489
       ],
       [
         0.00075,
-        1497
+        1489
       ],
       [
         0.001,
-        1497
+        1489
       ],
       [
         0.0015,
-        1497
+        1489
       ],
       [
         0.002,
-        1497
+        1489
       ],
       [
         0.003,
-        1497
+        1489
       ],
       [
         0.005,
-        1497
+        1489
       ],
       [
         0.0075,
-        1497
+        1489
       ],
       [
         0.01,
-        1497
+        1489
       ],
       [
         0.02,
-        1497
+        1489
       ],
       [
         0.033,
-        1497
+        1489
       ],
       [
         0.05,
-        1497
+        1489
       ],
       [
         0.1,
-        1497
+        1489
       ]
     ],
-    "first_successes": 1497,
-    "histogram_count": 1497,
+    "first_successes": 1489,
+    "histogram_count": 1489,
     "le_2ms_ratio": 1.0,
-    "mean_seconds": 0.00016845613560454177,
+    "mean_seconds": 0.00017896114573539272,
     "missed_periods": 0,
     "p99_bucket_seconds": [
       0.00025,
       0.0005
     ],
-    "p99_seconds_estimate": 0.00042222222222222227,
+    "p99_seconds_estimate": 0.0004753521126760564,
     "periods": 1500,
-    "rate": 49.899788587902364,
+    "rate": 49.63109843173599,
     "scheduled_periods_lower_bound": 1500,
     "second_call_successes": 0,
-    "successful_ticks": 1497,
-    "sum_seconds": 0.25217883499999905,
-    "throttled": 1503
+    "successful_ticks": 1489,
+    "sum_seconds": 0.26647314599999977,
+    "throttled": 1511
   },
-  "audio_measured_seconds": 30.000127102,
+  "audio_measured_seconds": 30.001350908,
   "audio_window_seconds": 30,
   "command": "VKS_MCU_TICK_METRICS=1 VKS_SOAK_SECONDS=60 VKS_SOAK_WARMUP=3 VKS_SOAK_PARTICIPANTS=4 VKS_SOAK_OUT='/home/pro/Рабочий стол/mcu/docs/progress/evidence/t14b-mcu-tick-soak/soak-60s-4p.json' cargo test --release -p vks-media-mcu --test mcu_tick_soak -- --ignored --nocapture",
   "cpu_model": "Intel(R) Xeon(R) CPU E5-2699 v3 @ 2.30GHz",
@@ -103,7 +103,7 @@
     "width": 1280
   },
   "git_dirty": false,
-  "git_sha": "c407b43aa0f3e42c7b1504db83b271648d4c7f99",
+  "git_sha": "9a8000534042d25dcc9e62c4a46172b4d4a3fdc5",
   "git_toplevel": "/var/tmp/vks-t14b-clean",
   "histogram_buckets_seconds": [
     0.000025,
@@ -137,7 +137,7 @@
     "video_compose_p99_le_33ms_budget": true
   },
   "target_dir": "/home/pro/Рабочий стол/mcu/target",
-  "timestamp_unix": 1792744165,
+  "timestamp_unix": 1792744469,
   "video": {
     "attempts": 1766,
     "buckets_cumulative": [
@@ -187,15 +187,15 @@
       ],
       [
         0.0075,
-        5
+        0
       ],
       [
         0.01,
-        5
+        47
       ],
       [
         0.02,
-        870
+        783
       ],
       [
         0.033,
@@ -215,22 +215,22 @@
     "histogram_count": 883,
     "le_2ms_ratio": 0.0,
     "le_33ms_ratio": 1.0,
-    "mean_seconds": 0.01646011249490375,
+    "mean_seconds": 0.017355991909399765,
     "missed_periods": 0,
     "p99_bucket_seconds": [
       0.02,
       0.033
     ],
-    "p99_seconds_estimate": 0.025,
+    "p99_seconds_estimate": 0.03196,
     "periods": 883,
-    "rate": 29.42796854992515,
+    "rate": 29.427905164944274,
     "scheduled_periods_lower_bound": 882,
     "second_call_successes": 0,
     "successful_ticks": 883,
-    "sum_seconds": 14.53427933300001,
+    "sum_seconds": 15.325340855999993,
     "throttled": 883
   },
-  "video_measured_seconds": 30.005469066,
+  "video_measured_seconds": 30.005533695,
   "video_window_seconds": 30,
   "warmup_seconds": 3
 }
