@@ -11,6 +11,7 @@ pub mod gateways;
 pub mod layout_signal;
 pub mod operator_policy;
 pub mod recorder;
+pub mod room_events;
 
 pub use cluster::ClusterManager;
 pub use gateways::GatewayManager;
@@ -127,6 +128,8 @@ pub fn build_app_with_services(
 ) -> Router {
     gateways.bind_state(Arc::downgrade(&state));
     state.set_dialer(gateways.clone());
+    // S12: события движка (речь, пересадка главного окна) доходят до клиентов.
+    room_events::install(&state, &mcu_engine);
 
     let csp = frontend.csp.clone();
     let ws_ctx = WsContext {

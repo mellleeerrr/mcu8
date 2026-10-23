@@ -38,7 +38,7 @@ pub mod viewer;
 
 pub use codian::{CodianScheme, Pip, Region};
 pub use core::{Layout, LayoutError, LayoutKind, NormalizedLayout, NormalizedSlot, ParticipantId, Slot, SlotId};
-pub use focus::FocusLayout;
+pub use focus::{main_window, promote_to_main_window, FocusLayout};
 pub use grid::GridLayout;
 pub use preset::{
     CalculatedSlot, GridDefaults, GridInfo, GridPayload, GridSlot, Position, PresetId, PresetScheme, SlotRect,

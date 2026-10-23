@@ -53,7 +53,7 @@ pub use codec_worker::{
     WorkerPool,
 };
 pub use compositor::{Compositor, CANVAS_SIZE};
-pub use engine::McuEngine;
+pub use engine::{EventSink, McuEngine, RoomEvent};
 pub use frame::{CodecError, Frame, MockVideoDecoder, MockVideoEncoder, VideoDecoder, VideoEncoder};
 pub use layout_bridge::{LayoutBridge, PixelRect, SlotKey, SlotRects, CROSSFADE_MS};
 pub use vad::{Vad, VadConfig, VadState, DEBOUNCE_MS, FRAME_MS, FRAME_SAMPLES};

@@ -91,6 +91,9 @@ struct RoomState {
     speaking_changes: Vec<(ParticipantId, bool)>,
     /// Current active/dominant speaker with silence hysteresis.
     active_speaker: Option<ParticipantId>,
+    /// «Важный» участник (Codian §2.2): принудительно в главном окне, важнее
+    /// активного спикера. Ставится администратором, снимается `None`.
+    important: Option<ParticipantId>,
 }
 
 impl RoomState {
@@ -122,6 +125,7 @@ impl RoomState {
             speaking_states: BTreeMap::new(),
             speaking_changes: Vec::new(),
             active_speaker: None,
+            important: None,
         }
     }
 
@@ -187,22 +191,10 @@ impl RoomState {
             if is_sparse_custom { assigned_count } else { (max_slot as usize + 1).max(assigned_count).clamp(1, 128) };
 
         let rects = match kind {
-            LayoutKind::Focus | LayoutKind::Speaker if total_slots > 1 => {
-                let large_h = canvas.height * 75 / 100;
-                let strip_h = canvas.height - large_h;
-                let m = (total_slots - 1) as u32;
-
-                let mut r = Vec::with_capacity(total_slots);
-                // Slot 0: large presenter/focus tile
-                r.push(vks_layout::Rect::new(0, 0, canvas.width, large_h));
-                // Slots 1..total_slots: bottom thumbnail strip
-                for k in 0..m {
-                    let x = canvas.width * k / m;
-                    let w = canvas.width / m;
-                    r.push(vks_layout::Rect::new(x, large_h, w, strip_h));
-                }
-                r
-            }
+            // B8: фокусная геометрия живёт в `vks-layout` — движок не держит
+            // вторую копию (раньше `FocusLayout::compute` был мёртв, а эта
+            // ветка повторяла его формулы).
+            LayoutKind::Focus | LayoutKind::Speaker => vks_layout::FocusLayout::slot_rects(&canvas, total_slots as u32),
             _ => GridLayout::compute(&canvas, total_slots),
         };
 
@@ -259,24 +251,24 @@ impl RoomState {
         frames: &BTreeMap<u32, Arc<Frame>>,
         audio_inputs: &[(ParticipantId, Vec<f32>)],
     ) -> bool {
-        self.tick_audio_at(now_ms, audio_inputs);
+        let _events = self.tick_audio_at(now_ms, audio_inputs);
         self.tick_video_at(now_ms, frames)
     }
 
     /// Advances the audio processing pass at a specific monotonic timestamp `now_ms` (20 ms cadence).
-    fn tick_audio_at(&mut self, now_ms: u64, audio_inputs: &[(ParticipantId, Vec<f32>)]) -> bool {
+    fn tick_audio_at(&mut self, now_ms: u64, audio_inputs: &[(ParticipantId, Vec<f32>)]) -> (bool, Vec<RoomEvent>) {
         if let Some(last) = self.last_audio_ms {
             if now_ms < last + 18 {
-                return false;
+                return (false, Vec::new());
             }
         }
         self.last_audio_ms = Some(now_ms);
         let started = vks_common::metrics::mcu_tick_metrics_enabled().then(std::time::Instant::now);
-        self.process_audio(audio_inputs);
+        let events = self.process_audio(audio_inputs);
         if let Some(started) = started {
             vks_common::metrics::observe_mcu_tick(vks_common::metrics::McuTickPhase::Audio, started.elapsed());
         }
-        true
+        (true, events)
     }
 
     /// Advances the video compositing pass at a specific monotonic timestamp `now_ms` (33 ms budget).
@@ -309,7 +301,47 @@ impl RoomState {
         self.stats.frames_rendered += 1;
     }
 
-    fn process_audio(&mut self, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
+    /// Пересадка главного окна по правилам Codian §2.2 (S12, ADR-0029 фаза 3).
+    ///
+    /// «Важный» участник важнее активного спикера; активный спикер важнее
+    /// всех остальных. Раскладка перестраивается **по событию** смены спикера:
+    /// если спикер уже в главном окне, `promote_to_main_window` возвращает
+    /// `false` и версия не меняется.
+    fn refresh_focus(&mut self) -> Option<RoomEvent> {
+        let desired = self.important.or(self.active_speaker)?;
+        if !matches!(self.current_layout.kind, LayoutKind::Focus | LayoutKind::Speaker) {
+            // Равная сетка и фиксированный макет PNM не имеют главного окна:
+            // голосовая активация их не трогает (Codian §2.1: 52 макета
+            // статичны по геометрии).
+            return None;
+        }
+        let layout_pid = vks_layout::ParticipantId::new(desired.as_uuid().as_u128());
+        if !vks_layout::promote_to_main_window(&mut self.current_layout, layout_pid) {
+            return None;
+        }
+        self.current_layout.bump_version();
+        self.sync_descriptor_assignments();
+        Some(RoomEvent::LayoutChanged { version: self.current_layout.version })
+    }
+
+    /// Дескриптор обязан отражать фактическое заселение: иначе следующая
+    /// `apply_layout` пересадит кадры по устаревшим назначениям (`rekey_frames`).
+    fn sync_descriptor_assignments(&mut self) {
+        let Some(descriptor) = self.layout.as_mut() else {
+            return;
+        };
+        descriptor.assignments.clear();
+        for slot in &self.current_layout.slots {
+            if let Some(pid) = slot.participant_id {
+                descriptor
+                    .assignments
+                    .insert(ParticipantId::from_uuid(uuid::Uuid::from_u128(pid.as_u128())), slot.id.as_u32());
+            }
+        }
+        descriptor.version = self.current_layout.version;
+    }
+
+    fn process_audio(&mut self, audio_inputs: &[(ParticipantId, Vec<f32>)]) -> Vec<RoomEvent> {
         let slices: Vec<&[f32]> = audio_inputs.iter().map(|(_, v)| v.as_slice()).collect();
         let target_len = self.mixed_audio.len().max(960);
         let (full_mix, minus_mixes) = AudioMixer.mix_and_mix_minus(&slices, target_len);
@@ -333,6 +365,7 @@ impl RoomState {
         // Per-participant VAD and active speaker detection
         let mut highest_energy = 0.0f32;
         let mut current_speaker = None;
+        let mut events = Vec::new();
 
         for (pid, buf) in audio_inputs {
             let vad = self.vads.entry(*pid).or_insert_with(|| Vad::new(crate::vad::VadConfig::default()));
@@ -346,12 +379,16 @@ impl RoomState {
             }
             vad.feed_frame(&frame);
             let is_speaking = vad.is_speaking();
+            // Уровень для индикатора речи в клиенте: RMS 20 мс кадра,
+            // 0..=1000 (протокол `SpeakingStateChanged.level`).
+            let level = (sum_sq / 960.0).sqrt().clamp(0.0, 1.0).mul_add(1000.0, 0.0) as u32;
             // Первое наблюдение — это начальное состояние, а не изменение:
             // в список попадают только смены «говорит/молчит».
             if let Some(previous) = self.speaking_states.get(pid) {
                 if *previous != is_speaking {
                     self.speaking_states.insert(*pid, is_speaking);
                     self.speaking_changes.push((*pid, is_speaking));
+                    events.push(RoomEvent::Speaking { participant: *pid, speaking: is_speaking, level });
                 }
             } else {
                 self.speaking_states.insert(*pid, is_speaking);
@@ -367,11 +404,49 @@ impl RoomState {
         if let Some(spk) = current_speaker {
             self.active_speaker = Some(spk);
         }
+
+        // Codian §2.2: главное окно следует за активным спикером (или за
+        // «Важным» участником). Пересчёт — по событию смены спикера, а не
+        // пересборка на каждом тике: если спикер уже в главном окне,
+        // `refresh_focus` ничего не меняет.
+        if let Some(event) = self.refresh_focus() {
+            events.push(event);
+        }
+        events
     }
 
     fn process_media(&mut self, frames: &BTreeMap<u32, Arc<Frame>>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
         self.process_video(frames);
-        self.process_audio(audio_inputs);
+        let _events = self.process_audio(audio_inputs);
+    }
+}
+
+/// Событие комнаты для внешнего потребителя (S12, ADR-0029 фаза 3).
+///
+/// Движок не знает про сигналинг: он отдаёт события тому, кто их поставил
+/// ([`McuEngine::set_event_sink`]), а сервер превращает их в
+/// `SpeakingStateChanged` и `LayoutChanged`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomEvent {
+    /// Участник начал или закончил говорить; `level` — громкость кадра
+    /// 0..=1000 (RMS), чтобы клиент мог нарисовать индикатор.
+    Speaking { participant: ParticipantId, speaking: bool, level: u32 },
+    /// Движок перестроил раскладку: главное окно переехало к новому спикеру
+    /// или к «Важному» участнику (Codian §2.2).
+    LayoutChanged { version: u32 },
+}
+
+/// Приёмник событий комнат. Сервер ставит его один раз на движок.
+pub type EventSink = Arc<dyn Fn(RoomId, RoomEvent) + Send + Sync>;
+
+/// Слот приёмника событий: `Arc<dyn Fn>` не реализует `Debug`, а движок
+/// обязан оставаться `Debug` (его печатают структуры состояния и тесты).
+#[derive(Default)]
+struct SinkSlot(Mutex<Option<EventSink>>);
+
+impl std::fmt::Debug for SinkSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SinkSlot").field("installed", &self.0.lock().map(|s| s.is_some()).unwrap_or(false)).finish()
     }
 }
 
@@ -392,6 +467,8 @@ pub struct McuEngine {
     /// первого шлюзового вызова). Применяется при создании комнаты/бридже,
     /// не аллоцируя 2 МБ композита для пустой SFU-сессии.
     pending_layouts: Arc<Mutex<BTreeMap<RoomId, LayoutDescriptor>>>,
+    /// Приёмник событий комнат (S12): ставится сервером один раз.
+    event_sink: SinkSlot,
 }
 
 fn layout_has_video(tracks: &[MediaTrack]) -> bool {
@@ -537,18 +614,67 @@ impl McuEngine {
     /// Advances only the audio pipeline at a specific monotonic timestamp `now_ms` (20 ms cadence).
     /// Returns true if an audio tick was executed, or false if throttled within the 20 ms budget.
     pub fn tick_audio_at(&self, room: RoomId, now_ms: u64) -> bool {
-        let mut g = self.rooms.lock().unwrap();
-        let state = match g.get_mut(&room) {
-            Some(s) => s,
-            None => return false,
+        let (ran, events) = {
+            let mut g = self.rooms.lock().unwrap();
+            let state = match g.get_mut(&room) {
+                Some(s) => s,
+                None => return false,
+            };
+            let audio_map = self.audio.lock().unwrap().get(&room).cloned().unwrap_or_default();
+            let audio_inputs: Vec<(ParticipantId, Vec<f32>)> = state
+                .publisher_tracks
+                .keys()
+                .filter_map(|pid| audio_map.get(pid).cloned().map(|samples| (*pid, samples)))
+                .collect();
+            state.tick_audio_at(now_ms, &audio_inputs)
         };
-        let audio_map = self.audio.lock().unwrap().get(&room).cloned().unwrap_or_default();
-        let audio_inputs: Vec<(ParticipantId, Vec<f32>)> = state
-            .publisher_tracks
-            .keys()
-            .filter_map(|pid| audio_map.get(pid).cloned().map(|samples| (*pid, samples)))
-            .collect();
-        state.tick_audio_at(now_ms, &audio_inputs)
+        self.emit(room, events);
+        ran
+    }
+
+    /// Ставит приёмник событий комнат (S12: `SpeakingStateChanged` и
+    /// `LayoutChanged`). Сервер зовёт это один раз; движок о сигналинге не знает.
+    pub fn set_event_sink(&self, sink: EventSink) {
+        *self.event_sink.0.lock().unwrap() = Some(sink);
+    }
+
+    /// Отдаёт события приёмнику. Вызывается **после** снятия блокировки комнат:
+    /// приёмник может брать другие блокировки (ростер, шина комнаты).
+    fn emit(&self, room: RoomId, events: Vec<RoomEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        let sink = self.event_sink.0.lock().unwrap().clone();
+        if let Some(sink) = sink {
+            for event in events {
+                sink(room, event);
+            }
+        }
+    }
+
+    /// «Важный» участник комнаты (Codian §2.2): принудительно в главном окне,
+    /// важнее активного спикера. `None` возвращает режим голосовой активации.
+    ///
+    /// Возвращает `true`, если раскладка перестроилась.
+    pub fn set_important_participant(&self, room: RoomId, participant: Option<ParticipantId>) -> bool {
+        let event = {
+            let mut g = self.rooms.lock().unwrap();
+            let Some(state) = g.get_mut(&room) else {
+                return false;
+            };
+            state.important = participant;
+            state.refresh_focus()
+        };
+        let changed = event.is_some();
+        if let Some(event) = event {
+            self.emit(room, vec![event]);
+        }
+        changed
+    }
+
+    /// «Важный» участник комнаты (`None` — не назначен).
+    pub fn important_participant(&self, room: RoomId) -> Option<ParticipantId> {
+        self.rooms.lock().unwrap().get(&room).and_then(|state| state.important)
     }
 
     /// Advances only the video pipeline at a specific monotonic timestamp `now_ms` (33 ms budget).
@@ -1249,6 +1375,150 @@ mod tests {
         assert_eq!(changes, vec![(a, true)], "громкий участник начал говорить");
         assert!(e.take_speaking_changes(rid).is_empty(), "список забирается один раз");
         assert!(e.is_speaking(rid, a));
+    }
+
+    /// Копит события комнаты: тест подставляет его вместо серверной шины.
+    fn collect_events(e: &McuEngine) -> Arc<Mutex<Vec<(RoomId, RoomEvent)>>> {
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&collected);
+        e.set_event_sink(Arc::new(move |room, event| {
+            sink.lock().unwrap().push((room, event));
+        }));
+        collected
+    }
+
+    /// Комната с применённой раскладкой (движок принимает её отдельным вызовом).
+    async fn apply_focus_layout(e: &McuEngine, rid: RoomId, layout_id: &str, assignments: &[(ParticipantId, u32)]) {
+        e.apply_layout(
+            rid,
+            LayoutDescriptor {
+                layout_id: layout_id.into(),
+                version: 1,
+                assignments: assignments.iter().copied().collect(),
+                geometry: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    fn slot_of(e: &McuEngine, rid: RoomId, pid: ParticipantId) -> Option<u32> {
+        let layout = e.current_layout(rid)?;
+        let wanted = pid.as_uuid().as_u128();
+        layout.slots.iter().find(|slot| slot.participant_id.map(|p| p.as_u128()) == Some(wanted)).map(|s| s.id.as_u32())
+    }
+
+    fn loud(e: &McuEngine, rid: RoomId, pid: ParticipantId, steps: u64) {
+        e.set_audio(rid, pid, vec![0.9f32; 960]);
+        for step in 0..steps {
+            e.tick_audio_at(rid, 100 + step * 20);
+        }
+    }
+
+    /// Codian §2.2: главное окно следует за активным спикером (S12, фаза 3).
+    #[tokio::test]
+    async fn voice_activation_moves_the_main_window_to_the_active_speaker() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        let a = p(1);
+        let b = p(2);
+        e.create_room(cfg(rid)).await.unwrap();
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.add_publisher(rid, b, vec![video_track(b)]).await.unwrap();
+        apply_focus_layout(&e, rid, "focus", &[(a, 0), (b, 1)]).await;
+        let events = collect_events(&e);
+
+        assert_eq!(slot_of(&e, rid, a), Some(0), "сначала главное окно у A");
+        assert_eq!(slot_of(&e, rid, b), Some(1));
+
+        // B говорит громко: главное окно (слот 0) переезжает к B, A получает
+        // освободившийся слот B (никто не пропадает из раскладки).
+        loud(&e, rid, b, 30);
+        assert_eq!(slot_of(&e, rid, b), Some(0), "активный спикер — в главном окне");
+        assert_eq!(slot_of(&e, rid, a), Some(1), "прежний жилец не пропал");
+        let version = e.current_layout(rid).expect("раскладка").version;
+
+        let collected = events.lock().unwrap().clone();
+        assert!(
+            collected.iter().any(|(room, event)| *room == rid
+                && matches!(event, RoomEvent::Speaking { participant, speaking, .. } if *participant == b && *speaking)),
+            "смена речи уходит наружу: {collected:?}"
+        );
+        assert!(
+            collected.iter().any(|(room, event)| *room == rid
+                && matches!(event, RoomEvent::LayoutChanged { version: v } if *v == version)),
+            "пересадка главного окна уходит наружу: {collected:?}"
+        );
+        // Дескриптор отражает фактическое заселение: повторный apply не откатит.
+        let descriptor = e.layout_descriptor(rid).expect("дескриптор");
+        assert_eq!(descriptor.assignments.get(&b), Some(&0));
+        assert_eq!(descriptor.assignments.get(&a), Some(&1));
+    }
+
+    /// «Важный» участник важнее активного спикера (Codian §2.2).
+    #[tokio::test]
+    async fn important_participant_outranks_the_active_speaker() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        let a = p(1);
+        let b = p(2);
+        e.create_room(cfg(rid)).await.unwrap();
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.add_publisher(rid, b, vec![video_track(b)]).await.unwrap();
+        apply_focus_layout(&e, rid, "focus", &[(a, 0), (b, 1)]).await;
+
+        // B говорит громче — главное окно у B.
+        loud(&e, rid, b, 30);
+        assert_eq!(slot_of(&e, rid, b), Some(0));
+
+        // Назначаем «Важным» A: он вытесняет спикера из главного окна.
+        assert!(e.set_important_participant(rid, Some(a)), "пересадка состоялась");
+        assert_eq!(slot_of(&e, rid, a), Some(0), "«Важный» — в главном окне");
+        assert_eq!(slot_of(&e, rid, b), Some(1));
+        assert_eq!(e.important_participant(rid), Some(a));
+
+        // Прежний спикер продолжает говорить — «Важный» всё равно главнее.
+        loud(&e, rid, b, 10);
+        assert_eq!(slot_of(&e, rid, a), Some(0), "спикер не вытесняет «Важного»");
+
+        // Снятие статуса возвращает голосовую активацию.
+        assert!(e.set_important_participant(rid, None));
+        assert_eq!(slot_of(&e, rid, b), Some(0), "голосовая активация вернулась");
+        assert!(e.important_participant(rid).is_none());
+        assert!(!e.set_important_participant(RoomId::from_uuid(uuid::Uuid::from_u128(4242)), Some(a)));
+    }
+
+    /// Равная сетка и фиксированный макет PNM не имеют главного окна:
+    /// голосовая активация их не трогает (Codian §2.1: 52 макета статичны).
+    #[tokio::test]
+    async fn voice_activation_leaves_grid_and_custom_layouts_alone() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        let a = p(1);
+        let b = p(2);
+        e.create_room(cfg(rid)).await.unwrap();
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.add_publisher(rid, b, vec![video_track(b)]).await.unwrap();
+        let before = e.current_layout(rid).expect("раскладка").clone();
+
+        loud(&e, rid, b, 30);
+        let after = e.current_layout(rid).expect("раскладка");
+        assert_eq!(after.kind, LayoutKind::Grid);
+        assert_eq!(after.slots.len(), before.slots.len());
+        assert_eq!(after.version, before.version, "сетка не перестраивается голосом");
+    }
+
+    /// Голосовая активация без подписки ничего не ломает: приёмника нет.
+    #[tokio::test]
+    async fn voice_activation_works_without_an_event_sink() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        let a = p(1);
+        e.create_room(cfg(rid)).await.unwrap();
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        apply_focus_layout(&e, rid, "speaker", &[(a, 0)]).await;
+        loud(&e, rid, a, 30);
+        assert_eq!(e.current_layout(rid).expect("раскладка").kind, LayoutKind::Speaker);
     }
 
     /// S12: авто-сетка и пересадка участников идут по порядку прихода, а не
