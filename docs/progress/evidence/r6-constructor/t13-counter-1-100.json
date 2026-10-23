@@ -35,10 +35,10 @@
    "min": "1",
    "max": "100",
    "type": "number",
-   "cls": "tc-text-field__input",
+   "cls": "tc-text-field__input mdc-text-field__input",
    "wrapper": "dynamic-layout-configurator-counter",
    "hasText": true,
-   "btnCls": "tc-button-container counter__button",
+   "btnCls": "tc-button-container tc-button-container--base counter__button",
    "center": true,
    "buttons": [
     {
@@ -86,10 +86,10 @@
    "min": "1",
    "max": "100",
    "type": "number",
-   "cls": "tc-text-field__input",
+   "cls": "tc-text-field__input mdc-text-field__input",
    "wrapper": "dynamic-layout-configurator-counter",
    "hasText": true,
-   "btnCls": "tc-button-container counter__button",
+   "btnCls": "tc-button-container tc-button-container--base counter__button",
    "center": true,
    "buttons": [
     {
@@ -137,10 +137,10 @@
    "min": "1",
    "max": "100",
    "type": "number",
-   "cls": "tc-text-field__input",
+   "cls": "tc-text-field__input mdc-text-field__input",
    "wrapper": "dynamic-layout-configurator-counter",
    "hasText": true,
-   "btnCls": "tc-button-container counter__button",
+   "btnCls": "tc-button-container tc-button-container--base counter__button",
    "center": true,
    "buttons": [
     {
@@ -188,10 +188,10 @@
    "min": "1",
    "max": "100",
    "type": "number",
-   "cls": "tc-text-field__input",
+   "cls": "tc-text-field__input mdc-text-field__input",
    "wrapper": "dynamic-layout-configurator-counter",
    "hasText": true,
-   "btnCls": "tc-button-container counter__button",
+   "btnCls": "tc-button-container tc-button-container--base counter__button",
    "center": true,
    "buttons": [
     {
@@ -239,10 +239,10 @@
    "min": "1",
    "max": "100",
    "type": "number",
-   "cls": "tc-text-field__input",
+   "cls": "tc-text-field__input mdc-text-field__input",
    "wrapper": "dynamic-layout-configurator-counter",
    "hasText": true,
-   "btnCls": "tc-button-container counter__button",
+   "btnCls": "tc-button-container tc-button-container--base counter__button",
    "center": true,
    "buttons": [
     {
@@ -290,10 +290,10 @@
    "min": "1",
    "max": "100",
    "type": "number",
-   "cls": "tc-text-field__input",
+   "cls": "tc-text-field__input mdc-text-field__input",
    "wrapper": "dynamic-layout-configurator-counter",
    "hasText": true,
-   "btnCls": "tc-button-container counter__button",
+   "btnCls": "tc-button-container tc-button-container--base counter__button",
    "center": true,
    "buttons": [
     {
@@ -341,10 +341,10 @@
    "min": "1",
    "max": "100",
    "type": "number",
-   "cls": "tc-text-field__input",
+   "cls": "tc-text-field__input mdc-text-field__input",
    "wrapper": "dynamic-layout-configurator-counter",
    "hasText": true,
-   "btnCls": "tc-button-container counter__button",
+   "btnCls": "tc-button-container tc-button-container--base counter__button",
    "center": true,
    "buttons": [
     {
@@ -398,10 +398,10 @@
    "min": "1",
    "max": "100",
    "type": "number",
-   "cls": "tc-text-field__input",
+   "cls": "tc-text-field__input mdc-text-field__input",
    "wrapper": "dynamic-layout-configurator-counter",
    "hasText": true,
-   "btnCls": "tc-button-container counter__button",
+   "btnCls": "tc-button-container tc-button-container--base counter__button",
    "center": true,
    "buttons": [
     {
@@ -449,10 +449,10 @@
    "min": "1",
    "max": "100",
    "type": "number",
-   "cls": "tc-text-field__input",
+   "cls": "tc-text-field__input mdc-text-field__input",
    "wrapper": "dynamic-layout-configurator-counter",
    "hasText": true,
-   "btnCls": "tc-button-container counter__button",
+   "btnCls": "tc-button-container tc-button-container--base counter__button",
    "center": true,
    "buttons": [
     {
@@ -500,10 +500,10 @@
    "min": "1",
    "max": "100",
    "type": "number",
-   "cls": "tc-text-field__input",
+   "cls": "tc-text-field__input mdc-text-field__input",
    "wrapper": "dynamic-layout-configurator-counter",
    "hasText": true,
-   "btnCls": "tc-button-container counter__button",
+   "btnCls": "tc-button-container tc-button-container--base counter__button",
    "center": true,
    "buttons": [
     {
@@ -554,10 +554,10 @@
    "min": "1",
    "max": "100",
    "type": "number",
-   "cls": "tc-text-field__input",
+   "cls": "tc-text-field__input mdc-text-field__input",
    "wrapper": "dynamic-layout-configurator-counter",
    "hasText": true,
-   "btnCls": "tc-button-container counter__button",
+   "btnCls": "tc-button-container tc-button-container--base counter__button",
    "center": true,
    "buttons": [
     {
@@ -588,5 +588,7 @@
    "layout-mode-selector-constructor"
   ]
  },
- "errs": []
+ "errs": [
+  "Operation canceled"
+ ]
 }

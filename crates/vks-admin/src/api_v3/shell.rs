@@ -886,7 +886,9 @@ pub async fn switch_video_layout_mode(
     // Поля формы UI кладёт во вложенный `payload`; верхний уровень — для совместимости.
     let nested = body.extra.get("payload").and_then(Value::as_object).cloned().unwrap_or_default();
     let field = |key: &str| nested.get(key).cloned().or_else(|| body.extra.get(key).cloned());
-    let size = field("size").and_then(|value| value.as_u64()).filter(|size| (1..=64).contains(size));
+    let size = field("size")
+        .and_then(|value| value.as_u64())
+        .filter(|size| (1..=vks_layout::grids::MAX_WINDOWS as u64).contains(size));
     let slots = match field("slots") {
         Some(Value::Array(slots)) if slots.iter().all(Value::is_object) => {
             let len = slots.len() as u64;

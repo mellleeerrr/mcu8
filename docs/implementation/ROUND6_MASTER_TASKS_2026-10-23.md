@@ -189,7 +189,19 @@ error перечисляет grid, release-note SIP UAS, «970→факт».
   `t13-counter-1-100.json`: 13→+→14→−→13→input42→pin_r_42→+→43→input100→
   PATCH `vks_pin_r_100` (100 слотов)→reopen 100, «макс.» disabled;
   `t13-counter-100.png` (счётчик 100, 5 карточек с бейджем 100).
-  Осталось: финальное ревью и коммит.
+  Ревью T13 на `4c36a6c` (7/10) нашло P1: number-input терял фокус на каждой
+  цифре (`onCounterInput` на `input` перестраивал секцию через innerHTML).
+  Исправлено в T13.1: карточки перестраиваются без пересоздания счётчика,
+  `input`-событие применяет N с дебаунсом 300 мс, `change`/Enter применяют
+  сразу и клампят; разметка TcButton/TcTextField приведена к вендорской
+  (`tc-button-container--base`, `mdc-button--text`, `tc-button__content`,
+  `tc-button__icon`/`tc-button__text`, `tc-notched-outline`), добавлены
+  aria-label/title для −/+; лимит `payload.size` в admin поднят с 64 до
+  `grids::MAX_WINDOWS` (100); добавлены тесты apply 100 окон (gateways) и
+  mode с size=100 (admin). Live: набор «100»/«42» с клавиатуры без потери
+  фокуса (`t13-keyboard-100-42.json`), «+»/«−»/мин./макс./fill работают,
+  save/reopen 100 (`t13-counter-1-100.json`, `t13-counter-100.png`).
+  Осталось: повторное ревью T13.1 и коммит.
 
 Из T2 (P1): session-route тест «auto→Конструктор не дёргает POST
 /api/v3/ui/video_layouts/mode» (в конференц-редакторе switchLayoutMode нет,

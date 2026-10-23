@@ -1441,6 +1441,28 @@ async fn m4_abonents_lifecycle_and_commands() {
     assert_eq!(constructor_body["payload"]["preset"], "vks_pin_r_9", "preset конструктора не подменяется");
     assert_eq!(constructor_body["payload"]["size"], 9, "size — число окон из параметрического id");
 
+    // 7d. T13: счётчик конструктора доходит до 100 — size больше старого
+    // лимита 64 не должен молча отбрасываться ни в mode, ни в upsert.
+    let hundred_switch = send(
+        &app,
+        request(
+            "POST",
+            "/api/v3/ui/video_layouts/mode",
+            Some(&token),
+            json!({
+                "session_id": room_id_str,
+                "new_mode": "mcu",
+                "video_layout_id": layout_id,
+                "payload": {"mode":"manual","preset":"vks_pin_b_100","type":"individual","size":100,"slots":[]}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(hundred_switch.status(), StatusCode::OK);
+    let hundred_body = json_body(hundred_switch).await;
+    assert_eq!(hundred_body["payload"]["preset"], "vks_pin_b_100", "100 окон не обрезаются до 64");
+    assert_eq!(hundred_body["payload"]["size"], 100, "size=100 принимается (MAX_WINDOWS)");
+
     let bad_mode = send(
         &app,
         request(

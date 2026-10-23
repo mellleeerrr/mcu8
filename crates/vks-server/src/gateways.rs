@@ -4195,6 +4195,36 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert_eq!(descriptor.geometry[0].height, expected[0].rect.height.round() as u32, "высота первого окна");
     }
 
+    /// T13: параметрический id конструктора на 100 окон доезжает до MCU
+    /// полной геометрией (не обрезается старым лимитом 64/25).
+    #[tokio::test]
+    async fn explicit_constructor_preset_applies_hundred_windows() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        mcu.ensure_room(room);
+        let pid = vks_core::ParticipantId::new();
+        mcu.bridge_participant(room, pid, vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)]);
+        let id = "vks_pin_b_100";
+        let layout = serde_json::json!({
+            "id": "ctor-100",
+            "payload": {
+                "mode": "manual", "preset": id, "type": "individual", "size": 100, "slots": []
+            }
+        });
+        manager.apply_layout(room, layout).await.expect("100-window layout applied");
+        let descriptor = mcu.layout_descriptor(room).expect("layout applied to MCU");
+        let expected = vks_layout::grids::geometry(id, 1920.0, 1080.0).expect("геометрия 100 окон");
+        assert_eq!(descriptor.geometry.len(), 100, "все 100 окон доехали до композитора");
+        assert_eq!(descriptor.geometry.len(), expected.len());
+        assert_eq!(
+            descriptor.geometry[0].width,
+            expected[0].rect.width.round() as u32,
+            "ширина первого окна из grids::geometry"
+        );
+    }
+
     /// T03: gateway не теряет вендорный z_order overlap/PiP-пресета.
     #[tokio::test]
     async fn gateway_manager_preserves_preset_z_order_for_overlap() {

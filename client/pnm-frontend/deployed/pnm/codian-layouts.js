@@ -612,31 +612,38 @@
 
   /* Вендорский CounterComponent (2.2.1.66): `.counter` = «мин.» + центр
    * (−, number-input max=100, +) + «макс.»; кнопки — TcButton (mdc-button). */
-  function buildCounterButton(action, label, icon) {
-    // TcButton = контейнер `.tc-button-container` + внутренняя кнопка: vendor
-    // CSS `.tc-button{width:100%;flex-grow:1}`, без контейнера кнопки
-    // растягиваются на весь ряд и перекрывают друг друга.
+  function buildCounterButton(action, label, icon, ariaLabel) {
+    // Разметка 1:1 вендорского TcButton (mode="base", type="text"):
+    //   div.tc-button-container.tc-button-container--base > button.tc-button.mdc-button--text
+    //     > span.mdc-button__ripple + div.tc-button__content > i.tc-button__icon
+    //     / span.mdc-button__label.tc-button__text.
     var container = document.createElement('div');
-    container.className = 'tc-button-container counter__button';
+    container.className = 'tc-button-container tc-button-container--base counter__button';
     container.setAttribute('data-counter-action', action);
+    if (ariaLabel) {
+      container.setAttribute('aria-label', ariaLabel);
+      container.setAttribute('title', ariaLabel);
+    }
     var button = document.createElement('button');
     button.type = 'button';
-    button.className = 'tc-button mdc-button mdc-button--unelevated';
+    button.className = 'tc-button mdc-button mdc-button--text' + (icon ? ' tc-button--icon' : '');
     var ripple = document.createElement('span');
     ripple.className = 'mdc-button__ripple';
     button.appendChild(ripple);
+    var content = document.createElement('div');
+    content.className = 'tc-button__content';
     if (icon) {
-      var glyph = document.createElement('span');
-      glyph.className = 'material-icons mdc-button__icon';
-      glyph.setAttribute('aria-hidden', 'true');
+      var glyph = document.createElement('i');
+      glyph.className = 'material-icons tc-button__icon mdc-button__icon notranslate';
       glyph.textContent = icon;
-      button.appendChild(glyph);
+      content.appendChild(glyph);
     } else {
       var text = document.createElement('span');
-      text.className = 'mdc-button__label';
+      text.className = 'mdc-button__label tc-button__text';
       text.textContent = label;
-      button.appendChild(text);
+      content.appendChild(text);
     }
+    button.appendChild(content);
     container.appendChild(button);
     return container;
   }
@@ -652,17 +659,18 @@
 
     var counter = document.createElement('div');
     counter.className = 'counter';
-    counter.appendChild(buildCounterButton('min', 'мин.', null));
+    counter.appendChild(buildCounterButton('min', 'мин.', null, 'Минимальное количество видеокон (1)'));
     var center = document.createElement('div');
     center.className = 'counter-center-segment';
-    center.appendChild(buildCounterButton('dec', null, 'remove'));
+    center.appendChild(buildCounterButton('dec', null, 'remove', 'Уменьшить количество видеокон'));
     var field = document.createElement('div');
     field.className = 'counter__text-field tc-text-field-container';
     var textField = document.createElement('div');
-    textField.className = 'tc-text-field mdc-text-field mdc-text-field--outlined mdc-text-field--no-label';
+    textField.className =
+      'tc-text-field mdc-text-field mdc-text-field--outlined tc-text-field--no-label mdc-text-field--no-label';
     var input = document.createElement('input');
     input.type = 'number';
-    input.className = 'tc-text-field__input';
+    input.className = 'tc-text-field__input mdc-text-field__input';
     input.min = '1';
     input.max = String(MAX_COUNT);
     input.step = '1';
@@ -670,11 +678,23 @@
     input.setAttribute('data-counter-input', '1');
     input.setAttribute('aria-label', 'Количество видеокон');
     textField.appendChild(input);
+    var outline = document.createElement('span');
+    outline.className = 'tc-notched-outline mdc-notched-outline mdc-notched-outline--upgraded';
+    var leading = document.createElement('span');
+    leading.className = 'mdc-notched-outline__leading';
+    var notch = document.createElement('span');
+    notch.className = 'mdc-notched-outline__notch';
+    var trailing = document.createElement('span');
+    trailing.className = 'mdc-notched-outline__trailing';
+    outline.appendChild(leading);
+    outline.appendChild(notch);
+    outline.appendChild(trailing);
+    textField.appendChild(outline);
     field.appendChild(textField);
     center.appendChild(field);
-    center.appendChild(buildCounterButton('inc', null, 'add'));
+    center.appendChild(buildCounterButton('inc', null, 'add', 'Увеличить количество видеокон'));
     counter.appendChild(center);
-    counter.appendChild(buildCounterButton('max', 'макс.', null));
+    counter.appendChild(buildCounterButton('max', 'макс.', null, 'Максимальное количество видеокон (100)'));
     wrapper.appendChild(counter);
     return wrapper;
   }
@@ -775,15 +795,34 @@
     onConstructorActivate(event);
   }
 
+  // Ввод с клавиатуры: не пересоздаём input на каждую цифру (фокус терялся),
+  // а применяем N с коротким дебаунсом; Enter/потеря фокуса применяют сразу.
+  var counterInputTimer = null;
   function onCounterInput(event) {
     var target = event.target;
     if (!target || !target.getAttribute || !target.getAttribute('data-counter-input')) return;
     var count = Math.floor(Number(target.value));
-    if (!(count >= 1 && count <= MAX_COUNT)) {
-      syncCounter(countForCounter());
-      return;
+    // Недобор (пусто/0) или перебор не применяем на каждую цифру: даём
+    // дописать число, клампим в change/blur.
+    if (!(count >= 1 && count <= MAX_COUNT)) return;
+    if (counterInputTimer) window.clearTimeout(counterInputTimer);
+    counterInputTimer = window.setTimeout(function () {
+      counterInputTimer = null;
+      applyCount(count);
+    }, 300);
+  }
+
+  function onCounterChange(event) {
+    var target = event.target;
+    if (!target || !target.getAttribute || !target.getAttribute('data-counter-input')) return;
+    if (counterInputTimer) {
+      window.clearTimeout(counterInputTimer);
+      counterInputTimer = null;
     }
-    applyCount(count);
+    var count = Math.floor(Number(target.value));
+    var next = count >= 1 && count <= MAX_COUNT ? count : count > MAX_COUNT ? MAX_COUNT : counterValue || 1;
+    applyCount(next);
+    syncCounter(next);
   }
 
   function buildConstructorSelector(count) {
@@ -833,7 +872,7 @@
       section.addEventListener('click', onSectionClick);
       section.addEventListener('keydown', onConstructorKeydown);
       section.addEventListener('input', onCounterInput);
-      section.addEventListener('change', onCounterInput);
+      section.addEventListener('change', onCounterChange);
       // Секция конструктора ставится перед группой Codian: при переходе на
       // пункт «Конструктор» она видна сразу, без прокрутки 54 карточек.
       if (firstGroup && firstGroup.parentNode === host) host.insertBefore(section, firstGroup);
@@ -853,8 +892,13 @@
       return;
     }
     section.setAttribute('data-count', String(count));
-    section.innerHTML = '';
-    section.appendChild(buildCounter(count));
+    var counter = section.querySelector('[data-vks-counter]');
+    if (!counter) {
+      counter = buildCounter(count);
+      section.insertBefore(counter, section.firstChild);
+    }
+    var selector = section.querySelector('.layout-scheme-selector');
+    if (selector && selector.parentNode) selector.parentNode.removeChild(selector);
     section.appendChild(buildConstructorSelector(count));
     syncConstructorActive();
     syncCounter(count);
@@ -877,6 +921,10 @@
   }
 
   function onConstructorKeydown(event) {
+    if (event.target && event.target.getAttribute && event.target.getAttribute('data-counter-input')) {
+      if (event.key === 'Enter') onCounterChange(event);
+      return;
+    }
     if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
     var item = closestConstructorItem(event.target);
     if (!item) return;
