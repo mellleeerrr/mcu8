@@ -125,6 +125,11 @@ CI service postgres, `--locked`.
 ## T12. Тесты/CI-гигиена
 Тесты приоритета id-геометрии и create_room-adopt pending, G722-флейк, calculate
 error перечисляет grid, release-note SIP UAS, «970→факт».
+Из T2 (P1): session-route тест «auto→Конструктор не дёргает POST
+/api/v3/ui/video_layouts/mode» (в конференц-редакторе switchLayoutMode нет,
+0 POST; на session-route watchEffect может успеть — проверить и подавить);
+захват payload сохранения в evidence; чипы «Количество видеоокон» сбрасывают
+preset на вендорский — зафиксировать поведение в тесте.
 
 ## Отметки выполнения
 
@@ -136,6 +141,8 @@ error перечисляет grid, release-note SIP UAS, «970→факт».
   после mode='manual' без fallback count=1, selectConstructor = только preset
   (вендор синтезирует слоты из хвоста id), единственный активный тайл.
   Live: auto→«Конструктор» → activePreset=vks_grid_25, activeTiles=[constructor],
-  переоткрытие сохраняет, 0 ошибок. P1 в T12: захват payload сохранения,
-  поведение чипов «Количество видеоокон» (сбрасывают preset на вендорский).
+  переоткрытие сохраняет, 0 ошибок. Второе ревью r6-t2-review-short: 9/10 на
+  committed-состоянии, P0 нет, save/reopen payload read-only подтверждён
+  (manual + vks_grid_25 + 25 AUTO); P1-risk session-route POST mode → T12
+  (в scope conference-layout воспроизведено 0 POST).
 - [ ] T2 … T12

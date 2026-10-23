@@ -567,8 +567,8 @@
       section.setAttribute(CONSTRUCTOR_ATTR, '1');
       section.addEventListener('click', onConstructorActivate);
       section.addEventListener('keydown', onConstructorKeydown);
-      // Конструктор — первая секция ручной панели: при переходе на пункт
-      // «Конструктор» пользователь видит его сразу, не прокручивая 54 Codian.
+      // Секция конструктора ставится перед группой Codian: при переходе на
+      // пункт «Конструктор» она видна сразу, без прокрутки 54 карточек.
       if (firstGroup && firstGroup.parentNode === host) host.insertBefore(section, firstGroup);
       else host.appendChild(section);
     }
