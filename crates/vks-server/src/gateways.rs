@@ -306,6 +306,10 @@ pub struct GatewayManager {
     candidate_ip: String,
     sip_uas_shutdown: Arc<tokio::sync::Notify>,
     sip_uas_stopping: Arc<std::sync::atomic::AtomicBool>,
+    /// Транспорт SIP UAS реально слушает UDP (не in-memory флаг регистрации).
+    sip_uas_active: Arc<std::sync::atomic::AtomicBool>,
+    /// H.323 UAS listener реально запущен (Python-процесс/порт 1720).
+    h323_uas_active: Arc<std::sync::atomic::AtomicBool>,
     sip_uas_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     sip_uas_reaper_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     h323_uas_shutdown: Arc<tokio::sync::Notify>,
@@ -338,6 +342,9 @@ impl GatewayManager {
     /// Создаёт и инициализирует менеджер шлюзов.
     pub fn new() -> Self {
         let mut sip = SipGateway::new();
+        // In-memory gate входящих вызовов: не статус доступности (T8 статус
+        // считает только по живому listener'у/health), а разрешение принять
+        // INVITE менеджером.
         if let Err(e) = sip.register_uas() {
             warn!(error = %e, "SIP UAS already registered or conflict");
         }
@@ -362,6 +369,8 @@ impl GatewayManager {
             h323_uas_shutdown: Arc::new(tokio::sync::Notify::new()),
             h323_uas_stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             h323_uas_task: Arc::new(std::sync::Mutex::new(None)),
+            sip_uas_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            h323_uas_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -496,30 +505,56 @@ impl GatewayManager {
         }
     }
 
+    /// Последний health-факт шлюза из `AppState` (если state привязан).
+    fn gateway_health_snapshot(&self, protocol: &str) -> Option<vks_admin::state::GatewayHealth> {
+        self.state
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
+            .and_then(|state| state.gateway_health(protocol))
+    }
+
+    /// Честный статус: `READY` только при живом транспорте (listener) или
+    /// реальном health-факте; транспортный отказ health → `FAILED`; иначе
+    /// `DISABLED`. In-memory `is_registered()` — не факт доступности.
+    fn gateway_status(&self, protocol: &str, listener: bool, active_calls: u64, account: &str) -> serde_json::Value {
+        let health = self.gateway_health_snapshot(protocol);
+        let transport_failed = health.as_ref().is_some_and(|entry| !entry.ok && !entry.terminal);
+        let ready = listener
+            || health.as_ref().is_some_and(|entry| entry.ok || entry.terminal || entry.last_success_at.is_some());
+        let status = if transport_failed {
+            "FAILED"
+        } else if ready {
+            "READY"
+        } else {
+            "DISABLED"
+        };
+        serde_json::json!({
+            "status": status,
+            "connected": ready,
+            "registration": listener,
+            "active_calls": active_calls,
+            "account": account,
+            "last_error": health.and_then(|entry| entry.error),
+        })
+    }
+
     /// Статус доступности SIP-шлюза для `ui_system_status`.
     pub fn sip_status(&self) -> serde_json::Value {
         let sip = self.sip.lock().unwrap();
-        let is_registered = sip.is_registered();
-        serde_json::json!({
-            "status": if is_registered { "READY" } else { "DISABLED" },
-            "connected": is_registered,
-            "registration": is_registered,
-            "active_calls": sip.active_calls_count(),
-            "account": "sip:vks@local"
-        })
+        let listener = self.sip_uas_active.load(std::sync::atomic::Ordering::SeqCst);
+        let active_calls = sip.active_calls_count();
+        drop(sip);
+        self.gateway_status("sip", listener, active_calls as u64, "sip:vks@local")
     }
 
     /// Статус доступности H.323-шлюза для `ui_system_status`.
     pub fn h323_status(&self) -> serde_json::Value {
         let h323 = self.h323.lock().unwrap();
-        let is_registered = h323.is_registered();
-        serde_json::json!({
-            "status": if is_registered { "READY" } else { "DISABLED" },
-            "connected": is_registered,
-            "registration": is_registered,
-            "active_calls": h323.active_calls_count(),
-            "account": "h323:vks@local"
-        })
+        let listener = self.h323_uas_active.load(std::sync::atomic::Ordering::SeqCst);
+        let active_calls = h323.active_calls_count();
+        drop(h323);
+        self.gateway_status("h323", listener, active_calls as u64, "h323:vks@local")
     }
 
     /// Ссылка на внутренний экземпляр SIP-шлюза.
@@ -1515,7 +1550,11 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                 );
                 continue;
             };
-            let identifier = ["contact_id", "call_string_id", "abonent_id", "connection_id"]
+            // T8: приоритет — реальный участник. `contact_id`/`call_string_id`
+            // у SIP-абонента могут быть `cs-<uuid>` (адресная книга), тогда слот
+            // занимал фантом, а реальный `sip-...@sip-gateway` уезжал в другое
+            // окно (а при одном окне оставался без окна).
+            let identifier = ["abonent_id", "connection_id", "contact_id", "call_string_id"]
                 .iter()
                 .filter_map(|key| slot[*key].as_str())
                 .map(str::trim)
@@ -1641,6 +1680,9 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             merged.extend(explicit.into_iter().map(|cell| (cell.slot, cell)));
         }
         let geometry: Vec<LayoutSlot> = merged.into_values().collect();
+        // Ни назначений, ни геометрии: manual/явная схема — применять нечего,
+        // а `auto` обязан дойти до движка пустым дескриптором — это сброс на
+        // авто-сетку (иначе MCU остаётся на предыдущей ручной раскладке).
         if assignments.is_empty() && geometry.is_empty() && mode != "auto" {
             return Ok(());
         }
@@ -1676,11 +1718,14 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
     }
 
     fn gateway_registration(&self, protocol: &str) -> Option<bool> {
-        match protocol {
-            "sip" => self.sip.lock().ok().map(|gateway| gateway.is_registered()),
-            "h323" => self.h323.lock().ok().map(|gateway| gateway.is_registered()),
-            _ => None,
-        }
+        // T8: shell-статус должен опираться на транспорт/health, а не на
+        // in-memory флаг «зарегистрирован».
+        let value = match protocol {
+            "sip" => self.sip_status(),
+            "h323" => self.h323_status(),
+            _ => return None,
+        };
+        Some(value["connected"].as_bool().unwrap_or(false))
     }
 
     fn hangup(&self, participant_id: &str) -> bool {
@@ -1982,6 +2027,23 @@ async fn stop_inbound_calls(
     let _ = tokio::time::timeout(std::time::Duration::from_secs(4), futures_util::future::join_all(waiters)).await;
 }
 
+/// RAII-маркер живого транспорта: сбрасывает флаг при любом выходе listener'а
+/// (включая ранние `?` и панику), чтобы статус не «залипал» в READY.
+struct ActiveFlag(Arc<std::sync::atomic::AtomicBool>);
+
+impl ActiveFlag {
+    fn set(flag: &Arc<std::sync::atomic::AtomicBool>) -> Self {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self(flag.clone())
+    }
+}
+
+impl Drop for ActiveFlag {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// UDP SIP UAS: принимает `INVITE sip:<room-id>@<advertised-ip>` и поднимает
 /// существующий RTP-мост. Транспорт минимален (UDP + plain RTP), потому что
 /// именно так вызывают терминалы/TrueConf в этом стенде; SRTP/TLS/100rel
@@ -2006,6 +2068,7 @@ async fn serve_sip_uas_on(
 ) -> std::io::Result<()> {
     let bind = socket.local_addr().map(|addr| addr.to_string()).unwrap_or_default();
     let local_port = socket.local_addr().map(|addr| addr.port()).unwrap_or(5060);
+    let _active = ActiveFlag::set(&manager.sip_uas_active);
     info!(bind = %bind, advertised_ip = %advertised_ip, "SIP UAS listening");
     let max_calls =
         std::env::var("VKS_SIP_UAS_MAX_CALLS").ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(64);
@@ -2949,9 +3012,11 @@ pub async fn serve_h323_uas(manager: Arc<GatewayManager>, bind: String, local_ip
                 }
             };
             let handle = uas.handle();
+            let active = ActiveFlag::set(&runner.h323_uas_active);
             info!(bind = %bind, local_ip = %local_ip, "H.323 UAS listening");
             let pending_guard = serve_h323_uas_session(&runner, &mut uas, handle, &local_ip).await;
             uas.shutdown().await;
+            drop(active);
             // Safe now: every forked child is gone before ports are released.
             drop(pending_guard);
             if !runner.h323_uas_stopping.load(std::sync::atomic::Ordering::SeqCst) {
@@ -3980,6 +4045,38 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert_eq!(rects.len(), 1, "one real participant, no auto slot and no phantom slot 2");
         let cell = rects.get(&0).expect("1-based position 1 normalizes to slot 0");
         assert_eq!((cell.x, cell.y, cell.w, cell.h), (0, 0, 960, 540), "exact PNM geometry, not sqrt grid");
+    }
+
+    /// T8: при наличии обоих id слот занимает реальный участник (`abonent_id`/
+    /// `connection_id`), а не `contact_id`/`call_string_id` из адресной книги
+    /// (`cs-<uuid>`), иначе в композите появлялось фантомное окно.
+    #[tokio::test]
+    async fn gateway_layout_prefers_abonent_id_over_contact_and_call_string() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        mcu.ensure_room(room);
+        let pid = vks_core::ParticipantId::new();
+        let participant = format!("sip-{}@sip-gateway", pid.as_uuid());
+        let contact = format!("cs-{}", vks_core::ParticipantId::new().as_uuid());
+        let layout = serde_json::json!({
+            "id": "t8-priority",
+            "payload": {"mode": "manual", "preset": "preset_equal_1", "slots": [
+                {"position": 1, "abonent_id": participant, "connection_id": participant,
+                 "contact_id": contact, "call_string_id": contact}
+            ]}
+        });
+        manager.apply_layout(room, layout).await.expect("layout reaches MCU");
+        let descriptor = mcu.layout_descriptor(room).expect("descriptor");
+        assert_eq!(descriptor.assignments.get(&pid), Some(&0), "окно 0 — реальный SIP-участник");
+        assert_eq!(descriptor.assignments.len(), 1, "фантомного слота от contact_id нет");
+        mcu.bridge_participant(room, pid, vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)]);
+        for _ in 0..11 {
+            mcu.tick(room);
+        }
+        let rects = mcu.slot_rects(room).expect("MCU room exists");
+        assert!(rects.contains_key(&0), "участник получил окно, а не остался без слота");
     }
 
     /// S10: слот без явной геометрии не теряет участника.

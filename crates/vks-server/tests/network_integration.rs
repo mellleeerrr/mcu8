@@ -765,13 +765,14 @@ async fn test_m5_gateway_sip_h323_integration() {
 
     let gw = GatewayManager::new();
 
-    // 1. Проверяем статус шлюзов
+    // 1. T8: без живого listener'а статус честный DISABLED, а не фиктивный READY
+    // (раньше `register_uas()`/`H323Gateway::default` выставляли bool без транспорта).
     let sip_st = gw.sip_status();
-    assert_eq!(sip_st["status"], "READY");
-    assert_eq!(sip_st["registration"], true);
+    assert_eq!(sip_st["status"], "DISABLED");
+    assert_eq!(sip_st["registration"], false);
     let h323_st = gw.h323_status();
-    assert_eq!(h323_st["status"], "READY");
-    assert_eq!(h323_st["registration"], true);
+    assert_eq!(h323_st["status"], "DISABLED");
+    assert_eq!(h323_st["registration"], false);
 
     // 2. Входящий SIP-вызов
     let sip_call = gw
@@ -1501,18 +1502,15 @@ async fn test_m5_gateway_dual_call_same_from_isolation_and_mcu_bridging() {
     let mcu = Arc::new(McuEngine::new());
     let gw = GatewayManager::new().with_mcu(Arc::clone(&mcu));
 
-    // 1. Dynamic gateway status: reflects actual registration
+    // 1. T8: in-memory register/unregister — не транспорт и не факт статуса.
     let sip_st = gw.sip_status();
-    assert_eq!(sip_st["status"], "READY");
-    assert_eq!(sip_st["connected"], true);
+    assert_eq!(sip_st["status"], "DISABLED");
+    assert_eq!(sip_st["connected"], false);
     assert_eq!(sip_st["active_calls"], 0);
-
-    // Unregister reflects DISABLED
     gw.sip().lock().unwrap().unregister();
-    let sip_st_unreg = gw.sip_status();
-    assert_eq!(sip_st_unreg["status"], "DISABLED");
-    assert_eq!(sip_st_unreg["connected"], false);
-    gw.sip().lock().unwrap().register_uas().expect("re-register");
+    assert_eq!(gw.sip_status()["status"], "DISABLED", "unregister не делает шлюз доступнее");
+    gw.sip().lock().unwrap().register_uas().expect("register_uas");
+    assert_eq!(gw.sip_status()["status"], "DISABLED", "register_uas без listener'а не READY");
 
     // 2. Strict codec offer rejection: unsupported codec returns Err
     let mut sip_gw = SipGateway::new();
