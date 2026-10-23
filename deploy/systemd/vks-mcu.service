@@ -3,7 +3,7 @@
 # dev-лог в репозиторий. Production — vks-mcu-prod.service.
 [Unit]
 Description=VKS MCU local stand (PROSTOR UI, SIP/H.323, SQLite)
-Documentation=file:///home/pro/mcu/docs/implementation/LIVE_MCU_TASKS_2026-10-21.md
+Documentation=file:///home/pro/mcu/docs/progress/MASTER_TASK_LIST.md
 After=network-online.target
 Wants=network-online.target
 

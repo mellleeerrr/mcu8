@@ -9,5 +9,13 @@
 - `FRONTEND_PORT_PLAN.md` — план переноса PNM-фронтенда (ADR-0027); перенос
   завершён, актуальные контракты — в коде и `docs/progress/evidence/`.
 - `TEMPLATE_ERROR.md` — шаблон записи ошибок в PROGRESS; больше не нужен.
+- `LIVE_MCU_TASKS_2026-10-21.md` — план живого стенда T0–T10; **все задачи
+  закрыты** (T10 → `docs/progress/evidence/t10/`), заменён мастер-списком.
+- `MASTER_PLAN_2026-10-21.md` — план «рабочий MCU, полная цепочка»; закрыт
+  2026-10-23 (T13 → `73c022b`), заменён мастер-списком.
+- `ARCHITECTURE_AND_VERSIONS_2026-10-21.md` — первый срез «архитектура +
+  версии пакетов»; **заменён** на
+  [`../../implementation/ARCHITECTURE_PLAN_2026-10-23.md`](../../implementation/ARCHITECTURE_PLAN_2026-10-23.md)
+  (актуальные версии — §5 там же; здесь версии датированы 2026-10-21).
 
 Единственный живой трекер задач: [`../MASTER_TASK_LIST.md`](../MASTER_TASK_LIST.md).

@@ -544,7 +544,7 @@ ring 0.17.14 · aws-lc-rs 1.18.2
 * `docs/progress/MASTER_TASK_LIST.md` — живой трекер (обновлён тем же коммитом);
 * `docs/implementation/MASTER_PLAN_CLEANUP_LAYOUTS_2026-10-23.md` — план чистки
   (пересмотрен по замечаниям агентов);
-* `docs/implementation/ARCHITECTURE_AND_VERSIONS_2026-10-21.md` — архитектура и
+* `docs/progress/archive/ARCHITECTURE_AND_VERSIONS_2026-10-21.md` — первый срез архитектуры и
   версии (§4.6 обновлён);
 * `docs/architecture/LAYOUT_ENGINE.md` — требует правки (см. вопрос 2);
 * `crates/vks-layout/tests/codian_layouts.rs` — контракт раскладок Codian;

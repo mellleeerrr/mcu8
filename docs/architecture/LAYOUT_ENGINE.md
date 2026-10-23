@@ -16,7 +16,7 @@
 | `crates/vks-layout/src/core.rs` | `Layout`, `Slot`, `SlotId`, `ParticipantId`, `LayoutKind`, `NormalizedLayout`/`NormalizedSlot` |
 | `crates/vks-layout/src/rect.rs` | `Rect` (пиксели), `Canvas`, `NormalizedRect` |
 | `crates/vks-layout/src/grid.rs` | `GridLayout::compute` — равномерная сетка N тайлов |
-| `crates/vks-layout/src/focus.rs` | `FocusLayout` — крупный тайл + полоса мелких |
+| `crates/vks-layout/src/focus.rs` | `FocusLayout::slot_rects` — геометрия «крупный тайл + полоса мелких» (единственная реализация: движок не держит копию); `main_window` / `promote_to_main_window` — правила Codian §2.2 о главном окне |
 | `crates/vks-layout/src/preset.rs` | 65 вендорных пресетов (`MANUAL_SCHEMES`), `cell_rect` — единая арифметика пикселей |
 | `crates/vks-layout/src/codian.rs` | 54 раскладки Codian MCU 4200 (52 пресета + 2 кастомные) |
 | `crates/vks-layout/src/roles.rs` | `SlotRole`, `assign_by_role`, `RotationState` — роли слотов (§2 спецификации Codian) |
@@ -80,9 +80,10 @@ pub fn assign_by_role(
 Приоритет: `fixed` → `active` → `rolling` (порядок прихода) → `default`
 (порядок прихода). Покрыта 5 юнит-тестами.
 
-> **План:** движок MCU пока не применяет роли при авто-назначении — там
-> `publisher_tracks: BTreeMap<ParticipantId, _>` (сортировка по UUID, а не по
-> порядку прихода) и нет триггера переназначения. См. `ARCHITECTURE_PLAN_2026-10-23.md`, шаг 7.
+> **План:** движок MCU пока не применяет `assign_by_role` при авто-назначении.
+> Порядок участников теперь **по приходу** (`join_order`), но роли
+> (`Fixed`/`Active`/`Rolling`) движок не разбирает: голосовая активация
+> использует отдельное правило §2.2 (см. §8). Остаток — в мастер-списке, S12.
 
 ---
 
@@ -92,8 +93,11 @@ pub fn assign_by_role(
   (`id, name, version, assigned_rooms, is_default`). PostgreSQL/`jsonb`,
   упомянутые в v0.1, в проекте **не используются**.
 * **Сигналинг** — protobuf (`prost 0.13.5`), схема `vks-proto`.
-  Сообщение `LayoutChanged` **отправляется**: `GatewayManager::apply_layout`
-  рассылает его участникам комнаты после применения раскладки в MCU
+  Сообщение `LayoutChanged` **отправляется** по двум поводам:
+  1) `GatewayManager::apply_layout` — после применения раскладки из UI;
+  2) голосовая активация — `McuEngine::refresh_focus` пересадил главное окно
+     (`crates/vks-server/src/room_events.rs`).
+  В обоих случаях источник — эффективная раскладка композитора
   (`crates/vks-server/src/layout_signal.rs`), поздний участник получает
   раскладку сразу после `JoinRoomResult`.
 * Файл `vks-layout/src/storage.rs` **не существует**: преобразования
@@ -176,6 +180,16 @@ stack_keys.sort_unstable_by_key(|key| (rects[key].z, *key));
 3. `seat_participant` (`vks-media-mcu`) сажает участника в первый свободный
    слот раскладки; назначения вне `geometry` отбрасываются
    (`sanitize_assignments`), чтобы участник не получил «поверх сетки весь канвас».
+4. **Голосовая активация (Codian §2.2)** — реализована: `RoomState::refresh_focus`
+   пересаживает главное окно к активному спикеру, «Важный» участник
+   (`set_important_participant`) важнее спикера. Главное окно определяется
+   **по площади** (`vks_layout::main_window`), жильцы меняются местами —
+   никто не пропадает из раскладки. Пересадка идёт по событию смены спикера,
+   а не пересборкой на каждом тике; `Layout.version` растёт только при
+   фактическом изменении. Равная сетка и фиксированный макет PNM голосом не
+   перестраиваются (Codian §2.1: 52 макета статичны по геометрии).
+   Остаток: порядок заполнения малых ячеек по убыванию речевой активности
+   (per-viewer, фаза 4 ADR-0029) — мастер-список, S12.
 
 ---
 
