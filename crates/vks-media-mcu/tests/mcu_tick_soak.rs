@@ -12,7 +12,7 @@
 //!
 //! ```text
 //! VKS_MCU_TICK_METRICS=1 VKS_SOAK_SECONDS=60 VKS_SOAK_WARMUP=3 \
-//!   VKS_SOAK_OUT="$PWD/docs/progress/evidence/t14b-mcu-tick-soak/soak-60s-4p.json" \
+//!   VKS_SOAK_OUT=/tmp/t14b-soak-60s.json \
 //!   cargo test --release -p vks-media-mcu --test mcu_tick_soak -- --ignored --nocapture
 //! ```
 //!
