@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="theme-dark">
 <head>
   <base href="/pnm/">
   <script>
@@ -29,6 +29,7 @@
   <!-- prostor:project-layer:start -->
   <script src="/mcu/api-errors.js"></script>
   <script src="/mcu/perf-overrides.js"></script>
+  <script src="/mcu/theme-toggle.js"></script>
   <script src="/mcu/codian-layouts.js"></script>
   <!-- prostor:project-layer:end -->
   <script type="module" crossorigin src="/mcu/chunks/index.bundle-2.2.1.66.js"></script>
@@ -254,27 +255,27 @@
 /* Pilot dark theme (scoped to monitoring sessions page). Uses invert+hue-rotate
    so all vendor colors flip to a dark palette without touching thousands of
    compiled rules. Images/SVG/canvas are reverted to their original look. */
-.main {
+html.theme-dark .main {
   filter: invert(85%) hue-rotate(180deg);
   background-color: #ffffff !important;
 }
-body {
+html.theme-dark body {
   background-color: #121212 !important;
 }
-.main .material-icons {
+html.theme-dark .main .material-icons {
   filter: invert(85%) hue-rotate(180deg) !important;
 }
-.main img,
-.main picture,
-.main video,
-.main canvas,
-.main .main-blank__image,
-.main svg.main-blank__image {
+html.theme-dark .main img,
+html.theme-dark .main picture,
+html.theme-dark .main video,
+html.theme-dark .main canvas,
+html.theme-dark .main .main-blank__image,
+html.theme-dark .main svg.main-blank__image {
   filter: invert(85%) hue-rotate(180deg) !important;
 }
 /* Hide vendor decorative underlay in dark mode (otherwise it renders as a
    bright gradient on top of the inverted background). */
- .main .main__background {
+ html.theme-dark .main .main__background {
   display: none !important;
 }
 </style>
