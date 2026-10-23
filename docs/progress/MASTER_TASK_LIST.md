@@ -156,7 +156,7 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > Модули ещё **не подключены** к SDP/мосту; PT113/H265 по-прежнему не объявляются в native-профиле.
 > Следующий этап — worker-actor + H.265 видео-мост, затем AAC-LATM аудио-мост и SDP-гейт по probe.
 
-> **T06b-7 (H.265 видео-мост: bridge internals + SDP offer/negotiate) — реализовано `374de84`+`e70c1fa`+`3a232dc`:**
+> **T06b-7 (H.265 видео-мост: bridge internals + SDP offer/negotiate) — ЗАКРЫТ `8c72aee`, финальное независимое ревью 9.5/10 APPROVED:****
 > `VideoProfile.codec` (H264/H265) параметризует FFmpeg spawn (`libx265`, `-x265-params`), определение AU по
 > AUD type 35, RFC 7798-пакетизацию, H.265-депакетизацию и инъекцию AUD; libx265 probe отдельный.
 > Loopback-тест `h265_loopback_video_bridge_encodes_and_decodes` прогоняет реальный x265 → H.265 RTP →
@@ -169,8 +169,10 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > Исходящий UAC также отвергает H.265 с чужим profile-id/tier. Workspace **1218 passed**, clippy/fmt чисто; UAS принимает HEVC как alias H.265.
 > Inbound UAS также принимает H265-only оффер: `InboundMedia.video_codec`, answer с `H265/90000` и
 > `profile-id=1`, inbound-мост поднимает H265-профиль (`uas::tests::h265_only_offer_is_answered_with_h265`).
-> Осталось: live-вызов с H265-терминалом, AAC-LATM мост, затем SDP readiness gate.
-> H.261/H.263 по-прежнему без пейлоадеров и не объявляются.
+> Live E2E на финальном бинаре: **233/233 checks, failure=null** (`/var/tmp/vks-e2e-final4/result.json`,
+> commit `8c72aee`, binary `c14a3a16`, 158 s), including detach→«Общая» and codec-GET budget 20/20.
+> Осталось: живой вызов с H265-терминалом (терминал отвечает H264 — interop-ограничение железа),
+> AAC-LATM мост, затем SDP readiness gate. H.261/H.263 по-прежнему без пейлоадеров и не объявляются.
 >
 > **T06b-5 (изолированные FFmpeg-воркеры: фундамент) закрыт `212649b`, ревью 9.5/10 APPROVED (r6, независимый):**
 > `codec_worker` — один долгоживущий FFmpeg на кодек/направление, `FfmpegCapabilities` probe
