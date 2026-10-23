@@ -543,7 +543,7 @@ Content-Type: application/sdp\r\nContent-Length: %LEN%\r\n\r\n%SDP%";
     #[test]
     fn h265_only_offer_is_answered_with_h265() {
         let offer = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\nm=video 5006 RTP/AVP 125\r\na=rtpmap:125 H265/90000\r\na=fmtp:125 profile-id=1\r\n";
-        let request = UasRequest::parse(&invite(offer)).unwrap();
+        assert!(UasRequest::parse(&invite(offer)).is_some());
         let media = negotiate(offer).expect("PCMU + H265 offer");
         assert_eq!(media.video_codec, Some("H265"));
         assert_eq!(media.video_payload_type, Some(125));
