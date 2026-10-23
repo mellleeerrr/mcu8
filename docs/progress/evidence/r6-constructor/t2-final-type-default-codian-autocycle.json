@@ -140,7 +140,9 @@
    "name": "ZZ T2 default",
    "type": "individual"
   },
-  "mode": [],
+  "mode": [
+   "layout-mode-selector-manual"
+  ],
   "ctor": [],
   "codian": [
    "codian_07"
@@ -169,7 +171,9 @@
    "name": "ZZ T2 default",
    "type": "individual"
   },
-  "mode": [],
+  "mode": [
+   "layout-mode-selector-manual"
+  ],
   "ctor": [],
   "codian": [
    "codian_07"

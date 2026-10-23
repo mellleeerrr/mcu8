@@ -239,5 +239,16 @@ preset на вендорский — зафиксировать поведени
   Codian после конструктора; auto→ctor берёт сохранённое N),
   `t2-final-reopen-tile-chip25.json` (reopen vks_grid_13→тайл→чип25→
   PATCH vks_grid_25→reopen), `t2-constructor-13.png` (13 окон, бейджи 13,
-  счётчик 13). MANIFEST 214/214.
+  счётчик 13). Ревью T2 на `4c36a6c`: 9/10, P0/P1 нет, P2: adopt без guard
+  N>0/400-мс fallback, дублирование initialAdopt/pendingAdopt, после Codian
+  нет active mode-тайла, невоспроизводимый шаг в evidence, T2 смешан с T13.
+  Исправлено (T2.9): `initialAdopt` удалён (pendingAdopt — единственный
+  источник), guard `startCount>0` в adoptNow, fallback 400 мс сам выбирает N
+  и `adoptTarget` возвращает его на позднем вендорском сбросе; после ухода
+  из конструктора вендорский тайл «Ручная настройка» снова active; save/auto
+  берут актуальное N (баг разбора `video_layout.payload` в loadLayoutCount:
+  читался внешний объект, serverCount всегда 0; плюс инвалидация после
+  вендорского «Сохранить» — fetch/XHR/клик); evidence перегенерировано
+  (save/reopen vks_grid_13 в matrix, c2 с кликом чипа, c4=vks_grid_9).
+  MANIFEST 214/214. Осталось: финальное ревью T2.9/T13.1 на коммитах.
 - [ ] T2 … T12

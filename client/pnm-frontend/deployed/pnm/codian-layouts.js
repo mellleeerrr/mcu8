@@ -101,12 +101,14 @@
 
   var constructorCount = 0;
   var constructorSide = 'grid'; // grid | l | r | t | b (последняя выбранная схема)
-  // Пока идёт первичный выбор после клика «Конструктор», reAdopt молчит: иначе
-  // он успевает принять вендорский preset_equal_25 и ставит 25 вместо исходного N.
-  var initialAdopt = false;
-  // Однократный отложенный выбор после переключения в ручной режим: выполняется
-  // из reAdopt, когда вендор выставил свой preset_* (событие, не таймер-гонка).
+  // Однократный отложенный выбор после переключения в ручной режим: пока он
+  // не null, reAdopt молчит (иначе принял бы вендорский preset_equal_25 и
+  // поставил 25 вместо исходного N). Выполняется из reAdopt, когда вендор
+  // выставил свой preset_*, или из страховочного таймера (медленный вендор).
   var pendingAdopt = null;
+  // Исходное N на случай, если вендор выставит preset_* уже после страховочного
+  // таймера: следующий preset_* обязан вернуть это N, а не текущие 25.
+  var adoptTarget = 0;
   var identityName = ''; // displayName серверной раскладки: вендор может обнулить
   var constructorState = 'idle'; // idle | loading | ready | failed
   var constructorSlots = Object.create(null);
@@ -153,7 +155,10 @@
     var result = request('/api/v3/ui/conferences/' + match[1] + '/video_layouts/' + match[2]);
     if (!result) return;
     result.then(function (data) {
-      var payload = (data && (data.video_layout || data.payload)) || data || {};
+      // GET отдаёт { video_layout: { payload: {...} } }; старый разбор читал
+      // video_layout как payload и всегда получал 0.
+      var layout = (data && data.video_layout) || data || {};
+      var payload = layout.payload || layout;
       var count = Array.isArray(payload.slots) ? payload.slots.length : 0;
       if (!(count > 0)) count = Number(payload.size) || 0;
       if (count > 0) serverCount = count;
@@ -206,11 +211,13 @@
       modeTileEngaged = true;
       return;
     }
-    if (initialAdopt) {
-      if (pendingAdopt && preset.indexOf('preset_') === 0) {
+    // Пока идёт первичный выбор — ждём, пока вендор выставит свой preset_*.
+    // Этот же флаг (pendingAdopt !== null) — единственный источник состояния
+    // «adopt ещё не выполнен» (отдельного initialAdopt нет).
+    if (pendingAdopt) {
+      if (preset.indexOf('preset_') === 0) {
         var runAdopt = pendingAdopt;
         pendingAdopt = null;
-        initialAdopt = false;
         runAdopt();
       }
       return;
@@ -218,7 +225,8 @@
     if (!modeTileEngaged) return;
     // Только вендорские preset_* — Codian-карточки не перехватываем.
     if (preset.indexOf('preset_') !== 0) return;
-    var count = currentCount();
+    var count = adoptTarget > 0 ? adoptTarget : currentCount();
+    adoptTarget = 0;
     if (!(count > 0)) return;
     // Без дедупликации: повторный клик того же чипа тоже обязан вернуть vks_*
     // (после adopt preset становится vks_*, и следующий subscribe выходит выше).
@@ -505,8 +513,8 @@
     // Явный выбор Codian-схемы выводит из конструктора: иначе reAdopt вернул бы
     // наш vks_* и карточка каталога осталась бы без active и без сохранения.
     modeTileEngaged = false;
-    initialAdopt = false;
     pendingAdopt = null;
+    adoptTarget = 0;
     syncModeTile();
     syncActive();
     subscribe(editor);
@@ -742,30 +750,32 @@
       // не придёт — ставим нашу схему сразу; в остальных режимах ждём
       // вендорский preset_* после переключения.
       if (current.mode !== 'manual' && currentPreset.indexOf('preset_') !== 0 && currentPreset.indexOf('vks_') !== 0) return;
-      initialAdopt = false;
+      pendingAdopt = null;
+      adoptTarget = 0;
       rememberIdentity(current);
       restoreIdentity(editor);
       selectConstructor('vks_' + (side === 'grid' ? 'grid' : 'pin_' + side) + '_' + count);
     }
     if (value.mode !== 'manual') {
       // Вендор после mode='manual' асинхронно ставит preset_equal_25; пока он
-      // не сделал этого, reAdopt молчит (initialAdopt), иначе примет 25.
-      initialAdopt = true;
+      // не сделал этого, reAdopt молчит (pendingAdopt), иначе примет 25.
       pendingAdopt = apply;
+      adoptTarget = count;
       try {
         editor.mode = 'manual';
       } catch (e) {
-        initialAdopt = false;
         pendingAdopt = null;
+        adoptTarget = 0;
         console.warn('codian-layouts: не удалось переключить режим на manual', e);
         return;
       }
       syncModeTile();
       schedule();
       setTimeout(function () {
-        if (!initialAdopt) return;
-        initialAdopt = false;
+        var run = pendingAdopt;
+        if (!run) return;
         pendingAdopt = null;
+        run();
       }, 400);
       return;
     }
@@ -999,7 +1009,6 @@
       if (chip) startCount = parseInt(chip.textContent, 10) || 0;
     }
     if (!(startCount > 0)) startCount = Number(startValue.size) || 0;
-    initialAdopt = true;
     var startName = startValue.displayName || '';
     // Сохранённая pin-раскладка задаёт сторону конструктора после reopen.
     var savedSide = /^vks_pin_([lrtb])_/.exec(startPreset);
@@ -1021,7 +1030,11 @@
       return 'vks_' + (startSide === 'grid' ? 'grid' : 'pin_' + startSide) + '_';
     }
     function adoptNow() {
-      initialAdopt = false;
+      pendingAdopt = null;
+      adoptTarget = 0;
+      // N=0 (медленный/неудачный GET и нет числового хвоста) — остаёмся на
+      // вендорском preset, тихий vks_*_0 запрещён.
+      if (!(startCount > 0)) return;
       rememberIdentity(startValue);
       if (keepName) identityName = keepName;
       restoreIdentity(editor);
@@ -1030,24 +1043,28 @@
     // Уже ручной режим: вендорский сброс preset_equal_25 не произойдёт, а
     // текущий preset может быть codian_*/preset_equal_* — ставим сразу.
     if (startValue.mode === 'manual') {
-      if (startCount > 0) adoptNow();
-      else initialAdopt = false;
+      adoptNow();
       var manualSection = document.querySelector('[' + CONSTRUCTOR_ATTR + ']');
       if (manualSection && typeof manualSection.scrollIntoView === 'function') {
         manualSection.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       }
       return;
     }
-    // Вендор после mode='manual' асинхронно ставит preset_equal_25 (свой
-    // дефолт на 25 слотов). Ждём именно событие store (reAdopt), а не таймер:
-    // так нет гонки, а target-N уже зафиксирован в adoptNow.
+    if (!(startCount > 0)) return;
+    // Вендор после mode='manual' асинхронно ставит preset_equal_25 (дефолт на
+    // 25 слотов). Ждём preset_* в reAdopt (его вызывает и подписка store, и
+    // schedule() по MutationObserver после вендорских перерисовок) — таймер
+    // только страховка для нестандартного пути; target-N уже зафиксирован.
     pendingAdopt = adoptNow;
-    // Страховка: если вендор не сменил preset (нестандартный путь), снимаем
-    // заморозку, чтобы ручные чипы снова подхватывались.
+    adoptTarget = startCount;
     setTimeout(function () {
-      if (!initialAdopt) return;
-      initialAdopt = false;
+      // Вендор не успел за 400 мс: выбираем наше N сами, а adoptTarget
+      // заставит следующий preset_* (поздний сброс вендора) снова взять его,
+      // а не текущие 25.
+      var run = pendingAdopt;
+      if (!run) return;
       pendingAdopt = null;
+      run();
     }, 400);
     var section = document.querySelector('[' + CONSTRUCTOR_ATTR + ']');
     if (section && typeof section.scrollIntoView === 'function') {
@@ -1075,6 +1092,15 @@
       }
     } else {
       tile.classList.remove('layout-mode-selector-item--active');
+      // Ушли из конструктора в ручную/Codian-схему — вендорский тайл «Ручная
+      // настройка» обязан остаться active (иначе ни один режим не подсвечен).
+      if (mode === 'manual' && !document.querySelector('.layout-mode-selector-item--active')) {
+        var manual = document.querySelector('[data-qa="layout-mode-selector-manual"]');
+        if (manual) {
+          manual.classList.add('layout-mode-selector-item--active');
+          manual.setAttribute('aria-pressed', 'true');
+        }
+      }
     }
     tile.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
@@ -1133,31 +1159,79 @@
   }
 
   /* После сохранения раскладки серверный payload меняется: сбрасываем кэш
-   * числа окон, иначе «Конструктор» после save+auto возьмёт старое N. */
+   * числа окон, иначе «Конструктор» после save+auto возьмёт старое N.
+   * Вендор сохраняет и через fetch, и через XHR (axios) — перехватываем оба. */
   function watchSaves() {
-    if (typeof window.fetch !== 'function' || window.fetch.__vksCodianWrapped) return;
-    var nativeFetch = window.fetch;
-    var wrapped = function (input, init) {
-      var result = nativeFetch.apply(this, arguments);
-      var url = typeof input === 'string' ? input : (input && input.url) || '';
-      var method = String((init && init.method) || 'GET').toUpperCase();
-      if (method !== 'GET' && /\/video_layouts\//.test(url) && !/calculate/.test(url) && result && result.then) {
-        result.then(function (response) {
-          if (response && response.ok) {
+    if (typeof window.fetch === 'function' && !window.fetch.__vksCodianWrapped) {
+      var nativeFetch = window.fetch;
+      var wrapped = function (input, init) {
+        var result = nativeFetch.apply(this, arguments);
+        var url = typeof input === 'string' ? input : (input && input.url) || '';
+        var method = String((init && init.method) || 'GET').toUpperCase();
+        if (method !== 'GET' && /\/video_layouts\//.test(url) && !/calculate/.test(url) && result && result.then) {
+          result.then(function (response) {
+            if (response && response.ok) {
+              serverCountKey = '';
+              schedule();
+            }
+          }, function () { /* ошибку покажет вендорский UI */ });
+        }
+        return result;
+      };
+      wrapped.__vksCodianWrapped = true;
+      window.fetch = wrapped;
+    }
+    var xhrProto = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
+    if (!xhrProto || xhrProto.__vksCodianWrapped) return;
+    var nativeOpen = xhrProto.open;
+    var nativeSend = xhrProto.send;
+    xhrProto.open = function (method, url) {
+      this.__vksCodianMethod = String(method || 'GET').toUpperCase();
+      this.__vksCodianUrl = String(url || '');
+      return nativeOpen.apply(this, arguments);
+    };
+    xhrProto.send = function () {
+      var xhr = this;
+      var method = xhr.__vksCodianMethod;
+      var url = xhr.__vksCodianUrl || '';
+      if (method !== 'GET' && /\/video_layouts\//.test(url) && !/calculate/.test(url)) {
+        xhr.addEventListener('load', function () {
+          if (xhr.status >= 200 && xhr.status < 300) {
             serverCountKey = '';
             schedule();
           }
-        }, function () { /* ошибку покажет вендорский UI */ });
+        });
       }
-      return result;
+      return nativeSend.apply(this, arguments);
     };
-    wrapped.__vksCodianWrapped = true;
-    window.fetch = wrapped;
+    xhrProto.__vksCodianWrapped = true;
+  }
+
+  /* Вендорский транспорт сохранения может быть не fetch/XHR-обёрткой (axios
+   * со своим адаптером, service-worker): дополнительно ловим сам клик по
+   * «Сохранить» и через паузу перечитываем N с сервера. */
+  function watchSaveButton() {
+    document.addEventListener(
+      'click',
+      function (event) {
+        var target = event.target;
+        var button = target && target.closest ? target.closest('button') : null;
+        if (!button || !/Сохранить/.test(button.textContent || '')) return;
+        var retry = function () {
+          serverCountKey = '';
+          loadLayoutCount();
+        };
+        window.setTimeout(retry, 1500);
+        window.setTimeout(retry, 3000);
+      },
+      true,
+    );
   }
 
   function start() {
     if (observer) return;
     watchSaves();
+    watchSaveButton();
     observer = new MutationObserver(function () { schedule(); });
     observer.observe(document.documentElement, { childList: true, subtree: true });
     schedule();
