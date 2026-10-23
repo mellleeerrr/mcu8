@@ -923,6 +923,18 @@ impl WorkerPool {
         self.semaphore.available_permits()
     }
 
+    /// Atomically reserves `permits` worker slots for a pipeline that spawns
+    /// FFmpeg directly (AAC-LATM's split-pipe pair). The returned permits must
+    /// live as long as the children; dropping them returns the slots.
+    #[must_use]
+    pub fn try_reserve(&self, permits: usize) -> Option<Vec<tokio::sync::OwnedSemaphorePermit>> {
+        let mut reserved = Vec::with_capacity(permits);
+        for _ in 0..permits {
+            reserved.push(self.semaphore.clone().try_acquire_owned().ok()?);
+        }
+        Some(reserved)
+    }
+
     /// Spawns a worker, applying backpressure while the pool is full.
     pub async fn spawn(
         &self,

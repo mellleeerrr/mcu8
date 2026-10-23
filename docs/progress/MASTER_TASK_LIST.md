@@ -233,7 +233,13 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > Остались блокеры до 9.5: (P0) нет liveness декодированного PCM + UAS принимает `object=8`/`rate=44.1`
 > без config — возможен «connected» с тишиной; (P1) блокирующие `await` в 20-мс цикле без таймаутов,
 > preflight пула не потребляет семафор (spawn идёт напрямую), inbound marker=0/фрагментация не
-> отвергается, нет RTP-level AAC-теста/prefill/pacing. cpresent=0/config и AAC-only live — открыты.
+> отвергается. **Раунд 10:** добавлены PCM-liveness (3 с без декодированного PCM → teardown),
+> отказ inbound marker=0/фрагментации, валидация UAS `object=2`/`rate=48000`, non-blocking
+> `try_push_loas/try_push_pcm` вместо блокирующих await в 20-мс цикле, реальный lease пула
+> (`WorkerPool::try_reserve(2)`) для двух прямых FFmpeg-процессов. **Live-бинарь `3caa7546`:
+> legal-гейт enforced — `aac_latm=false`, API AAC supported=false** (включается только
+> `VKS_AAC_LATM_LEGAL_ACCEPTED=1`). Осталось до 9.5: RTP-level AAC-тест (16:15/marker/timestamp/
+> teardown), prefill/pacing, повторные ревью; cpresent=0/config и AAC-only live — открыты.
 > Нельзя: `-flags low_delay`/`-avioflags direct`/`-fflags nobuffer` (ломали AAC), забыть
 > `-probesize 32 -analyzeduration 0` перед `-i`, ждать EOF для кадров, блокировать аудио-цикл чтением stdout,
 > объявлять native AAC без worker/packetizer/probe, резать кадр по MTU вместо drop+metric, писать `ptime:20`

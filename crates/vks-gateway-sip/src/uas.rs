@@ -464,7 +464,16 @@ fn bridgeable_audio(section: &str, payload: u8, aac_available: bool) -> Option<B
                 .filter(|line| line.to_ascii_lowercase().starts_with(&format!("a=fmtp:{payload} ")))
                 .collect::<String>()
                 .to_ascii_lowercase();
-            if fmtp.contains("cpresent=0") {
+            if fmtp.contains("cpresent=0") || fmtp.contains("config=") {
+                return None;
+            }
+            // cpresent by default is 1 (RFC 3016 §5.3), but the codec inside
+            // must be AAC-LC object type 2 at 48 kHz; anything else would leave
+            // FFmpeg alive with no PCM.
+            if fmtp.contains("object=") && !fmtp.contains("object=2") {
+                return None;
+            }
+            if fmtp.contains("rate=") && !fmtp.contains("rate=48000") {
                 return None;
             }
             return Some(BridgeableAudio {
@@ -970,5 +979,9 @@ a=rtpmap:101 telephone-event/8000\r\n";
         assert!(negotiate_with(&config_only, true).is_none(), "cpresent=0 needs config support");
         let bad_clock = offer.replace("MP4A-LATM/90000", "MP4A-LATM/48000");
         assert!(negotiate_with(&bad_clock, true).is_none(), "48 kHz clock is not bridged yet");
+        let he_aac = offer.replace("object=2", "object=8");
+        assert!(negotiate_with(&he_aac, true).is_none(), "HE-AAC is not bridged");
+        let bad_rate = offer.replace("object=2", "object=2;rate=44100");
+        assert!(negotiate_with(&bad_rate, true).is_none(), "44.1 kHz is not bridged");
     }
 }

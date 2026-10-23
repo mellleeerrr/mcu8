@@ -174,6 +174,12 @@ impl LatmEncoder {
         self.pcm_tx.take();
     }
 
+    /// Non-blocking variant for the 20 ms RTP loop: a full queue drops the
+    /// tick instead of stalling the mixer.
+    pub fn try_push_pcm(&self, pcm: &[i16]) -> bool {
+        self.pcm_tx.as_ref().is_some_and(|sender| sender.try_send(pcm.to_vec()).is_ok())
+    }
+
     /// Non-blocking receive of one `audioMuxElement` (LOAS header stripped).
     #[must_use]
     pub fn try_frame(&mut self) -> Option<Vec<u8>> {
@@ -329,6 +335,11 @@ impl LatmDecoder {
             Some(sender) => sender.send(loas).await.is_ok(),
             None => false,
         }
+    }
+
+    /// Non-blocking variant: a full decoder queue drops one packet.
+    pub fn try_push_loas(&self, loas: Vec<u8>) -> bool {
+        self.input_tx.as_ref().is_some_and(|sender| sender.try_send(loas).is_ok())
     }
 
     /// Non-blocking receive of one 20 ms PCM block.

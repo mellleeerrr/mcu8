@@ -61,6 +61,13 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
         session.media_stats.audio_codec_running.store(false, Relaxed);
         return;
     }
+    // Reserve the pool slots atomically; these two children are spawned
+    // directly (split pipes), so without the lease preflight would be a no-op.
+    let Some(_worker_lease) = crate::transcoder_runtime::pool().and_then(|pool| pool.try_reserve(2)) else {
+        tracing::warn!(participant = %session.participant_id_str, "AAC-LATM bridge rejected: no free worker slots");
+        session.media_stats.audio_codec_running.store(false, Relaxed);
+        return;
+    };
     let path = ffmpeg_path();
     let mut encoder = match LatmEncoder::spawn(path.clone(), 64_000) {
         Ok(encoder) => encoder,
@@ -109,6 +116,8 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
     let mut incoming = [0u8; 2048];
     let mut recv_errors = 0u8;
     let mut rejected_logs = 0u8;
+    let mut decoded_blocks = 0u64;
+    let mut first_packet_at: Option<Instant> = None;
     let mut dtmf = VecDeque::<u8>::new();
     let mut dtmf_active: Option<(u8, usize, u32)> = None;
     let mut dtmf_gap = 0u8;
@@ -154,6 +163,13 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed);
                     continue;
                 }
+                // Our contract is one complete audioMuxElement per packet
+                // (marker=1). RFC 3016 fragments (marker=0) are unsupported and
+                // would be fed to add_loas as if complete.
+                if !packet_in.marker {
+                    session.media_stats.rejected_packets.fetch_add(1, Relaxed);
+                    continue;
+                }
                 if let Some(last) = last_sequence {
                     let missing = usize::from(packet_in.sequence.wrapping_sub(last).wrapping_sub(1));
                     for _ in 0..missing.min(8) {
@@ -168,10 +184,11 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed);
                     continue;
                 };
-                if !decoder.push_loas(loas).await {
+                if !decoder.try_push_loas(loas) {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed);
                     continue;
                 }
+                first_packet_at.get_or_insert_with(Instant::now);
                 session.media_stats.audio_rx_packets.fetch_add(1, Relaxed);
                 session.media_stats.audio_rx_bytes.fetch_add(count as u64, Relaxed);
                 session.media_stats.last_rx_ms.store(
@@ -181,6 +198,7 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
             }
             _ = ticker.tick() => {
                 while let Some(block) = decoder.try_pcm() {
+                    decoded_blocks += 1;
                     for sample in block {
                         if pcm_queue.len() >= PCM_QUEUE_LIMIT { pcm_queue.pop_front(); }
                         pcm_queue.push_back(sample);
@@ -188,6 +206,18 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                 }
                 if decoder.failed() {
                     tracing::warn!(participant = %session.participant_id_str, "AAC decoder stopped");
+                    break;
+                }
+                // A live FFmpeg with no PCM (missing/lost SMC, unsupported
+                // object type) must not stay "connected" forever: RTP counters
+                // keep rising but the participant hears silence.
+                if decoded_blocks == 0
+                    && first_packet_at.is_some_and(|first| first.elapsed() >= Duration::from_secs(3))
+                {
+                    tracing::warn!(
+                        participant = %session.participant_id_str,
+                        "AAC decoder produced no PCM for 3 s; tearing the media bridge down"
+                    );
                     break;
                 }
                 let volume_tx = session.controls.volume_tx.load(Relaxed);
@@ -213,7 +243,7 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                 } else {
                     pcm.fill(0);
                 }
-                if !encoder.push_pcm(&pcm).await {
+                if !encoder.try_push_pcm(&pcm) {
                     tracing::warn!(participant = %session.participant_id_str, "AAC encoder queue closed");
                     break;
                 }
