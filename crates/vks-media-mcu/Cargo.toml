@@ -2,8 +2,8 @@
 # Фаза 3 (DEVELOPMENT_PLAN.md): MediaEngine-impl (MCU), compositor,
 # audio mixer, VAD, layout bridge. ADR-0004 (oxideav-scene, Q1).
 #
-# Dep-light по умолчанию (298-базовое тестирование workspace не
-# затрагивается): ядро компилируется на std + vks-core + vks-layout.
+# Dep-light по умолчанию (базовый прогон workspace не затрагивается):
+# ядро компилируется на std + vks-core + vks-layout.
 # Реальный кодек/композиция (oxideav-scene, ffmpeg) — опциональные
 # фичи; дефолтный build их не тянет.
 [package]
@@ -26,10 +26,11 @@ tokio.workspace = true
 vks-core = { path = "../vks-core" }
 vks-layout = { path = "../vks-layout" }
 # Tick histograms live in the shared metrics registry; no cycle (vks-common is
-# standalone). Gated at runtime by VKS_MCU_TICK_METRICS, so the default cost is one
-# cached bool load per tick plus a second one inside observe_mcu_tick. The server
-# already links vks-common; stand-alone users inherit its metrics/config stack,
-# which is acceptable here and could be feature-gated later.
+# standalone). Gated at runtime by VKS_MCU_TICK_METRICS: when the flag is off the
+# engine never calls observe_mcu_tick, so the default cost is one cached bool load
+# per phase; a second (internal) load happens only on enabled, successful ticks.
+# The server already links vks-common; stand-alone users inherit its metrics/config
+# stack, which is acceptable here and could be feature-gated later.
 vks-common = { path = "../vks-common" }
 # async-traits для MediaEngine-порта (vks-core использует async_trait).
 async-trait = "0.1"
@@ -43,6 +44,5 @@ oxideav-scene = { version = "0.1", optional = true }
 oxideav = ["dep:oxideav-scene"]
 
 [dev-dependencies]
-tokio = { workspace = true }
 prometheus.workspace = true
 serde_json.workspace = true

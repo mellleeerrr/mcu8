@@ -11,7 +11,7 @@
 
 use prometheus::{
     register_histogram_vec, register_int_counter_vec, register_int_gauge_vec, Histogram, HistogramVec, IntCounterVec,
-    IntGaugeVec, Registry,
+    IntGaugeVec,
 };
 use std::sync::LazyLock;
 
@@ -153,13 +153,16 @@ pub enum McuTickPhase {
     Video,
 }
 
+/// Accepts the documented spellings; anything else (including an empty or
+/// misspelled value) keeps instrumentation off.
+fn parse_tick_flag(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes")
+}
+
 /// Env-gated tick instrumentation (`VKS_MCU_TICK_METRICS=1`), read once.
 pub fn mcu_tick_metrics_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("VKS_MCU_TICK_METRICS")
-            .is_ok_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
-    })
+    *ENABLED.get_or_init(|| std::env::var("VKS_MCU_TICK_METRICS").is_ok_and(|value| parse_tick_flag(&value)))
 }
 
 /// Records one successful tick. Call only after the phase actually ran.
@@ -252,49 +255,6 @@ pub fn init_default() {
     });
 }
 
-/// Регистрирует все метрики в собственный `Registry` — *представление* над
-/// process-global коллекторами, а не изолированную копию.
-///
-/// `MetricVec`/`Gauge`/`Histogram` clone — Arc-backed, поэтому здесь
-/// регистрируются клоны глобальных коллекторов: значения общие, а `gather()`
-/// этого реестра равен глобальному набору семей. Это тестовый/инспекционный
-/// helper (отдельный `/metrics` без глобального состояния он не даёт); при
-/// добавлении новой глобальной метрики её нужно добавить и сюда, иначе
-/// тест `new_registry_is_a_full_view_of_global_metrics` это поймает.
-#[must_use]
-pub fn new_registry() -> Registry {
-    let mut registry = Registry::new();
-    // `MetricVec`/`Gauge`/`Histogram` clone are Arc-backed: registering clones of
-    // the global collectors shares their state instead of duplicating Opts, which
-    // used to drift from the declarations above (and made the test exercise the
-    // global registry instead of this function).
-    let register = |registry: &mut Registry, m: Box<dyn prometheus::core::Collector>, name: &str| {
-        registry.register(m).unwrap_or_else(|e| panic!("register {name} in new_registry: {e:?}"))
-    };
-    register(&mut registry, Box::new((*SIGNALING_MESSAGES).clone()), "vks_signaling_messages_total");
-    register(&mut registry, Box::new((*CODEC_WORKER_SUPPORTED).clone()), "vks_codec_worker_supported");
-    register(&mut registry, Box::new((*CODEC_WORKER_POOL_SIZE).clone()), "vks_codec_worker_pool_size");
-    register(&mut registry, Box::new((*ACTIVE_ROOMS).clone()), "vks_active_rooms");
-    register(&mut registry, Box::new((*BUILD_INFO).clone()), "vks_build_info");
-    register(&mut registry, Box::new((*MEDIA_BYTES).clone()), "vks_media_bytes_total");
-    register(&mut registry, Box::new((*MEDIA_PACKETS_DROPPED).clone()), "vks_media_packets_dropped_total");
-    register(&mut registry, Box::new((*WEBRTC_PEERS).clone()), "vks_webrtc_peers");
-    register(&mut registry, Box::new((*WEBRTC_OFFERS).clone()), "vks_webrtc_offers_total");
-    register(&mut registry, Box::new((*WEBRTC_ICE_FAILURES).clone()), "vks_webrtc_ice_failures_total");
-    register(&mut registry, Box::new((*WEBRTC_FRAMES_DROPPED).clone()), "vks_webrtc_frames_dropped_total");
-    register(&mut registry, Box::new((*WEBRTC_FALLBACK).clone()), "vks_webrtc_fallback_total");
-    register(&mut registry, Box::new((*ROOM_SIGNAL_LATENCY_MS).clone()), "vks_room_signal_latency_ms");
-    register(&mut registry, Box::new((*ERRORS).clone()), "vks_errors_total");
-    register(&mut registry, Box::new((*HTTP_REQUESTS).clone()), "vks_http_requests_total");
-    register(&mut registry, Box::new((*MCU_TICK_DURATION).clone()), "vks_mcu_tick_duration_seconds");
-    register(&mut registry, Box::new((*HTTP_REQUEST_DURATION).clone()), "vks_http_request_duration_seconds");
-    register(&mut registry, Box::new((*HTTP_RESPONSE_BYTES).clone()), "vks_http_response_bytes_total");
-    register(&mut registry, Box::new((*API_V3_REQUESTS).clone()), "vks_api_v3_requests_total");
-    register(&mut registry, Box::new((*LOGIN_ATTEMPTS).clone()), "vks_login_attempts_total");
-    register(&mut registry, Box::new((*FRONTEND_DENIED).clone()), "vks_frontend_denied_total");
-    registry
-}
-
 /// Text-format export of the global default registry (the `/metrics` body).
 pub fn encode() -> String {
     prometheus::TextEncoder::new().encode_to_string(&prometheus::gather()).unwrap_or_default()
@@ -303,6 +263,16 @@ pub fn encode() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tick_flag_parser_accepts_documented_spellings() {
+        for value in ["1", "true", "TRUE", " on ", "yes", "Yes"] {
+            assert!(parse_tick_flag(value), "expected {value:?} to enable tick metrics");
+        }
+        for value in ["", "0", "false", "off", "no", "garbage", "2"] {
+            assert!(!parse_tick_flag(value), "expected {value:?} to keep tick metrics off");
+        }
+    }
 
     #[test]
     fn mcu_tick_buckets_are_strictly_increasing_and_cover_slo_bounds() {
@@ -451,58 +421,5 @@ mod tests {
             let expected = format!("vks_errors_total{{code=\"{}\"}} 1", code.as_str());
             assert!(text.contains(&expected), "expected {expected} in encoded metrics");
         }
-    }
-
-    // `new_registry` is a view over the process-global collectors. The test seeds
-    // one sample per family (so both `gather()` calls emit every family), compares
-    // the complete family-name sets, and proves the collectors share state rather
-    // than being a drifted copy of the declarations.
-    #[test]
-    fn new_registry_is_a_full_view_of_global_metrics() {
-        init_default();
-        SIGNALING_MESSAGES.with_label_values(&["uplink"]).inc();
-        CODEC_WORKER_SUPPORTED.with_label_values(&["h264", "encode"]).set(1);
-        CODEC_WORKER_POOL_SIZE.set(1);
-        ACTIVE_ROOMS.with_label_values(&["r1"]).set(1);
-        BUILD_INFO.with_label_values(&[env!("CARGO_PKG_VERSION")]).set(1);
-        MEDIA_BYTES.with_label_values(&["t14b", "uplink"]).inc_by(1234);
-        MEDIA_PACKETS_DROPPED.with_label_values(&["congestion"]).inc();
-        WEBRTC_PEERS.set(1);
-        WEBRTC_OFFERS.with_label_values(&["ok"]).inc();
-        WEBRTC_ICE_FAILURES.with_label_values(&["timeout"]).inc();
-        WEBRTC_FRAMES_DROPPED.with_label_values(&["congestion"]).inc();
-        WEBRTC_FALLBACK.with_label_values(&["relay"]).inc();
-        ROOM_SIGNAL_LATENCY_MS.with_label_values(&["r1"]).set(5);
-        ERRORS.with_label_values(&["room_not_found"]).inc();
-        HTTP_REQUESTS.with_label_values(&["GET", "spa", "200"]).inc();
-        HTTP_REQUEST_DURATION.with_label_values(&["spa"]).observe(0.01);
-        HTTP_RESPONSE_BYTES.with_label_values(&["spa"]).inc_by(1024);
-        API_V3_REQUESTS.with_label_values(&["login"]).inc();
-        LOGIN_ATTEMPTS.with_label_values(&["ok"]).inc();
-        FRONTEND_DENIED.with_label_values(&["not_found"]).inc();
-        // Zero-count child, not `observe(0.0)`: a synthetic sample would inflate
-        // `_count` and could satisfy a count>0 gate.
-        let _ = MCU_TICK_DURATION.with_label_values(&["audio"]);
-
-        let view = new_registry();
-        let view_names: std::collections::BTreeSet<_> = view.gather().iter().map(|f| f.name().to_string()).collect();
-        let global_names: std::collections::BTreeSet<_> =
-            prometheus::gather().iter().map(|f| f.name().to_string()).collect();
-        assert_eq!(view_names, global_names, "new_registry must expose exactly the global family set");
-
-        let shared = view
-            .gather()
-            .into_iter()
-            .find(|family| family.name() == "vks_media_bytes_total")
-            .expect("view must contain vks_media_bytes_total")
-            .get_metric()
-            .iter()
-            .find(|metric| {
-                metric.get_label().iter().any(|label| label.name() == "codec" && label.value() == "t14b")
-                    && metric.get_label().iter().any(|label| label.name() == "direction" && label.value() == "uplink")
-            })
-            .map(|metric| metric.get_counter().value())
-            .expect("seeded t14b/uplink media counter");
-        assert_eq!(shared, 1234.0, "view collectors must share Arc-backed state with the globals");
     }
 }

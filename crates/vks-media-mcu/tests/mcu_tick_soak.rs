@@ -49,6 +49,7 @@ struct PhaseSnapshot {
 
 impl PhaseSnapshot {
     fn delta(&self, before: &Self) -> Self {
+        assert_eq!(self.buckets.len(), before.buckets.len(), "histogram bucket layout changed between snapshots");
         let buckets = self
             .buckets
             .iter()
@@ -86,7 +87,9 @@ impl PhaseSnapshot {
             previous_count = *seen;
             previous_bound = *bound;
         }
-        self.buckets.last().map(|(bound, _)| (*bound, *bound, *bound))
+        // The last finite bucket is below the target rank: a p99 above the
+        // histogram range is not a point estimate, so report it as unknown.
+        None
     }
 }
 
@@ -194,6 +197,8 @@ fn i420_frame(width: u32, height: u32, seed: u32) -> Frame {
 
 #[derive(Debug, Default)]
 struct Tally {
+    periods: u64,
+    missed_periods: u64,
     attempts: u64,
     ticks: u64,
     first_successes: u64,
@@ -201,79 +206,64 @@ struct Tally {
     second_call_successes: u64,
 }
 
-/// One audio-only measured phase: every 20 ms, set the slices, run the real
-/// tick, then make one same-timestamp duplicate call that must be throttled.
-fn audio_phase(
-    engine: &McuEngine,
-    room: RoomId,
-    pids: &[ParticipantId],
-    pcm: &[f32],
-    epoch: Instant,
+/// One measured window driven by the same sleep-to-deadline scheduler for both
+/// phases. `prepare` runs once per period (audio slice update); `attempt` runs
+/// the real engine tick. Every period makes two attempts at the same engine
+/// timestamp, so the second one must be throttled. Returns the tally and the
+/// measured wall-clock duration.
+fn run_window(
+    period: Duration,
     seconds: usize,
-) -> Tally {
+    epoch: Instant,
+    mut prepare: impl FnMut(),
+    mut attempt: impl FnMut(u64) -> bool,
+) -> (Tally, f64) {
     let start = Instant::now();
     let deadline = start + Duration::from_secs(seconds as u64);
     let mut tally = Tally::default();
     let mut next = start;
     while Instant::now() < deadline {
-        let now_ms = epoch.elapsed().as_millis() as u64;
-        for pid in pids {
-            engine.set_audio_slice(room, *pid, pcm);
-        }
-        tally.attempts += 2;
-        let first = engine.tick_audio_at(room, now_ms);
-        if first {
-            tally.ticks += 1;
-            tally.first_successes += 1;
-        } else {
-            tally.throttled += 1;
-        }
-        if engine.tick_audio_at(room, now_ms) {
-            tally.ticks += 1;
-            tally.second_call_successes += 1;
-        } else {
-            tally.throttled += 1;
-        }
-        next += Duration::from_millis(AUDIO_PERIOD_MS);
         let now = Instant::now();
-        if next <= now {
-            next = now + Duration::from_millis(AUDIO_PERIOD_MS);
+        if now >= next {
+            let now_ms = epoch.elapsed().as_millis() as u64;
+            prepare();
+            tally.periods += 1;
+            tally.attempts += 2;
+            if attempt(now_ms) {
+                tally.ticks += 1;
+                tally.first_successes += 1;
+            } else {
+                tally.throttled += 1;
+            }
+            if attempt(now_ms) {
+                tally.ticks += 1;
+                tally.second_call_successes += 1;
+            } else {
+                tally.throttled += 1;
+            }
+            let due = next + period;
+            let after = Instant::now();
+            if due <= after {
+                // The engine took longer than one period: count the skipped
+                // wall-clock slots instead of silently pretending they were
+                // attempts.
+                let behind = after.duration_since(due).as_nanos() / period.as_nanos();
+                tally.missed_periods += 1 + behind as u64;
+                next = after + period;
+            } else {
+                next = due;
+            }
         }
-        std::thread::sleep(next.min(deadline).saturating_duration_since(Instant::now()));
+        let sleep = next.min(deadline).saturating_duration_since(Instant::now());
+        if !sleep.is_zero() {
+            std::thread::sleep(sleep);
+        }
     }
-    tally
+    (tally, start.elapsed().as_secs_f64())
 }
 
-/// One video-only measured phase at 34 ms; the second same-timestamp call must
-/// be throttled and counted as `frames_dropped` by the engine.
-fn video_phase(engine: &McuEngine, room: RoomId, epoch: Instant, seconds: usize) -> Tally {
-    let start = Instant::now();
-    let deadline = start + Duration::from_secs(seconds as u64);
-    let mut tally = Tally::default();
-    let mut next = start;
-    while Instant::now() < deadline {
-        let now_ms = epoch.elapsed().as_millis() as u64;
-        tally.attempts += 2;
-        if engine.tick_video_at(room, now_ms).is_some() {
-            tally.ticks += 1;
-            tally.first_successes += 1;
-        } else {
-            tally.throttled += 1;
-        }
-        if engine.tick_video_at(room, now_ms).is_some() {
-            tally.ticks += 1;
-            tally.second_call_successes += 1;
-        } else {
-            tally.throttled += 1;
-        }
-        next += Duration::from_millis(VIDEO_PERIOD_MS);
-        let now = Instant::now();
-        if next <= now {
-            next = now + Duration::from_millis(VIDEO_PERIOD_MS);
-        }
-        std::thread::sleep(next.min(deadline).saturating_duration_since(Instant::now()));
-    }
-    tally
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[test]
@@ -293,7 +283,7 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     let seconds = env_usize("VKS_SOAK_SECONDS", 20);
     let warmup = env_usize("VKS_SOAK_WARMUP", 3);
     let participants = env_usize("VKS_SOAK_PARTICIPANTS", 4);
-    assert!((5..=3600).contains(&seconds), "VKS_SOAK_SECONDS must be 5..=3600, got {seconds}");
+    assert!((5..=604_800).contains(&seconds), "VKS_SOAK_SECONDS must be 5..=604800, got {seconds}");
     assert!(warmup >= 1 && warmup < seconds, "VKS_SOAK_WARMUP must be >=1 and < seconds");
     assert!((1..=32).contains(&participants), "VKS_SOAK_PARTICIPANTS must be 1..=32");
     let out = std::env::var("VKS_SOAK_OUT").unwrap_or_else(|_| "target/t14b-mcu-tick-soak.json".into());
@@ -347,17 +337,29 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     // tick cannot be rejected by the 18 ms audio throttle.
     std::thread::sleep(Duration::from_millis(AUDIO_PERIOD_MS));
     let audio_baseline = histogram_snapshot();
-    let audio_start = Instant::now();
-    let audio = audio_phase(&engine, room, &pids, &pcm, epoch, audio_seconds);
-    let audio_measured_seconds = audio_start.elapsed().as_secs_f64();
+    let (audio, audio_measured_seconds) = run_window(
+        Duration::from_millis(AUDIO_PERIOD_MS),
+        audio_seconds,
+        epoch,
+        || {
+            for pid in &pids {
+                engine.set_audio_slice(room, *pid, &pcm);
+            }
+        },
+        |now_ms| engine.tick_audio_at(room, now_ms),
+    );
     let audio_after = histogram_snapshot();
 
     std::thread::sleep(Duration::from_millis(VIDEO_PERIOD_MS));
     let video_baseline = histogram_snapshot();
     let dropped_baseline = engine.stats(room).map_or(0, |stats| stats.frames_dropped);
-    let video_start = Instant::now();
-    let video = video_phase(&engine, room, epoch, video_seconds);
-    let video_measured_seconds = video_start.elapsed().as_secs_f64();
+    let (video, video_measured_seconds) = run_window(
+        Duration::from_millis(VIDEO_PERIOD_MS),
+        video_seconds,
+        epoch,
+        || {},
+        |now_ms| engine.tick_video_at(room, now_ms).is_some(),
+    );
     let video_after = histogram_snapshot();
     let dropped = engine.stats(room).map_or(0, |stats| stats.frames_dropped).saturating_sub(dropped_baseline);
 
@@ -391,9 +393,13 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     let video_p99 = video_delta.p99();
     let audio_hz = audio.first_successes as f64 / audio_measured_seconds;
     let effective_video_fps = video.first_successes as f64 / video_measured_seconds;
+    // Wall-clock lower bound on scheduled periods in the measured window. Unlike
+    // `attempts / 2` this cannot be satisfied by dropping iterations: a skipped
+    // period lowers `first_successes` while the window stays the same.
+    let audio_scheduled = (audio_measured_seconds * 1000.0 / AUDIO_PERIOD_MS as f64).floor() as u64;
+    let video_scheduled = (video_measured_seconds * 1000.0 / VIDEO_PERIOD_MS as f64).floor() as u64;
 
     let report = serde_json::json!({
-        "profile": "release",
         "rustc": command_output("rustc", &["-V"]),
         "git_sha": command_output("git", &["rev-parse", "HEAD"]),
         // `null` when git is unavailable, otherwise any worktree change means
@@ -407,9 +413,16 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
         "video_window_seconds": video_seconds,
         "audio_measured_seconds": audio_measured_seconds,
         "video_measured_seconds": video_measured_seconds,
+        "cwd": std::env::current_dir().ok().map(|path| path.display().to_string()),
+        "git_toplevel": command_output("git", &["rev-parse", "--show-toplevel"]),
+        "target_dir": std::env::var("CARGO_TARGET_DIR").ok(),
+        "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
         "participants": participants,
         "frame": {"width": FRAME_WIDTH, "height": FRAME_HEIGHT, "format": "I420"},
         "audio": {
+            "periods": audio.periods,
+            "missed_periods": audio.missed_periods,
+            "scheduled_periods_lower_bound": audio_scheduled,
             "attempts": audio.attempts,
             "successful_ticks": audio.ticks,
             "first_successes": audio.first_successes,
@@ -422,8 +435,12 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
             "p99_bucket_seconds": audio_p99.map(|(_, lower, upper)| [lower, upper]),
             "sum_seconds": audio_delta.sum,
             "mean_seconds": (audio_delta.count > 0).then(|| audio_delta.sum / audio_delta.count as f64),
+            "buckets_cumulative": audio_delta.buckets,
         },
         "video": {
+            "periods": video.periods,
+            "missed_periods": video.missed_periods,
+            "scheduled_periods_lower_bound": video_scheduled,
             "attempts": video.attempts,
             "successful_ticks": video.ticks,
             "first_successes": video.first_successes,
@@ -438,6 +455,7 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
             "p99_bucket_seconds": video_p99.map(|(_, lower, upper)| [lower, upper]),
             "sum_seconds": video_delta.sum,
             "mean_seconds": (video_delta.count > 0).then(|| video_delta.sum / video_delta.count as f64),
+            "buckets_cumulative": video_delta.buckets,
         },
         "admin_rebuild_recorded_ticks": admin_pollution,
         "histogram_buckets_seconds": MCU_TICK_BUCKETS,
@@ -449,8 +467,9 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
         },
         "command": format!(
             "VKS_MCU_TICK_METRICS=1 VKS_SOAK_SECONDS={seconds} VKS_SOAK_WARMUP={warmup} \
-             VKS_SOAK_PARTICIPANTS={participants} VKS_SOAK_OUT={out} \
-             cargo test --release -p vks-media-mcu --test mcu_tick_soak -- --ignored --nocapture"
+             VKS_SOAK_PARTICIPANTS={participants} VKS_SOAK_OUT={} \
+             cargo test --release -p vks-media-mcu --test mcu_tick_soak -- --ignored --nocapture",
+            shell_quote(&out)
         ),
         "notes": "In-process engine only: no RTP, SIP, decode/encode, resize_i420, WebRTC fan-out or live DB. Audio and video are measured in separate sequential windows in one room: today's global room mutex would let video compose block the audio tick, and per-room actors/multi-room concurrency are S20. Frames are real 1280x720 I420. Each period makes one deliberate same-timestamp duplicate call that must be throttled; video throttles increment engine frames_dropped.",
     });
@@ -468,29 +487,20 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     assert_eq!(video_delta.count, video.ticks, "video histogram must count exactly the rendered ticks");
     assert_eq!(audio.second_call_successes, 0, "same-timestamp audio duplicate must be throttled");
     assert_eq!(video.second_call_successes, 0, "same-timestamp video duplicate must be throttled");
-    // Up to 1% of scheduled periods may miss the engine throttle because of OS
-    // scheduling jitter; the cadence floors below still catch systemic loss.
-    let audio_periods = audio.attempts / 2;
-    let video_periods = video.attempts / 2;
+    assert_eq!(audio.attempts, audio.periods * 2, "each audio period makes exactly two attempts");
+    assert_eq!(video.attempts, video.periods * 2, "each video period makes exactly two attempts");
+    // Wall-clock period-loss gate: a skipped slot lowers first successes while
+    // `scheduled` stays fixed. Up to 1% is allowed for OS scheduling jitter; the
+    // cadence floors below catch systemic loss.
     assert!(
-        audio.first_successes * 100 >= audio_periods * 99,
-        "audio lost more than 1% of scheduled periods: {} of {audio_periods}",
+        audio.first_successes * 100 >= audio_scheduled * 99,
+        "audio lost more than 1% of scheduled periods: {} of {audio_scheduled}",
         audio.first_successes
     );
     assert!(
-        video.first_successes * 100 >= video_periods * 99,
-        "video lost more than 1% of scheduled periods: {} of {video_periods}",
+        video.first_successes * 100 >= video_scheduled * 99,
+        "video lost more than 1% of scheduled periods: {} of {video_scheduled}",
         video.first_successes
-    );
-    assert_eq!(
-        audio.attempts.saturating_sub(audio.ticks),
-        audio.throttled,
-        "every rejected audio attempt must be accounted for"
-    );
-    assert_eq!(
-        video.attempts.saturating_sub(video.ticks),
-        video.throttled,
-        "every rejected video attempt must be accounted for"
     );
     assert_eq!(video.throttled, dropped, "every throttled video attempt must be visible as frames_dropped");
     assert_eq!(admin_pollution, 0, "admin rebuild paths must not be recorded as ticks");
