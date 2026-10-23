@@ -261,7 +261,11 @@
    * декоративный (aria-hidden): число уже в aria-label карточки. */
   function setCardCount(item, count) {
     item.setAttribute('data-windows', String(count));
-    if (!(count > 0)) return;
+    if (!(count > 0)) {
+      var old = item.querySelector('.layout-scheme-selector-item__badge');
+      if (old) old.remove();
+      return;
+    }
     var badge = item.querySelector('.layout-scheme-selector-item__badge');
     if (!badge) {
       badge = document.createElement('div');
