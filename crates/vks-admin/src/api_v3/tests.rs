@@ -2580,13 +2580,18 @@ async fn codian_calculate_returns_slot_geometry_for_preview() {
         assert!((slot["height"].as_f64().unwrap() - cell.rect.height).abs() < 1e-6, "высота слота {index}");
         assert_eq!(slot["z_order"], u64::from(cell.z_order), "z_order слота {index}");
     }
-    // Неизвестный id остаётся 400 (вендорская ошибка не изменилась).
+    // Неизвестный id остаётся 400 (вендорская ошибка не изменилась) и
+    // перечисляет параметрические id конструктора, а не только ручные пресеты.
     let response = send(
         &server,
         request("POST", "/api/v3/ui/video_layouts/calculate", Some(&token), json!({"preset": "codian_99"})),
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error = json_body(response).await;
+    let description = error["error"]["details"][0]["description"].as_str().unwrap_or_default();
+    assert!(description.contains("vks_grid_<n>"), "ошибка перечисляет vks_grid: {description}");
+    assert!(description.contains("vks_pin_"), "ошибка перечисляет vks_pin: {description}");
 }
 
 /// Конструктор участников: `vks_grid_*` / `vks_pin_*` дают превью той же

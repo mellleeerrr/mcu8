@@ -720,7 +720,8 @@ pub async fn video_layouts_calculate(Json(body): Json<serde_json::Value>) -> Res
                 "details": [{
                     "reason": "invalid.preset",
                     "description": format!(
-                        "Must be one of: {} (или codian_01..codian_52, codian_custom_22, codian_custom_14)",
+                        "Must be one of: {} (или codian_01..codian_52, codian_custom_22, codian_custom_14; \
+                         конструктор: vks_grid_<n>, vks_pin_{{l,r,t,b}}_<n> с опциями g<px>/m<px>, n = 1..100)",
                         vks_layout::preset::manual_preset_ids().collect::<Vec<_>>().join(", ")
                     ),
                     "position": "preset",

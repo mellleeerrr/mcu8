@@ -2199,6 +2199,41 @@ mod tests {
         assert_eq!(composite.data[270 * CANVAS_SIZE.0 as usize + 480], 99, "новый кадр виден в верхней левой ячейке");
     }
 
+    /// T12: pending-раскладка, пришедшая до создания комнаты, подхватывается
+    /// `create_room` (а не только первым мостом): первый зритель не видит
+    /// пустую сетку, версия/геометрия сохранены, pending очищен.
+    #[tokio::test]
+    async fn create_room_adopts_pending_layout() {
+        use vks_core::ports::media_engine::LayoutSlot;
+
+        let e = McuEngine::new();
+        let rid = room_id();
+        let geometry = vec![LayoutSlot { slot: 0, x: 0, y: 0, width: 1280, height: 720, z_order: 0 }];
+        e.apply_layout(
+            rid,
+            LayoutDescriptor {
+                layout_id: "preset_equal_1".into(),
+                version: 7,
+                assignments: Default::default(),
+                geometry,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(e.slot_rects(rid).is_none(), "комнаты ещё нет");
+        assert!(e.layout_descriptor(rid).is_some(), "pending сохранён");
+
+        e.create_room(cfg(rid)).await.unwrap();
+        let adopted = e.layout_descriptor(rid).expect("pending применён в create_room");
+        assert_eq!(adopted.layout_id, "preset_equal_1", "id раскладки сохранён");
+        assert_eq!(adopted.version, 7, "версия сохранена");
+        assert_eq!(adopted.geometry.len(), 1, "геометрия сохранена");
+        assert_eq!(e.slot_rects(rid).map(|rects| rects.len()), Some(1), "окно доступно сразу");
+
+        e.destroy_room(rid).await.unwrap();
+        assert!(e.layout_descriptor(rid).is_none(), "pending не воскресает после destroy");
+    }
+
     /// T03: pending-раскладка не создаёт комнату, но применяется на первом
     /// bridge; лишний паблишер не получает full-canvas вне geometry.
     #[tokio::test]
