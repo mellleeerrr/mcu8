@@ -244,6 +244,11 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > стартового; `PushOutcome::{Queued,Full,Closed}` — Full не рвёт мост; атомарный
 > `try_reserve` (`try_acquire_many_owned`); DTMF E-бит только в финальном пакете,
 > duration 20→100 мс; AAC не объявляется при пуле <2.
+> **SDP/UAS-ревью: 9.0/10.** P1 закрыт: `last_inbound_at`/`last_rx_ms` обновляются на любом
+> принятом RTP до push, поэтому забитая очередь декодера не маскирует молчащий FFmpeg;
+> liveness-предикат вынесен и покрыт тестом. UAC/UAS-политика fmtp синхронизирована
+> (`config` при cpresent=1 допустим, object≠2/SBR/cpresent=0 отвергаются), добавлены
+> негативные UAC-тесты. Пейсер ограничен 2 кадрами за тик (3 при backlog>4).
 > (`WorkerPool::try_reserve(2)`) для двух прямых FFmpeg-процессов. **Live-бинарь `3caa7546`:
 > legal-гейт enforced — `aac_latm=false`, API AAC supported=false** (включается только
 > `VKS_AAC_LATM_LEGAL_ACCEPTED=1`). Осталось до 9.5: RTP-level AAC-тест (16:15/marker/timestamp/

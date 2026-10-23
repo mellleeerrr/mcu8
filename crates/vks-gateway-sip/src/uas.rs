@@ -417,7 +417,7 @@ impl BridgeableAudio {
 /// AAC-LATM fmtp gate for the in-band-SMC bridge: `bitrate`, `profile-level-id`
 /// and unknown parameters are ignored (RFC 3016 allows them); the codec itself
 /// must be AAC-LC (object type 2) and SMC must travel in-band (`cpresent!=0`).
-fn aac_fmtp_is_bridgeable(fmtp: &str) -> bool {
+pub(crate) fn aac_fmtp_is_bridgeable(fmtp: &str) -> bool {
     let mut object: Option<&str> = None;
     let mut cpresent: Option<&str> = None;
     let mut sbr = false;

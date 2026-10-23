@@ -36,6 +36,21 @@ fn ffmpeg_path() -> std::path::PathBuf {
 
 /// Whether this RTP payload type/codec pair has to use the AAC-LATM bridge.
 #[must_use]
+/// True when RTP is still arriving (activity under 1 s old) but no PCM block
+/// has been decoded for 3 s — a live FFmpeg that stopped producing audio.
+fn pcm_liveness_stalled(
+    inbound_age: Option<Duration>,
+    pcm_age: Option<Duration>,
+    first_packet_age: Option<Duration>,
+) -> bool {
+    let inbound_alive = inbound_age.is_some_and(|age| age < Duration::from_secs(1));
+    let pcm_stalled = match pcm_age {
+        Some(age) => age >= Duration::from_secs(3),
+        None => first_packet_age.is_some_and(|age| age >= Duration::from_secs(3)),
+    };
+    inbound_alive && pcm_stalled
+}
+
 /// Builds one AAC RTP packet: one complete `audioMuxElement` per packet,
 /// marker=1, 90 kHz timestamp supplied by [`LatmRtpClock`].
 fn write_aac_rtp_packet(
@@ -207,14 +222,10 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed);
                     continue;
                 };
-                match decoder.try_push_loas(loas) {
-                    PushOutcome::Queued => {}
-                    PushOutcome::Full => {
-                        session.media_stats.rejected_packets.fetch_add(1, Relaxed);
-                        continue;
-                    }
-                    PushOutcome::Closed => break,
-                }
+                // Liveness must see every accepted RTP packet, including the
+                // ones rejected because the decoder queue is full: a wedged
+                // FFmpeg keeps the queue full, and stale inbound activity
+                // would hide exactly the silence this check exists for.
                 first_packet_at.get_or_insert_with(Instant::now);
                 last_inbound_at = Some(Instant::now());
                 session.media_stats.audio_rx_packets.fetch_add(1, Relaxed);
@@ -223,6 +234,14 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
                     Relaxed,
                 );
+                match decoder.try_push_loas(loas) {
+                    PushOutcome::Queued => {}
+                    PushOutcome::Full => {
+                        session.media_stats.rejected_packets.fetch_add(1, Relaxed);
+                        continue;
+                    }
+                    PushOutcome::Closed => break,
+                }
             }
             _ = ticker.tick() => {
                 while let Some(block) = decoder.try_pcm() {
@@ -241,12 +260,12 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                 // keep rising but the participant hears silence.
                 // Rolling liveness: RTP arriving but no PCM for a full 3 s is
                 // a dead decoder, not just a slow start.
-                let inbound_alive = last_inbound_at.is_some_and(|last| last.elapsed() < Duration::from_secs(1));
-                let pcm_stalled = last_pcm_at.map_or_else(
-                    || first_packet_at.is_some_and(|first| first.elapsed() >= Duration::from_secs(3)),
-                    |last| last.elapsed() >= Duration::from_secs(3),
+                let stalled = pcm_liveness_stalled(
+                    last_inbound_at.map(|at| at.elapsed()),
+                    last_pcm_at.map(|at| at.elapsed()),
+                    first_packet_at.map(|at| at.elapsed()),
                 );
-                if inbound_alive && pcm_stalled {
+                if stalled {
                     tracing::warn!(
                         participant = %session.participant_id_str,
                         "AAC decoder produced no PCM for 3 s while RTP arrived; tearing the media bridge down"
@@ -306,10 +325,16 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                 ticks += 1;
                 let due = ticks.saturating_mul(15) / 16;
                 // Keep a 3-frame cushion before the first packet, then send
-                // exactly the number of frames the 20 ms timeline owes.
-                while frames_sent < due && pending_tx.len()
-                    > if ticks < 32 { 2 } else { 0 }
+                // at most two frames per 20 ms tick (plus one when the encoder
+                // delivered a larger burst) so a backlog never leaves as a
+                // 4-packet burst on the wire.
+                let burst = if pending_tx.len() > 4 { 3 } else { 2 };
+                let mut sent_this_tick = 0u32;
+                while frames_sent < due
+                    && sent_this_tick < burst
+                    && pending_tx.len() > if ticks < 32 { 2 } else { 0 }
                 {
+                    sent_this_tick += 1;
                     let frame = pending_tx.pop_front().expect("pending frame");
                     let timestamp = clock.next_timestamp();
                     let length = write_aac_rtp_packet(
@@ -415,5 +440,21 @@ mod tests {
         assert_eq!(&packet[8..12], &0xDEAD_BEEFu32.to_be_bytes());
         assert_eq!(packet[12], 0x20);
         assert_eq!(&packet[12..16], &frame);
+    }
+
+    #[test]
+    fn aac_liveness_detects_a_wedged_decoder_under_full_queue() {
+        let secs = Duration::from_secs;
+        assert!(!pcm_liveness_stalled(Some(secs(0)), None, Some(secs(0))));
+        assert!(pcm_liveness_stalled(Some(secs(0)), None, Some(secs(4))), "no PCM after start");
+        assert!(
+            pcm_liveness_stalled(Some(secs(0)), Some(secs(4)), Some(secs(30))),
+            "mid-call silence while RTP arrives"
+        );
+        assert!(
+            !pcm_liveness_stalled(Some(secs(5)), Some(secs(4)), Some(secs(30))),
+            "no inbound RTP: rx watchdog owns this case"
+        );
+        assert!(!pcm_liveness_stalled(Some(secs(0)), Some(secs(1)), Some(secs(30))));
     }
 }

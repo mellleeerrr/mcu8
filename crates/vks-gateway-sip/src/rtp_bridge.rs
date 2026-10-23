@@ -1332,13 +1332,13 @@ fn negotiate_media_detailed_with(
         return Err(NegotiationFailure::UnsupportedAudio { codec: codec.name.to_string(), payload: codec.payload });
     }
     if aac_latm {
-        // cpresent=0 answers carry the configuration only in fmtp config=;
-        // this bridge sends in-band SMC (cpresent=1), so such an answer would
-        // produce "connected" with undecodable audio.
+        // Symmetric with the UAS: the answer must describe AAC-LC with in-band
+        // SMC. bitrate/config hints are legal; cpresent=0, SBR and other object
+        // types mean this bridge would answer but never decode audio.
         let fmtp = remote_audio.fmtp.get(&codec.payload);
-        if fmtp.is_some_and(|params| {
-            params.get("cpresent").is_some_and(|value| value == "0") || params.contains_key("config")
-        }) {
+        let rendered =
+            fmtp.map(|params| params.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join(";"));
+        if rendered.as_deref().is_some_and(|value| !crate::uas::aac_fmtp_is_bridgeable(value)) {
             return Err(NegotiationFailure::UnsupportedAudio { codec: codec.name.to_string(), payload: codec.payload });
         }
     }
@@ -1719,5 +1719,28 @@ a=rtpmap:113 MP4A-LATM/90000\r\na=fmtp:113 profile-level-id=1;object=2;cpresent=
         let answer_sdp = crate::uas::build_answer("127.0.0.1", 1, 41000, None, &inbound);
         assert!(answer_sdp.contains("a=rtpmap:113 MP4A-LATM/90000"), "{answer_sdp}");
         assert!(!answer_sdp.contains("a=ptime"), "AAC frame is 21.33 ms: {answer_sdp}");
+
+        for bad in [
+            "profile-level-id=1;object=2;cpresent=0;config=40002420",
+            "profile-level-id=1;object=8;cpresent=1",
+            "profile-level-id=1;object=2;SBR=1;cpresent=1",
+        ] {
+            let bad_answer = format!(
+                "v=0\r\nc=IN IP4 192.0.2.10\r\nm=audio 32000 RTP/AVP 113\r\n\
+a=rtpmap:113 MP4A-LATM/90000\r\na=fmtp:113 {bad}\r\n"
+            );
+            assert!(
+                matches!(
+                    negotiate_media_detailed_with(offer, &bad_answer, true),
+                    Err(NegotiationFailure::UnsupportedAudio { payload: 113, .. })
+                ),
+                "answer must be refused: {bad}"
+            );
+        }
+        let config_hint = answer.replace("cpresent=1", "cpresent=1;config=40002420;bitrate=64000");
+        assert!(
+            negotiate_media_detailed_with(offer, &config_hint, true).is_ok(),
+            "config hint with in-band SMC is legal"
+        );
     }
 }
