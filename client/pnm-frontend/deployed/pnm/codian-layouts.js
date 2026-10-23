@@ -98,6 +98,8 @@
   ];
 
   var constructorCount = 0;
+  var constructorSide = 'grid'; // grid | l | r | t | b (последняя выбранная схема)
+  var adoptPending = '';
   var constructorState = 'idle'; // idle | loading | ready | failed
   var constructorSlots = Object.create(null);
 
@@ -150,10 +152,29 @@
     if (!editor || editor === subscribedStore || typeof editor.$subscribe !== 'function') return;
     subscribedStore = editor;
     try {
-      editor.$subscribe(function () { schedule(); }, { detached: true });
+      editor.$subscribe(function () { schedule(); reAdopt(); }, { detached: true });
     } catch (e) {
       /* наблюдатель остаётся единственным источником обновлений */
     }
+  }
+
+  /* Вендорские чипы «Количество видеоокон»/пресеты ставят свой preset поверх
+   * нашего. Пока «Конструктор» активен, возвращаем vks_<side>_<N> с новым N:
+   * иначе сохранится вендорский preset, а карточки останутся без active. */
+  function reAdopt() {
+    if (!modeTileEngaged) return;
+    var editor = layoutEditor();
+    if (!editor) return;
+    var value = editor.modifiedValue || {};
+    if (value.mode !== 'manual') return;
+    var preset = typeof value.preset === 'string' ? value.preset : '';
+    if (preset.indexOf('vks_') === 0) return;
+    var count = currentCount();
+    if (!(count > 0)) return;
+    var key = preset + ':' + count;
+    if (key === adoptPending) return;
+    adoptPending = key;
+    selectConstructor('vks_' + (constructorSide === 'grid' ? 'grid' : 'pin_' + constructorSide) + '_' + count);
   }
 
   function round(value) {
@@ -615,6 +636,8 @@
   function selectConstructor(preset) {
     var editor = layoutEditor();
     if (!editor || !preset) return;
+    var side = /^vks_pin_([lrtb])_/.exec(preset);
+    constructorSide = side ? side[1] : 'grid';
     try {
       editor.editValueField('preset', preset);
     } catch (e) {
@@ -669,13 +692,24 @@
     // режима (слоты появляются не сразу) один раз подставляем vks_grid_<N>.
     // Тихий fallback на 1 окно запрещён: при N=0 остаёмся на вендорском preset.
     var attempts = 0;
+    var beforeValue = editor.modifiedValue || {};
+    var keepName = beforeValue.displayName || '';
     function adopt() {
       if (!modeTileEngaged) return;
       var value = editor.modifiedValue || {};
       var preset = typeof value.preset === 'string' ? value.preset : '';
       if (preset.indexOf('vks_') === 0) return;
       var count = currentCount();
-      if (count > 0) { selectConstructor('vks_grid_' + count); return; }
+      if (count > 0) {
+        // Свежий auto→manual: вендорский watch мог сбросить имя/тип — возвращаем,
+        // иначе save уходит с display_name:null, type:default (P0 T2).
+        try {
+          if (keepName) editor.editValueField('displayName', keepName);
+          editor.editValueField('type', 'individual');
+        } catch (e) { /* поля недоступны — сохранение увидит вендорские значения */ }
+        selectConstructor('vks_grid_' + count);
+        return;
+      }
       if (attempts++ < 40) setTimeout(adopt, 50);
     }
     adopt();

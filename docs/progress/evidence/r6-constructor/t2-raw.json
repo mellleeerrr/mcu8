@@ -1,0 +1,39 @@
+{
+ "autoSave": [
+  "{\"display_name\":\"Codian 07 — 13 окон\",\"payload\":{\"mode\":\"auto\",\"preset\":\"preset_default_13\",\"type\":\"individual\"}}"
+ ],
+ "afterTile": {
+  "activeTiles": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctorPreset": [
+   "vks_grid_25"
+  ],
+  "name": null,
+  "errs": null
+ },
+ "tileSave": [
+  "{\"display_name\":\"Codian 07 — 13 окон\",\"payload\":{\"mode\":\"manual\",\"preset\":\"vks_grid_25\",\"type\":\"individual\",\"slots\":[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"},{\"position\":5,\"role\":\"AUTO\"},{\"position\":6,\"role\":\"AUTO\"},{\"position\":7,\"role\":\"AUTO\"},{\"position\":8,\"role\":\"AUTO\"},{\"position\":9,\"role\":\"AUTO\"},{\"position\":10,\"role\":\"AUTO\"},{\"position\":11,\"role\":\"AUTO\"},{\"position\":12,\"role\":\"AUTO\"},{\"position\":13,\"role\":\"AUTO\"},{\"position\":14,\"role\":\"AUTO\"},{\"position\":15,\"role\":\"AUTO\"},{\"position\":16,\"role\":\"AUTO\"},{\"position\":"
+ ],
+ "afterCount": {
+  "activeTiles": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctorPreset": null,
+  "name": null,
+  "errs": null
+ },
+ "countSave": [
+  "{\"display_name\":\"Codian 07 — 13 окон\",\"payload\":{\"mode\":\"manual\",\"preset\":\"preset_equal_9\",\"type\":\"individual\",\"slots\":[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"},{\"position\":5,\"role\":\"AUTO\"},{\"position\":6,\"role\":\"AUTO\"},{\"position\":7,\"role\":\"AUTO\"},{\"position\":8,\"role\":\"AUTO\"},{\"position\":9,\"role\":\"AUTO\"}]}}",
+  "{\"preset\":\"vks_grid_9\",\"width\":887,\"height\":499}"
+ ],
+ "reopened": {
+  "activeTiles": [
+   "layout-mode-selector-manual"
+  ],
+  "ctorPreset": null,
+  "name": null,
+  "errs": null
+ },
+ "errs": []
+}
