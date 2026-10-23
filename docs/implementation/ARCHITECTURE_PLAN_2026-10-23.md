@@ -448,7 +448,7 @@ TURN. Без стенда эти пункты не закрываются код
 | Компонент | Версия | Примечание |
 |---|---|---|
 | Rust (MSRV) | **1.94** | `rust-toolchain.toml` → 1.94.0, edition 2021 |
-| cargo-deny | 2.x (CI) | `deny.toml`; `protobuf-src` в правилах не учтён — риск |
+| cargo-deny | 2.x (CI) | `deny.toml`; 9 новых крейтов `protoc-bin-vendored` — MIT, advisory 0 |
 | rustfmt | 1.94 | `.rustfmt.toml`: `max_width = 120` |
 | clippy | 1.94 | `-D warnings` в CI |
 | CI | GitHub Actions | `.github/workflows/ci.yml` |
@@ -469,7 +469,7 @@ TURN. Без стенда эти пункты не закрываются код
 | `vks-admin` | admin API | `axum 0.8.9`, `utoipa 5.5.0` |
 | `vks-auth` | RS256, RBAC | `sha2 0.10.9`, `jsonwebtoken`, `ring 0.17.14` |
 | `vks-signaling` | WS-сигналинг | `tokio-tungstenite 0.29.0` |
-| `vks-proto` | protobuf | `prost 0.13.5`, `prost-build 0.13.5`; фича `vendored-protoc` — нерабочая в пути с пробелом |
+| `vks-proto` | protobuf | `prost 0.13.5`, `prost-build 0.13.5`; `protoc-bin-vendored 3.3` — герметичный protoc (ADR-0031) |
 | `vks-storage` | SQLite | `sqlx 0.8.6` (SQLite) |
 | `vks-recorder` | запись | заглушка (write-only в проде) |
 | `vks-cluster` | кластер | заглушка (write-only в проде) |
@@ -480,6 +480,7 @@ TURN. Без стенда эти пункты не закрываются код
 ```
 axum 0.8.9 · tokio 1.53.3 · tokio-util 0.7.20 · futures 0.3.34 · async-trait 0.1.92
 serde 1.0.229 · serde_json 1.0.154 · prost 0.13.5 · prost-build 0.13.5
+protoc-bin-vendored 3.3.0 (+ 8 платформенных бинарей, только в build-зависимостях)
 tracing 0.1.44 · tracing-subscriber 0.3.23 · prometheus 0.14.0
 uuid 1.28.0 · ulid 1.2.1 · figment 0.10.19 · uncased 0.9
 thiserror 2.0.21 · anyhow 1.0.104 · parking_lot 0.12.5 · bytes 1.12.1
