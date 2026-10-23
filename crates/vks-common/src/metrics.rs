@@ -10,8 +10,8 @@
 //! в текстовом формате Prometheus для `/metrics`.
 
 use prometheus::{
-    register_histogram_vec, register_int_counter_vec, register_int_gauge_vec, Histogram, HistogramOpts, HistogramVec,
-    IntCounterVec, IntGaugeVec, Opts, Registry,
+    register_histogram_vec, register_int_counter_vec, register_int_gauge_vec, Histogram, HistogramVec, IntCounterVec,
+    IntGaugeVec, Registry,
 };
 use std::sync::LazyLock;
 
@@ -125,7 +125,7 @@ pub static HTTP_REQUESTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
 /// exact `le="0.002"` ratio is meaningful, coarse above it for diagnosis.
 pub const MCU_TICK_BUCKETS: &[f64] = &[
     0.000_025, 0.000_05, 0.000_1, 0.000_25, 0.000_5, 0.000_75, 0.001, 0.001_5, 0.002, 0.003, 0.005, 0.007_5, 0.01,
-    0.02, 0.05, 0.1,
+    0.02, 0.033, 0.05, 0.1,
 ];
 
 /// MCU engine tick work: audio mix or video compose, excluding RTP/network,
@@ -152,27 +152,35 @@ pub enum McuTickPhase {
 }
 
 /// Env-gated tick instrumentation (`VKS_MCU_TICK_METRICS=1`), read once.
-#[must_use]
 pub fn mcu_tick_metrics_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        matches!(std::env::var("VKS_MCU_TICK_METRICS").as_deref(), Ok("1" | "true" | "TRUE" | "on" | "yes"))
+        std::env::var("VKS_MCU_TICK_METRICS")
+            .is_ok_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
     })
 }
 
 /// Records one successful tick. Call only after the phase actually ran.
 pub fn observe_mcu_tick(phase: McuTickPhase, elapsed: std::time::Duration) {
+    // Defence in depth for future callers: a recording without the env gate
+    // would make the family appear on a supposedly uninstrumented server.
+    if !mcu_tick_metrics_enabled() {
+        return;
+    }
     match phase {
         McuTickPhase::Audio => MCU_TICK_AUDIO.observe(elapsed.as_secs_f64()),
         McuTickPhase::Video => MCU_TICK_VIDEO.observe(elapsed.as_secs_f64()),
     }
 }
 
-/// Материализует историю тиков, если она включена.
-pub fn init_mcu_tick_metrics() {
+/// Материализует zero-count series, если инструментация включена. Намеренно
+/// не пишет `observe(0.0)`: синтетический sample испортил бы `_count`, `_sum`
+/// и точное отношение `le=2ms`, а также мог бы удовлетворить проверку
+/// «count > 0» в soak-тесте без единого реального тика.
+fn init_mcu_tick_metrics() {
     if mcu_tick_metrics_enabled() {
-        MCU_TICK_AUDIO.observe(0.0);
-        MCU_TICK_VIDEO.observe(0.0);
+        let _ = &*MCU_TICK_AUDIO;
+        let _ = &*MCU_TICK_VIDEO;
     }
 }
 
@@ -244,235 +252,38 @@ pub fn init_default() {
 #[must_use]
 pub fn new_registry() -> Registry {
     let mut registry = Registry::new();
-    // `registry.register()` возвращает Result; ошибка возможна только при
-    // дубликате имени (единый `Registry` на процесс) — паникуем с сообщением.
-    // Каждая семья передаётся уже как `Box<dyn Collector>` (trait-объект) —
-    // `IntCounterVec` / `IntGaugeVec` реализуют `Collector`.
+    // `MetricVec`/`Gauge`/`Histogram` clone are Arc-backed: registering clones of
+    // the global collectors shares their state instead of duplicating Opts, which
+    // used to drift from the declarations above (and made the test exercise the
+    // global registry instead of this function).
     let register = |registry: &mut Registry, m: Box<dyn prometheus::core::Collector>, name: &str| {
         registry.register(m).unwrap_or_else(|e| panic!("register {name} in new_registry: {e:?}"))
     };
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntCounterVec::new(
-                Opts::new("vks_signaling_messages_total", "Total signaling messages processed"),
-                &["direction"],
-            )
-            .expect("IntCounterVec::new vks_signaling_messages_total"),
-        ),
-        "vks_signaling_messages_total",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntGaugeVec::new(
-                Opts::new("vks_codec_worker_supported", "Host codec worker support (1 available, 0 absent)"),
-                &["codec", "direction"],
-            )
-            .expect("IntGaugeVec::new vks_codec_worker_supported"),
-        ),
-        "vks_codec_worker_supported",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntGauge::new("vks_codec_worker_pool_size", "Configured codec worker process cap")
-                .expect("IntGauge::new vks_codec_worker_pool_size"),
-        ),
-        "vks_codec_worker_pool_size",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntGaugeVec::new(Opts::new("vks_active_rooms", "Number of active rooms"), &["room_id"])
-                .expect("IntGaugeVec::new vks_active_rooms"),
-        ),
-        "vks_active_rooms",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntGaugeVec::new(Opts::new("vks_build_info", "Build information"), &["version"])
-                .expect("IntGaugeVec::new vks_build_info"),
-        ),
-        "vks_build_info",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntCounterVec::new(
-                Opts::new("vks_media_bytes_total", "Total media bytes transferred"),
-                &["codec", "direction"],
-            )
-            .expect("IntCounterVec::new vks_media_bytes_total"),
-        ),
-        "vks_media_bytes_total",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntCounterVec::new(
-                Opts::new("vks_media_packets_dropped_total", "Total media packets dropped"),
-                &["reason"],
-            )
-            .expect("IntCounterVec::new vks_media_packets_dropped_total"),
-        ),
-        "vks_media_packets_dropped_total",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntGaugeVec::new(
-                Opts::new("vks_room_signal_latency_ms", "Last measured signaling latency in ms"),
-                &["room_id"],
-            )
-            .expect("IntGaugeVec::new vks_room_signal_latency_ms"),
-        ),
-        "vks_room_signal_latency_ms",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntCounterVec::new(Opts::new("vks_errors_total", "Total errors by error code"), &["code"])
-                .expect("IntCounterVec::new vks_errors_total"),
-        ),
-        "vks_errors_total",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntCounterVec::new(
-                Opts::new("vks_http_requests_total", "Total HTTP requests"),
-                &["method", "class", "status"],
-            )
-            .expect("IntCounterVec::new vks_http_requests_total"),
-        ),
-        "vks_http_requests_total",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::HistogramVec::new(
-                prometheus::HistogramOpts::new("vks_http_request_duration_seconds", "HTTP request duration in seconds"),
-                &["class"],
-            )
-            .expect("HistogramVec::new vks_http_request_duration_seconds"),
-        ),
-        "vks_http_request_duration_seconds",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::HistogramVec::new(
-                HistogramOpts::new(
-                    "vks_mcu_tick_duration_seconds",
-                    "MCU engine tick work duration (audio mix or video compose)",
-                )
-                .buckets(MCU_TICK_BUCKETS.to_vec()),
-                &["phase"],
-            )
-            .expect("HistogramVec::new vks_mcu_tick_duration_seconds"),
-        ),
-        "vks_mcu_tick_duration_seconds",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntCounterVec::new(
-                Opts::new("vks_http_response_bytes_total", "Total HTTP response body bytes"),
-                &["class"],
-            )
-            .expect("IntCounterVec::new vks_http_response_bytes_total"),
-        ),
-        "vks_http_response_bytes_total",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntCounterVec::new(
-                Opts::new("vks_api_v3_requests_total", "Total API v3 adapter requests"),
-                &["endpoint"],
-            )
-            .expect("IntCounterVec::new vks_api_v3_requests_total"),
-        ),
-        "vks_api_v3_requests_total",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntCounterVec::new(Opts::new("vks_login_attempts_total", "Total login attempts"), &["result"])
-                .expect("IntCounterVec::new vks_login_attempts_total"),
-        ),
-        "vks_login_attempts_total",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntCounterVec::new(
-                Opts::new("vks_frontend_denied_total", "Frontend requests denied"),
-                &["reason"],
-            )
-            .expect("IntCounterVec::new vks_frontend_denied_total"),
-        ),
-        "vks_frontend_denied_total",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntGauge::new("vks_webrtc_peers", "Real WebRTC peer tasks")
-                .expect("IntGauge::new vks_webrtc_peers"),
-        ),
-        "vks_webrtc_peers",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntCounterVec::new(
-                Opts::new("vks_webrtc_offers_total", "WebRTC offers by result"),
-                &["result"],
-            )
-            .expect("IntCounterVec::new vks_webrtc_offers_total"),
-        ),
-        "vks_webrtc_offers_total",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntCounterVec::new(
-                Opts::new("vks_webrtc_ice_failures_total", "WebRTC ICE failures"),
-                &["reason"],
-            )
-            .expect("IntCounterVec::new vks_webrtc_ice_failures_total"),
-        ),
-        "vks_webrtc_ice_failures_total",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntCounterVec::new(
-                Opts::new("vks_webrtc_frames_dropped_total", "WebRTC fanout frames dropped"),
-                &["reason"],
-            )
-            .expect("IntCounterVec::new vks_webrtc_frames_dropped_total"),
-        ),
-        "vks_webrtc_frames_dropped_total",
-    );
-    register(
-        &mut registry,
-        Box::new(
-            prometheus::IntCounterVec::new(
-                Opts::new("vks_webrtc_fallback_total", "WebRTC fallback events"),
-                &["reason"],
-            )
-            .expect("IntCounterVec::new vks_webrtc_fallback_total"),
-        ),
-        "vks_webrtc_fallback_total",
-    );
+    register(&mut registry, Box::new((*SIGNALING_MESSAGES).clone()), "vks_signaling_messages_total");
+    register(&mut registry, Box::new((*CODEC_WORKER_SUPPORTED).clone()), "vks_codec_worker_supported");
+    register(&mut registry, Box::new((*CODEC_WORKER_POOL_SIZE).clone()), "vks_codec_worker_pool_size");
+    register(&mut registry, Box::new((*ACTIVE_ROOMS).clone()), "vks_active_rooms");
+    register(&mut registry, Box::new((*BUILD_INFO).clone()), "vks_build_info");
+    register(&mut registry, Box::new((*MEDIA_BYTES).clone()), "vks_media_bytes_total");
+    register(&mut registry, Box::new((*MEDIA_PACKETS_DROPPED).clone()), "vks_media_packets_dropped_total");
+    register(&mut registry, Box::new((*WEBRTC_PEERS).clone()), "vks_webrtc_peers");
+    register(&mut registry, Box::new((*WEBRTC_OFFERS).clone()), "vks_webrtc_offers_total");
+    register(&mut registry, Box::new((*WEBRTC_ICE_FAILURES).clone()), "vks_webrtc_ice_failures_total");
+    register(&mut registry, Box::new((*WEBRTC_FRAMES_DROPPED).clone()), "vks_webrtc_frames_dropped_total");
+    register(&mut registry, Box::new((*WEBRTC_FALLBACK).clone()), "vks_webrtc_fallback_total");
+    register(&mut registry, Box::new((*ROOM_SIGNAL_LATENCY_MS).clone()), "vks_room_signal_latency_ms");
+    register(&mut registry, Box::new((*ERRORS).clone()), "vks_errors_total");
+    register(&mut registry, Box::new((*HTTP_REQUESTS).clone()), "vks_http_requests_total");
+    register(&mut registry, Box::new((*MCU_TICK_DURATION).clone()), "vks_mcu_tick_duration_seconds");
+    register(&mut registry, Box::new((*HTTP_REQUEST_DURATION).clone()), "vks_http_request_duration_seconds");
+    register(&mut registry, Box::new((*HTTP_RESPONSE_BYTES).clone()), "vks_http_response_bytes_total");
+    register(&mut registry, Box::new((*API_V3_REQUESTS).clone()), "vks_api_v3_requests_total");
+    register(&mut registry, Box::new((*LOGIN_ATTEMPTS).clone()), "vks_login_attempts_total");
+    register(&mut registry, Box::new((*FRONTEND_DENIED).clone()), "vks_frontend_denied_total");
     registry
 }
 
-/// Текстовое представление всех метрик (для `/metrics`).
-#[must_use]
+/// Text-format export of the global default registry (the `/metrics` body).
 pub fn encode() -> String {
     prometheus::TextEncoder::new().encode_to_string(&prometheus::gather()).unwrap_or_default()
 }
@@ -480,6 +291,14 @@ pub fn encode() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcu_tick_buckets_are_strictly_increasing_and_cover_slo_bounds() {
+        assert!(MCU_TICK_BUCKETS.windows(2).all(|pair| pair[0] < pair[1]), "buckets must be strictly increasing");
+        assert!(MCU_TICK_BUCKETS.contains(&0.002), "exact 2 ms bucket is the SLO gate");
+        assert!(MCU_TICK_BUCKETS.contains(&0.033), "exact 33 ms bucket is the video frame-budget gate");
+        assert!(MCU_TICK_BUCKETS.last().is_some_and(|last| *last >= 0.1));
+    }
 
     #[test]
     fn encode_contains_build_info() {
@@ -646,25 +465,34 @@ mod tests {
         API_V3_REQUESTS.with_label_values(&["login"]).inc();
         LOGIN_ATTEMPTS.with_label_values(&["ok"]).inc();
         FRONTEND_DENIED.with_label_values(&["not_found"]).inc();
-        MCU_TICK_DURATION.with_label_values(&["audio"]).observe(0.0005);
+        // Zero-count child, not `observe(0.0)`: a synthetic sample would
+        // inflate `_count` and could satisfy a count>0 gate.
+        let _ = MCU_TICK_DURATION.with_label_values(&["audio"]);
 
-        let families = prometheus::gather();
+        let families = new_registry().gather();
         let names: std::collections::BTreeSet<_> = families.iter().map(|f| f.name().to_string()).collect();
         for expected in [
             "vks_signaling_messages_total",
+            "vks_codec_worker_supported",
+            "vks_codec_worker_pool_size",
             "vks_active_rooms",
             "vks_build_info",
             "vks_media_bytes_total",
             "vks_media_packets_dropped_total",
+            "vks_webrtc_peers",
+            "vks_webrtc_offers_total",
+            "vks_webrtc_ice_failures_total",
+            "vks_webrtc_frames_dropped_total",
+            "vks_webrtc_fallback_total",
             "vks_room_signal_latency_ms",
             "vks_errors_total",
             "vks_http_requests_total",
+            "vks_mcu_tick_duration_seconds",
             "vks_http_request_duration_seconds",
             "vks_http_response_bytes_total",
             "vks_api_v3_requests_total",
             "vks_login_attempts_total",
             "vks_frontend_denied_total",
-            "vks_mcu_tick_duration_seconds",
         ] {
             assert!(names.contains(expected), "new_registry must expose {expected} (got: {names:?})");
         }

@@ -43,18 +43,18 @@ impl Compositor {
         // Build the canvas in one allocation: a YUV canvas starts at limited
         // range (16/128), a grayscale one at black. `filled` + `resize` used to
         // touch and copy the 3 MB buffer twice per tick.
-        let mut data = if yuv_canvas {
+        let mut canvas = if yuv_canvas {
             let mut data = vec![128u8; pixels * 3 / 2];
             data[..pixels].fill(16);
-            data
+            Frame::new(CANVAS_WIDTH, CANVAS_HEIGHT, data)
         } else {
-            vec![0u8; pixels]
+            Frame::new(CANVAS_WIDTH, CANVAS_HEIGHT, vec![0u8; pixels])
         };
-        let mut canvas = Frame::new(CANVAS_WIDTH, CANVAS_HEIGHT, std::mem::take(&mut data));
         // Overlap/PiP: z_index задаёт порядок отрисовки, ключ — стабильный
         // tie-break. BTreeMap сам по себе сортировал только по slot id.
-        // До 128 слотов сортируем на стеке: compose вызывается 30 раз/с и не
-        // должен аллоцировать на горячем пути.
+        // До 128 слотов сортируем на стеке: сортировка не аллоцирует. Сам
+        // канвас (3 МБ для YUV) выделяется один раз за вызов — его переиспользование
+        // требует per-room scratch-буфера и вынесено в отдельный срез S20.
         let mut stack_keys = [0u32; STACK_SORT_SLOTS];
         if rects.len() <= stack_keys.len() {
             let n = rects.len();
@@ -80,58 +80,57 @@ impl Compositor {
     }
 
     /// Scales `frame` into `rect` (uniform fit, centered) in the canvas.
+    ///
+    /// Nearest-neighbour mapping is exact integer floor math:
+    /// `fx = dx * fw / dw`, `fy = dy * fh / dh` (the previous `f64` version
+    /// truncated `dx / s` and could shift sampling by one source pixel). The
+    /// horizontal index is advanced incrementally so no division runs per pixel.
     fn blit(canvas: &mut Frame, frame: &Frame, rect: &PixelRect) {
         let (cw, ch) = (CANVAS_WIDTH as usize, CANVAS_HEIGHT as usize);
         // Visible region = intersection of `rect` with the canvas [0..W]×[0..H].
-        let rx = rect.x as usize;
-        let ry = rect.y as usize;
-        let right = rect.x.saturating_add(rect.w) as usize;
-        let bottom = rect.y.saturating_add(rect.h) as usize;
-        let rx = rx.min(cw);
-        let ry = ry.min(ch);
-        let right = right.min(cw);
-        let bottom = bottom.min(ch);
+        let right = (rect.x.saturating_add(rect.w) as usize).min(cw);
+        let bottom = (rect.y.saturating_add(rect.h) as usize).min(ch);
+        let rx = (rect.x as usize).min(cw);
+        let ry = (rect.y as usize).min(ch);
         let rw = right.saturating_sub(rx);
         let rh = bottom.saturating_sub(ry);
         if rw == 0 || rh == 0 || frame.width == 0 || frame.height == 0 {
             return;
         }
-        // Uniform (letterbox) scale, matching vks_layout::Renderer.
-        let sx = rw as f64 / frame.width as f64;
-        let sy = rh as f64 / frame.height as f64;
-        let s = sx.min(sy);
-        let dw = (frame.width as f64 * s).round() as usize;
-        let dh = (frame.height as f64 * s).round() as usize;
+        let fw = frame.width as usize;
+        let fh = frame.height as usize;
+        // Uniform (letterbox) fit, matching vks_layout::Renderer, in integer math:
+        // width-limited when rw/fw <= rh/fh, else height-limited. The free axis is
+        // rounded half-up exactly like the former `f64::round`.
+        let (dw, dh) = if rw * fh <= rh * fw {
+            (rw, ((fh * rw + fw / 2) / fw).max(1))
+        } else {
+            (((fw * rh + fh / 2) / fh).max(1), rh)
+        };
         if dw == 0 || dh == 0 {
             return;
         }
-        // Center the fitted image inside the rect (usize math, clamped to
-        // the canvas).
         let ox = rx + rw.saturating_sub(dw) / 2;
         let oy = ry + rh.saturating_sub(dh) / 2;
-        let fw = frame.width as usize;
-        let fh = frame.height as usize;
-        // 16.16 fixed-point nearest-neighbour mapping: the previous per-pixel
-        // `f64` division dominated the compose cost (4x720p could exceed the
-        // 30 fps budget). Integer steps keep the same geometry without FP
-        // division on the hot path.
-        let step_x = ((fw as u64) << 16) / dw as u64;
-        let step_y = ((fh as u64) << 16) / dh as u64;
+        let step_x = fw / dw;
+        let rem_x = fw % dw;
         for dy in 0..dh {
-            let fy = ((dy as u64 * step_y) >> 16) as usize;
-            let fy = fy.min(fh - 1);
-            let row = oy + dy;
-            if row >= ch {
-                break;
-            }
+            let fy = dy * fh / dh;
             let Some(source) = frame.data.get(fy * fw..fy * fw + fw) else { continue };
-            let destination_row = row * cw;
-            let Some(destination) = canvas.data.get_mut(destination_row + ox..destination_row + cw) else {
+            let destination_row = (oy + dy) * cw;
+            let Some(destination) = canvas.data.get_mut(destination_row + ox..destination_row + ox + dw) else {
                 continue;
             };
-            for (dx, pixel) in destination.iter_mut().enumerate().take(dw.min(cw.saturating_sub(ox))) {
-                let fx = ((dx as u64 * step_x) >> 16) as usize;
-                *pixel = source[fx.min(fw - 1)];
+            let mut fx = 0usize;
+            let mut rem = 0usize;
+            for pixel in destination {
+                *pixel = source[fx];
+                fx += step_x;
+                rem += rem_x;
+                if rem >= dw {
+                    rem -= dw;
+                    fx += 1;
+                }
             }
         }
         if canvas.data.len() == cw * ch * 3 / 2 {
@@ -139,29 +138,36 @@ impl Compositor {
             let source_pixels = fw * fh;
             let chroma_width = fw / 2;
             let chroma_height = fh / 2;
+            let chroma_dw = dw / 2;
+            let chroma_dh = dh / 2;
+            let chroma_step_x = chroma_width / chroma_dw.max(1);
+            let chroma_rem_x = chroma_width % chroma_dw.max(1);
             for plane in 0..2 {
                 let source_offset = source_pixels + plane * (source_pixels / 4);
                 let destination_offset = cw * ch + plane * (cw * ch / 4);
-                let chroma_step_x = ((chroma_width as u64) << 16) / (dw / 2).max(1) as u64;
-                let chroma_step_y = ((chroma_height as u64) << 16) / (dh / 2).max(1) as u64;
-                for dy in 0..dh / 2 {
+                for dy in 0..chroma_dh {
+                    let source_y = dy * chroma_height / chroma_dh.max(1);
                     let row = oy / 2 + dy;
-                    if row >= ch / 2 {
-                        break;
+                    let Some(destination) = canvas.data.get_mut(
+                        destination_offset + row * (cw / 2) + ox / 2
+                            ..destination_offset + row * (cw / 2) + ox / 2 + chroma_dw,
+                    ) else {
+                        continue;
+                    };
+                    if !is_yuv {
+                        destination.fill(128);
+                        continue;
                     }
-                    let source_y = (((dy as u64 * chroma_step_y) >> 16) as usize).min(chroma_height - 1);
-                    for dx in 0..dw / 2 {
-                        let column = ox / 2 + dx;
-                        if column >= cw / 2 {
-                            break;
+                    let mut fx = 0usize;
+                    let mut rem = 0usize;
+                    for pixel in destination {
+                        *pixel = frame.data[source_offset + source_y * chroma_width + fx];
+                        fx += chroma_step_x;
+                        rem += chroma_rem_x;
+                        if rem >= chroma_dw.max(1) {
+                            rem -= chroma_dw.max(1);
+                            fx += 1;
                         }
-                        let value = if is_yuv {
-                            let source_x = (((dx as u64 * chroma_step_x) >> 16) as usize).min(chroma_width - 1);
-                            frame.data[source_offset + source_y * chroma_width + source_x]
-                        } else {
-                            128
-                        };
-                        canvas.data[destination_offset + row * (cw / 2) + column] = value;
                     }
                 }
             }
@@ -172,6 +178,62 @@ impl Compositor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gradient_i420(width: usize, height: usize) -> Frame {
+        // Horizontal gradient pins the exact sampled source column; a uniform
+        // fill cannot detect a nearest-neighbour regression.
+        let mut data = vec![0u8; width * height * 3 / 2];
+        for y in 0..height {
+            for x in 0..width {
+                data[y * width + x] = (x % 251) as u8;
+            }
+        }
+        let chroma = width * height / 4;
+        data[width * height..width * height + chroma].fill(100);
+        data[width * height + chroma..].fill(200);
+        Frame::new(width as u32, height as u32, data)
+    }
+
+    /// Exact floor mapping `fx = dx * fw / dw` at a non-integer scale
+    /// (320x240 into 960x540 => dw=720, height-limited, ox=120).
+    #[test]
+    fn nearest_neighbour_maps_exact_source_columns() {
+        let frame = Arc::new(gradient_i420(320, 240));
+        let frames = BTreeMap::from([(0u32, frame)]);
+        let rects = BTreeMap::from([(0u32, PixelRect::new(0, 0, 960, 540))]);
+        let out = Compositor.compose(&frames, &rects);
+        let canvas_w = CANVAS_WIDTH as usize;
+        for dx in [0usize, 1, 2, 4, 9, 100, 359, 719] {
+            let expected = (dx * 320 / 720) % 251;
+            assert_eq!(out.data[dx + 120], expected as u8, "dx={dx} must sample source column {}", dx * 320 / 720);
+        }
+        // Chroma planes use the same exact mapping on their own resolution:
+        // dw/2 = 360 columns start at ox/2 = 60; U plane is 100, V plane 200.
+        let chroma_offset = canvas_w * CANVAS_HEIGHT as usize;
+        let chroma_plane = (canvas_w / 2) * (CANVAS_HEIGHT as usize / 2);
+        for dx in [0usize, 1, 179, 359] {
+            assert_eq!(out.data[chroma_offset + 60 + dx], 100, "U plane at dx={dx}");
+            assert_eq!(out.data[chroma_offset + chroma_plane + 60 + dx], 200, "V plane at dx={dx}");
+        }
+    }
+
+    /// Letterbox geometry stays centered and integer-exact (640x480 into 960x540).
+    #[test]
+    fn letterbox_geometry_is_centered() {
+        let frame = Arc::new(Frame::filled(640, 480, 77));
+        let frames = BTreeMap::from([(0u32, frame)]);
+        let rects = BTreeMap::from([(0u32, PixelRect::new(0, 0, 960, 540))]);
+        let out = Compositor.compose(&frames, &rects);
+        let canvas_w = CANVAS_WIDTH as usize;
+        // 640x480 at 1.125x => 720x540, centered with 120 px pillars on each side.
+        assert_eq!(out.data[0], 0, "left pillar is black");
+        assert_eq!(out.data[119], 0);
+        assert_eq!(out.data[120], 77, "image starts at the centered offset");
+        assert_eq!(out.data[120 + 719], 77);
+        assert_eq!(out.data[120 + 720], 0, "right pillar is black");
+        assert_eq!(out.data[(540 - 1) * canvas_w + 120], 77, "no vertical letterbox in the fitted image");
+        assert_eq!(out.data[540 * canvas_w + 120], 0, "bottom band outside 540-row image stays black");
+    }
 
     #[test]
     fn i420_color_survives_full_canvas_composition() {
