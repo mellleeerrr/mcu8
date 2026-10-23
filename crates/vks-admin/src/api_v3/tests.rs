@@ -3005,3 +3005,119 @@ async fn conference_contacts_counters_do_not_depend_on_session_state() {
     assert_eq!(body["conference"]["contacts"], inactive, "после остановки счётчики те же");
     assert_eq!(body["conference"]["has_stopped"], true, "комната остановлена");
 }
+
+/// T7: RBAC карточек/списков (Viewer не видит PIN), PATCH /profile и
+/// PATCH /sessions/{id} (exact и slash) в envelope, 409 на дубли имён.
+#[tokio::test]
+async fn t7_rbac_patches_and_duplicate_names() {
+    let (state, issuer) = test_state();
+    let viewer = crate::users::Users::create(&state, "t7_viewer", vks_core::Role::Viewer);
+    let viewer_token = issuer.issue(&viewer.id.to_string(), None).expect("issue viewer");
+    let app = app(state.clone());
+    let admin = login_token(&app, "admin", "s3cret").await;
+
+    let created = send(
+        &app,
+        request("POST", "/api/v3/conferences", Some(&admin), json!({"display_name":"T7 room","pin":"246813"})),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_body = json_body(created).await;
+    let room_id = created_body["conference"]["id"].as_str().expect("conference id").to_string();
+
+    // Anon: 401 envelope.
+    let anon = send(&app, request("GET", &format!("/api/v3/conferences/{room_id}"), None, json!({}))).await;
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+
+    // Viewer: карточка конференции и все 4 списка — 403 (и PIN недоступен).
+    for uri in [
+        format!("/api/v3/conferences/{room_id}"),
+        format!("/api/v3/ui/conferences/{room_id}"),
+        "/api/v3/conferences".to_string(),
+        "/api/v3/ui/conferences".to_string(),
+        "/api/v3/sessions".to_string(),
+        "/api/v3/ui/sessions".to_string(),
+    ] {
+        let response = send(&app, request("GET", &uri, Some(&viewer_token), json!({}))).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "Viewer {uri} должен быть 403");
+    }
+
+    // Admin: карточка 200 и PIN на месте (гейт, а не удаление поля).
+    let card = send(&app, request("GET", &format!("/api/v3/conferences/{room_id}"), Some(&admin), json!({}))).await;
+    assert_eq!(card.status(), StatusCode::OK);
+    let card_body = json_body(card).await;
+    assert_eq!(card_body["conference"]["pin"], "246813");
+    assert_eq!(card_body["conference"]["has_pin"], true);
+
+    // PATCH /profile: 200, записанные поля читаются из GET; role игнорируется.
+    let patch = send(
+        &app,
+        request(
+            "PATCH",
+            "/api/v3/profile",
+            Some(&admin),
+            json!({"display_name":"T7 admin","emails":["ops@example.test"],"locale_id":"en_US","role":"viewer"}),
+        ),
+    )
+    .await;
+    assert_eq!(patch.status(), StatusCode::OK);
+    let patch_body = json_body(patch).await;
+    assert_eq!(patch_body["user"]["display_name"], "T7 admin");
+    assert_ne!(patch_body["user"]["roles"][0]["display_name"], "Viewer", "self-PATCH не меняет роль");
+    let profile = send(&app, request("GET", "/api/v3/profile", Some(&admin), json!({}))).await;
+    let profile_body = json_body(profile).await;
+    assert_eq!(profile_body["user"]["emails"][0], "ops@example.test");
+    assert_eq!(profile_body["user"]["locale_id"], "en_US");
+    // Slash-форма тоже реализована (раньше 501 из catch-all).
+    let slash =
+        send(&app, request("PATCH", "/api/v3/profile/", Some(&admin), json!({"display_name":"T7 admin 2"}))).await;
+    assert_eq!(slash.status(), StatusCode::OK);
+    let slash_body = json_body(slash).await;
+    assert_eq!(slash_body["user"]["display_name"], "T7 admin 2");
+
+    // Viewer может править свой профиль (это не админская операция).
+    let viewer_patch =
+        send(&app, request("PATCH", "/api/v3/profile", Some(&viewer_token), json!({"display_name":"V"}))).await;
+    assert_eq!(viewer_patch.status(), StatusCode::OK);
+
+    // PATCH /sessions/{id}: 200 (exact и slash), имя меняется; Viewer — 403.
+    for uri in [format!("/api/v3/sessions/{room_id}"), format!("/api/v3/ui/sessions/{room_id}/")] {
+        let response =
+            send(&app, request("PATCH", &uri, Some(&admin), json!({"display_name":"T7 renamed", "duration": 600})))
+                .await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri} должен быть 200");
+    }
+    let after = send(&app, request("GET", &format!("/api/v3/conferences/{room_id}"), Some(&admin), json!({}))).await;
+    let after_body = json_body(after).await;
+    assert_eq!(after_body["conference"]["display_name"], "T7 renamed");
+    assert_eq!(after_body["conference"]["duration"], 600);
+    let viewer_patch_session = send(
+        &app,
+        request("PATCH", &format!("/api/v3/sessions/{room_id}"), Some(&viewer_token), json!({"display_name":"x"})),
+    )
+    .await;
+    assert_eq!(viewer_patch_session.status(), StatusCode::FORBIDDEN);
+
+    // 409: дубль имени при создании и при переименовании, тело — envelope.
+    let dup =
+        send(&app, request("POST", "/api/v3/conferences", Some(&admin), json!({"display_name":"T7 renamed"}))).await;
+    assert_eq!(dup.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(dup).await["error"]["code"], 409);
+    let second =
+        send(&app, request("POST", "/api/v3/conferences", Some(&admin), json!({"display_name":"T7 other"}))).await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_body = json_body(second).await;
+    let other_id = second_body["conference"]["id"].as_str().expect("id").to_string();
+    let rename_dup = send(
+        &app,
+        request(
+            "PATCH",
+            &format!("/api/v3/conferences/{other_id}"),
+            Some(&admin),
+            json!({"display_name":"T7 renamed"}),
+        ),
+    )
+    .await;
+    assert_eq!(rename_dup.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(rename_dup).await["error"]["code"], 409);
+}

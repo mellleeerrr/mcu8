@@ -49,6 +49,18 @@ impl Rooms {
         Ok(record)
     }
 
+    /// Занято ли имя комнаты (регистронезависимо, как UI/lookup). `except` —
+    /// сама переименовываемая комната: её собственное имя не конфликт.
+    pub fn name_taken(state: &AppState, name: &str, except: Option<&RoomId>) -> bool {
+        let target = name.trim().to_lowercase();
+        state
+            .rooms
+            .lock()
+            .expect("rooms store poisoned")
+            .values()
+            .any(|room| room.name.trim().to_lowercase() == target && except != Some(&room.id))
+    }
+
     /// Возвращает запись комнаты.
     pub fn get(state: &AppState, id: &RoomId) -> Option<RoomRecord> {
         state.rooms.lock().expect("rooms store poisoned").get(id).cloned()

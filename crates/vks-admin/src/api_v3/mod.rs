@@ -122,7 +122,8 @@ pub fn router(state: SharedState) -> Router {
         // Auth (protected: смена пароля).
         .route("/api/v3/password", patch(auth::change_password))
         // Shell (§4.5).
-        .route("/api/v3/profile", get(shell::profile))
+        .route("/api/v3/profile", get(shell::profile).patch(directory::update_profile))
+        .route("/api/v3/profile/", get(shell::profile).patch(directory::update_profile))
         .route("/api/v3/time-zones", get(shell::time_zones))
         .route("/api/v3/locales", get(shell::locales))
         .route("/api/v3/abonents/stop_reasons", get(shell::stop_reasons))
@@ -364,11 +365,25 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/conferences/status", get(shell::conferences_status))
         // Фаза 3 — данные (наши комнаты).
         .route("/api/v3/ui/sessions", get(sessions::ui_sessions).post(sessions::start_session))
-        .route("/api/v3/ui/sessions/{id}", get(sessions::session).delete(sessions::stop_session))
+        .route(
+            "/api/v3/ui/sessions/{id}",
+            get(sessions::session).patch(sessions::update_conference).delete(sessions::stop_session),
+        )
+        .route(
+            "/api/v3/ui/sessions/{id}/",
+            get(sessions::session).patch(sessions::update_conference).delete(sessions::stop_session),
+        )
         .route("/api/v3/ui/sessions/{id}/abonents", get(sessions::session_abonents))
         .route("/api/v3/sessions", get(sessions::sessions).post(sessions::start_session))
         .route("/api/v3/sessions/", get(sessions::sessions).post(sessions::start_session))
-        .route("/api/v3/sessions/{id}", get(sessions::session).delete(sessions::stop_session))
+        .route(
+            "/api/v3/sessions/{id}",
+            get(sessions::session).patch(sessions::update_conference).delete(sessions::stop_session),
+        )
+        .route(
+            "/api/v3/sessions/{id}/",
+            get(sessions::session).patch(sessions::update_conference).delete(sessions::stop_session),
+        )
         .route("/api/v3/sessions/{id}/abonents", get(sessions::session_abonents))
         .route("/api/v3/conferences", get(sessions::conferences).post(sessions::create_conference))
         .route("/api/v3/conferences/", get(sessions::conferences).post(sessions::create_conference))

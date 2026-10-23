@@ -1279,6 +1279,60 @@ async fn t02_mode_switch_on_shared_layout_copies_on_write() {
     assert_eq!(resources.links[&other_key], vec![layout], "другая комната осталась на оригинале");
 }
 
+/// T7: mode-only запрос (без preset/type/size) не затирает топологию
+/// вендорскими дефолтами; явный topology-payload по-прежнему применяется.
+#[tokio::test]
+async fn t7_mode_only_preserves_preset_type_size() {
+    let state = state();
+    let room = Rooms::create_async(&state, "mode only").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Mode only",
+        json!({"mode":"manual","preset":"preset_equal_4","type":"individual","size":4}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &layout).await, StatusCode::NO_CONTENT);
+
+    let response = crate::api_v3::shell::switch_video_layout_mode(
+        State(state.clone()),
+        Extension(operator()),
+        Json(crate::api_v3::shell::SwitchVideoLayoutModeRequest {
+            session_id: Some(room.id.to_string()),
+            conference_id: None,
+            mode: Some("auto".into()),
+            video_layout_id: Some(layout.clone()),
+            extra: serde_json::Map::new(),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = body(response).await;
+    assert_eq!(payload["payload"]["mode"], "auto");
+    assert_eq!(payload["payload"]["preset"], "preset_equal_4", "preset не перезаписан дефолтом");
+    assert_eq!(payload["payload"]["type"], "individual", "type не перезаписан дефолтом");
+    assert_eq!(payload["payload"]["size"], 4, "size не перезаписан дефолтом");
+
+    // Явный topology-payload применяется как раньше.
+    let mut extra = serde_json::Map::new();
+    extra.insert("payload".into(), json!({"mode":"manual","preset":"vks_grid_9","type":"individual","size":9}));
+    let response = crate::api_v3::shell::switch_video_layout_mode(
+        State(state.clone()),
+        Extension(operator()),
+        Json(crate::api_v3::shell::SwitchVideoLayoutModeRequest {
+            session_id: Some(room.id.to_string()),
+            conference_id: None,
+            mode: Some("manual".into()),
+            video_layout_id: Some(layout.clone()),
+            extra,
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = body(response).await;
+    assert_eq!(payload["payload"]["preset"], "vks_grid_9");
+    assert_eq!(payload["payload"]["size"], 9);
+}
+
 #[tokio::test]
 async fn t02_remove_default_is_409_and_single_layout_removal_restores_default() {
     let state = state();

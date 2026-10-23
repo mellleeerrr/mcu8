@@ -306,11 +306,20 @@ pub fn find_room(state: &AppState, id: &str) -> Option<RoomRecord> {
     rooms.values().find(|r| r.name == clean || r.name.eq_ignore_ascii_case(clean)).cloned()
 }
 
+/// Единая ролевая точка: всё, что содержит конфиг/PIN комнат (карточки,
+/// списки, мутации), доступно только Moderator+. Раньше карточка конференции и
+/// списки отдавали Viewer'у `pin` — теперь гейт один и тот же.
 #[allow(clippy::result_large_err)]
-pub fn check_permission(auth: &AuthContext, target_room_id: Option<&str>) -> Result<(), Response> {
+pub fn require_moderator(auth: &AuthContext) -> Result<(), Response> {
     if auth.role < Role::Moderator {
         return Err(error_json(403, "Forbidden: insufficient permissions"));
     }
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+pub fn check_permission(auth: &AuthContext, target_room_id: Option<&str>) -> Result<(), Response> {
+    require_moderator(auth)?;
     if let Some(ref scope) = auth.room_scope {
         match target_room_id {
             Some(rid) if rid.eq_ignore_ascii_case(scope) => Ok(()),
@@ -319,6 +328,19 @@ pub fn check_permission(auth: &AuthContext, target_room_id: Option<&str>) -> Res
     } else {
         Ok(())
     }
+}
+
+/// Событие `sessions:started` уходит всем WS-подписчикам (subscribe не гейтится
+/// по роли), поэтому PIN/`has_pin` из него вырезаются: право на PIN — только
+/// Moderator+ через гейченные списки/карточки. UI по событию перезапрашивает
+/// данные сам; id/имя ему достаточно.
+fn session_started_event(state: &AppState, room: &RoomRecord, contacts: &[Value]) -> Value {
+    let mut session = session_json(state, room, connections_limit(state), false, contacts);
+    if let Some(object) = session.as_object_mut() {
+        object.remove("pin");
+        object.remove("has_pin");
+    }
+    json!({"id": room.id.to_string(), "conference": {"id": room.id.to_string()}, "session": session})
 }
 
 fn audit_room(state: &AppState, user: &str, action: &str, room_id: &str, client_ip: Option<&str>) {
@@ -370,6 +392,9 @@ pub async fn ui_sessions(
     Query(query): Query<SessionsQuery>,
 ) -> Response {
     track("ui/sessions");
+    if let Err(resp) = require_moderator(&auth) {
+        return resp;
+    }
     Json(filter_sessions_scope(sessions_payload(&state, &query).await, &auth)).into_response()
 }
 
@@ -402,6 +427,9 @@ pub async fn sessions(
     Query(query): Query<SessionsQuery>,
 ) -> Response {
     track("sessions");
+    if let Err(resp) = require_moderator(&auth) {
+        return resp;
+    }
     Json(filter_sessions_scope(sessions_payload(&state, &query).await, &auth)).into_response()
 }
 
@@ -510,7 +538,8 @@ pub async fn start_session(
             None => return error_json(404, "Conference not found"),
         }
     } else {
-        match Rooms::create_async(&state, "Quick Session".to_string()).await {
+        let name = unique_room_name(&state, "Quick Session");
+        match Rooms::create_async(&state, name).await {
             Ok(r) => r,
             Err(e) => return error_json(500, &format!("Storage error: {e}")),
         }
@@ -570,7 +599,7 @@ pub async fn start_session(
                 .push(record);
         }
     }
-    state.notify_admin("sessions:started", json!({"id":room.id.to_string(),"conference":{"id":room.id.to_string()},"session":session_json(&state,&room,connections_limit(&state),false,&contacts)}));
+    state.notify_admin("sessions:started", session_started_event(&state, &room, &contacts));
     state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
     audit_room(
         &state,
@@ -598,8 +627,9 @@ pub async fn quick_session(
         .and_then(|b| b.get("display_name").or_else(|| b.get("name")))
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or("Quick Session");
-    let room = match Rooms::create_async(&state, name.to_string()).await {
+        .map(str::to_string)
+        .unwrap_or_else(|| unique_room_name(&state, "Quick Session"));
+    let room = match Rooms::create_async(&state, name).await {
         Ok(r) => r,
         Err(e) => return error_json(500, &format!("Storage error: {e}")),
     };
@@ -612,7 +642,7 @@ pub async fn quick_session(
     if let Err(response) = prepare_session_resources(&state, &room.id.to_string(), &auth.subject).await {
         return response;
     }
-    state.notify_admin("sessions:started", json!({"id":room.id.to_string(),"conference":{"id":room.id.to_string()},"session":session_json(&state,&room,connections_limit(&state),false,&[])}));
+    state.notify_admin("sessions:started", session_started_event(&state, &room, &[]));
     state.notify_admin("sessions", json!({ "action": "started", "id": room.id.to_string() }));
     state.notify_admin("conferences:created", json!({ "id": room.id.to_string() }));
     state.notify_admin("conferences", json!({ "action": "created", "id": room.id.to_string() }));
@@ -715,6 +745,9 @@ pub async fn conferences(
     Query(query): Query<SessionsQuery>,
 ) -> Response {
     track("conferences");
+    if let Err(resp) = require_moderator(&auth) {
+        return resp;
+    }
     Json(filter_sessions_scope(conferences_payload(&state, &query).await, &auth)).into_response()
 }
 
@@ -725,11 +758,28 @@ pub async fn ui_conferences(
     Query(query): Query<SessionsQuery>,
 ) -> Response {
     track("ui/conferences");
+    if let Err(resp) = require_moderator(&auth) {
+        return resp;
+    }
     Json(filter_sessions_scope(conferences_payload(&state, &query).await, &auth)).into_response()
 }
 
 /// `POST /api/v3/conferences` — создание комнаты тем же внутренним путём,
 /// что `POST /api/v1/rooms` (без дублирования логики).
+/// Свободное имя комнаты для автосоздаваемых сессий: точный дубль имени в
+/// SQLite UNIQUE давал 500; теперь `Quick Session`, `Quick Session 2`, …
+fn unique_room_name(state: &AppState, base: &str) -> String {
+    let taken: std::collections::HashSet<String> =
+        state.rooms.lock().expect("rooms store poisoned").values().map(|r| r.name.to_lowercase()).collect();
+    if !taken.contains(&base.to_lowercase()) {
+        return base.to_string();
+    }
+    (2..=9999)
+        .map(|n| format!("{base} {n}"))
+        .find(|candidate| !taken.contains(&candidate.to_lowercase()))
+        .unwrap_or_else(|| format!("{base} {}", uuid::Uuid::new_v4()))
+}
+
 /// Свободный 9-значный DTMF-код конференции (vendor-контракт: `primary_dtmf`).
 fn free_dtmf(settings: &std::collections::HashMap<vks_core::RoomId, Value>) -> String {
     let taken: std::collections::HashSet<&str> =
@@ -785,6 +835,9 @@ pub async fn create_conference(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Conference".to_string());
+    if Rooms::name_taken(&state, &name, None) {
+        return error_json(409, "Conference with the same name already exists");
+    }
     let record = match Rooms::create_async(&state, name.clone()).await {
         Ok(r) => r,
         Err(e) => return error_json(500, &format!("Storage error: {e}")),
@@ -838,10 +891,17 @@ pub async fn create_conference(
 }
 
 /// `GET /api/v3/conferences/{id}` → `{conference:{…}}` (404 JSON если нет).
-pub async fn conference(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
+pub async fn conference(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Response {
     track("conferences/{id}");
     match find_room(&state, &id) {
         Some(room) => {
+            if let Err(resp) = check_permission(&auth, Some(&room.id.to_string())) {
+                return resp;
+            }
             let is_stopped =
                 state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
             let contacts = contacts_snapshot(&state).await;
@@ -868,6 +928,9 @@ pub async fn update_conference(
         return error_json(404, "Conference not found");
     };
     if let Some(new_name) = body.display_name.filter(|s| !s.trim().is_empty()) {
+        if Rooms::name_taken(&state, &new_name, Some(&room.id)) {
+            return error_json(409, "Conference with the same name already exists");
+        }
         if let Err(e) = Rooms::update_async(&state, &room.id, Some(new_name), None, None, None).await {
             return error_json(500, &format!("Storage error: {e}"));
         }

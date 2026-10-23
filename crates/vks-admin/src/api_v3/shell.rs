@@ -67,6 +67,14 @@ pub async fn profile(State(state): State<SharedState>, Extension(verified): Exte
         .filter(|d| !d.is_empty())
         .or_else(|| username_from_db.clone())
         .unwrap_or_else(|| verified.user_id.clone());
+    // T7: PATCH /profile пишет эти поля в directory-профиль — GET обязан их
+    // отдавать, иначе UI видит изменение только display_name.
+    let profile_locale = directory_profile.as_ref().and_then(|p| p.locale_id.clone());
+    let profile_timezone = directory_profile.as_ref().and_then(|p| p.time_zone_id.clone());
+    let profile_emails = directory_profile.as_ref().map(|p| p.emails.clone()).unwrap_or_default();
+    let profile_phones = directory_profile.as_ref().map(|p| p.phones.clone()).unwrap_or_default();
+    let profile_description = directory_profile.as_ref().and_then(|p| p.description.clone());
+    let profile_view_own_only = directory_profile.as_ref().is_some_and(|p| p.view_own_only);
 
     // Роль — только из admin-хранилища (Users); неизвестному субъекту — Viewer
     // (least privilege). Единая точка резолвинга id/username — `Users::resolve_role`.
@@ -98,17 +106,17 @@ pub async fn profile(State(state): State<SharedState>, Extension(verified): Exte
                 "display_name": role.as_str(),
                 "permissions": permissions
             }],
-            "view_own_only": false,
+            "view_own_only": profile_view_own_only,
             "address": "",
             "payload": {},
             "permissions": permissions,
-            "locale_id": "ru_RU",
-            "time_zone_id": timezone,
+            "locale_id": profile_locale.unwrap_or_else(|| "ru_RU".to_string()),
+            "time_zone_id": profile_timezone.unwrap_or(timezone),
             "groups": [],
-            "emails": [],
-            "phones": [],
+            "emails": profile_emails,
+            "phones": profile_phones,
             "avatars": [],
-            "description": "",
+            "description": profile_description.unwrap_or_default(),
             "creator_id": "",
             "created_at": 0,
             "busy": false,
@@ -921,14 +929,6 @@ pub async fn switch_video_layout_mode(
                 .map(|scheme| scheme.count as u64)
         })
         .unwrap_or(13);
-    let type_default = match mode_lc.as_str() {
-        "dynamic" | "manual" => "individual",
-        _ => "default",
-    };
-    let preset_default = match mode_lc.as_str() {
-        "dynamic" | "manual" => format!("preset_equal_{inferred_size}"),
-        _ => "preset_default_13".to_string(),
-    };
     // `payload.mode` — режим раскладки (auto/dynamic/manual); mcu/sfu — топология комнаты.
     // `Boe` кладёт новый режим в `new_mode`, а в nested `payload.mode` — старое значение.
     // Приоритет: new_mode (auto/dynamic/manual) → nested payload.mode → auto.
@@ -943,9 +943,18 @@ pub async fn switch_video_layout_mode(
     };
     let mut patch = serde_json::Map::new();
     patch.insert("mode".to_string(), json!(layout_mode));
-    patch.insert("preset".to_string(), preset_field.unwrap_or_else(|| json!(preset_default)));
-    patch.insert("type".to_string(), field("type").unwrap_or_else(|| json!(type_default)));
-    patch.insert("size".to_string(), json!(inferred_size));
+    // T7: mode-only запрос не должен затирать топологию. `Boe` шлёт preset/type
+    // при смене схемы; если их нет — сохраняем прежние значения из payload.
+    let preset_present = preset_field.is_some();
+    if let Some(preset) = preset_field {
+        patch.insert("preset".to_string(), preset);
+    }
+    if let Some(layout_type) = field("type") {
+        patch.insert("type".to_string(), layout_type);
+    }
+    if size.is_some() || slots.is_some() || preset_present {
+        patch.insert("size".to_string(), json!(inferred_size));
+    }
     if let Some((slots, _)) = slots {
         patch.insert("slots".to_string(), slots);
     }

@@ -592,6 +592,9 @@ async fn spawn_live_server_with_auth() -> (SocketAddr, Arc<AppState>, String) {
     }));
     let db = Arc::new(LocalDb::new());
     db.register("u-admin", "admin", "admin").expect("register admin");
+    // T7: списки комнат гейтятся Moderator+; без записи в Users токен
+    // резолвится в Viewer (least privilege) и /ui/sessions отдаёт 403.
+    vks_admin::users::Users::bootstrap_operator(&state, "admin");
     state.jwt_issuer = Some(issuer.clone());
     state.local_db = Some(db);
     let token = issuer.issue("admin", None).expect("issue");
@@ -888,6 +891,9 @@ async fn spawn_live_server_with_sfu_udp() -> (SocketAddr, SocketAddr, Arc<AppSta
     }));
     let db = Arc::new(LocalDb::new());
     db.register("u-admin", "admin", "admin").expect("register admin");
+    // T7: списки комнат гейтятся Moderator+; без записи в Users токен
+    // резолвится в Viewer (least privilege) и /ui/sessions отдаёт 403.
+    vks_admin::users::Users::bootstrap_operator(&state, "admin");
     state.jwt_issuer = Some(issuer.clone());
     state.local_db = Some(db);
     let token = issuer.issue("admin", None).expect("issue");
@@ -1122,6 +1128,9 @@ async fn spawn_live_server_with_mcu_sfu(
     }));
     let db = Arc::new(LocalDb::new());
     db.register("u-admin", "admin", "admin").expect("register admin");
+    // T7: списки комнат гейтятся Moderator+; без записи в Users токен
+    // резолвится в Viewer (least privilege) и /ui/sessions отдаёт 403.
+    vks_admin::users::Users::bootstrap_operator(&state, "admin");
     state.jwt_issuer = Some(issuer.clone());
     state.local_db = Some(db);
     Users::bootstrap_operator(&state, "admin");

@@ -740,6 +740,87 @@ pub async fn get_user(
         .into_response()
 }
 
+/// Общие поля directory-профиля из PATCH-тела: и админский `update_user`, и
+/// self-`update_profile` пишут одни и те же поля (без `view_own_only`/`role` —
+/// их self-изменение запрещено).
+fn patch_directory_profile(directory: &mut DirectoryState, user: &crate::state::UserRecord, body: &Value) {
+    let profile = ensure_profile(directory, user);
+    if let Some(display) = body["display_name"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        profile.display_name = display.to_string();
+    }
+    if body.get("description").is_some() {
+        profile.description = body["description"].as_str().map(str::to_string);
+    }
+    if body.get("locale_id").is_some() {
+        profile.locale_id = body["locale_id"].as_str().map(str::to_string);
+    }
+    if body.get("time_zone_id").is_some() {
+        profile.time_zone_id = body["time_zone_id"].as_str().map(str::to_string);
+    }
+    if body.get("emails").is_some() {
+        profile.emails = string_list(body.get("emails"));
+    }
+    if body.get("phones").is_some() {
+        profile.phones = string_list(body.get("phones"));
+    }
+}
+
+fn validate_profile_patch(body: &Value) -> Result<(), Response> {
+    let new_display = body["display_name"].as_str().map(str::trim).filter(|s| !s.is_empty());
+    if body.get("display_name").is_some() && new_display.is_none() {
+        return Err(error_json(400, "display_name must not be empty"));
+    }
+    if new_display.is_some_and(|d| d.chars().count() > 255) {
+        return Err(error_json(400, "display_name is too long"));
+    }
+    Ok(())
+}
+
+/// `PATCH /api/v3/profile` — self-редактирование профиля (UI зовёт этот метод;
+/// до T7 маршрута не было — 405 с пустым телом). Роль/группы/`view_own_only`
+/// игнорируются: их меняет только администратор.
+pub async fn update_profile(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    client_ip: Option<Extension<ClientIp>>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    track("profile.update");
+    let body = match json_body(payload) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Some(user) = crate::users::Users::resolve(&state, &auth.subject) else {
+        return error_json(404, "User not found");
+    };
+    if let Err(response) = validate_profile_patch(&body) {
+        return response;
+    }
+    let user_id = user.id.to_string();
+    if let Err(response) = commit_directory(&state, |resources| {
+        patch_directory_profile(&mut resources.directory, &user, &body);
+        Ok(())
+    })
+    .await
+    {
+        return response;
+    }
+    let detail = {
+        let Some(updated) = find_user(&state, &user_id) else {
+            return error_json(404, "User not found");
+        };
+        let resources = state.api_v3.resources.lock().await;
+        user_detail(&state, &resources.directory, &updated, caller_id(&state, &auth.subject).as_deref())
+    };
+    state.record_audit_entry(
+        &auth.subject,
+        "profile.updated",
+        Some(user_id),
+        client_ip.map(|Extension(ip)| ip.0).unwrap_or_default(),
+    );
+    Json(json!({"user": detail})).into_response()
+}
+
 /// `PATCH /api/v3/users/{id}` — редактирование профиля.
 pub async fn update_user(
     State(state): State<SharedState>,
@@ -760,35 +841,14 @@ pub async fn update_user(
         return error_json(404, "User not found");
     };
     let user_id = user.id.to_string();
-    let new_display = body["display_name"].as_str().map(str::trim).filter(|s| !s.is_empty());
-    if body.get("display_name").is_some() && new_display.is_none() {
-        return error_json(400, "display_name must not be empty");
-    }
-    if new_display.is_some_and(|d| d.chars().count() > 255) {
-        return error_json(400, "display_name is too long");
+    if let Err(response) = validate_profile_patch(&body) {
+        return response;
     }
     if let Err(response) = commit_directory(&state, |resources| {
-        let profile = ensure_profile(&mut resources.directory, &user);
-        if let Some(display) = new_display {
-            profile.display_name = display.to_string();
-        }
-        if body.get("description").is_some() {
-            profile.description = body["description"].as_str().map(str::to_string);
-        }
+        patch_directory_profile(&mut resources.directory, &user, &body);
         if body.get("view_own_only").is_some() {
+            let profile = ensure_profile(&mut resources.directory, &user);
             profile.view_own_only = body["view_own_only"].as_bool().unwrap_or(false);
-        }
-        if body.get("locale_id").is_some() {
-            profile.locale_id = body["locale_id"].as_str().map(str::to_string);
-        }
-        if body.get("time_zone_id").is_some() {
-            profile.time_zone_id = body["time_zone_id"].as_str().map(str::to_string);
-        }
-        if body.get("emails").is_some() {
-            profile.emails = string_list(body.get("emails"));
-        }
-        if body.get("phones").is_some() {
-            profile.phones = string_list(body.get("phones"));
         }
         Ok(())
     })
