@@ -249,6 +249,12 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > liveness-предикат вынесен и покрыт тестом. UAC/UAS-политика fmtp синхронизирована
 > (`config` при cpresent=1 допустим, object≠2/SBR/cpresent=0 отвергаются), добавлены
 > негативные UAC-тесты. Пейсер ограничен 2 кадрами за тик (3 при backlog>4).
+> **LIVE AAC доказан (2026-10-23):** два локальных SIP UAS, legal opt-in, 200 OK с
+> `MP4A-LATM/90000`, RTP PT113 в обе стороны, счётчики rx/tx растут, UAS2 декодировал
+> микс MCU → AAC → PCM: `samples=121856 rms=0.0887` (тон UAS1 через MCU), UAS1 — тишина
+> (свой звук не возвращается); liveness/source-validator предупреждений нет, 4 FFmpeg-воркера
+> живы. Default-off восстановлен (`aac_latm=false`). Evidence:
+> `docs/progress/evidence/t06b8-live-aac/` (`SUMMARY.md`, `server.log`, `uas*.log`).
 > (`WorkerPool::try_reserve(2)`) для двух прямых FFmpeg-процессов. **Live-бинарь `3caa7546`:
 > legal-гейт enforced — `aac_latm=false`, API AAC supported=false** (включается только
 > `VKS_AAC_LATM_LEGAL_ACCEPTED=1`). Осталось до 9.5: RTP-level AAC-тест (16:15/marker/timestamp/

@@ -1,0 +1,53 @@
+[uas] listening on udp/5091
+[uas] prepared 3001 AAC frames (543890 LOAS bytes)
+[uas] rx RTP #1 pt=72 marker=True seq=6 ts=1502426764 len=36
+[uas] INVITE call-out-491c886b-d539-4881-9c99-a5aa5e3c4caa offer audio=41002@192.168.1.93; answering AAC 113
+[uas] sent 200 OK with MP4A-LATM/90000
+[uas] ACK received; starting RTP
+[uas] sent 1 AAC RTP packets
+[uas] rx RTP #25 pt=113 marker=True seq=30892 ts=2737336247 len=11
+[uas] sent 51 AAC RTP packets
+[uas] rx RTP #100 pt=113 marker=True seq=30967 ts=2737480247 len=11
+[uas] sent 101 AAC RTP packets
+[uas] decoded rx: samples=118784 rms=0.0000 nonzero=0
+[uas] sent 151 AAC RTP packets
+[uas] sent 201 AAC RTP packets
+[uas] sent 251 AAC RTP packets
+[uas] sent 301 AAC RTP packets
+[uas] sent 351 AAC RTP packets
+[uas] sent 401 AAC RTP packets
+[uas] sent 451 AAC RTP packets
+[uas] sent 501 AAC RTP packets
+[uas] sent 551 AAC RTP packets
+[uas] sent 601 AAC RTP packets
+[uas] sent 651 AAC RTP packets
+[uas] sent 701 AAC RTP packets
+[uas] sent 751 AAC RTP packets
+[uas] sent 801 AAC RTP packets
+[uas] sent 851 AAC RTP packets
+[uas] sent 901 AAC RTP packets
+[uas] sent 951 AAC RTP packets
+[uas] sent 1001 AAC RTP packets
+[uas] sent 1051 AAC RTP packets
+[uas] sent 1101 AAC RTP packets
+[uas] sent 1151 AAC RTP packets
+[uas] sent 1201 AAC RTP packets
+[uas] sent 1251 AAC RTP packets
+[uas] sent 1301 AAC RTP packets
+[uas] sent 1351 AAC RTP packets
+[uas] sent 1401 AAC RTP packets
+[uas] sent 1451 AAC RTP packets
+[uas] sent 1501 AAC RTP packets
+[uas] sent 1551 AAC RTP packets
+[uas] sent 1601 AAC RTP packets
+[uas] sent 1651 AAC RTP packets
+[uas] sent 1701 AAC RTP packets
+[uas] sent 1751 AAC RTP packets
+[uas] sent 1801 AAC RTP packets
+[uas] sent 1851 AAC RTP packets
+[uas] sent 1901 AAC RTP packets
+[uas] sent 1951 AAC RTP packets
+[uas] sent 2001 AAC RTP packets
+[uas] sent 2051 AAC RTP packets
+[uas] done: rx_packets=2083 sent_started=True
+[uas] rx pts={72, 113} markers={True} first_ts_deltas=[0, 0, 0, 1234871083, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920]

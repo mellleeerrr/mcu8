@@ -1,0 +1,47 @@
+[uas] listening on udp/5092
+[uas] prepared 2064 AAC frames (373937 LOAS bytes)
+[uas] rx RTP #1 pt=72 marker=True seq=6 ts=2553325367 len=36
+[uas] INVITE call-out-d1bfe764-e465-4d39-92b6-b9d7028c7175 offer audio=41000@192.168.1.93; answering AAC 113
+[uas] sent 200 OK with MP4A-LATM/90000
+[uas] ACK received; starting RTP
+[uas] sent 1 AAC RTP packets
+[uas] rx RTP #25 pt=113 marker=True seq=45737 ts=2219966536 len=163
+[uas] sent 51 AAC RTP packets
+[uas] rx RTP #100 pt=113 marker=True seq=45812 ts=2220110536 len=176
+[uas] sent 101 AAC RTP packets
+[uas] decoded rx: samples=121856 rms=0.0887 nonzero=121179
+[uas] sent 151 AAC RTP packets
+[uas] sent 201 AAC RTP packets
+[uas] sent 251 AAC RTP packets
+[uas] sent 301 AAC RTP packets
+[uas] sent 351 AAC RTP packets
+[uas] sent 401 AAC RTP packets
+[uas] sent 451 AAC RTP packets
+[uas] sent 501 AAC RTP packets
+[uas] sent 551 AAC RTP packets
+[uas] sent 601 AAC RTP packets
+[uas] sent 651 AAC RTP packets
+[uas] sent 701 AAC RTP packets
+[uas] sent 751 AAC RTP packets
+[uas] sent 801 AAC RTP packets
+[uas] sent 851 AAC RTP packets
+[uas] sent 901 AAC RTP packets
+[uas] sent 951 AAC RTP packets
+[uas] sent 1001 AAC RTP packets
+[uas] sent 1051 AAC RTP packets
+[uas] sent 1101 AAC RTP packets
+[uas] sent 1151 AAC RTP packets
+[uas] sent 1201 AAC RTP packets
+[uas] sent 1251 AAC RTP packets
+[uas] sent 1301 AAC RTP packets
+[uas] sent 1351 AAC RTP packets
+[uas] sent 1401 AAC RTP packets
+[uas] sent 1451 AAC RTP packets
+[uas] sent 1501 AAC RTP packets
+[uas] sent 1551 AAC RTP packets
+[uas] sent 1601 AAC RTP packets
+[uas] sent 1651 AAC RTP packets
+[uas] sent 1701 AAC RTP packets
+[uas] sent 1751 AAC RTP packets
+[uas] done: rx_packets=1784 sent_started=True
+[uas] rx pts={72, 113} markers={True} first_ts_deltas=[-333402991, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920, 1920]
