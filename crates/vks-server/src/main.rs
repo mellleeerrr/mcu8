@@ -381,6 +381,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let availability = vks_common::codec_capabilities::VideoCodecAvailability { h264: h264_raw, h265: h265_raw };
     vks_common::codec_capabilities::set_video_codec_availability(availability);
     info!(h264 = availability.h264, h265 = availability.h265, "gateway video codec availability");
+    // AAC-LATM stays unavailable until FFmpeg exposes both the AAC encoder +
+    // latm muxer and the aac_latm decoder + loas demuxer. Advertising it before
+    // the audio worker exists would connect calls with dead audio.
+    let aac_latm = vks_server::transcoder_runtime::capabilities()
+        .is_some_and(vks_media_mcu::codec_worker::ffmpeg::FfmpegCapabilities::has_audio_latm_bridge);
+    vks_common::codec_capabilities::set_audio_codec_availability(
+        vks_common::codec_capabilities::AudioCodecAvailability { aac_latm },
+    );
+    info!(aac_latm, "gateway audio codec availability (not advertised until the bridge lands)");
 
     if let Err(error) = vks_server::webrtc_runtime::preflight(&handler_config) {
         error!(%error, "WebRTC preflight failed");

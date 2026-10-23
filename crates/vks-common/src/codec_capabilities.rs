@@ -25,6 +25,34 @@ pub struct VideoCodecAvailability {
     pub h265: bool,
 }
 
+/// Доступность аудио-мостов, зависящих от внешнего FFmpeg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioCodecAvailability {
+    /// MP4A-LATM bridge: AAC encoder + `latm` muxer + `aac_latm` decoder + `loas` demuxer.
+    pub aac_latm: bool,
+}
+
+static AAC_LATM_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Записывает доступность аудио-мостов (один раз на старте сервера).
+pub fn set_audio_codec_availability(availability: AudioCodecAvailability) {
+    AAC_LATM_AVAILABLE.store(availability.aac_latm, std::sync::atomic::Ordering::Release);
+}
+
+/// Доступен ли AAC-LATM мост на этом хосте. До публикации результата probe
+/// возвращает `false`, чтобы SDP никогда не обещал AAC без воркера.
+#[must_use]
+pub fn audio_codec_available(name: &str) -> bool {
+    audio_codec_available_with(name, AAC_LATM_AVAILABLE.load(std::sync::atomic::Ordering::Acquire))
+}
+
+fn audio_codec_available_with(name: &str, aac_latm: bool) -> bool {
+    match normalize(name).as_str() {
+        "AAC" | "AACLATM" | "MP4ALATM" | "MP4A-LATM" => aac_latm,
+        _ => false,
+    }
+}
+
 /// Записывает доступность видео-мостов (один раз на старте сервера).
 pub fn set_video_codec_availability(availability: VideoCodecAvailability) {
     H264_AVAILABLE.store(availability.h264, std::sync::atomic::Ordering::Release);
@@ -153,5 +181,14 @@ mod tests {
         assert!(native_video_with("H265", false, true));
         assert!(!native_video_with("H264", false, true));
         assert!(!native_video_with("H261", true, true));
+    }
+
+    #[test]
+    fn aac_is_unavailable_until_the_host_probe_publishes_it() {
+        assert!(!audio_codec_available("AAC"));
+        assert!(!audio_codec_available("MP4A-LATM"));
+        assert!(!audio_codec_available("G711"));
+        assert!(audio_codec_available_with("aac", true));
+        assert!(!audio_codec_available_with("AAC", false));
     }
 }

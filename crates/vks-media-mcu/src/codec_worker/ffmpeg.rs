@@ -107,6 +107,8 @@ pub struct FfmpegCapabilities {
     pub version: String,
     decoders: BTreeSet<String>,
     encoders: BTreeSet<String>,
+    muxers: BTreeSet<String>,
+    demuxers: BTreeSet<String>,
 }
 
 impl FfmpegCapabilities {
@@ -126,7 +128,9 @@ impl FfmpegCapabilities {
 
         let encoders = list_codecs(ffmpeg_path, "-encoders").await?;
         let decoders = list_codecs(ffmpeg_path, "-decoders").await?;
-        Ok(Self { version, decoders, encoders })
+        let muxers = list_formats(ffmpeg_path, "-muxers").await?;
+        let demuxers = list_formats(ffmpeg_path, "-demuxers").await?;
+        Ok(Self { version, decoders, encoders, muxers, demuxers })
     }
 
     /// Whether the host can decode this audio codec.
@@ -151,6 +155,30 @@ impl FfmpegCapabilities {
     #[must_use]
     pub fn has_video_encoder(&self, codec: VideoCodec) -> bool {
         self.encoders.contains(codec.ffmpeg_encoder())
+    }
+
+    /// Whether the host can carry MP4A-LATM in both directions: an AAC encoder
+    /// plus the `latm` muxer, and the `aac_latm` decoder plus the `loas`
+    /// demuxer. Codec presence alone is not enough; containers can be built
+    /// out separately.
+    #[must_use]
+    pub fn has_audio_latm_bridge(&self) -> bool {
+        self.has_audio_encoder(AudioCodec::AacLatm)
+            && self.has_audio_decoder(AudioCodec::AacLatm)
+            && self.muxers.contains("latm")
+            && self.demuxers.contains("loas")
+    }
+
+    /// Whether a muxer was listed by `ffmpeg -muxers`.
+    #[must_use]
+    pub fn has_muxer(&self, name: &str) -> bool {
+        self.muxers.contains(name)
+    }
+
+    /// Whether a demuxer was listed by `ffmpeg -demuxers`.
+    #[must_use]
+    pub fn has_demuxer(&self, name: &str) -> bool {
+        self.demuxers.contains(name)
     }
 
     /// Checks a mode against probed support.
@@ -289,6 +317,40 @@ async fn list_codecs(ffmpeg: &std::path::Path, flag: &str) -> Result<BTreeSet<St
         }
     }
     Ok(names)
+}
+
+async fn list_formats(ffmpeg: &std::path::Path, flag: &str) -> Result<BTreeSet<String>, WorkerError> {
+    let mut command = command(ffmpeg);
+    command.arg("-hide_banner").arg(flag);
+    let output = run_bounded(command).await?;
+    if !output.status.success() {
+        return Err(WorkerError::Unavailable(format!(
+            "{} {flag} failed: {}",
+            ffmpeg.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(parse_format_list(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Parses `ffmpeg -muxers`/`-demuxers` output:
+/// `  E  latm             MPEG-4 LATM AAC`.
+fn parse_format_list(text: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for line in text.lines() {
+        let line = line.trim_start();
+        let mut tokens = line.split_whitespace();
+        let Some(flags) = tokens.next() else { continue };
+        let Some(name) = tokens.next() else { continue };
+        if !flags.chars().all(|symbol| matches!(symbol, 'D' | 'E' | '.')) {
+            continue;
+        }
+        if name == "=" || name.is_empty() {
+            continue;
+        }
+        names.insert(name.to_string());
+    }
+    names
 }
 
 /// A live FFmpeg pipeline.
@@ -1627,5 +1689,29 @@ mod tests {
             .expect("worker");
         let error = worker.write_video(&vec![0u8; expected + 1]).await.unwrap_err();
         assert!(matches!(error, WorkerError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn parses_muxer_and_demuxer_lists_without_legend_rows() {
+        let text = "File formats:\n  D. = Demuxing supported\n  .E = Muxing supported\n --\n  E  latm             MPEG-4 LATM AAC\n  D  loas             LOAS/LATM\n  E  adts             ADTS AAC\n";
+        let formats = parse_format_list(text);
+        assert!(formats.contains("latm"));
+        assert!(formats.contains("loas"));
+        assert!(formats.contains("adts"));
+        assert!(!formats.contains("="), "{formats:?}");
+        assert!(!formats.contains("supported"));
+    }
+
+    #[tokio::test]
+    async fn probe_reports_latm_muxer_and_loas_demuxer() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let capabilities = FfmpegCapabilities::probe(std::path::Path::new(&ffmpeg_bin())).await.expect("probe");
+        assert!(capabilities.has_muxer("latm"), "FFmpeg must expose the latm muxer");
+        assert!(capabilities.has_demuxer("loas"), "FFmpeg must expose the loas demuxer");
+        assert!(capabilities.has_audio_encoder(AudioCodec::Aac));
+        assert!(capabilities.has_audio_decoder(AudioCodec::AacLatm));
+        assert!(capabilities.has_audio_latm_bridge());
     }
 }
