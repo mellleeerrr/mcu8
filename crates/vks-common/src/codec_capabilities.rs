@@ -109,6 +109,18 @@ pub fn is_native_video(name: &str) -> bool {
     native_video_with(name, video_codec_available("H264"), video_codec_available("H265"))
 }
 
+/// Кодеки, у которых на хосте есть **и кодировщик, и декодировщик**.
+///
+/// Односторонние пути сюда не входят: FFmpeg умеет декодировать G.729, но не
+/// кодировать, а G.722.1/G.719 не умеет вообще. Объявлять их в SDP нельзя —
+/// терминал ответит кодеком, который шлюз не сможет отдать обратно, и звонок
+/// умрёт после 200 OK. Проба хоста проверяется отдельно
+/// ([`audio_codec_available`]).
+#[must_use]
+pub fn is_transcodeable_audio(name: &str) -> bool {
+    matches!(normalize(name).as_str(), "AAC" | "AACLATM" | "MP4ALATM")
+}
+
 fn native_video_with(name: &str, h264: bool, h265: bool) -> bool {
     match normalize(name).as_str() {
         "H264" => h264,
@@ -200,6 +212,18 @@ mod tests {
         assert!(!is_supported_audio_variant("AAC", None));
         assert!(audio_codec_available_with("AAC", true));
         assert!(!is_supported_audio_variant("AAC", None), "global probe is off in tests");
+    }
+
+    #[test]
+    fn only_two_way_audio_codecs_are_transcodeable() {
+        // В SDP можно объявлять только кодеки, которые шлюз и декодирует, и
+        // кодирует: FFmpeg декодирует G.729, но не кодирует, а G.722.1/G.719
+        // не умеет вообще.
+        assert!(is_transcodeable_audio("MP4A-LATM"));
+        assert!(is_transcodeable_audio("aac"));
+        for name in ["G729", "G7221", "G719", "PCMU", "OPUS"] {
+            assert!(!is_transcodeable_audio(name), "{name} не имеет двустороннего пути");
+        }
     }
 
     #[test]

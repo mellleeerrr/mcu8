@@ -470,6 +470,20 @@ pub const VIDEO_OFFER: &[OfferCodec] = &[
     },
 ];
 
+/// Аудио-кодеки оффера: native + DTMF + AAC-LATM (если проба FFmpeg прошла).
+///
+/// Кодеки без кодировщика на хосте (G.722.1/G.719/G.729) в SDP не попадают ни
+/// в одном профиле: терминал ответил бы ими, мост не смог бы отдать звук
+/// обратно — звонок умер бы после 200 OK.
+fn audio_offer(aac: bool) -> Vec<&'static OfferCodec> {
+    AUDIO_OFFER
+        .iter()
+        .filter(|codec| {
+            codec.native || codec.dtmf || (aac && vks_common::codec_capabilities::is_transcodeable_audio(codec.name))
+        })
+        .collect()
+}
+
 fn push_codec_attrs(sdp: &mut String, codecs: &[&OfferCodec]) {
     for codec in codecs.iter().copied() {
         if codec.channels > 1 {
@@ -522,10 +536,13 @@ fn payload_list(codecs: &[&OfferCodec]) -> String {
 ///   H.265 when the host probe found libx265, plus `telephone-event`).
 ///   This is the production default: a terminal answers with a codec we can actually
 ///   bridge, and the RTP bridge's single-payload-type pinning stays valid.
-/// * [`CodecProfile::Full`] — the whole vendor matrix. Required for lab
-///   interoperability checks, but it changes what a terminal chooses to send:
-///   a Polycom RPD 3.5 offered the full matrix transmits **G.722.1C (PT 106)**
-///   and **H.264 High (PT 98)** instead of PCMU/H.264 Baseline, and the current
+/// * [`CodecProfile::Full`] — the vendor matrix **restricted to codecs the
+///   runtime can carry in both directions** (plus H.264 High, which rides the
+///   same bridge). G.722.1/G.719/G.729 are deliberately absent: FFmpeg has no
+///   encoder for them, so a terminal that picked one could not be answered —
+///   the call would die after 200 OK. It also changes what a terminal chooses
+///   to send: a Polycom RPD 3.5 offered the full matrix transmits
+///   **H.264 High (PT 98)** instead of PCMU/H.264 Baseline, and the current
 ///   bridge (which pins one payload type per direction) would drop that RTP.
 ///   Use `VKS_SDP_CODEC_MATRIX=full` only together with transcoding workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -568,14 +585,7 @@ impl CodecProfile {
     fn audio(self) -> Vec<&'static OfferCodec> {
         // AAC-LATM is advertised only when the host probed both FFmpeg
         // directions; otherwise it would be "offer then 488 after dial".
-        self.audio_with(vks_common::codec_capabilities::audio_codec_available("MP4A-LATM"))
-    }
-
-    fn audio_with(self, aac: bool) -> Vec<&'static OfferCodec> {
-        AUDIO_OFFER
-            .iter()
-            .filter(|codec| if codec.payload == 113 { aac } else { self == Self::Full || codec.native || codec.dtmf })
-            .collect()
+        audio_offer(vks_common::codec_capabilities::audio_codec_available("MP4A-LATM"))
     }
 
     fn video(self) -> Vec<&'static OfferCodec> {
@@ -735,6 +745,12 @@ pub fn parse_remote_media_ports(sdp: &str) -> (Option<String>, Option<u16>, Opti
     (remote_ip, audio_port, video_port)
 }
 
+/// Вендорский оффер терминала: G.729 первым, PCMU следом. Мост G.729 не
+/// перекодирует, поэтому такой выбор обязан давать типизированный отказ.
+#[cfg(test)]
+const VENDOR_OFFER_WITH_G729: &str = "v=0\r\nc=IN IP4 192.0.2.1\r\n\
+m=audio 3230 RTP/AVP 18 0\r\na=rtpmap:18 G729/8000\r\na=rtpmap:0 PCMU/8000\r\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,36 +827,30 @@ m=video 5006 RTP/AVP 96\r\n";
     }
 
     #[test]
-    fn offer_carries_full_audio_matrix_with_correct_clock_rates_and_fmtp() {
+    fn full_offer_carries_only_codecs_the_runtime_can_carry() {
         let sdp = build_offer(CodecProfile::Full, "192.168.1.93", 41000, Some(41002));
         for line in [
-            "m=audio 41000 RTP/AVP 0 8 9 15 4 18 102 103 104 105 106 107 108 109 110 111 112 101",
+            "m=audio 41000 RTP/AVP 0 8 9 15 4 107 108 109 110 111 101",
             "a=rtpmap:0 PCMU/8000",
             "a=rtpmap:8 PCMA/8000",
             "a=rtpmap:9 G722/8000",
             "a=rtpmap:15 G728/8000",
             "a=rtpmap:4 G723/8000",
-            "a=rtpmap:18 G729/8000",
-            "a=fmtp:18 annexb=no",
-            "a=rtpmap:102 G7221/16000",
-            "a=fmtp:102 bitrate=24000",
-            "a=rtpmap:103 G7221/16000",
-            "a=fmtp:103 bitrate=32000",
-            "a=rtpmap:104 G7221/32000",
-            "a=rtpmap:105 G7221/32000",
-            "a=rtpmap:106 G7221/32000",
-            "a=fmtp:106 bitrate=48000",
             "a=rtpmap:107 G726-16/8000",
             "a=rtpmap:108 G726-24/8000",
             "a=rtpmap:109 G726-32/8000",
             "a=rtpmap:110 G726-40/8000",
             "a=rtpmap:111 opus/48000/2",
-            "a=rtpmap:112 G719/48000",
             "a=rtpmap:101 telephone-event/8000",
             "a=fmtp:101 0-16",
             "a=rtcp:41001",
         ] {
             assert!(sdp.contains(line), "offer misses `{line}`:\n{sdp}");
+        }
+        // Кодеков без кодировщика в SDP быть не должно: терминал выберет их
+        // и мост не сможет ответить — звонок умрёт после 200 OK.
+        for absent in ["a=rtpmap:18 G729/8000", "a=rtpmap:102 G7221/16000", "a=rtpmap:112 G719/48000"] {
+            assert!(!sdp.contains(absent), "full offer must not advertise unbridgeable `{absent}`:\n{sdp}");
         }
         assert!(!sdp.contains("a=rtpmap:113 "), "AAC needs the probe even in Full:\n{sdp}");
     }
@@ -1520,11 +1530,12 @@ a=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\n";
 
     #[test]
     fn strict_first_rejects_unbridged_codec_before_a_later_pcmu() {
-        let offer = build_offer(CodecProfile::Full, "192.168.1.93", 41000, None);
+        // Вендорский оффер (UAS): терминал первым предлагает G.729.
+        let offer = VENDOR_OFFER_WITH_G729;
         let answer = "v=0\r\nc=IN IP4 192.168.1.132\r\n\
 m=audio 3230 RTP/AVP 18 0\r\na=rtpmap:18 G729/8000\r\na=rtpmap:0 PCMU/8000\r\n";
         assert_eq!(
-            negotiate_media_detailed(&offer, answer),
+            negotiate_media_detailed(offer, answer),
             Err(NegotiationFailure::UnsupportedAudio { codec: "G729".into(), payload: 18 }),
             "late PCMU must not mask a peer-first G729 choice"
         );
@@ -1629,15 +1640,16 @@ a=sendrecv\r\n";
 
     #[test]
     fn common_but_unbridged_audio_is_a_typed_rejection() {
-        // Only the full matrix offers G.722; the native profile would report
-        // NoCommonAudio instead, which is a different (also correct) verdict.
-        let offer = build_offer(CodecProfile::Full, "127.0.0.1", 41000, None);
+        // Вендорский оффер (UAS) содержит G.729: мост его не перекодирует, и
+        // ответ должен быть типизированным отказом, а не «подключением с
+        // мёртвым звуком».
+        let offer = VENDOR_OFFER_WITH_G729;
         let answer = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 3230 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\n";
         assert_eq!(
-            negotiate_media_detailed(&offer, answer),
+            negotiate_media_detailed(offer, answer),
             Err(NegotiationFailure::UnsupportedAudio { codec: "G729".into(), payload: 18 })
         );
-        assert!(negotiate_media(&offer, answer).is_none(), "G.729 must never be reported as connected media");
+        assert!(negotiate_media(offer, answer).is_none(), "G.729 must never be reported as connected media");
     }
 
     #[test]
@@ -1680,9 +1692,9 @@ a=rtpmap:97 H264/90000\r\na=fmtp:97 packetization-mode=1;profile-level-id=42801e
 
     #[test]
     fn aac_latm_is_offered_last_and_only_with_probe_availability() {
-        let without = CodecProfile::Native.audio_with(false);
+        let without = audio_offer(false);
         assert!(without.iter().all(|codec| codec.payload != 113));
-        let with = CodecProfile::Native.audio_with(true);
+        let with = audio_offer(true);
         let aac = with.iter().find(|codec| codec.payload == 113).expect("PT113 advertised");
         assert_eq!(aac.name, "MP4A-LATM");
         assert_eq!(aac.clock, 90_000);
@@ -1690,7 +1702,7 @@ a=rtpmap:97 H264/90000\r\na=fmtp:97 packetization-mode=1;profile-level-id=42801e
         assert_eq!(last_audio.payload, 113, "AAC must stay the last audio codec before DTMF");
         let full_without_probe = build_offer(CodecProfile::Full, "127.0.0.1", 41000, None);
         assert!(!full_without_probe.contains("a=rtpmap:113 "), "Full must not bypass the probe: {full_without_probe}");
-        let full_with_probe = CodecProfile::Full.audio_with(true);
+        let full_with_probe = audio_offer(true);
         assert!(full_with_probe.iter().any(|codec| codec.payload == 113));
     }
 

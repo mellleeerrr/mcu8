@@ -10,16 +10,6 @@
 use vks_layout::{LayoutKind, NormalizedLayout, NormalizedRect, NormalizedSlot, ParticipantId, SlotId};
 use vks_proto::signaling::{Layout, SlotAssignment};
 
-/// Переводит вид раскладки из протокола в [`LayoutKind`].
-fn layout_kind(kind: &str) -> LayoutKind {
-    match kind {
-        "focus" => LayoutKind::Focus,
-        "speaker" => LayoutKind::Speaker,
-        "grid" => LayoutKind::Grid,
-        _ => LayoutKind::Custom,
-    }
-}
-
 /// Преобразует прото-раскладку в нормализованную модель `vks-layout`.
 ///
 /// Участник в слоте необязателен: пустой слот (окно без участника) —
@@ -47,7 +37,7 @@ pub fn normalized_layout_from_proto(proto: &Layout) -> NormalizedLayout {
             }
         })
         .collect();
-    NormalizedLayout { version: proto.version, kind: layout_kind(&proto.kind), slots }
+    NormalizedLayout { version: proto.version, kind: LayoutKind::parse(&proto.kind), slots }
 }
 
 #[cfg(test)]

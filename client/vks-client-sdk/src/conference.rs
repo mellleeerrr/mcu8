@@ -53,6 +53,12 @@ pub struct Conference {
     session_id: ulid::Ulid,
     join_nonce: Option<String>,
     nonce_acquired_at: Option<std::time::Instant>,
+    /// Очередь «живых» событий сервера (push-сообщения).
+    ///
+    /// Единственный владелец состояния раскладки и режима — `Conference`:
+    /// push-хендлер транспорта только кладёт событие в очередь, приложение
+    /// забирает очередь через [`Conference::drain_events`].
+    events: Arc<std::sync::Mutex<std::collections::VecDeque<crate::types::ConferenceEvent>>>,
 }
 
 impl Conference {
@@ -66,7 +72,41 @@ impl Conference {
             session_id: vks_common::ids::ulid(),
             join_nonce: None,
             nonce_acquired_at: None,
+            events: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         }
+    }
+
+    /// Media engine конференции — источник кадров для отрисовки.
+    ///
+    /// Раскладка и режим живут внутри конференции, поэтому приложение
+    /// берёт кадры именно отсюда: отдельный экземпляр движка видел бы
+    /// авто-сетку, а не раскладку сервера.
+    #[must_use]
+    pub fn media(&self) -> &MediaEngine {
+        &self.media
+    }
+
+    /// Забирает события, накопленные push-сообщениями сервера, и применяет
+    /// их к media engine (режим, раскладка).
+    pub fn drain_events(&mut self) -> Vec<crate::types::ConferenceEvent> {
+        let events: Vec<crate::types::ConferenceEvent> = {
+            let mut queue = self.events.lock().expect("events lock");
+            queue.drain(..).collect()
+        };
+        for event in &events {
+            match event {
+                crate::types::ConferenceEvent::ModeChanged { mode } => {
+                    if let Some(mode) = parse_room_mode(mode) {
+                        self.media.switch_mode(mode);
+                    }
+                }
+                crate::types::ConferenceEvent::LayoutChanged { layout } => {
+                    self.media.set_layout(layout.clone());
+                }
+                _ => {}
+            }
+        }
+        events
     }
 
     /// Текущее состояние.
@@ -142,15 +182,39 @@ impl Conference {
         self.join_nonce = Some(join_result.join_nonce);
         self.nonce_acquired_at = Some(std::time::Instant::now());
 
-        // 3. Раскладка комнаты: сервер шлёт её сразу после JoinRoomResult
-        // (поздний участник иначе рисовал бы авто-сетку до следующего
-        // изменения раскладки).
-        if let Some(layout) = client.current_layout() {
-            self.media.set_layout(layout);
+        // 3. Раскладка комнаты приходит снимком в JoinRoomResult — без гонки
+        // с push-сообщением (поздний участник иначе рисовал бы авто-сетку до
+        // следующего изменения раскладки).
+        if let Some(layout) = join_result.layout.as_ref() {
+            self.media.set_layout(crate::layout::normalized_layout_from_proto(layout));
         }
 
         // 4. Media engine → active.
         self.state = ConferenceState::Active;
+
+        // 5. Живые push-сообщения сервера (смена режима, смена раскладки)
+        // складываются в очередь конференции: приложение забирает её через
+        // `drain_events`. Конференция — единственный владелец состояния
+        // раскладки, поэтому SDK не держит вторую копию.
+        let events = self.events.clone();
+        client.set_push_handler(Arc::new(move |message: &vks_proto::signaling::SignalingMessage| {
+            let event = match &message.payload {
+                Some(vks_proto::signaling::signaling_message::Payload::LayoutChanged(changed)) => {
+                    changed.layout.as_ref().map(|layout| crate::types::ConferenceEvent::LayoutChanged {
+                        layout: crate::layout::normalized_layout_from_proto(layout),
+                    })
+                }
+                Some(vks_proto::signaling::signaling_message::Payload::RoomModeChanged(changed)) => {
+                    vks_proto::media::RoomMode::try_from(changed.new_mode).ok().map(|mode| {
+                        crate::types::ConferenceEvent::ModeChanged { mode: mode.as_str_name().to_lowercase() }
+                    })
+                }
+                _ => None,
+            };
+            if let Some(event) = event {
+                events.lock().expect("events lock").push_back(event);
+            }
+        }));
         Ok(())
     }
 
@@ -291,11 +355,18 @@ impl Default for QoeConfig {
     }
 }
 
+/// Разбор режима комнаты из строки (`sfu` | `mcu`).
+fn parse_room_mode(value: &str) -> Option<RoomMode> {
+    RoomMode::parse(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::render_surface::NullSurface;
     use crate::signaling_client::MockSignaling;
+    #[cfg(not(target_arch = "wasm32"))]
+    use async_trait::async_trait;
 
     fn test_cfg() -> ConferenceConfig {
         ConferenceConfig {
@@ -335,6 +406,102 @@ mod tests {
         let mut c = Conference::new(test_cfg());
         let mut client = SignalingClient::with_transport(Arc::new(MockSignaling::empty_server_hello()));
         assert!(matches!(c.start(&mut client), Err(ConferenceError::BadServerHello)));
+    }
+
+    /// Транспорт, умеющий доставить push-сообщение сервера.
+    struct PushTransport {
+        handler: std::sync::Mutex<Option<Arc<dyn crate::signaling_client::PushHandler>>>,
+    }
+
+    impl PushTransport {
+        fn new() -> Self {
+            Self { handler: std::sync::Mutex::new(None) }
+        }
+
+        fn deliver(&self, message: &vks_proto::signaling::SignalingMessage) {
+            let handler = self.handler.lock().expect("handler lock").clone();
+            if let Some(handler) = handler {
+                handler.on_message(message);
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl crate::signaling_client::SignalingTransport for PushTransport {
+        async fn client_hello(
+            &self,
+            _token: &str,
+        ) -> Result<crate::signaling_client::ServerHello, crate::signaling_client::SignalingError> {
+            Ok(crate::signaling_client::ServerHello {
+                server_version: "1.0".into(),
+                session_id: vks_common::ids::ulid_string(),
+                server_time_ms: 0,
+            })
+        }
+
+        async fn join_room(
+            &self,
+            room_id: &str,
+            _display_name: &str,
+        ) -> Result<crate::signaling_client::JoinRoomResult, crate::signaling_client::SignalingError> {
+            Ok(crate::signaling_client::JoinRoomResult {
+                room_id: room_id.into(),
+                participant_id: "p1".into(),
+                join_nonce: "nonce-1".into(),
+                participants: vec!["p1".into()],
+                layout: None,
+            })
+        }
+
+        async fn leave_room(&self, _room_id: &str) -> Result<(), crate::signaling_client::SignalingError> {
+            Ok(())
+        }
+
+        fn set_push_handler(&self, handler: Arc<dyn crate::signaling_client::PushHandler>) {
+            *self.handler.lock().expect("handler lock") = Some(handler);
+        }
+    }
+
+    /// S9: живой push раскладки доходит до отрисовки: сервер → push-хендлер →
+    /// очередь конференции → media engine → плитки на экране.
+    #[test]
+    fn live_layout_push_changes_the_rendered_tiles() {
+        use crate::render_surface::RecordingSurface;
+        use vks_proto::signaling::signaling_message::Payload;
+        use vks_proto::signaling::{Layout, LayoutChanged, Rect, Slot, SlotAssignment};
+
+        let transport = Arc::new(PushTransport::new());
+        let mut client = SignalingClient::with_transport(transport.clone());
+        let mut c = Conference::new(test_cfg());
+        c.start(&mut client).expect("join ok");
+
+        let message = vks_proto::signaling::SignalingMessage {
+            msg_id: 0,
+            reply_to: 0,
+            payload: Some(Payload::LayoutChanged(LayoutChanged {
+                layout: Some(Layout {
+                    version: 5,
+                    kind: "grid".into(),
+                    slots: vec![Slot {
+                        id: 0,
+                        rect: Some(Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }),
+                        z: 0,
+                        assignment: SlotAssignment::Fixed as i32,
+                        participant_id: Some("00000000-0000-0000-0000-0000000000aa".into()),
+                    }],
+                }),
+            })),
+        };
+        transport.deliver(&message);
+
+        let events = c.drain_events();
+        assert_eq!(events.len(), 1, "push попал в очередь конференции");
+        let surface = RecordingSurface::new();
+        c.media().render(&["a".into(), "b".into()], &surface);
+        let cmds = surface.take();
+        assert_eq!(cmds.len(), 1, "плитки берутся из раскладки сервера, а не из авто-сетки");
+        assert_eq!(cmds[0].participant_id, "00000000-0000-0000-0000-0000000000aa");
     }
 
     #[test]

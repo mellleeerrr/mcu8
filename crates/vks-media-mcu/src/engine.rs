@@ -552,6 +552,23 @@ impl McuEngine {
         self.pending_layouts.lock().unwrap().get(&room).cloned()
     }
 
+    /// Эффективная раскладка комнаты — ровно та, что рисует композитор:
+    /// с вычисленной авто-сеткой, с клампом прямоугольников в холст и с
+    /// участниками, разложенными по слотам.
+    ///
+    /// Источник истины для рассылки раскладки клиентам: дескриптор может
+    /// прийти без геометрии (режим auto), и тогда «провод» и «композит»
+    /// разошлись бы.
+    pub fn current_layout(&self, room: RoomId) -> Option<vks_layout::Layout> {
+        if let Some(state) = self.rooms.lock().unwrap().get(&room) {
+            return Some(state.current_layout.clone());
+        }
+        // Комната ещё не создана: раскладка лежит в pending и будет применена
+        // при первом бридже. Клиент всё равно должен получить её снимок.
+        let pending = self.pending_layouts.lock().unwrap().get(&room).cloned()?;
+        Some(RoomState::layout_from_descriptor(&pending))
+    }
+
     /// The current crossfaded slot rects of a room (test/inspector).
     pub fn slot_rects(&self, room: RoomId) -> Option<SlotRects> {
         self.rooms.lock().unwrap().get(&room).map(|s| s.slot_rects())
@@ -641,25 +658,50 @@ impl McuEngine {
                 state.adopt_layout(layout);
             }
         }
-        if !tracks.is_empty() {
-            let has_video = layout_has_video(&tracks);
-            state.publisher_tracks.insert(pid, tracks);
-            if has_video {
-                let descriptor = state.layout.get_or_insert_with(|| LayoutDescriptor {
-                    layout_id: "grid".into(),
-                    version: 0,
-                    assignments: BTreeMap::new(),
-                    geometry: Vec::new(),
-                });
-                if seat_participant(descriptor, pid) {
-                    descriptor.version = descriptor.version.saturating_add(1);
-                    let layout = RoomState::layout_from_descriptor(descriptor);
-                    state.bridge.apply(&layout);
-                    state.current_layout = layout;
-                    state.layout_applied_at_ms = None;
-                    state.elapsed_ms = 0;
-                }
+        Self::register_publisher(state, pid, tracks);
+    }
+
+    /// Registers a video publisher and seats it in a free layout slot **without**
+    /// making it a subscriber of the composite.
+    ///
+    /// Нужен транспорту WebRTC: браузер получает медиа через собственный
+    /// fanout (str0m), а не через композит MCU, — но он обязан занимать слот
+    /// раскладки, иначе `set_participant_frame` молча выбросит его кадры.
+    pub fn seat_publisher(&self, room: RoomId, pid: ParticipantId, tracks: Vec<MediaTrack>) {
+        let pending = self.pending_layouts.lock().unwrap().remove(&room);
+        let mut g = self.rooms.lock().unwrap();
+        let state = g.entry(room).or_insert_with(|| RoomState::new(RoomMode::Mcu, RoomCaps::default()));
+        if state.layout.is_none() {
+            if let Some(layout) = pending {
+                state.adopt_layout(layout);
             }
+        }
+        Self::register_publisher(state, pid, tracks);
+    }
+
+    /// Регистрирует паблишера и сажает его в свободный слот раскладки.
+    fn register_publisher(state: &mut RoomState, pid: ParticipantId, tracks: Vec<MediaTrack>) {
+        if tracks.is_empty() {
+            return;
+        }
+        let has_video = layout_has_video(&tracks);
+        state.publisher_tracks.insert(pid, tracks);
+        if !has_video {
+            return;
+        }
+        let descriptor = state.layout.get_or_insert_with(|| LayoutDescriptor {
+            layout_id: "grid".into(),
+            version: 0,
+            assignments: BTreeMap::new(),
+            geometry: Vec::new(),
+        });
+        if seat_participant(descriptor, pid) {
+            descriptor.version = descriptor.version.saturating_add(1);
+            let layout = RoomState::layout_from_descriptor(descriptor);
+            state.bridge.apply(&layout);
+            state.current_layout = layout;
+            state.layout_applied_at_ms = None;
+            state.elapsed_ms = 0;
         }
     }
 

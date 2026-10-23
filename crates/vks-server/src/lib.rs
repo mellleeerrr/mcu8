@@ -886,9 +886,24 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                     }
                                                     tracks.push(track);
                                                 }
-                                                if !real_webrtc_peer && !tracks.is_empty() {
+                                                if !tracks.is_empty() {
+                                                    // Публишер регистрируется в обоих движках при
+                                                    // любом транспорте: реестр паблишеров — это
+                                                    // состав участников и их треков, а не путь
+                                                    // доставки RTP (реальным WebRTC занимается
+                                                    // str0m). Раньше реальный пир в реестр не
+                                                    // попадал вовсе — участника не было видно
+                                                    // ни в списке треков, ни в раскладке.
                                                     let _ = ctx.sfu_engine.add_publisher(m.room_id, pid, tracks.clone()).await;
                                                     let _ = ctx.mcu_engine.add_publisher(m.room_id, pid, tracks.clone()).await;
+                                                    if real_webrtc_peer {
+                                                        // Реальный пир не подписан на композит
+                                                        // (своё медиа он получает через fanout
+                                                        // str0m), но обязан занять слот
+                                                        // раскладки: иначе `set_participant_frame`
+                                                        // выбросит его кадры.
+                                                        ctx.mcu_engine.seat_publisher(m.room_id, pid, tracks.clone());
+                                                    }
                                                     for track in &tracks {
                                                         let proto_kind = match track.media_kind {
                                                             vks_core::MediaKind::Audio => vks_proto::media::TrackKind::Audio,
@@ -1059,6 +1074,15 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                         track_ids: p.track_ids.clone(),
                                                     })
                                                     .collect();
+                                                // S9: снимок раскладки — в самом ответе на
+                                                // JoinRoom. Отдельный push после него создавал
+                                                // гонку (push мог прийти позже ответа), и
+                                                // клиент успевал нарисовать авто-сетку.
+                                                res.layout = ctx
+                                                    .mcu_engine
+                                                    .current_layout(rid)
+                                                    .as_ref()
+                                                    .map(crate::layout_signal::proto_layout);
                                             }
                                         }
 
@@ -1102,13 +1126,6 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             };
                                             let payload_bytes = Envelope::new(joined_msg).encode();
                                             state.room_hub.broadcast(&rid, Some(&pid_str), payload_bytes.into());
-                                        }
-
-                                        // S9: поздний участник получает текущую раскладку
-                                        // комнаты — иначе он рисовал бы авто-сетку, пока
-                                        // раскладка не изменится снова.
-                                        if let Some(descriptor) = ctx.mcu_engine.layout_descriptor(rid) {
-                                            replies.push(Envelope::new(crate::layout_signal::layout_changed(&descriptor)));
                                         }
 
                                         // Уведомляем админский WebSocket (/api/v3/ws)

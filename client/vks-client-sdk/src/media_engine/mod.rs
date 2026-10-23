@@ -26,6 +26,27 @@ pub enum RoomMode {
     Mcu,
 }
 
+impl RoomMode {
+    /// Строковое имя режима (совпадает с `vks_proto::media::RoomMode`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sfu => "sfu",
+            Self::Mcu => "mcu",
+        }
+    }
+
+    /// Разбор строки режима (`sfu` | `mcu`).
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "sfu" => Some(Self::Sfu),
+            "mcu" => Some(Self::Mcu),
+            _ => None,
+        }
+    }
+}
+
 /// Media engine SDK: хранит текущий режим + renderer.
 #[derive(Debug, Clone)]
 pub struct MediaEngine {
@@ -73,8 +94,10 @@ impl MediaEngine {
         match self.mode {
             RoomMode::Sfu => {
                 // Раскладка сервера важнее авто-сетки: только она описывает
-                // фактические позиции плиток (в т.ч. схемы Codian).
-                let cmds = match &self.layout {
+                // фактические позиции плиток (в т.ч. схемы Codian). Пустая
+                // раскладка (режим auto — геометрию строит MCU) игнорируется:
+                // иначе клиент нарисовал бы пустой экран.
+                let cmds = match self.layout.as_ref().filter(|layout| !layout.slots.is_empty()) {
                     Some(layout) => self.sfu.compose_from_normalized(layout, surface.size()),
                     None => self.sfu.compose(participants, surface.size()),
                 };
@@ -184,5 +207,30 @@ mod tests {
         e.render(&["a".into(), "b".into(), "c".into()], &surface);
         let cmds = surface.take();
         assert_eq!(cmds.len(), 2, "плитки берутся из раскладки сервера, а не из авто-сетки");
+    }
+
+    /// Участник доезжает от прото-раскладки до команды отрисовки: uuid →
+    /// u128 → uuid не должен терять идентичность.
+    #[test]
+    fn participant_id_survives_the_proto_round_trip() {
+        let mut e = MediaEngine::default();
+        let surface = RecordingSurface::new();
+        let participant = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+        let proto = vks_proto::signaling::Layout {
+            version: 1,
+            kind: "grid".into(),
+            slots: vec![vks_proto::signaling::Slot {
+                id: 0,
+                rect: Some(vks_proto::signaling::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }),
+                z: 0,
+                assignment: vks_proto::signaling::SlotAssignment::Fixed as i32,
+                participant_id: Some(participant.to_string()),
+            }],
+        };
+        e.set_layout(crate::layout::normalized_layout_from_proto(&proto));
+        e.render(&[], &surface);
+        let cmds = surface.take();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].participant_id, participant.to_string());
     }
 }

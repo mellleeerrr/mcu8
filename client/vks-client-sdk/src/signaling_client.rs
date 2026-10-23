@@ -24,7 +24,7 @@ pub struct ServerHello {
 }
 
 /// Результат JoinRoom (server → client).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct JoinRoomResult {
     /// Room id.
     pub room_id: String,
@@ -34,6 +34,8 @@ pub struct JoinRoomResult {
     pub join_nonce: String,
     /// Список участников (для UI).
     pub participants: Vec<String>,
+    /// Снимок раскладки комнаты на момент входа (прото-раскладка сервера).
+    pub layout: Option<vks_proto::signaling::Layout>,
 }
 
 /// Ошибка signaling.
@@ -55,6 +57,16 @@ pub enum SignalingError {
 pub trait PushHandler: Send + Sync {
     /// Сообщение от сервера.
     fn on_message(&self, message: &vks_proto::signaling::SignalingMessage);
+}
+
+/// Любое замыкание `Fn(&SignalingMessage)` — уже обработчик push-сообщений.
+impl<F> PushHandler for F
+where
+    F: Fn(&vks_proto::signaling::SignalingMessage) + Send + Sync,
+{
+    fn on_message(&self, message: &vks_proto::signaling::SignalingMessage) {
+        self(message);
+    }
 }
 
 /// Signaling transport-порт (WS или WebTransport; Q5).
@@ -85,29 +97,9 @@ pub trait SignalingTransport: Send + Sync {
     }
     /// Регистрирует получателя push-сообщений сервера.
     ///
-    /// Вызывается SDK при создании клиента; транспорт обязан звать
-    /// `PushHandler::on_message` при получении push-сообщения.
+    /// Вызывается приложением через [`SignalingClient::set_push_handler`];
+    /// транспорт обязан звать `PushHandler::on_message` при получении push.
     fn set_push_handler(&self, _handler: Arc<dyn PushHandler>) {}
-}
-
-/// Внутренний обработчик SDK: запоминает последнюю раскладку комнаты.
-struct SdkPushHandler {
-    layout: Arc<std::sync::RwLock<Option<vks_layout::NormalizedLayout>>>,
-}
-
-impl PushHandler for SdkPushHandler {
-    fn on_message(&self, message: &vks_proto::signaling::SignalingMessage) {
-        let Some(vks_proto::signaling::signaling_message::Payload::LayoutChanged(changed)) = &message.payload else {
-            return;
-        };
-        let Some(layout) = changed.layout.as_ref() else {
-            return;
-        };
-        let normalized = crate::layout::normalized_layout_from_proto(layout);
-        if let Ok(mut guard) = self.layout.write() {
-            *guard = Some(normalized);
-        }
-    }
 }
 
 /// Signaling клиент (обёртка над transport + backoff для auto-reconnect).
@@ -116,22 +108,12 @@ pub struct SignalingClient {
     // backoff для auto-reconnect (exponential 1s→16s, max 5 — §7).
     reconnect_delay: Duration,
     reconnect_attempts: u32,
-    /// Последняя раскладка комнаты, пришедшая от сервера (`LayoutChanged`).
-    layout: Arc<std::sync::RwLock<Option<vks_layout::NormalizedLayout>>>,
 }
 
 impl SignalingClient {
     #[must_use]
     pub fn new(transport: Arc<dyn SignalingTransport>) -> Self {
-        let client = Self {
-            transport: transport.clone(),
-            reconnect_delay: Duration::from_secs(1),
-            reconnect_attempts: 0,
-            layout: Arc::new(std::sync::RwLock::new(None)),
-        };
-        let layout = client.layout.clone();
-        transport.set_push_handler(Arc::new(SdkPushHandler { layout }));
-        client
+        Self { transport: transport.clone(), reconnect_delay: Duration::from_secs(1), reconnect_attempts: 0 }
     }
 
     /// Создаёт клиент с конкретным transport (для тестов — mock).
@@ -140,10 +122,14 @@ impl SignalingClient {
         Self::new(transport)
     }
 
-    /// Последняя раскладка комнаты от сервера, если она приходила.
-    #[must_use]
-    pub fn current_layout(&self) -> Option<vks_layout::NormalizedLayout> {
-        self.layout.read().ok().and_then(|guard| guard.clone())
+    /// Регистрирует обработчик push-сообщений сервера.
+    ///
+    /// Приложение получает `LayoutChanged`/`RoomModeChanged` и передаёт их в
+    /// конференцию (`Conference::on_layout_changed` / `on_mode_changed`).
+    /// Снимок раскладки на момент входа приходит в `JoinRoomResult.layout`,
+    /// поэтому отдельного кэша в SDK не нужно.
+    pub fn set_push_handler(&self, handler: Arc<dyn PushHandler>) {
+        self.transport.set_push_handler(handler);
     }
 
     /// ClientHello → ServerHello (async).
@@ -258,6 +244,7 @@ impl SignalingTransport for MockSignaling {
                 participant_id: "p1".into(),
                 join_nonce: "nonce-1".into(),
                 participants: vec!["p1".into()],
+                layout: None,
             })
         } else {
             Err(SignalingError::RoomNotFound(room_id.into()))
@@ -348,6 +335,7 @@ mod tests {
                 participant_id: "p1".into(),
                 join_nonce: "nonce-1".into(),
                 participants: vec!["p1".into()],
+                layout: None,
             })
         }
         async fn leave_room(&self, _room_id: &str) -> Result<(), SignalingError> {
@@ -359,10 +347,18 @@ mod tests {
     }
 
     #[test]
-    fn layout_push_is_remembered_by_client() {
+    /// Push-сообщения доходят до обработчика приложения: SDK не кэширует
+    /// раскладку сам — её применяет конференция (`on_layout_changed`).
+    fn layout_push_reaches_the_application_handler() {
+        use vks_proto::signaling::signaling_message::Payload;
         let transport = Arc::new(PushTransport::new());
         let client = SignalingClient::with_transport(transport.clone());
-        assert!(client.current_layout().is_none(), "до push раскладки нет");
+        let seen: Arc<std::sync::Mutex<Vec<vks_proto::signaling::SignalingMessage>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        client.set_push_handler(Arc::new(move |message: &vks_proto::signaling::SignalingMessage| {
+            sink.lock().expect("sink lock").push(message.clone());
+        }));
 
         let message = vks_proto::signaling::SignalingMessage {
             msg_id: 0,
@@ -385,7 +381,12 @@ mod tests {
         };
         transport.deliver(&message);
 
-        let layout = client.current_layout().expect("раскладка после push");
+        let seen = seen.lock().expect("sink lock");
+        assert_eq!(seen.len(), 1, "push дошёл до обработчика приложения");
+        let Some(Payload::LayoutChanged(changed)) = &seen[0].payload else {
+            panic!("ожидался LayoutChanged");
+        };
+        let layout = crate::layout::normalized_layout_from_proto(changed.layout.as_ref().expect("раскладка"));
         assert_eq!(layout.version, 2);
         assert_eq!(layout.slots.len(), 1);
         assert!((layout.slots[0].rect.h - 0.5).abs() < 1e-6);

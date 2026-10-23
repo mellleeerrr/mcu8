@@ -135,10 +135,17 @@ stack_keys.sort_unstable_by_key(|key| (rects[key].z, *key));
 
 * Клиентский рендер — собственный `DrawCommand` в `client/vks-client-sdk`,
   а **не** CSS-позиционирование (v1 из старого документа не реализован).
-* Раскладка на клиент **доходит**: `LayoutChanged` → `PushHandler` в SDK →
-  `MediaEngine::set_layout`; пока раскладки нет, клиент рисует авто-сетку.
-  `Rect` в протоколе нормализован (0..1) — клиент масштабирует под свой
-  холст (`NormalizedLayout::scale_to_canvas`).
+* Раскладка на клиент **доходит**: `LayoutChanged` → push-хендлер
+  транспорта → очередь конференции (`Conference::drain_events`) →
+  `MediaEngine::set_layout` → плитки на экране; пока раскладки нет, клиент
+  рисует авто-сетку. `Rect` в протоколе нормализован (0..1) — клиент
+  масштабирует под свой холст (`NormalizedLayout::scale_to_canvas`).
+* Владелец состояния раскладки — **конференция**: в SDK нет второй копии
+  раскладки. Приложение рисует через `Conference::media()`.
+* Источник истины на сервере — **эффективная раскладка композитора**
+  (`McuEngine::current_layout`), а не дескриптор: в режиме `auto` дескриптор
+  приходит без геометрии, и клиент получил бы пустой экран.
+  Контракт зафиксирован в ADR-0030.
 
 ---
 
@@ -188,8 +195,8 @@ stack_keys.sort_unstable_by_key(|key| (rects[key].z, *key));
 |---|---|
 | Admin → storage (SQLite) | работает |
 | Storage → signaling (NATS broadcast) | NATAS — заглушка (`vks-cluster`) |
-| `LayoutChanged` → клиенты | работает (рассылка по комнате) |
-| Snapshot при входе в комнату | работает: раскладка приходит следом за `JoinRoomResult` |
+| `LayoutChanged` → клиенты | работает (рассылка по комнате, источник — эффективная раскладка композитора) |
+| Snapshot при входе в комнату | работает: снимок в поле `JoinRoomResult.layout` (ADR-0030) |
 
 Полная карта разрывов — `ARCHITECTURE_PLAN_2026-10-23.md`, шаг 3.
 

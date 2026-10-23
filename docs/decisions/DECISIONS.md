@@ -33,6 +33,8 @@
 | 0026 | Режим MCU/SFU: глобальный дефолт + per-room override | accepted | 2026-10-13 | 0002, Q7 |
 | 0027 | Фронтенд PNM (legacy TrueConf MCU UI) — adopt-and-shim → поэтапно Dioxus | accepted | 2026-10-16 | 0010, 0013, 0009, 0019, 0022, 0026 |
 | 0028 | Codec-воркер: убийство process group через `libc::kill` | accepted | 2026-10-23 | 0016, T06b |
+| 0029 | Per-viewer композиция в MCU — базовый композит + персональная дельта | proposed | 2026-10-23 | 0002, 0004, 0012, 0026 |
+| 0030 | Контракт раскладки в сигналинге: нормализованные rect, 0-based slot_id, снимок в `JoinRoomResult` | accepted | 2026-10-23 | 0012, 0026 |
 
 ## Правила ведения
 

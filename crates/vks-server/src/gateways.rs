@@ -705,22 +705,22 @@ impl GatewayManager {
     }
     /// Рассылает участникам комнаты текущую раскладку MCU (`LayoutChanged`).
     ///
-    /// Источник истины — дескриптор, применённый движком: он уже прошёл
-    /// `sanitize_assignments`, поэтому клиент видит ровно ту геометрию, по
-    /// которой рисуется композит.
+    /// Источник истины — эффективная раскладка композитора: в режиме auto
+    /// дескриптор приходит без геометрии, а клиенту нужны реальные ячейки.
     async fn broadcast_layout(&self, room_id: RoomId) {
         let Some(mcu) = &self.mcu_engine else {
             return;
         };
-        let Some(descriptor) = mcu.layout_descriptor(room_id) else {
+        let Some(layout) = mcu.current_layout(room_id) else {
             return;
         };
         let Some(state) = self.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
         else {
             return;
         };
-        let message = crate::layout_signal::layout_changed(&descriptor);
+        let message = crate::layout_signal::layout_changed(&layout);
         let payload = vks_signaling::envelope::Envelope::new(message).encode();
+        tracing::debug!(%room_id, slots = layout.slots.len(), "раскладка отправлена участникам комнаты");
         state.room_hub.broadcast(&room_id, None, payload.into());
     }
 }
@@ -1597,16 +1597,13 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         // Явная геометрия UI перекрывает базовую по слоту. Раньше она
         // **заменяла** геометрию целиком: слот без x/y/w/h оставался без
         // ячейки, и `sanitize_assignments` молча выбрасывал его участника.
-        for cell in explicit {
-            match geometry.iter_mut().find(|slot| slot.slot == cell.slot) {
-                Some(existing) => *existing = cell,
-                None => geometry.push(cell),
-            }
-        }
+        let mut merged: std::collections::BTreeMap<u32, LayoutSlot> =
+            geometry.into_iter().map(|cell| (cell.slot, cell)).collect();
+        merged.extend(explicit.into_iter().map(|cell| (cell.slot, cell)));
+        let geometry: Vec<LayoutSlot> = merged.into_values().collect();
         if assignments.is_empty() && geometry.is_empty() && mode != "auto" {
             return Ok(());
         }
-        geometry.sort_by_key(|cell| cell.slot);
         // Если MCU-комнаты ещё нет, движок сохранит pending layout и применит
         // его на первом bridge — пустая SFU-сессия не аллоцирует композит.
         mcu.apply_layout(room_id, LayoutDescriptor { layout_id, version, assignments, geometry })
@@ -1615,7 +1612,7 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         // S9: раскладка — единственный источник истины о геометрии плиток, её
         // нужно донести до клиентов: `LayoutChanged` объявлен в протоколе, но
         // раньше никогда не отправлялся, и клиент рисовал свою авто-сетку.
-        GatewayManager::broadcast_layout(self, room_id).await;
+        self.broadcast_layout(room_id).await;
         Ok(())
     }
 
@@ -4037,6 +4034,47 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             Some(expected.as_str()),
             "участник привязан к своему слоту"
         );
+    }
+
+    /// S9: в режиме auto дескриптор приходит без геометрии, но клиент всё
+    /// равно должен получить ячейки — иначе он нарисует пустой экран.
+    ///
+    /// Источник истины — эффективная раскладка композитора, а не дескриптор.
+    #[tokio::test]
+    async fn auto_layout_broadcast_contains_real_cells() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let state = Arc::new(vks_admin::state::AppState::new());
+        manager.bind_state(Arc::downgrade(&state));
+        let room = RoomId::new();
+        let mut rx = state.room_hub.subscribe(&room);
+        mcu.ensure_room(room);
+        let pid = vks_core::ParticipantId::new();
+        mcu.bridge_participant(room, pid, vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)]);
+        let layout = serde_json::json!({
+            "id": "auto",
+            "payload": {
+                "mode": "auto", "preset": "preset_default_13", "type": "default", "size": 13,
+                "slots": [{"position": 1, "contact_id": pid.to_string()}]
+            }
+        });
+        manager.apply_layout(room, layout).await.expect("auto layout applied");
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("LayoutChanged must be broadcast")
+            .expect("broadcast event");
+        let envelope = vks_signaling::envelope::Envelope::decode(&event.payload).expect("protobuf envelope");
+        let Some(vks_proto::signaling::signaling_message::Payload::LayoutChanged(changed)) = envelope.payload() else {
+            panic!("ожидался LayoutChanged, получено {:?}", envelope.payload());
+        };
+        let layout = changed.layout.clone().expect("layout");
+        assert_eq!(layout.slots.len(), 1, "auto-сетка по одному участнику");
+        assert_eq!(layout.slots[0].id, 0);
+        let rect = layout.slots[0].rect.as_ref().expect("нормализованный rect");
+        assert!((rect.w - 1.0).abs() < 1e-5, "единственный участник занимает весь холст, w={}", rect.w);
+        assert!((rect.h - 1.0).abs() < 1e-5, "h={}", rect.h);
     }
 
     /// T03/B1: auto-«Общая» в существующей комнате строит сетку по числу

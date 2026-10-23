@@ -1452,6 +1452,28 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
         reqwest_like_request(tcp_addr, "GET", "/api/v3/sessions/room-pkg-d/abonents", &token, None).await;
     let ab_after_kick: serde_json::Value = serde_json::from_str(&body_after_kick).unwrap();
     assert_eq!(ab_after_kick["count"], 1);
+
+    // S9: поздний участник получает снимок раскладки в самом JoinRoomResult —
+    // без отдельного push-кадра, который мог прийти позже ответа.
+    let ws_carol = connect_ws(&ws_url, Some(&token)).await;
+    let (mut write_carol, mut read_carol) = ws_carol.split();
+    let hello_carol = client_hello(1, "room-pkg-d", "carol-client");
+    write_carol.send(TungsteniteMsg::Binary(hello_carol.encode().into())).await.unwrap();
+    let _ = read_carol.next().await.unwrap().unwrap();
+    let join_carol = join_room(2, "room-pkg-d", "Carol");
+    write_carol.send(TungsteniteMsg::Binary(join_carol.encode().into())).await.unwrap();
+    let res_join_carol = read_carol.next().await.unwrap().unwrap();
+    let env_join_carol = Envelope::decode(&res_join_carol.into_data()).unwrap();
+    match env_join_carol.payload() {
+        Some(Payload::JoinRoomResult(res)) => {
+            let layout = res.layout.as_ref().expect("поздний участник получает снимок раскладки");
+            assert!(!layout.slots.is_empty(), "снимок раскладки непуст");
+            assert_eq!(layout.slots[0].id, 0, "slot id — 0-based");
+            let rect = layout.slots[0].rect.as_ref().expect("нормализованный rect");
+            assert!(rect.w > 0.0 && rect.h > 0.0, "у слота есть размер");
+        }
+        other => panic!("expected JoinRoomResult, got {other:?}"),
+    }
 }
 
 #[tokio::test]

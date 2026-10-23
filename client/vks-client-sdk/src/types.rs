@@ -14,6 +14,8 @@ pub enum ConferenceEvent {
     Reconnected,
     /// Изменение режима (SFU ↔ MCU).
     ModeChanged { mode: String },
+    /// Новая раскладка комнаты (сервер — источник истины о геометрии плиток).
+    LayoutChanged { layout: vks_layout::NormalizedLayout },
     /// Новый участник.
     ParticipantJoined { id: String },
     /// Участник вышел.
@@ -35,6 +37,7 @@ impl ConferenceEvent {
             Self::ConnectionLost => "connection_lost",
             Self::Reconnected => "reconnected",
             Self::ModeChanged { .. } => "mode_changed",
+            Self::LayoutChanged { .. } => "layout_changed",
             Self::ParticipantJoined { .. } => "participant_joined",
             Self::ParticipantLeft { .. } => "participant_left",
             Self::QualityReport { .. } => "quality_report",

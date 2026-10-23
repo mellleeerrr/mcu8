@@ -75,6 +75,31 @@ pub enum LayoutKind {
     Custom,
 }
 
+impl LayoutKind {
+    /// Строковое имя вида раскладки — то же, что в протоколе
+    /// (`signaling.proto`: `kind` в `Layout`) и в serde.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::Focus => "focus",
+            Self::Speaker => "speaker",
+            Self::Custom => "custom",
+        }
+    }
+
+    /// Разбор строки вида раскладки (неизвестное имя ⇒ `Custom`).
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "grid" => Self::Grid,
+            "focus" => Self::Focus,
+            "speaker" => Self::Speaker,
+            _ => Self::Custom,
+        }
+    }
+}
+
 /// Слот раскладки: rect + привязка участника.
 ///
 /// `participant_id: None` — слот свободен (авто-назначение).

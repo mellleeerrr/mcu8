@@ -6,6 +6,12 @@
 //! Раскладка — единственный источник истины о геометрии плиток, поэтому
 //! после каждого `apply_layout` она рассылается участникам комнаты.
 //!
+//! **Источник истины — эффективная раскладка композитора**
+//! (`McuEngine::current_layout`), а не дескриптор: композитор считает
+//! авто-сетку сам, клампит прямоугольники в холст и раскладывает участников
+//! по слотам. Дескриптор без геометрии (режим auto) дал бы клиенту пустой
+//! список слотов — то есть пустой экран.
+//!
 //! **Единица координат:** `Rect` в протоколе — **нормализованная** (0..1)
 //! относительно холста MCU. Клиент рисует плитки в своём размере, поэтому
 //! пиксели холста 1920×1080 пересчитываются в доли один раз, на сервере.
@@ -14,122 +20,122 @@
 //! `LayoutDescriptor`: `assignments`/`geometry[].slot` — 0-based), тот же
 //! контракт, что и в `vks-core::ports::media_engine`.
 
-use std::collections::BTreeMap;
-
-use vks_core::ports::media_engine::LayoutDescriptor;
+use vks_layout::{Canvas, LayoutKind};
 use vks_proto::signaling::signaling_message::Payload;
 use vks_proto::signaling::{Layout, LayoutChanged, Rect, SignalingMessage, Slot, SlotAssignment};
 
-/// Вид раскладки для клиента: `grid` | `focus` | `speaker` | `custom`.
-fn layout_kind(layout_id: &str) -> &'static str {
-    match layout_id {
-        "grid" | "focus" | "speaker" => "grid",
-        _ => "custom",
-    }
-}
-
-/// Нормализует пиксельный прямоугольник холста MCU к диапазону 0..1.
-fn normalized_rect(x: u32, y: u32, width: u32, height: u32) -> Rect {
-    let (canvas_w, canvas_h) = vks_media_mcu::CANVAS_SIZE;
-    let canvas_w = (canvas_w as f32).max(1.0);
-    let canvas_h = (canvas_h as f32).max(1.0);
-    Rect { x: x as f32 / canvas_w, y: y as f32 / canvas_h, w: width as f32 / canvas_w, h: height as f32 / canvas_h }
-}
-
-/// Собирает прото-раскладку из дескриптора MCU.
+/// Собирает прото-раскладку из эффективной раскладки композитора.
 ///
-/// `assignments` разворачивается в обратную карту «слот → участник»: клиенту
-/// нужен именно слот (в нём рисуется участник), а не список соответствий.
+/// Нормализация — через `vks_layout` (`Layout::to_normalized`), чтобы сервер
+/// и клиент считали координаты одним кодом.
 #[must_use]
-pub fn proto_layout(descriptor: &LayoutDescriptor) -> Layout {
-    let mut by_slot: BTreeMap<u32, String> = BTreeMap::new();
-    for (participant, slot) in &descriptor.assignments {
-        by_slot.insert(*slot, participant.to_string());
-    }
-    let slots = descriptor
-        .geometry
+pub fn proto_layout(layout: &vks_layout::Layout) -> Layout {
+    let (canvas_w, canvas_h) = vks_media_mcu::CANVAS_SIZE;
+    let canvas = Canvas::new(canvas_w, canvas_h);
+    let normalized = layout.to_normalized(&canvas);
+    let slots = normalized
+        .slots
         .iter()
-        .map(|cell| {
-            let participant = by_slot.get(&cell.slot).cloned();
+        .map(|slot| {
+            let participant_id = slot.participant_id.map(|pid| uuid::Uuid::from_u128(pid.as_u128()).to_string());
             Slot {
-                id: cell.slot,
-                rect: Some(normalized_rect(cell.x, cell.y, cell.width, cell.height)),
-                z: cell.z_order,
-                // Явно занятый слот — «fixed»: участник закреплён за ячейкой.
-                assignment: if participant.is_some() {
+                id: slot.id.as_u32(),
+                rect: Some(Rect {
+                    x: slot.rect.x as f32,
+                    y: slot.rect.y as f32,
+                    w: slot.rect.w as f32,
+                    h: slot.rect.h as f32,
+                }),
+                z: slot.z_index.max(0) as u32,
+                // Закреплённый слот — «pinned», занятый — «fixed», свободный —
+                // «auto»: клиент различает их при наведении и в self-view.
+                assignment: if slot.pinned {
+                    SlotAssignment::Pinned as i32
+                } else if participant_id.is_some() {
                     SlotAssignment::Fixed as i32
                 } else {
                     SlotAssignment::Auto as i32
                 },
-                participant_id: participant,
+                participant_id,
             }
         })
         .collect();
-    Layout { version: descriptor.version, slots, kind: layout_kind(&descriptor.layout_id).to_string() }
+    Layout { version: layout.version, slots, kind: layout.kind.as_str().to_string() }
 }
 
-/// Сообщение `LayoutChanged` для дескриптора раскладки.
+/// Сообщение `LayoutChanged` для раскладки комнаты.
 #[must_use]
-pub fn layout_changed(descriptor: &LayoutDescriptor) -> SignalingMessage {
+pub fn layout_changed(layout: &vks_layout::Layout) -> SignalingMessage {
     SignalingMessage {
         msg_id: 0,
         reply_to: 0,
-        payload: Some(Payload::LayoutChanged(LayoutChanged { layout: Some(proto_layout(descriptor)) })),
+        payload: Some(Payload::LayoutChanged(LayoutChanged { layout: Some(proto_layout(layout)) })),
     }
+}
+
+/// Вид раскладки по строке протокола (для клиента и тестов).
+#[must_use]
+pub fn layout_kind(name: &str) -> LayoutKind {
+    LayoutKind::parse(name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vks_core::ports::media_engine::LayoutSlot;
-    use vks_core::ParticipantId;
+    use vks_layout::{Layout, Slot};
 
-    fn descriptor() -> LayoutDescriptor {
-        let mut assignments = BTreeMap::new();
-        assignments.insert(ParticipantId::from_uuid(uuid::Uuid::from_u128(7)), 0);
-        assignments.insert(ParticipantId::from_uuid(uuid::Uuid::from_u128(9)), 1);
-        LayoutDescriptor {
-            layout_id: "grid".into(),
-            version: 3,
-            assignments,
-            geometry: vec![
-                LayoutSlot { slot: 0, x: 0, y: 0, width: 960, height: 540, z_order: 0 },
-                LayoutSlot { slot: 1, x: 960, y: 0, width: 960, height: 540, z_order: 0 },
-            ],
-        }
+    fn layout() -> Layout {
+        let mut layout = Layout::new(LayoutKind::Grid);
+        layout.version = 3;
+        layout.slots.push(Slot::new(0, Some(vks_layout::ParticipantId::new(7)), vks_layout::Rect::new(0, 0, 960, 540)));
+        layout.slots.push(Slot::new(
+            1,
+            Some(vks_layout::ParticipantId::new(9)),
+            vks_layout::Rect::new(960, 0, 960, 540),
+        ));
+        layout
     }
 
     #[test]
     fn slots_are_zero_based_and_normalized() {
-        let layout = proto_layout(&descriptor());
-        assert_eq!(layout.version, 3);
-        assert_eq!(layout.kind, "grid");
-        assert_eq!(layout.slots.len(), 2);
-        assert_eq!(layout.slots[0].id, 0);
-        assert_eq!(layout.slots[1].id, 1);
-        let rect = layout.slots[1].rect.as_ref().expect("rect");
+        let proto = proto_layout(&layout());
+        assert_eq!(proto.version, 3);
+        assert_eq!(proto.kind, "grid");
+        assert_eq!(proto.slots.len(), 2);
+        assert_eq!(proto.slots[0].id, 0);
+        assert_eq!(proto.slots[1].id, 1);
+        let rect = proto.slots[1].rect.as_ref().expect("rect");
         assert!((rect.x - 0.5).abs() < 1e-6, "x={}", rect.x);
-        assert!((rect.y).abs() < 1e-6, "y={}", rect.y);
+        assert!(rect.y.abs() < 1e-6, "y={}", rect.y);
         assert!((rect.w - 0.5).abs() < 1e-6, "w={}", rect.w);
         assert!((rect.h - 0.5).abs() < 1e-6, "h={}", rect.h);
     }
 
     #[test]
     fn participant_is_bound_to_its_slot() {
-        let layout = proto_layout(&descriptor());
-        let first = layout.slots[0].participant_id.as_deref().expect("participant");
-        let second = layout.slots[1].participant_id.as_deref().expect("participant");
+        let proto = proto_layout(&layout());
+        let first = proto.slots[0].participant_id.as_deref().expect("participant");
+        let second = proto.slots[1].participant_id.as_deref().expect("participant");
         assert_ne!(first, second);
-        assert_eq!(layout.slots[0].assignment, SlotAssignment::Fixed as i32);
+        assert_eq!(proto.slots[0].assignment, SlotAssignment::Fixed as i32);
+    }
+
+    #[test]
+    fn pinned_slot_is_marked_pinned() {
+        let mut layout = layout();
+        layout.slots[0].pinned = true;
+        let proto = proto_layout(&layout);
+        assert_eq!(proto.slots[0].assignment, SlotAssignment::Pinned as i32);
+        assert_eq!(proto.slots[1].assignment, SlotAssignment::Fixed as i32);
     }
 
     #[test]
     fn message_carries_layout_changed_payload() {
-        let message = layout_changed(&descriptor());
+        let message = layout_changed(&layout());
         match message.payload {
             Some(Payload::LayoutChanged(changed)) => {
-                let layout = changed.layout.expect("layout");
-                assert_eq!(layout.slots.len(), 2);
+                let proto = changed.layout.expect("layout");
+                assert_eq!(proto.slots.len(), 2);
             }
             other => panic!("unexpected payload: {other:?}"),
         }
