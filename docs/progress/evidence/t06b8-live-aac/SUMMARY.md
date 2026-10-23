@@ -70,9 +70,10 @@ because the first rig still owned 5090 during the parallel run):
   four FFmpeg children (2 encoders + 2 decoders) stayed alive.
 - API abonents showed growing counters for both participants:
   rx 2059 packets / 391 509 B (56 378 bps), tx 2599 / 326 954 B (47 082 bps).
-- UAS2 decoded the MCU RTP mix: `samples=121856 rms=0.0887 nonzero=121179`
-  — the 1 kHz tone injected by UAS1 travelled MCU mix -> AAC-LATM encoder ->
-  RTP PT113 -> decoder on UAS2. This is the real end-to-end audio proof.
+- UAS2 decoded the MCU RTP mix: `samples=121856 rms=0.0887 nonzero=121179`.
+  Both rigs used the same 1 kHz tone, so this run alone does not attribute the
+  measured tone to UAS1 (own-loopback would look identical); the decisive
+  attribution run below uses one tone and one silent peer.
 - UAS1 decoded silence (`rms=0.0000`). This run does not *prove* mix-minus:
   UAS1 decoded its first ~120 packets at ~04:13:19, before UAS2 joined at
   04:13:38, so there was simply no second source in the mix yet. Mix-minus is
@@ -86,10 +87,28 @@ because the first rig still owned 5090 during the parallel run):
 No `source validator`, `no PCM`, `stalled` or `tearing` warnings appeared;
 bridges ended only when the UAS processes exited.
 
+## Decisive attribution run (440 Hz vs silence)
+
+A follow-up lab run used UAS1 (port 5091) = 440 Hz tone and UAS2 (port 5092)
+= silence (FFmpeg `volume=0`), in one session (`88df831c…`, two SIP dialogs
+confirmed MP4A-LATM, two bridges started).
+
+- UAS2, which sent only silence, decoded `samples=122880 rms=0.0884
+  nonzero=122852`, measured frequency 443.8 Hz (`uas-attrib-silent.log`,
+  `uas-attrib-440.latm`): it hears UAS1's tone through the MCU mixer, so this
+  is cross-forwarding, not its own loopback.
+- UAS1, which sent the 440 Hz tone, decoded `samples=122880 rms=0.0000
+  nonzero=0` (`uas-attrib-440.log`): no self-loop / mix-minus holds.
+
+This supersedes the ambiguous same-tone paragraph above.
+
 ## Caveats
 
-- Raw decoded artifact: `uas-5092-rx.latm`, sha256 in `SHA256SUMS`;
-  121 856 samples, RMS 0.08871, 121 179 non-zero.
+- `uas-5092-rx.latm` is a cleaned LOAS stream: the test rig had wrapped one
+  RTCP packet into a fake LOAS record; that record was removed, leaving 119
+  AAC frames (sha256 in `SHA256SUMS`). It decodes to 121 856 samples,
+  RMS 0.08871, 121 179 non-zero. `rx_packets=1784` in `uas-5092.log` includes
+  RTCP (its `rx pts={72,113}`).
 - The first single-peer run could only prove framing/timeline (RMS 0);
   the two-peer run above proves audible end-to-end audio.
 - Legal opt-in was enabled only for this lab test; default is off and was

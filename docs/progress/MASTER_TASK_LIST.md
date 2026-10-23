@@ -251,15 +251,18 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > негативные UAC-тесты. Пейсер ограничен 2 кадрами за тик (3 при backlog>4).
 > **LIVE AAC доказан (2026-10-23):** два локальных SIP UAS, legal opt-in, 200 OK с
 > `MP4A-LATM/90000`, RTP PT113 в обе стороны, счётчики rx/tx растут, UAS2 декодировал
-> микс MCU → AAC → PCM: `samples=121856 rms=0.0887` (тон UAS1 через MCU), UAS1 — тишина
-> (свой звук не возвращается); liveness/source-validator предупреждений нет, 4 FFmpeg-воркера
+> микс MCU → AAC → PCM: `samples=121856 rms=0.0887`; отдельный прогон с разными сигналами
+> (440 Гц против тишины) доказал кросс-пересылку и отсутствие self-loop; liveness/source-validator
+> предупреждений нет, 4 FFmpeg-воркера
 > живы. Default-off восстановлен (`aac_latm=false`). Evidence:
 > `docs/progress/evidence/t06b8-live-aac/` (`SUMMARY.md`, `server.log`, `uas*.log`, raw `uas-5092-rx.latm` + `SHA256SUMS`).
-> **Финальное ревью: 8.9/10, REQUEST CHANGES.** Исправлено: `is_aac_audio` больше не
+> **Ревью: 8.9/10 и 9.2/10, REQUEST CHANGES.** Исправлено: `is_aac_audio` больше не
 > подменяет кодек по PT113 (решает negotiated identity; тесты `(113,G722/OPUS)`), fmtp-гейт
 > fail-closed (SBR=true/TRUE, дубли `object=8;object=2`, `cpresent=0;cpresent=1`), добавлен
 > encoder-liveness (3 с без принятого PCM → teardown), evidence дополнен диалогом 5092,
-> сырым LATM и sha256, формулировки SUMMARY уточнены. Осталось: повторное ревью ≥9.5.
+> сырым LATM и sha256, формулировки SUMMARY уточнены; UAS-fmtp переведён на построчный
+> разбор всех `a=fmtp` строк с fail-closed AND (тесты на первый параметр и две строки).
+> Осталось: повторное ревью ≥9.5.
 > (`WorkerPool::try_reserve(2)`) для двух прямых FFmpeg-процессов. **Live-бинарь `3caa7546`:
 > legal-гейт enforced — `aac_latm=false`, API AAC supported=false** (включается только
 > `VKS_AAC_LATM_LEGAL_ACCEPTED=1`). Осталось до 9.5: RTP-level AAC-тест (16:15/marker/timestamp/

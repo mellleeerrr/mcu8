@@ -418,19 +418,29 @@ impl BridgeableAudio {
 /// and unknown parameters are ignored (RFC 3016 allows them); the codec itself
 /// must be AAC-LC (object type 2) and SMC must travel in-band (`cpresent!=0`).
 pub(crate) fn aac_fmtp_is_bridgeable(fmtp: &str) -> bool {
-    // Fail closed on every conflicting duplicate: a peer writing
-    // `object=8;object=2` or `cpresent=0;cpresent=1` must not slip through on
-    // "last key wins". SBR is rejected unless it is explicitly disabled.
+    let parameters: Vec<(String, String)> = fmtp
+        .split(';')
+        .filter_map(|parameter| {
+            let (key, value) = parameter.trim().split_once('=')?;
+            Some((key.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect();
+    aac_fmtp_parameters_bridgeable(&parameters)
+}
+
+/// Fail-closed across every occurrence: `object=8;object=2` or two
+/// `a=fmtp` lines must not pass on "last key wins". SBR is rejected unless
+/// it is explicitly disabled.
+fn aac_fmtp_parameters_bridgeable(parameters: &[(String, String)]) -> bool {
     let mut object_ok = true;
     let mut cpresent_ok = true;
     let mut sbr_ok = true;
-    for parameter in fmtp.split(';') {
-        let Some((key, value)) = parameter.split_once('=') else { continue };
+    for (key, value) in parameters {
         let value = value.trim();
         if value == "!conflict!" {
             return false;
         }
-        match key.trim().to_ascii_lowercase().as_str() {
+        match key.as_str() {
             "object" => object_ok &= value == "2",
             "cpresent" => cpresent_ok &= value != "0",
             "sbr" => {
@@ -488,12 +498,7 @@ fn bridgeable_audio(section: &str, payload: u8, aac_available: bool) -> Option<B
             if clock != 90_000 || channels.unwrap_or(1) != 1 {
                 return None;
             }
-            let fmtp = section
-                .lines()
-                .filter(|line| line.to_ascii_lowercase().starts_with(&format!("a=fmtp:{payload} ")))
-                .collect::<String>()
-                .to_ascii_lowercase();
-            if !aac_fmtp_is_bridgeable(&fmtp) {
+            if !aac_fmtp_parameters_bridgeable(&aac_fmtp_pairs(section, payload)) {
                 return None;
             }
             return Some(BridgeableAudio {
@@ -601,6 +606,21 @@ fn video_payloads(section: &str, codec_name: &str) -> Vec<u8> {
                 .then_some(payload)
         })
         .collect()
+}
+
+/// Every key/value pair from every `a=fmtp:<payload>` line, duplicates kept:
+/// the AAC gate must fail closed across all occurrences.
+fn aac_fmtp_pairs(section: &str, payload: u8) -> Vec<(String, String)> {
+    let prefix = format!("a=fmtp:{payload} ");
+    let mut parameters = Vec::new();
+    for line in section.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix(&prefix) else { continue };
+        for parameter in rest.split(';') {
+            let Some((key, value)) = parameter.trim().split_once('=') else { continue };
+            parameters.push((key.trim().to_ascii_lowercase(), value.trim().to_string()));
+        }
+    }
+    parameters
 }
 
 /// Parameter map from every `a=fmtp:<payload>` line (last value wins).
@@ -1025,5 +1045,24 @@ a=rtpmap:101 telephone-event/8000\r\n";
         assert!(negotiate_with(&bitrate, true).is_some(), "bitrate is informational");
         let config_hint = offer.replace("cpresent=1", "cpresent=1;config=40002420");
         assert!(negotiate_with(&config_hint, true).is_some(), "config hint with in-band SMC is legal");
+    }
+
+    #[test]
+    fn inbound_aac_fmtp_first_parameter_and_multiple_lines_fail_closed() {
+        let base = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP 113\r\n\
+a=rtpmap:113 MP4A-LATM/90000\r\n";
+        let cases = [
+            "a=fmtp:113 object=8;cpresent=1\r\n",
+            "a=fmtp:113 cpresent=0;object=2\r\n",
+            "a=fmtp:113 SBR=true;object=2;cpresent=1\r\n",
+            "a=fmtp:113 profile-level-id=1;object=2;cpresent=1\r\na=fmtp:113 object=8\r\n",
+            "a=fmtp:113 profile-level-id=1;object=2;cpresent=1\r\na=fmtp:113 cpresent=0\r\n",
+        ];
+        for fmtp in cases {
+            let offer = format!("{base}{fmtp}");
+            assert!(negotiate_with(&offer, true).is_none(), "must refuse:\n{fmtp}");
+        }
+        let legal = format!("{base}a=fmtp:113 object=2;cpresent=1;bitrate=64000;config=40002420\r\n");
+        assert!(negotiate_with(&legal, true).is_some(), "legal in-band offer must pass");
     }
 }
