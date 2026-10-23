@@ -208,6 +208,11 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > снимается, `-smc-interval 1`, обязательные `-probesize 32 -analyzeduration 0` (без них live-труба
 > буферизует ~5 МБ и первый кадр не приходит), запрещённые `low_delay`/`nobuffer`/`avioflags direct`
 > зафиксированы тестом; реальный тест 16×960 → 15–17 кадров, первый с SMC, ≤1200 B. Workspace 1225.
+> **Slice 2b готов:** `LatmDecoder` — второй долгоживущий FFmpeg (`loas` → `s16le` 48k), такие же
+> раздельные задачи, bounded-очереди, выдача 960-сэмпловых PCM-блоков; реальный loopback
+> 1 с тона → AAC-LATM RTP-payload → LOAS → decode даёт ≥44.1k сэмплов и RMS > 0.02. Workspace 1226.
+> Осталось: подключение пары к `run_audio_bridge` (16:15, marker=1, timestamp 1920/1024, prefill),
+> SDP PT113/fmtp, UAS cpresent=1, затем cpresent=0/config, pool preflight и live `.132`.
 > Нельзя: `-flags low_delay`/`-avioflags direct`/`-fflags nobuffer` (ломали AAC), забыть
 > `-probesize 32 -analyzeduration 0` перед `-i`, ждать EOF для кадров, блокировать аудио-цикл чтением stdout,
 > объявлять native AAC без worker/packetizer/probe, резать кадр по MTU вместо drop+metric, писать `ptime:20`

@@ -208,12 +208,180 @@ impl LatmEncoder {
     }
 }
 
+/// Builds the FFmpeg argument vector for one LATM decoder.
+///
+/// Input is LOAS framing (`add_loas` around each RTP `audioMuxElement`);
+/// output is raw mono `s16le` at 48 kHz. The same live-pipe probe limits as
+/// the encoder are mandatory.
+#[must_use]
+pub fn decoder_args() -> Vec<String> {
+    vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-probesize".into(),
+        "32".into(),
+        "-analyzeduration".into(),
+        "0".into(),
+        "-f".into(),
+        "loas".into(),
+        "-i".into(),
+        "pipe:0".into(),
+        "-f".into(),
+        "s16le".into(),
+        "-ac".into(),
+        "1".into(),
+        "-ar".into(),
+        "48000".into(),
+        "pipe:1".into(),
+    ]
+}
+
+/// A live LATM decoder producing 20 ms PCM blocks.
+pub struct LatmDecoder {
+    input_tx: Option<mpsc::Sender<Vec<u8>>>,
+    pcm_rx: mpsc::Receiver<Vec<f32>>,
+    failed: Arc<AtomicBool>,
+    child: Child,
+    input_task: tokio::task::JoinHandle<()>,
+    output_task: tokio::task::JoinHandle<()>,
+    stderr_task: tokio::task::JoinHandle<()>,
+    stderr: Arc<std::sync::Mutex<String>>,
+}
+
+impl LatmDecoder {
+    /// Spawns FFmpeg for a 48 kHz mono LATM stream.
+    ///
+    /// # Errors
+    /// [`WorkerError::Spawn`]/[`WorkerError::InvalidConfig`] when the child or
+    /// one of its pipes cannot be started.
+    pub fn spawn(ffmpeg: PathBuf) -> Result<Self, WorkerError> {
+        let mut child = Command::new(&ffmpeg)
+            .args(decoder_args())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(WorkerError::Spawn)?;
+        let mut stdin = child.stdin.take().ok_or_else(|| WorkerError::InvalidConfig("latm decoder stdin".into()))?;
+        let mut stdout = child.stdout.take().ok_or_else(|| WorkerError::InvalidConfig("latm decoder stdout".into()))?;
+        let stderr_pipe =
+            child.stderr.take().ok_or_else(|| WorkerError::InvalidConfig("latm decoder stderr".into()))?;
+        let (input_tx, mut input_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<f32>>(QUEUE_TICKS);
+        let failed = Arc::new(AtomicBool::new(false));
+        let stderr = Arc::new(std::sync::Mutex::new(String::new()));
+
+        let input_failed = failed.clone();
+        let input_task = tokio::spawn(async move {
+            while let Some(loas) = input_rx.recv().await {
+                if stdin.write_all(&loas).await.is_err() {
+                    input_failed.store(true, Ordering::Release);
+                    return;
+                }
+            }
+        });
+
+        let output_failed = failed.clone();
+        let output_task = tokio::spawn(async move {
+            loop {
+                let mut bytes = [0u8; LATM_TICK_SAMPLES * 2];
+                if stdout.read_exact(&mut bytes).await.is_err() {
+                    break;
+                }
+                let pcm = bytes
+                    .chunks_exact(2)
+                    .map(|pair| f32::from(i16::from_le_bytes([pair[0], pair[1]])) / 32768.0)
+                    .collect();
+                if pcm_tx.send(pcm).await.is_err() {
+                    break;
+                }
+            }
+            output_failed.store(true, Ordering::Release);
+        });
+
+        let stderr_text = stderr.clone();
+        let stderr_task = tokio::spawn(async move {
+            let mut pipe = stderr_pipe;
+            let mut buffer = [0u8; 1024];
+            while let Ok(count) = pipe.read(&mut buffer).await {
+                if count == 0 {
+                    break;
+                }
+                if let Ok(mut text) = stderr_text.lock() {
+                    text.push_str(&String::from_utf8_lossy(&buffer[..count]));
+                    if text.len() > 4096 {
+                        let split = text.len() - 2048;
+                        *text = text.split_off(split);
+                    }
+                }
+            }
+        });
+
+        Ok(Self { input_tx: Some(input_tx), pcm_rx, failed, child, input_task, output_task, stderr_task, stderr })
+    }
+
+    /// Queues one complete LOAS frame (header included). Returns `false` when
+    /// the decoder is gone; the caller drops the packet rather than blocking.
+    pub async fn push_loas(&self, loas: Vec<u8>) -> bool {
+        match &self.input_tx {
+            Some(sender) => sender.send(loas).await.is_ok(),
+            None => false,
+        }
+    }
+
+    /// Non-blocking receive of one 20 ms PCM block.
+    #[must_use]
+    pub fn try_pcm(&mut self) -> Option<Vec<f32>> {
+        self.pcm_rx.try_recv().ok()
+    }
+
+    /// Whether FFmpeg exited or a pipe failed.
+    #[must_use]
+    pub fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    /// Last FFmpeg stderr fragment (diagnostics only).
+    #[must_use]
+    pub fn last_stderr(&self) -> String {
+        self.stderr.lock().map(|text| text.clone()).unwrap_or_default()
+    }
+
+    /// Child process id (diagnostics/tests).
+    #[must_use]
+    pub fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    /// Closes the compressed side so FFmpeg drains; teardown only.
+    pub fn close_input(&mut self) {
+        self.input_tx.take();
+    }
+
+    /// Stops the child and all pipe tasks.
+    pub async fn shutdown(mut self) {
+        self.input_task.abort();
+        self.output_task.abort();
+        self.stderr_task.abort();
+        let _ = self.child.start_kill();
+        let _ = self.child.wait().await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn ffmpeg_bin() -> String {
         std::env::var("VKS_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".into())
+    }
+
+    fn loas_frame(payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0x56, 0xe0 | ((payload.len() >> 8) as u8 & 0x1f), payload.len() as u8];
+        frame.extend_from_slice(payload);
+        frame
     }
 
     fn ffmpeg_available() -> bool {
@@ -267,6 +435,58 @@ mod tests {
         );
         assert!(frames[0].first().is_some_and(|byte| byte & 0x80 == 0), "first frame carries SMC");
         assert!(frames.iter().all(|frame| frame.len() <= 1200), "payload fits MTU");
+        encoder.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn encoder_to_decoder_loopback_returns_audible_pcm() {
+        if !ffmpeg_available() {
+            return;
+        }
+        let mut encoder = LatmEncoder::spawn(PathBuf::from(ffmpeg_bin()), 64_000).expect("encoder");
+        let mut phase = 0.0f32;
+        for _ in 0..50 {
+            let mut block = [0i16; LATM_TICK_SAMPLES];
+            for sample in &mut block {
+                *sample = (phase.sin() * 8_000.0) as i16;
+                phase += 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
+            }
+            assert!(encoder.push_pcm(&block).await);
+        }
+        encoder.close_input();
+        let mut payloads = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+        while tokio::time::Instant::now() < deadline {
+            if let Some(frame) = encoder.try_frame() {
+                payloads.push(frame);
+            } else if encoder.failed() {
+                break;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        assert!(payloads.len() >= 45, "expected about one second of frames, got {}", payloads.len());
+
+        let mut decoder = LatmDecoder::spawn(PathBuf::from(ffmpeg_bin())).expect("decoder");
+        for payload in &payloads {
+            assert!(decoder.push_loas(loas_frame(payload)).await);
+        }
+        decoder.close_input();
+        let mut pcm = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+        while tokio::time::Instant::now() < deadline {
+            if let Some(block) = decoder.try_pcm() {
+                pcm.extend(block);
+            } else if decoder.failed() {
+                break;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        assert!(pcm.len() >= 44_100, "decoded {} samples; stderr={}", pcm.len(), decoder.last_stderr());
+        let rms = (pcm[2048..].iter().map(|sample| sample * sample).sum::<f32>() / (pcm.len() - 2048) as f32).sqrt();
+        assert!(rms > 0.02, "decoded tone is silent: rms={rms}");
+        decoder.shutdown().await;
         encoder.shutdown().await;
     }
 }
