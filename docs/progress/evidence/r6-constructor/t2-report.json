@@ -1,0 +1,23 @@
+{
+ "state": {
+  "sectionExists": true,
+  "sectionBeforeGroup": true,
+  "ctorCards": 5,
+  "activePreset": "vks_grid_25",
+  "activeBadge": "25",
+  "modeTileActive": true,
+  "countButtons": 0
+ },
+ "saved": "clicked",
+ "payload": null,
+ "reopened": {
+  "tileActive": true,
+  "activePreset": "vks_grid_25"
+ },
+ "errors": [
+  "console: Failed to load resource: the server responded with a status of 404 (Not Found)",
+  "console: Refused to execute script from 'http://127.0.0.1:8080/mcu/theme-toggle.js' because its MIME type ('') is not executable, and strict MIME type checking is enabled.",
+  "console: Failed to load resource: the server responded with a status of 404 (Not Found)",
+  "console: Refused to execute script from 'http://127.0.0.1:8080/mcu/theme-toggle.js' because its MIME type ('') is not executable, and strict MIME type checking is enabled."
+ ]
+}

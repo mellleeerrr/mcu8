@@ -551,13 +551,17 @@
     }
     if (constructorState !== 'ready') return;
     var section = host.querySelector('[' + CONSTRUCTOR_ATTR + ']');
+    var firstGroup = host.querySelector('[' + GROUP_ATTR + ']');
     if (!section) {
       section = document.createElement('div');
       section.className = 'main-form-section-16';
       section.setAttribute(CONSTRUCTOR_ATTR, '1');
       section.addEventListener('click', onConstructorActivate);
       section.addEventListener('keydown', onConstructorKeydown);
-      host.appendChild(section);
+      // Конструктор — первая секция ручной панели: при переходе на пункт
+      // «Конструктор» пользователь видит его сразу, не прокручивая 54 Codian.
+      if (firstGroup && firstGroup.parentNode === host) host.insertBefore(section, firstGroup);
+      else host.appendChild(section);
     }
     // Перерисовываем только при смене числа окон: MutationObserver ловит наши
     // же вставки, поэтому безусловный innerHTML дал бы бесконечный цикл.
@@ -660,6 +664,16 @@
     }
     syncModeTile();
     schedule();
+    // Вкладка «Конструктор» — это наш конструктор: если текущий preset не из
+    // нашего семейства (Codian/vendor), переключаемся на равномерную сетку с
+    // тем же числом окон, чтобы сохранение и превью были про vks_*.
+    var value = editor.modifiedValue;
+    var preset = value && typeof value.preset === 'string' ? value.preset : '';
+    if (preset.indexOf('vks_') !== 0) {
+      var count = currentCount();
+      if (!(count > 0)) count = 1;
+      selectConstructor('vks_grid_' + count);
+    }
     var section = document.querySelector('[' + CONSTRUCTOR_ATTR + ']');
     if (section && typeof section.scrollIntoView === 'function') {
       section.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
