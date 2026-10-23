@@ -40,7 +40,7 @@ git worktree add --detach /var/tmp/vks-t14b-clean <commit>
 cd /var/tmp/vks-t14b-clean
 CARGO_TARGET_DIR="$OLDPWD/target" \
 VKS_MCU_TICK_METRICS=1 VKS_SOAK_SECONDS=60 VKS_SOAK_WARMUP=3 \
-VKS_SOAK_PARTICIPANTS=4 VKS_SOAK_OUT="$OLDPWD/docs/progress/evidence/t14b-mcu-tick-soak/soak-60s-4p.json" \
+VKS_SOAK_PARTICIPANTS=4 VKS_SOAK_OUT=/tmp/t14b-soak-60s.json \
   cargo test --release -p vks-media-mcu --test mcu_tick_soak -- --ignored --nocapture
 ```
 
@@ -53,13 +53,13 @@ falling back.
 
 Run `3690699`, clean worktree (`git_dirty=false`), Intel Xeon E5-2699 v3,
 rustc 1.94.0. Machine report: [`soak-60s-4p.json`](soak-60s-4p.json). Reproducers
-should write `VKS_SOAK_OUT` to `/tmp`; the command above overwrites the canonical
-artifact.
+should keep `VKS_SOAK_OUT` in `/tmp`; to update the canonical artifact
+deliberately, pass the evidence path instead.
 
 | phase | samples | exact `le=2ms` | p99 bucket (estimate) | mean | rate |
 |---|---:|---:|---:|---:|---:|
 | audio engine work | 1492 | **1.000** | (0.25, 0.5] ms (0.387 ms) | 0.161 ms | 49.73 Hz |
-| video compose (I420) | 883 | 0.000 | (10, 20] ms (20.0 ms) | 16.02 ms | 29.43 fps |
+| video compose (I420) | 883 | 0.000 | (10, 20] ms (19.95 ms) | 16.02 ms | 29.43 fps |
 
 Video exact `le=33 ms` ratio **1.000**, engine `frames_dropped` delta 883 (all
 883 are the deliberate duplicate/throttle probes; first successes 883), audio
@@ -78,7 +78,7 @@ slot.
 **Verdict:** the audio engine-work p99 ≤2 ms SLO is met with a wide margin. Video
 compose fits the 33 ms frame budget in this workload but **not** the 2 ms target;
 its p99 is only known to be in (10, 20] ms because 20 ms is the upper bound of
-that histogram bucket (the estimate is 20.0 ms). The video 2 ms target is deferred
+that histogram bucket (the estimate is 19.95 ms). The video 2 ms target is deferred
 to S20 (SIMD/zero-copy/parallel tiles, per-room actors). No claim is made that
 the full media tick meets 2 ms.
 

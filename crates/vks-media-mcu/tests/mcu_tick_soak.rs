@@ -51,7 +51,9 @@ impl PhaseSnapshot {
         assert!(
             self.buckets.len() == before.buckets.len()
                 && self.buckets.iter().zip(&before.buckets).all(|((a, _), (b, _))| a == b),
-            "histogram bucket layout changed between snapshots"
+            "histogram bucket layout changed between snapshots: {} vs {} buckets",
+            self.buckets.len(),
+            before.buckets.len()
         );
         let buckets = self
             .buckets
@@ -439,7 +441,7 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     engine.clear_participant_frame(room, pids[0]);
     assert!(engine.set_participant_frame(room, pids[0], i420_frame(FRAME_WIDTH, FRAME_HEIGHT, 999)));
     engine.unbridge_participant(room, pids[1]);
-    assert!(!engine.has_participant(room, pids[1]), "unbridge must remove the participant");
+    assert!(!engine.has_participant(room, pids[1]), "unbridge must remove participant {}", pids[1]);
     let after_admin = histogram_snapshot();
     let admin_renders =
         engine.stats(room).map_or(0, |stats| stats.frames_rendered).saturating_sub(rendered_before_admin);
@@ -544,9 +546,10 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     assert_eq!(audio.second_call_successes, 0, "same-timestamp audio duplicate must be throttled");
     assert_eq!(video.second_call_successes, 0, "same-timestamp video duplicate must be throttled");
     // Wall-clock period-loss gate: a skipped slot lowers first successes while
-    // `scheduled` stays fixed. First successes also include 18 ms audio-throttle
-    // rejects on early wakes; up to 1% of all such losses is tolerated. The floored
-    // lower bound rejects a clearly larger loss (edge rounding can hide one slot).
+    // `scheduled` stays fixed. First-success shortfalls also include 18 ms
+    // audio-throttle rejects after a late previous tick; up to 1% of all such
+    // losses is tolerated. The floored lower bound rejects a clearly larger loss
+    // (edge rounding can hide one slot).
     assert!(
         audio.first_successes * 100 >= audio_scheduled * 99,
         "audio lost more than 1% of scheduled periods: {} of {audio_scheduled}",

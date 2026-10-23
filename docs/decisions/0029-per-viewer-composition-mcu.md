@@ -34,7 +34,7 @@
 
 Измеренная база (release-soak, 4 участника, 1280×720 I420,
 `crates/vks-media-mcu/tests/mcu_tick_soak.rs`; commit `3690699`): compose mean
-16.02 мс, p99 в бакете (10, 20] мс (estimate 20.0 мс), `le_2ms_ratio = 0.0`,
+16.02 мс, p99 в бакете (10, 20] мс (estimate 19.95 мс), `le_2ms_ratio = 0.0`,
 `le_33ms_ratio = 1.0`. Источник: `docs/progress/evidence/t14b-mcu-tick-soak/`.
 
 ## Варианты (Options)
@@ -159,11 +159,14 @@
 - [x] Фаза 3: voice activation / «Important» / приоритет заполнения; критерий:
       крупное окно следует за активным спикером, план пересчитывается по
       событию, а не на тик.
-      Сделано (2026-10-23): `vks-layout::focus::{main_window, promote_to_main_window}`
-      (главное окно — по площади, жильцы меняются местами), `RoomState::refresh_focus`
-      пересаживает главное окно при смене спикера и при назначении «Важного»,
-      `McuEngine::{set_event_sink, set_important_participant}` отдают `RoomEvent`
-      наружу, серверный `room_events` превращает их в `SpeakingStateChanged`
+      Сделано (2026-10-23): `vks-layout::focus::main_window` (главное окно — по
+      площади; правило одно, поэтому пересадку жильцов делает движок, а не
+      `vks-layout`), `RoomState::refresh_seating` пересаживает всех: главное окно —
+      «Важному» или активному спикеру, мелкие ячейки — по убыванию недавности
+      речи (`RoomState::recent_speakers`, MRU), плюс перенос кадров
+      (`rekey_frames`) вместе с участниками. `McuEngine::{set_event_sink,
+      set_important_participant}` отдают `RoomEvent` наружу, серверный
+      `room_events` превращает их в `SpeakingStateChanged`
       (поле 102, с уровнем RMS) и `LayoutChanged`. Равная сетка и фиксированные
       макеты PNM не перестраиваются голосом (Codian §2.1: 52 макета статичны).
       Побочно закрыт B8: мёртвый `FocusLayout::compute` заменён живым
