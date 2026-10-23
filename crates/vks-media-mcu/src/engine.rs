@@ -49,6 +49,9 @@ struct RoomState {
     caps: RoomCaps,
     /// Publisher → their tracks (kept for listing / future decode).
     publisher_tracks: BTreeMap<ParticipantId, Vec<MediaTrack>>,
+    /// Порядок прихода паблишеров (S12): сетка и заполнение слотов идут по
+    /// порядку прихода, а не по сортировке UUID.
+    join_order: Vec<ParticipantId>,
     /// Subscribers (MCU: they all receive the single composite track).
     subscribers: BTreeSet<ParticipantId>,
     /// Applied layout descriptor (core-level, from apply_layout).
@@ -69,7 +72,7 @@ struct RoomState {
     stats: McuRenderStats,
     /// Last composed frame, per subscriber (mock: the same composite for
     /// every subscriber).
-    composite: Frame,
+    composite: Arc<Frame>,
     /// Audio mix of the current frame (full mix for recording/monitoring).
     mixed_audio: Vec<f32>,
     /// Per-participant N-1 mix-minus audio (without self-echo).
@@ -78,6 +81,9 @@ struct RoomState {
     vads: BTreeMap<ParticipantId, Vad>,
     /// Last committed speaking state per participant.
     speaking_states: BTreeMap<ParticipantId, bool>,
+    /// Изменения состояния «говорит» (S12): список для внешнего потребителя
+    /// (ростер админки + push `SpeakingStateChanged`).
+    speaking_changes: Vec<(ParticipantId, bool)>,
     /// Current active/dominant speaker with silence hysteresis.
     active_speaker: Option<ParticipantId>,
 }
@@ -88,6 +94,7 @@ impl RoomState {
             mode,
             caps,
             publisher_tracks: BTreeMap::new(),
+            join_order: Vec::new(),
             subscribers: BTreeSet::new(),
             layout: None,
             current_layout: Layout::new(LayoutKind::Grid),
@@ -97,15 +104,16 @@ impl RoomState {
             last_render_ms: None,
             last_audio_ms: None,
             stats: McuRenderStats::default(),
-            composite: Frame::new(
+            composite: Arc::new(Frame::new(
                 CANVAS_SIZE.0,
                 CANVAS_SIZE.1,
                 vec![0u8; CANVAS_SIZE.0 as usize * CANVAS_SIZE.1 as usize],
-            ),
+            )),
             mixed_audio: Vec::new(),
             participant_audio: BTreeMap::new(),
             vads: BTreeMap::new(),
             speaking_states: BTreeMap::new(),
+            speaking_changes: Vec::new(),
             active_speaker: None,
         }
     }
@@ -286,7 +294,7 @@ impl RoomState {
     fn process_video(&mut self, frames: &BTreeMap<u32, Arc<Frame>>) {
         let t0 = std::time::Instant::now();
         let rects = self.slot_rects();
-        self.composite = Compositor.compose(frames, &rects);
+        self.composite = Arc::new(Compositor.compose(frames, &rects));
         self.stats.last_duration_us = t0.elapsed().as_micros() as u64;
         self.stats.frames_rendered += 1;
     }
@@ -328,7 +336,16 @@ impl RoomState {
             }
             vad.feed_frame(&frame);
             let is_speaking = vad.is_speaking();
-            self.speaking_states.insert(*pid, is_speaking);
+            // Первое наблюдение — это начальное состояние, а не изменение:
+            // в список попадают только смены «говорит/молчит».
+            if let Some(previous) = self.speaking_states.get(pid) {
+                if *previous != is_speaking {
+                    self.speaking_states.insert(*pid, is_speaking);
+                    self.speaking_changes.push((*pid, is_speaking));
+                }
+            } else {
+                self.speaking_states.insert(*pid, is_speaking);
+            }
 
             if is_speaking && sum_sq > highest_energy {
                 highest_energy = sum_sq;
@@ -474,7 +491,7 @@ impl McuEngine {
 
     /// Advances the room's pipeline (30 fps tick) and returns the composite
     /// frame. Deterministic for a given input sequence.
-    pub fn tick(&self, room: RoomId) -> Option<Frame> {
+    pub fn tick(&self, room: RoomId) -> Option<Arc<Frame>> {
         let mut g = self.rooms.lock().unwrap();
         let state = g.get_mut(&room)?;
         let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
@@ -490,7 +507,7 @@ impl McuEngine {
 
     /// Advances the room's pipeline at a specific monotonic timestamp `now_ms`.
     /// Returns Some(Frame) if rendered, or None if dropped by backpressure.
-    pub fn tick_at(&self, room: RoomId, now_ms: u64) -> Option<Frame> {
+    pub fn tick_at(&self, room: RoomId, now_ms: u64) -> Option<Arc<Frame>> {
         let mut g = self.rooms.lock().unwrap();
         let state = g.get_mut(&room)?;
         let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
@@ -526,7 +543,7 @@ impl McuEngine {
 
     /// Advances only the video pipeline at a specific monotonic timestamp `now_ms` (33 ms budget).
     /// Returns Some(Frame) if rendered, or None if dropped by frame-dropping backpressure.
-    pub fn tick_video_at(&self, room: RoomId, now_ms: u64) -> Option<Frame> {
+    pub fn tick_video_at(&self, room: RoomId, now_ms: u64) -> Option<Arc<Frame>> {
         let mut g = self.rooms.lock().unwrap();
         let state = g.get_mut(&room)?;
         let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
@@ -535,6 +552,27 @@ impl McuEngine {
         } else {
             None
         }
+    }
+
+    /// Кадровый тик + кадр для конкретного зрителя.
+    ///
+    /// То, что нужно egress'у: конвейер продвигается один раз, а кадр
+    /// выбирается для конкретного получателя (ADR-0029, фаза 0: общий кадр).
+    pub fn tick_video_for_viewer(&self, room: RoomId, now_ms: u64, viewer: ParticipantId) -> Option<Arc<Frame>> {
+        match self.tick_video_at(room, now_ms) {
+            Some(frame) => Some(frame),
+            None => self.frame_for_viewer(room, viewer),
+        }
+    }
+
+    /// Кадр для конкретного зрителя.
+    ///
+    /// Фаза 0 ADR-0029: персональной дельты ещё нет ⇒ зритель получает
+    /// **тот же** `Arc<Frame>`, что и все остальные (нулевые копии; байты
+    /// не меняются). Дальше зритель с отклонениями получит персональную
+    /// сборку из тайлов, а зритель без отклонений — по-прежнему общий `Arc`.
+    pub fn frame_for_viewer(&self, room: RoomId, _viewer: ParticipantId) -> Option<Arc<Frame>> {
+        self.composite_frame(room)
     }
 
     /// Returns the rendering and backpressure stats of a room (M3.6).
@@ -616,6 +654,16 @@ impl McuEngine {
     }
 
     /// Returns the active speaker determined by per-participant VAD.
+    /// Забирает накопленные изменения состояния «говорит» (S12).
+    ///
+    /// Потребитель (сервер) дренирует список после audio-тика и обновляет
+    /// ростер + рассылает `SpeakingStateChanged`: без этого состояние
+    /// «говорит» не покидало бы движок.
+    pub fn take_speaking_changes(&self, room: RoomId) -> Vec<(ParticipantId, bool)> {
+        let mut g = self.rooms.lock().unwrap();
+        g.get_mut(&room).map(|state| std::mem::take(&mut state.speaking_changes)).unwrap_or_default()
+    }
+
     pub fn active_speaker(&self, room: RoomId) -> Option<ParticipantId> {
         self.rooms.lock().unwrap().get(&room).and_then(|s| s.active_speaker)
     }
@@ -686,6 +734,9 @@ impl McuEngine {
         }
         let has_video = layout_has_video(&tracks);
         state.publisher_tracks.insert(pid, tracks);
+        if !state.join_order.contains(&pid) {
+            state.join_order.push(pid);
+        }
         if !has_video {
             return;
         }
@@ -732,7 +783,7 @@ impl McuEngine {
     }
 
     /// Current composed pixels, shared by subscribers when a render is throttled.
-    pub fn composite_frame(&self, room: RoomId) -> Option<Frame> {
+    pub fn composite_frame(&self, room: RoomId) -> Option<Arc<Frame>> {
         self.rooms.lock().unwrap().get(&room).map(|state| state.composite.clone())
     }
 
@@ -742,6 +793,7 @@ impl McuEngine {
         if let Some(state) = g.get_mut(&room) {
             state.subscribers.remove(&pid);
             state.publisher_tracks.remove(&pid);
+            state.join_order.retain(|known| *known != pid);
             state.vads.remove(&pid);
             state.speaking_states.remove(&pid);
             if state.active_speaker == Some(pid) {
@@ -838,6 +890,9 @@ impl MediaEngine for McuEngine {
         let mut g = self.rooms.lock().unwrap();
         let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
         state.publisher_tracks.insert(publisher, tracks);
+        if !state.join_order.contains(&publisher) {
+            state.join_order.push(publisher);
+        }
         Ok(PublisherHandle { room, publisher })
     }
 
@@ -845,6 +900,7 @@ impl MediaEngine for McuEngine {
         let mut g = self.rooms.lock().unwrap();
         let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
         state.publisher_tracks.remove(&publisher);
+        state.join_order.retain(|known| *known != publisher);
         state.vads.remove(&publisher);
         state.speaking_states.remove(&publisher);
         if state.active_speaker == Some(publisher) {
@@ -916,8 +972,19 @@ impl MediaEngine for McuEngine {
         // AUTO, auto-пресет, возврат к «Общей» после удаления ручной). Иначе
         // `set_participant_frame` перестал бы писать кадры и живой SIP-терминал
         // увидел бы замерший последний снимок вместо новой сетки.
-        let bridged: Vec<ParticipantId> =
-            state.publisher_tracks.iter().filter(|(_, tracks)| layout_has_video(tracks)).map(|(pid, _)| *pid).collect();
+        // Порядок посадки — порядок прихода (S12), а не сортировка по UUID:
+        // иначе после смены раскладки участники менялись бы местами.
+        let mut bridged: Vec<ParticipantId> = state
+            .join_order
+            .iter()
+            .copied()
+            .filter(|pid| state.publisher_tracks.get(pid).is_some_and(|tracks| layout_has_video(tracks)))
+            .collect();
+        for (pid, tracks) in &state.publisher_tracks {
+            if layout_has_video(tracks) && !bridged.contains(pid) {
+                bridged.push(*pid);
+            }
+        }
         let version_floor = state.layout.as_ref().map_or(0, |old| old.version.saturating_add(1));
         for pid in bridged {
             if !layout.assignments.contains_key(&pid) {
@@ -990,6 +1057,95 @@ mod tests {
         assert_eq!(handle.mode, RoomMode::Mcu);
         e.destroy_room(rid).await.unwrap();
         assert!(matches!(e.destroy_room(rid).await.unwrap_err(), MediaEngineError::RoomNotFound(_)));
+    }
+
+    /// ADR-0029, фаза 0: кадр для зрителя — тот же `Arc`, что и общий
+    /// композит (нулевые копии), байты не меняются.
+    #[tokio::test]
+    async fn frame_for_viewer_shares_the_composite_without_copies() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(1);
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.set_frame(rid, 0, Frame::filled(320, 180, 10));
+        for _ in 0..12 {
+            e.tick(rid);
+        }
+        let composite = e.composite_frame(rid).expect("composite");
+        let first = e.frame_for_viewer(rid, p(100)).expect("кадр для зрителя");
+        let second = e.frame_for_viewer(rid, p(101)).expect("кадр для второго зрителя");
+        assert!(std::sync::Arc::ptr_eq(&first, &second), "зрители делят один кадр");
+        assert!(std::sync::Arc::ptr_eq(&first, &composite), "кадр зрителя — общий композит");
+        assert_eq!(first.data, composite.data, "байты не изменились");
+    }
+
+    /// ADR-0029, фаза 0: egress-запрос кадра для зрителя продвигает конвейер
+    /// и возвращает композит (как раньше `tick_video_at`).
+    #[tokio::test]
+    async fn tick_video_for_viewer_advances_the_pipeline() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(1);
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.set_frame(rid, 0, Frame::filled(320, 180, 10));
+        let frame = e.tick_video_for_viewer(rid, 100, p(100)).expect("кадр");
+        assert_eq!((frame.width, frame.height), (CANVAS_SIZE.0, CANVAS_SIZE.1));
+        // Второй запрос в том же кадровом окне дропается по backpressure,
+        // но кадр зрителя всё равно доступен (последний композит).
+        let again = e.tick_video_for_viewer(rid, 101, p(100)).expect("кадр зрителя");
+        assert_eq!(again.data, frame.data);
+    }
+
+    /// S12: изменение состояния «говорит» выходит из движка наружу.
+    #[tokio::test]
+    async fn speaking_changes_leave_the_engine() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(1);
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.set_audio(rid, a, vec![0.9f32; 960]);
+        // VAD с дебаунсом 500 мс: состояние «говорит» фиксируется после
+        // устойчивого сигнала, а не с первого кадра.
+        for step in 0..30 {
+            e.tick_audio_at(rid, 100 + step * 20);
+        }
+        let changes = e.take_speaking_changes(rid);
+        assert_eq!(changes, vec![(a, true)], "громкий участник начал говорить");
+        assert!(e.take_speaking_changes(rid).is_empty(), "список забирается один раз");
+        assert!(e.is_speaking(rid, a));
+    }
+
+    /// S12: авто-сетка и пересадка участников идут по порядку прихода, а не
+    /// по сортировке UUID.
+    #[tokio::test]
+    async fn auto_layout_follows_the_join_order_not_the_uuid_sort() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        // `p(9)` приходит раньше `p(1)`, но сортировка по UUID дала бы p(1) первым.
+        let first = p(9);
+        let second = p(1);
+        e.add_publisher(rid, first, vec![video_track(first)]).await.unwrap();
+        e.add_publisher(rid, second, vec![video_track(second)]).await.unwrap();
+        e.apply_layout(
+            rid,
+            LayoutDescriptor {
+                layout_id: "auto".into(),
+                version: 1,
+                assignments: std::collections::BTreeMap::new(),
+                geometry: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let layout = e.current_layout(rid).expect("раскладка");
+        let vpid = |pid: ParticipantId| Some(vks_layout::ParticipantId::new(pid.as_uuid().as_u128()));
+        assert_eq!(layout.slots[0].participant_id, vpid(first), "слот 0 — первый пришедший");
+        assert_eq!(layout.slots[1].participant_id, vpid(second), "слот 1 — второй пришедший");
     }
 
     #[tokio::test]

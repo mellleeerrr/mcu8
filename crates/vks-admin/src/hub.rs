@@ -171,6 +171,21 @@ impl RoomHub {
         Some(participant.clone())
     }
 
+    /// Обновляет признак «говорит» в ростере (S12: состояние VAD доходит до
+    /// админки, а не остаётся в движке).
+    pub fn update_participant_speaking(
+        &self,
+        room_id: &RoomId,
+        participant_id: &str,
+        is_speaking: bool,
+    ) -> Option<ParticipantSnapshot> {
+        let mut map = self.channels.write().expect("RoomHub lock poisoned");
+        let entry = map.get_mut(room_id)?;
+        let participant = entry.participants.get_mut(participant_id)?;
+        participant.is_speaking = is_speaking;
+        Some(participant.clone())
+    }
+
     /// Atomically updates a participant's media state (audio/video mute or display name) in the roster.
     pub fn update_participant_media(
         &self,

@@ -625,6 +625,7 @@ pub(super) async fn spawn_video_media_bridge(
     let render_cancelled = session.cancelled.clone();
     let render_stats = session.stats.clone();
     let render_profile = session.profile.clone();
+    let render_viewer = session.participant_id;
     let render = tokio::spawn(async move {
         // fps из профиля, а не жёсткие 15 fps: иначе SPS/поле обещают 30,
         // а в эфир уходит 15 кадров/с.
@@ -636,9 +637,11 @@ pub(super) async fn spawn_video_media_bridge(
             let engine = render_engine.clone();
             let render_profile = render_profile.clone();
             let rendered = tokio::task::spawn_blocking(move || {
-                let frame = engine
-                    .tick_video_at(room, super::audio::media_clock_ms())
-                    .or_else(|| engine.composite_frame(room))?;
+                // Кадр запрашивается для конкретного получателя (ADR-0029):
+                // сегодня это общий композит, но путь выбора кадра уже
+                // персональный — персональная дельта добавится без
+                // изменения egress'а.
+                let frame = engine.tick_video_for_viewer(room, super::audio::media_clock_ms(), render_viewer)?;
                 Some(resize_i420(&frame, &render_profile))
             })
             .await;

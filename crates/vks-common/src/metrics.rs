@@ -169,9 +169,14 @@ pub fn observe_mcu_tick(phase: McuTickPhase, elapsed: std::time::Duration) {
     if !mcu_tick_metrics_enabled() {
         return;
     }
+    mcu_tick_histogram(phase).observe(elapsed.as_secs_f64());
+}
+
+/// Cached zero-allocation child handle for a phase.
+fn mcu_tick_histogram(phase: McuTickPhase) -> &'static Histogram {
     match phase {
-        McuTickPhase::Audio => MCU_TICK_AUDIO.observe(elapsed.as_secs_f64()),
-        McuTickPhase::Video => MCU_TICK_VIDEO.observe(elapsed.as_secs_f64()),
+        McuTickPhase::Audio => &MCU_TICK_AUDIO,
+        McuTickPhase::Video => &MCU_TICK_VIDEO,
     }
 }
 
@@ -181,8 +186,9 @@ pub fn observe_mcu_tick(phase: McuTickPhase, elapsed: std::time::Duration) {
 /// «count > 0» в soak-тесте без единого реального тика.
 fn init_mcu_tick_metrics() {
     if mcu_tick_metrics_enabled() {
-        let _ = &*MCU_TICK_AUDIO;
-        let _ = &*MCU_TICK_VIDEO;
+        // Dereference the cached children so both phases exist at count 0.
+        let _ = mcu_tick_histogram(McuTickPhase::Audio);
+        let _ = mcu_tick_histogram(McuTickPhase::Video);
     }
 }
 
