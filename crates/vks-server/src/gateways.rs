@@ -1504,6 +1504,10 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
     /// и голый UUID давали один и тот же `ParticipantId`. Слоты без
     /// идентификатора/позиции пропускаются (пустые окна сетки).
     ///
+    /// T10b: `payload.slots` может отсутствовать (id-only apply): тогда
+    /// применяется только геометрия `payload.preset` (Codian/конструктор/
+    /// ручной пресет), а окна заполняет MCU по мере подключения участников.
+    ///
     /// Идентификатор без UUID (`cs-1`, имя адресной книги) отбрасывается:
     /// `parse_participant_id` превратил бы его в sha-256 UUIDv5, который
     /// никогда не совпадёт с реально забридженным участником, — такой слот
@@ -1517,9 +1521,10 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         let layout_id = layout["id"].as_str().filter(|id| !id.is_empty()).unwrap_or("grid").to_string();
         let version =
             layout["payload"]["version"].as_u64().and_then(|version| u32::try_from(version).ok()).unwrap_or(1);
-        let Some(slots) = layout["payload"]["slots"].as_array() else {
-            return Ok(());
-        };
+        // id-only apply (T10b): без `payload.slots` геометрия берётся из
+        // `payload.preset`, назначения остаются пустыми.
+        let empty_slots: Vec<serde_json::Value> = Vec::new();
+        let slots = layout["payload"]["slots"].as_array().unwrap_or(&empty_slots);
 
         // Явный контракт: `calculate` и `attach_abonent` отдают 1-based
         // позиции, поэтому по умолчанию вычитаем 1. Для старых 0-based
@@ -4320,6 +4325,52 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             expected[0].rect.width.round() as u32,
             "ширина первого окна из grids::geometry"
         );
+    }
+
+    /// T10b: apply без `payload.slots` (id-only) применяет геометрию пресета:
+    /// конструктор и Codian доезжают до MCU без списка слотов.
+    #[tokio::test]
+    async fn id_only_apply_uses_preset_geometry_without_slots() {
+        use vks_admin::state::OutboundDialer;
+        for (preset, expected_windows) in [("vks_grid_9", 9_usize), ("codian_07", 13)] {
+            let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+            let manager = GatewayManager::new().with_mcu(mcu.clone());
+            let room = RoomId::new();
+            mcu.ensure_room(room);
+            let layout = serde_json::json!({
+                "id": format!("id-only-{preset}"),
+                "payload": { "mode": "manual", "preset": preset, "type": "individual" }
+            });
+            manager.apply_layout(room, layout).await.expect("id-only layout applied");
+            let descriptor = mcu.layout_descriptor(room).expect("layout applied to MCU");
+            assert_eq!(descriptor.layout_id, format!("id-only-{preset}"));
+            assert_eq!(descriptor.geometry.len(), expected_windows, "{preset}: окна из id");
+            assert!(descriptor.assignments.is_empty(), "{preset}: назначения пусты — окна заполнит MCU");
+        }
+    }
+
+    /// T8: READY только при реально слушающем SIP UAS; после shutdown — DISABLED.
+    #[tokio::test]
+    async fn gateway_sip_status_follows_live_uas_listener() {
+        let manager = Arc::new(GatewayManager::new());
+        assert_eq!(manager.sip_status()["status"], "DISABLED", "до старта listener'а");
+        serve_sip_uas(manager.clone(), "127.0.0.1:0".to_string(), "127.0.0.1".to_string())
+            .await
+            .expect("serve sip uas");
+        let mut ready = false;
+        for _ in 0..100 {
+            let status = manager.sip_status();
+            if status["status"] == "READY" && status["registration"] == true && status["connected"] == true {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(ready, "живой UDP listener должен давать READY/registration=true: {:?}", manager.sip_status());
+        manager.shutdown_sip_uas().await;
+        let after = manager.sip_status();
+        assert_eq!(after["status"], "DISABLED", "после shutdown listener'а: {after}");
+        assert_eq!(after["registration"], false);
     }
 
     /// T03: gateway не теряет вендорный z_order overlap/PiP-пресета.
