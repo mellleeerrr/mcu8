@@ -27,8 +27,6 @@ pub enum PushOutcome {
 
 /// PCM block size consumed by the MCU audio tick.
 pub const LATM_TICK_SAMPLES: usize = 960;
-/// AAC-LC samples per frame.
-pub const LATM_FRAME_SAMPLES: usize = 1024;
 /// Bound for queued PCM ticks and encoded frames; never grow without limit.
 const QUEUE_TICKS: usize = 8;
 

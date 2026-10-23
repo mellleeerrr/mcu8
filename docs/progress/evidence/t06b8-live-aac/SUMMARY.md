@@ -18,7 +18,8 @@ a=fmtp:113 profile-level-id=1;object=2;cpresent=1
 
 It sends its whole 60 s stream as LATM RTP frames of a 1 kHz tone (FFmpeg
 `-smc-interval 1`, 48 kHz mono, 64 kbps; 2851 packets sent, 2706 received) and
-decodes every RTP packet received from the MCU.
+decodes the first 120 RTP packets received from the MCU (a ~2.5 s window,
+enough for the RMS/frequency check).
 
 Session: conference/session `23bc65cf-f1ae-48a7-8197-7f5653339b4c`,
 dial `sip:127.0.0.1:5090` via

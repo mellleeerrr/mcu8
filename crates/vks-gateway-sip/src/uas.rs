@@ -620,7 +620,11 @@ fn aac_fmtp_pairs(section: &str, payload: u8) -> Vec<(String, String)> {
         // RFC 8866 allows any whitespace after the integer payload type, and
         // SDP integers may carry leading zeroes; a literal-space prefix would
         // silently skip the whole gate on `a=fmtp:113\t...`.
-        let Some((declared, rest)) = rest.split_once(char::is_whitespace) else { continue };
+        // Also split on `;` so the invalid `a=fmtp:113;object=8` can never be
+        // skipped and default the gate to accept.
+        let Some((declared, rest)) = rest.split_once(|c: char| c.is_whitespace() || c == ';') else {
+            continue;
+        };
         if declared.trim().parse::<u8>().ok() != Some(payload) {
             continue;
         }
@@ -1073,6 +1077,14 @@ a=rtpmap:113 MP4A-LATM/90000\r\n";
         }
         let legal = format!("{base}a=fmtp:113 object=2;cpresent=1;bitrate=64000;config=40002420\r\n");
         assert!(negotiate_with(&legal, true).is_some(), "legal in-band offer must pass");
+        for bad_prefix in
+            ["a=fmtp:113\tobject=8;cpresent=1\r\n", "a=fmtp:00113 object=8;cpresent=1\r\n", "a=fmtp:113;object=8\r\n"]
+        {
+            let offer = format!("{base}{bad_prefix}");
+            assert!(negotiate_with(&offer, true).is_none(), "must refuse prefix: {bad_prefix:?}");
+        }
+        let other_pt = format!("{base}a=fmtp:1130 object=8;cpresent=1\r\n");
+        assert!(negotiate_with(&other_pt, true).is_some(), "PT1130 is a different payload, fmtp must not gate 113");
         for weird in ["00", "false", "01", "true"] {
             let fmtp = format!("{base}a=fmtp:113 object=2;cpresent={weird}\r\n");
             assert!(negotiate_with(&fmtp, true).is_none(), "non-canonical cpresent={weird} must be refused");

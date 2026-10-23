@@ -344,20 +344,21 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                     pending_tx.push_back(frame);
                 }
                 ticks += 1;
-                let due = u64::from(frames_due(
+                let mut pending_due = frames_due(
                     ticks.saturating_mul(LATM_TICK_SAMPLES as u64),
-                    0,
-                ));
+                    frames_sent,
+                );
                 // Keep a 2-frame cushion before the first packet, then send
                 // at most two frames per 20 ms tick (plus one when the encoder
                 // delivered a larger burst) so a backlog never leaves as a
                 // 4-packet burst on the wire.
                 let burst = if pending_tx.len() > 4 { 3 } else { 2 };
                 let mut sent_this_tick = 0u32;
-                while frames_sent < due
+                while pending_due > 0
                     && sent_this_tick < burst
                     && pending_tx.len() > if ticks < 32 { 2 } else { 0 }
                 {
+                    pending_due -= 1;
                     sent_this_tick += 1;
                     let frame = pending_tx.pop_front().expect("pending frame");
                     let timestamp = clock.next_timestamp();
