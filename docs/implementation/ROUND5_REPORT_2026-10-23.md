@@ -81,7 +81,7 @@ Live: в auto пункт присутствует (`tileInSelector=true`), се�
 | r5-chain-media | аудит медиа-цепочки композита | 560 стр: «композит не доставляется браузеру» — не P0 (SDK композитит локально), композит нужен шлюзам; 3 замка MCU-комнаты; превью 260→320; перф-правки | Против классификации P0 и против «браузер=композит» без R6-харнесса | Принял: превью 320 внедрено; WebRTC-мост/перф — R6; формулировка в отчёте исправлена |
 | r5-chain-gateways | аудит шлюзовой цепочки | 440 стр: P0 contact_id>abonent_id (фантомное окно), SIP UAS default-on, фиктивный статус; регрессия pin `thumb_h<40` на превью; конфиги | Спорил: R4 P0-1 не закрыт (SDP шлюзов не валидируется, env сам давал TEST-NET) | Принял: порог pin масштабирован, env-пример без TEST-NET, SIP UAS opt-in; contact_id/статус — R5.1 |
 | r5-chain-signaling-storage | аудит сигналлинга/хранения/конфигов | 755 стр: P0 create_room не забирает pending, PG-путь типово сломан, SIP UAS, нет прод-клиента LayoutChanged; ~45 `VKS_*` вне Config; мёртвые core/legacy layouts | Подтвердил R4-удаления (aarch64/rust-src/deny) как безвредные; требует Config-унификацию | Принял P0-1 (pending в create_room) и P0-3 (SIP opt-in); PG/Config/мёртвый код — R5.1/R6 бэклог |
-| r5-regressions | регрессии после R4 | запущен, отчёт не успел к сдаче R5 | — | Учту в R5.1; гейт R5 прогнан заново |
+| r5-regressions | регрессии после R4 | прод-код R4 без регрессий; блокер CI `wasm-sdk` (tokio в `conference.rs:271` под wasm), деплой закрыт в WT; P2 граничные g/m и evidence | настаивал, что golden — self-oracle, а сверка с таблицей/текстом 4200 возможна | Принял: wasm-таймер через `setTimeout`, `clamp_gap` + граничные тесты; evidence-пометка superseded — R5.1 |
 
 Правило контраргументации соблюдалось в каждом промпте: агент обязан
 отстаивать позицию до согласия или убеждения; итоги выше — результат диалога.
@@ -125,7 +125,8 @@ P2: `pin` для N<4 визуально хуже галереи (правило 
 
 - `cargo fmt --all -- --check` — ok; `clippy --workspace --all-features
   --all-targets -D warnings` — ok; `cargo test --workspace` — зелёный
-  (см. `.work-tmp/r5-finalize.log`).
+  (1306 passed, 0 failed); `cargo check -p vks-client-sdk --target
+  wasm32-unknown-unknown` — ok (wasm-таймер теперь `setTimeout`, не tokio).
 - Live (Playwright, стенд 8080): 54 карточки Codian, 0 заголовков,
   `viewBox 0 0 1280 720`, пункт «Конструктор» в селекторе (в auto виден,
   секция скрыта), клик → active + секция, `calculate` всех 5 схем → 200,

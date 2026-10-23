@@ -235,6 +235,7 @@ fn gallery(count: usize, width: f64, height: f64, gap: f64, margin: f64) -> Vec<
     let count = count.max(1);
     let inner_w = (width - 2.0 * margin).max(1.0);
     let inner_h = (height - 2.0 * margin).max(1.0);
+    let gap = clamp_gap(gap, count, inner_w, inner_h);
     let best = (1..=count)
         .min_by(|&left, &right| {
             let cost = |rows: usize| gallery_cost(count, rows, inner_w, inner_h, gap);
@@ -299,6 +300,7 @@ fn pin(count: usize, side: PinSide, width: f64, height: f64, gap: f64, margin: f
     let count = count.max(1);
     let inner_w = (width - 2.0 * margin).max(1.0);
     let inner_h = (height - 2.0 * margin).max(1.0);
+    let gap = clamp_gap(gap, count, inner_w, inner_h);
     if count == 1 {
         return vec![SlotRect::new(margin, margin, inner_w, inner_h)];
     }
@@ -367,6 +369,22 @@ fn pin(count: usize, side: PinSide, width: f64, height: f64, gap: f64, margin: f
         }
     }
     rects
+}
+
+/// Слишком большой зазор (например `vks_pin_l_g32_64`) даёт отрицательные
+/// ячейки/выход за холст: тогда зазор обнуляется, чтобы геометрия оставалась
+/// валидной (id при этом не меняется — это защита рендера, не парсинг).
+fn clamp_gap(gap: f64, count: usize, inner_w: f64, inner_h: f64) -> f64 {
+    if !gap.is_finite() || gap <= 0.0 {
+        return 0.0;
+    }
+    let slots_axis = (count.max(1)) as f64;
+    let smallest = inner_w.min(inner_h);
+    if smallest - (slots_axis - 1.0) * gap < slots_axis {
+        0.0
+    } else {
+        gap
+    }
 }
 
 /// Границы `count` ячеек по одной оси с зазором `gap` (целочисленный разрез).

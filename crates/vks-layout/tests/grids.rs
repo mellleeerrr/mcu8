@@ -175,3 +175,34 @@ fn зазоры_и_поля_сохраняют_структуру() {
         }
     }
 }
+
+/// Граничные сочетания «много окон × большой зазор»: геометрия остаётся
+/// валидной (зазор обнуляется), окна внутри холста и не пересекаются.
+#[test]
+fn большой_зазор_при_многих_окнах_не_ломает_геометрию() {
+    for (count, gap) in [(64usize, 64u32), (36, 64), (64, 32), (64, 8)] {
+        for pin in [None, Some(PinSide::Left), Some(PinSide::Top)] {
+            let scheme = GridScheme { count, pin, options: GridOptions { gap, margin: 0 } };
+            let id = scheme.id();
+            let slots = grids::geometry(&id, W, H).expect("раскладка существует");
+            assert_eq!(slots.len(), count, "{id}: число окон");
+            for slot in &slots {
+                let rect = &slot.rect;
+                assert!(rect.width >= 1.0 && rect.height >= 1.0, "{id}: пустое окно");
+                assert!(
+                    rect.x >= 0.0 && rect.y >= 0.0 && rect.x + rect.width <= W + 0.5 && rect.y + rect.height <= H + 0.5,
+                    "{id}: окно вне холста"
+                );
+            }
+            for (index, first) in slots.iter().enumerate() {
+                for second in slots.iter().skip(index + 1) {
+                    let overlap_x = (first.rect.x + first.rect.width).min(second.rect.x + second.rect.width)
+                        - first.rect.x.max(second.rect.x);
+                    let overlap_y = (first.rect.y + first.rect.height).min(second.rect.y + second.rect.height)
+                        - first.rect.y.max(second.rect.y);
+                    assert!(overlap_x <= 0.5 || overlap_y <= 0.5, "{id}: окна пересекаются");
+                }
+            }
+        }
+    }
+}

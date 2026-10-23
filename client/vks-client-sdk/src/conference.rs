@@ -268,7 +268,7 @@ impl Conference {
             }
 
             let delay = client.next_reconnect_delay();
-            tokio::time::sleep(delay).await;
+            backoff_sleep(delay).await;
             attempts += 1;
 
             if self.state == ConferenceState::Left {
@@ -358,6 +358,23 @@ impl Default for QoeConfig {
 /// Разбор режима комнаты из строки (`sfu` | `mcu`).
 fn parse_room_mode(value: &str) -> Option<RoomMode> {
     RoomMode::parse(value)
+}
+
+/// Пауза backoff: tokio на native, `setTimeout` на wasm (tokio там недоступен).
+#[cfg(not(target_arch = "wasm32"))]
+async fn backoff_sleep(delay: std::time::Duration) {
+    tokio::time::sleep(delay).await;
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn backoff_sleep(delay: std::time::Duration) {
+    let millis = delay.as_millis().min(i32::MAX as u128) as i32;
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
 #[cfg(test)]
