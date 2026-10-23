@@ -251,24 +251,28 @@ impl RoomState {
         frames: &BTreeMap<u32, Arc<Frame>>,
         audio_inputs: &[(ParticipantId, Vec<f32>)],
     ) -> bool {
-        let _events = self.tick_audio_at(now_ms, audio_inputs);
+        let (_ran, _events, _seating) = self.tick_audio_at(now_ms, audio_inputs);
         self.tick_video_at(now_ms, frames)
     }
 
     /// Advances the audio processing pass at a specific monotonic timestamp `now_ms` (20 ms cadence).
-    fn tick_audio_at(&mut self, now_ms: u64, audio_inputs: &[(ParticipantId, Vec<f32>)]) -> (bool, Vec<RoomEvent>) {
+    fn tick_audio_at(
+        &mut self,
+        now_ms: u64,
+        audio_inputs: &[(ParticipantId, Vec<f32>)],
+    ) -> (bool, Vec<RoomEvent>, Option<SeatingMove>) {
         if let Some(last) = self.last_audio_ms {
             if now_ms < last + 18 {
-                return (false, Vec::new());
+                return (false, Vec::new(), None);
             }
         }
         self.last_audio_ms = Some(now_ms);
         let started = vks_common::metrics::mcu_tick_metrics_enabled().then(std::time::Instant::now);
-        let events = self.process_audio(audio_inputs);
+        let (events, seating) = self.process_audio(audio_inputs);
         if let Some(started) = started {
             vks_common::metrics::observe_mcu_tick(vks_common::metrics::McuTickPhase::Audio, started.elapsed());
         }
-        (true, events)
+        (true, events, seating)
     }
 
     /// Advances the video compositing pass at a specific monotonic timestamp `now_ms` (33 ms budget).
@@ -307,7 +311,7 @@ impl RoomState {
     /// всех остальных. Раскладка перестраивается **по событию** смены спикера:
     /// если спикер уже в главном окне, `promote_to_main_window` возвращает
     /// `false` и версия не меняется.
-    fn refresh_focus(&mut self) -> Option<RoomEvent> {
+    fn refresh_focus(&mut self) -> Option<(RoomEvent, SeatingMove)> {
         let desired = self.important.or(self.active_speaker)?;
         if !matches!(self.current_layout.kind, LayoutKind::Focus | LayoutKind::Speaker) {
             // Равная сетка и фиксированный макет PNM не имеют главного окна:
@@ -315,13 +319,24 @@ impl RoomState {
             // статичны по геометрии).
             return None;
         }
+        let old_assignments: BTreeMap<ParticipantId, u32> = self
+            .current_layout
+            .slots
+            .iter()
+            .filter_map(|slot| {
+                slot.participant_id
+                    .map(|pid| (ParticipantId::from_uuid(uuid::Uuid::from_u128(pid.as_u128())), slot.id.as_u32()))
+            })
+            .collect();
         let layout_pid = vks_layout::ParticipantId::new(desired.as_uuid().as_u128());
         if !vks_layout::promote_to_main_window(&mut self.current_layout, layout_pid) {
             return None;
         }
         self.current_layout.bump_version();
         self.sync_descriptor_assignments();
-        Some(RoomEvent::LayoutChanged { version: self.current_layout.version })
+        let event = RoomEvent::LayoutChanged { version: self.current_layout.version };
+        let seating = SeatingMove { old_assignments, new_layout: self.current_layout.clone() };
+        Some((event, seating))
     }
 
     /// Дескриптор обязан отражать фактическое заселение: иначе следующая
@@ -341,7 +356,7 @@ impl RoomState {
         descriptor.version = self.current_layout.version;
     }
 
-    fn process_audio(&mut self, audio_inputs: &[(ParticipantId, Vec<f32>)]) -> Vec<RoomEvent> {
+    fn process_audio(&mut self, audio_inputs: &[(ParticipantId, Vec<f32>)]) -> (Vec<RoomEvent>, Option<SeatingMove>) {
         let slices: Vec<&[f32]> = audio_inputs.iter().map(|(_, v)| v.as_slice()).collect();
         let target_len = self.mixed_audio.len().max(960);
         let (full_mix, minus_mixes) = AudioMixer.mix_and_mix_minus(&slices, target_len);
@@ -409,16 +424,30 @@ impl RoomState {
         // «Важным» участником). Пересчёт — по событию смены спикера, а не
         // пересборка на каждом тике: если спикер уже в главном окне,
         // `refresh_focus` ничего не меняет.
-        if let Some(event) = self.refresh_focus() {
+        let seating = self.refresh_focus().map(|(event, seating)| {
             events.push(event);
-        }
-        events
+            seating
+        });
+        (events, seating)
     }
 
     fn process_media(&mut self, frames: &BTreeMap<u32, Arc<Frame>>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
         self.process_video(frames);
-        let _events = self.process_audio(audio_inputs);
+        let (_events, _seating) = self.process_audio(audio_inputs);
     }
+}
+
+/// Пересадка участников внутри раскладки: что было и что стало.
+///
+/// Нужна, чтобы перенести декодированные кадры вместе с участниками
+/// ([`McuEngine::rekey_frames`]): кадр принадлежит участнику, а не номеру слота.
+/// Без переноса после голосовой пересадки в окне остаётся видео прежнего
+/// жильца — до следующего кадра этого участника, а если он выключил камеру,
+/// то навсегда.
+#[derive(Debug, Clone)]
+struct SeatingMove {
+    old_assignments: BTreeMap<ParticipantId, u32>,
+    new_layout: vks_layout::Layout,
 }
 
 /// Событие комнаты для внешнего потребителя (S12, ADR-0029 фаза 3).
@@ -614,7 +643,7 @@ impl McuEngine {
     /// Advances only the audio pipeline at a specific monotonic timestamp `now_ms` (20 ms cadence).
     /// Returns true if an audio tick was executed, or false if rejected by the 18 ms guard.
     pub fn tick_audio_at(&self, room: RoomId, now_ms: u64) -> bool {
-        let (ran, events) = {
+        let (ran, events, seating) = {
             let mut g = self.rooms.lock().unwrap();
             let state = match g.get_mut(&room) {
                 Some(s) => s,
@@ -628,6 +657,12 @@ impl McuEngine {
                 .collect();
             state.tick_audio_at(now_ms, &audio_inputs)
         };
+        // Кадр принадлежит участнику: после голосовой пересадки переносим
+        // пиксели в новые слоты, иначе в главном окне остаётся видео прежнего
+        // жильца (и навсегда, если тот выключил камеру).
+        if let Some(seating) = seating {
+            self.rekey_frames(room, &seating.old_assignments, &seating.new_layout);
+        }
         self.emit(room, events);
         ran
     }
@@ -657,7 +692,7 @@ impl McuEngine {
     ///
     /// Возвращает `true`, если раскладка перестроилась.
     pub fn set_important_participant(&self, room: RoomId, participant: Option<ParticipantId>) -> bool {
-        let event = {
+        let changed = {
             let mut g = self.rooms.lock().unwrap();
             let Some(state) = g.get_mut(&room) else {
                 return false;
@@ -665,11 +700,12 @@ impl McuEngine {
             state.important = participant;
             state.refresh_focus()
         };
-        let changed = event.is_some();
-        if let Some(event) = event {
-            self.emit(room, vec![event]);
-        }
-        changed
+        let Some((event, seating)) = changed else {
+            return false;
+        };
+        self.rekey_frames(room, &seating.old_assignments, &seating.new_layout);
+        self.emit(room, vec![event]);
+        true
     }
 
     /// «Важный» участник комнаты (`None` — не назначен).
@@ -1453,6 +1489,41 @@ mod tests {
         let descriptor = e.layout_descriptor(rid).expect("дескриптор");
         assert_eq!(descriptor.assignments.get(&b), Some(&0));
         assert_eq!(descriptor.assignments.get(&a), Some(&1));
+    }
+
+    /// Голосовая пересадка переносит и пиксели: кадр принадлежит участнику,
+    /// а не номеру слота. Без переноса в главном окне остался бы прежний жилец.
+    #[tokio::test]
+    async fn voice_activation_moves_the_frames_with_the_participants() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        let a = p(1);
+        let b = p(2);
+        e.create_room(cfg(rid)).await.unwrap();
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.add_publisher(rid, b, vec![video_track(b)]).await.unwrap();
+        apply_focus_layout(&e, rid, "focus", &[(a, 0), (b, 1)]).await;
+        let _ = collect_events(&e);
+
+        // Слот 0 (крупный) — A (яркость 10), слот 1 — B (яркость 20).
+        e.set_frame(rid, 0, Frame::filled(320, 180, 10));
+        e.set_frame(rid, 1, Frame::filled(320, 180, 20));
+        for _ in 0..12 {
+            e.tick(rid);
+        }
+
+        // B говорит громко: главное окно переезжает к B.
+        loud(&e, rid, b, 30);
+        assert_eq!(slot_of(&e, rid, b), Some(0), "главное окно — у спикера");
+
+        let out = e.tick(rid).unwrap();
+        let cw = CANVAS_SIZE.0 as usize;
+        // Кадр 320×180 вписывается в слоты с letterbox (1440×810 и 480×270 по
+        // центру), поэтому семплируем по центру окна, а не по его краю.
+        let main = out.data[400 * cw + 960];
+        let strip = out.data[900 * cw + 960];
+        assert_eq!(main, 20, "в главном окне пиксели спикера B, а не прежнего жильца A");
+        assert_eq!(strip, 10, "в полосе — пиксели A: кадры переехали вместе с участниками");
     }
 
     /// «Важный» участник важнее активного спикера (Codian §2.2).
