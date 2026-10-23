@@ -1,27 +1,69 @@
 {
-  "audio_ticks": 3000,
-  "notes": "In-process engine only: no RTP, SIP, decode/encode, resize or network. The video canvas is fixed 1920x1080, so compose p99 above 2 ms is a known optimisation target, not a harness artifact.",
-  "participants": 4,
-  "phases": {
-    "audio": {
-      "count": 3000,
-      "le_2ms_ratio": 1.0,
-      "p99_seconds_estimate": 0.0002208955223880597,
-      "sum_seconds": 0.1963443550000004
-    },
-    "video": {
-      "count": 1182,
-      "le_2ms_ratio": 0.0,
-      "p99_seconds_estimate": 0.019803921568627453,
-      "sum_seconds": 12.127218997000021
-    }
+  "admin_rebuild_recorded_ticks": 0,
+  "arch": "x86_64",
+  "audio": {
+    "attempts": 5132,
+    "histogram_count": 2566,
+    "le_2ms_ratio": 1.0,
+    "mean_seconds": 0.0001302617669524549,
+    "p99_bucket_seconds": [
+      0.0001,
+      0.00025
+    ],
+    "p99_seconds_estimate": 0.00024923167848699764,
+    "successful_ticks": 2566,
+    "sum_seconds": 0.33425169399999927
   },
+  "command": "VKS_MCU_TICK_METRICS=1 cargo test --release -p vks-media-mcu --test mcu_tick_soak -- --ignored --nocapture",
+  "cpu_model": "Intel(R) Xeon(R) CPU E5-2699 v3 @ 2.30GHz",
+  "git_dirty": false,
+  "git_sha": "cb57aa29a185b99e4314fc81c5bf8e665a9cf019",
+  "histogram_buckets_seconds": [
+    0.000025,
+    0.00005,
+    0.0001,
+    0.00025,
+    0.0005,
+    0.00075,
+    0.001,
+    0.0015,
+    0.002,
+    0.003,
+    0.005,
+    0.0075,
+    0.01,
+    0.02,
+    0.033,
+    0.05,
+    0.1
+  ],
+  "measured_seconds": 57.007,
+  "notes": "In-process engine only: no RTP, SIP, decode/encode, resize_i420, WebRTC fan-out or live DB. Single room, so no rooms-mutex contention between rooms.",
+  "participants": 4,
   "profile": "release",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
   "seconds": 60,
   "slo": {
-    "audio_p99_le_2ms": true,
-    "video_2ms_ratio": 0.0,
-    "video_p99_le_33ms_frame_budget": true
+    "audio_engine_work_p99_le_2ms": true,
+    "note": "audio is engine-work p99, not end-to-end latency; the video 2 ms target is deferred to S20",
+    "video_compose_p99_le_2ms": false,
+    "video_compose_p99_le_33ms_budget": true
   },
-  "video_ticks": 1819
+  "video": {
+    "attempts": 1720,
+    "effective_fps": 30.17173329591103,
+    "engine_frames_dropped_delta": 0,
+    "histogram_count": 1720,
+    "le_2ms_ratio": 0.0,
+    "le_33ms_ratio": 1.0,
+    "mean_seconds": 0.009865075745930214,
+    "p99_bucket_seconds": [
+      0.01,
+      0.02
+    ],
+    "p99_seconds_estimate": 0.019601873536299767,
+    "successful_ticks": 1720,
+    "sum_seconds": 16.96793028299997
+  },
+  "warmup_seconds": 3
 }
