@@ -1,114 +1,113 @@
 {
- "s1": {
-  "store": {
-   "preset": "preset_default_13",
-   "mode": "auto",
-   "type": "individual",
-   "slots": 0
+ "r": {
+  "s0": {
+   "store": {
+    "preset": "preset_default_13",
+    "mode": "auto",
+    "type": "individual",
+    "slots": 0
+   },
+   "value": null,
+   "active": false,
+   "activeTiles": [
+    "layout-mode-selector-auto"
+   ],
+   "codianActive": [],
+   "ctorActive": [],
+   "counter": false
   },
-  "value": null,
-  "active": false,
-  "activeTiles": [
-   "layout-mode-selector-auto"
-  ],
-  "ctorCards": 0,
-  "ctorActive": [],
-  "sectionVisible": true,
-  "counter": false
- },
- "s2": {
-  "store": {
-   "preset": "vks_grid_13",
-   "mode": "manual",
-   "type": "individual",
-   "slots": 13
+  "ctor": "ok",
+  "s1": {
+   "store": {
+    "preset": "vks_grid_13",
+    "mode": "manual",
+    "type": "individual",
+    "slots": 13
+   },
+   "value": "13",
+   "active": false,
+   "activeTiles": [
+    "layout-mode-selector-constructor"
+   ],
+   "codianActive": [],
+   "ctorActive": [
+    "vks_grid_13"
+   ],
+   "counter": true
   },
-  "value": "13",
-  "active": false,
-  "activeTiles": [
-   "layout-mode-selector-constructor"
-  ],
-  "ctorCards": 5,
-  "ctorActive": [
-   "vks_grid_13"
-  ],
-  "sectionVisible": true,
-  "counter": true
- },
- "s3": {
-  "store": {
-   "preset": "vks_grid_100",
-   "mode": "manual",
-   "type": "individual",
-   "slots": 100
+  "s2": {
+   "store": {
+    "preset": "vks_grid_100",
+    "mode": "manual",
+    "type": "individual",
+    "slots": 100
+   },
+   "value": "100",
+   "active": true,
+   "activeTiles": [
+    "layout-mode-selector-constructor"
+   ],
+   "codianActive": [],
+   "ctorActive": [
+    "vks_grid_100"
+   ],
+   "counter": true
   },
-  "value": "100",
-  "active": true,
-  "activeTiles": [
-   "layout-mode-selector-constructor"
-  ],
-  "ctorCards": 5,
-  "ctorActive": [
-   "vks_grid_100"
-  ],
-  "sectionVisible": true,
-  "counter": true
- },
- "clicked": "clicked",
- "s4": {
-  "store": {
-   "preset": "preset_equal_25",
-   "mode": "manual",
-   "type": "individual",
-   "slots": 25
+  "manualAfterCtor": "ok",
+  "s3": {
+   "store": {
+    "preset": "preset_equal_25",
+    "mode": "manual",
+    "type": "individual",
+    "slots": 25
+   },
+   "value": "25",
+   "active": false,
+   "activeTiles": [
+    "layout-mode-selector-manual"
+   ],
+   "codianActive": [],
+   "ctorActive": [],
+   "counter": true
   },
-  "value": "25",
-  "active": false,
-  "activeTiles": [
-   "layout-mode-selector-manual"
-  ],
-  "ctorCards": 5,
-  "ctorActive": [],
-  "sectionVisible": true,
-  "counter": true
- },
- "s5": {
-  "store": {
-   "preset": "vks_grid_25",
-   "mode": "manual",
-   "type": "individual",
-   "slots": 25
+  "codianClick": "ok",
+  "s4": {
+   "store": {
+    "preset": "codian_01",
+    "mode": "manual",
+    "type": "individual",
+    "slots": 1
+   },
+   "value": "1",
+   "active": false,
+   "activeTiles": [
+    "layout-mode-selector-manual"
+   ],
+   "codianActive": [
+    "codian_01"
+   ],
+   "ctorActive": [],
+   "counter": true
   },
-  "value": "25",
-  "active": false,
-  "activeTiles": [
-   "layout-mode-selector-constructor"
-  ],
-  "ctorCards": 5,
-  "ctorActive": [
-   "vks_grid_25"
-  ],
-  "sectionVisible": true,
-  "counter": true
- },
- "clamp0": {
-  "store": {
-   "preset": "vks_grid_1",
-   "mode": "manual",
-   "type": "individual",
-   "slots": 1
-  },
-  "value": "1",
-  "active": false,
-  "activeTiles": [
-   "layout-mode-selector-constructor"
-  ],
-  "ctorCards": 5,
-  "ctorActive": [
-   "vks_grid_1"
-  ],
-  "sectionVisible": true,
-  "counter": true
+  "manualAgain": "ok",
+  "s5": {
+   "store": {
+    "preset": "codian_01",
+    "mode": "manual",
+    "type": "individual",
+    "slots": 1
+   },
+   "value": "1",
+   "active": false,
+   "activeTiles": [
+    "layout-mode-selector-manual"
+   ],
+   "codianActive": [
+    "codian_01"
+   ],
+   "ctorActive": [],
+   "counter": true
+  }
  },
  "errs": [
   "Operation canceled"

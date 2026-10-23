@@ -1117,10 +1117,16 @@
       '[data-qa="layout-mode-selector-manual"], [data-qa="layout-mode-selector-auto"], [data-qa="layout-mode-selector-dynamic"]'
     );
     if (!tile) return;
+    var editor = layoutEditor();
+    var value = editor && editor.modifiedValue ? editor.modifiedValue : null;
+    var preset = value && typeof value.preset === 'string' ? value.preset : '';
+    // Сброс дефолта — только при выходе ИЗ конструктора. Клик по уже
+    // активному manual-тайлу в manual+codian — вендорский no-op; безусловная
+    // запись equal_25 теряла выбранную Codian-схему (регресс T13.3).
+    var wasConstructor = modeTileEngaged || preset.indexOf('vks_') === 0;
     modeTileEngaged = false;
     pendingAdopt = null;
-    if (tile.getAttribute('data-qa') !== 'layout-mode-selector-manual') return;
-    var editor = layoutEditor();
+    if (!wasConstructor || tile.getAttribute('data-qa') !== 'layout-mode-selector-manual') return;
     if (!editor || typeof editor.editValueField !== 'function') return;
     try {
       editor.editValueField('preset', 'preset_equal_25');

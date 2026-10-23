@@ -288,7 +288,7 @@ error перечисляет grid, release-note SIP UAS, «970→факт».
   abonent_id_over_contact_and_call_string`); release-note SIP UAS и «970→факт»
   сделаны в T6.
 
-### Статус T13 (финальное ревью T13.2)
+### Статус T13 (T13.4 — ре-ревью)
 - [ ] T13 — реализовано: вендорская разметка `.dynamic-layout-configurator-counter`
   (`__text`, `.counter`, `.counter-center-segment`, `counter__button` как
   TcButton-контейнер, `input[type=number][max=100][min=1]`), кнопки
@@ -336,10 +336,20 @@ error перечисляет grid, release-note SIP UAS, «970→факт».
     настройка» → `preset_equal_25/manual/25`, active tile manual, ctor active
     нет; возврат в конструктор → `vks_grid_25`; 0+blur → `vks_grid_1`,
     active=false. `t13-a11y-and-clamp.json` перегенерирован (wrapper aria=null).
-  Известное ограничение (P3, не регрессия T13.3): у `vks_pin_*_100` 99
-  миниатюр — полосы 144×7 (1 крупное окно + лента), документированный 16:9
-  действует для pin до 16 окон; контракт T13 — количество/перестройка/save.
-  Осталось: ре-ревью T13.3 (цель ≥9.5).
+  Ре-ревью T13.3 (`0a495b4`): 9.4/10, P0/P1 нет; P2 — новый регресс: клик по
+  уже активному manual-тайлу в manual+Codian сбрасывал `codian_01` на
+  `preset_equal_25` (запись дефолта была безусловной). Исправлено в T13.4:
+  дефолт пишется только при выходе из конструктора (`wasConstructor =
+  modeTileEngaged || preset.startsWith('vks_')`), иначе — только очистка
+  engaged/pending. Live `t13-manual-tile-exit.json`: ctor100 → manual
+  (equal_25/manual/25) → Codian `codian_01` → повторный manual-тайл →
+  `codian_01` сохранён (s5), tiles manual, наши ошибки отсутствуют; PNG
+  переснят в состоянии выхода (manual/25). `t13-a11y-and-clamp.json`
+  дополнен `clamp_method` (Enter vs blur-путь).
+  Известное ограничение (P3, не регрессия T13): у `vks_pin_*_100` 99
+  миниатюр — полосы 144×7 (1 крупное окно + лента); 16:9 действует для pin
+  `n <= 16` (уточнено в doc `grids.rs`), контракт T13 — количество/сборка/save.
+  Осталось: ре-ревью T13.4 (цель ≥9.5).
 
 Из T2 (P1): session-route тест «auto→Конструктор не дёргает POST
 /api/v3/ui/video_layouts/mode» (в конференц-редакторе switchLayoutMode нет,

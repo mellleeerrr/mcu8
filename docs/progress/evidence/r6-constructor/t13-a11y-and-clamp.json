@@ -478,5 +478,6 @@
  },
  "errs": [
   "Operation canceled"
- ]
+ ],
+ "clamp_method": "Enter: после ввода Enter применяет значение, фокус остаётся на input (active=true). Blur-путь зафиксирован в t13-manual-tile-exit.json (clamp0: vks_grid_1, active=false)."
 }
