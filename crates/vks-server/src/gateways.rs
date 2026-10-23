@@ -4238,6 +4238,38 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert_eq!((small.x, small.y, small.w, small.h), (0, 720, 640, 360), "small cell under the big zone");
     }
 
+    /// Ручные пресеты вендора, которые раньше доходили до MCU с чужой
+    /// геометрией: `preset_square_24` канонизировался в `preset_equal_24`
+    /// (схемы `square` в грамматике не было), а `preset_double_triple_11` и
+    /// `preset_selected_rbl_13` не разбирались вовсе ⇒ MCU рисовал равную
+    /// сетку вместо палитры вендора.
+    #[tokio::test]
+    async fn vendor_manual_presets_keep_reference_geometry() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        let pid = vks_core::ParticipantId::new();
+        let participant = format!("sip-{}@sip-gateway", pid.as_uuid());
+        let mut slots = vec![serde_json::json!({"position": 1, "abonent_id": participant, "role": "PEER"})];
+        slots.extend((2..=24).map(|position| serde_json::json!({"position": position, "role": "AUTO"})));
+        let layout = serde_json::json!({
+            "id": "l-square",
+            "payload": {"preset": "preset_square_24", "size": 24, "slots": slots}
+        });
+        manager.apply_layout(room, layout).await.expect("preset geometry must reach the MCU");
+        mcu.bridge_participant(room, pid, vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)]);
+        for _ in 0..11 {
+            mcu.tick(room);
+        }
+        let rects = mcu.slot_rects(room).expect("MCU room");
+        assert_eq!(rects.len(), 24, "24 окон палитры «квадрат»");
+        // Палитра вендора: четыре крупных окна 640×360 в центре сетки 6×6.
+        // Равная сетка 5×5 дала бы (0, 0, 384, 216) — это был дефект.
+        let large = rects.get(&0).expect("square palette slot 0");
+        assert_eq!((large.x, large.y, large.w, large.h), (320, 180, 640, 360), "крупное окно в центре палитры");
+    }
+
     /// Живой JSON раскладки, сохранённой UI в E2E на :8080 (сессия
     /// `c437bf65…`, layout `86a1a258…`): manual 4, `preset_equal_4`,
     /// окна 1..4 все AUTO (это состояние после «Очистить все видеоокна»).

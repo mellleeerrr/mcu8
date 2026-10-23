@@ -46,6 +46,10 @@ pub enum Position {
     Rlr,
     /// Верхняя и нижняя полосы.
     Btb,
+    /// Крупная зона вверху по центру, мелкие — по бокам и снизу.
+    Rbl,
+    /// Три яруса крупности: две крупные сверху, средние под ними, мелкие внизу.
+    Triple,
 }
 
 impl Position {
@@ -61,6 +65,8 @@ impl Position {
             Self::C => "c",
             Self::Rlr => "rlr",
             Self::Btb => "btb",
+            Self::Rbl => "rbl",
+            Self::Triple => "triple",
         }
     }
 
@@ -76,6 +82,8 @@ impl Position {
             "c" => Self::C,
             "rlr" => Self::Rlr,
             "btb" => Self::Btb,
+            "rbl" => Self::Rbl,
+            "triple" => Self::Triple,
             _ => return None,
         })
     }
@@ -98,6 +106,13 @@ pub enum PresetScheme {
     Double(Position),
     /// Вендорная «общая» раскладка (`preset_default_13`).
     Default,
+    /// Вендорная палитра «квадрат»: четыре крупных окна в центре, мелкие вокруг.
+    ///
+    /// Это **отдельная** схема, а не синоним `equal`: у вендора нет
+    /// `preset_equal_24`, а `preset_square_24` — это 4 крупных (2×2 в сетке 6×6)
+    /// и 20 мелких. Приравнивание `square` к `equal` теряло схему при
+    /// канонизации id и ломало геометрию в MCU.
+    Square,
 }
 
 /// Разобранный идентификатор пресета.
@@ -194,7 +209,8 @@ impl PresetId {
         let head = *tokens.first()?;
         let scheme = match head {
             "default" => PresetScheme::Default,
-            "equal" | "square" => PresetScheme::Equal,
+            "equal" => PresetScheme::Equal,
+            "square" => PresetScheme::Square,
             "selected" => {
                 let position = tokens.get(1).and_then(|token| Position::from_token(token))?;
                 PresetScheme::Selected(position)
@@ -225,6 +241,7 @@ impl std::fmt::Display for PresetId {
         let base = match self.scheme {
             PresetScheme::Equal => "equal".to_string(),
             PresetScheme::Default => "default".to_string(),
+            PresetScheme::Square => "square".to_string(),
             PresetScheme::Selected(position) => format!("selected_{}", position.as_str()),
             PresetScheme::Double(position) => format!("double_{}", position.as_str()),
         };
@@ -397,6 +414,11 @@ fn selected_slots(position: Position, count: usize, variant: Option<u8>) -> Vec<
         Position::C => center_slots(variant, smalls),
         Position::Rlr => two_sides_slots(variant, count),
         Position::Btb => two_bands_slots(variant, count),
+        // `selected_rbl`: крупная зона вверху по центру, мелкие — по бокам и
+        // снизу (топология из иконки вендора: крупный блок 2×2 в сетке 4×4).
+        Position::Rbl => rbl_slots(smalls),
+        // `selected_triple` у вендора не встречается ⇒ как `selected_c`.
+        Position::Triple => center_slots(variant, smalls),
     };
     slots.truncate(count);
     slots
@@ -459,6 +481,31 @@ fn center_slots(variant: Option<u8>, smalls: usize) -> Vec<SlotRect> {
     slots
 }
 
+/// `selected_rbl`: крупная зона вверху по центру, мелкие — по бокам и снизу.
+///
+/// Топология взята из иконки вендора `preset_selected_rbl_13`: сетка 4×4,
+/// крупный блок 2×2 в верхней центральной части, остальные 12 ячеек — мелкие
+/// окна, идут построчно.
+fn rbl_slots(smalls: usize) -> Vec<SlotRect> {
+    const GRID: u16 = 4;
+    let cell = 1.0 / f64::from(GRID);
+    let mut slots = vec![unit(cell, 0.0, 2.0 * cell, 2.0 * cell)];
+    'cells: for row in 0..GRID {
+        for col in 0..GRID {
+            // Крупная зона занимает колонки 1-2 верхних двух строк.
+            if row < 2 && (1..3).contains(&col) {
+                continue;
+            }
+            if slots.len() > smalls {
+                break 'cells;
+            }
+            slots.push(unit(f64::from(col) * cell, f64::from(row) * cell, cell, cell));
+        }
+    }
+    slots.truncate(smalls + 1);
+    slots
+}
+
 /// `selected_rlr`: две крупные боковые зоны + полоса мелких между ними.
 fn two_sides_slots(variant: Option<u8>, count: usize) -> Vec<SlotRect> {
     if count <= 1 {
@@ -508,8 +555,10 @@ fn double_slots(position: Position, count: usize, variant: Option<u8>) -> Vec<Sl
             slots.extend(fill_region(unit(0.0, 0.0, 1.0, strip), count - 2));
             slots
         }
-        Position::T => {
-            // Две крупные зоны сверху, полоса мелких снизу.
+        Position::T | Position::Triple => {
+            // Две крупные зоны сверху, полоса мелких снизу. `double_triple`
+            // отличается третьим ярусом (средние окна), но вендорский эталон
+            // есть только для ручного размера 11 ⇒ он берётся из MANUAL_SCHEMES.
             let strip = if variant.is_some() { 0.4 } else { 1.0 / 3.0 };
             let mut slots = vec![unit(0.0, 0.0, 0.5, 1.0 - strip), unit(0.5, 0.0, 0.5, 1.0 - strip)];
             slots.extend(fill_region(unit(0.0, 1.0 - strip, 1.0, strip), count - 2));
@@ -536,7 +585,7 @@ fn overlay_slots(scheme: &PresetScheme, count: usize, variant: Option<u8>, overl
     let factor = if overlap_factor.is_finite() && overlap_factor > 0.0 { overlap_factor.clamp(0.25, 2.5) } else { 1.0 };
     let position = match scheme {
         PresetScheme::Selected(position) | PresetScheme::Double(position) => *position,
-        PresetScheme::Equal | PresetScheme::Default => Position::Rb,
+        PresetScheme::Equal | PresetScheme::Default | PresetScheme::Square => Position::Rb,
     };
     let cols = (smalls as f64).sqrt().ceil() as usize;
     let rows = smalls.div_ceil(cols);
@@ -550,12 +599,16 @@ fn overlay_slots(scheme: &PresetScheme, count: usize, variant: Option<u8>, overl
         Position::B | Position::T | Position::C => (1.0 - box_width) / 2.0,
         Position::R | Position::Rb | Position::Rt | Position::Rlr | Position::Btb => 1.0 - box_width,
         Position::L => 0.0,
+        // `rbl`/`triple`: мелкие окна по центру (у вендора таких overlay-схем
+        // нет — только ручные размеры, они берутся из MANUAL_SCHEMES).
+        Position::Rbl | Position::Triple => (1.0 - box_width) / 2.0,
     };
     let box_y = match position {
         Position::T | Position::Rt => 0.0,
         Position::B | Position::Rlr | Position::Btb => 1.0 - box_height,
         Position::R | Position::L | Position::C => (1.0 - box_height) / 2.0,
         Position::Rb => 1.0 - box_height,
+        Position::Rbl | Position::Triple => 1.0 - box_height,
     };
     if variant.is_some() && position.is_corner() {
         // `_(2)` у pip-схем переносит окошко на противоположную сторону.
@@ -592,6 +645,10 @@ pub fn geometry(preset: &PresetId, width: f64, height: f64, overlap_factor: f64,
             PresetScheme::Selected(position) => selected_slots(position, count, preset.variant),
             PresetScheme::Double(position) => double_slots(position, count, preset.variant),
             PresetScheme::Default => equal_slots(count, preset.variant),
+            // Эталон палитры «квадрат» известен только для ручного размера 24
+            // (`preset_square_24` — 4 крупных в центре + 20 мелких), он берётся
+            // из MANUAL_SCHEMES. Динамического эталона у вендора нет ⇒ сетка.
+            PresetScheme::Square => equal_slots(count, preset.variant),
         }
     };
     normalized.into_iter().map(|rect| scale_rect(rect, width, height)).collect()
@@ -1002,6 +1059,105 @@ mod tests {
         assert!(rect.y + rect.height <= height + 1e-9, "{rect:?} выходит за высоту {height}");
     }
 
+    /// Все 92 вендорских id из бандла PNM 2.2.1.66
+    /// (`chunks/index.bundle-*.js` — иконки `Tee`, `chunks/index6.bundle-*.js` —
+    /// палитра редактора `mM` и подсказки `presetHints`): 65 ручных схем +
+    /// 26 базовых имён + `preset_default_13`.
+    const VENDOR_PRESET_IDS: [&str; 92] = [
+        "preset_default_13",
+        "preset_double_b",
+        "preset_double_b_10",
+        "preset_double_b_34",
+        "preset_double_b_42",
+        "preset_double_b_overlap",
+        "preset_double_b_overlap_5",
+        "preset_double_btb",
+        "preset_double_btb_10",
+        "preset_double_btb_34",
+        "preset_double_r",
+        "preset_double_r_10",
+        "preset_double_rlr",
+        "preset_double_rlr_10",
+        "preset_double_rlr_34",
+        "preset_double_t_overlap",
+        "preset_double_t_overlap_5",
+        "preset_double_triple",
+        "preset_double_triple_11",
+        "preset_equal",
+        "preset_equal_1",
+        "preset_equal_16",
+        "preset_equal_2",
+        "preset_equal_20",
+        "preset_equal_25",
+        "preset_equal_3",
+        "preset_equal_36",
+        "preset_equal_4",
+        "preset_equal_6",
+        "preset_equal_8",
+        "preset_equal_9",
+        "preset_selected_b",
+        "preset_selected_b_3",
+        "preset_selected_b_4",
+        "preset_selected_b_4_(2)",
+        "preset_selected_b_5",
+        "preset_selected_b_9",
+        "preset_selected_b_overlap",
+        "preset_selected_b_overlap_4",
+        "preset_selected_btb",
+        "preset_selected_btb_11",
+        "preset_selected_btb_9",
+        "preset_selected_c",
+        "preset_selected_c_13",
+        "preset_selected_l",
+        "preset_selected_l_3",
+        "preset_selected_l_4",
+        "preset_selected_l_5",
+        "preset_selected_l_overlap",
+        "preset_selected_l_overlap_6",
+        "preset_selected_r",
+        "preset_selected_r_3",
+        "preset_selected_r_4",
+        "preset_selected_r_5",
+        "preset_selected_r_overlap",
+        "preset_selected_r_overlap_6",
+        "preset_selected_rb",
+        "preset_selected_rb_13",
+        "preset_selected_rb_25",
+        "preset_selected_rb_37",
+        "preset_selected_rb_57",
+        "preset_selected_rb_6",
+        "preset_selected_rb_61",
+        "preset_selected_rb_77",
+        "preset_selected_rb_8",
+        "preset_selected_rb_9",
+        "preset_selected_rb_overlap",
+        "preset_selected_rb_overlap_2",
+        "preset_selected_rbl",
+        "preset_selected_rbl_13",
+        "preset_selected_rlr",
+        "preset_selected_rlr_11",
+        "preset_selected_rlr_9",
+        "preset_selected_rlr_overlap",
+        "preset_selected_rlr_overlap_11",
+        "preset_selected_rt",
+        "preset_selected_rt_13",
+        "preset_selected_rt_25",
+        "preset_selected_rt_6",
+        "preset_selected_rt_8",
+        "preset_selected_rt_9",
+        "preset_selected_rt_overlap",
+        "preset_selected_rt_overlap_2",
+        "preset_selected_t",
+        "preset_selected_t_3",
+        "preset_selected_t_4",
+        "preset_selected_t_4_(2)",
+        "preset_selected_t_5",
+        "preset_selected_t_overlap",
+        "preset_selected_t_overlap_4",
+        "preset_square",
+        "preset_square_24",
+    ];
+
     fn slots_json(slots: &[CalculatedSlot]) -> Vec<Value> {
         slots
             .iter()
@@ -1103,6 +1259,43 @@ mod tests {
             let want = expected.get(id).unwrap_or_else(|| panic!("{id} отсутствует в fixture")).clone();
             let got = slots_json(&geometry_for_manual(id, 1280.0, 720.0).unwrap());
             assert_eq!(Value::Array(got), want, "{id}: расхождение с эталоном");
+        }
+    }
+
+    /// Канонизация id не должна терять вендорскую схему.
+    ///
+    /// Раньше `preset_square_24` превращался в `preset_equal_24` (схемы
+    /// `square` не было), `preset_double_triple_11` и `preset_selected_rbl_13`
+    /// вообще не разбирались — три ручных пресета доходили до MCU с чужой
+    /// геометрией. Теперь канонический id совпадает с вендорским, и таблица
+    /// `MANUAL_SCHEMES` находится по тому же ключу, что и раньше.
+    #[test]
+    fn manual_preset_ids_survive_canonicalization() {
+        for id in manual_preset_ids() {
+            let parsed = PresetId::parse(id).unwrap_or_else(|| panic!("{id}: id не разбирается"));
+            assert_eq!(parsed.to_string(), id, "{id}: канонизация меняет id");
+        }
+    }
+
+    /// Все 92 вендорских id разбираются: словарь `Position`/`PresetScheme`
+    /// покрывает словарь бандла PNM, иначе пресет молча уезжает в равную сетку.
+    #[test]
+    fn parses_all_vendor_preset_ids() {
+        for id in VENDOR_PRESET_IDS {
+            assert!(PresetId::parse(id).is_some(), "{id}: вендорский id не разбирается");
+        }
+    }
+
+    /// Геометрия по канонизированному id совпадает с эталонной: цепочка
+    /// «id → `PresetId` → id → `geometry_for_manual`» не теряет раскладку.
+    #[test]
+    fn canonical_geometry_matches_manual_reference() {
+        for id in manual_preset_ids() {
+            let parsed = PresetId::parse(id).unwrap();
+            let canonical = parsed.to_string();
+            let direct = geometry_for_manual(id, 1280.0, 720.0).expect("эталонная геометрия");
+            let via_canonical = geometry_for_manual(&canonical, 1280.0, 720.0).expect("геометрия по канону");
+            assert_eq!(slots_json(&direct), slots_json(&via_canonical), "{id}: канон меняет геометрию");
         }
     }
 
