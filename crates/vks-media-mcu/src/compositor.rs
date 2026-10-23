@@ -23,9 +23,6 @@ pub const CANVAS_SIZE: (u32, u32) = (CANVAS_WIDTH, CANVAS_HEIGHT);
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Compositor;
 
-/// Максимальное число слотов, сортируемых на стеке без аллокации.
-const STACK_SORT_SLOTS: usize = 128;
-
 impl Compositor {
     /// Composes `frames` (slot key → frame) into a canvas using `rects`
     /// (slot key → target rect).
@@ -56,25 +53,11 @@ impl Compositor {
         // До 128 слотов сортируем на стеке: сортировка не аллоцирует. Сам
         // канвас (3 МБ для YUV) выделяется один раз за вызов — его переиспользование
         // требует per-room scratch-буфера и вынесено в отдельный срез S20.
-        let mut stack_keys = [0u32; STACK_SORT_SLOTS];
-        if rects.len() <= stack_keys.len() {
-            let n = rects.len();
-            for (slot, key) in stack_keys.iter_mut().zip(rects.keys()) {
-                *slot = *key;
-            }
-            stack_keys[..n].sort_unstable_by_key(|key| (rects[key].z, *key));
-            for key in &stack_keys[..n] {
-                if let Some(frame) = frames.get(key) {
-                    Self::blit(&mut canvas, frame, &rects[key]);
-                }
-            }
-        } else {
-            let mut ordered: Vec<(&u32, &PixelRect)> = rects.iter().collect();
-            ordered.sort_unstable_by_key(|(key, rect)| (rect.z, **key));
-            for (key, rect) in ordered {
-                if let Some(frame) = frames.get(key) {
-                    Self::blit(&mut canvas, frame, rect);
-                }
+        let mut ordered: Vec<(&u32, &PixelRect)> = rects.iter().collect();
+        ordered.sort_unstable_by_key(|(key, rect)| (rect.z, **key));
+        for (key, rect) in ordered {
+            if let Some(frame) = frames.get(key) {
+                Self::blit(&mut canvas, frame, rect);
             }
         }
         canvas

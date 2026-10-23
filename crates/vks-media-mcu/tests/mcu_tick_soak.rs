@@ -24,6 +24,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use vks_common::metrics::MCU_TICK_BUCKETS;
 use vks_core::{ParticipantId, RoomId, Track, TrackKind};
 use vks_media_mcu::{Frame, McuEngine};
@@ -206,6 +207,64 @@ struct Tally {
     first_successes: u64,
     throttled: u64,
     second_call_successes: u64,
+}
+
+/// Per-phase JSON block, shared by audio and video so a new field cannot drift
+/// between the two copies.
+#[derive(Serialize)]
+struct PhaseReport {
+    periods: u64,
+    missed_periods: u64,
+    scheduled_periods_lower_bound: u64,
+    attempts: u64,
+    successful_ticks: u64,
+    first_successes: u64,
+    throttled: u64,
+    second_call_successes: u64,
+    rate: f64,
+    histogram_count: u64,
+    le_2ms_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    le_33ms_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine_frames_dropped_delta: Option<u64>,
+    p99_seconds_estimate: Option<f64>,
+    p99_bucket_seconds: Option<[f64; 2]>,
+    sum_seconds: f64,
+    mean_seconds: Option<f64>,
+    buckets_cumulative: Vec<(f64, u64)>,
+}
+
+fn phase_report(
+    tally: &Tally,
+    delta: &PhaseSnapshot,
+    scheduled: u64,
+    rate: f64,
+    le_2ms: Option<f64>,
+    le_33ms: Option<f64>,
+    dropped: Option<u64>,
+) -> PhaseReport {
+    let p99 = delta.p99();
+    PhaseReport {
+        periods: tally.periods,
+        missed_periods: tally.missed_periods,
+        scheduled_periods_lower_bound: scheduled,
+        attempts: tally.attempts,
+        successful_ticks: tally.ticks,
+        first_successes: tally.first_successes,
+        throttled: tally.throttled,
+        second_call_successes: tally.second_call_successes,
+        rate,
+        histogram_count: delta.count,
+        le_2ms_ratio: le_2ms,
+        le_33ms_ratio: le_33ms,
+        engine_frames_dropped_delta: dropped,
+        p99_seconds_estimate: p99.map(|(estimate, _, _)| estimate),
+        p99_bucket_seconds: p99.map(|(_, lower, upper)| [lower, upper]),
+        sum_seconds: delta.sum,
+        mean_seconds: (delta.count > 0).then(|| delta.sum / delta.count as f64),
+        buckets_cumulative: delta.buckets.clone(),
+    }
 }
 
 /// One measured window driven by the same sleep-to-deadline scheduler for both
@@ -396,8 +455,6 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     let audio_ratio = audio_delta.cumulative_ratio(AUDIO_SLO_BOUND);
     let video_budget_ratio = video_delta.cumulative_ratio(VIDEO_FRAME_BUDGET);
     let video_slo_ratio = video_delta.cumulative_ratio(AUDIO_SLO_BOUND);
-    let audio_p99 = audio_delta.p99();
-    let video_p99 = video_delta.p99();
     let audio_hz = audio.first_successes as f64 / audio_measured_seconds;
     let effective_video_fps = video.first_successes as f64 / video_measured_seconds;
     // Conservative wall-clock lower bound on scheduled periods in the measured
@@ -430,44 +487,16 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
         "participants": participants,
         "frame": {"width": FRAME_WIDTH, "height": FRAME_HEIGHT, "format": "I420"},
-        "audio": {
-            "periods": audio.periods,
-            "missed_periods": audio.missed_periods,
-            "scheduled_periods_lower_bound": audio_scheduled,
-            "attempts": audio.attempts,
-            "successful_ticks": audio.ticks,
-            "first_successes": audio.first_successes,
-            "throttled": audio.throttled,
-            "second_call_successes": audio.second_call_successes,
-            "effective_hz": audio_hz,
-            "histogram_count": audio_delta.count,
-            "le_2ms_ratio": audio_ratio,
-            "p99_seconds_estimate": audio_p99.map(|(estimate, _, _)| estimate),
-            "p99_bucket_seconds": audio_p99.map(|(_, lower, upper)| [lower, upper]),
-            "sum_seconds": audio_delta.sum,
-            "mean_seconds": (audio_delta.count > 0).then(|| audio_delta.sum / audio_delta.count as f64),
-            "buckets_cumulative": audio_delta.buckets,
-        },
-        "video": {
-            "periods": video.periods,
-            "missed_periods": video.missed_periods,
-            "scheduled_periods_lower_bound": video_scheduled,
-            "attempts": video.attempts,
-            "successful_ticks": video.ticks,
-            "first_successes": video.first_successes,
-            "throttled": video.throttled,
-            "second_call_successes": video.second_call_successes,
-            "engine_frames_dropped_delta": dropped,
-            "effective_fps": effective_video_fps,
-            "histogram_count": video_delta.count,
-            "le_2ms_ratio": video_slo_ratio,
-            "le_33ms_ratio": video_budget_ratio,
-            "p99_seconds_estimate": video_p99.map(|(estimate, _, _)| estimate),
-            "p99_bucket_seconds": video_p99.map(|(_, lower, upper)| [lower, upper]),
-            "sum_seconds": video_delta.sum,
-            "mean_seconds": (video_delta.count > 0).then(|| video_delta.sum / video_delta.count as f64),
-            "buckets_cumulative": video_delta.buckets,
-        },
+        "audio": phase_report(&audio, &audio_delta, audio_scheduled, audio_hz, audio_ratio, None, None),
+        "video": phase_report(
+            &video,
+            &video_delta,
+            video_scheduled,
+            effective_video_fps,
+            video_slo_ratio,
+            video_budget_ratio,
+            Some(dropped),
+        ),
         "admin_rebuild_renders": admin_renders,
         "admin_rebuild_recorded_ticks": admin_pollution,
         "histogram_buckets_seconds": MCU_TICK_BUCKETS,
