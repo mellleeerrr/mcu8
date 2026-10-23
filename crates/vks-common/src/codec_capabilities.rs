@@ -6,7 +6,7 @@
 pub const NATIVE_AUDIO: &[&str] =
     &["PCMU", "PCMA", "G711", "G711U", "G711A", "G722", "G72616", "G72624", "G72632", "G72640", "G728", "G723", "OPUS"];
 /// Видео, которое native-профиль шлюза кодирует/декодирует (H.264 baseline mode=1).
-pub const NATIVE_VIDEO: &[&str] = &["H264", "H265"];
+pub const NATIVE_VIDEO: &[&str] = &["H264", "H265", "HEVC"];
 
 fn normalize(name: &str) -> String {
     name.trim().to_ascii_uppercase().replace(['.', '-', '_', ' '], "")
@@ -85,8 +85,11 @@ mod tests {
         }
         assert!(is_native_video("H264"));
         assert!(is_native_video("h.264"));
-        for name in ["H264-HIGH", "H265", "H263", "VP8"] {
-            assert!(!is_native_video(name), "{name} требует T06b-транскодера");
+        for name in ["H264", "h.264", "H265", "h.265", "HEVC"] {
+            assert!(is_native_video(name), "{name} мостится worker-мостом");
+        }
+        for name in ["H264-HIGH", "H263", "VP8"] {
+            assert!(!is_native_video(name), "{name} требует отдельного пейлоадера/моста");
         }
     }
 

@@ -3639,8 +3639,13 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         let error = ensure_bridgeable_codec_selection(Some(&g729_only), Some(&h265_only)).unwrap_err();
         assert!(error.contains("no common audio"), "{error}");
         let g711_g722 = serde_json::json!([{"name": "G722"}, {"name": "G711"}]);
-        let error = ensure_bridgeable_codec_selection(Some(&g711_g722), Some(&h265_only)).unwrap_err();
-        assert!(error.contains("no common video"), "H.265-only video всё ещё не мостится: {error}");
+        assert!(
+            ensure_bridgeable_codec_selection(Some(&g711_g722), Some(&h265_only)).is_ok(),
+            "H.265 now has a worker bridge"
+        );
+        let unbridgeable_video = serde_json::json!(["H263"]);
+        let error = ensure_bridgeable_codec_selection(Some(&g711_g722), Some(&unbridgeable_video)).unwrap_err();
+        assert!(error.contains("no common video"), "H.263-only video still has no payloader: {error}");
         let native = serde_json::json!([{"name": "G711", "bitrate": null}]);
         let h264 = serde_json::json!(["H264"]);
         assert!(ensure_bridgeable_codec_selection(Some(&native), Some(&h264)).is_ok());
