@@ -910,3 +910,14 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 | P1-5 | Распаковка в `deployed/.pnm-stage` + проверка `index.html` + `rm -rf`/`mv`: падение tar больше не оставляет рантайм без части чанков и без манифеста | `scripts/import-pnm-frontend.sh` |
 | Тесты | 9 unit-тестов ядра (идемпотентность, fail-closed, `--check`, откат, `limit`) + шаг CI `Unit tests (PNM patch lib)` | `scripts/test_pnm_patch_lib.py`, `.github/workflows/ci.yml` |
 | Найдено | Рабочее дерево `deployed/pnm` **не воспроизводится** из `archive/PNM-Frontend-20261016.zip` + скриптов: 91 расхождение (62 png, 24 js-чанка, wordmark, index.html, webmanifest) — это слой PROSTOR-ребренда вне репозитория. `import --force` на рабочем дереве сотрёт ребренд ⇒ нужен ручной слой ребренда после импорта. `MANIFEST.sha256` при этом соответствует текущему дереву | `docs/progress/evidence/s14-pnm-import/README.md` |
+
+### Продолжение 6 (2026-10-23) — Codian §2.2 доведён: недавность речи и перенос кадров
+
+| ID | Что сделано | Артефакт |
+|---|---|---|
+| S12 (фаза 3) | **Мелкие ячейки — по убыванию недавности речи.** `RoomState::refresh_seating` пересчитывает размещение целиком по одному правилу: главное окно (максимум площади) — «Важному» или активному спикеру; остальные слоты (по возрастанию номера) — по `recent_speakers` (MRU, 16 записей), затем по порядку прихода. Жильцы только меняются местами; если размещение уже верное — `None`, ложных `LayoutChanged` нет | `crates/vks-media-mcu/src/engine.rs` — `refresh_seating`, `note_recent_speaker`; тест `thumbnails_are_ordered_by_speech_recency` |
+| S12 (фаза 3) | **Кадры переезжают вместе с участниками.** `refresh_seating` возвращает `SeatingMove { old_assignments, new_layout }`, движок вызывает `rekey_frames` — иначе после пересадки в главном окне остаётся видео прежнего жильца (и навсегда, если тот выключил камеру) | `crates/vks-media-mcu/src/engine.rs`; тест `voice_activation_moves_the_frames_with_the_participants` |
+| Рефакторинг | `vks_layout::promote_to_main_window` удалён: он решал ту же задачу наполовину (только главное окно) ⇒ два правила и два прохода в движке стали одним правилом и одним проходом. `vks-layout` оставляет только `main_window` (главное окно по площади); тест идемпотентности пересадки удалён вместе с функцией — его проверяет `important_participant_outranks_the_active_speaker` | `crates/vks-layout/src/focus.rs`, `lib.rs` |
+| Найдено | Пре-существующий тест `self_view_moves_the_viewer_to_the_lowest_priority_cell` ждал 16 в освобождённой ячейке, но `Compositor::clear` для полутоновой подложки уже чистит в 0 (16/128 — только YUV420p, правка b55cebd) — исправлен в 9851e80 | `crates/vks-media-mcu/src/engine.rs` |
+| Осталось | `assign_by_role` не вызывается автоматически: в `LayoutDescriptor` нет ролей окон, а `layout_id` из UI не гарантирует `codian::roles(id)`. Подробный разбор подводных камней — в evidence | `docs/progress/evidence/s12-voice-seating/README.md` |
+
