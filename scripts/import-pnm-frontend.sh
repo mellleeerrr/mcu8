@@ -12,11 +12,11 @@
 #      исключая только служебные бэкапы `*.bak*` (следы ручных правок) и
 #      удаляя симлинки (политика безопасности: ServeDir следует симлинкам;
 #      каждый удалённый симлинк логируется).
-#   3.5 Восстанавливает ПРОЕКТНЫЙ слой (perf-overrides.js, api-errors.js и
-#      блок CSS-override в index.html — их нет в вендорском архиве, а
-#      копирование 1:1 их бы уничтожило) и применяет вендорские патчи
-#      (scripts/patch-pnm-*.py) — без них фичи T11b/T15 молча откатываются
-#      к вендорскому виду.
+#   3.5 Восстанавливает ПРОЕКТНЫЙ слой (perf-overrides.js, api-errors.js,
+#      codian-layouts.js и блок CSS-override в index.html — их нет в
+#      вендорском архиве, а копирование 1:1 их бы уничтожило) и применяет
+#      вендорские патчи (scripts/patch-pnm-*.py) — без них фичи T11b/T15
+#      молча откатываются к вендорскому виду.
 #   4. Пишет `client/pnm-frontend/MANIFEST.sha256` (по каждому файлу рантайма).
 #   5. Опции:
 #        --force       — перезаписать непустой deployed/ (иначе отказ);
@@ -126,14 +126,14 @@ fi
 [ -d "$TMP/deployed/pnm" ] || { echo "в архиве нет deployed/pnm" >&2; exit 1; }
 
 # 3. Копирование рантайма 1:1 (кроме *.bak*; симлинки вычищаются — политика NOTES.md).
-# Сначала сохраняем ПРОЕКТНЫЙ слой: perf-overrides.js, api-errors.js и блок
-# CSS-override из index.html. Их нет в вендорском архиве, а копирование 1:1
-# (rm -rf + распаковка) уничтожило бы их — вместе с правками T1.1/T12b/T13/
-# T14/T15, которые в них живут.
-log "сохранение проектного слоя (perf-overrides.js, api-errors.js, CSS-override)"
+# Сначала сохраняем ПРОЕКТНЫЙ слой: perf-overrides.js, api-errors.js,
+# codian-layouts.js и блок CSS-override из index.html. Их нет в вендорском
+# архиве, а копирование 1:1 (rm -rf + распаковка) уничтожило бы их — вместе
+# с правками T1.1/T12b/T13/T14/T15, которые в них живут.
+log "сохранение проектного слоя (perf-overrides.js, api-errors.js, codian-layouts.js, CSS-override)"
 PROJECT_LAYER="$TMP/project-layer"
 mkdir -p "$PROJECT_LAYER"
-for f in perf-overrides.js api-errors.js; do
+for f in perf-overrides.js api-errors.js codian-layouts.js; do
     if [ -f "$DEST/$f" ]; then
         cp -p "$DEST/$f" "$PROJECT_LAYER/$f"
         log "  сохранён: $f"
@@ -160,7 +160,7 @@ else:
 # повторный импорт восстанавливает его байт-в-байт (без эвристик вставки).
 block = re.search(r'<!-- prostor:project-layer:start -->.*?<!-- prostor:project-layer:end -->', text, re.S)
 if not block:
-    PROJECT_JS = ("api-errors.js", "perf-overrides.js")
+    PROJECT_JS = ("api-errors.js", "perf-overrides.js", "codian-layouts.js")
     tags = [
         tag
         for tag in re.findall(
@@ -221,7 +221,7 @@ log "файлов в рантайме: $FILE_COUNT ($TOTAL_BYTES байт)"
 # собственные скрипты), затем патчи вендорских чанков, затем — манифест
 # (шаг 4), который считается уже по итоговым байтам.
 log "восстановление проектного слоя"
-for f in perf-overrides.js api-errors.js; do
+for f in perf-overrides.js api-errors.js codian-layouts.js; do
     if [ -f "$PROJECT_LAYER/$f" ]; then
         cp -p "$PROJECT_LAYER/$f" "$DEST/$f"
         log "  восстановлен: $f"
