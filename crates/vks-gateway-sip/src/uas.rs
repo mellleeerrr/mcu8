@@ -202,15 +202,11 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
         .filter(|section| media_proto(section) == Some("RTP/AVP"))
         .filter(|section| media_port(section).is_some_and(|port| port > 0));
     let video_codec = video.and_then(|section| {
-        if vks_common::codec_capabilities::video_codec_available("H264") {
-            if let Some(payload) = h264_payload(section) {
-                return Some((payload, "H264"));
-            }
-        }
-        if vks_common::codec_capabilities::video_codec_available("H265") {
-            return h265_payload(section).map(|payload| (payload, "H265"));
-        }
-        None
+        select_video(
+            section,
+            vks_common::codec_capabilities::video_codec_available("H264"),
+            vks_common::codec_capabilities::video_codec_available("H265"),
+        )
     });
     let video_payload_type = video_codec.map(|(payload, _)| payload);
     let remote_video_port = video.and_then(media_port);
@@ -522,6 +518,22 @@ fn fmtp_allows_h265(section: &str, payload: u8) -> bool {
     true
 }
 
+/// Picks the first video codec the host can actually bridge, honouring the
+/// peer's payload order within each codec family.
+fn select_video(section: &str, h264: bool, h265: bool) -> Option<(u8, &'static str)> {
+    if h264 {
+        if let Some(payload) = h264_payload(section) {
+            return Some((payload, "H264"));
+        }
+    }
+    if h265 {
+        if let Some(payload) = h265_payload(section) {
+            return Some((payload, "H265"));
+        }
+    }
+    None
+}
+
 fn h265_payload(section: &str) -> Option<u8> {
     rtpmap_h265(section).filter(|payload| fmtp_allows_h265(section, *payload))
 }
@@ -575,6 +587,19 @@ Content-Type: application/sdp\r\nContent-Length: %LEN%\r\n\r\n%SDP%";
     const OFFER: &str = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\nm=video 5006 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
 
     #[test]
+    fn video_selection_follows_host_availability() {
+        let both = "m=video 5006 RTP/AVP 96 125\r\na=rtpmap:96 H264/90000\r\na=rtpmap:125 H265/90000\r\n";
+        assert_eq!(select_video(both, true, true), Some((96, "H264")));
+        assert_eq!(select_video(both, false, true), Some((125, "H265")));
+        assert_eq!(select_video(both, true, false), Some((96, "H264")));
+        assert_eq!(select_video(both, false, false), None);
+        let h264_only = "m=video 5006 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
+        assert_eq!(select_video(h264_only, false, true), None);
+        let h265_only = "m=video 5006 RTP/AVP 125\r\na=rtpmap:125 H265/90000\r\n";
+        assert_eq!(select_video(h265_only, true, true), Some((125, "H265")));
+    }
+
+    #[test]
     fn h265_don_diff_and_stray_rtpmap_are_rejected() {
         let base = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
         let don_one = format!("{base}m=video 5006 RTP/AVP 125\r\na=rtpmap:125 H265/90000\r\na=fmtp:125 profile-id=1;sprop-max-don-diff=1\r\n");
@@ -584,6 +609,10 @@ Content-Type: application/sdp\r\nContent-Length: %LEN%\r\n\r\n%SDP%";
         let don_zero = format!("{base}m=video 5006 RTP/AVP 125\r\na=rtpmap:125 H265/90000\r\na=fmtp:125 profile-id=1;sprop-max-don-diff=0\r\n");
         let media = negotiate(&don_zero).unwrap();
         assert_eq!(media.video_codec, Some("H265"));
+        let don_garbage = format!(
+            "{base}m=video 5006 RTP/AVP 125\r\na=rtpmap:125 H265/90000\r\na=fmtp:125 sprop-max-don-diff=abc\r\n"
+        );
+        assert_eq!(negotiate(&don_garbage).unwrap().video_codec, None);
         let stray = format!("{base}m=video 5006 RTP/AVP 0\r\na=rtpmap:125 H265/90000\r\n");
         let media = negotiate(&stray).unwrap();
         assert_eq!(media.video_codec, None, "PT125 is not in m=video");

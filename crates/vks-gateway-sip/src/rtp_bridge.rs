@@ -578,10 +578,17 @@ impl CodecProfile {
     }
 
     fn video(self) -> Vec<&'static OfferCodec> {
+        self.video_with(
+            vks_common::codec_capabilities::video_codec_available("H264"),
+            vks_common::codec_capabilities::video_codec_available("H265"),
+        )
+    }
+
+    fn video_with(self, h264: bool, h265: bool) -> Vec<&'static OfferCodec> {
         VIDEO_OFFER
             .iter()
             .filter(|codec| self == Self::Full || codec.native)
-            .filter(|codec| video_codec_available_for_offer(codec.name))
+            .filter(|codec| offer_video_enabled(codec.name, h264, h265))
             .collect()
     }
 }
@@ -1359,6 +1366,27 @@ mod h265_offer_tests {
         assert!(offer_video_enabled("H264", true, false));
         assert!(offer_video_enabled("H265", true, true));
         assert!(offer_video_enabled("H261", false, false));
+    }
+
+    #[test]
+    fn native_offer_omits_unavailable_video_codecs() {
+        let native = CodecProfile::Native.video_with(true, false);
+        assert!(native.iter().any(|codec| codec.name == "H264"));
+        assert!(!native.iter().any(|codec| codec.name == "H265"));
+        let h265_only = CodecProfile::Native.video_with(false, true);
+        assert!(!h265_only.iter().any(|codec| codec.name == "H264"));
+        assert!(h265_only.iter().any(|codec| codec.name == "H265"));
+        assert!(CodecProfile::Native.video_with(false, false).is_empty());
+    }
+
+    #[test]
+    fn hevc_alias_is_accepted_in_answers() {
+        let offer = build_offer(CodecProfile::Native, "127.0.0.1", 41000, Some(41002));
+        let answer = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\n\
+m=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+m=video 5006 RTP/AVP 125\r\na=rtpmap:125 HEVC/90000\r\na=fmtp:125 profile-id=1\r\n";
+        let media = negotiate_media(&offer, answer).expect("audio + HEVC");
+        assert_eq!(media.video_codec, Some("H265"));
     }
 
     #[test]
