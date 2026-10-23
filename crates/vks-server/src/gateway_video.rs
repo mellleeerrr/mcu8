@@ -1,4 +1,4 @@
-//! H.264 RTP payload processing and isolated FFmpeg codec workers.
+//! H.264/H.265 RTP payload processing and isolated FFmpeg codec workers.
 
 use super::audio::RtpPayload;
 use super::{GatewayMediaControls, GatewayMediaStats};
@@ -14,10 +14,8 @@ use vks_gateway_sip::h265::{nal_type, packetize_h265, strip_start_code, H265Depa
 /// через env (`VKS_GATEWAY_VIDEO_*`), а `max_frame_rate` из
 /// `/api/v3/settings/video` подхватывается в `GatewayManager`.
 /// Video codec used by the gateway bridge. H.265 uses the RFC 7798 payloader
-/// and libx265; the SDP layer must negotiate the same codec before this is
-/// selectable per call.
+/// and libx265; SDP negotiation selects it per call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // H265 becomes constructible from per-call negotiation once SDP offers it
 pub(super) enum GatewayVideoCodec {
     H264,
     H265,
@@ -110,9 +108,9 @@ impl VideoProfile {
     /// чтобы опечатка в unit-файле не отключила видео.
     pub(super) fn from_env() -> Self {
         let mut profile = Self::default();
-        // Codec selection is deliberately fixed until the SDP layer can offer
-        // H.265; a bridge sending H.265 under an H.264 m-line would be worse
-        // than no H.265. Tests construct VideoProfile with H265 directly.
+        // Base profile; per-call negotiation overrides the codec. A bridge must
+        // never send H.265 under an H.264 m-line, which is why gateways set this
+        // only from the negotiated codec.
         profile.codec = GatewayVideoCodec::H264;
         profile.width = env_u32("VKS_GATEWAY_VIDEO_WIDTH").unwrap_or(profile.width);
         profile.height = env_u32("VKS_GATEWAY_VIDEO_HEIGHT").unwrap_or(profile.height);
@@ -263,27 +261,34 @@ pub(super) struct VideoBridgeSession {
 static H264_AVAILABLE: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static H265_AVAILABLE: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 
-/// Availability of the codec the SDP layer currently offers (H.264).
+/// Availability of the H.264 bridge (the SDP default when H.265 is absent).
 pub(super) async fn codec_available() -> bool {
     codec_available_for(GatewayVideoCodec::H264).await
 }
 
 pub(super) async fn codec_available_for(codec: GatewayVideoCodec) -> bool {
-    let (cell, encoder) = match codec {
-        GatewayVideoCodec::H264 => (&H264_AVAILABLE, "libx264"),
-        GatewayVideoCodec::H265 => (&H265_AVAILABLE, "libx265"),
+    let (cell, encoder, decoder) = match codec {
+        GatewayVideoCodec::H264 => (&H264_AVAILABLE, "libx264", "h264"),
+        GatewayVideoCodec::H265 => (&H265_AVAILABLE, "libx265", "hevc"),
     };
     *cell
         .get_or_init(|| async {
-            match tokio::time::timeout(
-                Duration::from_secs(3),
-                Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output(),
-            )
-            .await
-            {
-                Ok(Ok(output)) => output.status.success() && String::from_utf8_lossy(&output.stdout).contains(encoder),
-                _ => false,
-            }
+            let has = |flag: &'static str, needle: &'static str| async move {
+                match tokio::time::timeout(
+                    Duration::from_secs(3),
+                    Command::new("ffmpeg").args(["-hide_banner", flag]).output(),
+                )
+                .await
+                {
+                    Ok(Ok(output)) => {
+                        output.status.success() && String::from_utf8_lossy(&output.stdout).contains(needle)
+                    }
+                    _ => false,
+                }
+            };
+            // The bridge both encodes and decodes, so a half-installed FFmpeg
+            // must not be advertised as usable.
+            has("-encoders", encoder).await && has("-decoders", decoder).await
         })
         .await
 }
@@ -349,6 +354,11 @@ fn spawn_codec(encoder: bool, profile: &VideoProfile) -> Result<Child, String> {
         ]);
     } else {
         let scale = format!("scale={}:{}", profile.width, profile.height);
+        if profile.codec == GatewayVideoCodec::H264 {
+            // Preserve the low-latency H.264 decoder contract; H.265 decode is
+            // validated separately by the worker and loopback tests.
+            command.args(["-flags", "low_delay"]);
+        }
         command.args([
             "-probesize",
             "32",
@@ -560,10 +570,26 @@ pub(super) async fn spawn_video_media_bridge(
                 if is_access_unit_delimiter(output_codec, &nal) && !pending.is_empty() {
                     let timestamp = (epoch.elapsed().as_micros() * 90 / 1000) as u32;
                     if !outgoing_controls.video_rx_muted.load(Relaxed) {
-                        let packets =
-                            packetize_access_unit(output_codec, &pending, payload_type, ssrc, &mut sequence, timestamp);
+                        let packets = match packetize_access_unit(
+                            output_codec,
+                            &pending,
+                            payload_type,
+                            ssrc,
+                            &mut sequence,
+                            timestamp,
+                        ) {
+                            Ok(packets) => packets,
+                            Err(()) => {
+                                outgoing_stats.dropped_video_frames.fetch_add(1, Relaxed);
+                                tracing::warn!(
+                                    codec = output_codec.name(),
+                                    "video access unit could not be packetized"
+                                );
+                                Vec::new()
+                            }
+                        };
                         let mut successful = false;
-                        for packet in packets.unwrap_or_default() {
+                        for packet in packets {
                             if let Ok(sent) = outgoing_socket.send_to(&packet, target).await {
                                 outgoing_stats.video_tx_packets.fetch_add(1, Relaxed);
                                 outgoing_stats.video_tx_bytes.fetch_add(sent as u64, Relaxed);
@@ -686,7 +712,11 @@ pub(super) async fn spawn_video_media_bridge(
         let _ = decoder.kill().await;
         let _ = decoder.wait().await;
         session.stats.video_codec_running.store(false, Relaxed);
-        tracing::info!(participant = %session.participant_id, "H264 media bridge and codec workers stopped");
+        tracing::info!(
+            participant = %session.participant_id,
+            codec = session.profile.codec.name(),
+            "video media bridge and codec workers stopped"
+        );
     }))
 }
 

@@ -3,8 +3,8 @@
 //! Транспорт (UDP-сокет) и жизненный цикл живут в `vks-server`; здесь только
 //! разбор запроса, выбор кодека и сериализация ответов, чтобы это тестировалось
 //! без сети. Поддерживаются INVITE/ACK/BYE/CANCEL/OPTIONS и plain RTP/AVP
-//! (PCMU/PCMA/G722/G726/G728/Opus + H.264). SRTP/TLS/100rel/digest осознанно
-//! отклоняются, а не имитируются.
+//! (PCMU/PCMA/G722/G726/G728/Opus + H.264/H.265, если мост доступен).
+//! SRTP/TLS/100rel/digest осознанно отклоняются, а не имитируются.
 
 /// Разобранный входящий SIP-запрос.
 #[derive(Debug, Clone)]
@@ -178,7 +178,7 @@ fn hex(byte: u8) -> Option<u8> {
 
 /// Выбирает первый поддерживаемый аудиокодек в порядке оффера
 /// (PCMU/PCMA/G722/G726); динамический PT сохраняется, кодек едет отдельно.
-/// и, если есть, H.264 из SDP-оффера.
+/// Видео — H.264, иначе H.265, если его мост доступен на хосте.
 pub fn negotiate(offer: &str) -> Option<InboundMedia> {
     let session_ip = media_ip(offer).unwrap_or_default();
     let audio = media_section(offer, "audio")?;
@@ -202,12 +202,10 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
         .filter(|section| media_proto(section) == Some("RTP/AVP"))
         .filter(|section| media_port(section).is_some_and(|port| port > 0));
     let video_codec = video.and_then(|section| {
-        if has_h264(section) {
-            dynamic_payload(section, "H264").map(|payload| (payload, "H264"))
-        } else if has_h265(section) {
-            dynamic_payload(section, "H265")
-                .or_else(|| dynamic_payload(section, "HEVC"))
-                .map(|payload| (payload, "H265"))
+        if let Some(payload) = h264_payload(section) {
+            Some((payload, "H264"))
+        } else if vks_common::codec_capabilities::video_codec_available("H265") {
+            h265_payload(section).map(|payload| (payload, "H265"))
         } else {
             None
         }
@@ -272,7 +270,7 @@ pub fn build_answer(
                 "m=video {port} RTP/AVP {payload}\r\na=rtpmap:{payload} {name}/90000\r\na=fmtp:{payload} {fmtp}\r\n"
             ));
         } else {
-            // Оффер содержал video, но совместимого H.264 нет: сохраняем
+            // Оффер содержал video, но совместимого H.264/H.265 нет: сохраняем
             // число m-line и явно отключаем поток (RFC 3264 §6).
             sdp.push_str("m=video 0 RTP/AVP 0\r\n");
         }
@@ -481,29 +479,63 @@ fn bridgeable_audio(section: &str, payload: u8) -> Option<BridgeableAudio> {
     }
 }
 
-fn has_h265(section: &str) -> bool {
-    section.lines().any(|line| {
-        let upper = line.trim().to_ascii_uppercase();
-        upper.starts_with("A=RTPMAP:") && (upper.contains("H265/90000") || upper.contains("HEVC/90000"))
-    })
+/// Payload types listed in the section's `m=` line. A stray `a=rtpmap:` for a
+/// PT that is not negotiated must never be answered.
+fn declared_payloads(section: &str) -> Vec<u8> {
+    section
+        .lines()
+        .next()
+        .map(|line| line.split_whitespace().skip(3).filter_map(|payload| payload.parse().ok()).collect())
+        .unwrap_or_default()
 }
 
-fn has_h264(section: &str) -> bool {
-    section.lines().any(|line| {
-        let line = line.trim();
-        line.starts_with("a=rtpmap:") && line.to_ascii_uppercase().contains("H264/90000")
-    })
-}
-
-fn dynamic_payload(section: &str, codec: &str) -> Option<u8> {
+fn rtpmap_h265(section: &str) -> Option<u8> {
+    let declared = declared_payloads(section);
     section.lines().find_map(|line| {
-        let line = line.trim().strip_prefix("a=rtpmap:")?;
-        let (payload, rest) = line.split_once(' ')?;
-        if rest.to_ascii_uppercase().starts_with(codec) {
-            payload.parse().ok()
-        } else {
-            None
+        let rest = line.trim().strip_prefix("a=rtpmap:")?;
+        let (payload, encoding) = rest.split_once(' ')?;
+        let payload: u8 = payload.parse().ok()?;
+        let (name, clock) = encoding.split_once('/')?;
+        ((96..=127).contains(&payload)
+            && declared.contains(&payload)
+            && (name.eq_ignore_ascii_case("H265") || name.eq_ignore_ascii_case("HEVC"))
+            && clock == "90000")
+            .then_some(payload)
+    })
+}
+
+/// `sprop-max-don-diff=0` means "no DONL" and works with the DON-less
+/// depacketizer; positive or unparsable values must not be answered.
+fn fmtp_allows_h265(section: &str, payload: u8) -> bool {
+    let prefix = format!("a=fmtp:{payload} ");
+    for line in section.lines().map(str::trim) {
+        let Some(parameters) = line.strip_prefix(&prefix) else { continue };
+        for parameter in parameters.split(';') {
+            let Some((key, value)) = parameter.trim().split_once('=') else { continue };
+            if key.trim().eq_ignore_ascii_case("sprop-max-don-diff") {
+                return value.trim().parse::<u32>().is_ok_and(|difference| difference == 0);
+            }
         }
+    }
+    true
+}
+
+fn h265_payload(section: &str) -> Option<u8> {
+    rtpmap_h265(section).filter(|payload| fmtp_allows_h265(section, *payload))
+}
+
+fn h264_payload(section: &str) -> Option<u8> {
+    let declared = declared_payloads(section);
+    section.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("a=rtpmap:")?;
+        let (payload, encoding) = rest.split_once(' ')?;
+        let payload: u8 = payload.parse().ok()?;
+        let (name, clock) = encoding.split_once('/')?;
+        (declared.contains(&payload)
+            && (96..=127).contains(&payload)
+            && name.eq_ignore_ascii_case("H264")
+            && clock == "90000")
+            .then_some(payload)
     })
 }
 
@@ -539,6 +571,21 @@ Content-Type: application/sdp\r\nContent-Length: %LEN%\r\n\r\n%SDP%";
     }
 
     const OFFER: &str = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\nm=video 5006 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
+
+    #[test]
+    fn h265_don_diff_and_stray_rtpmap_are_rejected() {
+        let base = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+        let don_one = format!("{base}m=video 5006 RTP/AVP 125\r\na=rtpmap:125 H265/90000\r\na=fmtp:125 profile-id=1;sprop-max-don-diff=1\r\n");
+        let media = negotiate(&don_one).unwrap();
+        assert_eq!(media.video_codec, None, "DONL is not implemented");
+        assert_eq!(media.video_payload_type, None);
+        let don_zero = format!("{base}m=video 5006 RTP/AVP 125\r\na=rtpmap:125 H265/90000\r\na=fmtp:125 profile-id=1;sprop-max-don-diff=0\r\n");
+        let media = negotiate(&don_zero).unwrap();
+        assert_eq!(media.video_codec, Some("H265"));
+        let stray = format!("{base}m=video 5006 RTP/AVP 0\r\na=rtpmap:125 H265/90000\r\n");
+        let media = negotiate(&stray).unwrap();
+        assert_eq!(media.video_codec, None, "PT125 is not in m=video");
+    }
 
     #[test]
     fn h265_only_offer_is_answered_with_h265() {

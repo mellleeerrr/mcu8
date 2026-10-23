@@ -103,7 +103,7 @@ impl CodecMap {
 
     /// Является ли видео-кодеком.
     fn is_video(name: &str) -> bool {
-        matches!(Self::canonical(name).as_str(), "H264" | "VP8" | "VP9")
+        matches!(Self::canonical(name).as_str(), "H264" | "H265" | "VP8" | "VP9")
     }
 
     /// Выбирает WebRTC-кодек для данного SIP-кодека и флагирует

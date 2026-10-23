@@ -497,6 +497,24 @@ fn push_video_attrs(sdp: &mut String, codecs: &[&OfferCodec], video: &VideoSdpPr
 
 /// H.264 High определяется по fmtp (`profile-level-id=6400…`), а не по
 /// магическому PT 98: нумерация payload type может измениться.
+/// Availability gate for offered video entries. H.264/H.265 need a working
+/// FFmpeg bridge; H.261/H.263 stay lab-only until their payloaders exist.
+fn video_codec_available_for_offer(name: &str) -> bool {
+    offer_video_enabled(
+        name,
+        vks_common::codec_capabilities::video_codec_available("H264"),
+        vks_common::codec_capabilities::video_codec_available("H265"),
+    )
+}
+
+fn offer_video_enabled(name: &str, h264: bool, h265: bool) -> bool {
+    match name.to_ascii_uppercase().as_str() {
+        "H264" => h264,
+        "H265" | "HEVC" => h265,
+        _ => true,
+    }
+}
+
 fn is_h264_high(codec: &OfferCodec) -> bool {
     codec.fmtp.is_some_and(|fmtp| fmtp.contains("profile-level-id=6400"))
 }
@@ -508,8 +526,8 @@ fn payload_list(codecs: &[&OfferCodec]) -> String {
 /// Which codecs an outbound offer advertises.
 ///
 /// * [`CodecProfile::Native`] — only codecs the media bridge really
-///   decodes/encodes (G.711, G.722, G.723.1, G.726, G.728, Opus, H.264
-///   baseline, plus `telephone-event`).
+///   decodes/encodes (G.711, G.722, G.723.1, G.726, G.728, Opus, H.264,
+///   H.265 when the host probe found libx265, plus `telephone-event`).
 ///   This is the production default: a terminal answers with a codec we can actually
 ///   bridge, and the RTP bridge's single-payload-type pinning stays valid.
 /// * [`CodecProfile::Full`] — the whole vendor matrix. Required for lab
@@ -560,7 +578,11 @@ impl CodecProfile {
     }
 
     fn video(self) -> Vec<&'static OfferCodec> {
-        VIDEO_OFFER.iter().filter(|codec| self == Self::Full || codec.native).collect()
+        VIDEO_OFFER
+            .iter()
+            .filter(|codec| self == Self::Full || codec.native)
+            .filter(|codec| video_codec_available_for_offer(codec.name))
+            .collect()
     }
 }
 
@@ -969,7 +991,7 @@ a=fmtp:97 packetization-mode=1;profile-level-id=42801e;max-mbps=49000;max-br=200
     }
 }
 
-/// Accepted plain-RTP answer, restricted to codecs this bridge actually implements.
+/// Accepted plain-RTP answer, restricted to codecs this bridge actually bridges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NegotiatedMedia {
     pub ip: String,
@@ -982,7 +1004,7 @@ pub struct NegotiatedMedia {
     pub dtmf_payload_type: Option<u8>,
     pub local_video_payload_type: Option<u8>,
     pub video_ip: Option<String>,
-    /// Canonical name of the negotiated video codec (only H.264 baseline today).
+    /// Canonical name of the negotiated video codec ("H264" or "H265").
     pub video_codec: Option<&'static str>,
 }
 
@@ -1145,9 +1167,8 @@ fn telephone_event(media: &SdpMedia) -> Option<u8> {
     })
 }
 
-/// Our real sender implements Baseline-family H264, non-interleaved mode1,
-/// 640x360/15fps at level3.0. High, mode0 and mode2 are distinct configurations.
-/// Local video codec selected for one payload.
+/// Local video codec selected for one payload. H.264 high/mode0 are distinct
+/// configurations and are not selected; H.265 is RFC 7798 without DONL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NegotiatedVideoCodec {
     H264,
@@ -1163,6 +1184,15 @@ impl NegotiatedVideoCodec {
     }
 }
 
+/// RFC 7798 `sprop-max-don-diff=0` means "no DONL" and is compatible with the
+/// DON-less payloader/depacketizer. Any positive or unparsable value is not.
+fn h265_don_compatible(value: Option<&str>) -> bool {
+    match value {
+        None => true,
+        Some(value) => value.trim().parse::<u32>().is_ok_and(|difference| difference == 0),
+    }
+}
+
 /// Recognises an H.265 payload in SDP (dynamic PT, H265/HEVC name, 90 kHz).
 /// RFC 7798 has no packetization-mode; `profile-id`/`tier-flag`/`level-id` are
 /// advisory here because libx265 chooses them from the slot.
@@ -1173,7 +1203,9 @@ fn h265_video(media: &SdpMedia, payload: u8) -> bool {
     (96..=127).contains(&payload)
         && (map.name.eq_ignore_ascii_case("H265") || map.name.eq_ignore_ascii_case("HEVC"))
         && map.clock == 90000
-        && !media.fmtp.get(&payload).is_some_and(|fmtp| fmtp.contains_key("sprop-max-don-diff"))
+        && h265_don_compatible(
+            media.fmtp.get(&payload).and_then(|fmtp| fmtp.get("sprop-max-don-diff")).map(String::as_str),
+        )
 }
 
 /// Resolves one remote video payload to a codec this bridge can carry.
@@ -1314,6 +1346,50 @@ pub fn negotiate_media(offer: &str, answer: &str) -> Option<NegotiatedMedia> {
 /// uses `negotiate_media` with the exact local offer instead of this convenience.
 pub fn parse_negotiated_media(answer: &str) -> Option<NegotiatedMedia> {
     negotiate_media(&build_plain_sdp("127.0.0.1", 2, Some(4)), answer)
+}
+
+#[cfg(test)]
+mod h265_offer_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_h265_is_not_offered() {
+        assert!(!offer_video_enabled("H265", true, false));
+        assert!(!offer_video_enabled("HEVC", true, false));
+        assert!(offer_video_enabled("H264", true, false));
+        assert!(offer_video_enabled("H265", true, true));
+        assert!(offer_video_enabled("H261", false, false));
+    }
+
+    #[test]
+    fn don_diff_zero_is_compatible_but_positive_is_not() {
+        assert!(h265_don_compatible(None));
+        assert!(h265_don_compatible(Some("0")));
+        assert!(!h265_don_compatible(Some("1")));
+        assert!(!h265_don_compatible(Some("garbage")));
+    }
+
+    #[test]
+    fn answer_with_h265_don_diff_one_is_not_selected() {
+        let offer = build_offer(CodecProfile::Native, "127.0.0.1", 41000, Some(41002));
+        let answer = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\n\
+m=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+m=video 5006 RTP/AVP 99\r\na=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1;sprop-max-don-diff=1\r\n";
+        let media = negotiate_media(&offer, answer).expect("audio still negotiates");
+        assert_eq!(media.video_codec, None);
+        assert_eq!(media.video_port, None);
+    }
+
+    #[test]
+    fn answer_with_h265_don_diff_zero_is_selected() {
+        let offer = build_offer(CodecProfile::Native, "127.0.0.1", 41000, Some(41002));
+        let answer = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\n\
+m=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+m=video 5006 RTP/AVP 99\r\na=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1;sprop-max-don-diff=0\r\n";
+        let media = negotiate_media(&offer, answer).expect("audio + H265");
+        assert_eq!(media.video_codec, Some("H265"));
+        assert_eq!(media.video_port, Some(5006));
+    }
 }
 
 #[cfg(test)]

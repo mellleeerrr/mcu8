@@ -1,12 +1,45 @@
 //! Единый источник правды о кодеках, которые шлюз реально мостит без
 //! транскодера (T06a). Списки настроек/UI остаются «намерением» и могут
 //! содержать полную матрицу T06b; SDP и выбор кодека фильтруются здесь.
+//!
+//! Для видео одного статического списка мало: H.264/H.265 мосты запускают
+//! внешний FFmpeg, поэтому SDP обязан спрашивать [`video_codec_available`],
+//! а `main` выставляет её по результату probe. Значения по умолчанию `true`
+//! нужны unit-тестам и библиотечным вызовам; production всегда переопределяет
+//! их на старте.
 
 /// Аудио, которое native-профиль шлюза принимает/отдаёт без транскодера.
 pub const NATIVE_AUDIO: &[&str] =
     &["PCMU", "PCMA", "G711", "G711U", "G711A", "G722", "G72616", "G72624", "G72632", "G72640", "G728", "G723", "OPUS"];
-/// Видео, которое native-профиль шлюза кодирует/декодирует (H.264 baseline mode=1).
+/// Видео, которое native-профиль шлюза кодирует/декодирует: H.264
+/// baseline/high и H.265 через изолированные FFmpeg-воркеры.
 pub const NATIVE_VIDEO: &[&str] = &["H264", "H265", "HEVC"];
+
+static H264_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static H265_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Результат FFmpeg probe: можно ли реально поднять мост для кодека.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoCodecAvailability {
+    pub h264: bool,
+    pub h265: bool,
+}
+
+/// Записывает доступность видео-мостов (один раз на старте сервера).
+pub fn set_video_codec_availability(availability: VideoCodecAvailability) {
+    H264_AVAILABLE.store(availability.h264, std::sync::atomic::Ordering::Release);
+    H265_AVAILABLE.store(availability.h265, std::sync::atomic::Ordering::Release);
+}
+
+/// Доступен ли мост конкретного видео-кодека на этом хосте.
+#[must_use]
+pub fn video_codec_available(name: &str) -> bool {
+    match normalize(name).as_str() {
+        "H264" => H264_AVAILABLE.load(std::sync::atomic::Ordering::Acquire),
+        "H265" | "HEVC" => H265_AVAILABLE.load(std::sync::atomic::Ordering::Acquire),
+        _ => false,
+    }
+}
 
 fn normalize(name: &str) -> String {
     name.trim().to_ascii_uppercase().replace(['.', '-', '_', ' '], "")
@@ -32,10 +65,11 @@ pub fn is_native_audio_variant(name: &str, bitrate: Option<u32>) -> bool {
     is_native_audio(name)
 }
 
-/// Мостится ли видеокодек native-профилем. `H264-HIGH`/`H265` — нет.
+/// Мостится ли видеокодек native-профилем *и* доступен ли его мост на хосте.
+/// `H264-HIGH` не входит в native-список (это отдельная конфигурация).
 #[must_use]
 pub fn is_native_video(name: &str) -> bool {
-    NATIVE_VIDEO.contains(&normalize(name).as_str())
+    NATIVE_VIDEO.contains(&normalize(name).as_str()) && video_codec_available(name)
 }
 
 fn truthy(value: Option<&str>) -> bool {

@@ -23,6 +23,13 @@ mod audio;
 #[path = "gateway_video.rs"]
 mod video;
 
+/// Availability of the two video bridges for SDP advertisement. H.264 uses
+/// raw FFmpeg, H.265 additionally requires libx265 encode+decode from the
+/// transcoder probe; callers must not offer a codec this returns false for.
+pub async fn video_bridge_availability() -> (bool, bool) {
+    (video::codec_available().await, video::codec_available_for(video::GatewayVideoCodec::H265).await)
+}
+
 /// Находит `call_string.sip|h323` сохранённого адреса по URI. Вынесено из
 /// async-метода, чтобы приоритет адреса проверялся без блокировок AppState.
 fn protocol_options<'a>(payload: &'a serde_json::Value, protocol: &str) -> Option<&'a serde_json::Value> {
@@ -114,9 +121,16 @@ fn codec_name(item: &serde_json::Value) -> Option<String> {
 /// SIP-only until H.245 g728 frame-count/packetization is verified against real
 /// terminals; the bridge accepts the RFC 3551 40-byte/20-ms packet only.
 const H323_AUDIO: &[&str] = &["PCMU", "G711U", "PCMA", "G711A", "G711", "G722", "G723", "G7231"];
+/// H.323 sidecar negotiates H.241/H.264 only; the SIP H.265 bridge does not
+/// apply to `h323:` addresses until H.245/OLC H.265 exists.
+const H323_VIDEO: &[&str] = &["H264"];
 
 fn h323_audio_native(name: &str) -> bool {
     H323_AUDIO.iter().any(|codec| codec.eq_ignore_ascii_case(name))
+}
+
+fn h323_video_native(name: &str) -> bool {
+    H323_VIDEO.iter().any(|codec| codec.eq_ignore_ascii_case(name))
 }
 
 #[cfg(test)]
@@ -136,10 +150,11 @@ fn ensure_bridgeable_codec_selection_for(
     let audio_supported: &[&str] = if h323 { H323_AUDIO } else { NATIVE_AUDIO };
     let audio_native: fn(&str) -> bool =
         if h323 { h323_audio_native } else { |name| is_native_audio_variant(name, None) };
-    for (kind, value, supported, native) in [
-        ("audio", audio, audio_supported, audio_native),
-        ("video", video, NATIVE_VIDEO, is_native_video as fn(&str) -> bool),
-    ] {
+    let video_supported: &[&str] = if h323 { H323_VIDEO } else { NATIVE_VIDEO };
+    let video_native: fn(&str) -> bool = if h323 { h323_video_native } else { is_native_video as fn(&str) -> bool };
+    for (kind, value, supported, native) in
+        [("audio", audio, audio_supported, audio_native), ("video", video, video_supported, video_native)]
+    {
         let Some(items) = value.and_then(serde_json::Value::as_array) else { continue };
         if items.is_empty() {
             continue;
@@ -1048,16 +1063,17 @@ impl GatewayManager {
             .ok_or_else(|| "No RTP/RTCP port pair is available; call was not started".to_string())?;
         let rtp_port = port_pair.rtp_port;
         let mut audio_lease = RtpPortLease::new(self.port_pool.clone(), rtp_port);
-        let mut video_pair = if video::codec_available().await {
-            Some(
-                self.port_pool
-                    .allocate_pair(&self.candidate_ip)
-                    .await
-                    .ok_or_else(|| "No RTP/RTCP video port pair is available; call was not started".to_string())?,
-            )
-        } else {
-            None
-        };
+        let mut video_pair =
+            if video::codec_available().await || video::codec_available_for(video::GatewayVideoCodec::H265).await {
+                Some(
+                    self.port_pool
+                        .allocate_pair(&self.candidate_ip)
+                        .await
+                        .ok_or_else(|| "No RTP/RTCP video port pair is available; call was not started".to_string())?,
+                )
+            } else {
+                None
+            };
         let mut video_lease = video_pair.as_ref().map(|pair| RtpPortLease::new(self.port_pool.clone(), pair.rtp_port));
         let mut setup = PendingOutboundGuard {
             cancelled: cancel_flag.clone(),
@@ -2979,7 +2995,9 @@ async fn serve_h323_uas_session(
                     let _ = handle.reject(call_id).await;
                     continue;
                 };
-                let video_pair = if video::codec_available().await {
+                let video_pair = if video::codec_available().await
+                    || video::codec_available_for(video::GatewayVideoCodec::H265).await
+                {
                     manager.port_pool.allocate_pair("0.0.0.0").await
                 } else {
                     None
@@ -3658,6 +3676,11 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert!(ensure_bridgeable_codec_selection(Some(&native), Some(&h264)).is_ok());
         assert!(ensure_bridgeable_codec_selection(None, None).is_ok());
         assert!(ensure_bridgeable_codec_selection(Some(&serde_json::json!([])), None).is_ok());
+        // H.323 sidecar is H.241/H.264 only: an H.265-only video selection must
+        // fail before dial instead of silently calling with H.264.
+        assert!(ensure_bridgeable_codec_selection_for(true, Some(&native), Some(&h265_only)).is_err());
+        assert!(ensure_bridgeable_codec_selection_for(true, Some(&native), Some(&h264)).is_ok());
+        assert!(ensure_bridgeable_codec_selection_for(false, Some(&native), Some(&h265_only)).is_ok());
         let high_only = serde_json::json!(["H264-HIGH"]);
         assert!(ensure_bridgeable_codec_selection(Some(&native), Some(&high_only)).is_err());
         // H.323 negotiates symmetric G.722, G.711U, PCMA or G.723.1.
