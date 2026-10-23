@@ -155,6 +155,16 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > `aud=1:repeat-headers=1`. 24 h265 + 7 aac тестов + интеграционный `x265_annexb_survives_rfc7798_packetization` (реальный x265 → AUD/VPS/SPS/PPS/IRAP → пакеты → побайтовая сборка), crate **119 passed**, workspace **1204 passed / 0 failed**, fmt/clippy/doc чисто.
 > Модули ещё **не подключены** к SDP/мосту; PT113/H265 по-прежнему не объявляются в native-профиле.
 > Следующий этап — worker-actor + H.265 видео-мост, затем AAC-LATM аудио-мост и SDP-гейт по probe.
+
+> **T06b-7 (H.265 видео-мост: bridge internals + SDP offer/negotiate) — реализовано `374de84`+`e70c1fa`+`3a232dc`:**
+> `VideoProfile.codec` (H264/H265) параметризует FFmpeg spawn (`libx265`, `-x265-params`), определение AU по
+> AUD type 35, RFC 7798-пакетизацию, H.265-депакетизацию и инъекцию AUD; libx265 probe отдельный.
+> Loopback-тест `h265_loopback_video_bridge_encodes_and_decodes` прогоняет реальный x265 → H.265 RTP →
+> hevc-decode и получает кадр. SDP: PT99 H265 объявляется native, `is_native_video` знает H265/HEVC,
+> answer-парсер принимает H265 (отвергает `sprop-max-don-diff`), а согласованный H265 переключает
+> `VideoProfile` на H265-мост, чтобы не слать H265 под H264 m-line. Workspace **1205 passed**, clippy/fmt чисто.
+> Осталось: inbound UAS H265 (сейчас answer только H264), live-вызов с H265-терминалом, AAC-LATM мост,
+> then SDP readiness gate. H.261/H.263 по-прежнему без пейлоадеров и не объявляются.
 >
 > **T06b-5 (изолированные FFmpeg-воркеры: фундамент) закрыт `212649b`, ревью 9.5/10 APPROVED (r6, независимый):**
 > `codec_worker` — один долгоживущий FFmpeg на кодек/направление, `FfmpegCapabilities` probe
