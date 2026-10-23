@@ -4,7 +4,7 @@
 //! Инварианты геометрии: фокус получает > 50% площади; остальные — мелкие;
 //! сумма площадей == canvas (без пробелов и пересечений).
 
-use crate::core::{Layout, ParticipantId, SlotId};
+use crate::core::{Layout, SlotId};
 use crate::rect::{Canvas, Rect};
 
 /// Генератор геометрии фокусных раскладок (focus + thumbnails).
@@ -52,41 +52,10 @@ pub fn main_window(layout: &Layout) -> Option<SlotId> {
     layout.slots.iter().max_by_key(|slot| (slot.rect.area(), std::cmp::Reverse(slot.id.as_u32()))).map(|slot| slot.id)
 }
 
-/// Переносит участника в главное окно раскладки (Codian §2.2).
-///
-/// Применяется к «Важному» участнику (`Important`) и к активному спикеру: они
-/// обязаны быть в самом крупном окне независимо от того, кто говорит громче.
-/// Жильцы главного окна и окна участника **меняются местами** — иначе прежний
-/// владелец крупного окна пропал бы из раскладки.
-///
-/// Возвращает `true`, если раскладка изменилась. Участник, которого нет в
-/// раскладке (не публикует видео), ничего не меняет.
-pub fn promote_to_main_window(layout: &mut Layout, participant: ParticipantId) -> bool {
-    let Some(main) = main_window(layout) else {
-        return false;
-    };
-    let Some(current) = layout.slots.iter().find(|slot| slot.participant_id == Some(participant)).map(|slot| slot.id)
-    else {
-        return false;
-    };
-    if current == main {
-        return false;
-    }
-    let displaced = layout.slots.iter().find(|slot| slot.id == main).and_then(|slot| slot.participant_id);
-    for slot in &mut layout.slots {
-        if slot.id == main {
-            slot.participant_id = Some(participant);
-        } else if slot.id == current {
-            slot.participant_id = displaced;
-        }
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::LayoutKind;
+    use crate::core::{LayoutKind, ParticipantId};
 
     fn pid(i: u128) -> ParticipantId {
         ParticipantId::new(i)
@@ -174,30 +143,5 @@ mod tests {
         layout.slots[2].rect = Rect::new(0, 0, 1920, 810);
         assert_eq!(main_window(&layout), Some(SlotId::new(2)));
         assert_eq!(main_window(&Layout::new(LayoutKind::Grid)), None, "пустая раскладка без окон");
-    }
-
-    #[test]
-    fn promotion_swaps_occupants_and_keeps_everyone_visible() {
-        let mut layout = two_by_two();
-        layout.slots[1].rect = Rect::new(0, 0, 1920, 810);
-        assert_eq!(main_window(&layout), Some(SlotId::new(1)));
-
-        assert!(promote_to_main_window(&mut layout, pid(4)), "пересадка состоялась");
-        assert_eq!(layout.slots[1].participant_id, Some(pid(4)), "главное окно — у спикера");
-        assert_eq!(layout.slots[3].participant_id, Some(pid(2)), "прежний жилец не пропал");
-        // Все участники остались в раскладке ровно по одному разу.
-        let mut seen: Vec<u128> = layout.slots.iter().filter_map(|s| s.participant_id).map(|p| p.as_u128()).collect();
-        seen.sort_unstable();
-        assert_eq!(seen, vec![1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn promotion_is_idempotent_and_ignores_absent_participants() {
-        let mut layout = two_by_two();
-        layout.slots[1].rect = Rect::new(0, 0, 1920, 810);
-        assert!(promote_to_main_window(&mut layout, pid(4)));
-        assert!(!promote_to_main_window(&mut layout, pid(4)), "повторная пересадка — не изменение");
-        assert!(!promote_to_main_window(&mut layout, pid(99)), "участника нет в раскладке");
-        assert!(!promote_to_main_window(&mut Layout::new(LayoutKind::Grid), pid(1)), "пустая раскладка");
     }
 }

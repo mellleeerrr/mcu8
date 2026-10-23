@@ -52,6 +52,9 @@ struct RoomState {
     /// Порядок прихода паблишеров (S12): сетка и заполнение слотов идут по
     /// порядку прихода, а не по сортировке UUID.
     join_order: Vec<ParticipantId>,
+    /// Недавность речи (Codian §2.2): участники в порядке убывания недавности,
+    /// свежий спикер — в голове. Мелкие ячейки заполняются по этому порядку.
+    recent_speakers: Vec<ParticipantId>,
     /// Subscribers (MCU: they all receive the single composite track).
     subscribers: BTreeSet<ParticipantId>,
     /// Applied layout descriptor (core-level, from apply_layout).
@@ -103,6 +106,7 @@ impl RoomState {
             caps,
             publisher_tracks: BTreeMap::new(),
             join_order: Vec::new(),
+            recent_speakers: Vec::new(),
             subscribers: BTreeSet::new(),
             layout: None,
             current_layout: Layout::new(LayoutKind::Grid),
@@ -305,38 +309,78 @@ impl RoomState {
         self.stats.frames_rendered += 1;
     }
 
-    /// Пересадка главного окна по правилам Codian §2.2 (S12, ADR-0029 фаза 3).
+    /// Пересадка по Codian §2.2 (S12, ADR-0029 фаза 3): главное окно —
+    /// «Важному» участнику или активному спикеру, мелкие ячейки — по убыванию
+    /// недавности речи.
     ///
-    /// «Важный» участник важнее активного спикера; активный спикер важнее
-    /// всех остальных. Раскладка перестраивается **по событию** смены спикера:
-    /// если спикер уже в главном окне, `promote_to_main_window` возвращает
-    /// `false` и версия не меняется.
-    fn refresh_focus(&mut self) -> Option<(RoomEvent, SeatingMove)> {
-        let desired = self.important.or(self.active_speaker)?;
+    /// Жильцы только меняются местами: никто не пропадает из раскладки. Равная
+    /// сетка и статичный макет PNM не трогаются (Codian §2.1: 52 макета
+    /// фиксированы по геометрии). Пересчёт идёт по событию смены спикера, а не
+    /// на каждом тике: если размещение уже верное, функция возвращает `None`.
+    fn refresh_seating(&mut self) -> Option<(RoomEvent, SeatingMove)> {
         if !matches!(self.current_layout.kind, LayoutKind::Focus | LayoutKind::Speaker) {
-            // Равная сетка и фиксированный макет PNM не имеют главного окна:
-            // голосовая активация их не трогает (Codian §2.1: 52 макета
-            // статичны по геометрии).
+            return None;
+        }
+        let main = vks_layout::main_window(&self.current_layout)?;
+        // Показываем только тех, кто уже в раскладке: остальные — без видео.
+        let shown: BTreeSet<ParticipantId> = self
+            .current_layout
+            .slots
+            .iter()
+            .filter_map(|slot| slot.participant_id)
+            .map(|pid| ParticipantId::from_uuid(uuid::Uuid::from_u128(pid.as_u128())))
+            .collect();
+        // Порядок: «важный»/спикер, затем недавность речи, затем порядок прихода.
+        let mut order: Vec<ParticipantId> = Vec::new();
+        let focus = self.important.or(self.active_speaker);
+        for pid in focus.iter().chain(self.recent_speakers.iter()).chain(self.join_order.iter()) {
+            if shown.contains(pid) && !order.contains(pid) {
+                order.push(*pid);
+            }
+        }
+        // Главное окно первым, остальные — по возрастанию номера слота.
+        let mut slots: Vec<vks_layout::SlotId> = self.current_layout.slots.iter().map(|slot| slot.id).collect();
+        slots.sort_by_key(|slot| (*slot != main, slot.as_u32()));
+        // `skip(1)`: первый участник уже занял главное окно.
+        let mut rest = order.iter().skip(1);
+        let desired: BTreeMap<vks_layout::SlotId, Option<ParticipantId>> = slots
+            .iter()
+            .map(|slot| {
+                let want = if *slot == main { order.first().copied() } else { rest.next().copied() };
+                (*slot, want)
+            })
+            .collect();
+        let current = |slot: &vks_layout::Slot| {
+            slot.participant_id.map(|pid| ParticipantId::from_uuid(uuid::Uuid::from_u128(pid.as_u128())))
+        };
+        if self.current_layout.slots.iter().all(|slot| desired.get(&slot.id).copied().flatten() == current(slot)) {
             return None;
         }
         let old_assignments: BTreeMap<ParticipantId, u32> = self
             .current_layout
             .slots
             .iter()
-            .filter_map(|slot| {
-                slot.participant_id
-                    .map(|pid| (ParticipantId::from_uuid(uuid::Uuid::from_u128(pid.as_u128())), slot.id.as_u32()))
-            })
+            .filter_map(|slot| current(slot).map(|pid| (pid, slot.id.as_u32())))
             .collect();
-        let layout_pid = vks_layout::ParticipantId::new(desired.as_uuid().as_u128());
-        if !vks_layout::promote_to_main_window(&mut self.current_layout, layout_pid) {
-            return None;
+        for slot in &mut self.current_layout.slots {
+            slot.participant_id = desired
+                .get(&slot.id)
+                .copied()
+                .flatten()
+                .map(|pid| vks_layout::ParticipantId::new(pid.as_uuid().as_u128()));
         }
         self.current_layout.bump_version();
         self.sync_descriptor_assignments();
         let event = RoomEvent::LayoutChanged { version: self.current_layout.version };
         let seating = SeatingMove { old_assignments, new_layout: self.current_layout.clone() };
         Some((event, seating))
+    }
+
+    /// Отмечает участника как недавнего спикера (MRU, ограниченный 16 записями).
+    fn note_recent_speaker(&mut self, pid: ParticipantId) {
+        self.recent_speakers.retain(|known| *known != pid);
+        self.recent_speakers.insert(0, pid);
+        self.recent_speakers.truncate(16);
     }
 
     /// Дескриптор обязан отражать фактическое заселение: иначе следующая
@@ -404,6 +448,10 @@ impl RoomState {
                     self.speaking_states.insert(*pid, is_speaking);
                     self.speaking_changes.push((*pid, is_speaking));
                     events.push(RoomEvent::Speaking { participant: *pid, speaking: is_speaking, level });
+                    if is_speaking {
+                        // Codian §2.2: мелкие ячейки — по убыванию недавности речи.
+                        self.note_recent_speaker(*pid);
+                    }
                 }
             } else {
                 self.speaking_states.insert(*pid, is_speaking);
@@ -420,11 +468,11 @@ impl RoomState {
             self.active_speaker = Some(spk);
         }
 
-        // Codian §2.2: главное окно следует за активным спикером (или за
-        // «Важным» участником). Пересчёт — по событию смены спикера, а не
-        // пересборка на каждом тике: если спикер уже в главном окне,
-        // `refresh_focus` ничего не меняет.
-        let seating = self.refresh_focus().map(|(event, seating)| {
+        // Codian §2.2: главное окно — активному спикеру или «Важному»
+        // участнику, мелкие ячейки — по недавности речи. Пересчёт — по событию
+        // смены спикера, а не пересборка на каждом тике: если размещение уже
+        // верное, `refresh_seating` ничего не меняет.
+        let seating = self.refresh_seating().map(|(event, seating)| {
             events.push(event);
             seating
         });
@@ -698,7 +746,7 @@ impl McuEngine {
                 return false;
             };
             state.important = participant;
-            state.refresh_focus()
+            state.refresh_seating()
         };
         let Some((event, seating)) = changed else {
             return false;
@@ -1489,6 +1537,38 @@ mod tests {
         let descriptor = e.layout_descriptor(rid).expect("дескриптор");
         assert_eq!(descriptor.assignments.get(&b), Some(&0));
         assert_eq!(descriptor.assignments.get(&a), Some(&1));
+    }
+
+    /// Codian §2.2: мелкие ячейки заполняются по убыванию недавности речи.
+    #[tokio::test]
+    async fn thumbnails_are_ordered_by_speech_recency() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        let (a, b, c) = (p(1), p(2), p(3));
+        e.create_room(cfg(rid)).await.unwrap();
+        for pid in [a, b, c] {
+            e.add_publisher(rid, pid, vec![video_track(pid)]).await.unwrap();
+        }
+        apply_focus_layout(&e, rid, "focus", &[(a, 0), (b, 1), (c, 2)]).await;
+        let _ = collect_events(&e);
+
+        // A говорит 0.6 с — главное окно уходит к нему.
+        e.set_audio(rid, a, vec![0.9f32; 960]);
+        for step in 0..30 {
+            e.tick_audio_at(rid, 100 + step * 20);
+        }
+        assert_eq!(slot_of(&e, rid, a), Some(0), "говорящий — в главном окне");
+
+        // A замолкает, говорит B: главное окно у B, а недавний спикер A —
+        // первым в полосе, не говоривший C — последним.
+        e.set_audio(rid, a, vec![0.0f32; 960]);
+        e.set_audio(rid, b, vec![0.9f32; 960]);
+        for step in 30..90 {
+            e.tick_audio_at(rid, 100 + step * 20);
+        }
+        assert_eq!(slot_of(&e, rid, b), Some(0), "главное окно следует за спикером");
+        assert_eq!(slot_of(&e, rid, a), Some(1), "недавний спикер — первая мелкая ячейка");
+        assert_eq!(slot_of(&e, rid, c), Some(2), "не говоривший — последняя ячейка");
     }
 
     /// Голосовая пересадка переносит и пиксели: кадр принадлежит участнику,

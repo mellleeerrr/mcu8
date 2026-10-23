@@ -16,7 +16,7 @@
 | `crates/vks-layout/src/core.rs` | `Layout`, `Slot`, `SlotId`, `ParticipantId`, `LayoutKind`, `NormalizedLayout`/`NormalizedSlot` |
 | `crates/vks-layout/src/rect.rs` | `Rect` (пиксели), `Canvas`, `NormalizedRect` |
 | `crates/vks-layout/src/grid.rs` | `GridLayout::compute` — равномерная сетка N тайлов |
-| `crates/vks-layout/src/focus.rs` | `FocusLayout::slot_rects` — геометрия «крупный тайл + полоса мелких» (единственная реализация: движок не держит копию); `main_window` / `promote_to_main_window` — правила Codian §2.2 о главном окне |
+| `crates/vks-layout/src/focus.rs` | `FocusLayout::slot_rects` — геометрия «крупный тайл + полоса мелких» (единственная реализация: движок не держит копию); `main_window` — главное окно по площади (Codian §2.2). Пересадку жильцов делает движок (`RoomState::refresh_seating`), а не `vks-layout`: правило одно — «кто в каком слоте», включая порядок мелких ячеек по недавности речи |
 | `crates/vks-layout/src/preset.rs` | 65 вендорных пресетов (`MANUAL_SCHEMES`), `cell_rect` — единая арифметика пикселей |
 | `crates/vks-layout/src/codian.rs` | 54 раскладки Codian MCU 4200 (52 пресета + 2 кастомные) |
 | `crates/vks-layout/src/roles.rs` | `SlotRole`, `assign_by_role`, `RotationState` — роли слотов (§2 спецификации Codian) |
