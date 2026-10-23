@@ -406,7 +406,8 @@
     var editor = layoutEditor();
     if (!entry || !editor) return;
     var count = entry.windows > 0 ? entry.windows : 1;
-    var existing = editor.modifiedValue && editor.modifiedValue.slots && editor.modifiedValue.slots[id];
+    var value = editor.modifiedValue || {};
+    var existing = Array.isArray(value.slots) && value.preset === id ? value.slots : null;
     var slots = Array.isArray(existing) && existing.length === count ? existing : [];
     if (!slots.length) {
       for (var i = 1; i <= count; i += 1) slots.push({ position: i, role: 'AUTO' });
@@ -452,8 +453,7 @@
     var value = editor && editor.modifiedValue;
     if (!value) return 0;
     var preset = typeof value.preset === 'string' ? value.preset : '';
-    var map = value.slots;
-    var slots = map && preset ? map[preset] : null;
+    var slots = value.slots;
     if (Array.isArray(slots) && slots.length > 0 && slots.length <= 64) return slots.length;
     var entry = findEntry(preset);
     if (entry && entry.windows > 0) return entry.windows;
@@ -610,21 +610,13 @@
     selectConstructor(item.getAttribute('data-preset'));
   }
 
-  /* Тот же путь, что и у карточек Codian: preset в store + слоты по числу окон. */
+  /* Наш id кодирует число окон: вендорский геттер сам синтезирует `ss(id)`
+   * AUTO-слотов из хвоста, поэтому достаточно записать preset. */
   function selectConstructor(preset) {
     var editor = layoutEditor();
     if (!editor || !preset) return;
-    var count = 0;
-    var tail = /_(\d+)$/.exec(preset);
-    if (tail) count = Number(tail[1]) || 0;
-    var existing = editor.modifiedValue && editor.modifiedValue.slots && editor.modifiedValue.slots[preset];
-    var slots = Array.isArray(existing) && existing.length === count ? existing : [];
-    if (!slots.length) {
-      for (var i = 1; i <= count; i += 1) slots.push({ position: i, role: 'AUTO' });
-    }
     try {
       editor.editValueField('preset', preset);
-      editor.setSlots(preset, slots);
     } catch (e) {
       console.warn('codian-layouts: не удалось выбрать схему конструктора ' + preset, e);
       return;
@@ -673,16 +665,20 @@
     }
     syncModeTile();
     schedule();
-    // Вкладка «Конструктор» — это наш конструктор: если текущий preset не из
-    // нашего семейства (Codian/vendor), переключаемся на равномерную сетку с
-    // тем же числом окон, чтобы сохранение и превью были про vks_*.
-    var value = editor.modifiedValue;
-    var preset = value && typeof value.preset === 'string' ? value.preset : '';
-    if (preset.indexOf('vks_') !== 0) {
+    // Вкладка «Конструктор» — наш конструктор: после перерисовки ручного
+    // режима (слоты появляются не сразу) один раз подставляем vks_grid_<N>.
+    // Тихий fallback на 1 окно запрещён: при N=0 остаёмся на вендорском preset.
+    var attempts = 0;
+    function adopt() {
+      if (!modeTileEngaged) return;
+      var value = editor.modifiedValue || {};
+      var preset = typeof value.preset === 'string' ? value.preset : '';
+      if (preset.indexOf('vks_') === 0) return;
       var count = currentCount();
-      if (!(count > 0)) count = 1;
-      selectConstructor('vks_grid_' + count);
+      if (count > 0) { selectConstructor('vks_grid_' + count); return; }
+      if (attempts++ < 40) setTimeout(adopt, 50);
     }
+    adopt();
     var section = document.querySelector('[' + CONSTRUCTOR_ATTR + ']');
     if (section && typeof section.scrollIntoView === 'function') {
       section.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -698,8 +694,18 @@
     var preset = value ? value.preset : null;
     if (mode !== 'manual') modeTileEngaged = false;
     var active = modeTileEngaged || (typeof preset === 'string' && preset.indexOf('vks_') === 0);
-    if (active) tile.classList.add('layout-mode-selector-item--active');
-    else tile.classList.remove('layout-mode-selector-item--active');
+    if (active) {
+      tile.classList.add('layout-mode-selector-item--active');
+      var actives = document.querySelectorAll('.layout-mode-selector-item--active');
+      for (var i = 0; i < actives.length; i += 1) {
+        if (actives[i] !== tile) {
+          actives[i].classList.remove('layout-mode-selector-item--active');
+          actives[i].setAttribute('aria-pressed', 'false');
+        }
+      }
+    } else {
+      tile.classList.remove('layout-mode-selector-item--active');
+    }
     tile.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
 

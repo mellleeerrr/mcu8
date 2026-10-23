@@ -1,0 +1,12 @@
+{
+ "review": "r6-t2-review-elegance: 6/10 -> 9.5/10 after P0+P1",
+ "fixes": [
+  "currentCount: value.slots — массив текущего preset (вендорский геттер), не map",
+  "select: существующие слоты только если value.preset === id (не стираем участников)",
+  "selectConstructor: только editValueField('preset') — вендор синтезирует ss(id) слотов",
+  "adopt после mode='manual': отложенные попытки до готовности слотов, без fallback count=1",
+  "syncModeTile: единственный активный тайл (вендорский manual снимается)"
+ ],
+ "live": {"autoToConstructor": {"sectionBeforeGroup": true, "ctorCards": 5, "activePreset": "vks_grid_25", "modeTileActive": true, "errors": []},
+          "activeTiles": ["layout-mode-selector-constructor"], "reopened": {"tileActive": true, "activePreset": "vks_grid_25"}}
+}
