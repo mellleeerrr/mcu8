@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 
-use vks_gateway_sip::aac_latm::{add_loas, LatmRtpClock, AAC_RTP_CLOCK};
+use vks_gateway_sip::aac_latm::{add_loas, frames_due, LatmRtpClock, AAC_FRAME_SAMPLES, AAC_RTP_CLOCK};
 use vks_media_mcu::codec_worker::latm::{LatmDecoder, LatmEncoder, PushOutcome, LATM_TICK_SAMPLES};
 
 use super::RtpBridgeSession;
@@ -32,6 +32,12 @@ fn gain(sample: f32, volume: u32) -> f32 {
 
 fn ffmpeg_path() -> std::path::PathBuf {
     std::env::var_os("VKS_FFMPEG_BIN").map_or_else(|| std::path::PathBuf::from("ffmpeg"), std::path::PathBuf::from)
+}
+
+/// How long the encoder input queue may stay full before the bridge is torn
+/// down: a live FFmpeg that no longer consumes PCM is as dead as a dead one.
+fn encoder_blocked_too_long(blocked_for: Option<Duration>) -> bool {
+    blocked_for.is_some_and(|age| age >= Duration::from_secs(3))
 }
 
 /// True when RTP is still arriving (activity under 1 s old) but no PCM block
@@ -214,7 +220,7 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                 if let Some(last) = last_sequence {
                     let missing = usize::from(packet_in.sequence.wrapping_sub(last).wrapping_sub(1));
                     for _ in 0..missing.min(8) {
-                        for _ in 0..1024 {
+                        for _ in 0..AAC_FRAME_SAMPLES as usize {
                             if pcm_queue.len() >= PCM_QUEUE_LIMIT { pcm_queue.pop_front(); }
                             pcm_queue.push_back(0.0);
                         }
@@ -306,14 +312,16 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                         // every PCM tick: mirror the decoder liveness.
                         let blocked = *encoder_blocked_at.get_or_insert_with(Instant::now);
                         session.media_stats.rejected_packets.fetch_add(1, Relaxed);
-                        if blocked.elapsed() >= Duration::from_secs(3) {
+                        if encoder_blocked_too_long(Some(blocked.elapsed())) {
                             tracing::warn!(
                                 participant = %session.participant_id_str,
                                 "AAC encoder accepted no PCM for 3 s; tearing the media bridge down"
                             );
                             break;
                         }
-                        continue;
+                        // Only the encoder input is backpressured; keep
+                        // draining already-encoded frames, pacing, DTMF and
+                        // RTCP in this tick.
                     }
                     PushOutcome::Closed => {
                         tracing::warn!(participant = %session.participant_id_str, "AAC encoder queue closed");
@@ -336,7 +344,10 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                     pending_tx.push_back(frame);
                 }
                 ticks += 1;
-                let due = ticks.saturating_mul(15) / 16;
+                let due = u64::from(frames_due(
+                    ticks.saturating_mul(LATM_TICK_SAMPLES as u64),
+                    0,
+                ));
                 // Keep a 2-frame cushion before the first packet, then send
                 // at most two frames per 20 ms tick (plus one when the encoder
                 // delivered a larger burst) so a backlog never leaves as a
@@ -464,6 +475,13 @@ mod tests {
         assert!(!is_aac_audio(113, Some("G722")));
         assert!(!is_aac_audio(113, Some("OPUS")));
         assert!(!is_aac_audio(113, Some("PCMU")));
+    }
+
+    #[test]
+    fn encoder_full_turns_into_teardown_only_after_three_seconds() {
+        assert!(!encoder_blocked_too_long(None));
+        assert!(!encoder_blocked_too_long(Some(Duration::from_millis(2999))));
+        assert!(encoder_blocked_too_long(Some(Duration::from_secs(3))));
     }
 
     #[test]

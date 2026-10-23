@@ -267,6 +267,13 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > тихий пир декодировал 440 Гц (rms 0.0884), источник тона — тишину (нет self-loop).
 > Остаточные P2 (unit-тесты encoder-liveness/pacing, preflight TOCTOU, a=rtcp, inbound DTMF,
 > точный префикс `a=fmtp` для неканонического SDP) — техдолг, закрытие не блокируют.
+> **Элегантность: 8.9 → cleanup.** Убран `continue` на `PushOutcome::Full` (backpressure
+> больше не глушит готовые кадры, пейсер, DTMF и RTCP), пейсер использует `frames_due`,
+> заливка дыр — `AAC_FRAME_SAMPLES`, добавлен unit-тест 3-с encoder-liveness; UAS-fmtp
+> принимает любой whitespace и ведущие нули PT; убрана недостижимая ветка `MP4A-LATM`,
+> починены докстринги; `VKS_AAC_LATM_LEGAL_ACCEPTED` задокументирован в env; evidence:
+> SHA256SUMS без self-hash, актуальные 2851/2706 пакетов, окно декодирования, строки
+> availability/restore в server.log.
 > (`WorkerPool::try_reserve(2)`) для двух прямых FFmpeg-процессов. **Live-бинарь `3caa7546`:
 > legal-гейт enforced — `aac_latm=false`, API AAC supported=false** (включается только
 > `VKS_AAC_LATM_LEGAL_ACCEPTED=1`). Осталось до 9.5: RTP-level AAC-тест (16:15/marker/timestamp/

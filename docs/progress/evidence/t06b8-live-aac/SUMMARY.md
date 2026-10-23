@@ -16,8 +16,9 @@ a=rtpmap:113 MP4A-LATM/90000
 a=fmtp:113 profile-level-id=1;object=2;cpresent=1
 ```
 
-It sends 210 LATM RTP frames of a 1 kHz tone (FFmpeg `-smc-interval 1`,
-48 kHz mono, 64 kbps) and decodes every RTP packet received from the MCU.
+It sends its whole 60 s stream as LATM RTP frames of a 1 kHz tone (FFmpeg
+`-smc-interval 1`, 48 kHz mono, 64 kbps; 2851 packets sent, 2706 received) and
+decodes every RTP packet received from the MCU.
 
 Session: conference/session `23bc65cf-f1ae-48a7-8197-7f5653339b4c`,
 dial `sip:127.0.0.1:5090` via
@@ -60,8 +61,8 @@ first_ts_deltas=[1920, 1920, ... x20]
   FFmpeg 8.0.1, proving the MCU outbound AAC-LATM framing is decodable.
   RMS is 0 because the room had a single participant (no other audio to
   mix); this proves framing/timeline, not speech content.
-- UAS→MCU: 210 tone frames over ~4.2 s; bridge stayed alive until the
-  session was torn down, so the decoder produced PCM.
+- UAS→MCU: the full 60 s tone stream; the bridge stayed alive until the
+  session was torn down, so the decoder produced PCM throughout.
 
 ## Two-peer mix (stronger run, logs `uas-5091.log` / `uas-5092.log`)
 
@@ -95,10 +96,11 @@ A follow-up lab run used UAS1 (port 5091) = 440 Hz tone and UAS2 (port 5092)
 = silence (FFmpeg `volume=0`), in one session (`88df831c…`, two SIP dialogs
 confirmed MP4A-LATM, two bridges started).
 
-- UAS2, which sent only silence, decoded `samples=122880 rms=0.0884
-  nonzero=122852`, frequency ~440 Hz (FFT peak 440.9 Hz; `uas-attrib-silent.log`,
-  `uas-attrib-440.latm`): it hears UAS1's tone through the MCU mixer, so this
-  is cross-forwarding, not its own loopback.
+- UAS2, which sent only silence, decoded a ~2.5 s window (after packet #100;
+  not the whole call) of `samples=122880 rms=0.0884 nonzero=122852`, frequency
+  ~440 Hz (FFT peak 440.9 Hz; `uas-attrib-silent.log`, `uas-attrib-440.latm`):
+  it hears UAS1's tone through the MCU mixer, so this is cross-forwarding,
+  not its own loopback.
 - UAS1, which sent the 440 Hz tone, decoded `samples=122880 rms=0.0000
   nonzero=0` (`uas-attrib-440.log`): no self-loop / mix-minus holds.
 

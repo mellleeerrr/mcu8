@@ -410,13 +410,9 @@ impl BridgeableAudio {
     }
 }
 
-/// Map one offered payload to a codec the bridge can handle without a
-/// transcoder.  Static PTs 0/8/9 may omit rtpmap; dynamic PTs (including our
-/// 107-110) must declare a matching name+clock, otherwise a hostile offer
-/// could claim PCMU while sending G.726.
 /// AAC-LATM fmtp gate for the in-band-SMC bridge: `bitrate`, `profile-level-id`
 /// and unknown parameters are ignored (RFC 3016 allows them); the codec itself
-/// must be AAC-LC (object type 2) and SMC must travel in-band (`cpresent!=0`).
+/// must be AAC-LC (object type 2) and SMC must travel in-band (`cpresent=1`).
 pub(crate) fn aac_fmtp_is_bridgeable(fmtp: &str) -> bool {
     let parameters: Vec<(String, String)> = fmtp
         .split(';')
@@ -455,6 +451,10 @@ fn aac_fmtp_parameters_bridgeable(parameters: &[(String, String)]) -> bool {
     object_ok && cpresent_ok && sbr_ok
 }
 
+/// Map one offered payload to a codec the bridge can handle without a
+/// transcoder. Static PTs 0/8/9 may omit rtpmap; dynamic PTs (including our
+/// 107-110) must declare a matching name+clock, otherwise a hostile offer
+/// could claim PCMU while sending G.726.
 fn bridgeable_audio(section: &str, payload: u8, aac_available: bool) -> Option<BridgeableAudio> {
     let static_codec = match payload {
         0 => Some("PCMU"),
@@ -613,10 +613,17 @@ fn video_payloads(section: &str, codec_name: &str) -> Vec<u8> {
 /// Every key/value pair from every `a=fmtp:<payload>` line, duplicates kept:
 /// the AAC gate must fail closed across all occurrences.
 fn aac_fmtp_pairs(section: &str, payload: u8) -> Vec<(String, String)> {
-    let prefix = format!("a=fmtp:{payload} ");
     let mut parameters = Vec::new();
-    for line in section.lines().map(str::trim) {
-        let Some(rest) = line.strip_prefix(&prefix) else { continue };
+    for line in section.lines() {
+        let lower = line.trim().to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("a=fmtp:") else { continue };
+        // RFC 8866 allows any whitespace after the integer payload type, and
+        // SDP integers may carry leading zeroes; a literal-space prefix would
+        // silently skip the whole gate on `a=fmtp:113\t...`.
+        let Some((declared, rest)) = rest.split_once(char::is_whitespace) else { continue };
+        if declared.trim().parse::<u8>().ok() != Some(payload) {
+            continue;
+        }
         for parameter in rest.split(';') {
             let Some((key, value)) = parameter.trim().split_once('=') else { continue };
             parameters.push((key.trim().to_ascii_lowercase(), value.trim().to_string()));

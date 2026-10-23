@@ -48,7 +48,7 @@ pub fn audio_codec_available(name: &str) -> bool {
 
 fn audio_codec_available_with(name: &str, aac_latm: bool) -> bool {
     match normalize(name).as_str() {
-        "AAC" | "AACLATM" | "MP4ALATM" | "MP4A-LATM" => aac_latm,
+        "AAC" | "AACLATM" | "MP4ALATM" => aac_latm,
         _ => false,
     }
 }

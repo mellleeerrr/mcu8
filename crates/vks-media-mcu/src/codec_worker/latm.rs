@@ -17,7 +17,6 @@ use tokio::sync::mpsc;
 
 use super::WorkerError;
 
-/// PCM block size consumed by the MCU audio tick.
 /// Result of a non-blocking push into a worker pipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushOutcome {
@@ -26,6 +25,7 @@ pub enum PushOutcome {
     Closed,
 }
 
+/// PCM block size consumed by the MCU audio tick.
 pub const LATM_TICK_SAMPLES: usize = 960;
 /// AAC-LC samples per frame.
 pub const LATM_FRAME_SAMPLES: usize = 1024;
