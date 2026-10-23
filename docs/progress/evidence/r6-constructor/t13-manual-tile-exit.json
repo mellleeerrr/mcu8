@@ -111,5 +111,6 @@
  },
  "errs": [
   "Operation canceled"
- ]
+ ],
+ "vendor_noise": "Operation canceled — вендорский pageerror (index6.bundle LayoutGridConfigurator); наших сообщений нет."
 }

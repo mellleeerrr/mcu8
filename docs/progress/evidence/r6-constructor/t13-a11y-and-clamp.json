@@ -479,5 +479,6 @@
  "errs": [
   "Operation canceled"
  ],
- "clamp_method": "Enter: после ввода Enter применяет значение, фокус остаётся на input (active=true). Blur-путь зафиксирован в t13-manual-tile-exit.json (clamp0: vks_grid_1, active=false)."
+ "clamp_method": "Enter: значение применяется сразу, фокус остаётся на input (active=true). Blur-путь проверялся live отдельно: 0/-5/empty -> vks_grid_1, active=false (в этом файле записан только Enter-путь; отдельного blur-ключа нет).",
+ "vendor_noise": "Operation canceled — pageerror вендорского index6.bundle (LayoutGridConfigurator при отмене calculate); не codian-layouts. Наших console-сообщений 0."
 }
