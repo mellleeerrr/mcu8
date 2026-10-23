@@ -142,16 +142,45 @@ for f in perf-overrides.js api-errors.js; do
     fi
 done
 if [ -f "$DEST/index.html" ]; then
-    python3 - "$DEST/index.html" "$PROJECT_LAYER/index-overrides.html" <<'PYEOF'
-import re, sys
-src, dst = sys.argv[1], sys.argv[2]
+    python3 - "$DEST/index.html" "$PROJECT_LAYER" <<'PYEOF'
+import re, sys, pathlib
+
+src, layer = sys.argv[1], pathlib.Path(sys.argv[2])
 text = open(src, encoding="utf-8").read()
 m = re.search(r'<style id="prostor-pnm-overrides">.*?</style>', text, re.S)
 if m:
-    open(dst, "w", encoding="utf-8").write(m.group(0))
+    (layer / "index-overrides.html").write_text(m.group(0), encoding="utf-8")
     print("  сохранён: index-overrides.html (%d символов)" % len(m.group(0)))
 else:
     print("  в index.html нет блока prostor-pnm-overrides (пропуск)")
+
+# P1-1: проектные <script src> — не часть вендорского архива, копирование 1:1
+# их теряло: файлы восстанавливались, а ссылок на них в index.html не было,
+# и правки T12b/T15 молча откатывались. Сохраняем блок с маркерами целиком:
+# повторный импорт восстанавливает его байт-в-байт (без эвристик вставки).
+block = re.search(r'<!-- prostor:project-layer:start -->.*?<!-- prostor:project-layer:end -->', text, re.S)
+if not block:
+    PROJECT_JS = ("api-errors.js", "perf-overrides.js")
+    tags = [
+        tag
+        for tag in re.findall(
+            r'<script[^>]*src="[^"]*(?:%s)"[^>]*></script>' % "|".join(map(re.escape, PROJECT_JS)), text
+        )
+    ]
+    block_text = (
+        "<!-- prostor:project-layer:start -->\n"
+        + "\n".join(tags)
+        + "\n<!-- prostor:project-layer:end -->"
+        if tags
+        else ""
+    )
+else:
+    block_text = block.group(0)
+if block_text:
+    (layer / "index-scripts.html").write_text(block_text, encoding="utf-8")
+    print("  сохранён: index-scripts.html (%d символов)" % len(block_text))
+else:
+    print("  в index.html нет проектных <script src> (пропуск)")
 PYEOF
 fi
 
@@ -165,8 +194,20 @@ if [ "$SYMLINK_COUNT" -gt 0 ]; then
     find "$TMP/deployed/pnm" -type l -delete
 fi
 mkdir -p "$DEST_PARENT"
-rm -rf "$DEST" "$DEST_PARENT/deployed"
-tar -C "$TMP/deployed" -cf - --exclude='*.bak' --exclude='*.bak.*' pnm | tar -C "$DEST_PARENT" -xf -
+# P1-5: распаковка в staging и подмена целиком. Прежний вариант (`rm -rf` +
+# tar поверх) оставлял НАПОЛОВИНУ импортированное дерево, если tar падал на
+# середине: рантайм без части чанков и без манифеста.
+STAGE="$DEST_PARENT/.pnm-stage"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+tar -C "$TMP/deployed" -cf - --exclude='*.bak' --exclude='*.bak.*' pnm | tar -C "$STAGE" -xf -
+if [ ! -f "$STAGE/pnm/index.html" ]; then
+    echo "распаковка неполная: нет $STAGE/pnm/index.html; рантайм не тронут" >&2
+    exit 1
+fi
+rm -rf "$DEST"
+mv "$STAGE/pnm" "$DEST"
+rmdir "$STAGE" 2>/dev/null || true
 
 BAK_COUNT="$(find "$TMP/deployed/pnm" -name '*.bak*' | wc -l)"
 FILE_COUNT="$(find "$DEST" -type f | wc -l)"
@@ -186,6 +227,29 @@ for f in perf-overrides.js api-errors.js; do
         log "  восстановлен: $f"
     fi
 done
+if [ -f "$PROJECT_LAYER/index-scripts.html" ]; then
+    python3 - "$DEST/index.html" "$PROJECT_LAYER/index-scripts.html" <<'PYEOF'
+import re, sys
+target, block_path = sys.argv[1], sys.argv[2]
+text = open(target, encoding="utf-8").read()
+block = open(block_path, encoding="utf-8").read()
+marked = re.compile(r'<!-- prostor:project-layer:start -->.*?<!-- prostor:project-layer:end -->', re.S)
+if marked.search(text):
+    text = marked.sub(lambda _: block, text, count=1)
+    action = "заменён"
+else:
+    # Вставляем перед первым вендорским module-скриптом — проектный слой
+    # обязан грузиться ДО бандла приложения (перехват console/fetch).
+    anchor = re.search(r'<script[^>]*type="module"[^>]*src="[^"]*index\.bundle', text)
+    if anchor:
+        text = text[: anchor.start()] + block + "\n" + text[anchor.start() :]
+    else:
+        text = text.replace("</body>", block + "\n</body>", 1)
+    action = "вставлен"
+open(target, "w", encoding="utf-8").write(text)
+print("  проектный слой <script> %s в index.html" % action)
+PYEOF
+fi
 if [ -f "$PROJECT_LAYER/index-overrides.html" ]; then
     python3 - "$DEST/index.html" "$PROJECT_LAYER/index-overrides.html" <<'PYEOF'
 import re, sys

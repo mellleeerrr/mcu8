@@ -196,6 +196,12 @@ jobs:
       - name: Unit tests (ASN.1 / Q.931 / H.245 contracts)
         working-directory: crates/vks-gateway-h323/python
         run: python -m unittest -v test_h323_sidecar test_h323_listener
+      # S14: ядро патч-скриптов PNM (идемпотентность, fail-closed на дрейфе
+      # вендора, откат при битом синтаксисе). Импорт фронтенда прогоняет эти
+      # скрипты, поэтому их контракт проверяется отдельно.
+      - name: Unit tests (PNM patch lib)
+        working-directory: scripts
+        run: python -m unittest -v test_pnm_patch_lib
 
   deny:
     name: cargo-deny

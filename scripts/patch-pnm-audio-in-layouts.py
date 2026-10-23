@@ -47,12 +47,11 @@
 from __future__ import annotations
 
 import argparse
-import os
-import shutil
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pnm_patch_lib import apply_rules, atomic_write, node_syntax_ok  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CHUNKS_REL = "client/pnm-frontend/deployed/pnm/chunks"
@@ -264,89 +263,6 @@ LEGACY_RULES = [
         1,
     ),
 ] + [(n, o, w, 1, 1) for n, o, w in BACK_CONFERENCE + BACK_SESSION]
-
-
-def atomic_write(path: Path, text: str) -> None:
-    """Пишет файл атомарно: временный файл рядом + os.replace."""
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
-def node_syntax_ok(path: Path) -> tuple[bool, str]:
-    """Проверка синтаксиса бандла (node --check). node может отсутствовать."""
-    node = shutil.which("node")
-    if not node:
-        return True, "node не найден — проверка синтаксиса пропущена"
-    proc = subprocess.run(
-        [node, "--check", str(path)], capture_output=True, text=True, check=False
-    )
-    if proc.returncode == 0:
-        return True, "node --check: OK"
-    return False, "node --check: ОШИБКА\n" + (proc.stderr or proc.stdout).strip()[:800]
-
-
-def apply_rules(path: Path, rules, check_only: bool) -> tuple[bool, list[str]]:
-    """Применяет правила к файлу. Возвращает (ok, сообщения).
-
-    Проверка по правилу: «уже применено» ⇔ якоря «до» нет (0 вхождений) И
-    якорь «после» присутствует в ожидаемом количестве. Иначе — «вендор
-    изменился» (якорь пропал/переехал/переписан вендором) ⇒ exit != 0.
-    """
-    messages: list[str] = []
-    if not path.is_file():
-        return False, ["    ОШИБКА: файл не найден: %s" % path]
-    original = path.read_text(encoding="utf-8")
-    text = original
-    for name, old, new, expected_old, expected_new in rules:
-        count_old = text.count(old)
-        count_new = text.count(new)
-        if count_old == expected_old:
-            text = text.replace(old, new)
-            verb = "проверено (в памяти)" if check_only else "применено"
-            messages.append("    %s: %s (old x%d)" % (verb, name, count_old))
-            continue
-        if count_old == 0 and count_new >= expected_new:
-            messages.append("    уже применено: %s" % name)
-            continue
-        messages.append(
-            "    ОШИБКА: %s — якорь «до» встречается %d раз(а), ожидалось %d,"
-            " якорь «после» — %d раз(а), ожидалось %d; вендор изменился,"
-            " патч требует ревизии"
-            % (name, count_old, expected_old, count_new, expected_new)
-        )
-        return False, messages
-    if text == original:
-        messages.append("    БЕЗ ИЗМЕНЕНИЙ: %s уже в нужном состоянии" % path.name)
-        return True, messages
-    if check_only:
-        messages.append("    НЕ ПРИМЕНЕНО (--check): %s требует патча" % path.name)
-        return False, messages
-    atomic_write(path, text)
-    syntax_ok, syntax_msg = node_syntax_ok(path)
-    if not syntax_ok:
-        # Откат: возвращаем исходное содержимое — сломанный бандл хуже
-        # непропатченного.
-        atomic_write(path, original)
-        messages.append("    ОТКАТ: синтаксис не прошёл проверку, файл восстановлен")
-        messages.append("    %s" % syntax_msg)
-        return False, messages
-    messages.append(
-        "    ЗАПИСАНО: %s (%d → %d байт); %s"
-        % (
-            path.name,
-            len(original.encode("utf-8")),
-            len(text.encode("utf-8")),
-            syntax_msg,
-        )
-    )
-    return True, messages
 
 
 def _norm_css(text: str) -> str:
