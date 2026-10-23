@@ -3,12 +3,15 @@
 //! FFmpeg's `latm` muxer emits LOAS frames: a 3-byte sync/length header
 //! followed by one `audioMuxElement`. RTP carries the `audioMuxElement`
 //! **without** that header, so outbound frames are stripped and inbound
-//! payloads are wrapped before they reach the `loas` demuxer. Every RTP packet
-//! holds exactly one complete element; there is no fragmentation layer.
+//! payloads are wrapped before they reach the `loas` demuxer. This bridge sends
+//! one complete element per RTP packet; RFC 3016 also permits fragmentation,
+//! which callers must detect (marker=0) rather than feed to `add_loas`.
 //!
-//! One AAC-LC frame is 1024 samples, so at 48 kHz the 90 kHz RTP timestamp
-//! advances by exactly 1920 per packet (46.875 packets/s versus a 50 Hz PCM
-//! tick — callers must not assume one packet per 20 ms tick).
+//! One AAC-LC frame is 1024 samples at every sampling rate. The RTP clock is
+//! normally 90 kHz (1920 ticks per frame at 48 kHz, 46.875 packets/s versus a
+//! 50 Hz PCM tick); peers such as FFmpeg's RTP LATM muxer may answer with a
+//! 48 kHz clock (1024 ticks per frame). Callers must use the negotiated clock
+//! and must not assume one packet per 20 ms tick.
 
 /// LOAS sync word (11 bits set, `0x2B7`).
 pub const LOAS_SYNC: u8 = 0x56;
@@ -102,37 +105,76 @@ pub fn frame_ticks(sample_rate: u32) -> u32 {
         as u32
 }
 
-/// Monotonic 90 kHz RTP timestamp generator that stays exact for non-integral
-/// sample-rate ratios by accumulating the real sample count.
+/// RTP timestamp generator for AAC-LATM that stays exact for non-integral
+/// sample-rate/clock ratios by accumulating the real sample count.
 #[derive(Debug, Clone, Copy)]
 pub struct LatmRtpClock {
     start: u32,
     samples: u64,
     sample_rate: u32,
+    rtp_clock: u32,
 }
 
 impl LatmRtpClock {
-    /// Creates a clock for `sample_rate`; timestamp starts at `start`.
+    /// Creates a clock with the standard 90 kHz MP4A-LATM RTP clock.
     #[must_use]
     pub const fn new(sample_rate: u32, start: u32) -> Self {
-        Self { start, samples: 0, sample_rate: if sample_rate == 0 { 48_000 } else { sample_rate } }
+        Self::with_rtp_clock(sample_rate, AAC_RTP_CLOCK, start)
+    }
+
+    /// Creates a clock for an explicitly negotiated RTP clock (90 kHz or
+    /// 48 kHz in practice; any positive value is accepted).
+    #[must_use]
+    pub const fn with_rtp_clock(sample_rate: u32, rtp_clock: u32, start: u32) -> Self {
+        Self {
+            start,
+            samples: 0,
+            sample_rate: if sample_rate == 0 { 48_000 } else { sample_rate },
+            rtp_clock: if rtp_clock == 0 { AAC_RTP_CLOCK } else { rtp_clock },
+        }
     }
 
     fn offset(&self) -> u32 {
-        ((self.samples * u64::from(AAC_RTP_CLOCK)) / u64::from(self.sample_rate.max(1))) as u32
+        ((self.samples * u64::from(self.rtp_clock)) / u64::from(self.sample_rate.max(1))) as u32
     }
 
     /// The timestamp for the next packet, then advances by one AAC frame.
     pub fn next_timestamp(&mut self) -> u32 {
-        let current = self.start.wrapping_add(self.offset());
-        self.samples += u64::from(AAC_FRAME_SAMPLES);
+        let current = self.timestamp();
+        self.advance(1);
         current
+    }
+
+    /// Advances the clock by `frames` encoded (or lost-but-timed) AAC frames.
+    pub fn advance(&mut self, frames: u32) {
+        self.samples += u64::from(frames) * u64::from(AAC_FRAME_SAMPLES);
     }
 
     /// Current (not-yet-sent) timestamp.
     #[must_use]
     pub fn timestamp(&self) -> u32 {
         self.start.wrapping_add(self.offset())
+    }
+
+    /// Negotiated RTP clock in Hz.
+    #[must_use]
+    pub const fn rtp_clock(&self) -> u32 {
+        self.rtp_clock
+    }
+}
+
+/// Number of whole AAC frames accumulated by `samples_in` PCM samples that
+/// have not been sent yet. At 48 kHz, 16 ticks of 960 samples yield exactly
+/// 15 frames (16 x 960 = 15 x 1024); callers must send 0 or more frames per
+/// tick and advance the RTP timestamp only for frames actually sent.
+#[must_use]
+pub const fn frames_due(samples_in: u64, frames_sent: u64) -> u32 {
+    let due = samples_in / AAC_FRAME_SAMPLES as u64;
+    let pending = due.saturating_sub(frames_sent);
+    if pending > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        pending as u32
     }
 }
 
@@ -181,6 +223,44 @@ mod tests {
         assert!(!carries_stream_mux_config(&[0x80]));
         assert!(!carries_stream_mux_config(&[0xff]));
         assert!(!carries_stream_mux_config(&[]));
+    }
+
+    #[test]
+    fn sixteen_pcm_ticks_accumulate_fifteen_aac_frames() {
+        assert_eq!(frames_due(0, 0), 0);
+        assert_eq!(frames_due(960, 0), 0);
+        for tick in 1..=15u64 {
+            assert_eq!(frames_due(tick * 960, 0), (tick as u32 * 960) / 1024, "tick {tick}");
+        }
+        assert_eq!(frames_due(16 * 960, 0), 15);
+        assert_eq!(frames_due(16 * 960, 15), 0, "no artificial frame on the 16th tick");
+        assert_eq!(frames_due(32 * 960, 15), 15);
+        assert_eq!(frames_due(32 * 960, 20), 10, "lost/failed frames still advance time");
+    }
+
+    #[test]
+    fn rtp_clock_supports_90k_and_48k_without_drift() {
+        let mut ninety = LatmRtpClock::new(48_000, 100);
+        assert_eq!(ninety.rtp_clock(), 90_000);
+        let mut timestamps = Vec::new();
+        for _ in 0..16 {
+            timestamps.push(ninety.next_timestamp());
+        }
+        assert_eq!(timestamps[0], 100);
+        assert_eq!(timestamps[15] - timestamps[0], 15 * 1920);
+        assert_eq!(ninety.timestamp(), 100 + 16 * 1920);
+        let mut forty_eight = LatmRtpClock::with_rtp_clock(48_000, 48_000, 7);
+        let first = forty_eight.next_timestamp();
+        let second = forty_eight.next_timestamp();
+        assert_eq!(second - first, 1024);
+        // 44.1 kHz: 45 frames are 2089.79 ticks each; the accumulator keeps the
+        // long-run error below one tick instead of drifting 0.38 s/hour.
+        let mut cd = LatmRtpClock::new(44_100, 0);
+        let start = cd.next_timestamp();
+        cd.advance(44);
+        let end = cd.next_timestamp();
+        let expected = (45u64 * 1024 * 90_000) / 44_100;
+        assert!((u64::from(end - start)).abs_diff(expected) <= 1, "{} vs {expected}", end - start);
     }
 
     #[test]
