@@ -435,9 +435,8 @@ impl VideoSdpProfile {
 
 /// Video codecs advertised in the outbound offer, in `m=video` order.
 ///
-/// Only bridgeable video is advertised: H.264 baseline and high (the gateway
-/// decodes both and re-encodes baseline). H.265/H.261/H.263 entries return once
-/// their worker bridge and RFC 7798/4587/4629 payloaders are wired.
+/// Only bridgeable video is advertised: H.264 baseline/high and H.265.
+/// H.261/H.263 entries return once their RFC 4587/4629 payloaders are wired.
 pub const VIDEO_OFFER: &[OfferCodec] = &[
     OfferCodec {
         payload: 97,
@@ -455,6 +454,18 @@ pub const VIDEO_OFFER: &[OfferCodec] = &[
         channels: 0,
         fmtp: Some("packetization-mode=1;profile-level-id=64001f;max-mbps=13800;max-fs=920;max-br=256"),
         native: false,
+        dtmf: false,
+    },
+    OfferCodec {
+        payload: 99,
+        name: "H265",
+        clock: 90000,
+        channels: 0,
+        // No packetization-mode for RFC 7798; profile-id 1 (Main) is what
+        // libx265 emits at the gateway's slot profiles. sprop-* are optional
+        // and would be stale after a resolution change, so they are omitted.
+        fmtp: Some("profile-id=1"),
+        native: true,
         dtmf: false,
     },
 ];
@@ -832,12 +843,14 @@ m=video 5006 RTP/AVP 96\r\n";
     fn offer_carries_bridgeable_video_matrix() {
         let sdp = build_offer(CodecProfile::Full, "192.168.1.93", 41000, Some(41002));
         for line in [
-            "m=video 41002 RTP/AVP 97 98",
+            "m=video 41002 RTP/AVP 97 98 99",
             "a=rtpmap:97 H264/90000",
             "b=AS:2048",
             "a=fmtp:97 packetization-mode=1;profile-level-id=42c01f;max-mbps=108000;max-fs=3600;max-br=2048",
             "a=rtpmap:98 H264/90000",
             "a=fmtp:98 packetization-mode=1;profile-level-id=64001f;max-mbps=108000;max-fs=3600;max-br=2048",
+            "a=rtpmap:99 H265/90000",
+            "a=fmtp:99 profile-id=1",
             "a=rtcp:41003",
         ] {
             assert!(sdp.contains(line), "offer misses `{line}`:\n{sdp}");
@@ -901,15 +914,17 @@ a=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1\r\n";
             "a=rtpmap:0 PCMU/8000",
             "a=rtpmap:8 PCMA/8000",
             "a=rtpmap:101 telephone-event/8000",
-            "m=video 41002 RTP/AVP 97",
+            "m=video 41002 RTP/AVP 97 99",
             "a=rtpmap:97 H264/90000",
+            "a=rtpmap:99 H265/90000",
+            "a=fmtp:99 profile-id=1",
         ] {
             assert!(sdp.contains(line), "native offer misses `{line}`:\n{sdp}");
         }
         // G.723.1 is 30 ms; a single 20 ms ptime hint would contradict it.
         assert!(!sdp.contains("a=ptime:"), "native G723 offer must not claim 20 ms ptime:\n{sdp}");
         assert!(sdp.contains("a=maxptime:30"), "native G723 offer caps packets at 30 ms:\n{sdp}");
-        for absent in ["G7221", "G729", "G719", "H265", "H263", "MP4A-LATM"] {
+        for absent in ["G7221", "G729", "G719", "H263", "MP4A-LATM"] {
             assert!(!sdp.contains(absent), "native offer must not advertise unbridgeable `{absent}`:\n{sdp}");
         }
     }
@@ -1132,6 +1147,55 @@ fn telephone_event(media: &SdpMedia) -> Option<u8> {
 
 /// Our real sender implements Baseline-family H264, non-interleaved mode1,
 /// 640x360/15fps at level3.0. High, mode0 and mode2 are distinct configurations.
+/// Local video codec selected for one payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NegotiatedVideoCodec {
+    H264,
+    H265,
+}
+
+impl NegotiatedVideoCodec {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::H264 => "H264",
+            Self::H265 => "H265",
+        }
+    }
+}
+
+/// Recognises an H.265 payload in SDP (dynamic PT, H265/HEVC name, 90 kHz).
+/// RFC 7798 has no packetization-mode; `profile-id`/`tier-flag`/`level-id` are
+/// advisory here because libx265 chooses them from the slot.
+fn h265_video(media: &SdpMedia, payload: u8) -> bool {
+    let Some(map) = media.maps.get(&payload) else {
+        return false;
+    };
+    (96..=127).contains(&payload)
+        && (map.name.eq_ignore_ascii_case("H265") || map.name.eq_ignore_ascii_case("HEVC"))
+        && map.clock == 90000
+        && !media.fmtp.get(&payload).is_some_and(|fmtp| fmtp.contains_key("sprop-max-don-diff"))
+}
+
+/// Resolves one remote video payload to a codec this bridge can carry.
+fn video_identity(media: &SdpMedia, payload: u8) -> Option<NegotiatedVideoCodec> {
+    if h264_baseline_level(media, payload).is_some() {
+        return Some(NegotiatedVideoCodec::H264);
+    }
+    if h265_video(media, payload) {
+        return Some(NegotiatedVideoCodec::H265);
+    }
+    None
+}
+
+/// Finds a local payload for the same codec (H.264 prefers compatible levels).
+fn local_video_payload(media: &SdpMedia, codec: NegotiatedVideoCodec, remote_level: Option<u8>) -> Option<u8> {
+    media.payloads.iter().copied().find(|payload| match codec {
+        NegotiatedVideoCodec::H264 => h264_baseline_level(media, *payload)
+            .is_some_and(|local_level| local_level.min(remote_level.unwrap_or(local_level)) >= 30),
+        NegotiatedVideoCodec::H265 => h265_video(media, *payload),
+    })
+}
+
 fn h264_baseline_level(media: &SdpMedia, payload: u8) -> Option<u8> {
     let map = media.maps.get(&payload)?;
     if !(96..=127).contains(&payload) || !map.name.eq_ignore_ascii_case("H264") || map.clock != 90000 {
@@ -1214,18 +1278,16 @@ pub fn negotiate_media_detailed(offer: &str, answer: &str) -> Result<NegotiatedM
     let mut video = None;
     if let (Some(local_video), Some(remote_video)) = (usable_media(&local, "video"), usable_media(&remote, "video")) {
         for transmit_payload in &remote_video.payloads {
-            let Some(remote_level) = h264_baseline_level(remote_video, *transmit_payload) else {
+            let Some(codec) = video_identity(remote_video, *transmit_payload) else {
                 continue;
             };
-            let receive_payload = local_video.payloads.iter().copied().find(|payload| {
-                h264_baseline_level(local_video, *payload)
-                    .is_some_and(|local_level| local_level.min(remote_level) >= 30)
-            });
-            if let Some(receive_payload) = receive_payload {
-                if let Some(video_ip) = remote_video.ip.clone().or(remote.ip.clone()) {
-                    video = Some((video_ip, remote_video.port, *transmit_payload, receive_payload));
-                    break;
-                }
+            let remote_level = h264_baseline_level(remote_video, *transmit_payload);
+            let Some(receive_payload) = local_video_payload(local_video, codec, remote_level) else {
+                continue;
+            };
+            if let Some(video_ip) = remote_video.ip.clone().or(remote.ip.clone()) {
+                video = Some((video_ip, remote_video.port, *transmit_payload, receive_payload, codec));
+                break;
             }
         }
     }
@@ -1239,7 +1301,7 @@ pub fn negotiate_media_detailed(offer: &str, answer: &str) -> Result<NegotiatedM
         video_port: video.as_ref().map(|value| value.1),
         video_payload_type: video.as_ref().map(|value| value.2),
         local_video_payload_type: video.as_ref().map(|value| value.3),
-        video_codec: video.as_ref().map(|_| "H264"),
+        video_codec: video.as_ref().map(|value| value.4.name()),
     })
 }
 
@@ -1434,14 +1496,15 @@ a=sendrecv\r\n";
     }
 
     #[test]
-    fn h265_only_answer_disables_video_but_keeps_native_audio() {
+    fn h265_answer_negotiates_h265_video_and_keeps_native_audio() {
         let offer = build_plain_sdp("127.0.0.1", 41000, Some(41002));
         let answer = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 3230 RTP/AVP 0\r\n\
 m=video 3232 RTP/AVP 99\r\na=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1\r\n";
-        let media = negotiate_media(&offer, answer).expect("PCMU audio must survive unsupported video");
+        let media = negotiate_media(&offer, answer).expect("PCMU + H265");
         assert_eq!(media.audio_payload_type, 0);
-        assert_eq!(media.video_port, None);
-        assert_eq!(media.video_codec, None);
+        assert_eq!(media.video_port, Some(3232));
+        assert_eq!(media.video_codec, Some("H265"));
+        assert_eq!(media.local_video_payload_type, Some(99));
     }
 
     #[test]

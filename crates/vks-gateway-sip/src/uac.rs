@@ -46,6 +46,8 @@ pub struct ActiveSipSession {
     pub remote_video_payload_type: Option<u8>,
     pub local_video_payload_type: Option<u8>,
     pub remote_video_ip: Option<String>,
+    /// Negotiated video codec name ("H264"/"H265"), when video is bridged.
+    pub remote_video_codec: Option<&'static str>,
     pub remote_dtmf_payload_type: Option<u8>,
     /// Raw `200 OK` SDP body, kept verbatim for diagnostics and live-call evidence.
     pub answer_sdp: String,
@@ -297,6 +299,7 @@ impl SipUacClient {
                         remote_video_payload_type: media.video_payload_type,
                         local_video_payload_type: media.local_video_payload_type,
                         remote_video_ip: media.video_ip,
+                        remote_video_codec: media.video_codec,
                         remote_dtmf_payload_type: media.dtmf_payload_type,
                         answer_sdp: response.body.to_string(),
                         socket: c.socket.clone(),

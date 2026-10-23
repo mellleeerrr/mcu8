@@ -1163,6 +1163,9 @@ impl GatewayManager {
                 vks_gateway_sip::video_answer_limits(&session.answer_sdp, session.remote_video_payload_type);
             let answer_bitrate = answer_limits.max_br.iter().chain(answer_limits.b_as.iter()).copied().min();
             video_profile.clamp_to_answer(answer_limits.max_fs, answer_bitrate, answer_limits.max_mbps);
+            if session.remote_video_codec == Some("H265") {
+                video_profile.codec = video::GatewayVideoCodec::H265;
+            }
             let audio_port = session
                 .remote_audio_port
                 .filter(|port| *port > 0)
@@ -1203,7 +1206,7 @@ impl GatewayManager {
             "audio_sample_rate": audio_sample_rate(audio_payload_type),
             "audio_tx_payload_type": audio_payload_type, "audio_rx_payload_type": audio_payload_type,
             "remote_audio_address": std::net::SocketAddr::new(remote_audio_ip, remote_audio_port).to_string(),
-            "video_codec": if has_video { Some("H264") } else { None },
+            "video_codec": if has_video { Some(video_profile.codec.name()) } else { None },
             "video_tx_payload_type": video_configuration.as_ref().map(|configuration| configuration.2),
             "video_rx_payload_type": video_configuration.as_ref().map(|configuration| configuration.3),
             "video_clock_rate": if has_video { Some(90000) } else { None },

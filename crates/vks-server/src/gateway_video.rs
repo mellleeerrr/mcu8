@@ -24,7 +24,7 @@ pub(super) enum GatewayVideoCodec {
 }
 
 impl GatewayVideoCodec {
-    const fn name(self) -> &'static str {
+    pub(super) const fn name(self) -> &'static str {
         match self {
             Self::H264 => "H264",
             Self::H265 => "H265",
