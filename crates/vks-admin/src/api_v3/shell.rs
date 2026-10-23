@@ -685,14 +685,20 @@ pub async fn update_settings_video(
 
 /// `POST /api/v3/ui/video_layouts/calculate` — геометрия слотов для превью.
 ///
-/// Контракт эталона TrueConf MCU 2.2.1.66: принимает только 65 вендорных
-/// manual-пресетов (`preset_equal_1`, `preset_selected_b_4`, `preset_double_b_10`,
-/// `preset_selected_rb_overlap_2`, …); dynamic/auto/базовые id → 400
-/// `invalid.preset`. Позиции 1-based, у pip-окон `z_order = 1`.
+/// Два словаря, id не пересекаются:
+/// * 65 вендорных manual-пресетов эталона TrueConf MCU 2.2.1.66
+///   (`preset_equal_1`, `preset_selected_b_4`, `preset_double_b_10`, …);
+/// * 54 раскладки Codian MCU 4200 (`codian_01`…`codian_52`,
+///   `codian_custom_22`, `codian_custom_14`) — расширение, чтобы UI мог
+///   построить превью наших схем тем же контрактом.
+///
+/// dynamic/auto/базовые id → 400 `invalid.preset`. Позиции 1-based, у pip-окон
+/// `z_order = 1`.
 pub async fn video_layouts_calculate(Json(body): Json<serde_json::Value>) -> Response {
     track("ui/video_layouts/calculate");
     let preset_name = body.get("preset").and_then(serde_json::Value::as_str).unwrap_or_default();
-    if !vks_layout::preset::is_known_preset(preset_name) {
+    let codian = vks_layout::codian::is_codian_preset(preset_name);
+    if !codian && !vks_layout::preset::is_known_preset(preset_name) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": {
@@ -718,7 +724,12 @@ pub async fn video_layouts_calculate(Json(body): Json<serde_json::Value>) -> Res
     };
     let width = dimension("width", 1280.0);
     let height = dimension("height", 720.0);
-    let Some(slots) = vks_layout::preset::geometry_for_manual(preset_name, width, height) else {
+    let slots = if codian {
+        vks_layout::codian::geometry(preset_name, width, height)
+    } else {
+        vks_layout::preset::geometry_for_manual(preset_name, width, height)
+    };
+    let Some(slots) = slots else {
         return super::error_json(400, "Bad Request");
     };
     let response: Vec<serde_json::Value> = slots
@@ -753,7 +764,24 @@ pub async fn video_layout_presets() -> Response {
     for id in vks_layout::codian::codian_preset_ids() {
         let title = vks_layout::codian::scheme(id).map(|scheme| scheme.title).unwrap_or_default();
         let windows = vks_layout::codian::slot_count(id).unwrap_or_default();
-        presets.push(json!({ "id": id, "title": title, "windows": windows, "source": "codian" }));
+        // Геометрия сразу в каталоге: проектный слой рисует превью карточки
+        // без 54 отдельных запросов `calculate` (контракт calculate остаётся).
+        let slots: Vec<serde_json::Value> = vks_layout::codian::geometry(id, 1280.0, 720.0)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .map(|(position, slot)| {
+                json!({
+                    "position": position + 1,
+                    "x": slot.rect.x,
+                    "y": slot.rect.y,
+                    "width": slot.rect.width,
+                    "height": slot.rect.height,
+                    "z_order": slot.z_order,
+                })
+            })
+            .collect();
+        presets.push(json!({ "id": id, "title": title, "windows": windows, "source": "codian", "slots": slots }));
     }
     Json(json!({ "presets": presets })).into_response()
 }
@@ -860,7 +888,19 @@ pub async fn switch_video_layout_mode(
         Some(_) => return super::error_json(422, "payload.slots items must be objects"),
         None => None,
     };
-    let inferred_size = size.or_else(|| slots.as_ref().map(|(_, len)| *len)).unwrap_or(13);
+    // Раскладки Codian принимаются по тому же пути, что вендорские manual-пресеты:
+    // число окон у них задаёт таблица макета (`codian::slot_count`), а не хвост id.
+    let preset_field = field("preset").filter(|preset| {
+        preset
+            .as_str()
+            .is_some_and(|p| super::resources::preset_size(p).is_some() || vks_layout::codian::is_codian_preset(p))
+    });
+    let inferred_size = size
+        .or_else(|| slots.as_ref().map(|(_, len)| *len))
+        .or_else(|| {
+            preset_field.as_ref().and_then(Value::as_str).and_then(vks_layout::codian::slot_count).map(|n| n as u64)
+        })
+        .unwrap_or(13);
     let type_default = match mode_lc.as_str() {
         "dynamic" | "manual" => "individual",
         _ => "default",
@@ -883,12 +923,7 @@ pub async fn switch_video_layout_mode(
     };
     let mut patch = serde_json::Map::new();
     patch.insert("mode".to_string(), json!(layout_mode));
-    patch.insert(
-        "preset".to_string(),
-        field("preset")
-            .filter(|preset| preset.as_str().is_some_and(|p| super::resources::preset_size(p).is_some()))
-            .unwrap_or_else(|| json!(preset_default)),
-    );
+    patch.insert("preset".to_string(), preset_field.unwrap_or_else(|| json!(preset_default)));
     patch.insert("type".to_string(), field("type").unwrap_or_else(|| json!(type_default)));
     patch.insert("size".to_string(), json!(inferred_size));
     if let Some((slots, _)) = slots {

@@ -1392,6 +1392,33 @@ async fn m4_abonents_lifecycle_and_commands() {
     .await;
     assert_eq!(unknown_layout.status(), StatusCode::NOT_FOUND, "чужой layout_id не даёт фейковый 200");
 
+    // 7b. Codian-раскладка проходит тем же путём «Применить»: id не подменяется на
+    // `preset_equal_N`, а size считается по таблице макета (`slot_count`), не по хвосту id.
+    let codian_switch = send(
+        &app,
+        request(
+            "POST",
+            "/api/v3/ui/video_layouts/mode",
+            Some(&token),
+            json!({
+                "session_id": room_id_str,
+                "new_mode": "mcu",
+                "video_layout_id": layout_id,
+                "payload": {"mode":"manual","preset":"codian_43"}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(codian_switch.status(), StatusCode::OK);
+    let codian_body = json_body(codian_switch).await;
+    assert_eq!(codian_body["payload"]["preset"], "codian_43", "codian-пресет не должен подменяться");
+    assert_eq!(
+        codian_body["payload"]["size"],
+        vks_layout::codian::slot_count("codian_43").unwrap() as u64,
+        "size — число окон макета, а не хвост id"
+    );
+    assert_eq!(codian_body["payload"]["mode"], "manual");
+
     let bad_mode = send(
         &app,
         request(
@@ -2474,6 +2501,121 @@ async fn pnm_video_layouts_calculate_parses_preset_suffix() {
         send(&server, request("POST", "/api/v3/ui/video_layouts/calculate", None, json!({"preset":"preset_equal_25"})))
             .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Превью раскладок Codian: тот же контракт, что у вендорских manual-пресетов
+/// (position 1-based, z_order для PiP/overlap), но из словаря `codian`.
+#[tokio::test]
+async fn codian_calculate_returns_slot_geometry_for_preview() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let id = "codian_custom_14";
+    let response = send(
+        &server,
+        request(
+            "POST",
+            "/api/v3/ui/video_layouts/calculate",
+            Some(&token),
+            json!({"preset": id, "width": 1920, "height": 1080}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let slots = body["slots"].as_array().expect("slots array");
+    let expected = vks_layout::codian::geometry(id, 1920.0, 1080.0).expect("геометрия Codian");
+    assert_eq!(slots.len(), expected.len(), "окон столько же, сколько в таблице");
+    assert_eq!(slots.len(), vks_layout::codian::slot_count(id).expect("число окон"));
+    // Позиции 1-based, порядок совпадает с таблицей геометрии.
+    for (index, (slot, cell)) in slots.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(slot["position"], index as u64 + 1, "позиции 1-based");
+        assert!((slot["x"].as_f64().unwrap() - cell.rect.x).abs() < 1e-6, "x слота {index}");
+        assert!((slot["width"].as_f64().unwrap() - cell.rect.width).abs() < 1e-6, "ширина слота {index}");
+        assert_eq!(slot["z_order"], u64::from(cell.z_order), "z_order слота {index}");
+    }
+    // Неизвестный id остаётся 400 (вендорская ошибка не изменилась).
+    let response = send(
+        &server,
+        request("POST", "/api/v3/ui/video_layouts/calculate", Some(&token), json!({"preset": "codian_99"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Все 54 раскладки Codian дают превью в канвасе; неизвестные id — по-прежнему 400.
+#[tokio::test]
+async fn every_codian_layout_has_preview_geometry() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    for id in vks_layout::codian::codian_preset_ids() {
+        let response = send(
+            &server,
+            request(
+                "POST",
+                "/api/v3/ui/video_layouts/calculate",
+                Some(&token),
+                json!({"preset": id, "width": 1280, "height": 720}),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "превью для {id}");
+        let body = json_body(response).await;
+        let slots = body["slots"].as_array().expect("slots array");
+        let expected = vks_layout::codian::slot_count(id).expect("slot_count") as usize;
+        assert_eq!(slots.len(), expected, "число окон {id}");
+        for (index, slot) in slots.iter().enumerate() {
+            assert_eq!(slot["position"], index as u64 + 1, "позиции 1-based у {id}");
+            assert!(matches!(slot["z_order"].as_u64(), Some(0 | 1)), "z_order 0/1 у {id}");
+            assert!(
+                slot["width"].as_f64().unwrap() > 0.0 && slot["height"].as_f64().unwrap() > 0.0,
+                "пустой слот у {id}"
+            );
+        }
+    }
+    for unknown in ["codian_99", "codian_53", "codian_custom_15", ""] {
+        let response = send(
+            &server,
+            request(
+                "POST",
+                "/api/v3/ui/video_layouts/calculate",
+                Some(&token),
+                json!({"preset": unknown, "width": 1280, "height": 720}),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "неизвестный id {unknown:?} отвергнут");
+    }
+}
+
+/// Каталог `/presets`: 65 вендорных + 54 Codian, id уникальны, `windows` = числу
+/// окон макета, title непустой — это контракт для проектного слоя UI.
+#[tokio::test]
+async fn video_layout_presets_catalog_covers_vendor_and_codian() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response = send(&server, request("GET", "/api/v3/ui/video_layouts/presets", Some(&token), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let presets = body["presets"].as_array().expect("presets array");
+    assert_eq!(presets.len(), 65 + 54, "65 вендорных manual + 54 Codian");
+    let mut ids = std::collections::HashSet::new();
+    for preset in presets {
+        let id = preset["id"].as_str().expect("id");
+        assert!(ids.insert(id.to_string()), "id {id} не должен повторяться");
+        match preset["source"].as_str() {
+            Some("vendor") => {}
+            Some("codian") => {
+                assert_eq!(preset["windows"].as_u64(), vks_layout::codian::slot_count(id).map(|n| n as u64));
+                assert!(!preset["title"].as_str().unwrap_or_default().is_empty(), "пустой title у {id}");
+                let slots = preset["slots"].as_array().expect("слоты каталога");
+                assert_eq!(slots.len(), vks_layout::codian::slot_count(id).unwrap(), "слоты каталога = числу окон");
+            }
+            other => panic!("неизвестный source {other:?} у {id}"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

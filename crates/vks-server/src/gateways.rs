@@ -1554,11 +1554,17 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         // `preset_default_13` давали участнику плитку 480×270). Для
         // manual/dynamic геометрия берётся из `payload.preset`.
         let mut geometry: Vec<LayoutSlot> = Vec::new();
-        if mode != "auto" {
+        let stored_preset = layout["payload"]["preset"].as_str().unwrap_or_default();
+        // Явно выбранная схема Codian — это ручная раскладка, даже если клиент
+        // забыл `mode:"manual"`: иначе геометрия пресета молча терялась
+        // (`preset_default_13` — дефолт «Общей», его в auto не трогаем).
+        let explicit_codian = !stored_preset.is_empty()
+            && stored_preset != "preset_default_13"
+            && vks_layout::codian::is_codian_preset(stored_preset);
+        if mode != "auto" || explicit_codian {
             let slot_count = assignments.values().copied().max().unwrap_or(0).saturating_add(1);
-            let preset_name = layout["payload"]["preset"].as_str().unwrap_or_default();
             let preset_size = layout["payload"]["size"].as_u64().and_then(|value| u8::try_from(value).ok());
-            let preset_name = vks_layout::preset::resolve(preset_name, preset_size);
+            let preset_name = vks_layout::preset::resolve(stored_preset, preset_size);
             // Пресеты Codian (`codian_01`…`codian_52`, `codian_custom_*`) имеют
             // собственную геометрию по спецификации 4200: их id не разбирается
             // `PresetId`, поэтому таблица раскладок проверяется напрямую.
@@ -4124,6 +4130,35 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         let layout = mcu.layout_descriptor(room).expect("layout");
         assert!(layout.geometry.is_empty(), "auto не синтезирует preset-геометрию");
         assert_eq!(layout.version, before + 1, "ровно один инкремент версии при возврате к «Общей»");
+    }
+
+    /// Явно выбранная схема Codian — ручная раскладка: даже если клиент забыл
+    /// `mode:"manual"` (дефолт `auto`), до MCU доезжает геометрия макета, а не
+    /// авто-сетка. `preset_default_13` («Общая») по-прежнему не синтезирует
+    /// геометрию в auto — см. тест выше.
+    #[tokio::test]
+    async fn explicit_codian_preset_applies_geometry_even_in_auto_mode() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        mcu.ensure_room(room);
+        let pid = vks_core::ParticipantId::new();
+        mcu.bridge_participant(room, pid, vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)]);
+        let id = "codian_43";
+        let layout = serde_json::json!({
+            "id": "codian-auto",
+            "payload": {
+                "mode": "auto", "preset": id, "type": "individual",
+                "size": vks_layout::codian::slot_count(id).expect("slot_count"), "slots": []
+            }
+        });
+        manager.apply_layout(room, layout).await.expect("codian layout applied");
+        let descriptor = mcu.layout_descriptor(room).expect("layout applied to MCU");
+        let expected = vks_layout::codian::geometry(id, 1920.0, 1080.0).expect("геометрия Codian");
+        assert_eq!(descriptor.geometry.len(), expected.len(), "геометрия макета, не авто-сетка");
+        assert_eq!(descriptor.geometry[0].width, expected[0].rect.width.round() as u32, "ширина первого окна");
+        assert_eq!(descriptor.geometry[0].height, expected[0].rect.height.round() as u32, "высота первого окна");
     }
 
     /// T03: gateway не теряет вендорный z_order overlap/PiP-пресета.
