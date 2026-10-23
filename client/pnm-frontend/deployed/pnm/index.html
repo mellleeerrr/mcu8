@@ -300,6 +300,21 @@ html.theme-dark .main *:focus-visible {
   outline-offset: 2px;
 }
 
+/* Task 3 refined: portaled floating surfaces outside .main receive direct
+   dark tokens (no filter cancellation needed because the root filter only
+   affects .main descendants). */
+html.theme-dark .mdc-menu-surface,
+html.theme-dark .tc-context-menu,
+html.theme-dark .notification-center__menu,
+html.theme-dark .header-profile__menu,
+html.theme-dark .bookmarks-drawer,
+html.theme-dark .notifier__container {
+  background-color: #1f2328 !important;
+  color: #e7e9ec !important;
+  border: 1px solid #2b3138;
+  box-shadow: 0 4px 16px rgba(0,0,0,.4);
+}
+
 </style>
 </head>
 <body>
