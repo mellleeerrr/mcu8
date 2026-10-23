@@ -200,6 +200,20 @@ CI service postgres, `--locked`.
 `grids` (прецедент `codian_geometry_golden.rs`) — обязательный первый шаг перед
 сокращением геометрии (r6-elegance).
 
+### Статус T11 (2026-10-24)
+- `docs/progress/evidence/codian-layouts/SUPERSEDED.md`: 43/46/49 — факты
+  «таблица vs текст vs production»; 49 = `2/5` (0.4, сетка 4×5), источник —
+  `ROUND4_PLAN_2026-10-23.md:56-57` / коммит `328c943`, а не измерение.
+- `tests/fixtures/codian_spec_43_46_1280x720.json` + `tests/codian_spec_43_46.rs`
+  (5 тестов): независимо от таблицы/чертежей; production совпал.
+- `tests/fixtures/grids_geometry_1280x720.json` + `tests/grids_geometry_golden.rs`
+  (3 + ignored-генератор): 174 id / 2178 окон, эталон-снимок production;
+  `gen_grids_golden.py` воспроизводит.
+- README codian-layouts обновлён (файлы, метод, CI). Проверки:
+  `cargo test -p vks-layout --locked` — 84 passed, 0 failed, 1 ignored
+  (ignored — только ручной генератор golden); `cargo fmt --all -- --check` и
+  `cargo clippy -p vks-layout --all-targets --locked -- -D warnings` — чисто.
+
 ## T13. Счётчик «Количество видеокон» + перестройка всех вариантов (НОВОЕ, мандат R6 п.7)
 Приоритет: сразу после T2 (прямой пункт мандата владельца). Сделать:
 - вендорская разметка 1:1 `.dynamic-layout-configurator-counter` (`.counter`,

@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Сборка `crates/vks-layout/src/codian.rs` целиком: заголовок + таблица + логика."""
+"""Сборка `crates/vks-layout/src/codian.rs` целиком: заголовок + таблица + логика.
+
+ВНИМАНИЕ (T11, 2026-10-24): скрипт исторический и перезаписывает production
+целиком. `gen_codian.py` не содержит R4-решений для 43/46/49 и R4-правок PIP
+33/38/39/51/52, поэтому прямой запуск откатит их. Для 43/46/49 источник истины —
+`SUPERSEDED.md` и `crates/vks-layout/tests/fixtures/codian_spec_43_46_1280x720.json`.
+Перед запуском — сверить diff с текущим `codian.rs`; без сверки не запускать.
+"""
 
 import importlib.util
 import os
