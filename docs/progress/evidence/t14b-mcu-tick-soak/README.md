@@ -23,8 +23,10 @@ phases: audio alone at 20 ms, then video alone at 34 ms. They are not concurrent
 because today's global room mutex would let a 15–27 ms compose block the audio tick;
 per-room actors and multi-room concurrency are S20. A 3 s warm-up is discarded.
 
-Each period makes one deliberate **same-timestamp duplicate** call that must be
-throttled. The report counts attempts, first successes, throttled calls,
+Run timing gates on an idle or pinned host: the wall-clock loss gate is
+load-sensitive (an unpinned 20 s run under heavy CI load can legitimately exceed
+the 1% budget). Each period makes one deliberate **same-timestamp duplicate**
+call that must be throttled. The report counts attempts, first successes, throttled calls,
 `second_call_successes` (must be 0), histogram count and engine
 `frames_dropped` (video), so the throttle/drop gates are not vacuous. After the
 windows, `clear_participant_frame` + `unbridge_participant` are invoked and the
@@ -49,22 +51,21 @@ falling back.
 
 ## Result — 60 s window (30 s per phase), 4 participants, release
 
-Run `ae59a62`, clean worktree (`git_dirty=false`), Intel Xeon E5-2699 v3,
+Run `2f5ba5e`, clean worktree (`git_dirty=false`), Intel Xeon E5-2699 v3,
 rustc 1.94.0. Machine report: [`soak-60s-4p.json`](soak-60s-4p.json). Reproducers
 should write `VKS_SOAK_OUT` to `/tmp`; the command above overwrites the canonical
 artifact.
 
 | phase | samples | exact `le=2ms` | p99 bucket (estimate) | mean | rate |
 |---|---:|---:|---:|---:|---:|
-| audio engine work | 1499 | **1.000** | (0.25, 0.5] ms (0.408 ms) | 0.147 ms | 49.97 Hz |
-| video compose (I420) | 883 | 0.000 | (20, 33] ms (26.1 ms) | 15.24 ms | 29.43 fps |
+| audio engine work | 1500 | **1.000** | (0.1, 0.25] ms (0.249 ms) | 0.141 ms | 50.0 Hz |
+| video compose (I420) | 883 | 0.000 | (10, 20] ms (20.0 ms) | 15.31 ms | 29.43 fps |
 
 Video exact `le=33 ms` ratio **1.000**, engine `frames_dropped` delta 883 (all
 883 are the deliberate duplicate/throttle probes; first successes 883), audio
-exact `le=2 ms` ratio **1.000**, admin rebuild recorded ticks 0. One of the 1500
-wall-clock audio slots lost its first tick (1499 first successes, 99.93%): that
-is real scheduling margin and is inside the 1% period-loss gate, not a
-histogram omission — the audio histogram count equals the tick count (1499).
+exact `le=2 ms` ratio **1.000**, admin rebuilds rendered 2 frames and recorded
+0 ticks. All 1500 wall-clock audio periods produced their first tick; the audio
+histogram count equals the tick count (1500).
 
 **Verdict:** the audio engine-work p99 ≤2 ms SLO is met with a wide margin. Video
 compose fits the 33 ms frame budget in this workload but **not** the 2 ms target;
@@ -75,10 +76,12 @@ per-room actors). No claim is made that the full media tick meets 2 ms.
 Compositor work in this slice: exact integer nearest-neighbour mapping
 (`fx = floor(dx*fw/dw)` via incremental quotient/remainder), integer letterbox
 geometry, row slices, single-allocation canvas. Golden tests pin 2-D luma,
-non-constant U/V planes and PiP letterbox-bar behaviour. The measured compose
-time includes the 34 ms inter-period gap, so cold caches and page faults are in
-the tail; a back-to-back compose of the same frames is faster, and the 33 ms
-margin should not be read as a warm-cache per-frame cost. No archived "before" JSON is
+non-constant U/V planes and PiP letterbox-bar behaviour. The timer wraps only
+`process_video`; the harness's 34 ms idle gap is not measured. Frames are static
+and warmed during the warm-up window, but a long idle gap can still leave
+cold-cache/page-fault effects in the first frames. The 33 ms figure is a budget
+margin for this harness, not a warm-cache per-frame cost; no back-to-back
+speedup or before/after claim is made. No archived "before" JSON is
 claimed; this is a single reproducible after-state measurement.
 
 ## Honest limits
@@ -90,11 +93,10 @@ claimed; this is a single reproducible after-state measurement.
   measured; S20 owns per-room actors and the multi-room p99.
 - Audio load is four participants; the signal is near full scale but not a
   stress corpus.
-- 1499/883 samples support the exact rank gates, not a precise p99 point; the
+- 1500/883 samples support the exact rank gates, not a precise p99 point; the
   report labels the estimate and its bucket interval.
-- This artifact does not prove that `/metrics` was scraped on the live service.
-  A live `/metrics` scrape is not part of this artifact; procedure A below is
-  how to obtain one. Default-off absence is covered by
+- This artifact does not prove that `/metrics` was scraped on the live service;
+  procedure A below is how to obtain one. Default-off absence is covered by
   `crates/vks-common/tests/metrics_default_off.rs`, and the env-on zero-count
   startup by `crates/vks-common/tests/metrics_tick_zero.rs`.
 
@@ -126,9 +128,10 @@ claimed; this is a single reproducible after-state measurement.
 Run the command above with `VKS_SOAK_SECONDS=259200` (72 h; the cap is 604800 s)
 for one long engine soak. The report is written when the window ends, so for
 periodic snapshots run shorter segments (for example 12 × 6 h) with distinct
-`VKS_SOAK_OUT` paths, or use procedure A for a live scrape. This path has no
-`/metrics` endpoint and no server process, so RSS/fd and Prometheus scraping
-belong to procedure A.
+`VKS_SOAK_OUT` paths, or use procedure A for a live scrape. Use a distinct
+`VKS_SOAK_OUT` for a long run: the canonical 60 s artifact must not be
+overwritten. This path has no `/metrics` endpoint and no server process, so
+RSS/fd and Prometheus scraping belong to procedure A.
 
 ## Artifacts
 
