@@ -160,6 +160,24 @@ envelope), 409 дублей, mode-endpoint не перезаписывает pre
 не менять DTO; live-вызовы UI.
 Критерии: тесты 401/403/409/200; Viewer PIN недоступен.
 
+### Статус T7 (2026-10-24, коммит d7ddd4e)
+- `require_moderator` — единая ролевая точка (Moderator+); карточка конференции
+  и все 4 списка гейчены, у Viewer 403 (PIN недоступен), anon 401, admin 200.
+  Решение Lead: списки — Moderator+, т.к. payload содержит PIN/полный конфиг;
+  Viewer-дашборд при этом 403 (его `sessions:view` — не право на PIN).
+- WS `sessions:started`: pin/has_pin вырезаны из broadcast (подписки не
+  гейтятся по роли); UI перезапрашивает данные по событию.
+- Дубли имён комнат: 409 envelope вместо 500 с SQL-текстом (create+rename,
+  `Rooms::name_taken`); автосоздаваемые сессии получают `Quick Session N`.
+- `PATCH /api/v3/profile[/]` — 200; пишет display_name/description/locale/
+  timezone/emails/phones (общий helper с `update_user`), self-роль/группы/
+  view_own_only игнорируются; GET /profile отдаёт эти поля из directory.
+- `PATCH /api/v3/sessions/{id}[/]` и `/ui/sessions/{id}[/]` — 200 (reuse
+  update_conference); раньше exact 405 без envelope, slash 501.
+- mode-only не затирает preset/type/size; явный topology-payload работает.
+- Тесты `t7_rbac_patches_and_duplicate_names` (401/403/200/409, обе формы URL),
+  `t7_mode_only_preserves_preset_type_size`; gейты vks-admin 296/0.
+
 ## T8. Шлюзы: abonent_id, статус, allowlist
 Приоритет `abonent_id` над `contact_id` (fallback), реальный статус вместо
 фиктивного (тесты `network_integration.rs:766-771` закрепляют фиктивность —
@@ -167,6 +185,24 @@ envelope), 409 дублей, mode-endpoint не перезаписывает pre
 Подводные камни: phantom window у SIP; не сломать inbound SIP; allowlist конфликт
 (см. T6).
 Критерии: тест «оба id → окно по abonent_id»; live-звонок без фантома.
+
+### Статус T8 (2026-10-24, коммит 12f2983)
+- Приоритет id: `abonent_id → connection_id → contact_id → call_string_id`
+  (было contact/call_string первыми). Тест «оба id»: окно 0 у реального
+  `sip-...@sip-gateway`, `cs-<uuid>` фантома нет; live-данные t06b1
+  подтверждали, что contact/call_string — адресная книга.
+- Статус шлюзов честный: READY только при живом listener'е (RAII ActiveFlag
+  SIP/H.323) или реальном health-факте, `FAILED` при транспортном отказе,
+  иначе `DISABLED`; `registration` = listener, `connected` = ready.
+  In-memory `register_uas()` остался только gate входящих INVITE. Тесты
+  обновлены (fresh DISABLED, register/unregister не меняют статус, живой
+  `serve_sip_uas` → READY → shutdown → DISABLED).
+- H.323 allowlist: из dev-unit убраны `VKS_H323_UAS_ALLOW/MAX_*` — единственный
+  источник `deploy/vks.env.example` (drop-in/EnvironmentFile).
+- source_latch: sip/in = LatchFirst, sip/out/h323/in/h323/out = Pinned
+  (H.323 inbound pinned — security-инвариант T07d, ослаблять нельзя);
+  «все стороны» = зафиксированная политика, а не механическое true.
+- Гейты: vks-server unit 108 passed/3 ignored, network_integration 22/0.
 
 ## T9. PG-типы и CI postgres
 `rooms.created_at TEXT` vs `Uuid` (миграция/биндинг), PG-тест не `#[ignore]`,
@@ -192,6 +228,11 @@ CI service postgres, `--locked`.
 
 ## T10a. Proto-поля `layout_id/preset/mode` + LayoutModeChanged (ADR)
 ## T10b. id-only apply (без `payload.slots`) — не требует proto
+Реализовано (f9b0a1b): `payload.slots` необязателен; без него assignments
+пусты, геометрия — из `payload.preset` (grids/Codian/ручной пресет), окна
+заполняет MCU; auto без назначений/геометрии по-прежнему доходит до движка
+пустым дескриптором (сброс на авто-сетку). Тест `id_only_apply_uses_preset_
+geometry_without_slots` (vks_grid_9→9, codian_07→13).
 ## T10c. Прод-потребитель LayoutChanged (PNM WS / SDK) — после T10a/b
 
 ## T11. Evidence/golden
@@ -235,7 +276,19 @@ save/reopen сохраняет N=100; тесты vks-layout; MANIFEST; 0 оши�
 ## T12. Тесты/CI-гигиена
 Тесты приоритета id-геометрии и create_room-adopt pending, G722-флейк, calculate
 error перечисляет grid, release-note SIP UAS, «970→факт».
-### Статус T13 (WIP, ожидает ревью)
+### Статус T12 (2026-10-24, коммит 9efd5be)
+- `create_room_adopts_pending_layout` — pending-раскладка (apply до create)
+  подхватывается create_room: id/version/geometry сохранены, окно доступно
+  сразу, после destroy не воскресает.
+- calculate 400 перечисляет id конструктора (`vks_grid_<n>`,
+  `vks_pin_{l,r,t,b}_<n>` с g/m, 1..100); тест проверяет текст.
+- G722-флейк воспроизвести не удалось (полный прогон зелёный) — оставлен
+  в бэклоге как неподтверждённый.
+- Тесты приоритета id-геометрии закрыты в T8 (`gateway_layout_prefers_
+  abonent_id_over_contact_and_call_string`); release-note SIP UAS и «970→факт»
+  сделаны в T6.
+
+### Статус T13 (финальное ревью T13.2)
 - [ ] T13 — реализовано: вендорская разметка `.dynamic-layout-configurator-counter`
   (`__text`, `.counter`, `.counter-center-segment`, `counter__button` как
   TcButton-контейнер, `input[type=number][max=100][min=1]`), кнопки
@@ -324,5 +377,5 @@ preset на вендорский — зафиксировать поведени
   P0/P1/P2 нет. T2 закрыта. По P3 ревьюера: мёртвая ветка `adoptTarget` удалена
   (T2.10) — поведение эквивалентно, подтверждено live probe2 (a2 vks_grid_13,
   b3 codian_07 + manual active, c4 vks_grid_9); evidence-маркеры кликов —
-  в бэклоге T12 (P3, не блокер). T13.1 — на ревью.
+  в бэклоге T12 (P3, не блокер). T13.2 — на финальном ревью.
 - [ ] T2 … T12
