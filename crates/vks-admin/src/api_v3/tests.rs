@@ -2574,7 +2574,16 @@ async fn constructor_calculate_matches_grid_geometry() {
     let (state, _) = test_state();
     let server = app(state);
     let token = login_token(&server, "admin", "s3cret").await;
-    for id in ["vks_grid_9", "vks_grid_20", "vks_pin_r_8", "vks_pin_b_13", "vks_grid_g12_m24_9", "vks_pin_l_g8_7"] {
+    for id in [
+        "vks_grid_9",
+        "vks_grid_20",
+        "vks_pin_r_8",
+        "vks_pin_b_13",
+        "vks_grid_g12_m24_9",
+        "vks_pin_l_g8_7",
+        "vks_grid_100",
+        "vks_pin_b_100",
+    ] {
         let response = send(
             &server,
             request(

@@ -1,0 +1,326 @@
+{
+ "s1": {
+  "store": {
+   "preset": "preset_default_13",
+   "mode": "auto",
+   "slots": 0,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "mode": "auto",
+   "size": 13,
+   "slots": 0,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-auto"
+  ],
+  "ctor": [],
+  "dw": [],
+  "counter": null
+ },
+ "s2": {
+  "store": {
+   "preset": "vks_grid_13",
+   "mode": "manual",
+   "slots": 13,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "mode": "auto",
+   "size": 13,
+   "slots": 0,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_13"
+  ],
+  "dw": [
+   "13"
+  ],
+  "counter": {
+   "value": "13",
+   "max": "100",
+   "min": "1"
+  }
+ },
+ "chips": {
+  "c9a": "clicked",
+  "c9b": "clicked",
+  "c25": "clicked"
+ },
+ "s3": {
+  "store": {
+   "preset": "vks_grid_9",
+   "mode": "manual",
+   "slots": 9,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "mode": "auto",
+   "size": 13,
+   "slots": 0,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_9"
+  ],
+  "dw": [
+   "9"
+  ],
+  "counter": {
+   "value": "9",
+   "max": "100",
+   "min": "1"
+  }
+ },
+ "s4": {
+  "store": {
+   "preset": "vks_grid_9",
+   "mode": "manual",
+   "slots": 9,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "mode": "auto",
+   "size": 13,
+   "slots": 0,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_9"
+  ],
+  "dw": [
+   "9"
+  ],
+  "counter": {
+   "value": "9",
+   "max": "100",
+   "min": "1"
+  }
+ },
+ "s5": {
+  "store": {
+   "preset": "vks_grid_25",
+   "mode": "manual",
+   "slots": 25,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "mode": "auto",
+   "size": 13,
+   "slots": 0,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_25"
+  ],
+  "dw": [
+   "25"
+  ],
+  "counter": {
+   "value": "25",
+   "max": "100",
+   "min": "1"
+  }
+ },
+ "pin": "clicked",
+ "s6": {
+  "store": {
+   "preset": "vks_pin_r_25",
+   "mode": "manual",
+   "slots": 25,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "mode": "auto",
+   "size": 13,
+   "slots": 0,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_pin_r_25"
+  ],
+  "dw": [
+   "25"
+  ],
+  "counter": {
+   "value": "25",
+   "max": "100",
+   "min": "1"
+  }
+ },
+ "c9c": "clicked",
+ "s7": {
+  "store": {
+   "preset": "vks_pin_r_9",
+   "mode": "manual",
+   "slots": 9,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "mode": "auto",
+   "size": 13,
+   "slots": 0,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_pin_r_9"
+  ],
+  "dw": [
+   "9"
+  ],
+  "counter": {
+   "value": "9",
+   "max": "100",
+   "min": "1"
+  }
+ },
+ "save1": [
+  {
+   "m": "PATCH",
+   "url": "7e6d4753-d21a-4955-ad6b-0c17de218427",
+   "body": "{\"display_name\":\"Codian 07 — 13 окон\",\"payload\":{\"mode\":\"manual\",\"preset\":\"vks_pin_r_9\",\"type\":\"individual\",\"slots\":[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"},{\"position\":5,\"role\":\"AUTO\"},{\"position\":6,\"role\":\"AUTO\"},{\"position\":7,\"role\":\"AUTO\"},{\"position\":8,\"role\":\"AUTO\"},{\"position\":9,\"role\":\"AUTO\"}]}}"
+  }
+ ],
+ "s7b": {
+  "store": {
+   "preset": "vks_pin_r_9",
+   "mode": "manual",
+   "slots": 9,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "vks_pin_r_9",
+   "mode": "manual",
+   "size": 9,
+   "slots": 9,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_pin_r_9"
+  ],
+  "dw": [
+   "9"
+  ],
+  "counter": {
+   "value": "9",
+   "max": "100",
+   "min": "1"
+  }
+ },
+ "s8": {
+  "store": {
+   "preset": "vks_pin_r_9",
+   "mode": "manual",
+   "slots": 9,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "vks_pin_r_9",
+   "mode": "manual",
+   "size": 9,
+   "slots": 9,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_pin_r_9"
+  ],
+  "dw": [
+   "9"
+  ],
+  "counter": {
+   "value": "9",
+   "max": "100",
+   "min": "1"
+  }
+ },
+ "c25b": "clicked",
+ "s9": {
+  "store": {
+   "preset": "vks_pin_r_25",
+   "mode": "manual",
+   "slots": 25,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "vks_pin_r_9",
+   "mode": "manual",
+   "size": 9,
+   "slots": 9,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_pin_r_25"
+  ],
+  "dw": [
+   "25"
+  ],
+  "counter": {
+   "value": "25",
+   "max": "100",
+   "min": "1"
+  }
+ },
+ "errs": [
+  "Operation canceled",
+  "Operation canceled",
+  "Operation canceled",
+  "Operation canceled",
+  "Operation canceled"
+ ]
+}

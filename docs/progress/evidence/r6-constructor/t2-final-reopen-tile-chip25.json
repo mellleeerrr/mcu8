@@ -1,35 +1,13 @@
 {
  "s1": {
   "store": {
-   "preset": "preset_default_13",
-   "mode": "auto",
-   "slots": 0,
-   "name": "Codian 07 — 13 окон",
-   "type": "individual"
-  },
-  "server": {
-   "preset": "preset_default_13",
-   "size": 13,
+   "preset": "vks_grid_13",
+   "mode": "manual",
    "slots": 0,
    "name": "Codian 07 — 13 окон"
   },
-  "mode": [
-   "layout-mode-selector-auto"
-  ],
-  "ctor": [],
-  "dw": []
- },
- "s2": {
-  "store": {
-   "preset": "vks_grid_13",
-   "mode": "manual",
-   "slots": 13,
-   "name": "Codian 07 — 13 окон",
-   "type": "individual"
-  },
   "server": {
-   "preset": "preset_default_13",
-   "size": 13,
+   "preset": "vks_grid_13",
    "slots": 0,
    "name": "Codian 07 — 13 окон"
   },
@@ -43,18 +21,37 @@
    "13"
   ]
  },
- "chip9": "title",
+ "s2": {
+  "store": {
+   "preset": "vks_grid_13",
+   "mode": "manual",
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "server": {
+   "preset": "vks_grid_13",
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_13"
+  ],
+  "dw": [
+   "13"
+  ]
+ },
  "s3": {
   "store": {
    "preset": "vks_grid_25",
    "mode": "manual",
    "slots": 25,
-   "name": "Codian 07 — 13 окон",
-   "type": "individual"
+   "name": "Codian 07 — 13 окон"
   },
   "server": {
-   "preset": "preset_default_13",
-   "size": 13,
+   "preset": "vks_grid_13",
    "slots": 0,
    "name": "Codian 07 — 13 окон"
   },
@@ -68,7 +65,7 @@
    "25"
   ]
  },
- "save9": [
+ "sv": [
   {
    "m": "PATCH",
    "body": "{\"display_name\":\"Codian 07 — 13 окон\",\"payload\":{\"mode\":\"manual\",\"preset\":\"vks_grid_25\",\"type\":\"individual\",\"slots\":[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"},{\"position\":5,\"role\":\"AUTO\"},{\"position\":6,\"role\":\"AUTO\"},{\"position\":7,\"role\":\"AUTO\"},{\"position\":8,\"role\":\"AUTO\"},{\"position\":9,\"role\":\"AUTO\"},{\"position\":10,\"role\":\"AUTO\"},{\"position\":11,\"role\":\"AUTO\"},{\"position\":12,\"role\":\"AUTO\"},{\"position\":13,\"role\":\"AUTO\"},{\"position\":14,\"role\":\"AUTO\"},{\"position\":15,\"role\":\"AUTO\"},{\"position\":16,\"role\":\"AUTO\"},{\"position\":17,\"role\":\"AUTO\"},{\"position\":18,\"role\":\"AUTO\"},{\"position\":19,\"role\":\"AUTO\"},{\"position\":20,\"role\":\"AUTO\"},{\"position\":21,\"role\":\"AUTO\"},{\"position\":22,\"role\":\"AUTO\"},{\"position\":23,\"role\":\"AUTO\"},{\"position\":24,\"role\":\"AUTO\"},{\"position\":25,\"role\":\"AUTO\"}]}}"
@@ -79,12 +76,10 @@
    "preset": "vks_grid_25",
    "mode": "manual",
    "slots": 25,
-   "name": "Codian 07 — 13 окон",
-   "type": "individual"
+   "name": "Codian 07 — 13 окон"
   },
   "server": {
    "preset": "vks_grid_25",
-   "size": 25,
    "slots": 25,
    "name": "Codian 07 — 13 окон"
   },
@@ -103,12 +98,10 @@
    "preset": "vks_grid_25",
    "mode": "manual",
    "slots": 25,
-   "name": "Codian 07 — 13 окон",
-   "type": "individual"
+   "name": "Codian 07 — 13 окон"
   },
   "server": {
    "preset": "vks_grid_25",
-   "size": 25,
    "slots": 25,
    "name": "Codian 07 — 13 окон"
   },
@@ -123,7 +116,6 @@
   ]
  },
  "errs": [
-  "Operation canceled",
   "Operation canceled"
  ]
 }

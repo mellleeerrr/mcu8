@@ -1,0 +1,287 @@
+{
+ "a1": {
+  "store": {
+   "preset": "preset_default_13",
+   "mode": "auto",
+   "slots": 0,
+   "name": "ZZ T2 default",
+   "type": "default"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "slots": 0,
+   "name": "ZZ T2 default",
+   "type": "default"
+  },
+  "mode": [
+   "layout-mode-selector-auto"
+  ],
+  "ctor": [],
+  "codian": [],
+  "dw": []
+ },
+ "a2": {
+  "store": {
+   "preset": "vks_grid_13",
+   "mode": "manual",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "slots": 0,
+   "name": "ZZ T2 default",
+   "type": "default"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_13"
+  ],
+  "codian": [],
+  "dw": [
+   "13"
+  ]
+ },
+ "saveA": [
+  {
+   "m": "PATCH",
+   "body": "{\"display_name\":\"ZZ T2 default\",\"payload\":{\"mode\":\"manual\",\"preset\":\"vks_grid_13\",\"type\":\"individual\",\"slots\":[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"},{\"position\":5,\"role\":\"AUTO\"},{\"position\":6,\"role\":\"AUTO\"},{\"position\":7,\"role\":\"AUTO\"},{\"position\":8,\"role\":\"AUTO\"},{\"position\":9,\"role\":\"AUTO\"},{\"position\":10,\"role\":\"AUTO\"},{\"position\":11,\"role\":\"AUTO\"},{\"position\":12,\"role\":\"AUTO\"},{\"position\":13,\"role\":\"AUTO\"}]}}"
+  }
+ ],
+ "a3": {
+  "store": {
+   "preset": "vks_grid_13",
+   "mode": "manual",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "vks_grid_13",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_13"
+  ],
+  "codian": [],
+  "dw": [
+   "13"
+  ]
+ },
+ "b1": {
+  "store": {
+   "preset": "vks_grid_13",
+   "mode": "manual",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "vks_grid_13",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_13"
+  ],
+  "codian": [],
+  "dw": [
+   "13"
+  ]
+ },
+ "b2": {
+  "store": {
+   "preset": "vks_grid_13",
+   "mode": "manual",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "vks_grid_13",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_13"
+  ],
+  "codian": [],
+  "dw": [
+   "13"
+  ]
+ },
+ "b3": {
+  "store": {
+   "preset": "codian_07",
+   "mode": "manual",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "vks_grid_13",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "mode": [],
+  "ctor": [],
+  "codian": [
+   "codian_07"
+  ],
+  "dw": [
+   "13"
+  ]
+ },
+ "saveB": [
+  {
+   "m": "PATCH",
+   "body": "{\"display_name\":\"ZZ T2 default\",\"payload\":{\"mode\":\"manual\",\"preset\":\"codian_07\",\"type\":\"individual\",\"slots\":[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"},{\"position\":5,\"role\":\"AUTO\"},{\"position\":6,\"role\":\"AUTO\"},{\"position\":7,\"role\":\"AUTO\"},{\"position\":8,\"role\":\"AUTO\"},{\"position\":9,\"role\":\"AUTO\"},{\"position\":10,\"role\":\"AUTO\"},{\"position\":11,\"role\":\"AUTO\"},{\"position\":12,\"role\":\"AUTO\"},{\"position\":13,\"role\":\"AUTO\"}]}}"
+  }
+ ],
+ "b4": {
+  "store": {
+   "preset": "codian_07",
+   "mode": "manual",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "codian_07",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "mode": [],
+  "ctor": [],
+  "codian": [
+   "codian_07"
+  ],
+  "dw": [
+   "13"
+  ]
+ },
+ "c1": {
+  "store": {
+   "preset": "codian_07",
+   "mode": "manual",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "codian_07",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-manual"
+  ],
+  "ctor": [],
+  "codian": [
+   "codian_07"
+  ],
+  "dw": [
+   "13"
+  ]
+ },
+ "c2": {
+  "store": {
+   "preset": "vks_grid_9",
+   "mode": "manual",
+   "slots": 9,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "codian_07",
+   "slots": 13,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_9"
+  ],
+  "codian": [],
+  "dw": [
+   "9"
+  ]
+ },
+ "saveC": [
+  {
+   "m": "PATCH",
+   "body": "{\"display_name\":\"ZZ T2 default\",\"payload\":{\"mode\":\"manual\",\"preset\":\"vks_grid_9\",\"type\":\"individual\",\"slots\":[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"},{\"position\":5,\"role\":\"AUTO\"},{\"position\":6,\"role\":\"AUTO\"},{\"position\":7,\"role\":\"AUTO\"},{\"position\":8,\"role\":\"AUTO\"},{\"position\":9,\"role\":\"AUTO\"}]}}"
+  }
+ ],
+ "c3": {
+  "store": {
+   "preset": "preset_default_13",
+   "mode": "auto",
+   "slots": 0,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "vks_grid_9",
+   "slots": 9,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-auto"
+  ],
+  "ctor": [],
+  "codian": [],
+  "dw": []
+ },
+ "c4": {
+  "store": {
+   "preset": "vks_grid_9",
+   "mode": "manual",
+   "slots": 9,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "vks_grid_9",
+   "slots": 9,
+   "name": "ZZ T2 default",
+   "type": "individual"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_9"
+  ],
+  "codian": [],
+  "dw": [
+   "9"
+  ]
+ },
+ "errs": [
+  "Operation canceled",
+  "Operation canceled"
+ ]
+}

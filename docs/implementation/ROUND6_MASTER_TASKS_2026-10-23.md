@@ -79,6 +79,27 @@ Storage), ветку self-view (до ADR-0029), `wasm-sdk` CI (job поймал 
 `gateway_video.rs:644` hot-path, публичный API admin.
 Критерии: clippy --all-features, тесты, grep без ссылок, LOC −≈980.
 
+### Решения по T5 (после анализа подводных камней, HEAD 82d93b8)
+T5 делится на T5a (сейчас) / T5b (после T10b) / T5c (только по отдельному решению):
+- T5a ≈ 490 LOC, только реально мёртвое: `vks-signaling/reconnect.rs` + re-export
+  и dev-dep proptest; заглушки `tungstenite_impl`/`wtransport_impl` + пустые
+  фичи `ws`/`wtransport` (трейты/моки `WsSession`/`MockWs`/`WebTransportSession`/
+  `MockWt` остаются — их используют тесты handler); legacy standalone `layouts`
+  в vks-storage (НЕ `core_layouts`); `Layout::any_overlap/total_area`;
+  `tower` → dev-dependencies; `sqlx` без `_unstable-all-types`.
+- НЕ удаляем: `viewer.rs`/`plan_viewer`, `frame_for_viewer`/`set_self_view`/
+  `tick_video_for_viewer` (ADR-0029, живой egress-fallback), трейты/моки ws/wt,
+  `SlotRole`/Codian, `assign_by_role`/`RotationState` (S12), `webrtc_glue`
+  (wasm-CI/задел R7), `core_layouts` trait-половину (T5b), `subtle`/`sha2`,
+  `core_adapter`, миграции, `CONFIGURATION_KEY` (T6).
+- Критерий LOC: фактический `git diff --shortstat` + зелёные гейты + отсутствие
+  ссылок; «−980» не гоняем. Публичные API-брейки в непубликуемых крейтах
+  допустимы, перечень снятых `pub use` — в evidence.
+- Тесты удаляемого кода удаляются вместе с ним; новые числа (signaling,
+  layout, storage) передаются в T6 для README.
+- Коммит T5a — только свои Rust-файлы; мастер-док/frontend/MANIFEST/БД/логи
+  не включать.
+
 ## T6. Конфиги и директории (полный cat), после T5
 Прочитать полностью: configs/*.toml, deploy/**, .cargo/config.toml,
 rust-toolchain.toml, Cargo.toml (workspace+crates), .gitignore, CI.
@@ -143,6 +164,20 @@ save/reopen сохраняет N=100; тесты vks-layout; MANIFEST; 0 оши�
 ## T12. Тесты/CI-гигиена
 Тесты приоритета id-геометрии и create_room-adopt pending, G722-флейк, calculate
 error перечисляет grid, release-note SIP UAS, «970→факт».
+### Статус T13 (WIP, ожидает ревью)
+- [ ] T13 — реализовано: вендорская разметка `.dynamic-layout-configurator-counter`
+  (`__text`, `.counter`, `.counter-center-segment`, `counter__button` как
+  TcButton-контейнер, `input[type=number][max=100][min=1]`), кнопки
+  мин./−/+/макс., clamp 1..100, disabled на границах; изменение N перестраивает
+  все 5 карточек через calculate (`vks_<side>_<N>`), сторона сохраняется;
+  backend `grids::MAX_WINDOWS=100` (опции g/m остаются 1..64, `MAX_OPTION`),
+  тесты `vks-layout` (100 окон, pin 100, g64/m64, 101→None), admin calculate
+  покрывает `vks_grid_100`/`vks_pin_b_100`. Live evidence
+  `t13-counter-1-100.json`: 13→+→14→−→13→input42→pin_r_42→+→43→input100→
+  PATCH `vks_pin_r_100` (100 слотов)→reopen 100, «макс.» disabled;
+  `t13-counter-100.png` (счётчик 100, 5 карточек с бейджем 100).
+  Осталось: финальное ревью и коммит.
+
 Из T2 (P1): session-route тест «auto→Конструктор не дёргает POST
 /api/v3/ui/video_layouts/mode» (в конференц-редакторе switchLayoutMode нет,
 0 POST; на session-route watchEffect может успеть — проверить и подавить);
@@ -154,35 +189,30 @@ preset на вендорский — зафиксировать поведени
 - [x] T1 — commit `c36f973`: бейджи 59/59, live 0 ошибок. Ревью: r6-t1-review-elegance
   9/10 → после P1 (aria-label с числом, единый источник count/data-windows) 9.5/10.
   P1 применены, MANIFEST согласован.
-- [ ] T2 — ПЕРЕОТКРЫТА: независимый live на HEAD `aadaf7e` даёт 2 P0 (ревью
-  r6-t2-review-bug, 6/10): (P0-1) клик по чипу «Количество видеоокон» при
-  активном «Конструктор» ставит вендорский preset (`preset_equal_9`) — наш
-  тайл остаётся активным, карточки без active, сохраняется не vks_*; (P0-2)
-  fresh auto→«Конструктор»→Сохранить → PATCH `display_name:null`,
-  `type:default` — имя раскладки стирается (в manual-ветке с vks_pin_r_25
-  save/reopen проходит). План T2.2: (1) запоминать pin-сторону и
-  re-adopt `vks_*_<N>` при смене счётчика/вендорского preset, один активный
-  тайл; (2) при auto→manual устанавливать/сохранять `type=individual` и
-  `displayName` (assert в payload); (3) raw fresh-auto + count-row evidence.
-  Прежние коммиты: `472e444` + `a13fcf4`. Ревью r6-t2-review-elegance: 6/10 →
-  9.5/10 после P0: slots-массив текущего preset (не map), отложенный adopt
-  после mode='manual' без fallback count=1, selectConstructor = только preset
-  (вендор синтезирует слоты из хвоста id), единственный активный тайл.
-  Live: auto→«Конструктор» → activePreset=vks_grid_25, activeTiles=[constructor],
-  переоткрытие сохраняет, 0 ошибок. Второе ревью r6-t2-review-short: 9/10 на
-  committed-состоянии, P0 нет, save/reopen payload read-only подтверждён
-  (manual + vks_grid_25 + 25 AUTO); P1-risk session-route POST mode → T12
-  (в scope conference-layout воспроизведено 0 POST).
-- [ ] T2 — ПОСЛЕ ревью r6-t2-review-elegance (6/10) переработана: убраны
-  `constructorTarget` и мёртвый `onChipPointer`; первичный выбор — однократная
-  отложенная установка после вендорского `preset_equal_25` (`initialAdopt`
-  глушит reAdopt в этом окне), Codian-карточки больше не перехватываются
-  (`reAdopt` только для `preset_*`, `select()` снимает engaged), сторона пина
-  восстанавливается из сохранённого preset. Raw evidence:
-  `t2-final-A-auto13-chip9.json` (auto/13→vks_grid_13→чип 9→PATCH vks_grid_9,
-  reopen 9), `t2-final-B-chip25.json` (чип 25→vks_grid_25→PATCH/reopen 25),
-  `t2-final-C-codian.json` (codian_07 после конструктора→PATCH codian_07,
-  имя сохранено), `t2-final-D-pin-restore.json` (reopen vks_pin_r_9→сторона
-  pin_r), скриншот `t2-constructor-13.png` (13 окон, бейджи 13). Осталось:
-  повторное ревью ≥9.5 и commit.
+- [ ] T2 — ЗАКРЫВАЕТСЯ после полного цикла ревью (5/10 `f3a006a` → 6/10 →
+  7/10 `82d93b8`; все P0/P1/P2 закрыты в текущем WIP, ожидает финального
+  ревью на коммите). Что исправлено по замечаниям ревью:
+  - повторный клик чипа и reopen+чип: `reAdopt` больше не гейтится transient-
+    флагом — сохранённая `vks_*` сразу даёт engaged=true и сторону из preset,
+    `adoptPending` удалён, дедупликации нет;
+  - чип 25/повторный чип: `constructorTarget` и мёртвый `onChipPointer` удалены;
+    первичный выбор N — событийный one-shot (`pendingAdopt` в `reAdopt` на
+    первом вендорском `preset_*`), без таймерной гонки; fallback 400 мс только
+    снимает заморозку;
+  - Codian/`type=default`: `reAdopt` реагирует только на `preset_*`,
+    `select()` снимает engaged; имя/type восстанавливаются через
+    `identityName`+`restoreIdentity` в отложенном adopt; `type` конструктора —
+    `individual`;
+  - клик «Конструктор» из manual/codian: немедленный `vks_<side>_<N>` (без
+    вендорского сброса), сторона pin_r/l/t/b сохраняется;
+  - `serverCount` инвалидируется после PATCH (обёртка fetch) — Конструктор
+    после save+auto берёт актуальное N.
+  Raw evidence (браузерный кеш отключён, реальные Playwright-клики):
+  `t2-final-matrix-chips-pin-reopen.json` (auto/13→ctor13→чип9→повтор9→чип25→
+  карточка pin_r→чип9→PATCH vks_pin_r_9→reopen→чип25=vks_pin_r_25),
+  `t2-final-type-default-codian-autocycle.json` (type=default: имя/type целы;
+  Codian после конструктора; auto→ctor берёт сохранённое N),
+  `t2-final-reopen-tile-chip25.json` (reopen vks_grid_13→тайл→чип25→
+  PATCH vks_grid_25→reopen), `t2-constructor-13.png` (13 окон, бейджи 13,
+  счётчик 13). MANIFEST 214/214.
 - [ ] T2 … T12

@@ -74,8 +74,10 @@
   var ITEM_ATTR = 'data-codian-id';
   var PREVIEW_WIDTH = 320;
   var PREVIEW_HEIGHT = 180;
-  var PREVIEW_INSET = 3;
   var ITEMS_PER_LINE = 8;
+  // Счётчик «Количество видеокон» конструктора: диапазон и вендорская
+  // разметка `.dynamic-layout-configurator-counter` (1:1 с 2.2.1.66).
+  var MAX_COUNT = 100;
 
   // Конструктор «Схема расположения участников»: параметрические id
   // (`vks_grid_9`, `vks_pin_r_8`) — геометрию из id считает сервер, поэтому
@@ -99,12 +101,16 @@
 
   var constructorCount = 0;
   var constructorSide = 'grid'; // grid | l | r | t | b (последняя выбранная схема)
-  var adoptPending = '';
   // Пока идёт первичный выбор после клика «Конструктор», reAdopt молчит: иначе
   // он успевает принять вендорский preset_equal_25 и ставит 25 вместо исходного N.
   var initialAdopt = false;
+  // Однократный отложенный выбор после переключения в ручной режим: выполняется
+  // из reAdopt, когда вендор выставил свой preset_* (событие, не таймер-гонка).
+  var pendingAdopt = null;
+  var identityName = ''; // displayName серверной раскладки: вендор может обнулить
   var constructorState = 'idle'; // idle | loading | ready | failed
   var constructorSlots = Object.create(null);
+  var counterValue = 0;
 
   var catalog = [];
   var catalogState = 'idle'; // idle | loading | ready | failed
@@ -151,6 +157,7 @@
       var count = Array.isArray(payload.slots) ? payload.slots.length : 0;
       if (!(count > 0)) count = Number(payload.size) || 0;
       if (count > 0) serverCount = count;
+      if (payload.display_name) identityName = String(payload.display_name);
     }).catch(function () { serverCountKey = ''; });
   }
 
@@ -185,19 +192,36 @@
    * нашего. Пока «Конструктор» активен, возвращаем vks_<side>_<N> с новым N:
    * иначе сохранится вендорский preset, а карточки останутся без active. */
   function reAdopt() {
-    if (!modeTileEngaged || initialAdopt) return;
     var editor = layoutEditor();
     if (!editor) return;
     var value = editor.modifiedValue || {};
+    rememberIdentity(value);
     if (value.mode !== 'manual') return;
     var preset = typeof value.preset === 'string' ? value.preset : '';
-    // Только вендорские preset_* — Codian-карточки и наши id не перехватываем.
+    // Сохранённая vks_* (reopen) — это уже конструктор: запоминаем сторону и
+    // считаем тайл активным, иначе первый же вендорский чип сломает раскладку.
+    if (preset.indexOf('vks_') === 0) {
+      var side = /^vks_pin_([lrtb])_/.exec(preset);
+      constructorSide = side ? side[1] : 'grid';
+      modeTileEngaged = true;
+      return;
+    }
+    if (initialAdopt) {
+      if (pendingAdopt && preset.indexOf('preset_') === 0) {
+        var runAdopt = pendingAdopt;
+        pendingAdopt = null;
+        initialAdopt = false;
+        runAdopt();
+      }
+      return;
+    }
+    if (!modeTileEngaged) return;
+    // Только вендорские preset_* — Codian-карточки не перехватываем.
     if (preset.indexOf('preset_') !== 0) return;
     var count = currentCount();
     if (!(count > 0)) return;
-    var key = preset + ':' + count;
-    if (key === adoptPending) return;
-    adoptPending = key;
+    // Без дедупликации: повторный клик того же чипа тоже обязан вернуть vks_*
+    // (после adopt preset становится vks_*, и следующий subscribe выходит выше).
     selectConstructor('vks_' + (constructorSide === 'grid' ? 'grid' : 'pin_' + constructorSide) + '_' + count);
   }
 
@@ -319,6 +343,20 @@
       item.appendChild(badge);
     }
     badge.textContent = String(count);
+  }
+
+  /* Вендор обнуляет displayName/type при переходе в manual (канонический auto
+   * имеет type:"default"). Держим серверное имя и возвращаем его перед выбором
+   * схемы; type конструктора всегда individual. */
+  function rememberIdentity(value) {
+    if (value && typeof value.displayName === 'string' && value.displayName) identityName = value.displayName;
+  }
+
+  function restoreIdentity(editor) {
+    try {
+      if (identityName) editor.editValueField('displayName', identityName);
+      editor.editValueField('type', 'individual');
+    } catch (e) { /* поля недоступны — останутся вендорские */ }
   }
 
   function findEntry(id) {
@@ -467,6 +505,8 @@
     // Явный выбор Codian-схемы выводит из конструктора: иначе reAdopt вернул бы
     // наш vks_* и карточка каталога осталась бы без active и без сохранения.
     modeTileEngaged = false;
+    initialAdopt = false;
+    pendingAdopt = null;
     syncModeTile();
     syncActive();
     subscribe(editor);
@@ -503,16 +543,16 @@
     if (!value) return 0;
     var preset = typeof value.preset === 'string' ? value.preset : '';
     var slots = value.slots;
-    if (Array.isArray(slots) && slots.length > 0 && slots.length <= 64) return slots.length;
+    if (Array.isArray(slots) && slots.length > 0 && slots.length <= MAX_COUNT) return slots.length;
     var entry = findEntry(preset);
     if (entry && entry.windows > 0) return entry.windows;
     var tail = /_(\d+)$/.exec(preset);
     if (tail) {
       var fromId = Number(tail[1]);
-      if (fromId >= 1 && fromId <= 64) return fromId;
+      if (fromId >= 1 && fromId <= MAX_COUNT) return fromId;
     }
     var size = Number(value.size);
-    if (isFinite(size) && size >= 1 && size <= 64) return Math.floor(size);
+    if (isFinite(size) && size >= 1 && size <= MAX_COUNT) return Math.floor(size);
     return 0;
   }
 
@@ -570,6 +610,182 @@
     return item;
   }
 
+  /* Вендорский CounterComponent (2.2.1.66): `.counter` = «мин.» + центр
+   * (−, number-input max=100, +) + «макс.»; кнопки — TcButton (mdc-button). */
+  function buildCounterButton(action, label, icon) {
+    // TcButton = контейнер `.tc-button-container` + внутренняя кнопка: vendor
+    // CSS `.tc-button{width:100%;flex-grow:1}`, без контейнера кнопки
+    // растягиваются на весь ряд и перекрывают друг друга.
+    var container = document.createElement('div');
+    container.className = 'tc-button-container counter__button';
+    container.setAttribute('data-counter-action', action);
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'tc-button mdc-button mdc-button--unelevated';
+    var ripple = document.createElement('span');
+    ripple.className = 'mdc-button__ripple';
+    button.appendChild(ripple);
+    if (icon) {
+      var glyph = document.createElement('span');
+      glyph.className = 'material-icons mdc-button__icon';
+      glyph.setAttribute('aria-hidden', 'true');
+      glyph.textContent = icon;
+      button.appendChild(glyph);
+    } else {
+      var text = document.createElement('span');
+      text.className = 'mdc-button__label';
+      text.textContent = label;
+      button.appendChild(text);
+    }
+    container.appendChild(button);
+    return container;
+  }
+
+  function buildCounter(count) {
+    var wrapper = document.createElement('div');
+    wrapper.className = 'dynamic-layout-configurator-counter';
+    wrapper.setAttribute('data-vks-counter', '1');
+    var caption = document.createElement('p');
+    caption.className = 'dynamic-layout-configurator-counter__text';
+    caption.textContent = 'Количество видеокон';
+    wrapper.appendChild(caption);
+
+    var counter = document.createElement('div');
+    counter.className = 'counter';
+    counter.appendChild(buildCounterButton('min', 'мин.', null));
+    var center = document.createElement('div');
+    center.className = 'counter-center-segment';
+    center.appendChild(buildCounterButton('dec', null, 'remove'));
+    var field = document.createElement('div');
+    field.className = 'counter__text-field tc-text-field-container';
+    var textField = document.createElement('div');
+    textField.className = 'tc-text-field mdc-text-field mdc-text-field--outlined mdc-text-field--no-label';
+    var input = document.createElement('input');
+    input.type = 'number';
+    input.className = 'tc-text-field__input';
+    input.min = '1';
+    input.max = String(MAX_COUNT);
+    input.step = '1';
+    input.value = String(count);
+    input.setAttribute('data-counter-input', '1');
+    input.setAttribute('aria-label', 'Количество видеокон');
+    textField.appendChild(input);
+    field.appendChild(textField);
+    center.appendChild(field);
+    center.appendChild(buildCounterButton('inc', null, 'add'));
+    counter.appendChild(center);
+    counter.appendChild(buildCounterButton('max', 'макс.', null));
+    wrapper.appendChild(counter);
+    return wrapper;
+  }
+
+  function countForCounter() {
+    var count = currentCount();
+    if (count < 1) count = counterValue;
+    return Math.max(1, Math.min(MAX_COUNT, count || 1));
+  }
+
+  function syncCounter(count) {
+    var section = document.querySelector('[' + CONSTRUCTOR_ATTR + ']');
+    if (!section) return;
+    var value = Math.max(1, Math.min(MAX_COUNT, count));
+    var input = section.querySelector('[data-counter-input]');
+    if (input) input.value = String(value);
+    var buttons = section.querySelectorAll('[data-counter-action]');
+    for (var i = 0; i < buttons.length; i += 1) {
+      var action = buttons[i].getAttribute('data-counter-action');
+      var disabled = (action === 'min' || action === 'dec') ? value <= 1 : value >= MAX_COUNT;
+      var inner = buttons[i].querySelector('button');
+      if (inner) inner.disabled = disabled;
+      if (disabled) buttons[i].setAttribute('aria-disabled', 'true');
+      else buttons[i].removeAttribute('aria-disabled');
+    }
+    counterValue = value;
+  }
+
+  /* Смена N счётчиком: включить ручной режим (если нужно), перестроить ВСЕ
+   * карточки конструктора под новое N и сохранить выбранную сторону. */
+  function applyCount(next) {
+    var count = Math.max(1, Math.min(MAX_COUNT, Math.floor(Number(next)) || 1));
+    var editor = layoutEditor();
+    if (!editor) return;
+    var value = editor.modifiedValue || {};
+    var preset = typeof value.preset === 'string' ? value.preset : '';
+    var savedSide = /^vks_pin_([lrtb])_/.exec(preset);
+    var side = savedSide ? savedSide[1] : constructorSide;
+    modeTileEngaged = true;
+    function apply() {
+      if (!modeTileEngaged) return;
+      var current = editor.modifiedValue || {};
+      var currentPreset = typeof current.preset === 'string' ? current.preset : '';
+      // В ручном режиме (в т.ч. codian_*/preset_equal_*) вендорский сброс уже
+      // не придёт — ставим нашу схему сразу; в остальных режимах ждём
+      // вендорский preset_* после переключения.
+      if (current.mode !== 'manual' && currentPreset.indexOf('preset_') !== 0 && currentPreset.indexOf('vks_') !== 0) return;
+      initialAdopt = false;
+      rememberIdentity(current);
+      restoreIdentity(editor);
+      selectConstructor('vks_' + (side === 'grid' ? 'grid' : 'pin_' + side) + '_' + count);
+    }
+    if (value.mode !== 'manual') {
+      // Вендор после mode='manual' асинхронно ставит preset_equal_25; пока он
+      // не сделал этого, reAdopt молчит (initialAdopt), иначе примет 25.
+      initialAdopt = true;
+      pendingAdopt = apply;
+      try {
+        editor.mode = 'manual';
+      } catch (e) {
+        initialAdopt = false;
+        pendingAdopt = null;
+        console.warn('codian-layouts: не удалось переключить режим на manual', e);
+        return;
+      }
+      syncModeTile();
+      schedule();
+      setTimeout(function () {
+        if (!initialAdopt) return;
+        initialAdopt = false;
+        pendingAdopt = null;
+      }, 400);
+      return;
+    }
+    apply();
+  }
+
+  function counterTarget(node) {
+    var element = node;
+    while (element && element !== document) {
+      if (element.getAttribute && element.getAttribute('data-counter-action')) return element.getAttribute('data-counter-action');
+      element = element.parentNode;
+    }
+    return '';
+  }
+
+  function onSectionClick(event) {
+    var action = counterTarget(event.target);
+    if (action) {
+      event.preventDefault();
+      var current = countForCounter();
+      if (action === 'min') applyCount(1);
+      else if (action === 'max') applyCount(MAX_COUNT);
+      else if (action === 'dec') applyCount(current - 1);
+      else if (action === 'inc') applyCount(current + 1);
+      return;
+    }
+    onConstructorActivate(event);
+  }
+
+  function onCounterInput(event) {
+    var target = event.target;
+    if (!target || !target.getAttribute || !target.getAttribute('data-counter-input')) return;
+    var count = Math.floor(Number(target.value));
+    if (!(count >= 1 && count <= MAX_COUNT)) {
+      syncCounter(countForCounter());
+      return;
+    }
+    applyCount(count);
+  }
+
   function buildConstructorSelector(count) {
     var selector = document.createElement('div');
     selector.className = 'layout-scheme-selector';
@@ -614,8 +830,10 @@
       section = document.createElement('div');
       section.className = 'main-form-section-16';
       section.setAttribute(CONSTRUCTOR_ATTR, '1');
-      section.addEventListener('click', onConstructorActivate);
+      section.addEventListener('click', onSectionClick);
       section.addEventListener('keydown', onConstructorKeydown);
+      section.addEventListener('input', onCounterInput);
+      section.addEventListener('change', onCounterInput);
       // Секция конструктора ставится перед группой Codian: при переходе на
       // пункт «Конструктор» она видна сразу, без прокрутки 54 карточек.
       if (firstGroup && firstGroup.parentNode === host) host.insertBefore(section, firstGroup);
@@ -625,14 +843,21 @@
     // же вставки, поэтому безусловный innerHTML дал бы бесконечный цикл.
     var rendered = section.getAttribute('data-count');
     var items = section.querySelectorAll('[' + CONSTRUCTOR_MODE_ATTR + ']');
-    if (rendered === String(count) && items.length === CONSTRUCTOR_MODES.length) {
+    if (
+      rendered === String(count) &&
+      items.length === CONSTRUCTOR_MODES.length &&
+      section.querySelector('[data-vks-counter]')
+    ) {
       syncConstructorActive();
+      syncCounter(count);
       return;
     }
     section.setAttribute('data-count', String(count));
     section.innerHTML = '';
+    section.appendChild(buildCounter(count));
     section.appendChild(buildConstructorSelector(count));
     syncConstructorActive();
+    syncCounter(count);
   }
 
   function closestConstructorItem(node) {
@@ -747,23 +972,35 @@
     function family() {
       return 'vks_' + (startSide === 'grid' ? 'grid' : 'pin_' + startSide) + '_';
     }
-    // Вендор после mode='manual' первым макротаском сам ставит preset_equal_25
-    // (свой дефолт на 25 слотов). Однократная отложенная установка уже после
-    // этого не перетирается; немедленная — всегда проигрывала гонку.
-    function applyDesired() {
-      if (!modeTileEngaged || !(startCount > 0)) { initialAdopt = false; return; }
-      var value = editor.modifiedValue || {};
-      var preset = typeof value.preset === 'string' ? value.preset : '';
-      if (preset.indexOf('preset_') !== 0) return;
+    function adoptNow() {
       initialAdopt = false;
-      try {
-        if (keepName) editor.editValueField('displayName', keepName);
-        editor.editValueField('type', 'individual');
-      } catch (e) { /* поля недоступны — останутся вендорские */ }
+      rememberIdentity(startValue);
+      if (keepName) identityName = keepName;
+      restoreIdentity(editor);
       selectConstructor(family() + startCount);
     }
-    setTimeout(applyDesired, 0);
-    setTimeout(applyDesired, 80);
+    // Уже ручной режим: вендорский сброс preset_equal_25 не произойдёт, а
+    // текущий preset может быть codian_*/preset_equal_* — ставим сразу.
+    if (startValue.mode === 'manual') {
+      if (startCount > 0) adoptNow();
+      else initialAdopt = false;
+      var manualSection = document.querySelector('[' + CONSTRUCTOR_ATTR + ']');
+      if (manualSection && typeof manualSection.scrollIntoView === 'function') {
+        manualSection.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+      return;
+    }
+    // Вендор после mode='manual' асинхронно ставит preset_equal_25 (свой
+    // дефолт на 25 слотов). Ждём именно событие store (reAdopt), а не таймер:
+    // так нет гонки, а target-N уже зафиксирован в adoptNow.
+    pendingAdopt = adoptNow;
+    // Страховка: если вендор не сменил preset (нестандартный путь), снимаем
+    // заморозку, чтобы ручные чипы снова подхватывались.
+    setTimeout(function () {
+      if (!initialAdopt) return;
+      initialAdopt = false;
+      pendingAdopt = null;
+    }, 400);
     var section = document.querySelector('[' + CONSTRUCTOR_ATTR + ']');
     if (section && typeof section.scrollIntoView === 'function') {
       section.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -847,8 +1084,32 @@
     }
   }
 
+  /* После сохранения раскладки серверный payload меняется: сбрасываем кэш
+   * числа окон, иначе «Конструктор» после save+auto возьмёт старое N. */
+  function watchSaves() {
+    if (typeof window.fetch !== 'function' || window.fetch.__vksCodianWrapped) return;
+    var nativeFetch = window.fetch;
+    var wrapped = function (input, init) {
+      var result = nativeFetch.apply(this, arguments);
+      var url = typeof input === 'string' ? input : (input && input.url) || '';
+      var method = String((init && init.method) || 'GET').toUpperCase();
+      if (method !== 'GET' && /\/video_layouts\//.test(url) && !/calculate/.test(url) && result && result.then) {
+        result.then(function (response) {
+          if (response && response.ok) {
+            serverCountKey = '';
+            schedule();
+          }
+        }, function () { /* ошибку покажет вендорский UI */ });
+      }
+      return result;
+    };
+    wrapped.__vksCodianWrapped = true;
+    window.fetch = wrapped;
+  }
+
   function start() {
     if (observer) return;
+    watchSaves();
     observer = new MutationObserver(function () { schedule(); });
     observer.observe(document.documentElement, { childList: true, subtree: true });
     schedule();

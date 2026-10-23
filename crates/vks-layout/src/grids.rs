@@ -27,8 +27,11 @@
 
 use crate::preset::{CalculatedSlot, SlotRect};
 
-/// Ограничение числа окон (и значений `g`/`m`) в параметрической раскладке.
-pub const MAX_WINDOWS: usize = 64;
+/// Максимальное число окон параметрической раскладки (счётчик UI — до 100).
+pub const MAX_WINDOWS: usize = 100;
+
+/// Максимальное значение опций `g`/`m` (пиксели канваса 720p).
+pub const MAX_OPTION: u32 = 64;
 
 /// Куда прижат крупный участник (лента занимает противоположную сторону).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,7 +171,7 @@ pub fn parse(id: &str) -> Option<GridScheme> {
 
 /// Значение опции `g`/`m`: 1..=64 (нулевые опции в id не выводятся).
 fn parse_option(value: &str) -> Option<u32> {
-    value.parse::<u32>().ok().filter(|value| (1..=MAX_WINDOWS as u32).contains(value))
+    value.parse::<u32>().ok().filter(|value| (1..=MAX_OPTION).contains(value))
 }
 
 /// Срезает вендорский суффикс варианта `_(2)` (копия раскладки).

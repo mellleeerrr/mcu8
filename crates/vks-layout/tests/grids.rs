@@ -20,7 +20,7 @@ fn variants(count: usize, options: GridOptions) -> Vec<GridScheme> {
 
 #[test]
 fn каждая_схема_даёт_ровно_n_окон() {
-    for count in 1..=36 {
+    for count in 1..=100 {
         let id = format!("vks_grid_{count}");
         assert_eq!(grids::geometry(&id, W, H).expect("раскладка существует").len(), count, "{id}");
         for scheme in variants(count, GridOptions::default()) {
@@ -33,7 +33,7 @@ fn каждая_схема_даёт_ровно_n_окон() {
 /// Все окна внутри канваса, не пересекаются, координаты конечны.
 #[test]
 fn окна_внутри_канваса_и_не_пересекаются() {
-    for count in 1..=36 {
+    for count in 1..=100 {
         for options in [GridOptions::default(), GridOptions { gap: 12, margin: 24 }] {
             for scheme in variants(count, options) {
                 let id = scheme.id();
@@ -66,7 +66,7 @@ fn окна_внутри_канваса_и_не_пересекаются() {
 
 #[test]
 fn идеальные_галереи_строго_16_9() {
-    for count in [4usize, 9, 16, 25, 36] {
+    for count in [4usize, 9, 16, 25, 36, 64, 100] {
         let id = format!("vks_grid_{count}");
         for slot in grids::geometry(&id, W, H).expect("раскладка существует") {
             let ratio = slot.rect.width / slot.rect.height;
@@ -78,7 +78,7 @@ fn идеальные_галереи_строго_16_9() {
 /// Галерея — равные ячейки; последний неполный ряд не растягивается.
 #[test]
 fn галерея_даёт_равные_ячейки() {
-    for count in 2..=36 {
+    for count in 2..=100 {
         let slots = grids::geometry(&format!("vks_grid_{count}"), W, H).expect("раскладка существует");
         let widths: Vec<f64> = slots.iter().map(|slot| slot.rect.width).collect();
         let heights: Vec<f64> = slots.iter().map(|slot| slot.rect.height).collect();
@@ -135,6 +135,21 @@ fn pin_отдаёт_крупному_больше_половины_а_миниа
     }
 }
 
+/// Счётчик UI доходит до 100; опции `g`/`m` по-прежнему ограничены 64.
+#[test]
+fn сто_окон_и_потолок_опций() {
+    for pin in [None, Some(PinSide::Right)] {
+        let scheme = GridScheme { count: 100, pin, options: GridOptions::default() };
+        let id = scheme.id();
+        assert_eq!(grids::parse(&id), Some(scheme), "id на 100 окон разбирается: {id}");
+        assert_eq!(grids::geometry(&id, W, H).expect("раскладка существует").len(), 100);
+    }
+    assert!(grids::parse("vks_grid_101").is_none());
+    assert!(grids::parse("vks_grid_g64_100").is_some());
+    assert!(grids::parse("vks_grid_g65_100").is_none());
+    assert!(grids::parse("vks_grid_m64_100").is_some());
+}
+
 #[test]
 fn чужие_id_не_дают_геометрии() {
     assert!(grids::geometry("codian_01", W, H).is_none());
@@ -180,7 +195,7 @@ fn зазоры_и_поля_сохраняют_структуру() {
 /// валидной (зазор обнуляется), окна внутри холста и не пересекаются.
 #[test]
 fn большой_зазор_при_многих_окнах_не_ломает_геометрию() {
-    for (count, gap) in [(64usize, 64u32), (36, 64), (64, 32), (64, 8)] {
+    for (count, gap) in [(64usize, 64u32), (36, 64), (64, 32), (64, 8), (100, 64), (100, 8)] {
         for pin in [None, Some(PinSide::Left), Some(PinSide::Top)] {
             let scheme = GridScheme { count, pin, options: GridOptions { gap, margin: 0 } };
             let id = scheme.id();

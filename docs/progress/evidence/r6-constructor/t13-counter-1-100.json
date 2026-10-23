@@ -1,0 +1,592 @@
+{
+ "s1": {
+  "store": {
+   "preset": "preset_default_13",
+   "mode": "auto",
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "counter": null,
+  "ctor": [],
+  "dw": [],
+  "mode": [
+   "layout-mode-selector-auto"
+  ]
+ },
+ "s2": {
+  "store": {
+   "preset": "vks_grid_13",
+   "mode": "manual",
+   "slots": 13,
+   "name": "Codian 07 — 13 окон"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "counter": {
+   "value": "13",
+   "min": "1",
+   "max": "100",
+   "type": "number",
+   "cls": "tc-text-field__input",
+   "wrapper": "dynamic-layout-configurator-counter",
+   "hasText": true,
+   "btnCls": "tc-button-container counter__button",
+   "center": true,
+   "buttons": [
+    {
+     "a": "min"
+    },
+    {
+     "a": "dec"
+    },
+    {
+     "a": "inc"
+    },
+    {
+     "a": "max"
+    }
+   ]
+  },
+  "ctor": [
+   "vks_grid_13"
+  ],
+  "dw": [
+   "13",
+   "13",
+   "13",
+   "13",
+   "13"
+  ],
+  "mode": [
+   "layout-mode-selector-constructor"
+  ]
+ },
+ "s3": {
+  "store": {
+   "preset": "vks_grid_14",
+   "mode": "manual",
+   "slots": 14,
+   "name": "Codian 07 — 13 окон"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "counter": {
+   "value": "14",
+   "min": "1",
+   "max": "100",
+   "type": "number",
+   "cls": "tc-text-field__input",
+   "wrapper": "dynamic-layout-configurator-counter",
+   "hasText": true,
+   "btnCls": "tc-button-container counter__button",
+   "center": true,
+   "buttons": [
+    {
+     "a": "min"
+    },
+    {
+     "a": "dec"
+    },
+    {
+     "a": "inc"
+    },
+    {
+     "a": "max"
+    }
+   ]
+  },
+  "ctor": [
+   "vks_grid_14"
+  ],
+  "dw": [
+   "14",
+   "14",
+   "14",
+   "14",
+   "14"
+  ],
+  "mode": [
+   "layout-mode-selector-constructor"
+  ]
+ },
+ "s4": {
+  "store": {
+   "preset": "vks_grid_13",
+   "mode": "manual",
+   "slots": 13,
+   "name": "Codian 07 — 13 окон"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "counter": {
+   "value": "13",
+   "min": "1",
+   "max": "100",
+   "type": "number",
+   "cls": "tc-text-field__input",
+   "wrapper": "dynamic-layout-configurator-counter",
+   "hasText": true,
+   "btnCls": "tc-button-container counter__button",
+   "center": true,
+   "buttons": [
+    {
+     "a": "min"
+    },
+    {
+     "a": "dec"
+    },
+    {
+     "a": "inc"
+    },
+    {
+     "a": "max"
+    }
+   ]
+  },
+  "ctor": [
+   "vks_grid_13"
+  ],
+  "dw": [
+   "13",
+   "13",
+   "13",
+   "13",
+   "13"
+  ],
+  "mode": [
+   "layout-mode-selector-constructor"
+  ]
+ },
+ "s5": {
+  "store": {
+   "preset": "vks_grid_42",
+   "mode": "manual",
+   "slots": 42,
+   "name": "Codian 07 — 13 окон"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "counter": {
+   "value": "42",
+   "min": "1",
+   "max": "100",
+   "type": "number",
+   "cls": "tc-text-field__input",
+   "wrapper": "dynamic-layout-configurator-counter",
+   "hasText": true,
+   "btnCls": "tc-button-container counter__button",
+   "center": true,
+   "buttons": [
+    {
+     "a": "min"
+    },
+    {
+     "a": "dec"
+    },
+    {
+     "a": "inc"
+    },
+    {
+     "a": "max"
+    }
+   ]
+  },
+  "ctor": [
+   "vks_grid_42"
+  ],
+  "dw": [
+   "42",
+   "42",
+   "42",
+   "42",
+   "42"
+  ],
+  "mode": [
+   "layout-mode-selector-constructor"
+  ]
+ },
+ "s6": {
+  "store": {
+   "preset": "vks_pin_r_42",
+   "mode": "manual",
+   "slots": 42,
+   "name": "Codian 07 — 13 окон"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "counter": {
+   "value": "42",
+   "min": "1",
+   "max": "100",
+   "type": "number",
+   "cls": "tc-text-field__input",
+   "wrapper": "dynamic-layout-configurator-counter",
+   "hasText": true,
+   "btnCls": "tc-button-container counter__button",
+   "center": true,
+   "buttons": [
+    {
+     "a": "min"
+    },
+    {
+     "a": "dec"
+    },
+    {
+     "a": "inc"
+    },
+    {
+     "a": "max"
+    }
+   ]
+  },
+  "ctor": [
+   "vks_pin_r_42"
+  ],
+  "dw": [
+   "42",
+   "42",
+   "42",
+   "42",
+   "42"
+  ],
+  "mode": [
+   "layout-mode-selector-constructor"
+  ]
+ },
+ "s7": {
+  "store": {
+   "preset": "vks_pin_r_43",
+   "mode": "manual",
+   "slots": 43,
+   "name": "Codian 07 — 13 окон"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "counter": {
+   "value": "43",
+   "min": "1",
+   "max": "100",
+   "type": "number",
+   "cls": "tc-text-field__input",
+   "wrapper": "dynamic-layout-configurator-counter",
+   "hasText": true,
+   "btnCls": "tc-button-container counter__button",
+   "center": true,
+   "buttons": [
+    {
+     "a": "min"
+    },
+    {
+     "a": "dec"
+    },
+    {
+     "a": "inc"
+    },
+    {
+     "a": "max"
+    }
+   ]
+  },
+  "ctor": [
+   "vks_pin_r_43"
+  ],
+  "dw": [
+   "43",
+   "43",
+   "43",
+   "43",
+   "43"
+  ],
+  "mode": [
+   "layout-mode-selector-constructor"
+  ]
+ },
+ "s8": {
+  "store": {
+   "preset": "vks_pin_r_100",
+   "mode": "manual",
+   "slots": 100,
+   "name": "Codian 07 — 13 окон"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "counter": {
+   "value": "100",
+   "min": "1",
+   "max": "100",
+   "type": "number",
+   "cls": "tc-text-field__input",
+   "wrapper": "dynamic-layout-configurator-counter",
+   "hasText": true,
+   "btnCls": "tc-button-container counter__button",
+   "center": true,
+   "buttons": [
+    {
+     "a": "min"
+    },
+    {
+     "a": "dec"
+    },
+    {
+     "a": "inc"
+    },
+    {
+     "a": "max"
+    }
+   ]
+  },
+  "ctor": [
+   "vks_pin_r_100"
+  ],
+  "dw": [
+   "100",
+   "100",
+   "100",
+   "100",
+   "100"
+  ],
+  "mode": [
+   "layout-mode-selector-constructor"
+  ]
+ },
+ "save100": [
+  {
+   "m": "PATCH",
+   "body": "{\"display_name\":\"Codian 07 — 13 окон\",\"payload\":{\"mode\":\"manual\",\"preset\":\"vks_pin_r_100\",\"type\":\"individual\",\"slots\":[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"},{\"position\":5,\"role\":\"AUTO\"},{\"position\":6,\"role\":\"AUTO\"},{\"position\":7,\"role\":\"AUTO\"},{\"position\":8,\"role\":\"AUTO\"},{\"position\":9,\"role\":\"AUTO\"},{\"position\":10,\"role\":\"AUTO\"},{\"position\":11,\"role\":\"AUTO\"},{\"position\":12,\"role\":\"AUTO\"},{\"position\":13,\"role\":\"AUTO\"},{\"position\":14,\"role\":\"AUTO\"},{\"position\":15,\"role\":\"AUTO\"},{\"position\":16,\"role\":\"AUTO\"},{\"position\":17,\"role\":\"AUTO\"},{\"position\":18,\"role\":\"AUTO\"},{\"position\":19,\"role\":\"AUTO\"},{\"position\":20,\"role\":\"AUTO\"},{\"position\":21,\"role\":\"AUTO\"},{\"position\":22,\"role\":\"AUTO\"},{\"position\":23,\"role\":\"AUTO\"},{\"position\":24,\"role\":\"AUTO\"},{\"position\":25,\"role\":\"AUTO\"},{\"position\":26,\"role\":\"AUTO\"},{\"position\":27,\"role\":\"AUTO\"},{\"position\":28,\"role\":\"AUTO\"},{\"position\":29,\"role\":\"AUTO\"},{\"position\":30,\"role\":\"AUTO\"},{\"position\":31,\"role\":\"AUTO\"},{\"position\":32,\"role\":\"AUTO\"},{\"position\":33,\"role\":\"AUTO\"},{\"position\":34,\"role\":\"AUTO\"},{\"position\":35,\"role\":\"AUTO\"},{\"position\":36,\"role\":\"AUTO\"},{\"position\":37,\"role\":\"AUTO\"},{\"position\":38,\"role\":\"AUTO\"},{\"position\":39,\"role\":\"AUTO\"},{\"position\":40,\"role\":\"AUTO\"},{\"position\":41,\"role\":\"AUTO\"},{\"position\":42,\"role\":\"AUTO\"},{\"position\":43,\"role\":\"AUTO\"},{\"position\":44,\"role\":\"AUTO\"},{\"position\":45,\"role\":\"AUTO\"},{\"position\":46,\"role\":\"AUTO\"},{\"position\":47,\"role\":\"AUTO\"},{\"position\":48,\"role\":\"AUTO\"},{\"position\":49,\"role\":\"AUTO\"},{\"position\":50,\"role\":\"AUTO\"},{\"position\":51,\"role\":\"AUTO\"},{\"position\":52,\"role\":\"AUTO\"},{\"position\":53,\"role\":\"AUTO\"},{\"position\":54,\"role\":\"AUTO\"},{\"position\":55,\"role\":\"AUTO\"},{\"position\":56,\"role\":\"AUTO\"},{\"position\":57,\"role\":\"AUTO\"},{\"position\":58,\"role\":\"AUTO\"},{\"position\":59,\"role\":\"AUTO\"},{\"position\":60,\"role\":\"AUTO\"},{\"position\":61,\"role\":\"AUTO\"},{\"position\":62,\"role\":\"AUTO\"},{\"position\":63,\"role\":\"AUTO\"},{\"position\":64,\"role\":\"AUTO\"},{\"position\":65,\"role\":\"AUTO\"},{\"position\":66,\"role\":\"AUTO\"},{\"position\":67,\"role\":\"AUTO\"},{\"position\":68,\"role\":\"AUTO\"},{\"position\":69,\"role\":\"AUTO\"},{\"position\":70,\"role\":\"AUTO\"},{\"position\":71,\"role\":\"AUTO\"},{\"position\":72,\"role\":\"AUTO\"},{\"position\":73,\"role\":\"AUTO\"},{\"position\":74,\"role\":\"AUTO\"},{\"position\":75,\"role\":\"AUTO\"},{\"position\":76,\"role\":\"AUTO\"},{\"position\":77,\"role\":\"AUTO\"},{\"position\":78,\"role\":\"AUTO\"},{\"position\":79,\"role\":\"AUTO\"},{\"position\":80,\"role\":\"AUTO\"},{\"position\":81,\"role\":\"AUTO\"},{\"position\":82,\"role\":\"AUTO\"},{\"position\":83,\"role\":\"AUTO\"},{\"position\":84,\"role\":\"AUTO\"},{\"position\":85,\"role\":\"AUTO\"},{\"position\":86,\"role\":\"AUTO\"},{\"position\":87,\"role\":\"AUTO\"},{\"position\":88,\"role\":\"AUTO\"},{\"position\":89,\"role\":\"AUTO\"},{\"position\":90,\"role\":\"AUTO\"},{\"position\":91,\"role\":\"AUTO\"},{\"position\":92,\"role\":\"AUTO\"},{\"position\":93,\"role\":\"AUTO\"},{\"position\":94,\"role\":\"AUTO\"},{\"position\":95,\"role\":\"AUTO\"},{\"position\":96,\"role\":\"AUTO\"},{\"position\":97,\"role\":\"AUTO\"},{\"position\":98,\"role\":\"AUTO\"},{\"position\":99,\"role\":\"AUTO\"},{\"position\":100,\"role\":\"AUTO\"}]}}"
+  }
+ ],
+ "s8b": {
+  "store": {
+   "preset": "vks_pin_r_100",
+   "mode": "manual",
+   "slots": 100,
+   "name": "Codian 07 — 13 окон"
+  },
+  "server": {
+   "preset": "vks_pin_r_100",
+   "slots": 100,
+   "name": "Codian 07 — 13 окон"
+  },
+  "counter": {
+   "value": "100",
+   "min": "1",
+   "max": "100",
+   "type": "number",
+   "cls": "tc-text-field__input",
+   "wrapper": "dynamic-layout-configurator-counter",
+   "hasText": true,
+   "btnCls": "tc-button-container counter__button",
+   "center": true,
+   "buttons": [
+    {
+     "a": "min"
+    },
+    {
+     "a": "dec"
+    },
+    {
+     "a": "inc"
+    },
+    {
+     "a": "max"
+    }
+   ]
+  },
+  "ctor": [
+   "vks_pin_r_100"
+  ],
+  "dw": [
+   "100",
+   "100",
+   "100",
+   "100",
+   "100"
+  ],
+  "mode": [
+   "layout-mode-selector-constructor"
+  ]
+ },
+ "s9": {
+  "store": {
+   "preset": "vks_pin_r_100",
+   "mode": "manual",
+   "slots": 100,
+   "name": "Codian 07 — 13 окон"
+  },
+  "server": {
+   "preset": "vks_pin_r_100",
+   "slots": 100,
+   "name": "Codian 07 — 13 окон"
+  },
+  "counter": {
+   "value": "100",
+   "min": "1",
+   "max": "100",
+   "type": "number",
+   "cls": "tc-text-field__input",
+   "wrapper": "dynamic-layout-configurator-counter",
+   "hasText": true,
+   "btnCls": "tc-button-container counter__button",
+   "center": true,
+   "buttons": [
+    {
+     "a": "min"
+    },
+    {
+     "a": "dec"
+    },
+    {
+     "a": "inc"
+    },
+    {
+     "a": "max"
+    }
+   ]
+  },
+  "ctor": [
+   "vks_pin_r_100"
+  ],
+  "dw": [
+   "100",
+   "100",
+   "100",
+   "100",
+   "100"
+  ],
+  "mode": [
+   "layout-mode-selector-constructor"
+  ]
+ },
+ "s10": {
+  "store": {
+   "preset": "vks_pin_r_100",
+   "mode": "manual",
+   "slots": 100,
+   "name": "Codian 07 — 13 окон"
+  },
+  "server": {
+   "preset": "vks_pin_r_100",
+   "slots": 100,
+   "name": "Codian 07 — 13 окон"
+  },
+  "counter": {
+   "value": "100",
+   "min": "1",
+   "max": "100",
+   "type": "number",
+   "cls": "tc-text-field__input",
+   "wrapper": "dynamic-layout-configurator-counter",
+   "hasText": true,
+   "btnCls": "tc-button-container counter__button",
+   "center": true,
+   "buttons": [
+    {
+     "a": "min"
+    },
+    {
+     "a": "dec"
+    },
+    {
+     "a": "inc"
+    },
+    {
+     "a": "max"
+    }
+   ]
+  },
+  "ctor": [
+   "vks_pin_r_100"
+  ],
+  "dw": [
+   "100",
+   "100",
+   "100",
+   "100",
+   "100"
+  ],
+  "mode": [
+   "layout-mode-selector-constructor"
+  ]
+ },
+ "saveAgain": {
+  "skipped": "disabled"
+ },
+ "s11": {
+  "store": {
+   "preset": "vks_pin_r_100",
+   "mode": "manual",
+   "slots": 100,
+   "name": "Codian 07 — 13 окон"
+  },
+  "server": {
+   "preset": "vks_pin_r_100",
+   "slots": 100,
+   "name": "Codian 07 — 13 окон"
+  },
+  "counter": {
+   "value": "100",
+   "min": "1",
+   "max": "100",
+   "type": "number",
+   "cls": "tc-text-field__input",
+   "wrapper": "dynamic-layout-configurator-counter",
+   "hasText": true,
+   "btnCls": "tc-button-container counter__button",
+   "center": true,
+   "buttons": [
+    {
+     "a": "min"
+    },
+    {
+     "a": "dec"
+    },
+    {
+     "a": "inc"
+    },
+    {
+     "a": "max"
+    }
+   ]
+  },
+  "ctor": [
+   "vks_pin_r_100"
+  ],
+  "dw": [
+   "100",
+   "100",
+   "100",
+   "100",
+   "100"
+  ],
+  "mode": [
+   "layout-mode-selector-constructor"
+  ]
+ },
+ "errs": []
+}
