@@ -174,6 +174,22 @@ CI service postgres, `--locked`.
 Подводные камни: sqlite-путь; необратимые миграции — сначала тест; Uuid decode.
 Критерии: PG-тест зелёный в CI; sqlite зелёный.
 
+Выполнено (2026-10-24):
+- корень бага: `created_at` в PG-схеме — `TEXT` (portable с SQLite), а Rust
+  биндил `Uuid` → PG ожидал `uuid`, тест был `#[ignore]`, поэтому дефект не
+  ловился. В миграции тип оставлен `TEXT` (необратимую миграцию не делаем),
+  а биндинг исправлен: INSERT `created_at.to_string()`, SELECT
+  `created_at::uuid AS created_at` (значения пишем только мы, UUIDv7-строки),
+  `ORDER BY created_at` — лексикографический порядок UUIDv7 = хронологический;
+- `init_roundtrip_live_db` больше не `#[ignore]`: с `VKS_STORAGE_PG_URL`
+  проверяет migrations + User/Room roundtrip, без переменной честно пишет
+  skipped (локально PostgreSQL нет);
+- CI: новый job `test-postgres` (postgres:16, healthcheck, `--locked`,
+  `VKS_STORAGE_PG_URL=postgres://postgres:postgres@localhost:5432/vks`);
+  sqlite-путь: `cargo test -p vks-storage --locked` — 24 passed, 0 failed;
+- локальная live-проверка PG невозможна (нет сервера/докера) — критерий
+  «PG-тест зелёный в CI» закрывается первым запуском job'а; sqlite зелёный.
+
 ## T10a. Proto-поля `layout_id/preset/mode` + LayoutModeChanged (ADR)
 ## T10b. id-only apply (без `payload.slots`) — не требует proto
 ## T10c. Прод-потребитель LayoutChanged (PNM WS / SDK) — после T10a/b

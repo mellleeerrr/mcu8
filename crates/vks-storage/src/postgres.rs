@@ -127,7 +127,8 @@ impl PostgresStorage {
         .bind(user.id)
         .bind(&user.login)
         .bind(&user.email)
-        .bind(user.created_at)
+        // created_at хранится как TEXT (portable SQLite/PostgreSQL): UUIDv7 строкой.
+        .bind(user.created_at.to_string())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -135,18 +136,20 @@ impl PostgresStorage {
 
     /// Возвращает пользователя по `id`.
     pub async fn get_user(&self, id: Uuid) -> Result<User> {
-        let row: Option<UserRow> = sqlx::query_as("SELECT id, login, email, created_at FROM users WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row: Option<UserRow> =
+            sqlx::query_as("SELECT id, login, email, created_at::uuid AS created_at FROM users WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
         row.map(|r| User { id: r.id, login: r.login, email: r.email, created_at: r.created_at })
             .ok_or_else(|| crate::Error::NotFound(format!("user {id}")))
     }
 
     /// Список всех пользователей.
     pub async fn list_users(&self) -> Result<Vec<User>> {
-        let rows: Vec<UserRow> =
-            sqlx::query_as("SELECT id, login, email, created_at FROM users").fetch_all(&self.pool).await?;
+        let rows: Vec<UserRow> = sqlx::query_as("SELECT id, login, email, created_at::uuid AS created_at FROM users")
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows
             .into_iter()
             .map(|r| User { id: r.id, login: r.login, email: r.email, created_at: r.created_at })
@@ -171,7 +174,8 @@ impl PostgresStorage {
             .bind(id)
             .bind(name)
             .bind(mode.as_str())
-            .bind(created_at)
+            // created_at хранится как TEXT (portable SQLite/PostgreSQL): UUIDv7 строкой.
+            .bind(created_at.to_string())
             .execute(&self.pool)
             .await?;
         Ok(Room { id, name: name.to_owned(), mode, created_at })
@@ -179,18 +183,20 @@ impl PostgresStorage {
 
     /// Возвращает комнату по `id`.
     pub async fn get_room(&self, id: Uuid) -> Result<Room> {
-        let row: Option<RoomRow> = sqlx::query_as("SELECT id, name, mode, created_at FROM rooms WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row: Option<RoomRow> =
+            sqlx::query_as("SELECT id, name, mode, created_at::uuid AS created_at FROM rooms WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
         let row = row.ok_or_else(|| crate::Error::NotFound(format!("room {id}")))?;
         Ok(Room { id: row.id, name: row.name, mode: RoomMode::from_str(&row.mode)?, created_at: row.created_at })
     }
 
     /// Список всех комнат.
     pub async fn list_rooms(&self) -> Result<Vec<Room>> {
-        let rows: Vec<RoomRow> =
-            sqlx::query_as("SELECT id, name, mode, created_at FROM rooms").fetch_all(&self.pool).await?;
+        let rows: Vec<RoomRow> = sqlx::query_as("SELECT id, name, mode, created_at::uuid AS created_at FROM rooms")
+            .fetch_all(&self.pool)
+            .await?;
         let mut rooms = Vec::with_capacity(rows.len());
         for r in rows {
             rooms.push(Room { id: r.id, name: r.name, mode: RoomMode::from_str(&r.mode)?, created_at: r.created_at });
@@ -263,7 +269,8 @@ impl PostgresStorage {
         .bind(key.user_id)
         .bind(&key.hashed_value)
         .bind(&key.prefix)
-        .bind(key.created_at)
+        // created_at хранится как TEXT (portable SQLite/PostgreSQL): UUIDv7 строкой.
+        .bind(key.created_at.to_string())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -271,11 +278,12 @@ impl PostgresStorage {
 
     /// Возвращает API-ключ по `id`.
     pub async fn get_api_key(&self, id: Uuid) -> Result<ApiKey> {
-        let row: Option<ApiKeyRow> =
-            sqlx::query_as("SELECT id, user_id, hashed_value, prefix, created_at FROM api_keys WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row: Option<ApiKeyRow> = sqlx::query_as(
+            "SELECT id, user_id, hashed_value, prefix, created_at::uuid AS created_at FROM api_keys WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
         let row = row.ok_or_else(|| crate::Error::NotFound(format!("api_key {id}")))?;
         Ok(ApiKey {
             id: row.id,
@@ -288,11 +296,12 @@ impl PostgresStorage {
 
     /// API-ключи пользователя.
     pub async fn list_api_keys(&self, user_id: Uuid) -> Result<Vec<ApiKey>> {
-        let rows: Vec<ApiKeyRow> =
-            sqlx::query_as("SELECT id, user_id, hashed_value, prefix, created_at FROM api_keys WHERE user_id = $1")
-                .bind(user_id)
-                .fetch_all(&self.pool)
-                .await?;
+        let rows: Vec<ApiKeyRow> = sqlx::query_as(
+            "SELECT id, user_id, hashed_value, prefix, created_at::uuid AS created_at FROM api_keys WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows
             .into_iter()
             .map(|r| ApiKey {
@@ -334,10 +343,11 @@ impl PostgresStorage {
 
     /// Весь журнал аудита (по времени).
     pub async fn list_audit(&self) -> Result<Vec<AuditEntry>> {
-        let rows: Vec<AuditRow> =
-            sqlx::query_as("SELECT id, created_at, event, subject_id, payload FROM audit_log ORDER BY created_at")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows: Vec<AuditRow> = sqlx::query_as(
+            "SELECT id, created_at::uuid AS created_at, event, subject_id, payload FROM audit_log ORDER BY created_at",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows
             .into_iter()
             .map(|r| AuditEntry {
@@ -361,12 +371,13 @@ impl PostgresStorage {
 mod tests {
     use super::*;
 
-    /// Без live-БД: проверяем парсинг URL и конфигурацию пула (compile-only).
+    /// Live PG: roundtrip User/Room против настоящего PostgreSQL (CI service).
+    /// Локально без `VKS_STORAGE_PG_URL` тест честно помечается skipped, но
+    /// больше не `#[ignore]`: в CI он обязательный.
     #[tokio::test]
-    #[ignore]
     async fn init_roundtrip_live_db() {
-        // Запускается только при наличии `VKS_STORAGE_PG_URL` (CI).
         let Some(url) = std::env::var("VKS_STORAGE_PG_URL").ok() else {
+            eprintln!("VKS_STORAGE_PG_URL не задан — PG roundtrip skipped");
             return;
         };
         let storage = PostgresStorage::init(&url).await.unwrap();

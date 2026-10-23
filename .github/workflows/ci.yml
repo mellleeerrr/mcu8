@@ -109,6 +109,40 @@ jobs:
       # жёстко в джобах check/clippy (--all-features --all-targets).
       - run: cargo test --workspace --locked --no-fail-fast
 
+  test-postgres:
+    name: test (PostgreSQL)
+    runs-on: ubuntu-24.04
+    # T9: PG-путь проверяется на живом сервере, а не только sqlite/memory.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vks
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d vks"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-postgres-${{ hashFiles('**/Cargo.lock') }}
+      - name: PG roundtrip (migrations + User/Room + TEXT UUID-биндинг)
+        run: cargo test -p vks-storage --locked --no-fail-fast
+        env:
+          VKS_STORAGE_PG_URL: postgres://postgres:postgres@localhost:5432/vks
+
   test-external:
     name: test (feature-gated crates, soft)
     runs-on: ubuntu-24.04
