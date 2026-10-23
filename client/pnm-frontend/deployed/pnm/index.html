@@ -291,13 +291,40 @@ html.theme-dark .main .notifier__container {
   filter: invert(100%) hue-rotate(180deg);
   background-color: #1f2328 !important;
   color: #e7e9ec !important;
-  border: 1px solid #2b3138;
-  box-shadow: 0 4px 16px rgba(0,0,0,.4);
+  border: 1px solid #2b3138 !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,.4) !important;
 }
 html.theme-dark .main-route--monitoring-sessions :focus-visible,
 html.theme-dark .main *:focus-visible {
   outline: 2px solid #7dd3fc;
   outline-offset: 2px;
+}
+
+/* Task 3 deeper surface tokens: header/cards/list cancel inversion once,
+   then use a consistent dark palette. This reduces dependence on the
+   outer hue-shift for text in the primary viewport components. */
+html.theme-dark .main .main-large-header,
+html.theme-dark .main .main-card,
+html.theme-dark .main .main-card-content,
+html.theme-dark .main .main-list-content,
+html.theme-dark .main .monitoring-list-item,
+html.theme-dark .main .tc-list-container {
+  filter: invert(100%) hue-rotate(180deg);
+  background-color: #1b2026 !important;
+  color: #e7e9ec !important;
+  border: 1px solid #27303a !important;
+}
+
+/* Portal inventory for teleported surfaces (root-level, outside .main). */
+html.theme-dark .mdc-dialog,
+html.theme-dark .mdc-dialog__surface,
+html.theme-dark .tc-modal,
+html.theme-dark .tc-modal-wrapper,
+html.theme-dark .tc-modal__content {
+  background-color: #1b2026 !important;
+  color: #e7e9ec !important;
+  border: 1px solid #27303a !important;
+  box-shadow: 0 8px 32px rgba(0,0,0,.45) !important;
 }
 
 /* Task 3 refined: portaled floating surfaces outside .main receive direct
@@ -311,8 +338,8 @@ html.theme-dark .bookmarks-drawer,
 html.theme-dark .notifier__container {
   background-color: #1f2328 !important;
   color: #e7e9ec !important;
-  border: 1px solid #2b3138;
-  box-shadow: 0 4px 16px rgba(0,0,0,.4);
+  border: 1px solid #2b3138 !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,.4) !important;
 }
 
 </style>

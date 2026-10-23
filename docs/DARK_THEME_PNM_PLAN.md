@@ -61,6 +61,13 @@ body {
 
 Manifest checksum for `./index.html` was updated in `client/pnm-frontend/MANIFEST.sha256`.
 
+### Task 3 (implemented and refined)
+- Floating surfaces inside `.main` cancel inherited `invert(85%)` with `invert(100%) hue-rotate(180deg)` and then use dark tokens `#1f2328/#e7e9ec/#2b3138`.
+- Additional portal roots outside `.main` now receive direct dark tokens (`#1b2026/#e7e9ec/#27303a`, elevation, focus).
+- Header, card, and list surfaces now have their own cancellation + `#1b2026/#e7e9ec/#27303a` token rules.
+- Approximate cancellation is documented: `invert(100%)` is not the exact inverse of `invert(85%)`.
+- Verification measured no console errors and portal background `rgb(31,35,40)`, recomputed manifest/CSP passed.
+
 ## Verification
 - `cargo test -p vks-server --lib csp` → 3 tests pass (CSP unchanged).
 - `sha256sum -c ../../MANIFEST.sha256` for `./index.html` → OK.
