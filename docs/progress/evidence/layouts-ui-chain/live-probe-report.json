@@ -1,0 +1,45 @@
+{
+  "usedRoute": "/pnm/monitoring/conferences/49b599d7-b5cd-45a7-8999-47a28c453a92/layouts/7e6d4753-d21a-4955-ad6b-0c17de218427",
+  "report": {
+    "url": "/pnm/monitoring/conferences/49b599d7-b5cd-45a7-8999-47a28c453a92/layouts/7e6d4753-d21a-4955-ad6b-0c17de218427",
+    "items": 54,
+    "unique": 54,
+    "rows": 7,
+    "perRow": 8,
+    "sectionParent": "manual-layout-configurator",
+    "firstTitle": "Полный экран — 1 окно",
+    "viewBox_01": "0 0 1280 720",
+    "viewBoxes_sample": [
+      "0 0 1280 720",
+      "0 0 1280 720",
+      "0 0 1280 720",
+      "0 0 1280 720"
+    ],
+    "rects_04": [
+      [
+        0,
+        307
+      ],
+      [
+        333,
+        294
+      ],
+      [
+        653,
+        294
+      ],
+      [
+        973,
+        307
+      ],
+      [
+        0,
+        307
+      ]
+    ],
+    "panelWidth": 305,
+    "activeAfterClick": true,
+    "appliedPayload": null,
+    "errors": []
+  }
+}
