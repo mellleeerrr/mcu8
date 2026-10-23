@@ -105,6 +105,8 @@
 
   var catalog = [];
   var catalogState = 'idle'; // idle | loading | ready | failed
+  var serverCount = 0; // авторитетное N сохранённой раскладки с сервера
+  var serverCountKey = '';
   var subscribedStore = null;
   var scheduled = false;
   var observer = null;
@@ -129,6 +131,24 @@
       if (!response.ok) throw new Error('HTTP ' + response.status);
       return response.json();
     });
+  }
+
+  /* N из сохранённой раскладки: вендорский store после fallback size/25 не
+   * отражает исходное число окон, поэтому один раз читаем серверный payload. */
+  function loadLayoutCount() {
+    var match = /\/monitoring\/conferences\/([^/]+)\/layouts\/([^/]+)/.exec(window.location.pathname);
+    if (!match) return;
+    var key = match[1] + '/' + match[2];
+    if (key === serverCountKey) return;
+    serverCountKey = key;
+    var result = request('/api/v3/ui/conferences/' + match[1] + '/video_layouts/' + match[2]);
+    if (!result) return;
+    result.then(function (data) {
+      var payload = (data && (data.video_layout || data.payload)) || data || {};
+      var count = Array.isArray(payload.slots) ? payload.slots.length : 0;
+      if (!(count > 0)) count = Number(payload.size) || 0;
+      if (count > 0) serverCount = count;
+    }).catch(function () { serverCountKey = ''; });
   }
 
   function pinia() {
@@ -683,7 +703,11 @@
     // свой fallback (size=25), и currentCount() уже не равен исходному N.
     var startValue = editor.modifiedValue || {};
     var startPreset = typeof startValue.preset === 'string' ? startValue.preset : '';
-    var startCount = currentCount();
+    // В manual слоты — источник истины; в auto/dynamic вендорский store уже
+    // мог получить fallback size, поэтому берём серверный payload раскладки.
+    var startCount = startValue.mode === 'manual' ? currentCount() : 0;
+    if (!(startCount > 0)) startCount = serverCount;
+    if (!(startCount > 0)) startCount = currentCount();
     if (!(startCount > 0)) {
       // Хвост нашего/вендорского preset'а — надёжный размер (codian_* исключён).
       var tail = /^(?:vks_|preset_)/.test(startPreset) ? /_(\d+)$/.exec(startPreset) : null;
@@ -804,6 +828,7 @@
         // Пункт «Конструктор» живёт в вендорском селекторе режимов и должен
         // быть виден на всех режимах, поэтому вставляется до проверки host.
         ensureModeTile();
+        loadLayoutCount();
         var host = document.querySelector(HOST_SELECTOR);
         if (!host) return;
         if (catalogState === 'idle') loadCatalog();
