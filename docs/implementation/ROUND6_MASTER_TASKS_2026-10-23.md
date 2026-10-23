@@ -136,7 +136,17 @@ preset на вендорский — зафиксировать поведени
 - [x] T1 — commit `c36f973`: бейджи 59/59, live 0 ошибок. Ревью: r6-t1-review-elegance
   9/10 → после P1 (aria-label с числом, единый источник count/data-windows) 9.5/10.
   P1 применены, MANIFEST согласован.
-- [x] T2 — commit `472e444` + `a13fcf4`. Ревью r6-t2-review-elegance: 6/10 →
+- [ ] T2 — ПЕРЕОТКРЫТА: независимый live на HEAD `aadaf7e` даёт 2 P0 (ревью
+  r6-t2-review-bug, 6/10): (P0-1) клик по чипу «Количество видеоокон» при
+  активном «Конструктор» ставит вендорский preset (`preset_equal_9`) — наш
+  тайл остаётся активным, карточки без active, сохраняется не vks_*; (P0-2)
+  fresh auto→«Конструктор»→Сохранить → PATCH `display_name:null`,
+  `type:default` — имя раскладки стирается (в manual-ветке с vks_pin_r_25
+  save/reopen проходит). План T2.2: (1) запоминать pin-сторону и
+  re-adopt `vks_*_<N>` при смене счётчика/вендорского preset, один активный
+  тайл; (2) при auto→manual устанавливать/сохранять `type=individual` и
+  `displayName` (assert в payload); (3) raw fresh-auto + count-row evidence.
+  Прежние коммиты: `472e444` + `a13fcf4`. Ревью r6-t2-review-elegance: 6/10 →
   9.5/10 после P0: slots-массив текущего preset (не map), отложенный adopt
   после mode='manual' без fallback count=1, selectConstructor = только preset
   (вендор синтезирует слоты из хвоста id), единственный активный тайл.
