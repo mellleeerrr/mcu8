@@ -256,15 +256,20 @@
     return 'окон';
   }
 
-  /* Бейдж числа окон — вендорский элемент карточки
-   * (.layout-scheme-selector-item__badge, absolute top-right). */
-  function appendBadge(item, count) {
+  /* Число окон карточки: data-windows + вендорский бейдж
+   * (.layout-scheme-selector-item__badge, absolute top-right). Бейдж
+   * декоративный (aria-hidden): число уже в aria-label карточки. */
+  function setCardCount(item, count) {
     item.setAttribute('data-windows', String(count));
     if (!(count > 0)) return;
-    var badge = document.createElement('div');
-    badge.className = 'layout-scheme-selector-item__badge';
+    var badge = item.querySelector('.layout-scheme-selector-item__badge');
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.className = 'layout-scheme-selector-item__badge';
+      badge.setAttribute('aria-hidden', 'true');
+      item.appendChild(badge);
+    }
     badge.textContent = String(count);
-    item.appendChild(badge);
   }
 
   function findEntry(id) {
@@ -324,8 +329,8 @@
     item.setAttribute('role', 'button');
     item.setAttribute('tabindex', '0');
     item.setAttribute('aria-pressed', 'false');
-    // Один label для title/aria: role=button скрывает бейдж от скринридера,
-    // поэтому число окон должно быть в доступном имени, а не только в badge.
+    // Одно доступное имя для title/aria: число окон — в нём, а бейдж
+    // помечен aria-hidden (декоративный дубль).
     var label = entry.windows > 0 ? entry.title + ' — ' + entry.windows + ' ' + windowsWord(entry.windows) : entry.title;
     item.setAttribute('title', label);
     item.setAttribute('aria-label', label);
@@ -337,7 +342,7 @@
     icon.innerHTML = entry.slots.length ? svgFromSlots(entry.slots) : svgFallback(entry.windows);
     container.appendChild(icon);
     item.appendChild(container);
-    appendBadge(item, entry.windows);
+    setCardCount(item, entry.windows);
     return item;
   }
 
@@ -508,7 +513,7 @@
     icon.innerHTML = slots && slots.length ? svgFromSlots(slots) : svgFallback(count);
     container.appendChild(icon);
     item.appendChild(container);
-    appendBadge(item, count);
+    setCardCount(item, count);
     return item;
   }
 
