@@ -92,6 +92,7 @@ impl CodecMap {
         match upper.as_str() {
             "PCMU" | "PCMA" => "G711".to_owned(),
             "H.264" | "H264" => "H264".to_owned(),
+            "H.265" | "H265" | "HEVC" => "H265".to_owned(),
             other => other.to_owned(),
         }
     }

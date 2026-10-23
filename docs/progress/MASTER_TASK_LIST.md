@@ -161,8 +161,10 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > AUD type 35, RFC 7798-пакетизацию, H.265-депакетизацию и инъекцию AUD; libx265 probe отдельный.
 > Loopback-тест `h265_loopback_video_bridge_encodes_and_decodes` прогоняет реальный x265 → H.265 RTP →
 > hevc-decode и получает кадр. SDP: PT99 H265 объявляется native, `is_native_video` знает H265/HEVC,
-> answer-парсер принимает H265 (отвергает `sprop-max-don-diff`), а согласованный H265 переключает
-> `VideoProfile` на H265-мост, чтобы не слать H265 под H264 m-line. Workspace **1205 passed**, clippy/fmt чисто.
+> answer-парсер принимает H265 (`sprop-max-don-diff=0`/отсутствие, >0 отвергается), а согласованный H265
+> переключает `VideoProfile` на H265-мост, чтобы не слать H265 под H264 m-line. Доступность H264/H265
+> публикуется из startup FFmpeg probe, и offer/UAS фильтруют кодеки без моста; H.323 остаётся H.264-only.
+> Workspace **1211 passed**, clippy/fmt чисто.
 > Inbound UAS также принимает H265-only оффер: `InboundMedia.video_codec`, answer с `H265/90000` и
 > `profile-id=1`, inbound-мост поднимает H265-профиль (`uas::tests::h265_only_offer_is_answered_with_h265`).
 > Осталось: live-вызов с H265-терминалом, AAC-LATM мост, затем SDP readiness gate.

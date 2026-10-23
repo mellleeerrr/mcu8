@@ -11,8 +11,8 @@
 /// Аудио, которое native-профиль шлюза принимает/отдаёт без транскодера.
 pub const NATIVE_AUDIO: &[&str] =
     &["PCMU", "PCMA", "G711", "G711U", "G711A", "G722", "G72616", "G72624", "G72632", "G72640", "G728", "G723", "OPUS"];
-/// Видео, которое native-профиль шлюза кодирует/декодирует: H.264
-/// baseline/high и H.265 через изолированные FFmpeg-воркеры.
+/// Видео, которое native-профиль шлюза кодирует/декодирует: H.264 baseline
+/// (high — отдельная конфигурация) и H.265 через FFmpeg-мост.
 pub const NATIVE_VIDEO: &[&str] = &["H264", "H265", "HEVC"];
 
 static H264_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -69,7 +69,15 @@ pub fn is_native_audio_variant(name: &str, bitrate: Option<u32>) -> bool {
 /// `H264-HIGH` не входит в native-список (это отдельная конфигурация).
 #[must_use]
 pub fn is_native_video(name: &str) -> bool {
-    NATIVE_VIDEO.contains(&normalize(name).as_str()) && video_codec_available(name)
+    native_video_with(name, video_codec_available("H264"), video_codec_available("H265"))
+}
+
+fn native_video_with(name: &str, h264: bool, h265: bool) -> bool {
+    match normalize(name).as_str() {
+        "H264" => h264,
+        "H265" | "HEVC" => h265,
+        _ => false,
+    }
 }
 
 fn truthy(value: Option<&str>) -> bool {
@@ -135,5 +143,15 @@ mod tests {
         assert_eq!(matrix_mode(Some("FULL"), None, Some("1")), "full");
         assert_eq!(matrix_mode(Some("native"), Some("1"), Some("1")), "native");
         assert_eq!(matrix_mode(Some("garbage"), Some("1"), Some("1")), "native");
+    }
+
+    #[test]
+    fn missing_video_bridge_hides_that_codec_only() {
+        assert!(native_video_with("H264", true, false));
+        assert!(!native_video_with("H265", true, false));
+        assert!(!native_video_with("HEVC", true, false));
+        assert!(native_video_with("H265", false, true));
+        assert!(!native_video_with("H264", false, true));
+        assert!(!native_video_with("H261", true, true));
     }
 }

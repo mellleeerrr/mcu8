@@ -202,13 +202,15 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
         .filter(|section| media_proto(section) == Some("RTP/AVP"))
         .filter(|section| media_port(section).is_some_and(|port| port > 0));
     let video_codec = video.and_then(|section| {
-        if let Some(payload) = h264_payload(section) {
-            Some((payload, "H264"))
-        } else if vks_common::codec_capabilities::video_codec_available("H265") {
-            h265_payload(section).map(|payload| (payload, "H265"))
-        } else {
-            None
+        if vks_common::codec_capabilities::video_codec_available("H264") {
+            if let Some(payload) = h264_payload(section) {
+                return Some((payload, "H264"));
+            }
         }
+        if vks_common::codec_capabilities::video_codec_available("H265") {
+            return h265_payload(section).map(|payload| (payload, "H265"));
+        }
+        None
     });
     let video_payload_type = video_codec.map(|(payload, _)| payload);
     let remote_video_port = video.and_then(media_port);

@@ -281,7 +281,15 @@ pub(super) async fn codec_available_for(codec: GatewayVideoCodec) -> bool {
                 .await
                 {
                     Ok(Ok(output)) => {
-                        output.status.success() && String::from_utf8_lossy(&output.stdout).contains(needle)
+                        if !output.status.success() {
+                            return false;
+                        }
+                        // Match the exact codec token, not a substring:
+                        // h264_qsv/vaapi wrappers are not the software decoder
+                        // the bridge's `-f h264/hevc` invocation uses.
+                        String::from_utf8_lossy(&output.stdout)
+                            .lines()
+                            .any(|line| line.split_whitespace().nth(1) == Some(needle))
                     }
                     _ => false,
                 }
@@ -354,11 +362,9 @@ fn spawn_codec(encoder: bool, profile: &VideoProfile) -> Result<Child, String> {
         ]);
     } else {
         let scale = format!("scale={}:{}", profile.width, profile.height);
-        if profile.codec == GatewayVideoCodec::H264 {
-            // Preserve the low-latency H.264 decoder contract; H.265 decode is
-            // validated separately by the worker and loopback tests.
-            command.args(["-flags", "low_delay"]);
-        }
+        // Both decoders are fed live RTP; low_delay avoids buffering a frame
+        // inside FFmpeg. H.261/AAC are not routed through this path.
+        command.args(["-flags", "low_delay"]);
         command.args([
             "-probesize",
             "32",
@@ -474,7 +480,10 @@ pub(super) async fn spawn_video_media_bridge(
     let local_port = session.rtp_socket.local_addr().map_err(|error| error.to_string())?.port();
     let lease = super::RtpPortLease::new(session.port_pool.clone(), local_port);
     if !codec_available_for(session.profile.codec).await {
-        return Err("FFmpeg with libx264 is unavailable; video was not started".into());
+        return Err(format!(
+            "FFmpeg {} encoder/decoder is unavailable; video was not started",
+            session.profile.codec.name()
+        ));
     }
     let mut encoder = spawn_codec(true, &session.profile)?;
     let mut decoder = match spawn_codec(false, &session.profile) {
@@ -484,8 +493,8 @@ pub(super) async fn spawn_video_media_bridge(
             return Err(error);
         }
     };
-    let encoder_errors = drain_errors(&mut encoder, "h264-encoder");
-    let decoder_errors = drain_errors(&mut decoder, "h264-decoder");
+    let encoder_errors = drain_errors(&mut encoder, session.profile.codec.name());
+    let decoder_errors = drain_errors(&mut decoder, session.profile.codec.name());
     let mut encoder_stdin = encoder.stdin.take().expect("encoder stdin");
     let mut encoder_stdout = encoder.stdout.take().expect("encoder stdout");
     let mut decoder_stdin = decoder.stdin.take().expect("decoder stdin");

@@ -378,12 +378,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // SDP must only advertise video codecs whose bridge can actually start on
     // this host. The probe is already cached, so this is a pure lookup.
     let (h264_raw, h265_raw) = vks_server::gateways::video_bridge_availability().await;
-    let h265_worker = vks_server::transcoder_runtime::capabilities().is_some_and(|capabilities| {
-        capabilities.has_video_encoder(vks_media_mcu::codec_worker::VideoCodec::H265)
-            && capabilities.has_video_decoder(vks_media_mcu::codec_worker::VideoCodec::H265)
-    });
-    let availability =
-        vks_common::codec_capabilities::VideoCodecAvailability { h264: h264_raw, h265: h265_raw && h265_worker };
+    let availability = vks_common::codec_capabilities::VideoCodecAvailability { h264: h264_raw, h265: h265_raw };
     vks_common::codec_capabilities::set_video_codec_availability(availability);
     info!(h264 = availability.h264, h265 = availability.h265, "gateway video codec availability");
 

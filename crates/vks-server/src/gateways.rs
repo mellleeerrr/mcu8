@@ -23,9 +23,9 @@ mod audio;
 #[path = "gateway_video.rs"]
 mod video;
 
-/// Availability of the two video bridges for SDP advertisement. H.264 uses
-/// raw FFmpeg, H.265 additionally requires libx265 encode+decode from the
-/// transcoder probe; callers must not offer a codec this returns false for.
+/// Availability of the two video bridges for SDP advertisement. Both use raw
+/// FFmpeg pipes; each probe requires its software encoder and decoder, so
+/// callers never offer a codec whose bridge cannot start.
 pub async fn video_bridge_availability() -> (bool, bool) {
     (video::codec_available().await, video::codec_available_for(video::GatewayVideoCodec::H265).await)
 }
@@ -1063,17 +1063,22 @@ impl GatewayManager {
             .ok_or_else(|| "No RTP/RTCP port pair is available; call was not started".to_string())?;
         let rtp_port = port_pair.rtp_port;
         let mut audio_lease = RtpPortLease::new(self.port_pool.clone(), rtp_port);
-        let mut video_pair =
-            if video::codec_available().await || video::codec_available_for(video::GatewayVideoCodec::H265).await {
-                Some(
-                    self.port_pool
-                        .allocate_pair(&self.candidate_ip)
-                        .await
-                        .ok_or_else(|| "No RTP/RTCP video port pair is available; call was not started".to_string())?,
-                )
-            } else {
-                None
-            };
+        let video_available = if is_h323 {
+            // The sidecar negotiates H.241/H.264 only.
+            video::codec_available().await
+        } else {
+            video::codec_available().await || video::codec_available_for(video::GatewayVideoCodec::H265).await
+        };
+        let mut video_pair = if video_available {
+            Some(
+                self.port_pool
+                    .allocate_pair(&self.candidate_ip)
+                    .await
+                    .ok_or_else(|| "No RTP/RTCP video port pair is available; call was not started".to_string())?,
+            )
+        } else {
+            None
+        };
         let mut video_lease = video_pair.as_ref().map(|pair| RtpPortLease::new(self.port_pool.clone(), pair.rtp_port));
         let mut setup = PendingOutboundGuard {
             cancelled: cancel_flag.clone(),
@@ -2995,9 +3000,7 @@ async fn serve_h323_uas_session(
                     let _ = handle.reject(call_id).await;
                     continue;
                 };
-                let video_pair = if video::codec_available().await
-                    || video::codec_available_for(video::GatewayVideoCodec::H265).await
-                {
+                let video_pair = if video::codec_available().await {
                     manager.port_pool.allocate_pair("0.0.0.0").await
                 } else {
                     None
