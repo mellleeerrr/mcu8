@@ -33,8 +33,8 @@
 утечки на комнату; per-viewer буфера умножат её на число зрителей.
 
 Измеренная база (release-soak, 4 участника, 1280×720 I420,
-`crates/vks-media-mcu/tests/mcu_tick_soak.rs`; commit `3690699`): compose mean
-16.02 мс, p99 в бакете (10, 20] мс (estimate 19.95 мс), `le_2ms_ratio = 0.0`,
+`crates/vks-media-mcu/tests/mcu_tick_soak.rs`; commit `866d2ec`): compose mean
+16.28 мс, p99 в бакете (10, 20] мс (estimate 20.0 мс), `le_2ms_ratio = 0.0`,
 `le_33ms_ratio = 1.0`. Источник: `docs/progress/evidence/t14b-mcu-tick-soak/`.
 
 ## Варианты (Options)

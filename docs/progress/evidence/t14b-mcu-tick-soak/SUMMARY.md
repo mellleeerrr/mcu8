@@ -1,6 +1,6 @@
 # T14b — MCU engine tick SLO / soak: итог
 
-Дата: 2026-10-23. Артефакт: commit `3690699`, clean worktree (`git_dirty=false`).
+Дата: 2026-10-23. Артефакт: commit `866d2ec`, clean worktree (`git_dirty=false`).
 Единственная таблица результатов и полная методика — в [`README.md`](README.md);
 машинный отчёт — [`soak-60s-4p.json`](soak-60s-4p.json). Здесь намеренно нет
 копии результатов, чтобы числа не расходились с JSON.
@@ -31,7 +31,7 @@
    same-timestamp тика на период. Warm-up 3 с отбрасывается, отчёт пишется до
    assert'ов, считаются периоды/пропущенные периоды/attempts/first
    successes/throttled/second-call successes/drops/effective rates, провенанс
-   (git sha, dirty, cwd, git toplevel, target dir, rustc, CPU, команда и окружение),
+   (git sha, dirty, cwd, git toplevel, target dir, rustc, CPU, команда),
    точные `le`-отношения, интервал бакета p99 и кумулятивные счётчики бакетов.
    Второй вызов каждого периода должен быть throttled, видео-throttle обязан
    увеличить `frames_dropped`. Гейт потерь периодов считается от измеренного

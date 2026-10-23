@@ -3,8 +3,11 @@
 ## Scope
 
 `vks_mcu_tick_duration_seconds{phase="audio"|"video"}` measures **engine work**
-inside `RoomState::tick_audio_at` / `tick_video_at`: audio mix + mix-minus + VAD,
-or video `slot_rects` + `Compositor::compose`. It excludes RTP/jitter/loss, SIP
+inside `RoomState::tick_audio_at` / `tick_video_at`: the whole audio pass (mix,
+mix-minus, VAD, RMS level and `refresh_focus`), or video `slot_rects` +
+`Compositor::compose`. The soak uses the default Grid layout, no event sink and
+no voice-activated re-seating, so the Focus/Speaker refresh is present in the
+timed path but inactive for these samples. It excludes RTP/jitter/loss, SIP
 and H.323 signalling, decode/encode, `resize_i420`, WebRTC fan-out, the
 composite hand-off, input cloning before the throttle, lock wait and the live DB.
 The audio number is therefore an **audio engine-work** p99, not end-to-end
@@ -51,34 +54,30 @@ falling back.
 
 ## Result — 60 s window (30 s per phase), 4 participants, release
 
-Run `3690699`, clean worktree (`git_dirty=false`), Intel Xeon E5-2699 v3,
+Run `866d2ec`, clean worktree (`git_dirty=false`), Intel Xeon E5-2699 v3,
 rustc 1.94.0. Machine report: [`soak-60s-4p.json`](soak-60s-4p.json). Reproducers
 should keep `VKS_SOAK_OUT` in `/tmp`; to update the canonical artifact
 deliberately, pass the evidence path instead.
 
 | phase | samples | exact `le=2ms` | p99 bucket (estimate) | mean | rate |
 |---|---:|---:|---:|---:|---:|
-| audio engine work | 1492 | **1.000** | (0.25, 0.5] ms (0.387 ms) | 0.161 ms | 49.73 Hz |
-| video compose (I420) | 883 | 0.000 | (10, 20] ms (19.95 ms) | 16.02 ms | 29.43 fps |
+| audio engine work | 1500 | **1.000** | (0.1, 0.25] ms (0.250 ms) | 0.159 ms | 50.0 Hz |
+| video compose (I420) | 883 | 0.000 | (10, 20] ms (20.0 ms) | 16.28 ms | 29.43 fps |
 
 Video exact `le=33 ms` ratio **1.000**, engine `frames_dropped` delta 883 (all
 883 are the deliberate duplicate/throttle probes; first successes 883), audio
 exact `le=2 ms` ratio **1.000**, admin rebuilds rendered 2 frames and recorded
-0 ticks. 1492 of 1500 wall-clock audio periods produced their first tick (99.5%);
-the 8 losses are first attempts rejected by the engine's 18 ms audio throttle
-because the previous successful tick ran slightly late, so the next 20 ms grid
-slot arrived within the engine's 18 ms guard: the harness slot executed but the
-audio tick was rejected and no audio work ran (`missed_periods` is 0 because no
-wall-clock slot was skipped). They are inside the 1%
-period-loss budget on this shared host, and the audio histogram count equals the
-tick count (1492). The wall-clock gate is deliberately load-sensitive: a busier
-host can fail it, and its floored lower bound can hide a single edge-rounding
-slot.
+0 ticks. All 1500 wall-clock audio periods produced their first tick on this
+(lighter-load) run; the previous run's 8/1500 losses were 18 ms throttle rejects
+after a late previous tick (no audio work ran, `missed_periods=0`) and stayed
+inside the 1% budget. The audio histogram count equals the tick count (1500).
+The wall-clock gate is deliberately load-sensitive: a busier host can fail it,
+and its floored lower bound can hide a single edge-rounding slot.
 
 **Verdict:** the audio engine-work p99 ≤2 ms SLO is met with a wide margin. Video
 compose fits the 33 ms frame budget in this workload but **not** the 2 ms target;
 its p99 is only known to be in (10, 20] ms because 20 ms is the upper bound of
-that histogram bucket (the estimate is 19.95 ms). The video 2 ms target is deferred
+that histogram bucket (the estimate is 20.0 ms). The video 2 ms target is deferred
 to S20 (SIMD/zero-copy/parallel tiles, per-room actors). No claim is made that
 the full media tick meets 2 ms.
 
@@ -92,7 +91,8 @@ and warmed during the warm-up window, but a long idle gap can still leave
 cold-cache/page-fault effects in the first frames. The 33 ms figure is a budget
 margin for this harness, not a warm-cache per-frame cost; no back-to-back
 speedup or before/after claim is made. No archived "before" JSON is
-claimed; this is a single reproducible after-state measurement.
+claimed; this is a single after-state measurement from a clean worktree, and
+exact p99/mean are load-sensitive even though the SLO conclusions are stable.
 
 ## Honest limits
 
