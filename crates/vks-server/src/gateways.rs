@@ -1226,6 +1226,9 @@ impl GatewayManager {
         if !bridgeable_audio_pts(is_h323).contains(&audio_payload_type) {
             return Err("Negotiated audio payload type is not supported by the RTP bridge".into());
         }
+        if audio_payload_type == 113 && !aac_bridge_preflight() {
+            return Err("AAC-LATM bridge unavailable: worker pool has no free encode/decode slots".into());
+        }
         let remote_audio_ip =
             remote_ip.parse::<std::net::IpAddr>().map_err(|_| "Invalid negotiated audio IP".to_string())?;
         controls

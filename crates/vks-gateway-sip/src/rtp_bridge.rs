@@ -574,7 +574,7 @@ impl CodecProfile {
     fn audio_with(self, aac: bool) -> Vec<&'static OfferCodec> {
         AUDIO_OFFER
             .iter()
-            .filter(|codec| self == Self::Full || codec.native || codec.dtmf || (codec.payload == 113 && aac))
+            .filter(|codec| if codec.payload == 113 { aac } else { self == Self::Full || codec.native || codec.dtmf })
             .collect()
     }
 
@@ -814,7 +814,7 @@ m=video 5006 RTP/AVP 96\r\n";
     fn offer_carries_full_audio_matrix_with_correct_clock_rates_and_fmtp() {
         let sdp = build_offer(CodecProfile::Full, "192.168.1.93", 41000, Some(41002));
         for line in [
-            "m=audio 41000 RTP/AVP 0 8 9 15 4 18 102 103 104 105 106 107 108 109 110 111 112 113 101",
+            "m=audio 41000 RTP/AVP 0 8 9 15 4 18 102 103 104 105 106 107 108 109 110 111 112 101",
             "a=rtpmap:0 PCMU/8000",
             "a=rtpmap:8 PCMA/8000",
             "a=rtpmap:9 G722/8000",
@@ -836,13 +836,13 @@ m=video 5006 RTP/AVP 96\r\n";
             "a=rtpmap:110 G726-40/8000",
             "a=rtpmap:111 opus/48000/2",
             "a=rtpmap:112 G719/48000",
-            "a=rtpmap:113 MP4A-LATM/90000",
             "a=rtpmap:101 telephone-event/8000",
             "a=fmtp:101 0-16",
             "a=rtcp:41001",
         ] {
             assert!(sdp.contains(line), "offer misses `{line}`:\n{sdp}");
         }
+        assert!(!sdp.contains("a=rtpmap:113 "), "AAC needs the probe even in Full:\n{sdp}");
     }
 
     #[test]
@@ -1331,6 +1331,17 @@ fn negotiate_media_detailed_with(
     if !codec.native && !aac_latm {
         return Err(NegotiationFailure::UnsupportedAudio { codec: codec.name.to_string(), payload: codec.payload });
     }
+    if aac_latm {
+        // cpresent=0 answers carry the configuration only in fmtp config=;
+        // this bridge sends in-band SMC (cpresent=1), so such an answer would
+        // produce "connected" with undecodable audio.
+        let fmtp = remote_audio.fmtp.get(&codec.payload);
+        if fmtp.is_some_and(|params| {
+            params.get("cpresent").is_some_and(|value| value == "0") || params.contains_key("config")
+        }) {
+            return Err(NegotiationFailure::UnsupportedAudio { codec: codec.name.to_string(), payload: codec.payload });
+        }
+    }
 
     let ip = remote_audio.ip.clone().or(remote.ip.clone()).ok_or(NegotiationFailure::NoCommonAudio)?;
     let dtmf_payload_type = telephone_event(local_audio).and_then(|_| telephone_event(remote_audio));
@@ -1669,20 +1680,24 @@ a=rtpmap:97 H264/90000\r\na=fmtp:97 packetization-mode=1;profile-level-id=42801e
         assert_eq!(aac.clock, 90_000);
         let last_audio = with.iter().rev().find(|codec| !codec.dtmf).expect("audio codec");
         assert_eq!(last_audio.payload, 113, "AAC must stay the last audio codec before DTMF");
-        let sdp = build_offer(CodecProfile::Full, "127.0.0.1", 41000, None);
-        assert!(sdp.contains("a=rtpmap:113 MP4A-LATM/90000"), "{sdp}");
+        let full_without_probe = build_offer(CodecProfile::Full, "127.0.0.1", 41000, None);
+        assert!(!full_without_probe.contains("a=rtpmap:113 "), "Full must not bypass the probe: {full_without_probe}");
+        let full_with_probe = CodecProfile::Full.audio_with(true);
+        assert!(full_with_probe.iter().any(|codec| codec.payload == 113));
     }
 
     #[test]
     fn aac_answer_needs_the_probe_and_has_no_ptime20() {
-        let offer = build_offer(CodecProfile::Full, "127.0.0.1", 41000, None);
+        let offer = "v=0\r\nc=IN IP4 192.0.2.1\r\nm=audio 41000 RTP/AVP 0 113\r\n\
+a=rtpmap:0 PCMU/8000\r\na=rtpmap:113 MP4A-LATM/90000\r\n\
+a=fmtp:113 profile-level-id=1;object=2;cpresent=1\r\n";
         let answer = "v=0\r\nc=IN IP4 192.0.2.10\r\nm=audio 32000 RTP/AVP 113\r\n\
 a=rtpmap:113 MP4A-LATM/90000\r\na=fmtp:113 profile-level-id=1;object=2;cpresent=1\r\n";
-        let media = negotiate_media_detailed_with(&offer, answer, true).expect("AAC with a probe");
+        let media = negotiate_media_detailed_with(offer, answer, true).expect("AAC with a probe");
         assert_eq!(media.audio_payload_type, 113);
         assert_eq!(media.audio_codec, "MP4A-LATM");
         assert!(matches!(
-            negotiate_media_detailed_with(&offer, answer, false),
+            negotiate_media_detailed_with(offer, answer, false),
             Err(NegotiationFailure::UnsupportedAudio { payload: 113, .. })
         ));
         let inbound = crate::uas::InboundMedia {

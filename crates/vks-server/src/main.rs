@@ -384,12 +384,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // AAC-LATM stays unavailable until FFmpeg exposes both the AAC encoder +
     // latm muxer and the aac_latm decoder + loas demuxer. Advertising it before
     // the audio worker exists would connect calls with dead audio.
-    let aac_latm = vks_server::transcoder_runtime::capabilities()
-        .is_some_and(vks_media_mcu::codec_worker::ffmpeg::FfmpegCapabilities::has_audio_latm_bridge);
+    // AAC-LATM patent/licensing sign-off is an explicit deployment decision:
+    // the FFmpeg probe alone must never enable it. Operators opt in after legal
+    // approval; otherwise AAC stays 488/fallback like before T06b-8.
+    let aac_latm_legal = std::env::var("VKS_AAC_LATM_LEGAL_ACCEPTED").is_ok_and(|value| value.trim() == "1");
+    let aac_latm = aac_latm_legal
+        && vks_server::transcoder_runtime::capabilities()
+            .is_some_and(vks_media_mcu::codec_worker::ffmpeg::FfmpegCapabilities::has_audio_latm_bridge);
     vks_common::codec_capabilities::set_audio_codec_availability(
         vks_common::codec_capabilities::AudioCodecAvailability { aac_latm },
     );
-    info!(aac_latm, "gateway audio codec availability (AAC advertised only with bridge + pool preflight)");
+    info!(
+        aac_latm,
+        aac_latm_legal, "gateway audio codec availability (AAC needs probe + legal opt-in + pool preflight)"
+    );
 
     if let Err(error) = vks_server::webrtc_runtime::preflight(&handler_config) {
         error!(%error, "WebRTC preflight failed");

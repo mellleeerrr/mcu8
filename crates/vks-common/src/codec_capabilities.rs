@@ -99,7 +99,7 @@ pub fn is_native_audio_variant(name: &str, bitrate: Option<u32>) -> bool {
 #[must_use]
 pub fn is_supported_audio_variant(name: &str, bitrate: Option<u32>) -> bool {
     is_native_audio_variant(name, bitrate)
-        || (matches!(normalize(name).as_str(), "AAC" | "MP4ALATM") && audio_codec_available("MP4A-LATM"))
+        || (matches!(normalize(name).as_str(), "AAC" | "AACLATM" | "MP4ALATM") && audio_codec_available("MP4A-LATM"))
 }
 
 /// Мостится ли видеокодек native-профилем *и* доступен ли его мост на хосте.

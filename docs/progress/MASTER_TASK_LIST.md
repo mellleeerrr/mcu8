@@ -226,7 +226,14 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > публикует AAC в `/api/v3/settings/audio_codecs`. **Live E2E: 233/233, failure=null**
 > (`/var/tmp/vks-e2e-aac/result.json`, бинарь `0096ff90`); `.132` выбрал G722 по своему порядку —
 > AAC-live не доказан, это regression proof. Live API на бинаре `0f8402`: AAC supported=true.
-> Workspace 1231. Осталось: cpresent=0/config, AAC-только live-вызов, независимые ревью, legal-гейт.
+> Workspace 1231. **Независимые ревью AAC (SDP и медиа): по 7.5/10, REQUEST CHANGES.**
+> Исправлено после ревью: legal-гейт `VKS_AAC_LATM_LEGAL_ACCEPTED=1` (по умолчанию AAC выключен,
+> probe сам по себе не включает), Full-профиль больше не обходит availability, UAC отвергает
+> answer с `cpresent=0`/`config=`, outbound-путь проверяет пул ≥2, `AACLATM` в supported-матчинге.
+> Остались блокеры до 9.5: (P0) нет liveness декодированного PCM + UAS принимает `object=8`/`rate=44.1`
+> без config — возможен «connected» с тишиной; (P1) блокирующие `await` в 20-мс цикле без таймаутов,
+> preflight пула не потребляет семафор (spawn идёт напрямую), inbound marker=0/фрагментация не
+> отвергается, нет RTP-level AAC-теста/prefill/pacing. cpresent=0/config и AAC-only live — открыты.
 > Нельзя: `-flags low_delay`/`-avioflags direct`/`-fflags nobuffer` (ломали AAC), забыть
 > `-probesize 32 -analyzeduration 0` перед `-i`, ждать EOF для кадров, блокировать аудио-цикл чтением stdout,
 > объявлять native AAC без worker/packetizer/probe, резать кадр по MTU вместо drop+metric, писать `ptime:20`
