@@ -23,7 +23,7 @@ green). One room, four participants, real **1280×720 I420** frames with 2-D lum
 non-constant U/V planes, feeding 960-sample near-full-scale PCM (exercises
 the mixer's `tanh` soft-clip). The measured window has two **sequential**
 phases: audio alone at 20 ms, then video alone at 34 ms. They are not concurrent
-because today's global room mutex would let an ~16 ms mean / ~20 ms p99 compose block the audio tick;
+because today's global room mutex would let an ~17 ms mean / ~27 ms p99 compose block the audio tick;
 per-room actors and multi-room concurrency are S20. A 3 s warm-up is discarded.
 
 Run timing gates on an idle or pinned host: the wall-clock loss gate is
