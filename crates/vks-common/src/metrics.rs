@@ -5,9 +5,10 @@
 //! `docs/architecture/CLUSTERING.md` §12 (monitoring).
 //! В фазе 0 — регистр + дефолтные метрики; метрики сервисов добавляются в их фазах.
 //!
-//! Каждая метрика — публичная статическая `LazyLock<*>Vec`, зарегистрированная
-//! один раз (в глобальном default-реестре prometheus). `encode()` выводит их
-//! в текстовом формате Prometheus для `/metrics`.
+//! Большинство метрик — публичные статические `LazyLock<*Vec>`, зарегистрированные
+//! один раз в глобальном default-реестре prometheus; гистограмма MCU-тика приватна,
+//! а часть коллекторов — скаляры (`IntGauge`). `encode()` выводит их в текстовом
+//! формате Prometheus для `/metrics`.
 
 use prometheus::{
     register_histogram_vec, register_int_counter_vec, register_int_gauge_vec, Histogram, HistogramVec, IntCounterVec,
@@ -130,9 +131,10 @@ pub const MCU_TICK_BUCKETS: &[f64] = &[
 
 /// MCU engine tick work: audio mix or video compose, excluding RTP/network,
 /// input cloning and composite cloning. It is registered lazily like the other
-/// collectors, but only `observe_mcu_tick` (env-gated) and the soak test's
-/// `with_label_values` ever materialise children; a default deployment therefore
-/// pays nothing and exposes no samples.
+/// collectors. Only `init_default()` (through `init_mcu_tick_metrics`, and only
+/// when the env flag is on) creates the zero-count children; the env-gated
+/// `observe_mcu_tick` records samples. A default deployment pays nothing and
+/// exposes no samples.
 static MCU_TICK_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!(
         "vks_mcu_tick_duration_seconds",

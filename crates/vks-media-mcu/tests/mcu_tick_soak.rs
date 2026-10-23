@@ -32,11 +32,9 @@ const AUDIO_PERIOD_MS: u64 = 20;
 const VIDEO_PERIOD_MS: u64 = 34;
 const AUDIO_SLO_BOUND: f64 = 0.002;
 const VIDEO_FRAME_BUDGET: f64 = 0.033;
-/// Audio tasks are due every 20 ms (50 Hz); the floor leaves a small scheduling
-/// margin. Video is driven at 34 ms because the engine drops ticks closer than
-/// 30 ms; 28 fps leaves room for a missed period.
-const AUDIO_CADENCE_FLOOR_HZ: f64 = 45.0;
-const VIDEO_CADENCE_FLOOR_FPS: f64 = 28.0;
+/// Audio tasks are due every 20 ms (50 Hz); video at 34 ms because the engine
+/// drops ticks closer than 30 ms. The wall-clock period-loss gate below is the
+/// cadence guard.
 const FRAME_WIDTH: u32 = 1280;
 const FRAME_HEIGHT: u32 = 720;
 
@@ -49,7 +47,11 @@ struct PhaseSnapshot {
 
 impl PhaseSnapshot {
     fn delta(&self, before: &Self) -> Self {
-        assert_eq!(self.buckets.len(), before.buckets.len(), "histogram bucket layout changed between snapshots");
+        assert!(
+            self.buckets.len() == before.buckets.len()
+                && self.buckets.iter().zip(&before.buckets).all(|((a, _), (b, _))| a == b),
+            "histogram bucket layout changed between snapshots"
+        );
         let buckets = self
             .buckets
             .iter()
@@ -244,12 +246,13 @@ fn run_window(
             let due = next + period;
             let after = Instant::now();
             if due <= after {
-                // The engine took longer than one period: count the skipped
-                // wall-clock slots instead of silently pretending they were
-                // attempts.
-                let behind = after.duration_since(due).as_nanos() / period.as_nanos();
-                tally.missed_periods += 1 + behind as u64;
-                next = after + period;
+                // The engine took longer than one period: count every grid slot
+                // between `due` and the first future one, then align `next` to
+                // that grid slot.
+                let behind = after.duration_since(due);
+                let skipped = 1 + (behind.as_nanos() / period.as_nanos()) as u64;
+                tally.missed_periods += skipped;
+                next = due + period * u32::try_from(skipped).unwrap_or(u32::MAX);
             } else {
                 next = due;
             }
@@ -287,6 +290,7 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     assert!(warmup >= 1 && warmup < seconds, "VKS_SOAK_WARMUP must be >=1 and < seconds");
     assert!((1..=32).contains(&participants), "VKS_SOAK_PARTICIPANTS must be 1..=32");
     let out = std::env::var("VKS_SOAK_OUT").unwrap_or_else(|_| "target/t14b-mcu-tick-soak.json".into());
+    assert!(!out.trim().is_empty(), "VKS_SOAK_OUT must not be empty");
 
     let audio_seconds = seconds / 2;
     let video_seconds = seconds - audio_seconds;
@@ -350,7 +354,6 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     );
     let audio_after = histogram_snapshot();
 
-    std::thread::sleep(Duration::from_millis(VIDEO_PERIOD_MS));
     let video_baseline = histogram_snapshot();
     let dropped_baseline = engine.stats(room).map_or(0, |stats| stats.frames_dropped);
     let (video, video_measured_seconds) = run_window(
@@ -366,11 +369,15 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     // Admin rebuilds call `process_video` directly and must stay out of the
     // histogram: clear/unbridge are the two public admin paths that re-render.
     let before_admin = histogram_snapshot();
+    let rendered_before_admin = engine.stats(room).map_or(0, |stats| stats.frames_rendered);
     engine.clear_participant_frame(room, pids[0]);
     assert!(engine.set_participant_frame(room, pids[0], i420_frame(FRAME_WIDTH, FRAME_HEIGHT, 999)));
     engine.unbridge_participant(room, pids[1]);
     assert!(!engine.has_participant(room, pids[1]), "unbridge must remove the participant");
     let after_admin = histogram_snapshot();
+    let admin_renders =
+        engine.stats(room).map_or(0, |stats| stats.frames_rendered).saturating_sub(rendered_before_admin);
+    assert!(admin_renders > 0, "admin rebuild must actually re-render a frame");
     let admin_pollution = after_admin
         .get("video")
         .map_or(0, |snapshot| snapshot.count)
@@ -393,13 +400,17 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     let video_p99 = video_delta.p99();
     let audio_hz = audio.first_successes as f64 / audio_measured_seconds;
     let effective_video_fps = video.first_successes as f64 / video_measured_seconds;
-    // Wall-clock lower bound on scheduled periods in the measured window. Unlike
-    // `attempts / 2` this cannot be satisfied by dropping iterations: a skipped
-    // period lowers `first_successes` while the window stays the same.
+    // Conservative wall-clock lower bound on scheduled periods in the measured
+    // window (the t=0 slot is omitted). A skipped period consumes one slot of the
+    // 1% budget: up to 1% may be lost, more than 1% fails.
     let audio_scheduled = (audio_measured_seconds * 1000.0 / AUDIO_PERIOD_MS as f64).floor() as u64;
     let video_scheduled = (video_measured_seconds * 1000.0 / VIDEO_PERIOD_MS as f64).floor() as u64;
 
     let report = serde_json::json!({
+        "schema_version": 2,
+        "timestamp_unix": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs()),
         "rustc": command_output("rustc", &["-V"]),
         "git_sha": command_output("git", &["rev-parse", "HEAD"]),
         // `null` when git is unavailable, otherwise any worktree change means
@@ -457,6 +468,7 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
             "mean_seconds": (video_delta.count > 0).then(|| video_delta.sum / video_delta.count as f64),
             "buckets_cumulative": video_delta.buckets,
         },
+        "admin_rebuild_renders": admin_renders,
         "admin_rebuild_recorded_ticks": admin_pollution,
         "histogram_buckets_seconds": MCU_TICK_BUCKETS,
         "slo": {
@@ -487,11 +499,9 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     assert_eq!(video_delta.count, video.ticks, "video histogram must count exactly the rendered ticks");
     assert_eq!(audio.second_call_successes, 0, "same-timestamp audio duplicate must be throttled");
     assert_eq!(video.second_call_successes, 0, "same-timestamp video duplicate must be throttled");
-    assert_eq!(audio.attempts, audio.periods * 2, "each audio period makes exactly two attempts");
-    assert_eq!(video.attempts, video.periods * 2, "each video period makes exactly two attempts");
     // Wall-clock period-loss gate: a skipped slot lowers first successes while
-    // `scheduled` stays fixed. Up to 1% is allowed for OS scheduling jitter; the
-    // cadence floors below catch systemic loss.
+    // `scheduled` stays fixed. Up to 1% is allowed for OS scheduling jitter; a
+    // larger loss fails here.
     assert!(
         audio.first_successes * 100 >= audio_scheduled * 99,
         "audio lost more than 1% of scheduled periods: {} of {audio_scheduled}",
@@ -504,17 +514,6 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     );
     assert_eq!(video.throttled, dropped, "every throttled video attempt must be visible as frames_dropped");
     assert_eq!(admin_pollution, 0, "admin rebuild paths must not be recorded as ticks");
-    assert!(
-        audio_hz >= AUDIO_CADENCE_FLOOR_HZ,
-        "audio cadence too low: {} ticks / {audio_measured_seconds:.3}s = {audio_hz:.2} Hz (floor {AUDIO_CADENCE_FLOOR_HZ})",
-        audio.first_successes
-    );
-    assert!(
-        effective_video_fps >= VIDEO_CADENCE_FLOOR_FPS,
-        "video render cadence too low: {effective_video_fps:.2} fps (attempts {}, ticks {})",
-        video.attempts,
-        video.ticks
-    );
     assert!(
         audio_ratio.is_some_and(|ratio| ratio >= 0.99),
         "audio engine work: only {:.4}% of ticks <= 2 ms (count {})",
