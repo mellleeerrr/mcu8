@@ -215,8 +215,13 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > декодер→PCM-очередь→MCU-микс, выход MCU→энкодер→RTP с marker=1, 90 кГц timestamp по кадру,
 > sequence/SSRC/RTCP SR, conceal на sequence-gap, bounded-очереди, контроли mute/gain; диспетчеризация
 > в `run_audio_bridge` по PT113/каноническому имени. Workspace 1227. DTMF для AAC пока drain+один warning.
-> Осталось: SDP PT113/fmtp (native только при availability+preflight пула), UAS cpresent=1,
-> затем cpresent=0/config, live `.132`.
+> **Slice 3b готов:** PT113 MP4A-LATM (`profile-level-id=1;object=2;cpresent=1`, clock 90000)
+> объявляется последним audio-кодеком только при `audio_codec_available` probe; negotiation принимает
+> AAC лишь при availability; UAS принимает cpresent=1, отвергает clock≠90000/cpresent=0 (488, а не
+> «200 OK и тишина»), answer без `a=ptime:20`; метаданные PT113 (name/48k sample rate/90k clock),
+> `bridgeable_audio_pts` и **preflight пула ≥2 воркеров до 200 OK**. Workspace 1229, live-бинарь
+> `73473c49` поднят, `/readyz=200`, лог `aac_latm=true`. Осталось: UAS wire-тест cpresent=1,
+> cpresent=0/config, DTMF, live `.132`, независимые ревью.
 > Нельзя: `-flags low_delay`/`-avioflags direct`/`-fflags nobuffer` (ломали AAC), забыть
 > `-probesize 32 -analyzeduration 0` перед `-i`, ждать EOF для кадров, блокировать аудио-цикл чтением stdout,
 > объявлять native AAC без worker/packetizer/probe, резать кадр по MTU вместо drop+metric, писать `ptime:20`

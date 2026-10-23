@@ -713,16 +713,28 @@ pub(super) fn audio_sample_rate(payload_type: u8) -> u32 {
     match payload_type {
         9 => 16_000,
         111 => 48_000,
+        113 => 48_000,
         _ => 8_000,
     }
 }
 
-fn bridgeable_audio_pts(is_h323: bool) -> &'static [u8] {
+/// AAC-LATM needs two FFmpeg workers (encode + decode) before a call may be
+/// answered. The pool is bounded; a busy host must refuse with 488/503 rather
+/// than answer 200 OK and leave the participant with dead audio.
+fn aac_bridge_preflight() -> bool {
+    vks_common::codec_capabilities::audio_codec_available("MP4A-LATM")
+        && crate::transcoder_runtime::pool().is_some_and(|pool| pool.available() >= 2)
+}
+
+fn bridgeable_audio_pts(is_h323: bool) -> Vec<u8> {
     if is_h323 {
-        vks_gateway_h323::H323_NATIVE_AUDIO_PTS
-    } else {
-        &[0, 4, 8, 9, 15, 107, 108, 109, 110, 111]
+        return vks_gateway_h323::H323_NATIVE_AUDIO_PTS.to_vec();
     }
+    let mut pts = vec![0, 4, 8, 9, 15, 107, 108, 109, 110, 111];
+    if vks_common::codec_capabilities::audio_codec_available("MP4A-LATM") {
+        pts.push(113);
+    }
+    pts
 }
 
 /// H.323 single-codec bridge: only symmetric static G.711U/PCMA/G.722/G.723.1
@@ -751,6 +763,7 @@ pub(super) fn audio_codec_name(payload_type: u8) -> &'static str {
         109 => "G726-32",
         110 => "G726-40",
         111 => "OPUS",
+        113 => "MP4A-LATM",
         _ => "unknown",
     }
 }
@@ -1226,7 +1239,7 @@ impl GatewayManager {
         let media_details = serde_json::json!({
             "audio_codec": audio_codec_name(audio_payload_type),
             "audio_payload_type": audio_payload_type,
-            "audio_clock_rate": if matches!(audio_payload_type, 111) { 48000 } else { 8000 },
+            "audio_clock_rate": match audio_payload_type { 111 => 48000, 113 => 90000, _ => 8000 },
             "audio_sample_rate": audio_sample_rate(audio_payload_type),
             "audio_tx_payload_type": audio_payload_type, "audio_rx_payload_type": audio_payload_type,
             "remote_audio_address": std::net::SocketAddr::new(remote_audio_ip, remote_audio_port).to_string(),
@@ -2246,6 +2259,22 @@ async fn serve_sip_uas_on(
                     );
                     continue;
                 };
+                if media.audio_codec == "MP4A-LATM" && !aac_bridge_preflight() {
+                    sip_send(
+                        &socket,
+                        peer,
+                        &vks_gateway_sip::build_response(
+                            488,
+                            "Not Acceptable Here",
+                            &request,
+                            &advertised_ip,
+                            local_port,
+                            Some(&to_tag),
+                            "",
+                        ),
+                    );
+                    continue;
+                }
                 let Some(audio_pair) = manager.port_pool.allocate_pair("0.0.0.0").await else {
                     sip_send(
                         &socket,
@@ -2480,7 +2509,7 @@ async fn serve_sip_uas_on(
                         "audio_clock_rate": media.audio_clock_rate,
                         "audio_sample_rate": match media.audio_codec {
                             "G722" => 16_000,
-                            "OPUS" => 48_000,
+                            "OPUS" | "MP4A-LATM" => 48_000,
                             _ => 8_000,
                         },
                         "video_codec": answer_video_port.and(media.video_codec),

@@ -389,7 +389,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     vks_common::codec_capabilities::set_audio_codec_availability(
         vks_common::codec_capabilities::AudioCodecAvailability { aac_latm },
     );
-    info!(aac_latm, "gateway audio codec availability (not advertised until the bridge lands)");
+    info!(aac_latm, "gateway audio codec availability (AAC advertised only with bridge + pool preflight)");
 
     if let Err(error) = vks_server::webrtc_runtime::preflight(&handler_config) {
         error!(%error, "WebRTC preflight failed");

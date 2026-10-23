@@ -566,7 +566,16 @@ impl CodecProfile {
     }
 
     fn audio(self) -> Vec<&'static OfferCodec> {
-        AUDIO_OFFER.iter().filter(|codec| self == Self::Full || codec.native || codec.dtmf).collect()
+        // AAC-LATM is advertised only when the host probed both FFmpeg
+        // directions; otherwise it would be "offer then 488 after dial".
+        self.audio_with(vks_common::codec_capabilities::audio_codec_available("MP4A-LATM"))
+    }
+
+    fn audio_with(self, aac: bool) -> Vec<&'static OfferCodec> {
+        AUDIO_OFFER
+            .iter()
+            .filter(|codec| self == Self::Full || codec.native || codec.dtmf || (codec.payload == 113 && aac))
+            .collect()
     }
 
     fn video(self) -> Vec<&'static OfferCodec> {
@@ -1283,6 +1292,14 @@ fn h264_baseline_level(media: &SdpMedia, payload: u8) -> Option<u8> {
 /// audio"; vendor/unknown codecs never cause a parse error. Unsupported video
 /// leaves audio usable.
 pub fn negotiate_media_detailed(offer: &str, answer: &str) -> Result<NegotiatedMedia, NegotiationFailure> {
+    negotiate_media_detailed_with(offer, answer, vks_common::codec_capabilities::audio_codec_available("MP4A-LATM"))
+}
+
+fn negotiate_media_detailed_with(
+    offer: &str,
+    answer: &str,
+    aac_available: bool,
+) -> Result<NegotiatedMedia, NegotiationFailure> {
     let local = parse_sdp(offer).ok_or(NegotiationFailure::UnusableSdp)?;
     let remote = parse_sdp(answer).ok_or(NegotiationFailure::UnusableSdp)?;
     let local_audio = usable_media(&local, "audio").ok_or(NegotiationFailure::NoCommonAudio)?;
@@ -1310,7 +1327,8 @@ pub fn negotiate_media_detailed(offer: &str, answer: &str) -> Result<NegotiatedM
         break;
     }
     let codec = first_common.ok_or(NegotiationFailure::NoCommonAudio)?;
-    if !codec.native {
+    let aac_latm = codec.payload == 113 && aac_available;
+    if !codec.native && !aac_latm {
         return Err(NegotiationFailure::UnsupportedAudio { codec: codec.name.to_string(), payload: codec.payload });
     }
 
@@ -1639,5 +1657,52 @@ a=rtpmap:97 H264/90000\r\na=fmtp:97 packetization-mode=1;profile-level-id=42801e
         assert_eq!(media.video_payload_type, Some(97));
         assert_eq!(media.local_video_payload_type, Some(97));
         assert_eq!(media.video_codec, Some("H264"));
+    }
+
+    #[test]
+    fn aac_latm_is_offered_last_and_only_with_probe_availability() {
+        let without = CodecProfile::Native.audio_with(false);
+        assert!(without.iter().all(|codec| codec.payload != 113));
+        let with = CodecProfile::Native.audio_with(true);
+        let aac = with.iter().find(|codec| codec.payload == 113).expect("PT113 advertised");
+        assert_eq!(aac.name, "MP4A-LATM");
+        assert_eq!(aac.clock, 90_000);
+        let last_audio = with.iter().rev().find(|codec| !codec.dtmf).expect("audio codec");
+        assert_eq!(last_audio.payload, 113, "AAC must stay the last audio codec before DTMF");
+        let sdp = build_offer(CodecProfile::Full, "127.0.0.1", 41000, None);
+        assert!(sdp.contains("a=rtpmap:113 MP4A-LATM/90000"), "{sdp}");
+    }
+
+    #[test]
+    fn aac_answer_needs_the_probe_and_has_no_ptime20() {
+        let offer = build_offer(CodecProfile::Full, "127.0.0.1", 41000, None);
+        let answer = "v=0\r\nc=IN IP4 192.0.2.10\r\nm=audio 32000 RTP/AVP 113\r\n\
+a=rtpmap:113 MP4A-LATM/90000\r\na=fmtp:113 profile-level-id=1;object=2;cpresent=1\r\n";
+        let media = negotiate_media_detailed_with(&offer, answer, true).expect("AAC with a probe");
+        assert_eq!(media.audio_payload_type, 113);
+        assert_eq!(media.audio_codec, "MP4A-LATM");
+        assert!(matches!(
+            negotiate_media_detailed_with(&offer, answer, false),
+            Err(NegotiationFailure::UnsupportedAudio { payload: 113, .. })
+        ));
+        let inbound = crate::uas::InboundMedia {
+            audio_payload_type: 113,
+            audio_codec: "MP4A-LATM",
+            audio_clock_rate: 90_000,
+            audio_channels: 1,
+            audio_fmtp: Some("profile-level-id=1;object=2;cpresent=1"),
+            audio_ptime_ms: 0,
+            video_payload_type: None,
+            video_codec: None,
+            video_fmtp: None,
+            remote_ip: "192.0.2.10".into(),
+            remote_audio_port: 32000,
+            remote_video_port: None,
+            remote_video_ip: None,
+            video_offered: false,
+        };
+        let answer_sdp = crate::uas::build_answer("127.0.0.1", 1, 41000, None, &inbound);
+        assert!(answer_sdp.contains("a=rtpmap:113 MP4A-LATM/90000"), "{answer_sdp}");
+        assert!(!answer_sdp.contains("a=ptime"), "AAC frame is 21.33 ms: {answer_sdp}");
     }
 }

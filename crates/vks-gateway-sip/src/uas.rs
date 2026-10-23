@@ -257,7 +257,11 @@ pub fn build_answer(
     if let Some(fmtp) = media.audio_fmtp {
         sdp.push_str(&format!("a=fmtp:{} {fmtp}\r\n", media.audio_payload_type));
     }
-    sdp.push_str(&format!("a=ptime:{}\r\n", media.audio_ptime_ms));
+    // MP4A-LATM is 1024 samples (21.33 ms) per frame; a ptime of 20 would
+    // promise packets the encoder cannot produce. 0 means "omit".
+    if media.audio_ptime_ms > 0 {
+        sdp.push_str(&format!("a=ptime:{}\r\n", media.audio_ptime_ms));
+    }
     if media.audio_codec == "G723" {
         // G.723.1 can pack multiple 30 ms frames; the bridge decodes one.
         sdp.push_str("a=maxptime:30\r\n");
@@ -440,6 +444,33 @@ fn bridgeable_audio(section: &str, payload: u8) -> Option<BridgeableAudio> {
     } else if (96..=127).contains(&payload) {
         let (name, clock, channels) = declared_codec(section, payload)?;
         let name = name.trim().to_ascii_uppercase().replace(['.', '-', '_'], "");
+        if name == "MP4ALATM" {
+            if !vks_common::codec_capabilities::audio_codec_available("MP4A-LATM") {
+                return None;
+            }
+            // Slice 3 supports in-band SMC (cpresent=1) only: a config-only
+            // stream needs a synthetic SMC built from fmtp config=, which is
+            // not implemented yet. Refusing it here yields 488 instead of
+            // "200 OK and silence".
+            if clock != 90_000 || channels.unwrap_or(1) != 1 {
+                return None;
+            }
+            let fmtp = section
+                .lines()
+                .filter(|line| line.to_ascii_lowercase().starts_with(&format!("a=fmtp:{payload} ")))
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if fmtp.contains("cpresent=0") {
+                return None;
+            }
+            return Some(BridgeableAudio {
+                codec: "MP4A-LATM",
+                clock: 90_000,
+                channels: 1,
+                fmtp: Some("profile-level-id=1;object=2;cpresent=1"),
+                ptime_ms: 0,
+            });
+        }
         if name == "OPUS" {
             // RFC 7587: 48 kHz clock, rtpmap channel count 2 (codec maximum);
             // the bridge itself is mono, advertised via stereo=0.
