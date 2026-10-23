@@ -103,17 +103,7 @@ impl Compositor {
             let Some(destination) = canvas.data.get_mut(destination_row + ox..destination_row + ox + dw) else {
                 continue;
             };
-            let mut fx = 0usize;
-            let mut rem = 0usize;
-            for pixel in destination {
-                *pixel = source[fx];
-                fx += step_x;
-                rem += rem_x;
-                if rem >= dw {
-                    rem -= dw;
-                    fx += 1;
-                }
-            }
+            Self::scale_row(destination, source, dw, step_x, rem_x);
         }
         // Chroma is half-resolution. Layout rects can have odd origins or widths
         // (Focus strips with 8+ participants, 7x7 presets, crossfade intermediate
@@ -146,21 +136,61 @@ impl Compositor {
                         destination.fill(128);
                         continue;
                     }
-                    let mut fx = 0usize;
-                    let mut rem = 0usize;
-                    for pixel in destination {
-                        *pixel = frame.data[source_offset + source_y * chroma_width + fx];
-                        fx += chroma_step_x;
-                        rem += chroma_rem_x;
-                        if rem >= chroma_dw.max(1) {
-                            rem -= chroma_dw.max(1);
-                            fx += 1;
-                        }
-                    }
+                    let source_row = &frame.data[source_offset + source_y * chroma_width
+                        ..source_offset + source_y * chroma_width + chroma_width];
+                    let cw_dest = chroma_dw.max(1);
+                    Self::scale_row(destination, source_row, cw_dest, chroma_step_x, chroma_rem_x);
                 }
             }
         }
     }
+    /// Copies one scaled row using exact `floor(dx * src_w / dst_w)`.
+    ///
+    /// The scalar fallback is the incremental quotient/remainder sampler. Exact
+    /// integer downscales take every `src_w / dst_w`-th sample; the canonical
+    /// 2×2 layout (1280×720 into 960×540) is a 4:3 downscale, where three
+    /// output samples come from each group of four input samples (`0, 1, 2`;
+    /// `3` is skipped). Both fast paths are byte-identical to the fallback; the
+    /// tests pin this against the floor formula.
+    fn scale_row(destination: &mut [u8], source: &[u8], dw: usize, step_x: usize, rem_x: usize) {
+        debug_assert_eq!(destination.len(), dw);
+        if step_x == 1 && rem_x == 0 {
+            if let Some(source) = source.get(..dw) {
+                destination.copy_from_slice(source);
+            }
+            return;
+        }
+        if rem_x == 0 && step_x > 1 {
+            if let Some(source) = source.get(..dw.saturating_mul(step_x)) {
+                for (pixel, chunk) in destination.iter_mut().zip(source.chunks_exact(step_x)) {
+                    *pixel = chunk[0];
+                }
+                return;
+            }
+        }
+        // 4:3 downscale (fw*3 == dw*4): each 3 output samples use source 0,1,2
+        // of the next 4, matching floor(x*4/3) exactly. Canonical 2×2 tiles.
+        if dw.is_multiple_of(3) && source.len().saturating_mul(3) == dw.saturating_mul(4) {
+            for (group, chunk) in destination.chunks_exact_mut(3).zip(source.chunks_exact(4)) {
+                group[0] = chunk[0];
+                group[1] = chunk[1];
+                group[2] = chunk[2];
+            }
+            return;
+        }
+        let mut fx = 0usize;
+        let mut rem = 0usize;
+        for pixel in destination {
+            *pixel = source[fx];
+            fx += step_x;
+            rem += rem_x;
+            if rem >= dw {
+                rem -= dw;
+                fx += 1;
+            }
+        }
+    }
+
     /// Затирает `rect` фоном канваса (luma 16 / chroma 128 для YUV, 0 для
     /// серого). Используется персональной сборкой: ячейка зрителя в общей
     /// сетке освобождается под самопросмотр.
@@ -328,6 +358,26 @@ mod tests {
             rects.insert(i, PixelRect::new(x, y, 960, 540));
         }
         (frames, rects)
+    }
+
+    #[test]
+    fn exact_ratio_fast_paths_match_floor_mapping() {
+        // 1280x720 -> 960x540: both axes are exactly 4:3, so the luma and
+        // chroma fast paths run. 640x360 -> 480x270 is the same ratio and also
+        // exercises integer chroma dimensions.
+        for (fw, fh, dw) in [(1280usize, 720usize, 960usize), (640, 360, 480), (1280, 720, 640), (1280, 720, 1280)] {
+            let mut source = vec![0u8; fw * fh];
+            for y in 0..fh {
+                for x in 0..fw {
+                    source[y * fw + x] = ((x * 7 + y * 13) % 251) as u8;
+                }
+            }
+            let mut destination = vec![0u8; dw];
+            Compositor::scale_row(&mut destination, &source, dw, fw / dw, fw % dw);
+            for (dx, pixel) in destination.iter().enumerate() {
+                assert_eq!(*pixel, source[dx * fw / dw], "luma mismatch at dx={dx}, fw/dw={fw}/{dw}");
+            }
+        }
     }
 
     #[test]
