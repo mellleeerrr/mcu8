@@ -106,9 +106,6 @@
   // поставил 25 вместо исходного N). Выполняется из reAdopt, когда вендор
   // выставил свой preset_*, или из страховочного таймера (медленный вендор).
   var pendingAdopt = null;
-  // Исходное N на случай, если вендор выставит preset_* уже после страховочного
-  // таймера: следующий preset_* обязан вернуть это N, а не текущие 25.
-  var adoptTarget = 0;
   var identityName = ''; // displayName серверной раскладки: вендор может обнулить
   var constructorState = 'idle'; // idle | loading | ready | failed
   var constructorSlots = Object.create(null);
@@ -225,8 +222,7 @@
     if (!modeTileEngaged) return;
     // Только вендорские preset_* — Codian-карточки не перехватываем.
     if (preset.indexOf('preset_') !== 0) return;
-    var count = adoptTarget > 0 ? adoptTarget : currentCount();
-    adoptTarget = 0;
+    var count = currentCount();
     if (!(count > 0)) return;
     // Без дедупликации: повторный клик того же чипа тоже обязан вернуть vks_*
     // (после adopt preset становится vks_*, и следующий subscribe выходит выше).
@@ -514,7 +510,6 @@
     // наш vks_* и карточка каталога осталась бы без active и без сохранения.
     modeTileEngaged = false;
     pendingAdopt = null;
-    adoptTarget = 0;
     syncModeTile();
     syncActive();
     subscribe(editor);
@@ -751,7 +746,6 @@
       // вендорский preset_* после переключения.
       if (current.mode !== 'manual' && currentPreset.indexOf('preset_') !== 0 && currentPreset.indexOf('vks_') !== 0) return;
       pendingAdopt = null;
-      adoptTarget = 0;
       rememberIdentity(current);
       restoreIdentity(editor);
       selectConstructor('vks_' + (side === 'grid' ? 'grid' : 'pin_' + side) + '_' + count);
@@ -760,12 +754,10 @@
       // Вендор после mode='manual' асинхронно ставит preset_equal_25; пока он
       // не сделал этого, reAdopt молчит (pendingAdopt), иначе примет 25.
       pendingAdopt = apply;
-      adoptTarget = count;
       try {
         editor.mode = 'manual';
       } catch (e) {
         pendingAdopt = null;
-        adoptTarget = 0;
         console.warn('codian-layouts: не удалось переключить режим на manual', e);
         return;
       }
@@ -1031,7 +1023,6 @@
     }
     function adoptNow() {
       pendingAdopt = null;
-      adoptTarget = 0;
       // N=0 (медленный/неудачный GET и нет числового хвоста) — остаёмся на
       // вендорском preset, тихий vks_*_0 запрещён.
       if (!(startCount > 0)) return;
@@ -1056,11 +1047,10 @@
     // schedule() по MutationObserver после вендорских перерисовок) — таймер
     // только страховка для нестандартного пути; target-N уже зафиксирован.
     pendingAdopt = adoptNow;
-    adoptTarget = startCount;
     setTimeout(function () {
-      // Вендор не успел за 400 мс: выбираем наше N сами, а adoptTarget
-      // заставит следующий preset_* (поздний сброс вендора) снова взять его,
-      // а не текущие 25.
+      // Вендор не успел за 400 мс: выбираем наше N сами (startCount уже
+      // зафиксирован в adoptNow). Поздний сброс вендора после этого — вне
+      // защиты: live он не воспроизводится (сброс ~100–350 мс).
       var run = pendingAdopt;
       if (!run) return;
       pendingAdopt = null;
