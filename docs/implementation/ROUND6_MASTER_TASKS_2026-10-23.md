@@ -347,50 +347,37 @@ error перечисляет grid, release-note SIP UAS, «970→факт».
 захват payload сохранения в evidence; чипы «Количество видеоокон» сбрасывают
 preset на вендорский — зафиксировать поведение в тесте.
 
-## Отметки выполнения
+## Отметки выполнения (2026-10-24)
 
-- [x] T1 — commit `c36f973`: бейджи 59/59, live 0 ошибок. Ревью: r6-t1-review-elegance
-  9/10 → после P1 (aria-label с числом, единый источник count/data-windows) 9.5/10.
-  P1 применены, MANIFEST согласован.
-- [ ] T2 — ЗАКРЫВАЕТСЯ после полного цикла ревью (5/10 `f3a006a` → 6/10 →
-  7/10 `82d93b8`; все P0/P1/P2 закрыты в текущем WIP, ожидает финального
-  ревью на коммите). Что исправлено по замечаниям ревью:
-  - повторный клик чипа и reopen+чип: `reAdopt` больше не гейтится transient-
-    флагом — сохранённая `vks_*` сразу даёт engaged=true и сторону из preset,
-    `adoptPending` удалён, дедупликации нет;
-  - чип 25/повторный чип: `constructorTarget` и мёртвый `onChipPointer` удалены;
-    первичный выбор N — событийный one-shot (`pendingAdopt` в `reAdopt` на
-    первом вендорском `preset_*`), без таймерной гонки; fallback 400 мс только
-    снимает заморозку;
-  - Codian/`type=default`: `reAdopt` реагирует только на `preset_*`,
-    `select()` снимает engaged; имя/type восстанавливаются через
-    `identityName`+`restoreIdentity` в отложенном adopt; `type` конструктора —
-    `individual`;
-  - клик «Конструктор» из manual/codian: немедленный `vks_<side>_<N>` (без
-    вендорского сброса), сторона pin_r/l/t/b сохраняется;
-  - `serverCount` инвалидируется после PATCH (обёртка fetch) — Конструктор
-    после save+auto берёт актуальное N.
-  Raw evidence (браузерный кеш отключён, реальные Playwright-клики):
-  `t2-final-matrix-chips-pin-reopen.json` (auto/13→ctor13→чип9→повтор9→чип25→
-  карточка pin_r→чип9→PATCH vks_pin_r_9→reopen→чип25=vks_pin_r_25),
-  `t2-final-type-default-codian-autocycle.json` (type=default: имя/type целы;
-  Codian после конструктора; auto→ctor берёт сохранённое N),
-  `t2-final-reopen-tile-chip25.json` (reopen vks_grid_13→тайл→чип25→
-  PATCH vks_grid_25→reopen), `t2-constructor-13.png` (13 окон, бейджи 13,
-  счётчик 13). Ревью T2 на `4c36a6c`: 9/10, P0/P1 нет, P2: adopt без guard
-  N>0/400-мс fallback, дублирование initialAdopt/pendingAdopt, после Codian
-  нет active mode-тайла, невоспроизводимый шаг в evidence, T2 смешан с T13.
-  Исправлено (T2.9): `initialAdopt` удалён (pendingAdopt — единственный
-  источник), guard `startCount>0` в adoptNow, fallback 400 мс сам выбирает N
-  и `adoptTarget` возвращает его на позднем вендорском сбросе; после ухода
-  из конструктора вендорский тайл «Ручная настройка» снова active; save/auto
-  берут актуальное N (баг разбора `video_layout.payload` в loadLayoutCount:
-  читался внешний объект, serverCount всегда 0; плюс инвалидация после
-  вендорского «Сохранить» — fetch/XHR/клик); evidence перегенерировано
-  (save/reopen vks_grid_13 в matrix, c2 с кликом чипа, c4=vks_grid_9).
-  MANIFEST 214/214. Повторное ревью T2.9 (`ebce17a`): **9.5/10, ПРИНИМАЮ**,
-  P0/P1/P2 нет. T2 закрыта. По P3 ревьюера: мёртвая ветка `adoptTarget` удалена
-  (T2.10) — поведение эквивалентно, подтверждено live probe2 (a2 vks_grid_13,
-  b3 codian_07 + manual active, c4 vks_grid_9); evidence-маркеры кликов —
-  в бэклоге T12 (P3, не блокер). T13.2 — на финальном ревью.
-- [ ] T2 … T12
+- [x] T1 — `c36f973`/`3c6124c`: бейджи 59/59, live 0 ошибок; ревью elegance
+  9→9.5, bug 9→9.5 после P0 (манифест). T1.2 guard count≤0.
+- [x] T2 — закрыта: T2.9 `ebce17a` (ревью 9.5/ПРИНИМАЮ) + T2.10 `f2546d4`
+  (P3 мёртвый adoptTarget); live matrix/chips/reopen в evidence.
+- [x] T3 — закрыта решением: вендорский ряд «Количество видеоокон» 1..64 уже
+  даёт контрол; gap/margin только в id/API (вендор save их отбрасывает);
+  `vks-layout` 67 тестов.
+- [x] T4a — `scripts/qwen.sh` + `docs/implementation/QWEN_INTEGRATION.md`
+  (коммит `c36f973`); endpoint qwen в сети не найден — мост готов.
+- [ ] T4b — вне раунда по решению (не входит в R6).
+- [x] T5a — `66af883`: −552 LOC/12 файлов, гейты зелёные.
+- [ ] T5b — снята зависимость: T10b сделал id-only apply без trait-половины
+  core_layouts; удаление отложено до появления потребителя (риск API).
+- [ ] T5c — только по отдельному решению владельца (viewer/self-view/
+  webrtc_glue остаются как задел R7/ADR-0029).
+- [x] T6 — `7190361`: конфиги прочитаны cat, противоречий 0, allowlist один
+  источник, dev-IP в drop-in, SIP UAS release-note.
+- [x] T7 — `d7ddd4e`: RBAC карточек/списков, PATCH profile/sessions, 409
+  дублей, mode-only; vks-admin 296/0.
+- [x] T8 — `12f2983` + `fc8d165`: приоритет abonent_id, честный статус шлюзов
+  (ActiveFlag), allowlist из одного источника; vks-server 108/3 + 22/0.
+- [x] T9 — `840ff9c`: PG TEXT→uuid bind/cast, живой PG-тест в CI (`test-postgres`).
+- [ ] T10a — ОТКРЫТА: proto-поля `layout_id/preset/mode` + `LayoutModeChanged`
+  (ADR) не реализованы; требует proto/WS-контракта и потребителей.
+- [x] T10b — `f9b0a1b`: id-only apply, тесты vks_grid_9/codian_07, auto-сброс.
+- [ ] T10c — ОТКРЫТА вслед за T10a: прод-потребитель LayoutChanged в PNM WS/SDK.
+- [x] T11 — `9eb2f4e`: SUPERSEDED 43/46/49, fixtures+5 тестов, golden
+  174 id/2178 окон (84 passed/1 ignored).
+- [x] T12 — `9efd5be`: create_room-adopt pending, calculate id конструктора,
+  G722-флейк не воспроизведён (бэклог); README 1317/8.
+- [ ] T13 — `0a495b4` (T13.3): счётчик 1..100, a11y/outline/кламп, выход
+  через manual-тайл; ре-ревью T13.3 в процессе (предыдущее 9.3, P2 закрыт).
