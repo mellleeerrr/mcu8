@@ -1,0 +1,24 @@
+PASS  login 200 + token :: 200
+PASS  каталог 200 :: 200
+PASS  каталог: 65 вендорских + 54 codian :: (65, 54)
+PASS  codian_07 в каталоге :: {'id': 'codian_07', 'slots': [{'height': 360.0, 'position': 1, 'width': 640.0, 'x': 0.0, 'y': 0.0, 'z_order': 0}, {'height': 180.0, 'position': 2, 'width': 320.0, 'x': 640.0, 'y': 0.0, 'z_order': 0}, {'height': 180.0, 'position': 3, 'width': 320.0, 'x': 960.0, 'y': 0.0, 'z_order': 0}, {'height': 180.0, 'position': 4, 'width': 320.0, 'x': 640.0, 'y': 180.0, 'z_order': 0}, {'height': 180.0, 'position': 5, 'width': 320.0, 'x': 960.0, 'y': 180.0, 'z_order': 0}, {'height': 180.0, 'position': 6, 'width': 320.0, 'x': 0.0, 'y': 360.0, 'z_order': 0}, {'height': 180.0, 'position': 7, 'width': 320.0, 'x': 320.0, 'y': 360.0, 'z_order': 0}, {'height': 180.0, 'position': 8, 'width': 320.0, 'x': 640.0, 'y': 360.0, 'z_order': 0}, {'height': 180.0, 'position': 9, 'width': 320.0, 'x': 960.0, 'y': 360.0, 'z_order': 0}, {'height': 180.0, 'position': 10, 'width': 320.0, 'x': 0.0, 'y': 540.0, 'z_order': 0}, {'height': 180.0, 'position': 11, 'width': 320.0, 'x': 320.0, 'y': 540.0, 'z_order': 0}, {'height': 180.0, 'position': 12, 'width': 320.0, 'x': 640.0, 'y': 540.0, 'z_order': 0}, {'height': 180.0, 'position': 13, 'width': 320.0, 'x': 960.0, 'y': 540.0, 'z_order': 0}], 'source': 'codian', 'title': 'Угловая 1+12 (4×4)', 'windows': 13}
+PASS  каталог несёт геометрию slots :: 13
+PASS  слоты каталога 1-based :: {'height': 360.0, 'position': 1, 'width': 640.0, 'x': 0.0, 'y': 0.0, 'z_order': 0}
+PASS  calculate codian_07 = 200 :: 200
+PASS  calculate: 13 окон :: 13
+PASS  calculate согласован с каталогом
+PASS  calculate: неизвестный codian -> 400 :: 400
+PASS  создана конференция :: (200, ['conference'])
+PASS  создана раскладка codian_43 :: 201
+PASS  payload.preset сохранён как codian_43 (L-3) :: codian_43
+PASS  attach раскладки к конференции :: 204
+PASS  раскладка видна в списке конференции :: ['5e7df9cb-7da3-4f7d-b0f7-bd2a43a4ae0b']
+PASS  список отдаёт codian-пресет (L-3) :: codian_43
+PASS  PATCH раскладки 200 :: (200, None)
+PASS  PATCH сохранил codian_07 и size=13 (L-3) :: ('codian_07', 13)
+PASS  сессия запущена :: (200, None)
+PASS  mode-эндпоинт 200 :: 200
+PASS  mode: пресет не подменён (L-3) :: codian_07
+PASS  mode: size из slot_count = 13 (L-3) :: 13
+
+RESULT: ALL PASS
