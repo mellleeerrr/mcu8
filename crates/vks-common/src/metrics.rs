@@ -131,10 +131,10 @@ pub const MCU_TICK_BUCKETS: &[f64] = &[
 
 /// MCU engine tick work: audio mix or video compose, excluding RTP/network,
 /// input cloning and composite cloning. It is registered lazily like the other
-/// collectors. Only `init_default()` (through `init_mcu_tick_metrics`, and only
-/// when the env flag is on) creates the zero-count children; the env-gated
-/// `observe_mcu_tick` records samples. A default deployment pays one cached
-/// branch check per tick and exposes no samples.
+/// collectors. With the env flag on, `init_default()` (through
+/// `init_mcu_tick_metrics`) pre-materialises zero-count children; a lazy
+/// `observe_mcu_tick` would also create them on first sample. A default
+/// deployment pays one cached branch check per phase tick and exposes no samples.
 static MCU_TICK_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!(
         "vks_mcu_tick_duration_seconds",

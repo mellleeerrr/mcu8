@@ -29,13 +29,13 @@ use vks_common::metrics::MCU_TICK_BUCKETS;
 use vks_core::{ParticipantId, RoomId, Track, TrackKind};
 use vks_media_mcu::{Frame, McuEngine};
 
+/// Audio tasks are due every 20 ms (50 Hz); video at 34 ms because the engine
+/// drops ticks closer than 30 ms. The wall-clock period-loss gate below is the
+/// cadence guard.
 const AUDIO_PERIOD_MS: u64 = 20;
 const VIDEO_PERIOD_MS: u64 = 34;
 const AUDIO_SLO_BOUND: f64 = 0.002;
 const VIDEO_FRAME_BUDGET: f64 = 0.033;
-/// Audio tasks are due every 20 ms (50 Hz); video at 34 ms because the engine
-/// drops ticks closer than 30 ms. The wall-clock period-loss gate below is the
-/// cadence guard.
 const FRAME_WIDTH: u32 = 1280;
 const FRAME_HEIGHT: u32 = 720;
 
@@ -235,15 +235,20 @@ struct PhaseReport {
     buckets_cumulative: Vec<(f64, u64)>,
 }
 
-fn phase_report(
-    tally: &Tally,
-    delta: &PhaseSnapshot,
+/// Named inputs for [`phase_report`]: two adjacent `Option<f64>` positional
+/// arguments would silently transpose if swapped.
+struct PhaseReportInput<'a> {
+    tally: &'a Tally,
+    delta: &'a PhaseSnapshot,
     scheduled: u64,
     rate: f64,
     le_2ms: Option<f64>,
     le_33ms: Option<f64>,
     dropped: Option<u64>,
-) -> PhaseReport {
+}
+
+fn phase_report(input: PhaseReportInput<'_>) -> PhaseReport {
+    let PhaseReportInput { tally, delta, scheduled, rate, le_2ms, le_33ms, dropped } = input;
     let p99 = delta.p99();
     PhaseReport {
         periods: tally.periods,
@@ -346,8 +351,10 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     let warmup = env_usize("VKS_SOAK_WARMUP", 3);
     let participants = env_usize("VKS_SOAK_PARTICIPANTS", 4);
     assert!((5..=604_800).contains(&seconds), "VKS_SOAK_SECONDS must be 5..=604800, got {seconds}");
-    assert!(warmup >= 1 && warmup < seconds, "VKS_SOAK_WARMUP must be >=1 and < seconds");
-    assert!((2..=32).contains(&participants), "VKS_SOAK_PARTICIPANTS must be 2..=32");
+    assert!(warmup >= 1 && warmup < seconds, "VKS_SOAK_WARMUP must be >=1 and < seconds, got {warmup} for {seconds}");
+    // The admin-unbridge step indexes pids[1], so one participant cannot exercise
+    // the two-sided admin gate.
+    assert!((2..=32).contains(&participants), "VKS_SOAK_PARTICIPANTS must be 2..=32, got {participants}");
     let out = std::env::var("VKS_SOAK_OUT").unwrap_or_else(|_| "target/t14b-mcu-tick-soak.json".into());
     assert!(!out.trim().is_empty(), "VKS_SOAK_OUT must not be empty");
 
@@ -487,16 +494,24 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
         "participants": participants,
         "frame": {"width": FRAME_WIDTH, "height": FRAME_HEIGHT, "format": "I420"},
-        "audio": phase_report(&audio, &audio_delta, audio_scheduled, audio_hz, audio_ratio, None, None),
-        "video": phase_report(
-            &video,
-            &video_delta,
-            video_scheduled,
-            effective_video_fps,
-            video_slo_ratio,
-            video_budget_ratio,
-            Some(dropped),
-        ),
+        "audio": phase_report(PhaseReportInput {
+            tally: &audio,
+            delta: &audio_delta,
+            scheduled: audio_scheduled,
+            rate: audio_hz,
+            le_2ms: audio_ratio,
+            le_33ms: None,
+            dropped: None,
+        }),
+        "video": phase_report(PhaseReportInput {
+            tally: &video,
+            delta: &video_delta,
+            scheduled: video_scheduled,
+            rate: effective_video_fps,
+            le_2ms: video_slo_ratio,
+            le_33ms: video_budget_ratio,
+            dropped: Some(dropped),
+        }),
         "admin_rebuild_renders": admin_renders,
         "admin_rebuild_recorded_ticks": admin_pollution,
         "histogram_buckets_seconds": MCU_TICK_BUCKETS,

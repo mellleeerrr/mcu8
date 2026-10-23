@@ -66,8 +66,9 @@ Video exact `le=33 ms` ratio **1.000**, engine `frames_dropped` delta 883 (all
 exact `le=2 ms` ratio **1.000**, admin rebuilds rendered 2 frames and recorded
 0 ticks. 1492 of 1500 wall-clock audio periods produced their first tick (99.5%);
 the 8 losses are first attempts rejected by the engine's 18 ms audio throttle
-when the loop woke a few milliseconds early (the harness slot executed but the
-audio tick was rejected, so no audio work ran; `missed_periods` is 0 because no
+because the previous successful tick ran slightly late, so the next 20 ms grid
+slot arrived within the engine's 18 ms guard: the harness slot executed but the
+audio tick was rejected and no audio work ran (`missed_periods` is 0 because no
 wall-clock slot was skipped). They are inside the 1%
 period-loss budget on this shared host, and the audio histogram count equals the
 tick count (1492). The wall-clock gate is deliberately load-sensitive: a busier
