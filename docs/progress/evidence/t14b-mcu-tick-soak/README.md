@@ -68,9 +68,9 @@ Video exact `le=33 ms` ratio **1.000**, engine `frames_dropped` delta 883 (all
 883 are the deliberate duplicate/throttle probes; first successes 883), audio
 exact `le=2 ms` ratio **1.000**, admin rebuilds rendered 2 frames and recorded
 0 ticks. All 1500 wall-clock audio periods produced their first tick on this
-(lighter-load) run; the previous run's 8/1500 losses were 18 ms throttle rejects
-after a late previous tick (no audio work ran, `missed_periods=0`) and stayed
-inside the 1% budget. The audio histogram count equals the tick count (1500).
+lighter-load run; heavier-load runs showed 18 ms throttle rejects after a late
+previous tick (no audio work ran, `missed_periods=0`) and stayed inside the 1%
+budget. The audio histogram count equals the tick count (1500).
 The wall-clock gate is deliberately load-sensitive: a busier host can fail it,
 and its floored lower bound can hide a single edge-rounding slot.
 
@@ -103,7 +103,7 @@ exact p99/mean are load-sensitive even though the SLO conclusions are stable.
   measured; S20 owns per-room actors and the multi-room p99.
 - Audio load is four participants; the signal is near full scale but not a
   stress corpus.
-- 1492/883 samples support the exact rank gates, not a precise p99 point; the
+- 1500/883 samples support the exact rank gates, not a precise p99 point; the
   report labels the estimate and its bucket interval.
 - This artifact does not prove that `/metrics` was scraped on the live service;
   procedure A below is how to obtain one. Default-off absence is covered by
