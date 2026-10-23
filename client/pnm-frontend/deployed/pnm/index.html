@@ -278,6 +278,28 @@ html.theme-dark .main svg.main-blank__image {
  html.theme-dark .main .main__background {
   display: none !important;
 }
+
+/* Task 3: cancel inherited inversion on floating surfaces and restyle them.
+   Filter cancellation is approximate because the root uses invert(85%);
+   direct colors are therefore intentionally dark. */
+html.theme-dark .main .mdc-menu-surface,
+html.theme-dark .main .tc-context-menu,
+html.theme-dark .main .notification-center__menu,
+html.theme-dark .main .header-profile__menu,
+html.theme-dark .main .bookmarks-drawer,
+html.theme-dark .main .notifier__container {
+  filter: invert(100%) hue-rotate(180deg);
+  background-color: #1f2328 !important;
+  color: #e7e9ec !important;
+  border: 1px solid #2b3138;
+  box-shadow: 0 4px 16px rgba(0,0,0,.4);
+}
+html.theme-dark .main-route--monitoring-sessions :focus-visible,
+html.theme-dark .main *:focus-visible {
+  outline: 2px solid #7dd3fc;
+  outline-offset: 2px;
+}
+
 </style>
 </head>
 <body>
