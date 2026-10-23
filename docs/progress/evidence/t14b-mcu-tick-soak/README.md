@@ -42,7 +42,7 @@ falling back.
 
 ## Result — 60 s window (57.0 s measured), 4 participants, release
 
-Run `cb57aa2`, dirty=false, Intel Xeon E5-2699 v3, rustc 1.94.0. Full machine
+Run `aadd264`, dirty=false, Intel Xeon E5-2699 v3, rustc 1.94.0. Full machine
 report: [`soak-60s-4p.json`](soak-60s-4p.json).
 
 | phase | samples | exact `le=2ms` | p99 bucket (estimate) | mean |
