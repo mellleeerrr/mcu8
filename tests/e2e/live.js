@@ -542,31 +542,36 @@ async function api(token, method, urlPath, body) {
     // поэтому выходим через верхнее меню «Панель управления» в список сессий.
     // Даём UI обработать websocket-событие detach: иначе он успевает
     // автоматически открыть редактор default-раскладки уже после нашего клика.
-    await page.waitForTimeout(2000);
-    // The detach websocket event can re-open the default layout editor right
-    // after the first navigation, so retry the menu path until the session's
-    // «Раскладки» tab is actually on screen instead of a layout editor.
+    // Let the detach websocket event settle before leaving the editor; if it
+    // re-opens the default layout after navigation, go back through history
+    // once instead of reloading the whole app (each document costs two codec
+    // GETs, and the perf check caps the journey at 20).
+    await page.waitForTimeout(5000);
     let bodyAfterDetach = '';
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      await page.getByText('Панель управления', { exact: true }).first().click();
-      await page.waitForTimeout(1800);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (attempt === 0) {
+        await page.getByText('Панель управления', { exact: true }).first().click();
+        await page.waitForTimeout(2500);
+      } else {
+        await page.goBack();
+        await page.waitForTimeout(2500);
+      }
       if (sessionName) {
         const sessionRow = page.getByText(sessionName, { exact: true }).first();
         if (await sessionRow.count()) {
           await sessionRow.click();
-          await page.waitForTimeout(1500);
+          await page.waitForTimeout(2000);
         }
       }
       const layoutsPanel = page.getByText('Раскладки', { exact: true }).first();
       if (await layoutsPanel.count()) {
         await layoutsPanel.click();
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(1200);
       }
       bodyAfterDetach = await page.locator('body').innerText();
       if (/Общая/.test(bodyAfterDetach) && !bodyAfterDetach.includes('Название раскладки')) {
         break;
       }
-      await page.waitForTimeout(1500);
     }
     check('layout: default «Общая» visible after detach', /Общая/.test(bodyAfterDetach),
       `${page.url()} ${bodyAfterDetach.slice(0, 500)}`);
