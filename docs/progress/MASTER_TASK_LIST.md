@@ -198,9 +198,12 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > preflight пула воркеров до 200 OK/ACK и audio availability; (6) **юридический гейт**: патенты AAC-LATM
 > (до ~2028/2031) — сознательный 488 в T06b-2b, FFmpeg-процесс не снимает патентные требования; включать
 > native AAC только после legal sign-off, по умолчанию оставить 488/fallback.
-> Срезы: 0) математика 16:15/clock/marker без SDP; 1) `-smc-interval 1` + probe muxer latm/demuxer loas +
-> audio availability; 2) outbound encode-only за флагом; 3) inbound cpresent=1; 4) cpresent=0/config, PLC,
-> pool preflight, 44.1/32, soak; 5) включение после legal + live .132.
+> Срезы: ~~0) математика 16:15/clock/marker без SDP~~ (**готово `c25d49a`: `frames_due`, 90/48 кГц clock,
+> 9 тестов**); ~~1) probe muxer latm/demuxer loas + audio availability~~ (**готово `6a055ee`:
+> `has_audio_latm_bridge`, `audio_codec_available` default=false, startup-публикация; live-бинарь
+> `e8285df5` логирует `aac_latm=true`, SDP всё ещё не объявляет**); 2) outbound encode-only за флагом;
+> 3) inbound cpresent=1; 4) cpresent=0/config, PLC, pool preflight, 44.1/32, soak; 5) включение после
+> legal + live .132.
 > Нельзя: `-flags low_delay`/`-avioflags direct`/`-fflags nobuffer` (ломали AAC), забыть
 > `-probesize 32 -analyzeduration 0` перед `-i`, ждать EOF для кадров, блокировать аудио-цикл чтением stdout,
 > объявлять native AAC без worker/packetizer/probe, резать кадр по MTU вместо drop+metric, писать `ptime:20`
