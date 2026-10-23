@@ -630,6 +630,13 @@
     var button = document.createElement('button');
     button.type = 'button';
     button.className = 'tc-button mdc-button mdc-button--text' + (icon ? ' tc-button--icon' : '');
+    // Доступное имя — на настоящей кнопке: wrapper-div не попадает в AX-дерево
+    // как control, поэтому aria только на контейнере давала иконкам имена
+    // «remove»/«add» вместо «Уменьшить/Увеличить количество видеокон».
+    if (ariaLabel) {
+      button.setAttribute('aria-label', ariaLabel);
+      button.setAttribute('title', ariaLabel);
+    }
     var ripple = document.createElement('span');
     ripple.className = 'mdc-button__ripple';
     button.appendChild(ripple);
@@ -638,6 +645,7 @@
     if (icon) {
       var glyph = document.createElement('i');
       glyph.className = 'material-icons tc-button__icon mdc-button__icon notranslate';
+      glyph.setAttribute('aria-hidden', 'true');
       glyph.textContent = icon;
       content.appendChild(glyph);
     } else {
@@ -681,14 +689,16 @@
     input.setAttribute('data-counter-input', '1');
     input.setAttribute('aria-label', 'Количество видеокон');
     textField.appendChild(input);
-    var outline = document.createElement('span');
-    outline.className = 'tc-notched-outline mdc-notched-outline mdc-notched-outline--upgraded';
-    var leading = document.createElement('span');
-    leading.className = 'mdc-notched-outline__leading';
-    var notch = document.createElement('span');
-    notch.className = 'mdc-notched-outline__notch';
-    var trailing = document.createElement('span');
-    trailing.className = 'mdc-notched-outline__trailing';
+    // 1:1 вендор: div.tc-notched-outline.mdc-notched-outline > div с обоими
+    // tc-/mdc-классами leading/notch/trailing (без `--upgraded`).
+    var outline = document.createElement('div');
+    outline.className = 'tc-notched-outline mdc-notched-outline';
+    var leading = document.createElement('div');
+    leading.className = 'tc-notched-outline__leading mdc-notched-outline__leading';
+    var notch = document.createElement('div');
+    notch.className = 'tc-notched-outline__notch mdc-notched-outline__notch';
+    var trailing = document.createElement('div');
+    trailing.className = 'tc-notched-outline__trailing mdc-notched-outline__trailing';
     outline.appendChild(leading);
     outline.appendChild(notch);
     outline.appendChild(trailing);
@@ -822,7 +832,9 @@
       counterInputTimer = null;
     }
     var count = Math.floor(Number(target.value));
-    var next = count >= 1 && count <= MAX_COUNT ? count : count > MAX_COUNT ? MAX_COUNT : counterValue || 1;
+    // Как вендорский TcTextField(min=1): пусто/0/отрицательное клампится к 1,
+    // перебор — к MAX_COUNT, а не откатывается к прежнему N.
+    var next = Number.isFinite(count) ? Math.max(1, Math.min(MAX_COUNT, count)) : 1;
     applyCount(next);
     syncCounter(next);
   }

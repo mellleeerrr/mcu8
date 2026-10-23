@@ -1,0 +1,482 @@
+{
+ "s1": {
+  "store": {
+   "preset": "preset_default_13",
+   "mode": "auto"
+  },
+  "value": null,
+  "active": false,
+  "ctor": [],
+  "dw": [],
+  "btns": [],
+  "outline": null,
+  "inputCls": null
+ },
+ "s2": {
+  "store": {
+   "preset": "vks_grid_13",
+   "mode": "manual"
+  },
+  "value": "13",
+  "active": false,
+  "ctor": [
+   "vks_grid_13"
+  ],
+  "dw": [
+   "13",
+   "13",
+   "13",
+   "13",
+   "13"
+  ],
+  "btns": [
+   {
+    "action": "min",
+    "wrapAria": "Минимальное количество видеокон (1)",
+    "btnAria": "Минимальное количество видеокон (1)",
+    "btnTitle": "Минимальное количество видеокон (1)",
+    "iconAriaHidden": null,
+    "disabled": false
+   },
+   {
+    "action": "dec",
+    "wrapAria": "Уменьшить количество видеокон",
+    "btnAria": "Уменьшить количество видеокон",
+    "btnTitle": "Уменьшить количество видеокон",
+    "iconAriaHidden": "true",
+    "disabled": false
+   },
+   {
+    "action": "inc",
+    "wrapAria": "Увеличить количество видеокон",
+    "btnAria": "Увеличить количество видеокон",
+    "btnTitle": "Увеличить количество видеокон",
+    "iconAriaHidden": "true",
+    "disabled": false
+   },
+   {
+    "action": "max",
+    "wrapAria": "Максимальное количество видеокон (100)",
+    "btnAria": "Максимальное количество видеокон (100)",
+    "btnTitle": "Максимальное количество видеокон (100)",
+    "iconAriaHidden": null,
+    "disabled": false
+   }
+  ],
+  "outline": {
+   "tag": "DIV",
+   "cls": "tc-notched-outline mdc-notched-outline",
+   "children": [
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__leading mdc-notched-outline__leading"
+    },
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__notch mdc-notched-outline__notch"
+    },
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__trailing mdc-notched-outline__trailing"
+    }
+   ]
+  },
+  "inputCls": "tc-text-field__input mdc-text-field__input"
+ },
+ "trace": [
+  {
+   "value": "1",
+   "active": true
+  },
+  {
+   "value": "10",
+   "active": true
+  },
+  {
+   "value": "100",
+   "active": true
+  }
+ ],
+ "s3": {
+  "store": {
+   "preset": "vks_grid_100",
+   "mode": "manual"
+  },
+  "value": "100",
+  "active": true,
+  "ctor": [
+   "vks_grid_100"
+  ],
+  "dw": [
+   "100",
+   "100",
+   "100",
+   "100",
+   "100"
+  ],
+  "btns": [
+   {
+    "action": "min",
+    "wrapAria": "Минимальное количество видеокон (1)",
+    "btnAria": "Минимальное количество видеокон (1)",
+    "btnTitle": "Минимальное количество видеокон (1)",
+    "iconAriaHidden": null,
+    "disabled": false
+   },
+   {
+    "action": "dec",
+    "wrapAria": "Уменьшить количество видеокон",
+    "btnAria": "Уменьшить количество видеокон",
+    "btnTitle": "Уменьшить количество видеокон",
+    "iconAriaHidden": "true",
+    "disabled": false
+   },
+   {
+    "action": "inc",
+    "wrapAria": "Увеличить количество видеокон",
+    "btnAria": "Увеличить количество видеокон",
+    "btnTitle": "Увеличить количество видеокон",
+    "iconAriaHidden": "true",
+    "disabled": true
+   },
+   {
+    "action": "max",
+    "wrapAria": "Максимальное количество видеокон (100)",
+    "btnAria": "Максимальное количество видеокон (100)",
+    "btnTitle": "Максимальное количество видеокон (100)",
+    "iconAriaHidden": null,
+    "disabled": true
+   }
+  ],
+  "outline": {
+   "tag": "DIV",
+   "cls": "tc-notched-outline mdc-notched-outline",
+   "children": [
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__leading mdc-notched-outline__leading"
+    },
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__notch mdc-notched-outline__notch"
+    },
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__trailing mdc-notched-outline__trailing"
+    }
+   ]
+  },
+  "inputCls": "tc-text-field__input mdc-text-field__input"
+ },
+ "clamp0": {
+  "store": {
+   "preset": "vks_grid_1",
+   "mode": "manual"
+  },
+  "value": "1",
+  "active": true,
+  "ctor": [
+   "vks_grid_1"
+  ],
+  "dw": [
+   "1",
+   "1",
+   "1",
+   "1",
+   "1"
+  ],
+  "btns": [
+   {
+    "action": "min",
+    "wrapAria": "Минимальное количество видеокон (1)",
+    "btnAria": "Минимальное количество видеокон (1)",
+    "btnTitle": "Минимальное количество видеокон (1)",
+    "iconAriaHidden": null,
+    "disabled": true
+   },
+   {
+    "action": "dec",
+    "wrapAria": "Уменьшить количество видеокон",
+    "btnAria": "Уменьшить количество видеокон",
+    "btnTitle": "Уменьшить количество видеокон",
+    "iconAriaHidden": "true",
+    "disabled": true
+   },
+   {
+    "action": "inc",
+    "wrapAria": "Увеличить количество видеокон",
+    "btnAria": "Увеличить количество видеокон",
+    "btnTitle": "Увеличить количество видеокон",
+    "iconAriaHidden": "true",
+    "disabled": false
+   },
+   {
+    "action": "max",
+    "wrapAria": "Максимальное количество видеокон (100)",
+    "btnAria": "Максимальное количество видеокон (100)",
+    "btnTitle": "Максимальное количество видеокон (100)",
+    "iconAriaHidden": null,
+    "disabled": false
+   }
+  ],
+  "outline": {
+   "tag": "DIV",
+   "cls": "tc-notched-outline mdc-notched-outline",
+   "children": [
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__leading mdc-notched-outline__leading"
+    },
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__notch mdc-notched-outline__notch"
+    },
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__trailing mdc-notched-outline__trailing"
+    }
+   ]
+  },
+  "inputCls": "tc-text-field__input mdc-text-field__input"
+ },
+ "clampNeg": {
+  "store": {
+   "preset": "vks_grid_1",
+   "mode": "manual"
+  },
+  "value": "1",
+  "active": true,
+  "ctor": [
+   "vks_grid_1"
+  ],
+  "dw": [
+   "1",
+   "1",
+   "1",
+   "1",
+   "1"
+  ],
+  "btns": [
+   {
+    "action": "min",
+    "wrapAria": "Минимальное количество видеокон (1)",
+    "btnAria": "Минимальное количество видеокон (1)",
+    "btnTitle": "Минимальное количество видеокон (1)",
+    "iconAriaHidden": null,
+    "disabled": true
+   },
+   {
+    "action": "dec",
+    "wrapAria": "Уменьшить количество видеокон",
+    "btnAria": "Уменьшить количество видеокон",
+    "btnTitle": "Уменьшить количество видеокон",
+    "iconAriaHidden": "true",
+    "disabled": true
+   },
+   {
+    "action": "inc",
+    "wrapAria": "Увеличить количество видеокон",
+    "btnAria": "Увеличить количество видеокон",
+    "btnTitle": "Увеличить количество видеокон",
+    "iconAriaHidden": "true",
+    "disabled": false
+   },
+   {
+    "action": "max",
+    "wrapAria": "Максимальное количество видеокон (100)",
+    "btnAria": "Максимальное количество видеокон (100)",
+    "btnTitle": "Максимальное количество видеокон (100)",
+    "iconAriaHidden": null,
+    "disabled": false
+   }
+  ],
+  "outline": {
+   "tag": "DIV",
+   "cls": "tc-notched-outline mdc-notched-outline",
+   "children": [
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__leading mdc-notched-outline__leading"
+    },
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__notch mdc-notched-outline__notch"
+    },
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__trailing mdc-notched-outline__trailing"
+    }
+   ]
+  },
+  "inputCls": "tc-text-field__input mdc-text-field__input"
+ },
+ "clampEmpty": {
+  "store": {
+   "preset": "vks_grid_1",
+   "mode": "manual"
+  },
+  "value": "1",
+  "active": true,
+  "ctor": [
+   "vks_grid_1"
+  ],
+  "dw": [
+   "1",
+   "1",
+   "1",
+   "1",
+   "1"
+  ],
+  "btns": [
+   {
+    "action": "min",
+    "wrapAria": "Минимальное количество видеокон (1)",
+    "btnAria": "Минимальное количество видеокон (1)",
+    "btnTitle": "Минимальное количество видеокон (1)",
+    "iconAriaHidden": null,
+    "disabled": true
+   },
+   {
+    "action": "dec",
+    "wrapAria": "Уменьшить количество видеокон",
+    "btnAria": "Уменьшить количество видеокон",
+    "btnTitle": "Уменьшить количество видеокон",
+    "iconAriaHidden": "true",
+    "disabled": true
+   },
+   {
+    "action": "inc",
+    "wrapAria": "Увеличить количество видеокон",
+    "btnAria": "Увеличить количество видеокон",
+    "btnTitle": "Увеличить количество видеокон",
+    "iconAriaHidden": "true",
+    "disabled": false
+   },
+   {
+    "action": "max",
+    "wrapAria": "Максимальное количество видеокон (100)",
+    "btnAria": "Максимальное количество видеокон (100)",
+    "btnTitle": "Максимальное количество видеокон (100)",
+    "iconAriaHidden": null,
+    "disabled": false
+   }
+  ],
+  "outline": {
+   "tag": "DIV",
+   "cls": "tc-notched-outline mdc-notched-outline",
+   "children": [
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__leading mdc-notched-outline__leading"
+    },
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__notch mdc-notched-outline__notch"
+    },
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__trailing mdc-notched-outline__trailing"
+    }
+   ]
+  },
+  "inputCls": "tc-text-field__input mdc-text-field__input"
+ },
+ "s4": {
+  "store": {
+   "preset": "vks_grid_42",
+   "mode": "manual"
+  },
+  "value": "42",
+  "active": true,
+  "ctor": [
+   "vks_grid_42"
+  ],
+  "dw": [
+   "42",
+   "42",
+   "42",
+   "42",
+   "42"
+  ],
+  "btns": [
+   {
+    "action": "min",
+    "wrapAria": "Минимальное количество видеокон (1)",
+    "btnAria": "Минимальное количество видеокон (1)",
+    "btnTitle": "Минимальное количество видеокон (1)",
+    "iconAriaHidden": null,
+    "disabled": false
+   },
+   {
+    "action": "dec",
+    "wrapAria": "Уменьшить количество видеокон",
+    "btnAria": "Уменьшить количество видеокон",
+    "btnTitle": "Уменьшить количество видеокон",
+    "iconAriaHidden": "true",
+    "disabled": false
+   },
+   {
+    "action": "inc",
+    "wrapAria": "Увеличить количество видеокон",
+    "btnAria": "Увеличить количество видеокон",
+    "btnTitle": "Увеличить количество видеокон",
+    "iconAriaHidden": "true",
+    "disabled": false
+   },
+   {
+    "action": "max",
+    "wrapAria": "Максимальное количество видеокон (100)",
+    "btnAria": "Максимальное количество видеокон (100)",
+    "btnTitle": "Максимальное количество видеокон (100)",
+    "iconAriaHidden": null,
+    "disabled": false
+   }
+  ],
+  "outline": {
+   "tag": "DIV",
+   "cls": "tc-notched-outline mdc-notched-outline",
+   "children": [
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__leading mdc-notched-outline__leading"
+    },
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__notch mdc-notched-outline__notch"
+    },
+    {
+     "tag": "DIV",
+     "cls": "tc-notched-outline__trailing mdc-notched-outline__trailing"
+    }
+   ]
+  },
+  "inputCls": "tc-text-field__input mdc-text-field__input"
+ },
+ "a11y": {
+  "names": [
+   {
+    "aria": "Минимальное количество видеокон (1)",
+    "title": "Минимальное количество видеокон (1)",
+    "text": "мин."
+   },
+   {
+    "aria": "Уменьшить количество видеокон",
+    "title": "Уменьшить количество видеокон",
+    "text": "remove"
+   },
+   {
+    "aria": "Увеличить количество видеокон",
+    "title": "Увеличить количество видеокон",
+    "text": "add"
+   },
+   {
+    "aria": "Максимальное количество видеокон (100)",
+    "title": "Максимальное количество видеокон (100)",
+    "text": "макс."
+   }
+  ]
+ },
+ "errs": [
+  "Operation canceled"
+ ]
+}

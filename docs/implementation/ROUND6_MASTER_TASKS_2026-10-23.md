@@ -259,7 +259,19 @@ error перечисляет grid, release-note SIP UAS, «970→факт».
   mode с size=100 (admin). Live: набор «100»/«42» с клавиатуры без потери
   фокуса (`t13-keyboard-100-42.json`), «+»/«−»/мин./макс./fill работают,
   save/reopen 100 (`t13-counter-1-100.json`, `t13-counter-100.png`).
-  Осталось: повторное ревью T13.1 и коммит.
+  Повторное ревью T13.1 (`ebce17a`): 9.0/10, P0/P1 нет; P2 — aria-label/title
+  только на wrapper-div (AX: «remove»/«add»), notched-outline не 1:1 вендору,
+  кламп <1 откатывался к прежнему N. Исправлено в T13.2:
+  - aria-label/title продублированы на настоящие `button`, иконки
+    `aria-hidden="true"` → AX-имена «Уменьшить/Увеличить количество видеокон»;
+  - outline 1:1 вендору: `div.tc-notched-outline.mdc-notched-outline` >
+    `div.tc-notched-outline__{leading,notch,trailing}.mdc-notched-outline__*`
+    (без `--upgraded`);
+  - кламп как TcTextField(min=1): пусто/0/−5 → 1 (не откат к прежнему N).
+  Live evidence `t13-a11y-and-clamp.json`/`.png`: AX-имена на button,
+  outline-классы, typing 100 с сохранением фокуса (trace 1→10→100,
+  `vks_grid_100`), 0/−5/empty→`vks_grid_1`, 42→`vks_grid_42`, focus сохранён.
+  Осталось: финальное ревью T13.2 (цель ≥9.5) и коммит.
 
 Из T2 (P1): session-route тест «auto→Конструктор не дёргает POST
 /api/v3/ui/video_layouts/mode» (в конференц-редакторе switchLayoutMode нет,
