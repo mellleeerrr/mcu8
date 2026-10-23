@@ -1,0 +1,27 @@
+{
+ "url": "/pnm/monitoring/conferences/49b599d7-b5cd-45a7-8999-47a28c453a92/layouts/7e6d4753-d21a-4955-ad6b-0c17de218427",
+ "codianCount": 54,
+ "ctorCount": 5,
+ "codianBad": [],
+ "ctorBad": [],
+ "sample": {
+  "id": "codian_01",
+  "expected": 1,
+  "text": "1",
+  "ok": true,
+  "position": "absolute",
+  "w": "24px",
+  "h": "24px"
+ },
+ "ctorSample": {
+  "id": "vks_grid_25",
+  "expected": 25,
+  "text": "25",
+  "ok": true,
+  "position": "absolute",
+  "w": "24px",
+  "h": "24px"
+ },
+ "extras": 59,
+ "errors": []
+}

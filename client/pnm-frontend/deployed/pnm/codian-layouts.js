@@ -256,6 +256,17 @@
     return 'окон';
   }
 
+  /* Бейдж числа окон — вендорский элемент карточки
+   * (.layout-scheme-selector-item__badge, absolute top-right). */
+  function appendBadge(item, count) {
+    item.setAttribute('data-windows', String(count));
+    if (!(count > 0)) return;
+    var badge = document.createElement('div');
+    badge.className = 'layout-scheme-selector-item__badge';
+    badge.textContent = String(count);
+    item.appendChild(badge);
+  }
+
   function findEntry(id) {
     for (var i = 0; i < catalog.length; i += 1) {
       if (catalog[i].id === id) return catalog[i];
@@ -310,12 +321,14 @@
     item.className = 'layout-scheme-selector-item';
     item.setAttribute(ITEM_ATTR, entry.id);
     item.setAttribute('data-source', 'codian');
-    item.setAttribute('data-windows', String(entry.windows));
     item.setAttribute('role', 'button');
     item.setAttribute('tabindex', '0');
     item.setAttribute('aria-pressed', 'false');
-    item.setAttribute('title', entry.windows > 0 ? entry.title + ' — ' + entry.windows + ' ' + windowsWord(entry.windows) : entry.title);
-    item.setAttribute('aria-label', entry.title);
+    // Один label для title/aria: role=button скрывает бейдж от скринридера,
+    // поэтому число окон должно быть в доступном имени, а не только в badge.
+    var label = entry.windows > 0 ? entry.title + ' — ' + entry.windows + ' ' + windowsWord(entry.windows) : entry.title;
+    item.setAttribute('title', label);
+    item.setAttribute('aria-label', label);
 
     var container = document.createElement('span');
     container.className = 'tc-icon-container layout-scheme-selector-item__icon';
@@ -324,6 +337,7 @@
     icon.innerHTML = entry.slots.length ? svgFromSlots(entry.slots) : svgFallback(entry.windows);
     container.appendChild(icon);
     item.appendChild(container);
+    appendBadge(item, entry.windows);
     return item;
   }
 
@@ -482,7 +496,6 @@
     item.className = 'layout-scheme-selector-item';
     item.setAttribute(CONSTRUCTOR_MODE_ATTR, mode.key);
     item.setAttribute('data-preset', preset);
-    item.setAttribute('data-windows', String(count));
     item.setAttribute('role', 'button');
     item.setAttribute('tabindex', '0');
     item.setAttribute('aria-pressed', 'false');
@@ -495,6 +508,7 @@
     icon.innerHTML = slots && slots.length ? svgFromSlots(slots) : svgFallback(count);
     container.appendChild(icon);
     item.appendChild(container);
+    appendBadge(item, count);
     return item;
   }
 
