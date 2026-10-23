@@ -163,8 +163,10 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > hevc-decode и получает кадр. SDP: PT99 H265 объявляется native, `is_native_video` знает H265/HEVC,
 > answer-парсер принимает H265 (отвергает `sprop-max-don-diff`), а согласованный H265 переключает
 > `VideoProfile` на H265-мост, чтобы не слать H265 под H264 m-line. Workspace **1205 passed**, clippy/fmt чисто.
-> Осталось: inbound UAS H265 (сейчас answer только H264), live-вызов с H265-терминалом, AAC-LATM мост,
-> then SDP readiness gate. H.261/H.263 по-прежнему без пейлоадеров и не объявляются.
+> Inbound UAS также принимает H265-only оффер: `InboundMedia.video_codec`, answer с `H265/90000` и
+> `profile-id=1`, inbound-мост поднимает H265-профиль (`uas::tests::h265_only_offer_is_answered_with_h265`).
+> Осталось: live-вызов с H265-терминалом, AAC-LATM мост, затем SDP readiness gate.
+> H.261/H.263 по-прежнему без пейлоадеров и не объявляются.
 >
 > **T06b-5 (изолированные FFmpeg-воркеры: фундамент) закрыт `212649b`, ревью 9.5/10 APPROVED (r6, независимый):**
 > `codec_worker` — один долгоживущий FFmpeg на кодек/направление, `FfmpegCapabilities` probe

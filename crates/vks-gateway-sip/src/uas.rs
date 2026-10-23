@@ -40,6 +40,9 @@ pub struct InboundMedia {
     /// Packetization time advertised in the answer.
     pub audio_ptime_ms: u16,
     pub video_payload_type: Option<u8>,
+    /// Negotiated video codec name (`H264`/`H265`), mirroring
+    /// [`InboundMedia::video_payload_type`].
+    pub video_codec: Option<&'static str>,
     pub remote_ip: String,
     pub remote_audio_port: u16,
     pub remote_video_port: Option<u16>,
@@ -198,8 +201,18 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
     let video = video_section
         .filter(|section| media_proto(section) == Some("RTP/AVP"))
         .filter(|section| media_port(section).is_some_and(|port| port > 0));
-    let video_payload_type =
-        video.filter(|section| has_h264(section)).and_then(|section| dynamic_payload(section, "H264"));
+    let video_codec = video.and_then(|section| {
+        if has_h264(section) {
+            dynamic_payload(section, "H264").map(|payload| (payload, "H264"))
+        } else if has_h265(section) {
+            dynamic_payload(section, "H265")
+                .or_else(|| dynamic_payload(section, "HEVC"))
+                .map(|payload| (payload, "H265"))
+        } else {
+            None
+        }
+    });
+    let video_payload_type = video_codec.map(|(payload, _)| payload);
     let remote_video_port = video.and_then(media_port);
     let audio_ip = section_ip(audio, &session_ip);
     if audio_ip.is_empty() {
@@ -214,6 +227,7 @@ pub fn negotiate(offer: &str) -> Option<InboundMedia> {
         audio_fmtp: bridge_audio.fmtp,
         audio_ptime_ms: bridge_audio.ptime_ms,
         video_payload_type,
+        video_codec: video_codec.map(|(_, codec)| codec),
         remote_ip: audio_ip,
         remote_audio_port: audio_port,
         remote_video_port,
@@ -250,8 +264,12 @@ pub fn build_answer(
     }
     if media.video_offered {
         if let (Some(port), Some(payload)) = (video_port, media.video_payload_type) {
+            let (name, fmtp) = match media.video_codec {
+                Some("H265") => ("H265", "profile-id=1"),
+                _ => ("H264", "packetization-mode=1;profile-level-id=42e01f"),
+            };
             sdp.push_str(&format!(
-                "m=video {port} RTP/AVP {payload}\r\na=rtpmap:{payload} H264/90000\r\na=fmtp:{payload} packetization-mode=1;profile-level-id=42e01f\r\n"
+                "m=video {port} RTP/AVP {payload}\r\na=rtpmap:{payload} {name}/90000\r\na=fmtp:{payload} {fmtp}\r\n"
             ));
         } else {
             // Оффер содержал video, но совместимого H.264 нет: сохраняем
@@ -463,6 +481,13 @@ fn bridgeable_audio(section: &str, payload: u8) -> Option<BridgeableAudio> {
     }
 }
 
+fn has_h265(section: &str) -> bool {
+    section.lines().any(|line| {
+        let upper = line.trim().to_ascii_uppercase();
+        upper.starts_with("A=RTPMAP:") && (upper.contains("H265/90000") || upper.contains("HEVC/90000"))
+    })
+}
+
 fn has_h264(section: &str) -> bool {
     section.lines().any(|line| {
         let line = line.trim();
@@ -514,6 +539,20 @@ Content-Type: application/sdp\r\nContent-Length: %LEN%\r\n\r\n%SDP%";
     }
 
     const OFFER: &str = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\nm=video 5006 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
+
+    #[test]
+    fn h265_only_offer_is_answered_with_h265() {
+        let offer = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\nm=video 5006 RTP/AVP 125\r\na=rtpmap:125 H265/90000\r\na=fmtp:125 profile-id=1\r\n";
+        let request = UasRequest::parse(&invite(offer)).unwrap();
+        let media = negotiate(offer).expect("PCMU + H265 offer");
+        assert_eq!(media.video_codec, Some("H265"));
+        assert_eq!(media.video_payload_type, Some(125));
+        let answer = build_answer("192.168.1.93", 7, 41000, Some(41002), &media);
+        assert!(answer.contains("m=video 41002 RTP/AVP 125"), "{answer}");
+        assert!(answer.contains("a=rtpmap:125 H265/90000"), "{answer}");
+        assert!(answer.contains("a=fmtp:125 profile-id=1"), "{answer}");
+        assert!(!answer.contains("H264"), "{answer}");
+    }
 
     #[test]
     fn parses_invite_uri_and_negotiates_media() {

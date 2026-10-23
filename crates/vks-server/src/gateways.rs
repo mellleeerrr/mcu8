@@ -2373,7 +2373,14 @@ async fn serve_sip_uas_on(
                                 controls: controls.clone(),
                                 cancelled: cancel.clone(),
                                 stats: stats.clone(),
-                                profile: video::VideoProfile::default(),
+                                profile: video::VideoProfile {
+                                    codec: if media.video_codec == Some("H265") {
+                                        video::GatewayVideoCodec::H265
+                                    } else {
+                                        video::GatewayVideoCodec::H264
+                                    },
+                                    ..video::VideoProfile::default()
+                                },
                             };
                             video_task = Some(tokio::spawn(async move {
                                 let mut lease = video_lease.take();
@@ -2443,7 +2450,7 @@ async fn serve_sip_uas_on(
                             "OPUS" => 48_000,
                             _ => 8_000,
                         },
-                        "video_codec": media.video_payload_type.map(|_| "H264"),
+                        "video_codec": media.video_payload_type.and(media.video_codec),
                         "video_payload_type": media.video_payload_type,
                         "video_clock_rate": media.video_payload_type.map(|_| 90000u32),
                         "answer_audio_port": audio_pair.rtp_port,
