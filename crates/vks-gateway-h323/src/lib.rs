@@ -14,7 +14,7 @@
 //! Текущая волна: self-contained testable core — [`codec`] (таблица
 //! соответствий), [`ffi`] (mock FFI-граница с watchdog и panic hook) и
 //! [`call`] (H.323-вызов FSM + in-memory шлюз). Реальная FFI-обёртка над
-//! H323Plus/OPAL — за опциональным feature `h323plus`; дефолтная сборка
+//! H323Plus/OPAL — реальная FFI-граница появится вместе с библиотекой; дефолтная сборка
 //! dep-light, без `unsafe`.
 //!
 //! ## Module

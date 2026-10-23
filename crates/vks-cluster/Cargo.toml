@@ -1,5 +1,5 @@
 # vks-cluster — кластер (NATS, ownership, heartbeat).
-# Фаза 7. Фаза 0: скелет. Дерево: vks-core, vks-proto (ARCHITECTURE.md §3).
+# Фаза 7: кластер. Дерево: нет (крейт standalone).
 [package]
 name = "vks-cluster"
 version.workspace = true

@@ -1555,20 +1555,27 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         // manual/dynamic геометрия берётся из `payload.preset`.
         let mut geometry: Vec<LayoutSlot> = Vec::new();
         let stored_preset = layout["payload"]["preset"].as_str().unwrap_or_default();
-        // Явно выбранная схема Codian — это ручная раскладка, даже если клиент
-        // забыл `mode:"manual"`: иначе геометрия пресета молча терялась
-        // (`preset_default_13` — дефолт «Общей», его в auto не трогаем).
-        let explicit_codian = !stored_preset.is_empty()
-            && stored_preset != "preset_default_13"
-            && vks_layout::codian::is_codian_preset(stored_preset);
-        if mode != "auto" || explicit_codian {
+        // Явно выбранная схема Codian или конструктора — это ручная раскладка,
+        // даже если клиент забыл `mode:"manual"`: иначе геометрия пресета
+        // молча терялась (`preset_default_13` — дефолт «Общей», его в auto
+        // не трогаем). Конструктор сохраняется вендорской кнопкой как
+        // `mode:"auto"` с параметрическим preset, поэтому без этого условия
+        // схема превращалась в равную сетку движка.
+        let preset_name = vks_layout::preset::resolve(stored_preset, None);
+        let explicit_preset = !preset_name.is_empty()
+            && preset_name != "preset_default_13"
+            && (vks_layout::codian::is_codian_preset(&preset_name) || vks_layout::grids::is_grid_preset(&preset_name));
+        if mode != "auto" || explicit_preset {
             let slot_count = assignments.values().copied().max().unwrap_or(0).saturating_add(1);
             let preset_size = layout["payload"]["size"].as_u64().and_then(|value| u8::try_from(value).ok());
             let preset_name = vks_layout::preset::resolve(stored_preset, preset_size);
             // Пресеты Codian (`codian_01`…`codian_52`, `codian_custom_*`) имеют
             // собственную геометрию по спецификации 4200: их id не разбирается
             // `PresetId`, поэтому таблица раскладок проверяется напрямую.
-            let codian = vks_layout::codian::geometry(&preset_name, 1920.0, 1080.0);
+            // Конструктор участников: параметрический id (`vks_grid_9`,
+            // `vks_pin_r_8`) несёт число окон и режим — геометрия из id.
+            let codian = vks_layout::codian::geometry(&preset_name, 1920.0, 1080.0)
+                .or_else(|| vks_layout::grids::geometry(&preset_name, 1920.0, 1080.0));
             let overlap_factor = layout["payload"]["overlap_factor"]
                 .as_f64()
                 .filter(|value| value.is_finite() && *value > 0.0)
@@ -4271,6 +4278,37 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert_eq!((large.x, large.y, large.w, large.h), (0, 0, 1920, 720), "vendor 2/3 zone, not a 2x2 grid");
         let small = rects.get(&1).expect("selected scheme slot 1");
         assert_eq!((small.x, small.y, small.w, small.h), (0, 720, 640, 360), "small cell under the big zone");
+    }
+
+    /// Конструктор «Схема расположения участников»: вендорская кнопка
+    /// сохраняет `mode:"auto"` с параметрическим preset, но это ручная
+    /// раскладка — геометрия обязана дойти до MCU, иначе схема молча
+    /// превращается в авто-сетку движка.
+    #[tokio::test]
+    async fn constructor_preset_reaches_mcu_in_auto_mode() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        let pid = vks_core::ParticipantId::new();
+        let participant = format!("sip-{}@sip-gateway", pid.as_uuid());
+        let mut slots = vec![serde_json::json!({"position": 1, "abonent_id": participant, "role": "PEER"})];
+        slots.extend((2..=9).map(|position| serde_json::json!({"position": position, "role": "AUTO"})));
+        let layout = serde_json::json!({
+            "id": "l-grid",
+            "payload": {"mode": "auto", "preset": "vks_grid_9", "size": 9, "slots": slots}
+        });
+        manager.apply_layout(room, layout).await.expect("grid geometry must reach the MCU");
+        let descriptor = mcu.layout_descriptor(room).expect("pending grid layout must be stored");
+        assert_eq!(descriptor.geometry.len(), 9, "3×3 конструктора, а не авто-сетка по паблишерам");
+        let first = descriptor.geometry.first().expect("первая ячейка");
+        assert_eq!(
+            (first.x, first.y, first.width, first.height),
+            (0, 0, 640, 360),
+            "16:9-ячейка 3×3 на холсте 1920×1080"
+        );
+        let last = descriptor.geometry.last().expect("девятая ячейка");
+        assert_eq!((last.x, last.y, last.width, last.height), (1280, 720, 640, 360), "последняя ячейка 3×3");
     }
 
     /// Ручные пресеты вендора, которые раньше доходили до MCU с чужой

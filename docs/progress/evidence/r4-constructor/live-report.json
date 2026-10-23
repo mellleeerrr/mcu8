@@ -1,0 +1,149 @@
+{
+  "url": "/pnm/monitoring/conferences/49b599d7-b5cd-45a7-8999-47a28c453a92/layouts/7e6d4753-d21a-4955-ad6b-0c17de218427",
+  "codianItems": 54,
+  "codianUnique": 54,
+  "rows": 7,
+  "groupHeaders": [],
+  "codianMcu4200Header": false,
+  "viewBoxes": {
+    "codian_01": "0 0 1280 720",
+    "codian_07": "0 0 1280 720",
+    "codian_43": "0 0 1280 720",
+    "codian_46": "0 0 1280 720",
+    "codian_custom_22": "0 0 1280 720",
+    "codian_custom_14": "0 0 1280 720",
+    "codian_33": "0 0 1280 720",
+    "codian_51": "0 0 1280 720"
+  },
+  "rects": {
+    "codian_01": [
+      [
+        26,
+        14,
+        1228,
+        692
+      ]
+    ],
+    "codian_04": [
+      [
+        26,
+        14,
+        268,
+        152
+      ],
+      [
+        346,
+        14,
+        268,
+        152
+      ],
+      [
+        666,
+        14,
+        268,
+        152
+      ],
+      [
+        986,
+        14,
+        268,
+        152
+      ]
+    ],
+    "codian_custom_22": [
+      [
+        26,
+        14,
+        481,
+        260
+      ],
+      [
+        559,
+        14,
+        481,
+        260
+      ],
+      [
+        1092,
+        14,
+        162,
+        116
+      ],
+      [
+        1092,
+        158,
+        162,
+        116
+      ]
+    ]
+  },
+  "constructorSections": 1,
+  "constructorItems": [
+    {
+      "mode": "grid",
+      "preset": "vks_grid_13",
+      "title": "Равномерная сетка — 13 окон",
+      "rectCount": 13
+    },
+    {
+      "mode": "pin_l",
+      "preset": "vks_pin_l_13",
+      "title": "Крупный слева, лента справа — 13 окон",
+      "rectCount": 13
+    },
+    {
+      "mode": "pin_r",
+      "preset": "vks_pin_r_13",
+      "title": "Крупный справа, лента слева — 13 окон",
+      "rectCount": 13
+    },
+    {
+      "mode": "pin_t",
+      "preset": "vks_pin_t_13",
+      "title": "Крупный сверху, лента снизу — 13 окон",
+      "rectCount": 13
+    },
+    {
+      "mode": "pin_b",
+      "preset": "vks_pin_b_13",
+      "title": "Крупный снизу, лента сверху — 13 окон",
+      "rectCount": 13
+    }
+  ],
+  "activeAfterClick": true,
+  "calculateCalls": [
+    {
+      "status": 200,
+      "preset": "codian_07"
+    },
+    {
+      "status": 200,
+      "preset": "vks_grid_13"
+    },
+    {
+      "status": 200,
+      "preset": "vks_pin_l_13"
+    },
+    {
+      "status": 200,
+      "preset": "vks_pin_r_13"
+    },
+    {
+      "status": 200,
+      "preset": "vks_pin_t_13"
+    },
+    {
+      "status": 200,
+      "preset": "vks_pin_b_13"
+    },
+    {
+      "status": 200,
+      "preset": "vks_grid_13"
+    }
+  ],
+  "appliedPayload": {
+    "slots": 0
+  },
+  "errors": [],
+  "usedRoute": "/pnm/monitoring/conferences/49b599d7-b5cd-45a7-8999-47a28c453a92/layouts/7e6d4753-d21a-4955-ad6b-0c17de218427"
+}

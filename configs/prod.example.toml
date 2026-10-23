@@ -19,7 +19,10 @@ media_listen_addr = "0.0.0.0:40000"
 # until a canary proves the path; when enabled, open the UDP range
 # VKS_WEBRTC_PORT_MIN..VKS_WEBRTC_PORT_MAX (or accept ephemeral ports) and note
 # that ICE-lite cannot gather TURN relay candidates itself.
-candidate_addr = "203.0.113.10"
+# Пустое значение обязательно к заполнению: префлайт отвергает пусто и
+# документационные TEST-NET адреса (RFC 5737) — лучше громкий exit 78, чем
+# браузер, который молча не подключается.
+candidate_addr = ""
 
 # Аутентификация: JWT-секрет только из env, минимум 32 случайных байта:
 #   VKS_JWT_SECRET="$(openssl rand -base64 48)"

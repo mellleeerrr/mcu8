@@ -1,5 +1,5 @@
 # vks-admin — admin REST API (axum).
-# Фаза 5. Фаза 0: скелет. Дерево: vks-core, vks-proto, vks-auth, vks-storage (ARCHITECTURE.md §3).
+# Фаза 5: admin REST API. Дерево: vks-core, vks-proto, vks-auth, vks-storage, vks-common, vks-layout.
 [package]
 name = "vks-admin"
 version.workspace = true

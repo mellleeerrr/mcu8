@@ -5,8 +5,8 @@
 # Дерево зависимостей: vks-common (ARCHITECTURE §3); vks-core напрямую не нужен.
 #
 # H323Plus — тяжёлая C++/FFI-зависимость. В этой волне — MOCK FFI-граница
-# (детерминированная, без реальных потоков: tick-счётчик); реальная FFI-
-# обёртка — за опциональным feature `h323plus`.
+# (детерминированная, без реальных потоков: tick-счётчик); реальная FFI-обёртка
+# появится вместе с H323Plus, отдельного feature-флага нет (он ничего не включал).
 [package]
 name = "vks-gateway-h323"
 version.workspace = true
@@ -26,11 +26,6 @@ uuid.workspace = true
 vks-common = { path = "../vks-common" }
 tokio = { workspace = true }
 libc = { workspace = true }
-
-[features]
-default = []
-# Подключает реальную FFI-обёртку над H323Plus/OPAL (ADR-0007).
-h323plus = []
 
 [dev-dependencies]
 tokio = { workspace = true }

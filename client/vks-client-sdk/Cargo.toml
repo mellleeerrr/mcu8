@@ -1,5 +1,5 @@
 # vks-client-sdk — SDK для видеоконференций (Rust + WASM).
-# Фаза 2 (signaling), 8 (meeting UI). Фаза 0: скелет.
+# Фаза 2 (signaling), 8 (meeting UI).
 # Цели: wasm32-unknown-unknown (браузер, Q8: web-sys + WebRTC API) и native (str0m).
 [package]
 name = "vks-client-sdk"

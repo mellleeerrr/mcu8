@@ -1,5 +1,5 @@
 # vks-layout — движок раскладок (shared client/server).
-# Фаза 4. Фаза 0: скелет. Дерево: vks-core (ARCHITECTURE.md §3).
+# Фаза 4: движок раскладок. Дерево: нет (крейт standalone).
 [package]
 name = "vks-layout"
 version.workspace = true

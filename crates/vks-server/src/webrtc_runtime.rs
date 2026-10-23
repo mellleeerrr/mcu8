@@ -37,6 +37,20 @@ pub fn preflight(config: &HandlerConfig) -> Result<(), String> {
     }
     let ip: IpAddr =
         candidate.parse().map_err(|error| format!("candidate_addr {candidate:?} is not a valid IP: {error}"))?;
+    // TEST-NET-1/2/3 (RFC 5737) — документационные адреса: они «выглядят»
+    // валидными, но в SDP кандидат недостижим, и браузер молча не подключится.
+    let test_net = match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+        }
+        IpAddr::V6(_) => false,
+    };
+    if test_net {
+        return Err(format!("candidate_addr {ip} is a documentation (TEST-NET) address; set the real reachable IP"));
+    }
     if (ip.is_loopback() || ip.is_unspecified()) && std::env::var("VKS_ALLOW_LOOPBACK_MEDIA").as_deref() != Ok("1") {
         return Err(format!(
             "candidate_addr {ip} is loopback/unspecified; set a reachable address or VKS_ALLOW_LOOPBACK_MEDIA=1"

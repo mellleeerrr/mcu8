@@ -1,5 +1,5 @@
 # vks-auth — аутентификация (JWT, API-ключи, LDAP, local_db, provider).
-# Фаза 5. Фаза 0: скелет. Дерево: vks-core, vks-proto (ARCHITECTURE.md §3).
+# Фаза 5: аутентификация. Дерево: vks-core.
 [package]
 name = "vks-auth"
 version.workspace = true

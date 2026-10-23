@@ -690,7 +690,9 @@ pub async fn update_settings_video(
 ///   (`preset_equal_1`, `preset_selected_b_4`, `preset_double_b_10`, …);
 /// * 54 раскладки Codian MCU 4200 (`codian_01`…`codian_52`,
 ///   `codian_custom_22`, `codian_custom_14`) — расширение, чтобы UI мог
-///   построить превью наших схем тем же контрактом.
+///   построить превью наших схем тем же контрактом;
+/// * параметрические раскладки конструктора (`vks_grid_9`, `vks_pin_r_8`) —
+///   id полностью определяет геометрию, поэтому превью и применение совпадают.
 ///
 /// dynamic/auto/базовые id → 400 `invalid.preset`. Позиции 1-based, у pip-окон
 /// `z_order = 1`.
@@ -698,7 +700,10 @@ pub async fn video_layouts_calculate(Json(body): Json<serde_json::Value>) -> Res
     track("ui/video_layouts/calculate");
     let preset_name = body.get("preset").and_then(serde_json::Value::as_str).unwrap_or_default();
     let codian = vks_layout::codian::is_codian_preset(preset_name);
-    if !codian && !vks_layout::preset::is_known_preset(preset_name) {
+    // Конструктор «Схема расположения участников»: id несёт число окон и режим,
+    // геометрия вычисляется из id (без реестра и хранения координат).
+    let grid = vks_layout::grids::is_grid_preset(preset_name);
+    if !grid && !vks_layout::preset::is_known_preset(preset_name) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": {
@@ -726,6 +731,8 @@ pub async fn video_layouts_calculate(Json(body): Json<serde_json::Value>) -> Res
     let height = dimension("height", 720.0);
     let slots = if codian {
         vks_layout::codian::geometry(preset_name, width, height)
+    } else if grid {
+        vks_layout::grids::geometry(preset_name, width, height)
     } else {
         vks_layout::preset::geometry_for_manual(preset_name, width, height)
     };
@@ -888,17 +895,28 @@ pub async fn switch_video_layout_mode(
         Some(_) => return super::error_json(422, "payload.slots items must be objects"),
         None => None,
     };
-    // Раскладки Codian принимаются по тому же пути, что вендорские manual-пресеты:
-    // число окон у них задаёт таблица макета (`codian::slot_count`), а не хвост id.
+    // Раскладки Codian и конструктора принимаются по тому же пути, что
+    // вендорские manual-пресеты: число окон у Codian задаёт таблица макета
+    // (`codian::slot_count`), у конструктора — параметрический id
+    // (`grids::parse`), а не хвост `preset_size`.
     let preset_field = field("preset").filter(|preset| {
-        preset
-            .as_str()
-            .is_some_and(|p| super::resources::preset_size(p).is_some() || vks_layout::codian::is_codian_preset(p))
+        preset.as_str().is_some_and(|p| {
+            super::resources::preset_size(p).is_some()
+                || vks_layout::codian::is_codian_preset(p)
+                || vks_layout::grids::is_grid_preset(p)
+        })
     });
     let inferred_size = size
         .or_else(|| slots.as_ref().map(|(_, len)| *len))
         .or_else(|| {
             preset_field.as_ref().and_then(Value::as_str).and_then(vks_layout::codian::slot_count).map(|n| n as u64)
+        })
+        .or_else(|| {
+            preset_field
+                .as_ref()
+                .and_then(Value::as_str)
+                .and_then(vks_layout::grids::parse)
+                .map(|scheme| scheme.count as u64)
         })
         .unwrap_or(13);
     let type_default = match mode_lc.as_str() {

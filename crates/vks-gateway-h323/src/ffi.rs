@@ -11,7 +11,7 @@
 //!
 //! Эта волна — **mock** FFI-границы: детерминированная, без реальных
 //! потоков и времени — используется tick-счётчик. Реальная FFI-обёртка
-//! над H323Plus/OPAL (C++) — за feature `h323plus` (там же — единственные
+//! над H323Plus/OPAL (C++); единственные
 //! `unsafe` блоки).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -196,7 +196,7 @@ impl Default for H323PlusBridge {
 ///
 /// Паник в FFI не роняет процесс: [`catch_unwind`] ловит его, логирует и
 /// возвращает [`Error::Internal`]. Это — «форма» panic hook, которая
-/// будет применена к реальной FFI-границе (feature `h323plus`).
+/// будет применена к реальной FFI-границе H323Plus.
 fn run_with_panic_hook(
     operation: &str,
     f: impl FnOnce() -> FfiResult + std::panic::UnwindSafe,

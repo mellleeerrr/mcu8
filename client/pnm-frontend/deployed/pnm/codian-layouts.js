@@ -64,7 +64,9 @@
   if (window.__vksCodianLayoutsInstalled) return;
   window.__vksCodianLayoutsInstalled = true;
 
-  var GROUP_TITLE = 'Codian MCU 4200';
+  // Заголовок группы владелец удалил; константа осталась только как
+  // доступное имя группы (aria-label), в DOM название не выводится.
+  var GROUP_TITLE = 'Раскладки Codian';
   var CATALOG_URL = '/api/v3/ui/video_layouts/presets';
   var TOKEN_KEY = 'TrueConfMCU_AccessToken';
   var HOST_SELECTOR = '.manual-layout-configurator';
@@ -73,13 +75,27 @@
   var PREVIEW_WIDTH = 260;
   var PREVIEW_HEIGHT = 180;
   var PREVIEW_INSET = 3;
-  var PREVIEW_CONCURRENCY = 4;
   var ITEMS_PER_LINE = 8;
+
+  // Конструктор «Схема расположения участников»: параметрические id
+  // (`vks_grid_9`, `vks_pin_r_8`) — геометрию из id считает сервер, поэтому
+  // превью (calculate) и применение (apply_layout) всегда совпадают.
+  var CONSTRUCTOR_ATTR = 'data-vks-constructor';
+  var CONSTRUCTOR_MODE_ATTR = 'data-vks-constructor-mode';
+  var CONSTRUCTOR_MODES = [
+    { key: 'grid', title: 'Равномерная сетка', id: function (count) { return 'vks_grid_' + count; } },
+    { key: 'pin_l', title: 'Крупный слева, лента справа', id: function (count) { return 'vks_pin_l_' + count; } },
+    { key: 'pin_r', title: 'Крупный справа, лента слева', id: function (count) { return 'vks_pin_r_' + count; } },
+    { key: 'pin_t', title: 'Крупный сверху, лента снизу', id: function (count) { return 'vks_pin_t_' + count; } },
+    { key: 'pin_b', title: 'Крупный снизу, лента сверху', id: function (count) { return 'vks_pin_b_' + count; } }
+  ];
+
+  var constructorCount = 0;
+  var constructorState = 'idle'; // idle | loading | ready | failed
+  var constructorSlots = Object.create(null);
 
   var catalog = [];
   var catalogState = 'idle'; // idle | loading | ready | failed
-  var previews = Object.create(null);
-  var icons = Object.create(null);
   var subscribedStore = null;
   var scheduled = false;
   var observer = null;
@@ -171,26 +187,22 @@
       maxX = Math.max(maxX, valid[b].x + valid[b].width);
       maxY = Math.max(maxY, valid[b].y + valid[b].height);
     }
-    // Полузазор: соседние ячейки дают 2h между собой, а края макета остаются
-    // вплотную к viewBox (иначе по периметру появляется лишняя рамка).
-    var half = Math.max(1, Math.round(maxX * 0.01));
+    // Полузазор сжимает КАЖДУЮ ячейку со всех четырёх сторон: соседние дают
+    // 2h между собой, по периметру остаётся поле h. Так одиночные ячейки
+    // одинаковы независимо от края (раньше крайние были шире внутренних на h).
+    // Полузазоры по осям — одинаковая ДОЛЯ канваса (2%), поэтому соседние
+    // ячейки дают 2h между собой, по периметру остаётся поле h, а 16:9
+    // ячейки остаются 16:9 (единый half по обеим осям искажал аспект ~10%).
+    var halfX = Math.max(1, Math.round(maxX * 0.02));
+    var halfY = Math.max(1, Math.round(maxY * 0.02));
+    var radius = Math.min(halfX, halfY);
     var rects = [];
     for (var r = 0; r < valid.length; r += 1) {
       var cell = valid[r];
-      var ix = cell.x;
-      var iw = cell.width;
-      var iy = cell.y;
-      var ih = cell.height;
-      if (cell.x > 0) {
-        ix = cell.x + half;
-        iw -= half;
-      }
-      if (cell.x + cell.width < maxX) iw -= half;
-      if (cell.y > 0) {
-        iy = cell.y + half;
-        ih -= half;
-      }
-      if (cell.y + cell.height < maxY) ih -= half;
+      var ix = cell.x + halfX;
+      var iy = cell.y + halfY;
+      var iw = cell.width - 2 * halfX;
+      var ih = cell.height - 2 * halfY;
       if (iw <= 0 || ih <= 0) {
         ix = cell.x;
         iy = cell.y;
@@ -199,7 +211,7 @@
       }
       rects.push(
         '<rect x="' + round(ix) + '" y="' + round(iy) + '" width="' + round(iw) +
-        '" height="' + round(ih) + '" rx="' + round(half) + '"></rect>'
+        '" height="' + round(ih) + '" rx="' + round(radius) + '"></rect>'
       );
     }
     return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + round(maxX) + ' ' + round(maxY) +
@@ -313,14 +325,6 @@
     section.className = 'main-form-section-16';
     section.setAttribute(GROUP_ATTR, '1');
 
-    var header = document.createElement('div');
-    header.className = 'main-form__subheader';
-    var text = document.createElement('p');
-    text.className = 'main-form__subheader-text';
-    text.textContent = GROUP_TITLE;
-    header.appendChild(text);
-    section.appendChild(header);
-
     var selector = document.createElement('div');
     selector.className = 'layout-scheme-selector';
     selector.setAttribute('role', 'group');
@@ -337,9 +341,6 @@
 
     section.addEventListener('click', onActivate);
     section.addEventListener('keydown', onKeydown);
-    for (var id in icons) {
-      if (Object.prototype.hasOwnProperty.call(icons, id)) paintIcon(id);
-    }
     return section;
   }
 
@@ -413,6 +414,192 @@
     if (editor) subscribe(editor);
   }
 
+
+  /* Число окон текущей раскладки в редакторе: слоты выбранного пресета (их
+   * заполняет вендорский calculate), затем хвост id, затем size. */
+  function currentCount() {
+    var editor = layoutEditor();
+    var value = editor && editor.modifiedValue;
+    if (!value) return 0;
+    var preset = typeof value.preset === 'string' ? value.preset : '';
+    var map = value.slots;
+    var slots = map && preset ? map[preset] : null;
+    if (Array.isArray(slots) && slots.length > 0 && slots.length <= 64) return slots.length;
+    var entry = findEntry(preset);
+    if (entry && entry.windows > 0) return entry.windows;
+    var tail = /_(\d+)$/.exec(preset);
+    if (tail) {
+      var fromId = Number(tail[1]);
+      if (fromId >= 1 && fromId <= 64) return fromId;
+    }
+    var size = Number(value.size);
+    if (isFinite(size) && size >= 1 && size <= 64) return Math.floor(size);
+    return 0;
+  }
+
+  /* Превью всех вариантов конструктора: один calculate на вариант (как у
+   * вендора), ответ кэшируется до смены числа окон. */
+  function loadConstructor(count) {
+    if (constructorState === 'loading' && constructorCount === count) return;
+    constructorCount = count;
+    constructorState = 'loading';
+    constructorSlots = Object.create(null);
+    var results = Object.create(null);
+    var requests = [];
+    CONSTRUCTOR_MODES.forEach(function (mode) {
+      requests.push(
+        request('/api/v3/ui/video_layouts/calculate', {
+          method: 'POST',
+          body: JSON.stringify({ preset: mode.id(count), width: PREVIEW_WIDTH, height: PREVIEW_HEIGHT })
+        }).then(
+          function (data) { results[mode.key] = data && Array.isArray(data.slots) ? data.slots : null; },
+          function () { results[mode.key] = null; }
+        )
+      );
+    });
+    Promise.all(requests).then(function () {
+      if (constructorCount !== count) return;
+      var ready = 0;
+      for (var key in results) {
+        if (Object.prototype.hasOwnProperty.call(results, key) && results[key]) ready += 1;
+      }
+      constructorSlots = results;
+      constructorState = ready > 0 ? 'ready' : 'failed';
+      ensureConstructor();
+    });
+  }
+
+  function buildConstructorItem(mode, slots, count) {
+    var preset = mode.id(count);
+    var item = document.createElement('div');
+    item.className = 'layout-scheme-selector-item';
+    item.setAttribute(CONSTRUCTOR_MODE_ATTR, mode.key);
+    item.setAttribute('data-preset', preset);
+    item.setAttribute('data-windows', String(count));
+    item.setAttribute('role', 'button');
+    item.setAttribute('tabindex', '0');
+    item.setAttribute('aria-pressed', 'false');
+    item.setAttribute('aria-label', mode.title + ' — ' + count + ' ' + windowsWord(count));
+    item.setAttribute('title', mode.title + ' — ' + count + ' ' + windowsWord(count));
+    var container = document.createElement('span');
+    container.className = 'tc-icon-container layout-scheme-selector-item__icon';
+    var icon = document.createElement('i');
+    icon.className = 'material-icons tc-icon__icon notranslate';
+    icon.innerHTML = slots && slots.length ? svgFromSlots(slots) : svgFallback(count);
+    container.appendChild(icon);
+    item.appendChild(container);
+    return item;
+  }
+
+  function buildConstructorSelector(count) {
+    var selector = document.createElement('div');
+    selector.className = 'layout-scheme-selector';
+    selector.setAttribute('role', 'group');
+    selector.setAttribute('aria-label', 'Схема расположения участников');
+    var group = document.createElement('div');
+    group.className = 'layout-scheme-selector__group';
+    for (var i = 0; i < CONSTRUCTOR_MODES.length; i += 1) {
+      var mode = CONSTRUCTOR_MODES[i];
+      group.appendChild(buildConstructorItem(mode, constructorSlots[mode.key], count));
+    }
+    selector.appendChild(group);
+    return selector;
+  }
+
+  function syncConstructorActive() {
+    var editor = layoutEditor();
+    var preset = editor && editor.modifiedValue ? editor.modifiedValue.preset : null;
+    var items = document.querySelectorAll('[' + CONSTRUCTOR_MODE_ATTR + ']');
+    for (var i = 0; i < items.length; i += 1) {
+      var item = items[i];
+      var active = preset !== null && item.getAttribute('data-preset') === preset;
+      if (active) item.classList.add('layout-scheme-selector-item--active');
+      else item.classList.remove('layout-scheme-selector-item--active');
+      item.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+  }
+
+  function ensureConstructor() {
+    var host = document.querySelector(HOST_SELECTOR);
+    if (!host) return;
+    var count = currentCount();
+    if (count < 1) return;
+    if (constructorCount !== count) {
+      loadConstructor(count);
+      return;
+    }
+    if (constructorState !== 'ready') return;
+    var section = host.querySelector('[' + CONSTRUCTOR_ATTR + ']');
+    if (!section) {
+      section = document.createElement('div');
+      section.className = 'main-form-section-16';
+      section.setAttribute(CONSTRUCTOR_ATTR, '1');
+      section.addEventListener('click', onConstructorActivate);
+      section.addEventListener('keydown', onConstructorKeydown);
+      host.appendChild(section);
+    }
+    // Перерисовываем только при смене числа окон: MutationObserver ловит наши
+    // же вставки, поэтому безусловный innerHTML дал бы бесконечный цикл.
+    var rendered = section.getAttribute('data-count');
+    var items = section.querySelectorAll('[' + CONSTRUCTOR_MODE_ATTR + ']');
+    if (rendered === String(count) && items.length === CONSTRUCTOR_MODES.length) {
+      syncConstructorActive();
+      return;
+    }
+    section.setAttribute('data-count', String(count));
+    section.innerHTML = '';
+    section.appendChild(buildConstructorSelector(count));
+    syncConstructorActive();
+  }
+
+  function closestConstructorItem(node) {
+    var element = node;
+    while (element && element !== document) {
+      if (element.getAttribute && element.getAttribute(CONSTRUCTOR_MODE_ATTR)) return element;
+      element = element.parentNode;
+    }
+    return null;
+  }
+
+  function onConstructorActivate(event) {
+    var item = closestConstructorItem(event.target);
+    if (!item) return;
+    event.preventDefault();
+    selectConstructor(item.getAttribute('data-preset'));
+  }
+
+  function onConstructorKeydown(event) {
+    if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+    var item = closestConstructorItem(event.target);
+    if (!item) return;
+    event.preventDefault();
+    selectConstructor(item.getAttribute('data-preset'));
+  }
+
+  /* Тот же путь, что и у карточек Codian: preset в store + слоты по числу окон. */
+  function selectConstructor(preset) {
+    var editor = layoutEditor();
+    if (!editor || !preset) return;
+    var count = 0;
+    var tail = /_(\d+)$/.exec(preset);
+    if (tail) count = Number(tail[1]) || 0;
+    var existing = editor.modifiedValue && editor.modifiedValue.slots && editor.modifiedValue.slots[preset];
+    var slots = Array.isArray(existing) && existing.length === count ? existing : [];
+    if (!slots.length) {
+      for (var i = 1; i <= count; i += 1) slots.push({ position: i, role: 'AUTO' });
+    }
+    try {
+      editor.editValueField('preset', preset);
+      editor.setSlots(preset, slots);
+    } catch (e) {
+      console.warn('codian-layouts: не удалось выбрать схему конструктора ' + preset, e);
+      return;
+    }
+    syncActive();
+    syncConstructorActive();
+    subscribe(editor);
+  }
+
   function ensureGroup() {
     if (catalogState !== 'ready') return;
     var host = document.querySelector(HOST_SELECTOR);
@@ -435,6 +622,7 @@
         if (!host) return;
         if (catalogState === 'idle') loadCatalog();
         if (catalogState === 'ready') ensureGroup();
+        if (catalogState === 'ready') ensureConstructor();
       } catch (e) {
         /* вендорская страница важнее нашей группы, но поломка не должна быть невидимой */
         console.warn('codian-layouts: группа Codian не вставлена', e);

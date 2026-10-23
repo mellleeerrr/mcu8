@@ -1,6 +1,6 @@
 # vks-signaling — сигнализация (WS/WSS + WebTransport) + Session FSM.
 # Фаза 2 (этап: Session FSM + envelope + reconnect по SIGNALING_PROTOCOL.md).
-# Дерево: vks-core, vks-proto, vks-common, vks-auth (ARCHITECTURE.md §3).
+# Дерево: vks-proto.
 [package]
 name = "vks-signaling"
 version.workspace = true

@@ -307,7 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let port = local_addr.port();
             info!(candidate_ip = %ip, candidate_port = %port, "WebRTC SDP ICE candidate configured");
             if ip == "127.0.0.1" && local_addr.ip().is_unspecified() {
-                warn!("WebRTC candidate IP defaulted to 127.0.0.1 while listening on 0.0.0.0; external endpoints (e.g. 192.168.1.132) will fail to connect. Set candidate_addr in config or VKS_CANDIDATE_ADDR env.");
+                warn!("WebRTC candidate IP defaulted to 127.0.0.1 while listening on 0.0.0.0; external endpoints (e.g. 10.0.0.10) will fail to connect. Set candidate_addr in config or VKS_CANDIDATE_ADDR env.");
             }
             (Some(Arc::new(loop_handle)), Some(task), ip, port)
         }

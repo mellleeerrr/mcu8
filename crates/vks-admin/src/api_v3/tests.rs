@@ -1419,6 +1419,28 @@ async fn m4_abonents_lifecycle_and_commands() {
     );
     assert_eq!(codian_body["payload"]["mode"], "manual");
 
+    // 7c. Конструктор участников: параметрический `vks_*` не подменяется и не
+    // теряется — иначе PIN молча превращался в equal-сетку из N окон.
+    let constructor_switch = send(
+        &app,
+        request(
+            "POST",
+            "/api/v3/ui/video_layouts/mode",
+            Some(&token),
+            json!({
+                "session_id": room_id_str,
+                "new_mode": "mcu",
+                "video_layout_id": layout_id,
+                "payload": {"mode":"manual","preset":"vks_pin_r_9"}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(constructor_switch.status(), StatusCode::OK);
+    let constructor_body = json_body(constructor_switch).await;
+    assert_eq!(constructor_body["payload"]["preset"], "vks_pin_r_9", "preset конструктора не подменяется");
+    assert_eq!(constructor_body["payload"]["size"], 9, "size — число окон из параметрического id");
+
     let bad_mode = send(
         &app,
         request(
@@ -2531,7 +2553,9 @@ async fn codian_calculate_returns_slot_geometry_for_preview() {
     for (index, (slot, cell)) in slots.iter().zip(expected.iter()).enumerate() {
         assert_eq!(slot["position"], index as u64 + 1, "позиции 1-based");
         assert!((slot["x"].as_f64().unwrap() - cell.rect.x).abs() < 1e-6, "x слота {index}");
+        assert!((slot["y"].as_f64().unwrap() - cell.rect.y).abs() < 1e-6, "y слота {index}");
         assert!((slot["width"].as_f64().unwrap() - cell.rect.width).abs() < 1e-6, "ширина слота {index}");
+        assert!((slot["height"].as_f64().unwrap() - cell.rect.height).abs() < 1e-6, "высота слота {index}");
         assert_eq!(slot["z_order"], u64::from(cell.z_order), "z_order слота {index}");
     }
     // Неизвестный id остаётся 400 (вендорская ошибка не изменилась).
@@ -2541,6 +2565,47 @@ async fn codian_calculate_returns_slot_geometry_for_preview() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Конструктор участников: `vks_grid_*` / `vks_pin_*` дают превью той же
+/// геометрией, что MCU применит к холсту (`grids::geometry`), позиции 1-based.
+#[tokio::test]
+async fn constructor_calculate_matches_grid_geometry() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    for id in ["vks_grid_9", "vks_grid_20", "vks_pin_r_8", "vks_pin_b_13"] {
+        let response = send(
+            &server,
+            request(
+                "POST",
+                "/api/v3/ui/video_layouts/calculate",
+                Some(&token),
+                json!({"preset": id, "width": 1280, "height": 720}),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "превью для {id}");
+        let body = json_body(response).await;
+        let slots = body["slots"].as_array().expect("slots array");
+        let expected = vks_layout::grids::geometry(id, 1280.0, 720.0).expect("геометрия конструктора");
+        assert_eq!(slots.len(), expected.len(), "окон столько же у {id}");
+        let windows = vks_layout::grids::parse(id).expect("id разобран").count;
+        assert_eq!(slots.len(), windows, "число окон из id у {id}");
+        for (index, (slot, cell)) in slots.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(slot["position"], index as u64 + 1, "позиции 1-based у {id}");
+            assert!((slot["x"].as_f64().unwrap() - cell.rect.x).abs() < 1e-6, "x слота {index} у {id}");
+            assert!((slot["height"].as_f64().unwrap() - cell.rect.height).abs() < 1e-6, "h слота {index} у {id}");
+        }
+    }
+    for unknown in ["vks_grid_0", "vks_grid_9x9", "vks_pin_x_9"] {
+        let response = send(
+            &server,
+            request("POST", "/api/v3/ui/video_layouts/calculate", Some(&token), json!({"preset": unknown})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "неизвестный id {unknown:?}");
+    }
 }
 
 /// Все 54 раскладки Codian дают превью в канвасе; неизвестные id — по-прежнему 400.
@@ -2565,14 +2630,23 @@ async fn every_codian_layout_has_preview_geometry() {
         let slots = body["slots"].as_array().expect("slots array");
         let expected = vks_layout::codian::slot_count(id).expect("slot_count") as usize;
         assert_eq!(slots.len(), expected, "число окон {id}");
+        let mut area = 0.0_f64;
+        let (mut max_x, mut max_y) = (0.0_f64, 0.0_f64);
         for (index, slot) in slots.iter().enumerate() {
             assert_eq!(slot["position"], index as u64 + 1, "позиции 1-based у {id}");
             assert!(matches!(slot["z_order"].as_u64(), Some(0 | 1)), "z_order 0/1 у {id}");
-            assert!(
-                slot["width"].as_f64().unwrap() > 0.0 && slot["height"].as_f64().unwrap() > 0.0,
-                "пустой слот у {id}"
-            );
+            let (x, y) = (slot["x"].as_f64().unwrap(), slot["y"].as_f64().unwrap());
+            let (width, height) = (slot["width"].as_f64().unwrap(), slot["height"].as_f64().unwrap());
+            assert!(width > 0.0 && height > 0.0, "пустой слот у {id}");
+            if slot["z_order"] == 0 {
+                area += width * height;
+                max_x = max_x.max(x + width);
+                max_y = max_y.max(y + height);
+            }
         }
+        // Основные окна покрывают канвас 16:9 без щелей (PIP — наложенные, не в счёт).
+        assert!((area - 1280.0 * 720.0).abs() < 2.0, "площадь основных окон у {id}: {area}");
+        assert!((max_x - 1280.0).abs() < 0.5 && (max_y - 720.0).abs() < 0.5, "край канваса у {id}");
     }
     for unknown in ["codian_99", "codian_53", "codian_custom_15", ""] {
         let response = send(
@@ -2612,6 +2686,12 @@ async fn video_layout_presets_catalog_covers_vendor_and_codian() {
                 assert!(!preset["title"].as_str().unwrap_or_default().is_empty(), "пустой title у {id}");
                 let slots = preset["slots"].as_array().expect("слоты каталога");
                 assert_eq!(slots.len(), vks_layout::codian::slot_count(id).unwrap(), "слоты каталога = числу окон");
+                for slot in slots {
+                    for key in ["position", "x", "y", "width", "height", "z_order"] {
+                        assert!(slot[key].is_number(), "поле {key} слота каталога у {id}");
+                    }
+                    assert!(slot["width"].as_f64().unwrap() > 0.0 && slot["height"].as_f64().unwrap() > 0.0);
+                }
             }
             other => panic!("неизвестный source {other:?} у {id}"),
         }

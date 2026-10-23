@@ -14,6 +14,7 @@
 //! - [`focus`] — [`FocusLayout`]: крупный фокус + полоса мелких.
 //! - [`preset`] — вендорные пресеты PNM: id, схемы и геометрия слотов.
 //! - [`codian`] — 52 раскладки Codian MCU 4200 + 2 кастомные.
+//! - [`grids`] — конструктор «Схема расположения участников»: `vks_grid_*`, `vks_pin_*`.
 //! - [`roles`] — роли окон (default/fixed/active/rolling) и назначение участников.
 //! - [`viewer`] — план раскладки для зрителя (ADR-0029, §2 Codian).
 //!
@@ -31,6 +32,7 @@ pub mod codian;
 mod core;
 mod focus;
 mod grid;
+pub mod grids;
 pub mod preset;
 mod rect;
 pub mod roles;

@@ -1,12 +1,8 @@
 # Настройки cargo для workspace VKS.
 # Основание: docs/DEVELOPMENT_PLAN.md (Фаза 0), docs/rules/CODE_STYLE.md.
 
-[build]
-# Прочие target'ы (wasm32, aarch64) ставятся при необходимости:
-#   rustup target add wasm32-unknown-unknown   # уже в rust-toolchain.toml
-#   rustup target add aarch64-unknown-linux-gnu
-
-[target.wasm32-unknown-unknown]
-rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
+# wasm32 объявлен в rust-toolchain.toml; aarch64 не собирается в этом раунде.
+# wasm32-специфика getrandom задаётся фичей `wasm_js` в манифестах, а не
+# rustflags здесь (один источник истины).
 
 # Профили сборки — в корневом Cargo.toml (единственное место).

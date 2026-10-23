@@ -11,10 +11,10 @@
 # Проверяем зависимости целей из rust-toolchain.toml (сборки для других платформ не анализируем).
 targets = [
     "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
     "wasm32-unknown-unknown",
 ]
-all-features = false
+# CI собирает `--all-features`, значит и лицензии проверяются на полном графе.
+all-features = true
 
 # Лицензии: разрешаем MIT / Apache-2.0 (+ LLVM-exception) / BSD* / ISC / Unicode / Zlib / CC0 / MPL-2.0 / OpenSSL.
 [licenses]
@@ -31,16 +31,13 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "MPL-2.0",
-    # webpki-roots (Mozilla, permissive; достижим при `--all-features`: reqwest→rustls).
-    "CDLA-Permissive-2.0",
 ]
-# NB: в каждом отдельном графе часть записей allow остаётся невстреченной
-# (cargo-deny печатает `warning[license-not-encountered]` — informational, exit=0):
-#   default:        Unicode-DFS-2016, OpenSSL, CC0-1.0, MPL-2.0, CDLA-Permissive-2.0
-#   --all-features: Unicode-DFS-2016, OpenSSL, MPL-2.0
-# Список — union для обоих графов (CI гоняет `check`; полный граф — локально/по релизам):
-# урезание allow под конкретный граф ломало бы второй. Duplicate-варнинги (getrandom и т.п.) —
-# информационные (разные версии транзитивных крейтов), в CI не deny.
+# NB: часть записей allow может не встретиться в конкретном графе
+# (`warning[license-not-encountered]` — informational, exit=0). Список — union
+# для всех целей graph.targets; урезать его под один граф нельзя.
+# После удаления rvoip (мёртвая зависимость) TLS-стек в графе отсутствует,
+# поэтому OpenSSL/Zlib/CC0/MPL/Unicode-DFS остаются про запас для будущих
+# зависимостей; CDLA-Permissive-2.0 (webpki-roots) больше недостижим и удалён.
 # Copyleft (GPL/LGPL/AGPL) и SSPL запрещены неявно: `allow` — whitelist,
 # ключ `[licenses] deny` удалён в cargo-deny 0.20 (PR #611); всё, что не в allow, — error.
 confidence-threshold = 0.80

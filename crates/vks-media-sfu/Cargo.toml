@@ -1,7 +1,7 @@
 # vks-media-sfu — SFU-движок.
 # Фаза 2 (DEVELOPMENT_PLAN.md): engine/forwarder/simulcast/bwe/congestion,
 # DTLS-SRTP (str0m, optional feature), ICE-lite, codec feature flags (ADR-0017).
-# Дерево: vks-core (MediaEngine-порт), vks-proto, vks-common (ARCHITECTURE.md §3).
+# Дерево: vks-core (MediaEngine-порт), vks-common.
 [package]
 name = "vks-media-sfu"
 version.workspace = true

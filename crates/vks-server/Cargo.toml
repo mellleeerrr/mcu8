@@ -52,4 +52,3 @@ path = "src/main.rs"
 [dev-dependencies]
 tokio-tungstenite = "0.29"
 tower = { version = "0.5", features = ["util"] }
-vks-proto = { path = "../vks-proto" }

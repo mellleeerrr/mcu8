@@ -387,3 +387,18 @@ Roboto; при фолбэке на системный шрифт сумма мо
     cd client/pnm-frontend/deployed/pnm && sha256sum -c ../../MANIFEST.sha256
 
 Ожидаемый результат — 213 строк `OK` и ни одной `FAILED`.
+
+## R4 (2026-10-23): конструктор участников, геометрия 16:9, заголовок группы
+
+- Заголовок группы «Codian MCU 4200» (`.main-form__subheader`) удалён по
+  требованию владельца; `aria-label` остался.
+- Добавлена секция конструктора «Схема расположения участников»: 5 карточек
+  (`vks_grid_<n>` + `vks_pin_<l|r|t|b>_<n>`), превью через
+  `POST /api/v3/ui/video_layouts/calculate`, клик — store-путь
+  `editValueField('preset', id)` + `setSlots(id, …)`. Геометрия в JS отсутствует.
+- Иконки: per-axis inset 2% (все ячейки равны независимо от края, 16:9 сохранён);
+  `viewBox` всех карточек = `0 0 1280 720` (custom_22/custom_14 исправлены).
+- Мёртвый код (`icons`/`previews`/`paintIcon`) удалён; `fallbackSlots` заменён
+  переиспользованием `svgFallback`.
+- Live-проверка: `docs/progress/evidence/r4-constructor/` (54 карточки, 0
+  заголовков, 5 карточек конструктора, calculate 200, PATCH `vks_grid_13`).

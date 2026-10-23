@@ -1,7 +1,5 @@
 # vks-common — общие утилиты (error, tracing, metrics, config, ids).
 # Крейт-привязка: docs/rules/BACKEND_RULES.md §6, docs/PROJECT_RULES.md §19–22.
-# Дерево зависимостей: vks-common зависит от vks-core (в фазе 1);
-# в фазе 0 — standalone, чтобы компилировался.
 [package]
 name = "vks-common"
 version.workspace = true
@@ -30,11 +28,3 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 [dev-dependencies]
 # proptest для property-тестов id-генерации
 proptest.workspace = true
-proptest-derive = "0.5"
-
-[features]
-default = []
-# debug-режим: verbose tracing, stack traces (?trace=1).
-debug = []
-# JSON-формат логов (tracing-subscriber/json).
-json = ["tracing-subscriber/json"]
