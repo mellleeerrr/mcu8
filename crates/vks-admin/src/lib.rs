@@ -1,5 +1,5 @@
 #![recursion_limit = "256"]
-//! `vks-admin` — admin REST API (axum + utoipa).
+//! `vks-admin` — admin REST API (axum).
 //!
 //! Фаза 5: `server.rs` (axum app), `rooms.rs` (CRUD + live status +
 //! Observer), `users.rs` (CRUD + LDAP sync + bulk), `settings.rs`
@@ -10,7 +10,6 @@
 //!
 //! Дерево: vks-core, vks-proto, vks-auth, vks-storage.
 //! API versioning (BACKEND_RULES §7): `/api/v1/...`.
-//! utoipa — опциональная feature `openapi` (не в default-сборке).
 
 pub mod api_v3;
 pub mod audit;

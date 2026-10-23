@@ -48,7 +48,7 @@ jobs:
             target
           key: cargo-check-${{ hashFiles('**/Cargo.lock') }}
       # --locked: CI не имеет права молча обновить Cargo.lock.
-      # --all-features: компилирует oxideav/rvoip/str0m/openapi — раньше эти фичи
+      # --all-features: компилирует oxideav/str0m — раньше эти фичи
       # не компилировались ни в одном шаге CI.
       - run: cargo check --workspace --all-features --all-targets --locked
 
@@ -93,7 +93,7 @@ jobs:
   test-external:
     name: test (feature-gated crates, soft)
     runs-on: ubuntu-24.04
-    # Не блокирует: эти крейты под фичами (rvoip/str0m/oxideav) могут требовать
+    # Не блокирует: эти крейты под фичами (str0m/oxideav) могут требовать
     # сеть, SIP-сервер или реальные устройства. Джоб показывает реальный список
     # внешних зависимостей, но не роняет первый запуск CI. Компиляция всех фич
     # жёстко гейтится в джобах check/clippy (--all-features --all-targets).
@@ -110,14 +110,10 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-test-external-${{ hashFiles('**/Cargo.lock') }}
-      # SIP-шлюз (rvoip) — может требовать SIP-сервер/сеть.
-      - run: cargo test -p vks-gateway-sip --features rvoip --locked --no-fail-fast
       # SFU-транспорт (str0m) — может требовать сеть/ICE.
       - run: cargo test -p vks-media-sfu --features str0m --locked --no-fail-fast
       # MCU-композитор (oxideav) — требует GPU/видеоустройств.
       - run: cargo test -p vks-media-mcu --features oxideav --locked --no-fail-fast
-      # OpenAPI-схемы (utoipa) — внешних зависимостей нет, но фича выключена по умолчанию.
-      - run: cargo test -p vks-admin --features openapi --locked --no-fail-fast
 
   test-serial:
     name: test (--test-threads=1)

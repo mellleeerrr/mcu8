@@ -250,7 +250,7 @@ pub async fn readyz(State(state): State<SharedState>) -> Response {
     (StatusCode::from_u16(r.status_code()).unwrap(), Json(serde_json::to_value(r).unwrap())).into_response()
 }
 
-/// `GET /openapi.json` — stub OpenAPI (utoipa behind `openapi` feature).
+/// `GET /openapi.json` — статическая заглушка схемы OpenAPI (схема не генерируется).
 pub async fn openapi() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "openapi": "3.1.0",

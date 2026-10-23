@@ -1,12 +1,11 @@
-# vks-gateway-sip — SIP-шлюз (rvoip, ADR-0006).
+# vks-gateway-sip — SIP-шлюз (ADR-0006).
 # Фаза 6 (DEVELOPMENT_PLAN.md): SIP UAS, «приземление» вызова в WebRTC-комнату
 # (participant = gateway), codec negotiation SIP SDP → WebRTC SDP.
 #
 # Дерево зависимостей: vks-common (ARCHITECTURE §3); vks-core напрямую не нужен.
 #
-# rvoip — тяжёлая FFI-зависимость (SIP UAS). В этой волне подключается за
-# опциональным feature `rvoip`; дефолтная сборка остаётся dep-light и
-# полностью тестовая (mock UAS в `call.rs`).
+# SIP-транспорт: текущая волна — dep-light и полностью тестовая
+# (mock UAS в `call.rs`); реальный SIP-стек (ADR-0006) ещё не подключён.
 [package]
 name = "vks-gateway-sip"
 version.workspace = true
@@ -14,7 +13,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "VKS SIP gateway: SIP UAS (rvoip) bridged into WebRTC rooms"
+description = "VKS SIP gateway: SIP UAS bridged into WebRTC rooms"
 
 [dependencies]
 thiserror.workspace = true
@@ -29,13 +28,8 @@ rusty-opus = "=1.0.2"
 oxideav-g728 = "=0.0.8"
 oxideav-g7231 = "=0.0.9"
 
-# Тяжёлая SIP-стек (опционально, ADR-0006).
-rvoip = { version = "0.2", optional = true }
-
 [features]
 default = []
-# Подключает rvoip SIP UAS (реальный SIP-транспорт).
-rvoip = ["dep:rvoip"]
 
 [dev-dependencies]
 tokio = { workspace = true }

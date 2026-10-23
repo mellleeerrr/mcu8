@@ -1,4 +1,4 @@
-# vks-admin — admin REST API (axum + utoipa).
+# vks-admin — admin REST API (axum).
 # Фаза 5. Фаза 0: скелет. Дерево: vks-core, vks-proto, vks-auth, vks-storage (ARCHITECTURE.md §3).
 [package]
 name = "vks-admin"
@@ -30,14 +30,8 @@ prost.workspace = true
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 chrono-tz = "0.10.4"
 
-# utoipa — опциональная генерация OpenAPI (не в default-сборке).
-[dependencies.utoipa]
-workspace = true
-optional = true
-
 [features]
 default = []
-openapi = ["dep:utoipa"]
 
 [dev-dependencies]
 tokio.workspace = true

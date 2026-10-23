@@ -35,7 +35,6 @@ members = [
 # runtime / async
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
-parking_lot = "0.12"
 subtle = "2.6"
 libc = "0.2"
 # ошибки
@@ -58,7 +57,6 @@ prost = "0.13"
 prost-build = "0.13"
 # веб / api
 axum = { version = "0.8", features = ["ws", "multipart"] }
-utoipa = { version = "5", features = ["axum_extras"] }
 # Статика фронтенда PNM: ServeDir/ServeFile (ADR-0027, docs/progress/archive/FRONTEND_PORT_PLAN.md §4.2).
 # Мержит `fs`-фичу (без default, чтобы не тянуть trace/cors в бинарник).
 tower-http = { version = "0.6", default-features = false, features = ["fs"] }

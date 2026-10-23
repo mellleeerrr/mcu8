@@ -31,7 +31,7 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "MPL-2.0",
-    # webpki-roots (Mozilla, permissive; достижим при `--all-features`: rvoip/reqwest→rustls).
+    # webpki-roots (Mozilla, permissive; достижим при `--all-features`: reqwest→rustls).
     "CDLA-Permissive-2.0",
 ]
 # NB: в каждом отдельном графе часть записей allow остаётся невстреченной

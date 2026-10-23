@@ -682,14 +682,6 @@ pub fn is_known_preset(id: &str) -> bool {
     is_manual_preset(id) || crate::codian::is_codian_preset(id)
 }
 
-fn safe_dimension(value: f64, fallback: f64) -> f64 {
-    if value.is_finite() && value > 0.0 {
-        value
-    } else {
-        fallback
-    }
-}
-
 /// Пиксельный rect ячейки/блока сетки `cols × rows` по эталонной формуле
 /// (`x = floor(coord * canvas / grid)` — так эталон распределяет остаток).
 pub(crate) fn cell_rect(cell: (u16, u16, u16, u16), cols: u16, rows: u16, canvas: (f64, f64)) -> SlotRect {
@@ -709,8 +701,8 @@ pub(crate) fn cell_rect(cell: (u16, u16, u16, u16), cols: u16, rows: u16, canvas
 /// доли канваса из live-ответа `calculate` (1280×720).
 pub fn geometry_for_manual(id: &str, width: f64, height: f64) -> Option<Vec<CalculatedSlot>> {
     let (_, scheme) = MANUAL_SCHEMES.iter().find(|(preset, _)| *preset == id)?;
-    let width = safe_dimension(width, 1280.0);
-    let height = safe_dimension(height, 720.0);
+    let width = dimension(width, 1280.0);
+    let height = dimension(height, 720.0);
     let mut slots = Vec::new();
     match scheme {
         ManualScheme::Grid { cols, rows, blocks } => {
