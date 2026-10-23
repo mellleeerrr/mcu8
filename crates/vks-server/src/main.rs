@@ -389,6 +389,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // approval; otherwise AAC stays 488/fallback like before T06b-8.
     let aac_latm_legal = std::env::var("VKS_AAC_LATM_LEGAL_ACCEPTED").is_ok_and(|value| value.trim() == "1");
     let aac_latm = aac_latm_legal
+        && vks_server::transcoder_runtime::pool().is_some_and(|pool| pool.max_workers() >= 2)
         && vks_server::transcoder_runtime::capabilities()
             .is_some_and(vks_media_mcu::codec_worker::ffmpeg::FfmpegCapabilities::has_audio_latm_bridge);
     vks_common::codec_capabilities::set_audio_codec_availability(

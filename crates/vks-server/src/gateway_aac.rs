@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 
 use vks_gateway_sip::aac_latm::{add_loas, LatmRtpClock, AAC_RTP_CLOCK};
-use vks_media_mcu::codec_worker::latm::{LatmDecoder, LatmEncoder, LATM_TICK_SAMPLES};
+use vks_media_mcu::codec_worker::latm::{LatmDecoder, LatmEncoder, PushOutcome, LATM_TICK_SAMPLES};
 
 use super::RtpBridgeSession;
 
@@ -132,7 +132,8 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
     let mut incoming = [0u8; 2048];
     let mut recv_errors = 0u8;
     let mut rejected_logs = 0u8;
-    let mut decoded_blocks = 0u64;
+    let mut last_pcm_at: Option<Instant> = None;
+    let mut last_inbound_at: Option<Instant> = None;
     // 3-frame prefill (64 ms) plus a token-bucket pacer at the exact AAC rate
     // (46.875 fps = 15 frames per 16 ticks) avoids the 4-frame/100 ms bursts
     // measured on the live pipe.
@@ -206,11 +207,16 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed);
                     continue;
                 };
-                if !decoder.try_push_loas(loas) {
-                    session.media_stats.rejected_packets.fetch_add(1, Relaxed);
-                    continue;
+                match decoder.try_push_loas(loas) {
+                    PushOutcome::Queued => {}
+                    PushOutcome::Full => {
+                        session.media_stats.rejected_packets.fetch_add(1, Relaxed);
+                        continue;
+                    }
+                    PushOutcome::Closed => break,
                 }
                 first_packet_at.get_or_insert_with(Instant::now);
+                last_inbound_at = Some(Instant::now());
                 session.media_stats.audio_rx_packets.fetch_add(1, Relaxed);
                 session.media_stats.audio_rx_bytes.fetch_add(count as u64, Relaxed);
                 session.media_stats.last_rx_ms.store(
@@ -220,7 +226,7 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
             }
             _ = ticker.tick() => {
                 while let Some(block) = decoder.try_pcm() {
-                    decoded_blocks += 1;
+                    last_pcm_at = Some(Instant::now());
                     for sample in block {
                         if pcm_queue.len() >= PCM_QUEUE_LIMIT { pcm_queue.pop_front(); }
                         pcm_queue.push_back(sample);
@@ -233,12 +239,17 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                 // A live FFmpeg with no PCM (missing/lost SMC, unsupported
                 // object type) must not stay "connected" forever: RTP counters
                 // keep rising but the participant hears silence.
-                if decoded_blocks == 0
-                    && first_packet_at.is_some_and(|first| first.elapsed() >= Duration::from_secs(3))
-                {
+                // Rolling liveness: RTP arriving but no PCM for a full 3 s is
+                // a dead decoder, not just a slow start.
+                let inbound_alive = last_inbound_at.is_some_and(|last| last.elapsed() < Duration::from_secs(1));
+                let pcm_stalled = last_pcm_at.map_or_else(
+                    || first_packet_at.is_some_and(|first| first.elapsed() >= Duration::from_secs(3)),
+                    |last| last.elapsed() >= Duration::from_secs(3),
+                );
+                if inbound_alive && pcm_stalled {
                     tracing::warn!(
                         participant = %session.participant_id_str,
-                        "AAC decoder produced no PCM for 3 s; tearing the media bridge down"
+                        "AAC decoder produced no PCM for 3 s while RTP arrived; tearing the media bridge down"
                     );
                     break;
                 }
@@ -265,9 +276,17 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                 } else {
                     pcm.fill(0);
                 }
-                if !encoder.try_push_pcm(&pcm) {
-                    tracing::warn!(participant = %session.participant_id_str, "AAC encoder queue closed");
-                    break;
+                match encoder.try_push_pcm(&pcm) {
+                    PushOutcome::Queued => {}
+                    PushOutcome::Full => {
+                        // A transiently slow tick must not tear the call down.
+                        session.media_stats.rejected_packets.fetch_add(1, Relaxed);
+                        continue;
+                    }
+                    PushOutcome::Closed => {
+                        tracing::warn!(participant = %session.participant_id_str, "AAC encoder queue closed");
+                        break;
+                    }
                 }
                 if encoder.failed() {
                     tracing::warn!(participant = %session.participant_id_str, "AAC encoder stopped");
@@ -318,7 +337,7 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                             dtmf_active = dtmf.pop_front().map(|event| (event, 0, dtmf_timestamp));
                         }
                         if let Some((event, step, started)) = dtmf_active {
-                            let duration = [160u16, 320, 480, 480, 480][step];
+                            let duration = [160u16, 320, 480, 640, 800][step];
                             let mut event_packet = [0u8; 16];
                             vks_gateway_sip::write_rtp_header(
                                 &mut event_packet[..12],
@@ -330,7 +349,7 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                             );
                             sequence = sequence.wrapping_add(1);
                             event_packet[12] = event;
-                            event_packet[13] = if step >= 2 { 0x8a } else { 0x0a };
+                            event_packet[13] = if step == 4 { 0x8a } else { 0x0a };
                             event_packet[14..].copy_from_slice(&duration.to_be_bytes());
                             let _ = session.rtp_socket.send_to(&event_packet, egress).await;
                             if step == 4 {

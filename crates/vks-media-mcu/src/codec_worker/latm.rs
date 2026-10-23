@@ -18,6 +18,14 @@ use tokio::sync::mpsc;
 use super::WorkerError;
 
 /// PCM block size consumed by the MCU audio tick.
+/// Result of a non-blocking push into a worker pipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushOutcome {
+    Queued,
+    Full,
+    Closed,
+}
+
 pub const LATM_TICK_SAMPLES: usize = 960;
 /// AAC-LC samples per frame.
 pub const LATM_FRAME_SAMPLES: usize = 1024;
@@ -175,9 +183,16 @@ impl LatmEncoder {
     }
 
     /// Non-blocking variant for the 20 ms RTP loop: a full queue drops the
-    /// tick instead of stalling the mixer.
-    pub fn try_push_pcm(&self, pcm: &[i16]) -> bool {
-        self.pcm_tx.as_ref().is_some_and(|sender| sender.try_send(pcm.to_vec()).is_ok())
+    /// tick instead of stalling the mixer, while a closed pipe must end it.
+    pub fn try_push_pcm(&self, pcm: &[i16]) -> PushOutcome {
+        match self.pcm_tx.as_ref() {
+            Some(sender) => match sender.try_send(pcm.to_vec()) {
+                Ok(()) => PushOutcome::Queued,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => PushOutcome::Full,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => PushOutcome::Closed,
+            },
+            None => PushOutcome::Closed,
+        }
     }
 
     /// Non-blocking receive of one `audioMuxElement` (LOAS header stripped).
@@ -338,8 +353,15 @@ impl LatmDecoder {
     }
 
     /// Non-blocking variant: a full decoder queue drops one packet.
-    pub fn try_push_loas(&self, loas: Vec<u8>) -> bool {
-        self.input_tx.as_ref().is_some_and(|sender| sender.try_send(loas).is_ok())
+    pub fn try_push_loas(&self, loas: Vec<u8>) -> PushOutcome {
+        match self.input_tx.as_ref() {
+            Some(sender) => match sender.try_send(loas) {
+                Ok(()) => PushOutcome::Queued,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => PushOutcome::Full,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => PushOutcome::Closed,
+            },
+            None => PushOutcome::Closed,
+        }
     }
 
     /// Non-blocking receive of one 20 ms PCM block.

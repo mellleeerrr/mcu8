@@ -237,7 +237,13 @@ proof с реальным терминалом. H.264/H.265 в browser SFU — T
 > отказ inbound marker=0/фрагментации, валидация UAS `object=2`/`rate=48000`, non-blocking
 > `try_push_loas/try_push_pcm` вместо блокирующих await в 20-мс цикле, реальный lease пула,
 > 3-кадровый prefill + token-bucket pacing (15 кадров на 16 тиков, без пачек 4/100 мс),
-> RTP-level тест пакета (PT113, marker=1, 90 кГц timestamp, payload)
+> RTP-level тест пакета (PT113, marker=1, 90 кГц timestamp, payload).
+> **Повторное ревью медиа: 8.0/10 (REQUEST CHANGES).** Исправлено: точный key=value
+> fmtp-парсер AAC (`bitrate` игнорируется, `object` строго 2, `cpresent=0` отвергается,
+> `config=` при cpresent=1 допустим, SBR=1 отвергается); rolling 3-с PCM-liveness вместо
+> стартового; `PushOutcome::{Queued,Full,Closed}` — Full не рвёт мост; атомарный
+> `try_reserve` (`try_acquire_many_owned`); DTMF E-бит только в финальном пакете,
+> duration 20→100 мс; AAC не объявляется при пуле <2.
 > (`WorkerPool::try_reserve(2)`) для двух прямых FFmpeg-процессов. **Live-бинарь `3caa7546`:
 > legal-гейт enforced — `aac_latm=false`, API AAC supported=false** (включается только
 > `VKS_AAC_LATM_LEGAL_ACCEPTED=1`). Осталось до 9.5: RTP-level AAC-тест (16:15/marker/timestamp/

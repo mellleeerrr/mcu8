@@ -927,12 +927,9 @@ impl WorkerPool {
     /// FFmpeg directly (AAC-LATM's split-pipe pair). The returned permits must
     /// live as long as the children; dropping them returns the slots.
     #[must_use]
-    pub fn try_reserve(&self, permits: usize) -> Option<Vec<tokio::sync::OwnedSemaphorePermit>> {
-        let mut reserved = Vec::with_capacity(permits);
-        for _ in 0..permits {
-            reserved.push(self.semaphore.clone().try_acquire_owned().ok()?);
-        }
-        Some(reserved)
+    pub fn try_reserve(&self, permits: usize) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let permits = u32::try_from(permits).ok()?;
+        self.semaphore.clone().try_acquire_many_owned(permits).ok()
     }
 
     /// Spawns a worker, applying backpressure while the pool is full.

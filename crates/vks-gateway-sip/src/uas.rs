@@ -414,6 +414,25 @@ impl BridgeableAudio {
 /// transcoder.  Static PTs 0/8/9 may omit rtpmap; dynamic PTs (including our
 /// 107-110) must declare a matching name+clock, otherwise a hostile offer
 /// could claim PCMU while sending G.726.
+/// AAC-LATM fmtp gate for the in-band-SMC bridge: `bitrate`, `profile-level-id`
+/// and unknown parameters are ignored (RFC 3016 allows them); the codec itself
+/// must be AAC-LC (object type 2) and SMC must travel in-band (`cpresent!=0`).
+fn aac_fmtp_is_bridgeable(fmtp: &str) -> bool {
+    let mut object: Option<&str> = None;
+    let mut cpresent: Option<&str> = None;
+    let mut sbr = false;
+    for parameter in fmtp.split(';') {
+        let Some((key, value)) = parameter.split_once('=') else { continue };
+        match key.trim().to_ascii_lowercase().as_str() {
+            "object" => object = Some(value.trim()),
+            "cpresent" => cpresent = Some(value.trim()),
+            "sbr" => sbr = value.trim() == "1",
+            _ => {}
+        }
+    }
+    !sbr && cpresent != Some("0") && object.is_none_or(|value| value == "2")
+}
+
 fn bridgeable_audio(section: &str, payload: u8, aac_available: bool) -> Option<BridgeableAudio> {
     let static_codec = match payload {
         0 => Some("PCMU"),
@@ -464,16 +483,7 @@ fn bridgeable_audio(section: &str, payload: u8, aac_available: bool) -> Option<B
                 .filter(|line| line.to_ascii_lowercase().starts_with(&format!("a=fmtp:{payload} ")))
                 .collect::<String>()
                 .to_ascii_lowercase();
-            if fmtp.contains("cpresent=0") || fmtp.contains("config=") {
-                return None;
-            }
-            // cpresent by default is 1 (RFC 3016 §5.3), but the codec inside
-            // must be AAC-LC object type 2 at 48 kHz; anything else would leave
-            // FFmpeg alive with no PCM.
-            if fmtp.contains("object=") && !fmtp.contains("object=2") {
-                return None;
-            }
-            if fmtp.contains("rate=") && !fmtp.contains("rate=48000") {
+            if !aac_fmtp_is_bridgeable(&fmtp) {
                 return None;
             }
             return Some(BridgeableAudio {
@@ -981,7 +991,16 @@ a=rtpmap:101 telephone-event/8000\r\n";
         assert!(negotiate_with(&bad_clock, true).is_none(), "48 kHz clock is not bridged yet");
         let he_aac = offer.replace("object=2", "object=8");
         assert!(negotiate_with(&he_aac, true).is_none(), "HE-AAC is not bridged");
-        let bad_rate = offer.replace("object=2", "object=2;rate=44100");
-        assert!(negotiate_with(&bad_rate, true).is_none(), "44.1 kHz is not bridged");
+        for object in ["22", "23", "29"] {
+            let variant = offer.replace("object=2", &format!("object={object}"));
+            assert!(negotiate_with(&variant, true).is_none(), "object={object} is not AAC-LC");
+        }
+        let sbr = offer.replace("object=2", "object=2;SBR=1");
+        assert!(negotiate_with(&sbr, true).is_none(), "SBR implies HE-AAC");
+        // RFC 3016 legal parameters must not be mistaken for a rate limit.
+        let bitrate = offer.replace("object=2", "object=2;bitrate=64000");
+        assert!(negotiate_with(&bitrate, true).is_some(), "bitrate is informational");
+        let config_hint = offer.replace("cpresent=1", "cpresent=1;config=40002420");
+        assert!(negotiate_with(&config_hint, true).is_some(), "config hint with in-band SMC is legal");
     }
 }
