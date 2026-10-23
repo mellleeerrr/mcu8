@@ -36,6 +36,22 @@ fn ffmpeg_path() -> std::path::PathBuf {
 
 /// Whether this RTP payload type/codec pair has to use the AAC-LATM bridge.
 #[must_use]
+/// Builds one AAC RTP packet: one complete `audioMuxElement` per packet,
+/// marker=1, 90 kHz timestamp supplied by [`LatmRtpClock`].
+fn write_aac_rtp_packet(
+    packet: &mut [u8],
+    payload_type: u8,
+    sequence: u16,
+    timestamp: u32,
+    ssrc: u32,
+    frame: &[u8],
+) -> usize {
+    debug_assert!(frame.len() <= MAX_AAC_PAYLOAD);
+    vks_gateway_sip::write_rtp_header(&mut packet[..12], payload_type, sequence, timestamp, ssrc, true);
+    packet[12..12 + frame.len()].copy_from_slice(frame);
+    12 + frame.len()
+}
+
 pub(super) fn is_aac_audio(payload_type: u8, codec: Option<&str>) -> bool {
     if payload_type == AAC_PAYLOAD_TYPE {
         return true;
@@ -117,6 +133,12 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
     let mut recv_errors = 0u8;
     let mut rejected_logs = 0u8;
     let mut decoded_blocks = 0u64;
+    // 3-frame prefill (64 ms) plus a token-bucket pacer at the exact AAC rate
+    // (46.875 fps = 15 frames per 16 ticks) avoids the 4-frame/100 ms bursts
+    // measured on the live pipe.
+    let mut pending_tx: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
+    let mut ticks = 0u64;
+    let mut frames_sent = 0u64;
     let mut first_packet_at: Option<Instant> = None;
     let mut dtmf = VecDeque::<u8>::new();
     let mut dtmf_active: Option<(u8, usize, u32)> = None;
@@ -256,20 +278,34 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                         session.media_stats.rejected_packets.fetch_add(1, Relaxed);
                         continue;
                     }
+                    if pending_tx.len() >= 64 {
+                        pending_tx.pop_front();
+                        session.media_stats.rejected_packets.fetch_add(1, Relaxed);
+                    }
+                    pending_tx.push_back(frame);
+                }
+                ticks += 1;
+                let due = ticks.saturating_mul(15) / 16;
+                // Keep a 3-frame cushion before the first packet, then send
+                // exactly the number of frames the 20 ms timeline owes.
+                while frames_sent < due && pending_tx.len()
+                    > if ticks < 32 { 2 } else { 0 }
+                {
+                    let frame = pending_tx.pop_front().expect("pending frame");
                     let timestamp = clock.next_timestamp();
-                    vks_gateway_sip::write_rtp_header(
-                        &mut packet[..12],
+                    let length = write_aac_rtp_packet(
+                        &mut packet,
                         session.audio_payload_type,
                         sequence,
                         timestamp,
                         ssrc,
-                        true,
+                        &frame,
                     );
-                    packet[12..12 + frame.len()].copy_from_slice(&frame);
-                    if session.rtp_socket.send_to(&packet[..12 + frame.len()], egress).await.is_ok() {
+                    if session.rtp_socket.send_to(&packet[..length], egress).await.is_ok() {
                         session.media_stats.audio_tx_packets.fetch_add(1, Relaxed);
                         session.media_stats.audio_tx_bytes.fetch_add((12 + frame.len()) as u64, Relaxed);
                         sequence = sequence.wrapping_add(1);
+                        frames_sent += 1;
                     }
                 }
                 // RFC 4733 events keep their own 8 kHz clock; do not advance the
@@ -344,5 +380,21 @@ mod tests {
         assert!(is_aac_audio(96, Some("AAC")));
         assert!(!is_aac_audio(96, Some("G722")));
         assert!(!is_aac_audio(9, Some("G722")));
+    }
+
+    #[test]
+    fn aac_rtp_packet_has_one_element_marker_and_90k_timestamp() {
+        let mut packet = [0u8; 1400];
+        let frame = [0x20u8, 0x00, 0x11, 0x88];
+        let length = write_aac_rtp_packet(&mut packet, 113, 7, 123_456, 0xDEAD_BEEF, &frame);
+        assert_eq!(length, 16);
+        assert_eq!(packet[0], 0x80, "RTP v2");
+        assert_eq!(packet[1] & 0x7f, 113, "MP4A-LATM payload type");
+        assert_eq!(packet[1] & 0x80, 0x80, "marker: complete audioMuxElement");
+        assert_eq!(&packet[2..4], &7u16.to_be_bytes());
+        assert_eq!(&packet[4..8], &123_456u32.to_be_bytes(), "90 kHz clock");
+        assert_eq!(&packet[8..12], &0xDEAD_BEEFu32.to_be_bytes());
+        assert_eq!(packet[12], 0x20);
+        assert_eq!(&packet[12..16], &frame);
     }
 }
