@@ -38,12 +38,19 @@ impl Compositor {
     /// - Overlapping rects: higher `z` wins; equal `z` falls back to slot key
     ///   (deterministic order).
     pub fn compose(&self, frames: &BTreeMap<u32, Arc<Frame>>, rects: &BTreeMap<u32, PixelRect>) -> Frame {
-        let mut canvas = Frame::filled(CANVAS_WIDTH, CANVAS_HEIGHT, 0);
         let pixels = CANVAS_WIDTH as usize * CANVAS_HEIGHT as usize;
-        if frames.values().any(|frame| frame.is_yuv420p()) {
-            canvas.data.fill(16);
-            canvas.data.resize(pixels * 3 / 2, 128);
-        }
+        let yuv_canvas = frames.values().any(|frame| frame.is_yuv420p());
+        // Build the canvas in one allocation: a YUV canvas starts at limited
+        // range (16/128), a grayscale one at black. `filled` + `resize` used to
+        // touch and copy the 3 MB buffer twice per tick.
+        let mut data = if yuv_canvas {
+            let mut data = vec![128u8; pixels * 3 / 2];
+            data[..pixels].fill(16);
+            data
+        } else {
+            vec![0u8; pixels]
+        };
+        let mut canvas = Frame::new(CANVAS_WIDTH, CANVAS_HEIGHT, std::mem::take(&mut data));
         // Overlap/PiP: z_index задаёт порядок отрисовки, ключ — стабильный
         // tie-break. BTreeMap сам по себе сортировал только по slot id.
         // До 128 слотов сортируем на стеке: compose вызывается 30 раз/с и не
@@ -104,48 +111,52 @@ impl Compositor {
         let oy = ry + rh.saturating_sub(dh) / 2;
         let fw = frame.width as usize;
         let fh = frame.height as usize;
+        // 16.16 fixed-point nearest-neighbour mapping: the previous per-pixel
+        // `f64` division dominated the compose cost (4x720p could exceed the
+        // 30 fps budget). Integer steps keep the same geometry without FP
+        // division on the hot path.
+        let step_x = ((fw as u64) << 16) / dw as u64;
+        let step_y = ((fh as u64) << 16) / dh as u64;
         for dy in 0..dh {
-            let fy = (dy as f64 / s) as usize; // nearest neighbour, clamped
+            let fy = ((dy as u64 * step_y) >> 16) as usize;
             let fy = fy.min(fh - 1);
             let row = oy + dy;
             if row >= ch {
                 break;
             }
-            for dx in 0..dw {
-                let fx = (dx as f64 / s) as usize;
-                let fx = fx.min(fw - 1);
-                let col = ox + dx;
-                if col >= cw {
-                    break;
-                }
-                let src = fy * fw + fx;
-                let val = frame.data.get(src).copied().unwrap_or(0);
-                let dst = row * cw + col;
-                if dst < canvas.data.len() {
-                    canvas.data[dst] = val;
-                }
+            let Some(source) = frame.data.get(fy * fw..fy * fw + fw) else { continue };
+            let destination_row = row * cw;
+            let Some(destination) = canvas.data.get_mut(destination_row + ox..destination_row + cw) else {
+                continue;
+            };
+            for (dx, pixel) in destination.iter_mut().enumerate().take(dw.min(cw.saturating_sub(ox))) {
+                let fx = ((dx as u64 * step_x) >> 16) as usize;
+                *pixel = source[fx.min(fw - 1)];
             }
         }
         if canvas.data.len() == cw * ch * 3 / 2 {
+            let is_yuv = frame.is_yuv420p();
             let source_pixels = fw * fh;
             let chroma_width = fw / 2;
             let chroma_height = fh / 2;
             for plane in 0..2 {
                 let source_offset = source_pixels + plane * (source_pixels / 4);
                 let destination_offset = cw * ch + plane * (cw * ch / 4);
+                let chroma_step_x = ((chroma_width as u64) << 16) / (dw / 2).max(1) as u64;
+                let chroma_step_y = ((chroma_height as u64) << 16) / (dh / 2).max(1) as u64;
                 for dy in 0..dh / 2 {
                     let row = oy / 2 + dy;
                     if row >= ch / 2 {
                         break;
                     }
+                    let source_y = (((dy as u64 * chroma_step_y) >> 16) as usize).min(chroma_height - 1);
                     for dx in 0..dw / 2 {
                         let column = ox / 2 + dx;
                         if column >= cw / 2 {
                             break;
                         }
-                        let value = if frame.is_yuv420p() {
-                            let source_x = ((dx as f64 / s) as usize).min(chroma_width - 1);
-                            let source_y = ((dy as f64 / s) as usize).min(chroma_height - 1);
+                        let value = if is_yuv {
+                            let source_x = (((dx as u64 * chroma_step_x) >> 16) as usize).min(chroma_width - 1);
                             frame.data[source_offset + source_y * chroma_width + source_x]
                         } else {
                             128

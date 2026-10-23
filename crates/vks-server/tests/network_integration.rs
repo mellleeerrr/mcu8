@@ -628,6 +628,23 @@ async fn reqwest_like_get(addr: SocketAddr, path: &str, token: &str) -> String {
     }
 }
 
+/// Читает следующее сообщение комнаты, пропуская push-раскладки (S9).
+///
+/// Смена раскладки теперь доезжает до клиентов отдельным `LayoutChanged`,
+/// поэтому тесты, ожидающие конкретный push, должны её пропустить.
+async fn next_non_layout(
+    stream: &mut futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+) -> vks_signaling::envelope::Envelope {
+    loop {
+        let msg = stream.next().await.unwrap().unwrap();
+        let env = vks_signaling::envelope::Envelope::decode(&msg.into_data()).unwrap();
+        if matches!(env.payload(), Some(Payload::LayoutChanged(_))) {
+            continue;
+        }
+        return env;
+    }
+}
+
 async fn reqwest_like_request(
     addr: SocketAddr,
     method: &str,
@@ -1297,25 +1314,21 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
     assert_eq!(mode_json["payload"]["mode"], "auto", "топология mcu не меняет режим раскладки");
 
     // Alice and Bob both receive RoomModeChanged(new_mode: Mcu, switch_epoch: 1) on their live WebSockets!
-    let alice_mode_msg = read_alice.next().await.unwrap().unwrap();
-    let env_alice_mode = Envelope::decode(&alice_mode_msg.into_data()).unwrap();
-    match env_alice_mode.payload() {
-        Some(Payload::RoomModeChanged(rmc)) => {
-            assert_eq!(rmc.new_mode, vks_proto::media::RoomMode::Mcu as i32);
-            assert_eq!(rmc.switch_epoch, 1);
-        }
+    // S9: перед этим приходит push-сообщение LayoutChanged (раскладка комнаты
+    // теперь доезжает до клиентов), поэтому читаем до RoomModeChanged.
+    let alice_mode = match next_non_layout(&mut read_alice).await.payload() {
+        Some(Payload::RoomModeChanged(rmc)) => rmc.clone(),
         other => panic!("expected RoomModeChanged for Alice, got: {other:?}"),
-    }
+    };
+    assert_eq!(alice_mode.new_mode, vks_proto::media::RoomMode::Mcu as i32);
+    assert_eq!(alice_mode.switch_epoch, 1);
 
-    let bob_mode_msg = read_bob.next().await.unwrap().unwrap();
-    let env_bob_mode = Envelope::decode(&bob_mode_msg.into_data()).unwrap();
-    match env_bob_mode.payload() {
-        Some(Payload::RoomModeChanged(rmc)) => {
-            assert_eq!(rmc.new_mode, vks_proto::media::RoomMode::Mcu as i32);
-            assert_eq!(rmc.switch_epoch, 1);
-        }
+    let bob_mode = match next_non_layout(&mut read_bob).await.payload() {
+        Some(Payload::RoomModeChanged(rmc)) => rmc.clone(),
         other => panic!("expected RoomModeChanged for Bob, got: {other:?}"),
-    }
+    };
+    assert_eq!(bob_mode.new_mode, vks_proto::media::RoomMode::Mcu as i32);
+    assert_eq!(bob_mode.switch_epoch, 1);
 
     // Verify engine_abonents populates main participant monitor roster (M4.2)
     let (code_eng, body_eng) = reqwest_like_request(tcp_addr, "GET", "/api/v3/engine/abonents", &token, None).await;
@@ -1410,8 +1423,7 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
     assert_eq!(code_kick, 204);
 
     // Bob receives ParticipantLeft { reason: 2 (kicked) } followed by WebSocket CloseFrame(4003)
-    let bob_kick_msg = read_bob.next().await.unwrap().unwrap();
-    let env_bob_kick = Envelope::decode(&bob_kick_msg.into_data()).unwrap();
+    let env_bob_kick = next_non_layout(&mut read_bob).await;
     match env_bob_kick.payload() {
         Some(Payload::ParticipantLeft(left)) => {
             assert_eq!(left.participant_id, bob_pid);
@@ -1427,8 +1439,7 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
     );
 
     // Alice receives ParticipantLeft for Bob
-    let alice_left_msg = read_alice.next().await.unwrap().unwrap();
-    let env_alice_left = Envelope::decode(&alice_left_msg.into_data()).unwrap();
+    let env_alice_left = next_non_layout(&mut read_alice).await;
     match env_alice_left.payload() {
         Some(Payload::ParticipantLeft(left)) => {
             assert_eq!(left.participant_id, bob_pid);

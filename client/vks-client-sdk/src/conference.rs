@@ -142,7 +142,14 @@ impl Conference {
         self.join_nonce = Some(join_result.join_nonce);
         self.nonce_acquired_at = Some(std::time::Instant::now());
 
-        // 3. Media engine → active.
+        // 3. Раскладка комнаты: сервер шлёт её сразу после JoinRoomResult
+        // (поздний участник иначе рисовал бы авто-сетку до следующего
+        // изменения раскладки).
+        if let Some(layout) = client.current_layout() {
+            self.media.set_layout(layout);
+        }
+
+        // 4. Media engine → active.
         self.state = ConferenceState::Active;
         Ok(())
     }
@@ -156,6 +163,14 @@ impl Conference {
     pub fn on_mode_changed(&mut self, mode: RoomMode) {
         if self.state == ConferenceState::Active {
             self.media.switch_mode(mode);
+        }
+    }
+
+    /// Реакция на LayoutChanged — раскладка сервера становится источником
+    /// геометрии плиток (вместо авто-сетки клиента).
+    pub fn on_layout_changed(&mut self, layout: vks_layout::NormalizedLayout) {
+        if self.state == ConferenceState::Active {
+            self.media.set_layout(layout);
         }
     }
 

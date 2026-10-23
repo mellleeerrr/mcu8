@@ -1,0 +1,27 @@
+{
+  "audio_ticks": 3000,
+  "notes": "In-process engine only: no RTP, SIP, decode/encode, resize or network. The video canvas is fixed 1920x1080, so compose p99 above 2 ms is a known optimisation target, not a harness artifact.",
+  "participants": 4,
+  "phases": {
+    "audio": {
+      "count": 3000,
+      "le_2ms_ratio": 1.0,
+      "p99_seconds_estimate": 0.0002208955223880597,
+      "sum_seconds": 0.1963443550000004
+    },
+    "video": {
+      "count": 1182,
+      "le_2ms_ratio": 0.0,
+      "p99_seconds_estimate": 0.019803921568627453,
+      "sum_seconds": 12.127218997000021
+    }
+  },
+  "profile": "release",
+  "seconds": 60,
+  "slo": {
+    "audio_p99_le_2ms": true,
+    "video_2ms_ratio": 0.0,
+    "video_p99_le_33ms_frame_budget": true
+  },
+  "video_ticks": 1819
+}

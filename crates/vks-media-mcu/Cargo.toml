@@ -42,3 +42,5 @@ oxideav = ["dep:oxideav-scene"]
 
 [dev-dependencies]
 tokio = { workspace = true }
+prometheus.workspace = true
+serde_json.workspace = true

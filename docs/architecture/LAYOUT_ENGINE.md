@@ -92,8 +92,10 @@ pub fn assign_by_role(
   (`id, name, version, assigned_rooms, is_default`). PostgreSQL/`jsonb`,
   упомянутые в v0.1, в проекте **не используются**.
 * **Сигналинг** — protobuf (`prost 0.13.5`), схема `vks-proto`.
-  Сообщение `LayoutChanged` **объявлено, но не отправляется** — это разрыв
-  цепочки Ц7 (см. `ARCHITECTURE_PLAN_2026-10-23.md`, шаг 3).
+  Сообщение `LayoutChanged` **отправляется**: `GatewayManager::apply_layout`
+  рассылает его участникам комнаты после применения раскладки в MCU
+  (`crates/vks-server/src/layout_signal.rs`), поздний участник получает
+  раскладку сразу после `JoinRoomResult`.
 * Файл `vks-layout/src/storage.rs` **не существует**: преобразования
   `Layout ↔ JSON` и `Layout ↔ protobuf` живут в `vks-admin` и `vks-server`.
 
@@ -133,8 +135,10 @@ stack_keys.sort_unstable_by_key(|key| (rects[key].z, *key));
 
 * Клиентский рендер — собственный `DrawCommand` в `client/vks-client-sdk`,
   а **не** CSS-позиционирование (v1 из старого документа не реализован).
-* Раскладка на клиент **не доходит**: событие `LayoutChanged` не отправляется,
-  клиент рисует авто-сетку. Разрыв Ц7.
+* Раскладка на клиент **доходит**: `LayoutChanged` → `PushHandler` в SDK →
+  `MediaEngine::set_layout`; пока раскладки нет, клиент рисует авто-сетку.
+  `Rect` в протоколе нормализован (0..1) — клиент масштабирует под свой
+  холст (`NormalizedLayout::scale_to_canvas`).
 
 ---
 
@@ -184,8 +188,8 @@ stack_keys.sort_unstable_by_key(|key| (rects[key].z, *key));
 |---|---|
 | Admin → storage (SQLite) | работает |
 | Storage → signaling (NATS broadcast) | NATAS — заглушка (`vks-cluster`) |
-| `LayoutChanged` → клиенты | **не отправляется** (разрыв Ц7) |
-| Snapshot при входе в комнату | работает на уровне `JoinRoom` |
+| `LayoutChanged` → клиенты | работает (рассылка по комнате) |
+| Snapshot при входе в комнату | работает: раскладка приходит следом за `JoinRoomResult` |
 
 Полная карта разрывов — `ARCHITECTURE_PLAN_2026-10-23.md`, шаг 3.
 

@@ -780,9 +780,60 @@ H.323 DTMF сейчас не реализован (H.245 userInputIndication) �
 | S16 | **Грамматика id пресетов**: `PresetId::parse` не покрывает `preset_double_triple*`, `preset_selected_rbl*`; `preset_square_24` теряет «square» при round-trip | 🟡 | Вендорный словарь в бандле — 92 id; палитра пресетов — **серверная** (`vks-layout/src/preset.rs`), бандл содержит только словарь + `icons`/`presetHints` ⇒ патч вендора CSP-нейтрален |
 | S17 | **Дубли и конфиги**: B4 (дубли `docs/implementation/*`), B6 (ключи конфига vs `vks-common::Config`), B7 (два systemd-юнита), B8 (дубли в `scripts/`), B9 (дубли в `tests/e2e/`) | 🟡 | Один живой трекер — `MASTER_TASK_LIST.md` (PROJECT_RULES §3.1) |
 | S18 | **Удалить `.work-tmp/`** в конце сессии; сверить `client/pnm-frontend/MANIFEST.sha256` с фактическими файлами | 🟡 | `.work-tmp` в `.gitignore` (добавлен) |
+| S19 | **MCU tick-метрика и engine-soak**: `vks_mcu_tick_duration_seconds{phase}` (16 бакетов, точная граница 2 мс, env `VKS_MCU_TICK_METRICS=1`, default off), инструментация только успешных тиков, in-process release-soak (`crates/vks-media-mcu/tests/mcu_tick_soak.rs`), оптимизация композитора: fixed-point вместо `f64` на пиксель, row-slice, один аллоцированный канвас | 🟢 | 60 с / 4 участника: audio p99 **0.22 мс** (SLO ≤2 мс выполнен), video compose p99 **19.8 мс** (80 мс до оптимизации; в 33 мс бюджет, но не в 2 мс) — `docs/progress/evidence/t14b-mcu-tick-soak/` |
+| S20 | **Видео-compose ≤2 мс и per-room actors**: SIMD/zero-copy/параллельные тайлы вместо глобального `rooms`-мьютекса, 6–8 комнат 720p30, 24–72 ч live soak с реальными SIP/H.323-вызовами | 🔴 | S19 показал разрыв: копия канваса 1920×1080 и blit'ы доминируют; per-room actor нужен и для каденса, и для честного мультикомнатного p99 |
 
 > **Блокеры, требующие решения владельца:** namespace id Codian (`codian_01…codian_52` —
 > принято мной и обоими агентами, требует подтверждения); `panic = "abort"` →
 > `unwind` (сделано, требует подтверждения); per-viewer self-view (архитектурное
 > решение); H.263 320×240 (`h263p` — «не реализовано» или отказ).
+
+---
+
+## Сессия 2026-10-23 (продолжение) — решения владельца и доска S9–S20
+
+> Мандат владельца: «делай» по пяти открытым вопросам и критичным задачам
+> доски. Все пять решений приняты и реализованы; ниже — что именно сделано
+> и что осталось.
+
+### Решения владельца (подтверждены)
+
+| Вопрос | Решение | Как реализовано |
+|---|---|---|
+| Namespace id Codian | `codian_01…codian_52` + `codian_custom_22` + `codian_custom_14` — **подтверждено** | Без изменений: `crates/vks-layout/src/codian.rs`, справочник `GET /api/v3/ui/video_layouts/presets` отдаёт `source: "codian"` |
+| `panic = "abort"` → `unwind` | **подтверждено** | `Cargo.toml` (workspace): `panic = "unwind"`; `catch_unwind` в воркерех доступен |
+| Per-viewer self-view | **делать** — смена модели композиции | План: см. S21 ниже (ADR + пошаговая реализация) |
+| `artifacts/` | **вынести в отдельное хранилище** | Артефакты E2E пишутся в `$XDG_STATE_HOME/vks/artifacts` (fallback `~/.local/state/vks/artifacts`), 247 МБ вынесены из репозитория |
+| H.263 320×240 | **«не реализовано»** → `VideoCodec::H263Plus` → `h263p` | Реализовано: `h263p` кодирует 320×240 и 640×480 (базовый `h263` их отвергает) |
+
+### Выполнено в этой сессии
+
+| ID | Задача | Статус | Коммит/артефакт |
+|---|---|---|---|
+| S9 | **`LayoutChanged` доходит до клиента**: отправка при смене раскладки, снимок раскладки для позднего участника, приём в SDK и отрисовка по раскладке сервера вместо авто-сетки | 🟢 | `crates/vks-server/src/layout_signal.rs` (нов.), `gateways.rs::broadcast_layout`, `lib.rs` (поздний участник), `client/vks-client-sdk/src/{layout.rs,signaling_client.rs,media_engine/mod.rs,conference.rs}`; тесты: сервер (broadcast) + SDK (push, рендер) |
+| S10 | **Единый 0-based `slot_id`**: `Slot.id` в протоколе 0-based; явная геометрия UI перекрывает базовую (пресетную) **по слоту**, а не заменяет её — больше нет молчаливого выбрасывания участников | 🟢 | `crates/vks-server/src/gateways.rs` (слияние геометрий), `layout_signal.rs`; регресс-тест `explicit_slot_geometry_does_not_drop_other_participants` |
+| S22 | **H.263+ (`h263p`)**: 320×240 и 640×480 кодируются; FFmpeg's raw `h263` muxer отвергает `h263p` ⇒ кодирование идёт через AVI, worker достаёт elementary stream из RIFF | 🟢 | `crates/vks-media-mcu/src/codec_worker/{mod,ffmpeg}.rs`: `VideoCodec::H263Plus`, `needs_avi_container()`, `extract_avi_video_es()`; тест round-trip 320×240 |
+| S23 | **`artifacts/` вне репозитория**: общий резолвер путей, 247 МБ вынесены, `.gitignore`/README обновлены | 🟢 | `tests/e2e/paths.js`, `tests/e2e/*.js`, `tests/e2e/README.md` |
+| S24 | **Мёртвый код/линт**: `compositor.rs` — `needless_range_loop`, `metrics.rs` — `matches!`, тест — `contains_key` | 🟢 | `cargo clippy --workspace --all-targets -- -D warnings` — чисто |
+
+### Осталось
+
+| ID | Задача | Статус | Подводные камни |
+|---|---|---|---|
+| S11 | **WebRTC-транспорт** (Ц1–Ц6): реальный пир не регистрируется паблишером; WebRTC не связан с MCU/SIP/H.323; `VKS_TRANSCODER_ENABLED=1` открывает кодеки без рантайма; `MAX_PEERS_PER_ROOM=2`; ICE-lite без TURN | 🔴 | Звонок умирает после 200 OK, если транскодера нет ⇒ нужен `codec_capabilities`-гейт на SDP |
+| S12 | **Роли в движке**: `assign_by_role` не вызывается автоматически; нужен `join_order` (сейчас сортировка по UUID) и передача `active_speaker` наружу (`is_speaking` всегда `false`) | 🟡 | Семантика Codian §2 требует per-viewer композиции (S21) |
+| S13 | **Мелкий мёртвый код**: `PixelRect` → `vks_layout::Rect`, ~25 мёртвых `pub fn` в 10 крейтах, `csv_escape`×3→1, `canonical_uri`×2→1, `now_*`×7→1, 5 неиспользуемых зависимостей, `focus.rs` — канонизация | 🟡 | `focus.rs` удалять нельзя: `Speaker` = алиас `Focus`, инлайн-копия в `engine.rs` — дубликат |
+| S14 | **Импорт PNM**: P1-1 (скрипт теряет `<script>`-теги), P1-2 (`patch-pnm-chartjs.py` не падает и не идемпотентен), P1-5 (наполовину импортированное дерево) | 🟡 | Общий `scripts/pnm_patch_lib.py`; CSP не затрагивается — меняется только `MANIFEST.sha256` |
+| S15 | **CI и сборка**: `vendored-protoc` нерабочая в пути с пробелом ⇒ удалить фичу + поставить `protoc` в CI; добавить `cargo check --workspace --all-features --all-targets --exclude vks-proto` | 🟡 | `oxideav` — no-op фича |
+| S16 | **Грамматика id пресетов**: `PresetId::parse` не покрывает `preset_double_triple*`, `preset_selected_rbl*`; `preset_square_24` теряет «square» | 🟡 | Палитра пресетов — серверная (`vks-layout/src/preset.rs`) |
+| S17 | **Дубли и конфиги**: B4 (дубли `docs/implementation/*`), B6 (ключи конфига vs `vks-common::Config`), B7 (два systemd-юнита), B8 (дубли в `scripts/`), B9 (дубли в `tests/e2e/`) | 🟡 | Один живой трекер — этот файл (PROJECT_RULES §3.1) |
+| S18 | Сверить `client/pnm-frontend/MANIFEST.sha256` с фактическими файлами | 🟡 | `.work-tmp` удалён |
+| S19 | **MCU tick-метрика и engine-soak** | 🟢 | audio p99 0,22 мс; video compose p99 19,8 мс — в бюджете 33 мс, но не в 2 мс |
+| S20 | **Видео-compose ≤2 мс и per-room actors** | 🔴 | Копия канваса 1920×1080 и blit'ы доминируют |
+| S21 | **Per-viewer self-view** (архитектурная смена модели композиции): `McuEngine` сейчас composites один кадр на всех зрителей; Codian §2 (8 пунктов: семейства, voice activation, «Important», self-view, приоритет заполнения, FECC/DTMF, глобальные команды) без смены модели не реализуем | 🔴 | План: ADR + `McuEngine::compose_for(viewer)` вместо общего `tick`; композит 1920×1080 на зрителя ⇒ нужен кэш общих тайлов; совместимость — `compose_for` = текущий общий кадр, пока флагов нет |
+
+> **H.263+ — остаточное ограничение:** сквозной SIP-мост H.263/H.263+ не
+> работает: в шлюзе нет RTP-payloader (RFC 2429, payload type 34). Кодек
+> теперь кодируется/декодируется на воркере, но `ensure_bridgeable_codec_selection`
+> по-прежнему относит H.263 к «unbridgeable». Payloader — отдельная задача.
 > Полный список — `docs/implementation/ARCHITECTURE_PLAN_2026-10-23.md` §6.

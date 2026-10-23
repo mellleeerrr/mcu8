@@ -8,6 +8,7 @@
 pub mod cluster;
 pub mod frontend;
 pub mod gateways;
+pub mod layout_signal;
 pub mod operator_policy;
 pub mod recorder;
 
@@ -1101,6 +1102,13 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             };
                                             let payload_bytes = Envelope::new(joined_msg).encode();
                                             state.room_hub.broadcast(&rid, Some(&pid_str), payload_bytes.into());
+                                        }
+
+                                        // S9: поздний участник получает текущую раскладку
+                                        // комнаты — иначе он рисовал бы авто-сетку, пока
+                                        // раскладка не изменится снова.
+                                        if let Some(descriptor) = ctx.mcu_engine.layout_descriptor(rid) {
+                                            replies.push(Envelope::new(crate::layout_signal::layout_changed(&descriptor)));
                                         }
 
                                         // Уведомляем админский WebSocket (/api/v3/ws)

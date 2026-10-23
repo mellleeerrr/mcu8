@@ -30,6 +30,12 @@ pub enum RoomMode {
 #[derive(Debug, Clone)]
 pub struct MediaEngine {
     mode: RoomMode,
+    /// Раскладка комнаты, пришедшая от сервера (`LayoutChanged`).
+    ///
+    /// `None` — сервер ещё не прислал раскладку: клиент рисует авто-сетку.
+    /// Как только раскладка приходит, она становится единственным источником
+    /// геометрии плиток.
+    layout: Option<vks_layout::NormalizedLayout>,
     sfu: SfuRenderer,
     mcu: McuRenderer,
 }
@@ -37,7 +43,7 @@ pub struct MediaEngine {
 impl MediaEngine {
     #[must_use]
     pub fn new() -> Self {
-        Self { mode: RoomMode::Sfu, sfu: SfuRenderer::new(), mcu: McuRenderer::new() }
+        Self { mode: RoomMode::Sfu, layout: None, sfu: SfuRenderer::new(), mcu: McuRenderer::new() }
     }
 
     /// Текущий режим.
@@ -51,11 +57,27 @@ impl MediaEngine {
         self.mode = mode;
     }
 
+    /// Применяет раскладку комнаты (по LayoutChanged signaling).
+    pub fn set_layout(&mut self, layout: vks_layout::NormalizedLayout) {
+        self.layout = Some(layout);
+    }
+
+    /// Текущая раскладка комнаты, если сервер её присылал.
+    #[must_use]
+    pub fn layout(&self) -> Option<&vks_layout::NormalizedLayout> {
+        self.layout.as_ref()
+    }
+
     /// Рендерит кадр: SFU → N треков через layout; MCU → 1 композитный.
     pub fn render(&self, participants: &[String], surface: &dyn RenderSurface) {
         match self.mode {
             RoomMode::Sfu => {
-                let cmds = self.sfu.compose(participants, surface.size());
+                // Раскладка сервера важнее авто-сетки: только она описывает
+                // фактические позиции плиток (в т.ч. схемы Codian).
+                let cmds = match &self.layout {
+                    Some(layout) => self.sfu.compose_from_normalized(layout, surface.size()),
+                    None => self.sfu.compose(participants, surface.size()),
+                };
                 surface.render(&cmds);
             }
             RoomMode::Mcu => {
@@ -125,5 +147,42 @@ mod tests {
         e.switch_mode(RoomMode::Mcu);
         e.render(&["a".into(), "b".into()], &surface);
         assert_eq!(surface.take().len(), 1);
+    }
+
+    #[test]
+    fn server_layout_replaces_auto_grid() {
+        let mut e = MediaEngine::default();
+        let surface = RecordingSurface::new();
+        // Авто-сетка: 3 участника → 3 плитки.
+        e.render(&["a".into(), "b".into(), "c".into()], &surface);
+        assert_eq!(surface.take().len(), 3);
+
+        // Раскладка сервера: две полосы (второй слот — половина по высоте).
+        let layout = vks_layout::NormalizedLayout {
+            version: 1,
+            kind: vks_layout::LayoutKind::Custom,
+            slots: vec![
+                vks_layout::NormalizedSlot {
+                    id: vks_layout::SlotId::new(0),
+                    participant_id: Some(vks_layout::ParticipantId::new(1)),
+                    rect: vks_layout::NormalizedRect::new(0.0, 0.0, 1.0, 0.5),
+                    z_index: 0,
+                    pinned: false,
+                    is_focus: false,
+                },
+                vks_layout::NormalizedSlot {
+                    id: vks_layout::SlotId::new(1),
+                    participant_id: Some(vks_layout::ParticipantId::new(2)),
+                    rect: vks_layout::NormalizedRect::new(0.0, 0.5, 1.0, 0.5),
+                    z_index: 0,
+                    pinned: false,
+                    is_focus: false,
+                },
+            ],
+        };
+        e.set_layout(layout);
+        e.render(&["a".into(), "b".into(), "c".into()], &surface);
+        let cmds = surface.take();
+        assert_eq!(cmds.len(), 2, "плитки берутся из раскладки сервера, а не из авто-сетки");
     }
 }

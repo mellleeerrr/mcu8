@@ -275,14 +275,23 @@ enum SlotAssignment {
 }
 ```
 
-**Синхронизация**: push через NATS `vks.cluster.room.layout_changed` → `LayoutChanged` broadcast. Pull — `JoinRoomResult.layout` snapshot.
+**Синхронизация**: push по комнате через `RoomHub` → `LayoutChanged` broadcast.
+Pull — снимок раскладки в `JoinRoomResult` (для позднего участника).
 
-> **Факт на 2026-10-23:** сообщение `LayoutChanged` объявлено в
-> `crates/vks-proto/proto/signaling.proto` (поле 80 в `ServerEvent`), но
-> **ни один отправитель его не формирует**, а NATS-канал — заглушка
-> (`vks-cluster`). Клиент при отсутствии события рисует авто-сетку, поэтому
-> раскладка, выбранная в UI, до браузера **не доходит**. Это разрыв цепочки
-> Ц7; план исправления — `ARCHITECTURE_PLAN_2026-10-23.md`, шаг 3.
+> **Факт на 2026-10-23 (после правки Ц7):** сообщение `LayoutChanged` теперь
+> **формируется и отправляется**: `GatewayManager::apply_layout` после
+> успешного применения раскладки в MCU рассылает `LayoutChanged` участникам
+> комнаты (`crates/vks-server/src/layout_signal.rs`), а поздний участник
+> получает текущую раскладку сразу после `JoinRoomResult`.
+> NATS-канал `vks.cluster.room.layout_changed` по-прежнему заглушка
+> (`vks-cluster`) — межузловая рассылка раскладки не реализована.
+>
+> **Единицы координат:** `Rect` в протоколе — нормализованные `[0.0, 1.0]`
+> относительно холста MCU 1920×1080 (пересчёт пикселей делает сервер, клиент
+> рисует плитки в своём разрешении).
+>
+> **Нумерация слотов:** `Slot.id` — всегда 0-based (контракт
+> `LayoutDescriptor`); `position` в админском API остаётся 1-based.
 
 ## 10. Quality / Error / Ack
 

@@ -155,9 +155,8 @@ pub enum McuTickPhase {
 #[must_use]
 pub fn mcu_tick_metrics_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| match std::env::var("VKS_MCU_TICK_METRICS").as_deref() {
-        Ok("1" | "true" | "TRUE" | "on" | "yes") => true,
-        _ => false,
+    *ENABLED.get_or_init(|| {
+        matches!(std::env::var("VKS_MCU_TICK_METRICS").as_deref(), Ok("1" | "true" | "TRUE" | "on" | "yes"))
     })
 }
 

@@ -47,6 +47,16 @@ pub enum SignalingError {
     Transport(String),
 }
 
+/// Обработчик push-сообщений сервера.
+///
+/// Сервер шлёт push без запроса: `LayoutChanged` (смена раскладки),
+/// `RoomModeChanged` (SFU ↔ MCU), `SpeakingStateChanged` и т.д. Транспорт
+/// вызывает обработчик; SDK разбирает сообщения и обновляет своё состояние.
+pub trait PushHandler: Send + Sync {
+    /// Сообщение от сервера.
+    fn on_message(&self, message: &vks_proto::signaling::SignalingMessage);
+}
+
 /// Signaling transport-порт (WS или WebTransport; Q5).
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -73,6 +83,31 @@ pub trait SignalingTransport: Send + Sync {
     async fn send_ice_candidate(&self, _candidate: &str) -> Result<(), SignalingError> {
         Ok(())
     }
+    /// Регистрирует получателя push-сообщений сервера.
+    ///
+    /// Вызывается SDK при создании клиента; транспорт обязан звать
+    /// `PushHandler::on_message` при получении push-сообщения.
+    fn set_push_handler(&self, _handler: Arc<dyn PushHandler>) {}
+}
+
+/// Внутренний обработчик SDK: запоминает последнюю раскладку комнаты.
+struct SdkPushHandler {
+    layout: Arc<std::sync::RwLock<Option<vks_layout::NormalizedLayout>>>,
+}
+
+impl PushHandler for SdkPushHandler {
+    fn on_message(&self, message: &vks_proto::signaling::SignalingMessage) {
+        let Some(vks_proto::signaling::signaling_message::Payload::LayoutChanged(changed)) = &message.payload else {
+            return;
+        };
+        let Some(layout) = changed.layout.as_ref() else {
+            return;
+        };
+        let normalized = crate::layout::normalized_layout_from_proto(layout);
+        if let Ok(mut guard) = self.layout.write() {
+            *guard = Some(normalized);
+        }
+    }
 }
 
 /// Signaling клиент (обёртка над transport + backoff для auto-reconnect).
@@ -81,18 +116,34 @@ pub struct SignalingClient {
     // backoff для auto-reconnect (exponential 1s→16s, max 5 — §7).
     reconnect_delay: Duration,
     reconnect_attempts: u32,
+    /// Последняя раскладка комнаты, пришедшая от сервера (`LayoutChanged`).
+    layout: Arc<std::sync::RwLock<Option<vks_layout::NormalizedLayout>>>,
 }
 
 impl SignalingClient {
     #[must_use]
     pub fn new(transport: Arc<dyn SignalingTransport>) -> Self {
-        Self { transport, reconnect_delay: Duration::from_secs(1), reconnect_attempts: 0 }
+        let client = Self {
+            transport: transport.clone(),
+            reconnect_delay: Duration::from_secs(1),
+            reconnect_attempts: 0,
+            layout: Arc::new(std::sync::RwLock::new(None)),
+        };
+        let layout = client.layout.clone();
+        transport.set_push_handler(Arc::new(SdkPushHandler { layout }));
+        client
     }
 
     /// Создаёт клиент с конкретным transport (для тестов — mock).
     #[must_use]
     pub fn with_transport(transport: Arc<dyn SignalingTransport>) -> Self {
         Self::new(transport)
+    }
+
+    /// Последняя раскладка комнаты от сервера, если она приходила.
+    #[must_use]
+    pub fn current_layout(&self) -> Option<vks_layout::NormalizedLayout> {
+        self.layout.read().ok().and_then(|guard| guard.clone())
     }
 
     /// ClientHello → ServerHello (async).
@@ -265,5 +316,78 @@ mod tests {
         // reset
         c.reset_reconnect();
         assert_eq!(c.next_reconnect_delay(), Duration::from_secs(1));
+    }
+
+    /// Транспорт, который умеет доставить push-сообщение сервера.
+    struct PushTransport {
+        handler: std::sync::Mutex<Option<Arc<dyn PushHandler>>>,
+    }
+
+    impl PushTransport {
+        fn new() -> Self {
+            Self { handler: std::sync::Mutex::new(None) }
+        }
+
+        fn deliver(&self, message: &vks_proto::signaling::SignalingMessage) {
+            let handler = self.handler.lock().expect("handler lock").clone();
+            if let Some(handler) = handler {
+                handler.on_message(message);
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SignalingTransport for PushTransport {
+        async fn client_hello(&self, _token: &str) -> Result<ServerHello, SignalingError> {
+            Ok(ServerHello { server_version: "1.0".into(), ..ServerHello::default() })
+        }
+        async fn join_room(&self, room_id: &str, _display_name: &str) -> Result<JoinRoomResult, SignalingError> {
+            Ok(JoinRoomResult {
+                room_id: room_id.into(),
+                participant_id: "p1".into(),
+                join_nonce: "nonce-1".into(),
+                participants: vec!["p1".into()],
+            })
+        }
+        async fn leave_room(&self, _room_id: &str) -> Result<(), SignalingError> {
+            Ok(())
+        }
+        fn set_push_handler(&self, handler: Arc<dyn PushHandler>) {
+            *self.handler.lock().expect("handler lock") = Some(handler);
+        }
+    }
+
+    #[test]
+    fn layout_push_is_remembered_by_client() {
+        let transport = Arc::new(PushTransport::new());
+        let client = SignalingClient::with_transport(transport.clone());
+        assert!(client.current_layout().is_none(), "до push раскладки нет");
+
+        let message = vks_proto::signaling::SignalingMessage {
+            msg_id: 0,
+            reply_to: 0,
+            payload: Some(vks_proto::signaling::signaling_message::Payload::LayoutChanged(
+                vks_proto::signaling::LayoutChanged {
+                    layout: Some(vks_proto::signaling::Layout {
+                        version: 2,
+                        kind: "grid".into(),
+                        slots: vec![vks_proto::signaling::Slot {
+                            id: 0,
+                            rect: Some(vks_proto::signaling::Rect { x: 0.0, y: 0.0, w: 1.0, h: 0.5 }),
+                            z: 0,
+                            assignment: vks_proto::signaling::SlotAssignment::Auto as i32,
+                            participant_id: None,
+                        }],
+                    }),
+                },
+            )),
+        };
+        transport.deliver(&message);
+
+        let layout = client.current_layout().expect("раскладка после push");
+        assert_eq!(layout.version, 2);
+        assert_eq!(layout.slots.len(), 1);
+        assert!((layout.slots[0].rect.h - 0.5).abs() < 1e-6);
     }
 }
