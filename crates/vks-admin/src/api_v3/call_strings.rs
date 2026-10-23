@@ -176,11 +176,6 @@ pub fn conflict_error(description: &str) -> Response {
         .into_response()
 }
 
-/// Канонизирует адрес абонента, гарантируя наличие схемы протокола (`sip:` по умолчанию).
-/// T10: политика живёт в `vks_common::uri`, чтобы API и дедупликация не расходились.
-/// Ре-экспорт, а не обёртка: реализация одна, а вызовы из других модулей
-/// (`api_v3::directory::addresses`) остаются рабочими.
-
 /// One call intent can have several attempts; stale completions cannot replace a retry.
 #[derive(Debug, Clone)]
 pub struct CallAttempt {
