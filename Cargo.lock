@@ -2214,17 +2214,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "proptest-derive"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ee1c9ac207483d5e7db4940700de86a9aae46ef90c48b57f99fe7edb8345e49"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "prost"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3857,7 +3846,6 @@ dependencies = [
  "getrandom 0.3.4",
  "prometheus",
  "proptest",
- "proptest-derive",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
