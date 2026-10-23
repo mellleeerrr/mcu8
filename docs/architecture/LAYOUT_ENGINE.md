@@ -95,7 +95,7 @@ pub fn assign_by_role(
 * **Сигналинг** — protobuf (`prost 0.13.5`), схема `vks-proto`.
   Сообщение `LayoutChanged` **отправляется** по двум поводам:
   1) `GatewayManager::apply_layout` — после применения раскладки из UI;
-  2) голосовая активация — `McuEngine::refresh_focus` пересадил главное окно
+  2) голосовая активация — `McuEngine::refresh_seating` пересадил главное окно
      (`crates/vks-server/src/room_events.rs`).
   В обоих случаях источник — эффективная раскладка композитора
   (`crates/vks-server/src/layout_signal.rs`), поздний участник получает
@@ -180,7 +180,7 @@ stack_keys.sort_unstable_by_key(|key| (rects[key].z, *key));
 3. `seat_participant` (`vks-media-mcu`) сажает участника в первый свободный
    слот раскладки; назначения вне `geometry` отбрасываются
    (`sanitize_assignments`), чтобы участник не получил «поверх сетки весь канвас».
-4. **Голосовая активация (Codian §2.2)** — реализована: `RoomState::refresh_focus`
+4. **Голосовая активация (Codian §2.2)** — реализована: `RoomState::refresh_seating`
    пересаживает главное окно к активному спикеру, «Важный» участник
    (`set_important_participant`) важнее спикера. Главное окно определяется
    **по площади** (`vks_layout::main_window`), жильцы меняются местами —
