@@ -65,12 +65,42 @@ LEGACY = "index-legacy6.bundle-2.2.1.66.js"
 # (например, без max-height или с возвращённой иллюстрацией 240×240) дал бы
 # «зелёный» --check, хотя панель делилась бы 50/50 или кнопка «Добавить»
 # уходила бы за нижний край.
+# T16: обе иллюстрации пустых состояний (раскладки + аудиоканалы) должны быть
+# РОВНО ВДВОЕ меньше вендорских 240×240, то есть 120×120; прежний якорь
+# "display: none" (иллюстрация аудиоканалов была скрыта) больше не существует.
+#
+# ВАЖНО (аудит T16): якорь проверяется как ЦЕЛОЕ ПРАВИЛО (селектор + объявления),
+# а не как отдельная подстрока. С подстроками ("width: 120px") частично
+# устаревший override проходил --check «зелёным»: например, возврат иллюстрации
+# РАСКЛАДОК к 240×240 не ловился — подстрока "width: 120px" оставалась в
+# соседнем правиле иллюстрации аудиоканалов. Сравнение выполняется по
+# нормализованным пробелам (переносы строк и отступы не важны, а значения — важны).
 INDEX_CSS_REQUIRED = (
+    # блок аудиоканалов в объединённой панели (конференция и сессия)
     ".main-card-body__container > .main-card-body.conference-audio-channels",
     ".main-card-body__container > .main-card-body.session-audio-channels",
-    ":has(> .main-card-body.conference-audio-channels)",
-    "max-height: 320px",
-    "display: none",
+    # геометрия блока аудиоканалов: не растёт, потолок 320px
+    (
+        ".main-card-body__container > .main-card-body.conference-audio-channels,"
+        " .main-card-body__container > .main-card-body.session-audio-channels"
+        " { flex: 0 0 auto; min-height: 0; max-height: 320px;"
+    ),
+    # T16: компенсация высоты — вертикальный padding блока аудиоканалов 12px
+    "padding-top: 12px; padding-bottom: 12px;",
+    # правило :has() — список раскладок растягивается на остаток панели
+    ":has(> .main-card-body.conference-audio-channels) > .main-card-body:first-child",
+    # T16: иллюстрация пустого состояния списка РАСКЛАДОК — ровно 120×120
+    (
+        ".main-card-body__container > .main-card-body.layouts .main-blank__image"
+        " { width: 120px; height: 120px; }"
+    ),
+    # T16: иллюстрация пустого состояния списка АУДИОКАНАЛОВ — ровно 120×120
+    (
+        ".main-card-body__container > .main-card-body.conference-audio-channels"
+        " .main-blank__image,"
+        " .main-card-body__container > .main-card-body.session-audio-channels"
+        " .main-blank__image { width: 120px; height: 120px; }"
+    ),
 )
 
 # ── Якоря возврата из редактора аудиоканала ──────────────────────────────────
@@ -319,6 +349,12 @@ def apply_rules(path: Path, rules, check_only: bool) -> tuple[bool, list[str]]:
     return True, messages
 
 
+def _norm_css(text: str) -> str:
+    """Нормализует пробелы/переносы строк — сравнение якорей не должно зависеть
+    от форматирования override-блока, но значения объявлений — должны."""
+    return " ".join(text.split())
+
+
 def check_index_css(root: Path) -> tuple[bool, list[str]]:
     """Проверяет, что в index.html есть CSS-override геометрии мержа T15."""
     messages: list[str] = []
@@ -326,7 +362,10 @@ def check_index_css(root: Path) -> tuple[bool, list[str]]:
     if not index.is_file():
         return False, ["    ОШИБКА: index.html не найден: %s" % index]
     text = index.read_text(encoding="utf-8")
-    missing = [snippet for snippet in INDEX_CSS_REQUIRED if snippet not in text]
+    haystack = _norm_css(text)
+    missing = [
+        snippet for snippet in INDEX_CSS_REQUIRED if _norm_css(snippet) not in haystack
+    ]
     if missing:
         messages.append(
             "    ОШИБКА: в index.html нет CSS-override геометрии мержа T15"

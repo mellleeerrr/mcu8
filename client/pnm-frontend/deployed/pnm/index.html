@@ -166,11 +166,8 @@
      заголовок; при большом числе каналов — свой скролл;
    - список раскладок сохраняет flex:1 1 1px: растёт на всю оставшуюся
      высоту панели и сжимается, когда места мало (свой скролл);
-   - пустое состояние аудиоканалов — без иллюстрации: в объединённой панели
-     два пустых состояния не помещаются в карточку, и без иллюстрации у
-     блока аудио (138px) + у списка раскладок (403px) = 541px влезает даже
-     в карточку 549.8px (1024×768). Панель раскладок сохраняет вендорскую
-     иллюстрацию 240×240 — ужимается «гость», а не «хозяин»;
+   - обе иллюстрации пустых состояний — 120×120 (T16, см. ниже): в
+     объединённой панели видно картинку и у раскладок, и у аудиоканалов;
    - тело таблицы аудиоканалов — минимум 140px: вендорский
      .tc-list{flex:1 1 80px} иначе показывает всего 2 строки из 12+.
 
@@ -187,14 +184,52 @@
   max-height: 320px;
   overflow-y: auto;
   border-top: 1px solid #dfdfdf;
+  /* T16: компенсация высоты — вертикальный padding блока аудиоканалов
+     16px → 12px (вендор: .conference-audio-channels{padding:16px 0},
+     специфичность 0,1,0). Экономия 8px нужна, чтобы ДВА пустых
+     состояния с иллюстрациями 120×120 влезли в карточку: без неё
+     сумма 283.2 + 269.2 = 552.4px > контейнера 549.8px (1024×768),
+     список раскладок получает собственную прокрутку, и кнопка
+     «Добавить» уезжает за нижний край. С padding 12px сумма
+     283.2 + 262.2 = 545.4px — запас 4.4px. */
+  padding-top: 12px;
+  padding-bottom: 12px;
 }
 .main-card-body__container:has(> .main-card-body.conference-audio-channels) > .main-card-body:first-child,
 .main-card-body__container:has(> .main-card-body.session-audio-channels) > .main-card-body:first-child {
   flex: 1 1 1px;
 }
+/* T16: иллюстрации пустых состояний — ровно вдвое меньше вендорских.
+   Заказчик: «сделай меньше в 2 раза».
+     • BSmrOOY7.svg — пустое состояние списка РАСКЛАДОК (LayoutBlank);
+     • eNWXoy3B.svg — пустое состояние списка АУДИОКАНАЛОВ (AudioChannelBlank).
+   Вендор: .main-blank__image{height:240px;width:240px} (0,1,0), обе SVG
+   квадратные (viewBox 0 0 240 240) ⇒ 120×120 = ровно половина.
+
+   Область действия — ТОЛЬКО объединённая панель «Раскладки» (конференция
+   и сессия). Селекторы — по классу блока, без :has():
+     • .main-card-body.layouts (0,4,0) — блок списка раскладок есть ровно
+       в одном месте: вкладка «Раскладки» (LayoutTab) конференции и сессии.
+       Вне панели «Раскладки» (пустое состояние контактов, вариант inModal
+       редактора слота) этот класс не используется ⇒ правило их не задевает;
+     • .conference-audio-channels / .session-audio-channels (0,4,0) — блок
+       аудиоканалов объединённой панели (в вендоре он жил во вкладке
+       «Аудиоканал(ы)», T15 убрал вкладку и перенёс блок сюда).
+   Без :has() — в legacy-сборке (index-legacy6) он не поддерживается, а
+   классовые селекторы дают одинаковую геометрию в modern и legacy
+   (проверено Playwright: 120×120 и одинаковые высоты в обоих режимах).
+
+   Специфичность 0,4,0 > вендорской 0,1,0: CSS чанка 7 подключается
+   рантаймом ПОСЛЕ этого инлайн-блока, поэтому правило равной
+   специфичности проиграло бы по порядку в документе. */
 .main-card-body__container > .main-card-body.conference-audio-channels .main-blank__image,
 .main-card-body__container > .main-card-body.session-audio-channels .main-blank__image {
-  display: none;
+  width: 120px;
+  height: 120px;
+}
+.main-card-body__container > .main-card-body.layouts .main-blank__image {
+  width: 120px;
+  height: 120px;
 }
 .main-card-body__container > .main-card-body.conference-audio-channels .main-blank__content > :not(:last-child),
 .main-card-body__container > .main-card-body.session-audio-channels .main-blank__content > :not(:last-child) {

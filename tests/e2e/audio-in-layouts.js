@@ -66,6 +66,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const { artifactsDir } = require('./paths');
 const path = require('node:path');
 const { chromium } = require('playwright');
 
@@ -74,7 +75,7 @@ const LOGIN = process.env.VKS_LOGIN || 'admin';
 const PASSWORD = process.env.VKS_PASSWORD || 'admin_password';
 const CONFERENCE_ID = process.env.VKS_CONFERENCE_ID || '49b599d7-b5cd-45a7-8999-47a28c453a92';
 const PARTICIPANT = process.env.VKS_PARTICIPANT || 'T12b Label Probe';
-const ART = path.resolve(process.env.VKS_ARTIFACTS || 'artifacts/e2e-audio-in-layouts');
+const ART = artifactsDir('e2e-audio-in-layouts');
 const CHROMIUM = process.env.VKS_CHROMIUM
   || '/home/pro/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome';
 // Режим САМОПРОВЕРКИ ЧЕКОВ: имитировать «исправленное» состояние средствами DOM.
@@ -551,7 +552,21 @@ const GEOM_PROBE = () => {
   const audio = document.querySelector('.conference-audio-channels, .session-audio-channels');
   const layouts = panel ? panel.querySelector('.layouts') : null;
   const addButton = audio ? [...audio.querySelectorAll('button')].find(button => /добавить/i.test(button.innerText || '')) : null;
-  const image = audio ? audio.querySelector('.main-blank__image') : null;
+  const image = audio ? audio.querySelector('.main-blank__image, .main-black__image') : null;
+  // иллюстрация пустого состояния списка РАСКЛАДОК (BSmrOOY7.svg) — она есть
+  // только когда список пуст; на сессии список не пуст, картинки нет
+  const layoutsImage = layouts ? layouts.querySelector('.main-blank__image, .main-black__image') : null;
+  const describeImage = el => {
+    if (!el) return null;
+    const box = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    return {
+      src: (el.getAttribute('src') || '').split('/').pop(),
+      width: box.width, height: box.height,
+      display: style.display, visibility: style.visibility,
+      naturalWidth: el.naturalWidth, naturalHeight: el.naturalHeight,
+    };
+  };
   const rect = el => {
     if (!el) return null;
     const box = el.getBoundingClientRect();
@@ -579,6 +594,8 @@ const GEOM_PROBE = () => {
     layoutsFlex: layouts ? getComputedStyle(layouts).flex : null,
     addButton: addRect,
     illustration: rect(image),
+    illustrationInfo: describeImage(image),
+    layoutsIllustrationInfo: describeImage(layoutsImage),
     // насколько нижняя граница уходит за нижнюю границу контейнера (>0 = обрезка)
     addButtonOverflowPx: (addRect && containerRect) ? addRect.bottom - containerRect.bottom : null,
     audioOverflowPx: (audioRect && containerRect) ? audioRect.bottom - containerRect.bottom : null,
@@ -600,7 +617,26 @@ const GEOM_PROBE = () => {
  *       ограничен 320px, а его контент выше ⇒ кнопка срезана ВНУТРИ блока.
  */
 const CLIP_VARIANT_CSS = {
+  // A — откат политики T16: вендорские 240×240 (наш override не применился)
   A: `
+.main-card-body__container > .main-card-body.conference-audio-channels .main-blank__image,
+.main-card-body__container > .main-card-body.session-audio-channels .main-blank__image,
+.main-card-body__container > .main-card-body.layouts .main-blank__image {
+  width: 240px !important;
+  height: 240px !important;
+}
+`,
+  // B — откат к политике T15: иллюстрация аудиоканалов скрыта (display:none)
+  B: `
+.main-card-body__container > .main-card-body.conference-audio-channels .main-blank__image,
+.main-card-body__container > .main-card-body.session-audio-channels .main-blank__image {
+  display: none !important;
+}
+`,
+  // C — полный откат к состоянию до T15/T16: высотная политика вендора плюс
+  //     вендорские 240×240, из-за чего блок аудио выходит за нижний край
+  //     контейнера (обрезанная кнопка «Добавить»)
+  C: `
 .main-card-body__container > .main-card-body.conference-audio-channels,
 .main-card-body__container > .main-card-body.session-audio-channels {
   flex: 0 0 auto !important;
@@ -609,9 +645,9 @@ const CLIP_VARIANT_CSS = {
   height: max-content !important;
   border-top: 0 !important;
 }
-/* старая иллюстрация пустого состояния — 240×240 и видимая */
 .main-card-body__container > .main-card-body.conference-audio-channels .main-blank__image,
-.main-card-body__container > .main-card-body.session-audio-channels .main-blank__image {
+.main-card-body__container > .main-card-body.session-audio-channels .main-blank__image,
+.main-card-body__container > .main-card-body.layouts .main-blank__image {
   display: block !important;
   width: 240px !important;
   height: 240px !important;
@@ -626,13 +662,13 @@ const CLIP_VARIANT_CSS = {
   min-height: auto !important;
 }
 `,
-  B: `
+  // D — нынешняя высотная политика max-height:320px, но со старой видимой
+  //     картинкой 240×240 ⇒ кнопка «Добавить» срезана ВНУТРИ блока аудио
+  D: `
 .main-card-body__container > .main-card-body.conference-audio-channels,
 .main-card-body__container > .main-card-body.session-audio-channels {
   min-height: auto !important;
 }
-/* старая иллюстрация пустого состояния — 240×240 и видимая; блок аудио
-   остаётся ограниченным 320px, поэтому кнопка срезается ВНУТРИ блока */
 .main-card-body__container > .main-card-body.conference-audio-channels .main-blank__image,
 .main-card-body__container > .main-card-body.session-audio-channels .main-blank__image {
   display: block !important;
@@ -696,23 +732,55 @@ async function checkAudioBlockGeometry(page, scope, phase, options = {}) {
   check(`${prefix}${vp}${scope}: the panel container has no vertical overflow`,
     g.containerScrollH !== null && g.containerScrollH <= g.containerClientH + 1,
     `scrollH=${g.containerScrollH} clientH=${g.containerClientH} overflowY=${g.containerOverflowY}`);
-  // По текущей высотной политике иллюстрация пустого состояния блока аудио
-  // СКРЫТА (display:none) — блок аудио в пустом состоянии занимает ~138px.
-  // Проверка сформулирована как «не больше 120×120»: и скрытая (0×0), и
-  // видимая 120×120 иллюстрация допустимы, а старая 240×240 — нет.
+  // T16: в объединённой панели «Раскладки» иллюстрация пустого состояния
+  // аудиоканалов ВИДИМА и ровно 120×120 (вдвое меньше вендорских 240×240).
+  const info = g.illustrationInfo;
+  const infoText = info
+    ? `${info.src} ${info.width.toFixed(1)}×${info.height.toFixed(1)} display=${info.display} `
+      + `visibility=${info.visibility} natural=${info.naturalWidth}×${info.naturalHeight}`
+    : 'иллюстрации нет';
+  // N7.5 (оставлена): иллюстрация не больше вендорской половины
   check(`${prefix}${vp}${scope}: the empty-state illustration of the audio block takes no more than 120×120`,
     Boolean(g.illustration) && g.illustration.width <= 121 && g.illustration.height <= 121,
-    `illustration=${g.illustration ? `${g.illustration.width.toFixed(1)}×${g.illustration.height.toFixed(1)}` : 'n/a'}`
-    + ' (в текущей политике иллюстрация скрыта: display:none)');
-  // ОТДЕЛЬНЫЙ контракт финальной политики: в объединённой панели пустого
-  // состояния аудиоканалов иллюстрации нет вообще (display:none, 0×0). Без
-  // этого на 1280×800 / 1024×768 список раскладок не помещался в остаток
-  // высоты, и его кнопка «Добавить» уходила за нижний край блока. Откат
-  // этой политики (видимая иллюстрация) обязан давать FAIL.
-  check(`${prefix}${vp}${scope}: the empty-state illustration of the audio block is hidden (display:none)`,
-    !g.illustration || (g.illustration.width <= 1 && g.illustration.height <= 1),
-    `illustration=${g.illustration ? `${g.illustration.width.toFixed(1)}×${g.illustration.height.toFixed(1)}` : 'нет элемента'}`
-    + ' — ожидается скрытая иллюстрация (0×0 / элемента нет)');
+    `illustration=${infoText}`);
+  // N7.5b (политика T16): иллюстрация аудиоканалов ВИДИМА и ровно 120×120,
+  // пропорции не искажены (бокс квадратный, natural квадратный 150×150)
+  const audioImageOk = Boolean(info)
+    && info.display !== 'none' && info.visibility === 'visible'
+    && Math.abs(info.width - 120) <= 1 && Math.abs(info.height - 120) <= 1
+    && info.naturalWidth > 0 && info.naturalWidth === info.naturalHeight
+    && Math.abs(info.width - info.height) <= 1;
+  check(`${prefix}${vp}${scope}: the empty-state illustration of the audio block is visible and exactly 120×120`,
+    audioImageOk,
+    `illustration=${infoText}`
+    + ' — ожидается видимая картинка 120×120 (вендорские 240×240 — не наш override)');
+  // T16: иллюстрация пустого состояния списка РАСКЛАДОК — тоже 120×120 и
+  // видимая. На конференции список пуст (картинка есть), на сессии список не
+  // пуст — тогда проверка неприменима и фиксируется как info.
+  const layoutsInfo = g.layoutsIllustrationInfo;
+  const layoutsInfoText = layoutsInfo
+    ? `${layoutsInfo.src} ${layoutsInfo.width.toFixed(1)}×${layoutsInfo.height.toFixed(1)} `
+      + `display=${layoutsInfo.display} visibility=${layoutsInfo.visibility} `
+      + `natural=${layoutsInfo.naturalWidth}×${layoutsInfo.naturalHeight}`
+    : 'иллюстрации нет (список раскладок не пуст)';
+  const layoutsImageOk = Boolean(layoutsInfo)
+    && layoutsInfo.display !== 'none' && layoutsInfo.visibility === 'visible'
+    && Math.abs(layoutsInfo.width - 120) <= 1 && Math.abs(layoutsInfo.height - 120) <= 1
+    && layoutsInfo.naturalWidth > 0 && layoutsInfo.naturalWidth === layoutsInfo.naturalHeight
+    && Math.abs(layoutsInfo.width - layoutsInfo.height) <= 1;
+  check(`${prefix}${vp}${scope}: the empty-state illustration of the layouts list is visible and exactly 120×120`,
+    layoutsImageOk,
+    `illustration=${layoutsInfoText}`,
+    layoutsInfo ? 'fatal' : 'info');
+  // T16: вендорский размер 240×240 означал бы, что наш override не применился
+  const vendorSized = [g.illustrationInfo, g.layoutsIllustrationInfo]
+    .filter(Boolean)
+    .filter(item => Math.abs(item.width - 240) <= 1 && Math.abs(item.height - 240) <= 1);
+  check(`${prefix}${vp}${scope}: neither empty-state illustration is the vendor 240×240`,
+    vendorSized.length === 0,
+    `vendor-sized (240×240): ${vendorSized.map(item => item.src).join(',') || 'нет'}`
+    + `; audio=${info ? `${info.width.toFixed(1)}×${info.height.toFixed(1)}` : 'n/a'}`
+    + `; layouts=${layoutsInfo ? `${layoutsInfo.width.toFixed(1)}×${layoutsInfo.height.toFixed(1)}` : 'n/a'}`);
   // высотная политика T15: блок аудио ограничен max-height (320px)
   const maxHeightPx = g.audioMaxHeight && /px$/.test(g.audioMaxHeight) ? parseFloat(g.audioMaxHeight) : null;
   check(`${prefix}${vp}${scope}: the audio channel block does not exceed its max-height`,
@@ -733,23 +801,66 @@ async function checkAudioBlockGeometry(page, scope, phase, options = {}) {
     + (allowLayoutsScroll ? ' — на низком вьюпорте прокрутка списка раскладок допустима' : ''),
     allowLayoutsScroll ? 'info' : 'fatal');
   if (clipVariant) {
-    // обрезка засчитывается, если срезано ЛИБО сам блок аудио (нижняя граница
-    // блока за нижней границей контейнера), ЛИБО кнопка «Добавить» (за краем
-    // контейнера или внутри блока)
-    const reproduced = (g.audioOverflowPx !== null && g.audioOverflowPx > 1)
-      || (g.addButtonOverflowPx !== null && g.addButtonOverflowPx > 1)
-      || (g.addButtonInsideAudioPx !== null && g.addButtonInsideAudioPx > 1);
-    check(`${prefix}${scope} (clip check ${clipVariant}): the legacy CSS really reproduces the clipped block`,
-      reproduced || (scope === 'session' && clipVariant === 'A'),
-      `audio.bottom - container.bottom = ${overflow(g.audioOverflowPx)}, `
-      + `addButton.bottom - container.bottom = ${overflow(g.addButtonOverflowPx)}, `
-      + `addButton.bottom - audioBlock.bottom = ${overflow(g.addButtonInsideAudioPx)} (ожидаем обрезку > 1px)`
-      + (scope === 'session' && clipVariant === 'A'
-        ? ' — на сессии список раскладок высокий и сжимается сам, поэтому вариант A тут не воспроизводится (см. вариант B)'
-        : ''),
-      scope === 'session' && clipVariant === 'A' ? 'info' : 'fatal');
+    // Что именно должен сломать каждый вариант отката:
+    //   A — вендорские 240×240 (контракт размера иллюстраций);
+    //   B — display:none у иллюстрации аудио (контракт видимости);
+    //   C — состояние до T15/T16: блок аудио срезан границей контейнера;
+    //   D — max-height:320px со старой картинкой: кнопка срезана внутри блока.
+    const isVendorSized = item => Boolean(item)
+      && Math.abs(item.width - 240) <= 1 && Math.abs(item.height - 240) <= 1;
+    const illustrations = [g.illustrationInfo, g.layoutsIllustrationInfo].filter(Boolean);
+    const reproduced = {
+      A: illustrations.some(isVendorSized),
+      B: Boolean(g.illustrationInfo) && g.illustrationInfo.display === 'none',
+      C: (g.audioOverflowPx !== null && g.audioOverflowPx > 1)
+        || (g.addButtonOverflowPx !== null && g.addButtonOverflowPx > 1),
+      D: (g.addButtonInsideAudioPx !== null && g.addButtonInsideAudioPx > 1)
+        || (g.addButtonOverflowPx !== null && g.addButtonOverflowPx > 1),
+    }[clipVariant];
+    check(`${prefix}${scope} (clip check ${clipVariant}): the rollback really breaks the contract`,
+      reproduced,
+      `audio illustration=${g.illustrationInfo ? `${g.illustrationInfo.width.toFixed(1)}×${g.illustrationInfo.height.toFixed(1)} display=${g.illustrationInfo.display}` : 'n/a'}`
+      + `; layouts illustration=${g.layoutsIllustrationInfo ? `${g.layoutsIllustrationInfo.width.toFixed(1)}×${g.layoutsIllustrationInfo.height.toFixed(1)}` : 'n/a'}`
+      + `; audio.bottom - container.bottom = ${overflow(g.audioOverflowPx)}`
+      + `; addButton.bottom - audioBlock.bottom = ${overflow(g.addButtonInsideAudioPx)}`
+      + ' (ожидаем нарушение контракта по своему варианту)');
   }
   return g;
+}
+
+/**
+ * T16: правило 120×120 действует ТОЛЬКО в объединённой панели «Раскладки».
+ * Вне неё иллюстрации пустых состояний остаются вендорскими 240×240
+ * (пустое состояние контактов D50U8FhX.svg, пустое состояние панели
+ * управления сессии CkOvTFTY.svg) — иначе правило «расползлось» бы на всё
+ * приложение.
+ */
+async function checkVendorImagesOutsidePanel(page, phase) {
+  const prefix = phase ? `[${phase}] ` : '';
+  const collect = () => [...document.querySelectorAll('.main-blank__image, .main-black__image')].map(el => {
+    const box = el.getBoundingClientRect();
+    return {
+      src: (el.getAttribute('src') || '').split('/').pop(),
+      width: box.width, height: box.height, display: getComputedStyle(el).display,
+    };
+  });
+  const isVendor = images => images.length > 0
+    && images.every(item => Math.abs(item.width - 240) <= 1 && Math.abs(item.height - 240) <= 1);
+  // 1) вкладка «Панель управления» сессии — точно вне панели «Раскладки»
+  await page.locator(`${TAB_BAR} [data-qa="session-main-tabs-control-panel"]`).click();
+  await page.waitForTimeout(1200);
+  const controlPanel = await page.evaluate(collect);
+  check(`${prefix}outside the layouts panel: the session control-panel illustration keeps the vendor 240×240`,
+    isVendor(controlPanel),
+    `images=${JSON.stringify(controlPanel)}`);
+  // 2) список сессий — пустое состояние контактов (D50U8FhX.svg)
+  await page.goto(`${BASE}/pnm/monitoring/sessions`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(2200);
+  const listImages = await page.evaluate(collect);
+  check(`${prefix}outside the layouts panel: the contacts empty-state illustration keeps the vendor 240×240`,
+    isVendor(listImages),
+    `images=${JSON.stringify(listImages)}`);
+  return { controlPanel, listImages };
 }
 
 /**
@@ -804,6 +915,10 @@ async function checkSessionTabBarContract(page, phase) {
 async function checkSessionBranch(page) {
   let sessionGeometry = null;
   let sessionKeyboard = null;
+  let outsidePanelImages = null;
+  // clip-варианты сессии живут в своей области видимости (в main() — свои,
+  // для конференции); в result.json попадают через walk.clipVariants
+  const clipGeometries = {};
   let clipGeometryBSession = null;
   const sessionUrl = `${BASE}/pnm/monitoring/sessions/${SESSION_ID}`;
   await page.goto(sessionUrl, { waitUntil: 'networkidle' });
@@ -862,12 +977,15 @@ async function checkSessionBranch(page) {
         CHECKS_SELFTEST || REVERT_CHECK ? 'fixed-sim' : '',
         { clipVariant: CLIP_CHECK ? 'A' : null });
       if (CLIP_CHECK) {
-        // на сессии список раскладок высокий (678px) и сжимается сам, поэтому
-        // вариант A (обрезка границей контейнера) тут не воспроизводится;
-        // воспроизводится вариант B — кнопка срезана ВНУТРИ блока аудио
-        clipGeometryBSession = await checkAudioBlockGeometry(page, 'session',
-          CHECKS_SELFTEST || REVERT_CHECK ? 'fixed-sim' : '',
-          { clipVariant: 'B', label: '[clip-B]' });
+        // на сессии список раскладок НЕ пуст (иллюстрации BSmrOOY7.svg нет),
+        // поэтому проверки по ней — info; откаты B (display:none) и D
+        // (обрезанная кнопка) воспроизводятся
+        for (const variant of ['B', 'D']) {
+          const geometry = await checkAudioBlockGeometry(page, 'session',
+            CHECKS_SELFTEST || REVERT_CHECK ? 'fixed-sim' : '',
+            { clipVariant: variant, label: `[clip-${variant}]` });
+          clipGeometries[`session-${variant}`] = geometry;
+        }
       }
     } else {
       check(`session tab ${spec.label}: the audio channel block is not mounted here`,
@@ -890,8 +1008,13 @@ async function checkSessionBranch(page) {
     expected: ['session-main-tabs-skins', 'session-record-and-stream-tab', 'session-main-tabs-additional'],
     tabs: SESSION_TABS,
   });
+  // T16: правило 120×120 не должно расползтись за пределы панели «Раскладки»
+  outsidePanelImages = await checkVendorImagesOutsidePanel(page, CHECKS_SELFTEST || REVERT_CHECK ? 'fixed-sim' : '');
+
   walk.geometry = sessionGeometry;
   walk.keyboard = sessionKeyboard;
+  walk.outsidePanelImages = outsidePanelImages;
+  walk.clipVariants = clipGeometries;
   return walk;
 }
 
@@ -1012,8 +1135,7 @@ async function checkKeyboardNavigation(page, options = {}) {
   let sessionKeyboard = null;
   let conferenceGeometry = null;
   let sessionGeometry = null;
-  let clipGeometryB = null;
-  let clipGeometryBSession = null;
+  const clipGeometries = {};
   let lowViewportGeometry = null;
   let keyboard = null;
   let editorRoundTrip = null;
@@ -1141,11 +1263,15 @@ async function checkKeyboardNavigation(page, options = {}) {
           CHECKS_SELFTEST || REVERT_CHECK ? 'fixed-sim' : '',
           { clipVariant: CLIP_CHECK ? 'A' : null });
         if (CLIP_CHECK) {
-          // второй способ обрезки: старая картинка 240px при нынешней политике
-          // max-height:320px ⇒ кнопка срезана ВНУТРИ блока аудиоканалов
-          clipGeometryB = await checkAudioBlockGeometry(page, 'conference',
-            CHECKS_SELFTEST || REVERT_CHECK ? 'fixed-sim' : '',
-            { clipVariant: 'B', label: '[clip-B]' });
+          // остальные способы отката политики: B) display:none у иллюстрации
+          // аудио, C) состояние до T15/T16 (блок срезан границей контейнера),
+          // D) max-height:320px со старой картинкой (кнопка срезана в блоке)
+          for (const variant of ['B', 'C', 'D']) {
+            const geometry = await checkAudioBlockGeometry(page, 'conference',
+              CHECKS_SELFTEST || REVERT_CHECK ? 'fixed-sim' : '',
+              { clipVariant: variant, label: `[clip-${variant}]` });
+            clipGeometries[variant] = geometry;
+          }
         }
       } else {
         check(`tab ${spec.label}: the audio channel block is not mounted here`,
@@ -1197,7 +1323,13 @@ async function checkKeyboardNavigation(page, options = {}) {
     // sessionWalk — массив обхода вкладок; клавиатура и геометрия сессии
     // лежат в свойствах массива и в JSON не попадают — выносим отдельно
     sessionKeyboard = sessionWalk.keyboard || null;
-    sessionWalk = { tabs: sessionWalk, keyboard: sessionKeyboard };
+    sessionWalk = {
+      tabs: sessionWalk,
+      keyboard: sessionKeyboard,
+      geometry: sessionWalk.geometry || null,
+      outsidePanelImages: sessionWalk.outsidePanelImages || null,
+      clipVariants: sessionWalk.clipVariants || {},
+    };
 
     // --- 6: сетка раскладок в редакторе раскладок (та же вкладка «Раскладки»)
     await page.goto(`${BASE}/pnm/monitoring/conferences/${CONFERENCE_ID}/layouts`, { waitUntil: 'networkidle' });
@@ -1376,8 +1508,7 @@ async function checkKeyboardNavigation(page, options = {}) {
       geometry: {
         conference: conferenceGeometry,
         session: sessionGeometry,
-        clipVariantB: clipGeometryB,
-        clipVariantBSession: clipGeometryBSession,
+        clipVariants: clipGeometries,
         lowViewports: lowViewportGeometry,
       },
       keyboard,
