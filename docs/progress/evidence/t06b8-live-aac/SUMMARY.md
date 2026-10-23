@@ -73,17 +73,23 @@ because the first rig still owned 5090 during the parallel run):
 - UAS2 decoded the MCU RTP mix: `samples=121856 rms=0.0887 nonzero=121179`
   — the 1 kHz tone injected by UAS1 travelled MCU mix -> AAC-LATM encoder ->
   RTP PT113 -> decoder on UAS2. This is the real end-to-end audio proof.
-- UAS1 decoded its own mix as silence (`rms=0.0000`), as expected: the MCU
-  does not loop a participant's own audio back.
-- Both logs also captured MCU RTCP sender reports (parsed as PT72 when the
-  test script masks the second RTP byte; `first_ts_deltas` shows three RTCP
-  packets before the steady 1920-step PT113 stream).
+- UAS1 decoded silence (`rms=0.0000`). This run does not *prove* mix-minus:
+  UAS1 decoded its first ~120 packets at ~04:13:19, before UAS2 joined at
+  04:13:38, so there was simply no second source in the mix yet. Mix-minus is
+  a design property, not a measured result of this run.
+- The 5091 log captured MCU RTCP sender reports before the PT113 stream
+  (parsed as PT72 when the script masks the second RTP byte; three packets,
+  then a steady 1920-step PT113 stream). The 5092 log's first `pt=72` packet
+  arrived before its own INVITE and is RTCP from the earlier 5091 call sent to
+  the reused port+1; its own stream then steps by 1920.
 
 No `source validator`, `no PCM`, `stalled` or `tearing` warnings appeared;
 bridges ended only when the UAS processes exited.
 
 ## Caveats
 
+- Raw decoded artifact: `uas-5092-rx.latm`, sha256 in `SHA256SUMS`;
+  121 856 samples, RMS 0.08871, 121 179 non-zero.
 - The first single-peer run could only prove framing/timeline (RMS 0);
   the two-peer run above proves audible end-to-end audio.
 - Legal opt-in was enabled only for this lab test; default is off and was

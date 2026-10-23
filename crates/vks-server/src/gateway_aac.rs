@@ -34,8 +34,6 @@ fn ffmpeg_path() -> std::path::PathBuf {
     std::env::var_os("VKS_FFMPEG_BIN").map_or_else(|| std::path::PathBuf::from("ffmpeg"), std::path::PathBuf::from)
 }
 
-/// Whether this RTP payload type/codec pair has to use the AAC-LATM bridge.
-#[must_use]
 /// True when RTP is still arriving (activity under 1 s old) but no PCM block
 /// has been decoded for 3 s — a live FFmpeg that stopped producing audio.
 fn pcm_liveness_stalled(
@@ -67,14 +65,18 @@ fn write_aac_rtp_packet(
     12 + frame.len()
 }
 
+/// Whether this RTP payload type/codec pair has to use the AAC-LATM bridge.
+/// The negotiated codec identity wins when present: PT113 is a local dynamic
+/// assignment, so a peer may legally map it to G.722 or Opus.
+#[must_use]
 pub(super) fn is_aac_audio(payload_type: u8, codec: Option<&str>) -> bool {
-    if payload_type == AAC_PAYLOAD_TYPE {
-        return true;
+    match codec {
+        Some(name) => {
+            let normalized = name.trim().to_ascii_uppercase().replace(['.', '-', '_'], "");
+            matches!(normalized.as_str(), "AAC" | "AACLATM" | "MP4ALATM")
+        }
+        None => payload_type == AAC_PAYLOAD_TYPE,
     }
-    codec.is_some_and(|name| {
-        let normalized = name.trim().to_ascii_uppercase().replace(['.', '-', '_'], "");
-        matches!(normalized.as_str(), "AAC" | "AACLATM" | "MP4ALATM")
-    })
 }
 
 /// Runs the AAC-LATM audio bridge until the call ends.
@@ -155,6 +157,7 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
     let mut pending_tx: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
     let mut ticks = 0u64;
     let mut frames_sent = 0u64;
+    let mut encoder_blocked_at: Option<Instant> = None;
     let mut first_packet_at: Option<Instant> = None;
     let mut dtmf = VecDeque::<u8>::new();
     let mut dtmf_active: Option<(u8, usize, u32)> = None;
@@ -296,10 +299,20 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                     pcm.fill(0);
                 }
                 match encoder.try_push_pcm(&pcm) {
-                    PushOutcome::Queued => {}
+                    PushOutcome::Queued => encoder_blocked_at = None,
                     PushOutcome::Full => {
-                        // A transiently slow tick must not tear the call down.
+                        // A transiently slow tick must not tear the call down,
+                        // but a wedged-yet-alive encoder would silently drop
+                        // every PCM tick: mirror the decoder liveness.
+                        let blocked = *encoder_blocked_at.get_or_insert_with(Instant::now);
                         session.media_stats.rejected_packets.fetch_add(1, Relaxed);
+                        if blocked.elapsed() >= Duration::from_secs(3) {
+                            tracing::warn!(
+                                participant = %session.participant_id_str,
+                                "AAC encoder accepted no PCM for 3 s; tearing the media bridge down"
+                            );
+                            break;
+                        }
                         continue;
                     }
                     PushOutcome::Closed => {
@@ -324,7 +337,7 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                 }
                 ticks += 1;
                 let due = ticks.saturating_mul(15) / 16;
-                // Keep a 3-frame cushion before the first packet, then send
+                // Keep a 2-frame cushion before the first packet, then send
                 // at most two frames per 20 ms tick (plus one when the encoder
                 // delivered a larger burst) so a backlog never leaves as a
                 // 4-packet burst on the wire.
@@ -440,6 +453,17 @@ mod tests {
         assert_eq!(&packet[8..12], &0xDEAD_BEEFu32.to_be_bytes());
         assert_eq!(packet[12], 0x20);
         assert_eq!(&packet[12..16], &frame);
+    }
+
+    #[test]
+    fn aac_dispatch_uses_the_codec_identity_over_the_dynamic_pt() {
+        assert!(is_aac_audio(113, None));
+        assert!(is_aac_audio(96, Some("AAC")));
+        assert!(is_aac_audio(96, Some("MP4A-LATM")));
+        assert!(is_aac_audio(96, Some("AAC-LATM")));
+        assert!(!is_aac_audio(113, Some("G722")));
+        assert!(!is_aac_audio(113, Some("OPUS")));
+        assert!(!is_aac_audio(113, Some("PCMU")));
     }
 
     #[test]

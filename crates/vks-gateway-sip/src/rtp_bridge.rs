@@ -1112,7 +1112,15 @@ fn parse_sdp(sdp: &str) -> Option<SdpDescription> {
                         let entry = media.fmtp.entry(payload).or_default();
                         for parameter in parameters.split(';').map(str::trim) {
                             if let Some((key, value)) = parameter.split_once('=') {
-                                entry.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
+                                let key = key.trim().to_ascii_lowercase();
+                                let value = value.trim();
+                                // Conflicting duplicates must fail closed; a
+                                // "last key wins" map would hide object=8.
+                                if entry.get(&key).is_some_and(|previous| previous != value) {
+                                    entry.insert(key, "!conflict!".to_string());
+                                } else {
+                                    entry.insert(key, value.to_string());
+                                }
                             }
                         }
                     }
@@ -1724,6 +1732,9 @@ a=rtpmap:113 MP4A-LATM/90000\r\na=fmtp:113 profile-level-id=1;object=2;cpresent=
             "profile-level-id=1;object=2;cpresent=0;config=40002420",
             "profile-level-id=1;object=8;cpresent=1",
             "profile-level-id=1;object=2;SBR=1;cpresent=1",
+            "profile-level-id=1;object=2;SBR=true;cpresent=1",
+            "profile-level-id=1;object=8;object=2;cpresent=1",
+            "profile-level-id=1;object=2;cpresent=0;cpresent=1",
         ] {
             let bad_answer = format!(
                 "v=0\r\nc=IN IP4 192.0.2.10\r\nm=audio 32000 RTP/AVP 113\r\n\

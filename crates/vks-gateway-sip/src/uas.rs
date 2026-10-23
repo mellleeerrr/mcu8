@@ -418,19 +418,29 @@ impl BridgeableAudio {
 /// and unknown parameters are ignored (RFC 3016 allows them); the codec itself
 /// must be AAC-LC (object type 2) and SMC must travel in-band (`cpresent!=0`).
 pub(crate) fn aac_fmtp_is_bridgeable(fmtp: &str) -> bool {
-    let mut object: Option<&str> = None;
-    let mut cpresent: Option<&str> = None;
-    let mut sbr = false;
+    // Fail closed on every conflicting duplicate: a peer writing
+    // `object=8;object=2` or `cpresent=0;cpresent=1` must not slip through on
+    // "last key wins". SBR is rejected unless it is explicitly disabled.
+    let mut object_ok = true;
+    let mut cpresent_ok = true;
+    let mut sbr_ok = true;
     for parameter in fmtp.split(';') {
         let Some((key, value)) = parameter.split_once('=') else { continue };
+        let value = value.trim();
+        if value == "!conflict!" {
+            return false;
+        }
         match key.trim().to_ascii_lowercase().as_str() {
-            "object" => object = Some(value.trim()),
-            "cpresent" => cpresent = Some(value.trim()),
-            "sbr" => sbr = value.trim() == "1",
+            "object" => object_ok &= value == "2",
+            "cpresent" => cpresent_ok &= value != "0",
+            "sbr" => {
+                let disabled = value.eq_ignore_ascii_case("0") || value.eq_ignore_ascii_case("false");
+                sbr_ok &= disabled;
+            }
             _ => {}
         }
     }
-    !sbr && cpresent != Some("0") && object.is_none_or(|value| value == "2")
+    object_ok && cpresent_ok && sbr_ok
 }
 
 fn bridgeable_audio(section: &str, payload: u8, aac_available: bool) -> Option<BridgeableAudio> {
@@ -995,8 +1005,21 @@ a=rtpmap:101 telephone-event/8000\r\n";
             let variant = offer.replace("object=2", &format!("object={object}"));
             assert!(negotiate_with(&variant, true).is_none(), "object={object} is not AAC-LC");
         }
-        let sbr = offer.replace("object=2", "object=2;SBR=1");
-        assert!(negotiate_with(&sbr, true).is_none(), "SBR implies HE-AAC");
+        for sbr in ["SBR=1", "SBR=true", "SBR=TRUE"] {
+            let variant = offer.replace("object=2", &format!("object=2;{sbr}"));
+            assert!(negotiate_with(&variant, true).is_none(), "SBR implies HE-AAC: {sbr}");
+        }
+        assert!(
+            negotiate_with(&offer.replace("object=2", "object=2;SBR=0"), true).is_some(),
+            "explicitly disabled SBR is fine"
+        );
+        for (bad, label) in [
+            ("object=8;object=2", "conflicting object duplicates"),
+            ("cpresent=0;cpresent=1", "conflicting cpresent duplicates"),
+        ] {
+            let variant = offer.replace("cpresent=1", &format!("cpresent=1;{bad}"));
+            assert!(negotiate_with(&variant, true).is_none(), "{label} must be refused");
+        }
         // RFC 3016 legal parameters must not be mistaken for a rate limit.
         let bitrate = offer.replace("object=2", "object=2;bitrate=64000");
         assert!(negotiate_with(&bitrate, true).is_some(), "bitrate is informational");
