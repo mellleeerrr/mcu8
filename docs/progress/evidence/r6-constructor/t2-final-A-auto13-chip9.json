@@ -1,0 +1,129 @@
+{
+ "s1": {
+  "store": {
+   "preset": "preset_default_13",
+   "mode": "auto",
+   "slots": 0,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "size": 13,
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "mode": [
+   "layout-mode-selector-auto"
+  ],
+  "ctor": [],
+  "dw": []
+ },
+ "s2": {
+  "store": {
+   "preset": "vks_grid_13",
+   "mode": "manual",
+   "slots": 13,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "size": 13,
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_13"
+  ],
+  "dw": [
+   "13"
+  ]
+ },
+ "chip9": "title",
+ "s3": {
+  "store": {
+   "preset": "vks_grid_9",
+   "mode": "manual",
+   "slots": 9,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "preset_default_13",
+   "size": 13,
+   "slots": 0,
+   "name": "Codian 07 — 13 окон"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_9"
+  ],
+  "dw": [
+   "9"
+  ]
+ },
+ "save9": [
+  {
+   "m": "PATCH",
+   "body": "{\"display_name\":\"Codian 07 — 13 окон\",\"payload\":{\"mode\":\"manual\",\"preset\":\"vks_grid_9\",\"type\":\"individual\",\"slots\":[{\"position\":1,\"role\":\"AUTO\"},{\"position\":2,\"role\":\"AUTO\"},{\"position\":3,\"role\":\"AUTO\"},{\"position\":4,\"role\":\"AUTO\"},{\"position\":5,\"role\":\"AUTO\"},{\"position\":6,\"role\":\"AUTO\"},{\"position\":7,\"role\":\"AUTO\"},{\"position\":8,\"role\":\"AUTO\"},{\"position\":9,\"role\":\"AUTO\"}]}}"
+  }
+ ],
+ "s3b": {
+  "store": {
+   "preset": "vks_grid_9",
+   "mode": "manual",
+   "slots": 9,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "vks_grid_9",
+   "size": 9,
+   "slots": 9,
+   "name": "Codian 07 — 13 окон"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_9"
+  ],
+  "dw": [
+   "9"
+  ]
+ },
+ "s4": {
+  "store": {
+   "preset": "vks_grid_9",
+   "mode": "manual",
+   "slots": 9,
+   "name": "Codian 07 — 13 окон",
+   "type": "individual"
+  },
+  "server": {
+   "preset": "vks_grid_9",
+   "size": 9,
+   "slots": 9,
+   "name": "Codian 07 — 13 окон"
+  },
+  "mode": [
+   "layout-mode-selector-constructor"
+  ],
+  "ctor": [
+   "vks_grid_9"
+  ],
+  "dw": [
+   "9"
+  ]
+ },
+ "errs": [
+  "Operation canceled",
+  "Operation canceled"
+ ]
+}

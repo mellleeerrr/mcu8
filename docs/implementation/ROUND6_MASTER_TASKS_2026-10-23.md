@@ -122,6 +122,24 @@ CI service postgres, `--locked`.
 `grids` (прецедент `codian_geometry_golden.rs`) — обязательный первый шаг перед
 сокращением геометрии (r6-elegance).
 
+## T13. Счётчик «Количество видеокон» + перестройка всех вариантов (НОВОЕ, мандат R6 п.7)
+Приоритет: сразу после T2 (прямой пункт мандата владельца). Сделать:
+- вендорская разметка 1:1 `.dynamic-layout-configurator-counter` (`.counter`,
+  `.counter__button` «мин.»/«макс.», `.counter-center-segment`, −/`+` с иконками
+  `remove`/`add`, `input[type=number][max=100]`, `.tc-text-field*`) — внутрь нашей
+  секции конструктора; видна при «Конструкторе» и «Ручной настройке».
+- поведение: мин. 1, макс. 100, шаг 1, −/+ и input clamp, значение синхронизировано
+  с текущим N; изменение N перестраивает ВСЕ наши карточки (grid/pin_l/r/t/b) под
+  `vks_*_<N>` с сохранением выбранной стороны; превью — через calculate.
+- N>25: серверная грамматика/геометрия до 100 (`vks-layout::grids::MAX_WINDOWS`
+  64→100; опции g/m остаются 1..64), calculate/apply/compositor принимают 100,
+  тест на 100 слотов.
+Подводные камни: MDC-кнопки и ripple-классы; max=100 vs 64; вендорский fallback
+`preset_equal_25`; не сломать вендорские чипы (reAdopt); a11y/disabled на границах;
+payload 100 слотов в БД/движке.
+Критерии: live 1→100 в счётчике перестраивает 5 карточек, активна `vks_<side>_<N>`;
+save/reopen сохраняет N=100; тесты vks-layout; MANIFEST; 0 ошибок.
+
 ## T12. Тесты/CI-гигиена
 Тесты приоритета id-геометрии и create_room-adopt pending, G722-флейк, calculate
 error перечисляет grid, release-note SIP UAS, «970→факт».
@@ -155,4 +173,16 @@ preset на вендорский — зафиксировать поведени
   committed-состоянии, P0 нет, save/reopen payload read-only подтверждён
   (manual + vks_grid_25 + 25 AUTO); P1-risk session-route POST mode → T12
   (в scope conference-layout воспроизведено 0 POST).
+- [ ] T2 — ПОСЛЕ ревью r6-t2-review-elegance (6/10) переработана: убраны
+  `constructorTarget` и мёртвый `onChipPointer`; первичный выбор — однократная
+  отложенная установка после вендорского `preset_equal_25` (`initialAdopt`
+  глушит reAdopt в этом окне), Codian-карточки больше не перехватываются
+  (`reAdopt` только для `preset_*`, `select()` снимает engaged), сторона пина
+  восстанавливается из сохранённого preset. Raw evidence:
+  `t2-final-A-auto13-chip9.json` (auto/13→vks_grid_13→чип 9→PATCH vks_grid_9,
+  reopen 9), `t2-final-B-chip25.json` (чип 25→vks_grid_25→PATCH/reopen 25),
+  `t2-final-C-codian.json` (codian_07 после конструктора→PATCH codian_07,
+  имя сохранено), `t2-final-D-pin-restore.json` (reopen vks_pin_r_9→сторона
+  pin_r), скриншот `t2-constructor-13.png` (13 окон, бейджи 13). Осталось:
+  повторное ревью ≥9.5 и commit.
 - [ ] T2 … T12

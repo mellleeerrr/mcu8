@@ -100,10 +100,9 @@
   var constructorCount = 0;
   var constructorSide = 'grid'; // grid | l | r | t | b (последняя выбранная схема)
   var adoptPending = '';
-  // Целевой preset конструктора: вендор после mode='manual' асинхронно
-  // сбрасывает preset на preset_equal_25, поэтому цель переутверждаем
-  // в schedule(), пока пользователь не выберет другое число окон.
-  var constructorTarget = '';
+  // Пока идёт первичный выбор после клика «Конструктор», reAdopt молчит: иначе
+  // он успевает принять вендорский preset_equal_25 и ставит 25 вместо исходного N.
+  var initialAdopt = false;
   var constructorState = 'idle'; // idle | loading | ready | failed
   var constructorSlots = Object.create(null);
 
@@ -182,32 +181,18 @@
     }
   }
 
-  /* Явный выбор числа окон в вендорском счётчике отменяет цель конструктора:
-   * дальше reAdopt подхватывает новое N из слотов. */
-  function onChipPointer(event) {
-    var target = event.target;
-    if (!target || typeof target.closest !== 'function') return;
-    if (!target.closest('.layout-size-range-selector-item')) return;
-    constructorTarget = '';
-  }
-
   /* Вендорские чипы «Количество видеоокон»/пресеты ставят свой preset поверх
    * нашего. Пока «Конструктор» активен, возвращаем vks_<side>_<N> с новым N:
    * иначе сохранится вендорский preset, а карточки останутся без active. */
   function reAdopt() {
-    if (!modeTileEngaged) return;
+    if (!modeTileEngaged || initialAdopt) return;
     var editor = layoutEditor();
     if (!editor) return;
     var value = editor.modifiedValue || {};
     if (value.mode !== 'manual') return;
     var preset = typeof value.preset === 'string' ? value.preset : '';
-    if (preset.indexOf('vks_') === 0) return;
-    // Вендор после mode='manual' ставит свой дефолт preset_equal_25 уже после
-    // нашего выбора — возвращаем цель (исходное N из auto/ручной раскладки).
-    if (constructorTarget && preset === 'preset_equal_25') {
-      selectConstructor(constructorTarget);
-      return;
-    }
+    // Только вендорские preset_* — Codian-карточки и наши id не перехватываем.
+    if (preset.indexOf('preset_') !== 0) return;
     var count = currentCount();
     if (!(count > 0)) return;
     var key = preset + ':' + count;
@@ -479,6 +464,10 @@
       console.warn('codian-layouts: не удалось выбрать схему ' + id, e);
       return;
     }
+    // Явный выбор Codian-схемы выводит из конструктора: иначе reAdopt вернул бы
+    // наш vks_* и карточка каталога осталась бы без active и без сохранения.
+    modeTileEngaged = false;
+    syncModeTile();
     syncActive();
     subscribe(editor);
   }
@@ -737,8 +726,11 @@
       if (chip) startCount = parseInt(chip.textContent, 10) || 0;
     }
     if (!(startCount > 0)) startCount = Number(startValue.size) || 0;
+    initialAdopt = true;
     var startName = startValue.displayName || '';
-    var startSide = constructorSide;
+    // Сохранённая pin-раскладка задаёт сторону конструктора после reopen.
+    var savedSide = /^vks_pin_([lrtb])_/.exec(startPreset);
+    var startSide = savedSide ? savedSide[1] : constructorSide;
     // Вендорский `mode` — свойство редактора (reactivity store), не поле формы:
     // `editValueField('mode')` пишет в черновик раскладки и портит payload.
     try {
@@ -751,40 +743,27 @@
     // Вкладка «Конструктор» — наш конструктор: после перерисовки ручного
     // режима (слоты появляются не сразу) один раз подставляем vks_grid_<N>.
     // Тихий fallback на 1 окно запрещён: при N=0 остаёмся на вендорском preset.
-    var attempts = 0;
     var keepName = startName;
     function family() {
       return 'vks_' + (startSide === 'grid' ? 'grid' : 'pin_' + startSide) + '_';
     }
-    if (startCount > 0) {
+    // Вендор после mode='manual' первым макротаском сам ставит preset_equal_25
+    // (свой дефолт на 25 слотов). Однократная отложенная установка уже после
+    // этого не перетирается; немедленная — всегда проигрывала гонку.
+    function applyDesired() {
+      if (!modeTileEngaged || !(startCount > 0)) { initialAdopt = false; return; }
+      var value = editor.modifiedValue || {};
+      var preset = typeof value.preset === 'string' ? value.preset : '';
+      if (preset.indexOf('preset_') !== 0) return;
+      initialAdopt = false;
       try {
         if (keepName) editor.editValueField('displayName', keepName);
         editor.editValueField('type', 'individual');
       } catch (e) { /* поля недоступны — останутся вендорские */ }
-      constructorTarget = family() + startCount;
-      selectConstructor(constructorTarget);
-      return;
+      selectConstructor(family() + startCount);
     }
-    function adopt() {
-      if (!modeTileEngaged) return;
-      var value = editor.modifiedValue || {};
-      var preset = typeof value.preset === 'string' ? value.preset : '';
-      if (preset.indexOf('vks_') === 0) return;
-      var count = currentCount();
-      if (count > 0) {
-        // Свежий auto→manual: вендорский watch мог сбросить имя/тип — возвращаем,
-        // иначе save уходит с display_name:null, type:default (P0 T2).
-        try {
-          if (keepName) editor.editValueField('displayName', keepName);
-          editor.editValueField('type', 'individual');
-        } catch (e) { /* поля недоступны — сохранение увидит вендорские значения */ }
-        constructorTarget = 'vks_grid_' + count;
-        selectConstructor(constructorTarget);
-        return;
-      }
-      if (attempts++ < 40) setTimeout(adopt, 50);
-    }
-    adopt();
+    setTimeout(applyDesired, 0);
+    setTimeout(applyDesired, 80);
     var section = document.querySelector('[' + CONSTRUCTOR_ATTR + ']');
     if (section && typeof section.scrollIntoView === 'function') {
       section.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
