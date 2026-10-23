@@ -51,6 +51,7 @@ pub async fn init() -> Result<(), String> {
                 g729_decode = capabilities.has_audio_decoder(AudioCodec::G729),
                 h261 = capabilities.has_video_decoder(VideoCodec::H261),
                 h263 = capabilities.has_video_decoder(VideoCodec::H263),
+                h263p = capabilities.has_video_decoder(VideoCodec::H263Plus),
                 h265 = capabilities.has_video_decoder(VideoCodec::H265),
                 "codec worker capabilities probed (not advertised until bridge wiring lands)"
             );
@@ -87,6 +88,11 @@ fn publish_support(capabilities: &FfmpegCapabilities) {
         ("g729", capabilities.has_audio_decoder(AudioCodec::G729), false),
         ("h261", capabilities.has_video_decoder(VideoCodec::H261), capabilities.has_video_encoder(VideoCodec::H261)),
         ("h263", capabilities.has_video_decoder(VideoCodec::H263), capabilities.has_video_encoder(VideoCodec::H263)),
+        (
+            "h263p",
+            capabilities.has_video_decoder(VideoCodec::H263Plus),
+            capabilities.has_video_encoder(VideoCodec::H263Plus),
+        ),
         ("h265", capabilities.has_video_decoder(VideoCodec::H265), capabilities.has_video_encoder(VideoCodec::H265)),
     ] {
         CODEC_WORKER_SUPPORTED.with_label_values(&[codec, "decode"]).set(i64::from(decode));

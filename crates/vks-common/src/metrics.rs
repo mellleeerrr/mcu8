@@ -82,7 +82,7 @@ pub static WEBRTC_FALLBACK: LazyLock<IntCounterVec> = LazyLock::new(|| {
 
 /// Gauge: host codec-worker capability per codec/direction (1 = available).
 ///
-/// Labels: `codec` (`aac`, `aac_latm`, `g729`, `h261`, `h263`, `h265`) and
+/// Labels: `codec` (`aac`, `aac_latm`, `g729`, `h261`, `h263`, `h263p`, `h265`) and
 /// `direction` (`decode`, `encode`). The gateway's SDP policy remains native
 /// until the RTP bridge for a codec exists; this gauge only reports the probe.
 pub static CODEC_WORKER_SUPPORTED: LazyLock<IntGaugeVec> = LazyLock::new(|| {
@@ -171,7 +171,7 @@ pub fn init_default() {
         }
         WEBRTC_FRAMES_DROPPED.with_label_values(&["queue_full"]);
         WEBRTC_FALLBACK.with_label_values(&["disabled"]);
-        for codec in ["aac", "aac_latm", "g729", "h261", "h263", "h265"] {
+        for codec in ["aac", "aac_latm", "g729", "h261", "h263", "h263p", "h265"] {
             for direction in ["decode", "encode"] {
                 CODEC_WORKER_SUPPORTED.with_label_values(&[codec, direction]).set(0);
             }

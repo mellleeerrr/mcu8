@@ -103,6 +103,8 @@ pub enum VideoCodec {
     H261,
     /// ITU-T H.263 baseline.
     H263,
+    /// ITU-T H.263+ / H.263-1998 (расширенные форматы 320×240, 640×480).
+    H263Plus,
     /// ITU-T H.265 / HEVC (via libx265 on the host).
     H265,
 }
@@ -113,7 +115,10 @@ impl VideoCodec {
     pub const fn ffmpeg_name(self) -> &'static str {
         match self {
             Self::H261 => "h261",
-            Self::H263 => "h263",
+            // H.263+ не имеет отдельного demuxer/muxer: бистрим-контейнер у
+            // него тот же `h263`, а отличается только **энкодер** (`h263p`).
+            // Декодер `h263` в FFmpeg умеет и H.263+, и H.263-1998.
+            Self::H263 | Self::H263Plus => "h263",
             Self::H265 => "hevc",
         }
     }
@@ -124,6 +129,9 @@ impl VideoCodec {
         match self {
             Self::H261 => "h261",
             Self::H263 => "h263",
+            // Базовый `h263` кодировщик 320×240 **не принимает** («Try H.263+»);
+            // `h263p` — единственный путь к расширенным форматам.
+            Self::H263Plus => "h263p",
             Self::H265 => "libx265",
         }
     }
@@ -143,6 +151,13 @@ impl VideoCodec {
             Self::H261 => matches!((width, height), (176, 144) | (352, 288)),
             // FFmpeg's H.263 encoder accepts exactly these picture formats.
             Self::H263 => matches!((width, height), (128, 96) | (176, 144) | (352, 288) | (704, 576) | (1408, 1152)),
+            // H.263+ adds the extended formats 320x240 and 640x480; the rest of
+            // the baseline set is inherited. Verified against FFmpeg's `h263p`
+            // encoder (all seven sizes accepted).
+            Self::H263Plus => matches!(
+                (width, height),
+                (128, 96) | (176, 144) | (320, 240) | (352, 288) | (640, 480) | (704, 576) | (1408, 1152)
+            ),
             // HEVC/x265 requires at least 16x16 macroblock granularity.
             // x265 requires at least 16x16; a multiple of 16 is NOT required
             // (x265 accepts 18x18, 100x100, 176x144). Even dimensions are
@@ -161,6 +176,16 @@ impl VideoCodec {
             && height.is_multiple_of(2)
             && width <= MAX_VIDEO_WIDTH
             && height <= MAX_VIDEO_HEIGHT
+    }
+
+    /// Whether the encoded stream must be carried in an AVI container.
+    ///
+    /// FFmpeg's raw `h263` muxer accepts **only** the baseline `h263`
+    /// encoder ("h263 muxer supports only codec h263 for type video"), so
+    /// H.263+ (`h263p`) has to go through the AVI muxer; the worker then
+    /// extracts the elementary stream back out of the RIFF container.
+    pub const fn needs_avi_container(self) -> bool {
+        matches!(self, Self::H263Plus)
     }
 }
 
@@ -289,6 +314,15 @@ mod tests {
         slot.width = 128;
         slot.height = 96;
         assert!(slot.validate_for(VideoCodec::H263).is_ok());
+        // H.263+ — единственный путь к 320×240: базовый `h263` кодировщик
+        // такой размер отвергает («Try H.263+»).
+        slot.width = 320;
+        slot.height = 240;
+        assert!(slot.validate_for(VideoCodec::H263).is_err(), "FFmpeg rejects 320x240 H.263");
+        assert!(slot.validate_for(VideoCodec::H263Plus).is_ok(), "H.263+ accepts 320x240");
+        slot.width = 640;
+        slot.height = 480;
+        assert!(slot.validate_for(VideoCodec::H263Plus).is_ok(), "H.263+ accepts 640x480");
         assert!(!VideoCodec::H265.supports_encode_size(8, 8));
         assert!(VideoCodec::H265.supports_encode_size(16, 16));
         assert!(VideoCodec::H265.supports_decode_size(3840, 2160));

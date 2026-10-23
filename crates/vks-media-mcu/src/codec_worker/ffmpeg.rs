@@ -790,6 +790,16 @@ impl FfmpegWorker {
             }
         }
         self.stats.bytes_out.fetch_add(output.len() as u64, Ordering::Relaxed);
+        // H.263+ is encoded through the AVI muxer (the raw `h263` muxer
+        // refuses the `h263p` encoder): unwrap the elementary stream back out
+        // so the caller always sees a plain codec bitstream.
+        if let WorkerMode::VideoEncode(codec) = self.mode {
+            if codec.needs_avi_container() {
+                let es = extract_avi_video_es(&output)?;
+                self.stats.bytes_out.fetch_add(es.len() as u64, Ordering::Relaxed);
+                return Ok(es);
+            }
+        }
         Ok(output)
     }
 
@@ -1098,10 +1108,85 @@ fn ffmpeg_args(mode: WorkerMode, slot: SlotConfig) -> Vec<String> {
                     .map(str::to_string),
                 );
             }
-            args.extend(["-f", codec.ffmpeg_name(), "pipe:1"].map(str::to_string));
+            args.extend(["-f", ffmpeg_muxer(codec), "pipe:1"].map(str::to_string));
         }
     }
     args
+}
+
+/// FFmpeg muxer for the encoded elementary stream.
+///
+/// The raw `h263` muxer refuses the H.263+ encoder, so `H263Plus` goes
+/// through the AVI muxer and the worker extracts the elementary stream from
+/// the RIFF container afterwards.
+fn ffmpeg_muxer(codec: VideoCodec) -> &'static str {
+    if codec.needs_avi_container() {
+        "avi"
+    } else {
+        codec.ffmpeg_name()
+    }
+}
+
+/// Extracts the H.263+ elementary stream from an AVI (RIFF) container.
+///
+/// FFmpeg's AVI muxer writes each video frame as a `00dc` chunk inside the
+/// `movi` list; the payload of those chunks *is* the H.263+ bitstream. The
+/// raw `h263` muxer cannot carry the `h263p` encoder, so the worker wraps
+/// the encode into AVI and unwraps it here. The H.261/H.263 encode path is
+/// EOF-only anyway, so a single pass over the finished buffer is enough.
+fn extract_avi_video_es(avi: &[u8]) -> Result<Vec<u8>, WorkerError> {
+    /// Finds a chunk (or a LIST with the wanted list type) in a RIFF tree.
+    ///
+    /// For a LIST the **payload without the list type** is returned, so the
+    /// caller can walk the chunks inside it directly.
+    fn find_chunk<'a>(data: &'a [u8], id: &[u8; 4]) -> Option<&'a [u8]> {
+        let mut offset = 0usize;
+        while offset + 8 <= data.len() {
+            let chunk_id = &data[offset..offset + 4];
+            let size =
+                u32::from_le_bytes([data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7]]) as usize;
+            let start = offset + 8;
+            let end = start.saturating_add(size).min(data.len());
+            if chunk_id == id {
+                return Some(&data[start..end]);
+            }
+            if chunk_id == b"LIST" || chunk_id == b"RIFF" {
+                if start + 4 > end {
+                    break;
+                }
+                let payload = &data[start + 4..end];
+                if chunk_id == b"LIST" && &data[start..start + 4] == id {
+                    return Some(payload);
+                }
+                if let Some(found) = find_chunk(payload, id) {
+                    return Some(found);
+                }
+            }
+            offset = end + (size & 1);
+        }
+        None
+    }
+
+    let movi = find_chunk(avi, b"movi").ok_or_else(|| WorkerError::Codec("AVI container has no movi list".into()))?;
+    // The `movi` list holds one `00dc` chunk per video frame; the chunk
+    // payload *is* the H.263+ elementary stream.
+    let mut es = Vec::new();
+    let mut offset = 0usize;
+    while offset + 8 <= movi.len() {
+        let chunk_id = &movi[offset..offset + 4];
+        let size =
+            u32::from_le_bytes([movi[offset + 4], movi[offset + 5], movi[offset + 6], movi[offset + 7]]) as usize;
+        let start = offset + 8;
+        let end = start.saturating_add(size).min(movi.len());
+        if chunk_id.starts_with(b"0") && chunk_id.ends_with(b"dc") {
+            es.extend_from_slice(&movi[start..end]);
+        }
+        offset = end + (size & 1);
+    }
+    if es.is_empty() {
+        return Err(WorkerError::Codec("AVI container holds no video frames".into()));
+    }
+    Ok(es)
 }
 
 /// Extracts one Annex-B NAL unit from `buffer`, keeping the next start code.
@@ -1413,6 +1498,40 @@ mod tests {
         decoder.finish_input().await;
         let pixels = decoder.read_to_end(4 * 1024 * 1024).await.expect("pixels");
         assert!(pixels.len() >= 704 * 576 * 3 / 2);
+    }
+
+    #[tokio::test]
+    async fn h263_plus_encodes_320x240_which_base_h263_rejects() {
+        if !ffmpeg_available() {
+            return;
+        }
+        // Базовый H.263 кодировщик FFmpeg 320×240 **не принимает**
+        // («Try H.263+»); H.263+ (`h263p`) — единственный путь к этому формату.
+        let slot = SlotConfig {
+            bitrate_bps: 400_000,
+            width: 320,
+            height: 240,
+            fps: 5,
+            audio_bitrate_bps: 64_000,
+            max_queue: 4,
+        };
+        let mut encoder =
+            FfmpegWorker::spawn(WorkerMode::VideoEncode(VideoCodec::H263Plus), slot, WorkerConfig::default())
+                .await
+                .expect("h263p encoder");
+        encoder.write_video(&vec![32u8; 320 * 240 * 3 / 2]).await.expect("frame");
+        encoder.finish_input().await;
+        let bitstream = encoder.read_to_end(4 * 1024 * 1024).await.expect("bitstream");
+        assert!(!bitstream.is_empty(), "h263p must produce a bitstream at 320x240");
+
+        let mut decoder =
+            FfmpegWorker::spawn(WorkerMode::VideoDecode(VideoCodec::H263Plus), slot, WorkerConfig::default())
+                .await
+                .expect("h263p decoder");
+        decoder.write_encoded(&bitstream).await.expect("bitstream in");
+        decoder.finish_input().await;
+        let pixels = decoder.read_to_end(4 * 1024 * 1024).await.expect("pixels");
+        assert!(pixels.len() >= 320 * 240 * 3 / 2);
     }
 
     #[tokio::test]
