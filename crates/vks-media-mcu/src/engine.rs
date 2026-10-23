@@ -612,7 +612,7 @@ impl McuEngine {
     }
 
     /// Advances only the audio pipeline at a specific monotonic timestamp `now_ms` (20 ms cadence).
-    /// Returns true if an audio tick was executed, or false if throttled within the 20 ms budget.
+    /// Returns true if an audio tick was executed, or false if rejected by the 18 ms guard.
     pub fn tick_audio_at(&self, room: RoomId, now_ms: u64) -> bool {
         let (ran, events) = {
             let mut g = self.rooms.lock().unwrap();

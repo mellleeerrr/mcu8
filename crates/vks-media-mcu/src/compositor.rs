@@ -175,10 +175,11 @@ impl Compositor {
         if rw == 0 || rh == 0 {
             return;
         }
+        let luma = if canvas.is_yuv420p() { 16 } else { 0 };
         for row in ry..ry + rh {
             let offset = row * cw + rx;
             if let Some(line) = canvas.data.get_mut(offset..offset + rw) {
-                line.fill(16);
+                line.fill(luma);
             }
         }
         // YUV-канвас: хроматическая плоскость вдвое меньше по каждой оси.
@@ -398,6 +399,26 @@ mod tests {
         let out = Compositor.compose(&frames, &rects);
         assert_eq!(out.data[100], 20, "PiP window (z=1) paints over the large zone");
         assert_eq!(out.data[600 * 1920 + 100], 10, "large zone (z=0) remains outside the PiP");
+    }
+
+    #[test]
+    fn clear_yuv_uses_studio_black_and_neutral_chroma() {
+        let mut canvas = Frame::new(1920, 1080, vec![42u8; 1920 * 1080 * 3 / 2]);
+        Compositor::clear(&mut canvas, &PixelRect::new(0, 0, 960, 540));
+        assert_eq!(canvas.data[0], 16, "YUV luma background must be studio black");
+        assert_eq!(canvas.data[100], 16);
+        let chroma = 1920 * 1080;
+        assert_eq!(canvas.data[chroma], 128, "YUV chroma background must be neutral");
+        assert_eq!(canvas.data[chroma + 270 * 960], 42, "chroma outside the cleared rect stays untouched");
+    }
+
+    #[test]
+    fn clear_grayscale_uses_zero_background() {
+        let mut canvas = Frame::new(1920, 1080, vec![42u8; 1920 * 1080]);
+        Compositor::clear(&mut canvas, &PixelRect::new(0, 0, 960, 540));
+        assert_eq!(canvas.data[0], 0, "grayscale canvas background is 0, as documented");
+        assert_eq!(canvas.data[100], 0);
+        assert_eq!(canvas.data[1000 * 1920], 42, "outside the cleared rect stays untouched");
     }
 
     #[test]

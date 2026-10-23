@@ -20,7 +20,7 @@ green). One room, four participants, real **1280×720 I420** frames with 2-D lum
 non-constant U/V planes, feeding 960-sample near-full-scale PCM (exercises
 the mixer's `tanh` soft-clip). The measured window has two **sequential**
 phases: audio alone at 20 ms, then video alone at 34 ms. They are not concurrent
-because today's global room mutex would let a 16–20 ms compose block the audio tick;
+because today's global room mutex would let an ~16 ms mean / ~20 ms p99 compose block the audio tick;
 per-room actors and multi-room concurrency are S20. A 3 s warm-up is discarded.
 
 Run timing gates on an idle or pinned host: the wall-clock loss gate is
@@ -66,8 +66,9 @@ Video exact `le=33 ms` ratio **1.000**, engine `frames_dropped` delta 883 (all
 exact `le=2 ms` ratio **1.000**, admin rebuilds rendered 2 frames and recorded
 0 ticks. 1492 of 1500 wall-clock audio periods produced their first tick (99.5%);
 the 8 losses are first attempts rejected by the engine's 18 ms audio throttle
-when the loop woke a millisecond early (the period itself still executed, and
-`missed_periods` is 0), not skipped wall-clock slots. They are inside the 1%
+when the loop woke a few milliseconds early (the harness slot executed but the
+audio tick was rejected, so no audio work ran; `missed_periods` is 0 because no
+wall-clock slot was skipped). They are inside the 1%
 period-loss budget on this shared host, and the audio histogram count equals the
 tick count (1492). The wall-clock gate is deliberately load-sensitive: a busier
 host can fail it, and its floored lower bound can hide a single edge-rounding
@@ -75,9 +76,10 @@ slot.
 
 **Verdict:** the audio engine-work p99 ≤2 ms SLO is met with a wide margin. Video
 compose fits the 33 ms frame budget in this workload but **not** the 2 ms target;
-its p99 is only known to be in (20, 33] ms because that is the histogram bucket
-width. The video 2 ms target is deferred to S20 (SIMD/zero-copy/parallel tiles,
-per-room actors). No claim is made that the full media tick meets 2 ms.
+its p99 is only known to be in (10, 20] ms because 20 ms is the upper bound of
+that histogram bucket (the estimate is 20.0 ms). The video 2 ms target is deferred
+to S20 (SIMD/zero-copy/parallel tiles, per-room actors). No claim is made that
+the full media tick meets 2 ms.
 
 Compositor work in this slice: exact integer nearest-neighbour mapping
 (`fx = floor(dx*fw/dw)` via incremental quotient/remainder), integer letterbox
