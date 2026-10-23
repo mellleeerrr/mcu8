@@ -2574,7 +2574,7 @@ async fn constructor_calculate_matches_grid_geometry() {
     let (state, _) = test_state();
     let server = app(state);
     let token = login_token(&server, "admin", "s3cret").await;
-    for id in ["vks_grid_9", "vks_grid_20", "vks_pin_r_8", "vks_pin_b_13"] {
+    for id in ["vks_grid_9", "vks_grid_20", "vks_pin_r_8", "vks_pin_b_13", "vks_grid_g12_m24_9", "vks_pin_l_g8_7"] {
         let response = send(
             &server,
             request(
@@ -2598,7 +2598,25 @@ async fn constructor_calculate_matches_grid_geometry() {
             assert!((slot["height"].as_f64().unwrap() - cell.rect.height).abs() < 1e-6, "h слота {index} у {id}");
         }
     }
-    for unknown in ["vks_grid_0", "vks_grid_9x9", "vks_pin_x_9"] {
+    // Опции библиотеки (зазор/поля) приходят из id и учитываются в превью.
+    let response = send(
+        &server,
+        request(
+            "POST",
+            "/api/v3/ui/video_layouts/calculate",
+            Some(&token),
+            json!({"preset": "vks_grid_g12_m24_9", "width": 1280, "height": 720}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let slots = body["slots"].as_array().expect("slots array");
+    let left = slots.iter().map(|slot| slot["x"].as_f64().unwrap()).fold(f64::MAX, f64::min);
+    let top = slots.iter().map(|slot| slot["y"].as_f64().unwrap()).fold(f64::MAX, f64::min);
+    assert!(left >= 23.0, "левое поле из id g12_m24: {left}");
+    assert!(top >= 23.0, "верхнее поле из id g12_m24: {top}");
+    for unknown in ["vks_grid_0", "vks_grid_9x9", "vks_pin_x_9", "vks_grid_9_g12"] {
         let response = send(
             &server,
             request("POST", "/api/v3/ui/video_layouts/calculate", Some(&token), json!({"preset": unknown})),

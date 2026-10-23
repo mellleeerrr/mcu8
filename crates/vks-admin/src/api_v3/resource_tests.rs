@@ -1728,3 +1728,26 @@ fn normalize_loaded_collapses_duplicate_canonical_addresses_and_rewrites_refs() 
     assert_eq!(personal.len(), 1);
     assert_eq!(personal.keys().next().map(String::as_str), Some(kept.id.as_str()));
 }
+
+#[test]
+fn recalc_layout_size_распознаёт_конструктор() {
+    let mut record = json!({"payload": {"mode": "auto", "preset": "vks_grid_g8_m16_5"}});
+    recalc_layout_size(&mut record);
+    assert_eq!(record["payload"]["size"], 5, "size выводится из параметрического id");
+
+    // Слоты могли остаться от прежней раскладки: id-число окон важнее их длины.
+    let mut stale = json!({
+        "payload": {
+            "mode": "auto",
+            "preset": "vks_grid_g8_m16_5",
+            "slots": [{"position": 1}, {"position": 2}, {"position": 3}, {"position": 4},
+                      {"position": 5}, {"position": 6}, {"position": 7}, {"position": 8}, {"position": 9}],
+        }
+    });
+    recalc_layout_size(&mut stale);
+    assert_eq!(stale["payload"]["size"], 5, "id конструктора важнее устаревших slots");
+
+    let mut codian = json!({"payload": {"mode": "manual", "preset": "codian_07"}});
+    recalc_layout_size(&mut codian);
+    assert_eq!(codian["payload"]["size"], 13, "Codian-схема по-прежнему даёт свой размер");
+}

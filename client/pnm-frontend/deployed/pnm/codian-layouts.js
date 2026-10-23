@@ -72,7 +72,7 @@
   var HOST_SELECTOR = '.manual-layout-configurator';
   var GROUP_ATTR = 'data-vks-codian-group';
   var ITEM_ATTR = 'data-codian-id';
-  var PREVIEW_WIDTH = 260;
+  var PREVIEW_WIDTH = 320;
   var PREVIEW_HEIGHT = 180;
   var PREVIEW_INSET = 3;
   var ITEMS_PER_LINE = 8;
@@ -81,6 +81,13 @@
   // (`vks_grid_9`, `vks_pin_r_8`) — геометрию из id считает сервер, поэтому
   // превью (calculate) и применение (apply_layout) всегда совпадают.
   var CONSTRUCTOR_ATTR = 'data-vks-constructor';
+  // Пункт «Конструктор» в вендорском селекторе режимов раскладки: та же
+  // разметка/классы, что у auto/dynamic/manual, вставляется после «Ручная
+  // настройка». Клик переводит редактор в ручной режим и раскрывает секцию
+  // конструктора (схемы vks_grid_* / vks_pin_*).
+  var MODE_SELECTOR = '.layout-mode-selector';
+  var MODE_TILE_ATTR = 'data-vks-constructor-tile';
+  var modeTileEngaged = false;
   var CONSTRUCTOR_MODE_ATTR = 'data-vks-constructor-mode';
   var CONSTRUCTOR_MODES = [
     { key: 'grid', title: 'Равномерная сетка', id: function (count) { return 'vks_grid_' + count; } },
@@ -600,6 +607,78 @@
     subscribe(editor);
   }
 
+
+  function buildModeTile() {
+    var tile = document.createElement('div');
+    tile.className = 'layout-mode-selector-item';
+    tile.setAttribute(MODE_TILE_ATTR, '1');
+    tile.setAttribute('data-qa', 'layout-mode-selector-constructor');
+    tile.setAttribute('role', 'button');
+    tile.setAttribute('tabindex', '0');
+    var text = document.createElement('p');
+    text.className = 'layout-mode-selector-item__text';
+    text.textContent = 'Конструктор';
+    var description = document.createElement('p');
+    description.className = 'layout-mode-selector-item__description';
+    description.textContent = 'Схема расположения участников: сетка или крупный участник с лентой';
+    tile.appendChild(text);
+    tile.appendChild(description);
+    tile.addEventListener('click', onModeTileActivate);
+    tile.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+      event.preventDefault();
+      onModeTileActivate(event);
+    });
+    return tile;
+  }
+
+  function onModeTileActivate(event) {
+    event.preventDefault();
+    var editor = layoutEditor();
+    if (!editor) return;
+    modeTileEngaged = true;
+    // Вендорский `mode` — свойство редактора (reactivity store), не поле формы:
+    // `editValueField('mode')` пишет в черновик раскладки и портит payload.
+    try {
+      editor.mode = 'manual';
+    } catch (e) {
+      console.warn('codian-layouts: не удалось переключить режим на manual', e);
+    }
+    syncModeTile();
+    schedule();
+    var section = document.querySelector('[' + CONSTRUCTOR_ATTR + ']');
+    if (section && typeof section.scrollIntoView === 'function') {
+      section.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }
+
+  function syncModeTile() {
+    var tile = document.querySelector('[' + MODE_TILE_ATTR + ']');
+    if (!tile) return;
+    var editor = layoutEditor();
+    var value = editor && editor.modifiedValue ? editor.modifiedValue : null;
+    var mode = value ? value.mode : null;
+    var preset = value ? value.preset : null;
+    if (mode !== 'manual') modeTileEngaged = false;
+    var active = modeTileEngaged || (typeof preset === 'string' && preset.indexOf('vks_') === 0);
+    if (active) tile.classList.add('layout-mode-selector-item--active');
+    else tile.classList.remove('layout-mode-selector-item--active');
+    tile.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+
+  function ensureModeTile() {
+    var selector = document.querySelector(MODE_SELECTOR);
+    if (!selector) return;
+    var tile = selector.querySelector('[' + MODE_TILE_ATTR + ']');
+    if (!tile) {
+      tile = buildModeTile();
+      var manual = selector.querySelector('[data-qa="layout-mode-selector-manual"]');
+      if (manual && manual.parentNode) manual.parentNode.insertBefore(tile, manual.nextSibling);
+      else selector.appendChild(tile);
+    }
+    syncModeTile();
+  }
+
   function ensureGroup() {
     if (catalogState !== 'ready') return;
     var host = document.querySelector(HOST_SELECTOR);
@@ -618,6 +697,9 @@
     var run = function () {
       scheduled = false;
       try {
+        // Пункт «Конструктор» живёт в вендорском селекторе режимов и должен
+        // быть виден на всех режимах, поэтому вставляется до проверки host.
+        ensureModeTile();
         var host = document.querySelector(HOST_SELECTOR);
         if (!host) return;
         if (catalogState === 'idle') loadCatalog();

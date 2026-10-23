@@ -1182,11 +1182,13 @@ fn validate_layout_payload(payload: &Value) -> Result<(), String> {
 
 fn recalc_layout_size(record: &mut Value) {
     let Some(payload) = record["payload"].as_object() else { return };
+    // Параметрический id конструктора — источник истины о числе окон: слоты
+    // могли остаться от прежней раскладки (id изменился, slots — нет).
     let size = payload
-        .get("slots")
-        .and_then(Value::as_array)
-        .map(Vec::len)
-        .filter(|count| *count > 0)
+        .get("preset")
+        .and_then(Value::as_str)
+        .and_then(vks_layout::grids::slot_count)
+        .or_else(|| payload.get("slots").and_then(Value::as_array).map(Vec::len).filter(|count| *count > 0))
         .or_else(|| payload.get("preset").and_then(Value::as_str).and_then(preset_size).map(|n| n as usize))
         .or_else(|| payload.get("preset").and_then(Value::as_str).and_then(vks_layout::codian::slot_count));
     if let Some(size) = size {

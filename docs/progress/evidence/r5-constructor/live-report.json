@@ -1,0 +1,164 @@
+{
+  "url": "/pnm/monitoring/conferences/49b599d7-b5cd-45a7-8999-47a28c453a92/layouts/7e6d4753-d21a-4955-ad6b-0c17de218427",
+  "codianItems": 54,
+  "codianUnique": 54,
+  "rows": 7,
+  "groupHeaders": [],
+  "codianMcu4200Header": false,
+  "viewBoxes": {
+    "codian_01": "0 0 1280 720",
+    "codian_07": "0 0 1280 720",
+    "codian_43": "0 0 1280 720",
+    "codian_46": "0 0 1280 720",
+    "codian_custom_22": "0 0 1280 720",
+    "codian_custom_14": "0 0 1280 720",
+    "codian_33": "0 0 1280 720",
+    "codian_51": "0 0 1280 720"
+  },
+  "rects": {
+    "codian_01": [
+      [
+        26,
+        14,
+        1228,
+        692
+      ]
+    ],
+    "codian_04": [
+      [
+        26,
+        14,
+        268,
+        152
+      ],
+      [
+        346,
+        14,
+        268,
+        152
+      ],
+      [
+        666,
+        14,
+        268,
+        152
+      ],
+      [
+        986,
+        14,
+        268,
+        152
+      ]
+    ],
+    "codian_custom_22": [
+      [
+        26,
+        14,
+        481,
+        260
+      ],
+      [
+        559,
+        14,
+        481,
+        260
+      ],
+      [
+        1092,
+        14,
+        162,
+        116
+      ],
+      [
+        1092,
+        158,
+        162,
+        116
+      ]
+    ]
+  },
+  "modeSelector": {
+    "text": "Конструктор",
+    "description": "Схема расположения участников: сетка или крупный участник с лентой",
+    "dataQa": "layout-mode-selector-constructor",
+    "afterManual": true,
+    "inSelector": true,
+    "classes": "layout-mode-selector-item layout-mode-selector-item--active"
+  },
+  "constructorSections": 1,
+  "constructorItems": [
+    {
+      "mode": "grid",
+      "preset": "vks_grid_25",
+      "title": "Равномерная сетка — 25 окон",
+      "rectCount": 25
+    },
+    {
+      "mode": "pin_l",
+      "preset": "vks_pin_l_25",
+      "title": "Крупный слева, лента справа — 25 окон",
+      "rectCount": 25
+    },
+    {
+      "mode": "pin_r",
+      "preset": "vks_pin_r_25",
+      "title": "Крупный справа, лента слева — 25 окон",
+      "rectCount": 25
+    },
+    {
+      "mode": "pin_t",
+      "preset": "vks_pin_t_25",
+      "title": "Крупный сверху, лента снизу — 25 окон",
+      "rectCount": 25
+    },
+    {
+      "mode": "pin_b",
+      "preset": "vks_pin_b_25",
+      "title": "Крупный снизу, лента сверху — 25 окон",
+      "rectCount": 25
+    }
+  ],
+  "modeFlowAfterAuto": {
+    "tileExists": true,
+    "tileInSelector": true,
+    "ctorHidden": true
+  },
+  "modeTileAfterClick": {
+    "active": true,
+    "hasCtorSection": true
+  },
+  "activeAfterClick": true,
+  "calculateCalls": [
+    {
+      "status": 200,
+      "preset": "vks_grid_25"
+    },
+    {
+      "status": 200,
+      "preset": "vks_grid_25"
+    },
+    {
+      "status": 200,
+      "preset": "vks_pin_l_25"
+    },
+    {
+      "status": 200,
+      "preset": "vks_pin_r_25"
+    },
+    {
+      "status": 200,
+      "preset": "vks_pin_t_25"
+    },
+    {
+      "status": 200,
+      "preset": "vks_pin_b_25"
+    },
+    {
+      "status": 200,
+      "preset": "vks_grid_25"
+    }
+  ],
+  "appliedPayload": null,
+  "errors": [],
+  "usedRoute": "/pnm/monitoring/conferences/49b599d7-b5cd-45a7-8999-47a28c453a92/layouts/7e6d4753-d21a-4955-ad6b-0c17de218427"
+}

@@ -1122,7 +1122,14 @@ impl MediaEngine for McuEngine {
         if g.contains_key(&cfg.room_id) {
             return Err(MediaEngineError::RoomAlreadyExists(cfg.room_id));
         }
-        let state = RoomState::new(RoomMode::Mcu, cfg.caps);
+        let mut state = RoomState::new(RoomMode::Mcu, cfg.caps);
+        // Сохранённая до моста раскладка не должна теряться: adopt pending
+        // здесь, иначе первый зритель увидит пустую сетку, пока не придёт
+        // следующий apply_layout. Порядок локов rooms → pending (как у
+        // destroy_room/apply_layout).
+        if let Some(layout) = self.pending_layouts.lock().unwrap().remove(&cfg.room_id) {
+            state.adopt_layout(layout);
+        }
         g.insert(cfg.room_id, state);
         Ok(RoomMediaHandle { room: cfg.room_id, mode: RoomMode::Mcu })
     }

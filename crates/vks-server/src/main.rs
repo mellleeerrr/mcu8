@@ -410,10 +410,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(GatewayManager::new().with_mcu(mcu_engine.clone()).with_candidate_ip(&candidate_addr));
     gateway_manager.bind_state(Arc::downgrade(&admin_state));
     admin_state.set_dialer(gateway_manager.clone());
-    // Входящий SIP UAS включается явно; в тестах listener не поднимается,
-    // чтобы 5060 не конфликтовал с mock-терминалами. `VKS_SIP_UAS_ENABLED=0`
-    // выключает его на стенде.
-    if std::env::var("VKS_SIP_UAS_ENABLED").map_or(true, |value| value != "0") {
+    // Входящий SIP UAS — opt-in: открывать 0.0.0.0:5060 по умолчанию
+    // (без auth/allowlist) нельзя. Включается только `VKS_SIP_UAS_ENABLED=1`.
+    if std::env::var("VKS_SIP_UAS_ENABLED").is_ok_and(|value| value == "1") {
         let bind = std::env::var("VKS_SIP_UAS_BIND").unwrap_or_else(|_| "0.0.0.0:5060".to_string());
         let advertised = candidate_addr.clone();
         let manager = gateway_manager.clone();

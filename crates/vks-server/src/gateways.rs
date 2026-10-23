@@ -1576,6 +1576,23 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             // `vks_pin_r_8`) несёт число окон и режим — геометрия из id.
             let codian = vks_layout::codian::geometry(&preset_name, 1920.0, 1080.0)
                 .or_else(|| vks_layout::grids::geometry(&preset_name, 1920.0, 1080.0));
+            // Переполнение раскладки не должно быть молчаливым: участников
+            // больше, чем окон у явной схемы (Codian/конструктор) — лишние не
+            // попадут в композит, и без предупреждения это невидимо.
+            if let Some(cells) = &codian {
+                let participants = assignments.len();
+                let windows = cells.len();
+                if participants > windows {
+                    tracing::warn!(
+                        room = %room_id,
+                        preset = %preset_name,
+                        windows,
+                        participants,
+                        hidden = participants - windows,
+                        "участники сверх числа окон раскладки не попадут в композит"
+                    );
+                }
+            }
             let overlap_factor = layout["payload"]["overlap_factor"]
                 .as_f64()
                 .filter(|value| value.is_finite() && *value > 0.0)
@@ -1612,7 +1629,17 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         // ячейки, и `sanitize_assignments` молча выбрасывал его участника.
         let mut merged: std::collections::BTreeMap<u32, LayoutSlot> =
             geometry.into_iter().map(|cell| (cell.slot, cell)).collect();
-        merged.extend(explicit.into_iter().map(|cell| (cell.slot, cell)));
+        // Для явной схемы (Codian/конструктор) координаты из id — источник
+        // истины: присланные клиентом x/y их не перекрывают (иначе смешение
+        // единиц 1280/1920 даёт съехавшую ячейку). Для остальных режимов явная
+        // геометрия по-прежнему перекрывает базовую.
+        if explicit_preset {
+            for cell in explicit {
+                merged.entry(cell.slot).or_insert(cell);
+            }
+        } else {
+            merged.extend(explicit.into_iter().map(|cell| (cell.slot, cell)));
+        }
         let geometry: Vec<LayoutSlot> = merged.into_values().collect();
         if assignments.is_empty() && geometry.is_empty() && mode != "auto" {
             return Ok(());

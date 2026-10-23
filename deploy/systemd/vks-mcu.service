@@ -16,6 +16,8 @@ Environment=VKS_H323_UAS_MAX_CALLS=20
 Environment=VKS_H323_UAS_MAX_PER_IP=20
 # Real str0m ICE-lite/DTLS-SRTP browser transport (1 on this stand).
 Environment=VKS_WEBRTC_TRANSPORT=1
+# DEV ONLY: входящий SIP на стенде (в шаблоне по умолчанию выключен).
+Environment=VKS_SIP_UAS_ENABLED=1
 # DEV ONLY: IP этого стенда. В prod-юните значение задаётся через EnvironmentFile.
 Environment=VKS_CANDIDATE_ADDR=192.168.1.93
 # Firewall/NAT must open this UDP range; empty = ephemeral ports.
