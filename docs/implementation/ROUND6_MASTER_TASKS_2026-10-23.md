@@ -131,8 +131,11 @@ error перечисляет grid, release-note SIP UAS, «970→факт».
 - [x] T1 — commit `c36f973`: бейджи 59/59, live 0 ошибок. Ревью: r6-t1-review-elegance
   9/10 → после P1 (aria-label с числом, единый источник count/data-windows) 9.5/10.
   P1 применены, MANIFEST согласован.
-- [x] T2 — реализовано + live: секция конструктора первой, preset → `vks_grid_<N>`
-  при переходе на «Конструктор», 5 карточек, сохранение/переоткрытие vks_*.
-  Ревью: внешние ревьюеры не ответили (сбой субагентов), self-review Lead 9/10:
-  P0 нет; P1 — тест сохранения через реальный PATCH и aria-проверка (в T12).
+- [x] T2 — commit `472e444` + `a13fcf4`. Ревью r6-t2-review-elegance: 6/10 →
+  9.5/10 после P0: slots-массив текущего preset (не map), отложенный adopt
+  после mode='manual' без fallback count=1, selectConstructor = только preset
+  (вендор синтезирует слоты из хвоста id), единственный активный тайл.
+  Live: auto→«Конструктор» → activePreset=vks_grid_25, activeTiles=[constructor],
+  переоткрытие сохраняет, 0 ошибок. P1 в T12: захват payload сохранения,
+  поведение чипов «Количество видеоокон» (сбрасывают preset на вендорский).
 - [ ] T2 … T12
