@@ -129,9 +129,11 @@ pub const MCU_TICK_BUCKETS: &[f64] = &[
 ];
 
 /// MCU engine tick work: audio mix or video compose, excluding RTP/network,
-/// input cloning and composite cloning. Only registered when
-/// `VKS_MCU_TICK_METRICS=1` so a default deployment pays nothing.
-pub static MCU_TICK_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
+/// input cloning and composite cloning. It is registered lazily like the other
+/// collectors, but only `observe_mcu_tick` (env-gated) and the soak test's
+/// `with_label_values` ever materialise children; a default deployment therefore
+/// pays nothing and exposes no samples.
+static MCU_TICK_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!(
         "vks_mcu_tick_duration_seconds",
         "MCU engine tick work duration (audio mix or video compose)",
@@ -244,11 +246,15 @@ pub fn init_default() {
     });
 }
 
-/// Регистрирует все метрики в собственный `Registry` (изолировано от глобального).
+/// Регистрирует все метрики в собственный `Registry` — *представление* над
+/// process-global коллекторами, а не изолированную копию.
 ///
-/// Каждая семья описана теми же Opts, что и публичные статические переменные —
-/// единая точка для изолированного экспорта (например, отдельный /metrics-эндпоинт)
-/// и для unit-тестов. При добавлении новой метрики сюда нужно добавить её в список.
+/// `MetricVec`/`Gauge`/`Histogram` clone — Arc-backed, поэтому здесь
+/// регистрируются клоны глобальных коллекторов: значения общие, а `gather()`
+/// этого реестра равен глобальному набору семей. Это тестовый/инспекционный
+/// helper (отдельный `/metrics` без глобального состояния он не даёт); при
+/// добавлении новой глобальной метрики её нужно добавить и сюда, иначе
+/// тест `new_registry_is_a_full_view_of_global_metrics` это поймает.
 #[must_use]
 pub fn new_registry() -> Registry {
     let mut registry = Registry::new();
@@ -441,22 +447,25 @@ mod tests {
         }
     }
 
-    // `new_registry` — изолированный реестр с теми же метриками (без глобальной
-    // регистрации): код Opts совпадает с реальными, чтобы `new_registry` нельзя
-    // было «забыть» обновить при добавлении метрики.
-    //
-    // В text-формате Prometheus family появляется только после первой записи
-    // образца, поэтому тест устанавливает по одному sample на каждый family.
+    // `new_registry` is a view over the process-global collectors. The test seeds
+    // one sample per family (so both `gather()` calls emit every family), compares
+    // the complete family-name sets, and proves the collectors share state rather
+    // than being a drifted copy of the declarations.
     #[test]
-    fn new_registry_exposes_all_metrics() {
-        // Глобальные метрики (однако же Opts) — трогает каждая по одному
-        // labeled-образцу, чтобы `gather()` эммитил семью; затем сравниваем по имени.
+    fn new_registry_is_a_full_view_of_global_metrics() {
         init_default();
         SIGNALING_MESSAGES.with_label_values(&["uplink"]).inc();
+        CODEC_WORKER_SUPPORTED.with_label_values(&["h264", "encode"]).set(1);
+        CODEC_WORKER_POOL_SIZE.set(1);
         ACTIVE_ROOMS.with_label_values(&["r1"]).set(1);
         BUILD_INFO.with_label_values(&[env!("CARGO_PKG_VERSION")]).set(1);
-        MEDIA_BYTES.with_label_values(&["vp8", "uplink"]).inc();
+        MEDIA_BYTES.with_label_values(&["t14b", "uplink"]).inc_by(1234);
         MEDIA_PACKETS_DROPPED.with_label_values(&["congestion"]).inc();
+        WEBRTC_PEERS.set(1);
+        WEBRTC_OFFERS.with_label_values(&["ok"]).inc();
+        WEBRTC_ICE_FAILURES.with_label_values(&["timeout"]).inc();
+        WEBRTC_FRAMES_DROPPED.with_label_values(&["congestion"]).inc();
+        WEBRTC_FALLBACK.with_label_values(&["relay"]).inc();
         ROOM_SIGNAL_LATENCY_MS.with_label_values(&["r1"]).set(5);
         ERRORS.with_label_values(&["room_not_found"]).inc();
         HTTP_REQUESTS.with_label_values(&["GET", "spa", "200"]).inc();
@@ -465,36 +474,29 @@ mod tests {
         API_V3_REQUESTS.with_label_values(&["login"]).inc();
         LOGIN_ATTEMPTS.with_label_values(&["ok"]).inc();
         FRONTEND_DENIED.with_label_values(&["not_found"]).inc();
-        // Zero-count child, not `observe(0.0)`: a synthetic sample would
-        // inflate `_count` and could satisfy a count>0 gate.
+        // Zero-count child, not `observe(0.0)`: a synthetic sample would inflate
+        // `_count` and could satisfy a count>0 gate.
         let _ = MCU_TICK_DURATION.with_label_values(&["audio"]);
 
-        let families = new_registry().gather();
-        let names: std::collections::BTreeSet<_> = families.iter().map(|f| f.name().to_string()).collect();
-        for expected in [
-            "vks_signaling_messages_total",
-            "vks_codec_worker_supported",
-            "vks_codec_worker_pool_size",
-            "vks_active_rooms",
-            "vks_build_info",
-            "vks_media_bytes_total",
-            "vks_media_packets_dropped_total",
-            "vks_webrtc_peers",
-            "vks_webrtc_offers_total",
-            "vks_webrtc_ice_failures_total",
-            "vks_webrtc_frames_dropped_total",
-            "vks_webrtc_fallback_total",
-            "vks_room_signal_latency_ms",
-            "vks_errors_total",
-            "vks_http_requests_total",
-            "vks_mcu_tick_duration_seconds",
-            "vks_http_request_duration_seconds",
-            "vks_http_response_bytes_total",
-            "vks_api_v3_requests_total",
-            "vks_login_attempts_total",
-            "vks_frontend_denied_total",
-        ] {
-            assert!(names.contains(expected), "new_registry must expose {expected} (got: {names:?})");
-        }
+        let view = new_registry();
+        let view_names: std::collections::BTreeSet<_> = view.gather().iter().map(|f| f.name().to_string()).collect();
+        let global_names: std::collections::BTreeSet<_> =
+            prometheus::gather().iter().map(|f| f.name().to_string()).collect();
+        assert_eq!(view_names, global_names, "new_registry must expose exactly the global family set");
+
+        let shared = view
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "vks_media_bytes_total")
+            .expect("view must contain vks_media_bytes_total")
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                metric.get_label().iter().any(|label| label.name() == "codec" && label.value() == "t14b")
+                    && metric.get_label().iter().any(|label| label.name() == "direction" && label.value() == "uplink")
+            })
+            .map(|metric| metric.get_counter().value())
+            .expect("seeded t14b/uplink media counter");
+        assert_eq!(shared, 1234.0, "view collectors must share Arc-backed state with the globals");
     }
 }

@@ -2,12 +2,13 @@
 //! `vks_mcu_tick_duration_seconds` histogram.
 //!
 //! Runs in-process (no HTTP server, live DB, RTP or SIP sockets) and only
-//! measures engine work. Audio and video are driven from two threads — like the
-//! production per-participant tasks — because a single thread cannot sustain a
-//! 20 ms audio cadence while a 1280×720 I420 compose takes double-digit
-//! milliseconds. Timing gates are meaningless in debug builds, so the test is
-//! `#[ignore]` and exits early in a debug profile (it still compiles, so
-//! `cargo test --workspace` stays green):
+//! measures engine work. The measured window has two sequential phases: audio
+//! alone at 20 ms, then video alone at 34 ms (above the engine's 30 ms video
+//! throttle). They are not run concurrently, because today's global room mutex
+//! would let a 1280×720 I420 compose block the audio tick and distort its
+//! cadence; per-room actors and multi-room concurrency are S20. Timing gates are
+//! meaningless in debug builds, so the test is `#[ignore]` and exits early in a
+//! debug profile (it still compiles, so `cargo test --workspace` stays green):
 //!
 //! ```text
 //! VKS_MCU_TICK_METRICS=1 VKS_SOAK_SECONDS=60 VKS_SOAK_WARMUP=3 \
@@ -21,7 +22,6 @@
 //! hard errors rather than silently falling back.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use vks_common::metrics::MCU_TICK_BUCKETS;
@@ -29,11 +29,12 @@ use vks_core::{ParticipantId, RoomId, Track, TrackKind};
 use vks_media_mcu::{Frame, McuEngine};
 
 const AUDIO_PERIOD_MS: u64 = 20;
-const VIDEO_PERIOD_MS: u64 = 33;
+const VIDEO_PERIOD_MS: u64 = 34;
 const AUDIO_SLO_BOUND: f64 = 0.002;
 const VIDEO_FRAME_BUDGET: f64 = 0.033;
-/// Audio tasks are due every 20 ms (50 Hz). The floor allows one lost period in
-/// ten while both threads share the room mutex (S20 will remove that coupling).
+/// Audio tasks are due every 20 ms (50 Hz); the floor leaves a small scheduling
+/// margin. Video is driven at 34 ms because the engine drops ticks closer than
+/// 30 ms; 28 fps leaves room for a missed period.
 const AUDIO_CADENCE_FLOOR_HZ: f64 = 45.0;
 const VIDEO_CADENCE_FLOOR_FPS: f64 = 28.0;
 const FRAME_WIDTH: u32 = 1280;
@@ -139,6 +140,18 @@ fn command_output(program: &str, args: &[&str]) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+/// `git status --porcelain` raw output; `None` means git itself failed. An
+/// empty string is a clean tree and must not be confused with "unknown".
+fn git_status_porcelain() -> Option<String> {
+    std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 fn cpu_model() -> String {
     std::fs::read_to_string("/proc/cpuinfo")
         .ok()
@@ -183,30 +196,37 @@ fn i420_frame(width: u32, height: u32, seed: u32) -> Frame {
 struct Tally {
     attempts: u64,
     ticks: u64,
+    first_successes: u64,
     throttled: u64,
     second_call_successes: u64,
 }
 
-fn audio_loop(
-    engine: Arc<McuEngine>,
+/// One audio-only measured phase: every 20 ms, set the slices, run the real
+/// tick, then make one same-timestamp duplicate call that must be throttled.
+fn audio_phase(
+    engine: &McuEngine,
     room: RoomId,
-    pids: Vec<ParticipantId>,
-    pcm: Vec<f32>,
-    start: Instant,
-    deadline: Instant,
+    pids: &[ParticipantId],
+    pcm: &[f32],
+    epoch: Instant,
+    seconds: usize,
 ) -> Tally {
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(seconds as u64);
     let mut tally = Tally::default();
-    let mut next = Instant::now();
+    let mut next = start;
     while Instant::now() < deadline {
-        let now_ms = start.elapsed().as_millis() as u64;
-        for pid in &pids {
-            engine.set_audio_slice(room, *pid, &pcm);
+        let now_ms = epoch.elapsed().as_millis() as u64;
+        for pid in pids {
+            engine.set_audio_slice(room, *pid, pcm);
         }
-        // Two calls at the same timestamp: the second must be throttled and must
-        // not be recorded. This exercises the production throttle, not a mock.
         tally.attempts += 2;
-        if engine.tick_audio_at(room, now_ms) {
+        let first = engine.tick_audio_at(room, now_ms);
+        if first {
             tally.ticks += 1;
+            tally.first_successes += 1;
+        } else {
+            tally.throttled += 1;
         }
         if engine.tick_audio_at(room, now_ms) {
             tally.ticks += 1;
@@ -215,28 +235,31 @@ fn audio_loop(
             tally.throttled += 1;
         }
         next += Duration::from_millis(AUDIO_PERIOD_MS);
-        if next <= Instant::now() {
-            next = Instant::now() + Duration::from_millis(AUDIO_PERIOD_MS);
+        let now = Instant::now();
+        if next <= now {
+            next = now + Duration::from_millis(AUDIO_PERIOD_MS);
         }
-        if next < deadline {
-            std::thread::sleep(next.saturating_duration_since(Instant::now()));
-        }
+        std::thread::sleep(next.min(deadline).saturating_duration_since(Instant::now()));
     }
     tally
 }
 
-fn video_loop(engine: Arc<McuEngine>, room: RoomId, start: Instant, deadline: Instant) -> Tally {
+/// One video-only measured phase at 34 ms; the second same-timestamp call must
+/// be throttled and counted as `frames_dropped` by the engine.
+fn video_phase(engine: &McuEngine, room: RoomId, epoch: Instant, seconds: usize) -> Tally {
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(seconds as u64);
     let mut tally = Tally::default();
-    let mut next = Instant::now();
+    let mut next = start;
     while Instant::now() < deadline {
-        let now_ms = start.elapsed().as_millis() as u64;
-        tally.attempts += 1;
+        let now_ms = epoch.elapsed().as_millis() as u64;
+        tally.attempts += 2;
         if engine.tick_video_at(room, now_ms).is_some() {
             tally.ticks += 1;
+            tally.first_successes += 1;
+        } else {
+            tally.throttled += 1;
         }
-        // Deliberate same-timestamp attempt: must be throttled and visible as
-        // `frames_dropped`, so the drop accounting gate is not vacuous.
-        tally.attempts += 1;
         if engine.tick_video_at(room, now_ms).is_some() {
             tally.ticks += 1;
             tally.second_call_successes += 1;
@@ -244,12 +267,11 @@ fn video_loop(engine: Arc<McuEngine>, room: RoomId, start: Instant, deadline: In
             tally.throttled += 1;
         }
         next += Duration::from_millis(VIDEO_PERIOD_MS);
-        if next <= Instant::now() {
-            next = Instant::now() + Duration::from_millis(VIDEO_PERIOD_MS);
+        let now = Instant::now();
+        if next <= now {
+            next = now + Duration::from_millis(VIDEO_PERIOD_MS);
         }
-        if next < deadline {
-            std::thread::sleep(next.saturating_duration_since(Instant::now()));
-        }
+        std::thread::sleep(next.min(deadline).saturating_duration_since(Instant::now()));
     }
     tally
 }
@@ -276,7 +298,10 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     assert!((1..=32).contains(&participants), "VKS_SOAK_PARTICIPANTS must be 1..=32");
     let out = std::env::var("VKS_SOAK_OUT").unwrap_or_else(|_| "target/t14b-mcu-tick-soak.json".into());
 
-    let engine = Arc::new(McuEngine::new());
+    let audio_seconds = seconds / 2;
+    let video_seconds = seconds - audio_seconds;
+
+    let engine = McuEngine::new();
     let room = RoomId::new();
     engine.ensure_room(room);
     let pids: Vec<_> = (0..participants).map(|_| ParticipantId::new()).collect();
@@ -293,49 +318,48 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
             "I420 frame must be accepted for {pid}"
         );
     }
+    let pcm = sine_pcm();
+    let epoch = Instant::now();
 
-    // Warm both engine paths before the baseline snapshot; measured windows use
-    // fresh counters, so warm-up samples cannot leak into the SLO ratio.
+    // Warm both engine paths before any baseline snapshot; both measured phases
+    // then use their own histogram delta, so warm-up samples cannot leak in.
     let warmup_start = Instant::now();
-    let mut next_audio = Instant::now();
-    let mut next_video = Instant::now();
+    let mut next_audio = warmup_start;
+    let mut next_video = warmup_start;
     while warmup_start.elapsed() < Duration::from_secs(warmup as u64) {
-        let now_ms = warmup_start.elapsed().as_millis() as u64;
-        if Instant::now() >= next_audio {
+        let now = Instant::now();
+        let now_ms = epoch.elapsed().as_millis() as u64;
+        if now >= next_audio {
             for pid in &pids {
-                engine.set_audio_slice(room, *pid, &sine_pcm());
+                engine.set_audio_slice(room, *pid, &pcm);
             }
             let _ = engine.tick_audio_at(room, now_ms);
             next_audio += Duration::from_millis(AUDIO_PERIOD_MS);
         }
-        if Instant::now() >= next_video {
+        if now >= next_video {
             let _ = engine.tick_video_at(room, now_ms);
             next_video += Duration::from_millis(VIDEO_PERIOD_MS);
         }
         std::thread::sleep(Duration::from_micros(500));
     }
 
-    let baseline = histogram_snapshot();
-    let baseline_dropped = engine.stats(room).map_or(0, |stats| stats.frames_dropped);
+    // Let one full period pass since the last warm-up tick so the first measured
+    // tick cannot be rejected by the 18 ms audio throttle.
+    std::thread::sleep(Duration::from_millis(AUDIO_PERIOD_MS));
+    let audio_baseline = histogram_snapshot();
+    let audio_start = Instant::now();
+    let audio = audio_phase(&engine, room, &pids, &pcm, epoch, audio_seconds);
+    let audio_measured_seconds = audio_start.elapsed().as_secs_f64();
+    let audio_after = histogram_snapshot();
 
-    let measurement_start = Instant::now();
-    let deadline = measurement_start + Duration::from_secs(seconds as u64);
-    let audio_handle = {
-        let engine = Arc::clone(&engine);
-        let pids = pids.clone();
-        let pcm = sine_pcm();
-        std::thread::spawn(move || audio_loop(engine, room, pids, pcm, measurement_start, deadline))
-    };
-    let video_handle = {
-        let engine = Arc::clone(&engine);
-        std::thread::spawn(move || video_loop(engine, room, measurement_start, deadline))
-    };
-    let audio = audio_handle.join().expect("audio tick thread");
-    let video = video_handle.join().expect("video tick thread");
-    let measured_seconds = measurement_start.elapsed().as_secs_f64();
-
-    let after = histogram_snapshot();
-    let dropped = engine.stats(room).map_or(0, |stats| stats.frames_dropped).saturating_sub(baseline_dropped);
+    std::thread::sleep(Duration::from_millis(VIDEO_PERIOD_MS));
+    let video_baseline = histogram_snapshot();
+    let dropped_baseline = engine.stats(room).map_or(0, |stats| stats.frames_dropped);
+    let video_start = Instant::now();
+    let video = video_phase(&engine, room, epoch, video_seconds);
+    let video_measured_seconds = video_start.elapsed().as_secs_f64();
+    let video_after = histogram_snapshot();
+    let dropped = engine.stats(room).map_or(0, |stats| stats.frames_dropped).saturating_sub(dropped_baseline);
 
     // Admin rebuilds call `process_video` directly and must stay out of the
     // histogram: clear/unbridge are the two public admin paths that re-render.
@@ -350,37 +374,45 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
         .map_or(0, |snapshot| snapshot.count)
         .saturating_sub(before_admin.get("video").map_or(0, |snapshot| snapshot.count));
 
-    let audio_delta =
-        after.get("audio").cloned().unwrap_or_default().delta(&baseline.get("audio").cloned().unwrap_or_default());
-    let video_delta =
-        after.get("video").cloned().unwrap_or_default().delta(&baseline.get("video").cloned().unwrap_or_default());
+    let audio_delta = audio_after
+        .get("audio")
+        .cloned()
+        .unwrap_or_default()
+        .delta(&audio_baseline.get("audio").cloned().unwrap_or_default());
+    let video_delta = video_after
+        .get("video")
+        .cloned()
+        .unwrap_or_default()
+        .delta(&video_baseline.get("video").cloned().unwrap_or_default());
     let audio_ratio = audio_delta.cumulative_ratio(AUDIO_SLO_BOUND);
     let video_budget_ratio = video_delta.cumulative_ratio(VIDEO_FRAME_BUDGET);
     let video_slo_ratio = video_delta.cumulative_ratio(AUDIO_SLO_BOUND);
     let audio_p99 = audio_delta.p99();
     let video_p99 = video_delta.p99();
-    let audio_hz = audio.ticks as f64 / measured_seconds;
-    let effective_video_fps = video.ticks as f64 / measured_seconds;
+    let audio_hz = audio.first_successes as f64 / audio_measured_seconds;
+    let effective_video_fps = video.first_successes as f64 / video_measured_seconds;
 
     let report = serde_json::json!({
         "profile": "release",
         "rustc": command_output("rustc", &["-V"]),
         "git_sha": command_output("git", &["rev-parse", "HEAD"]),
-        // Any worktree change is dirty; foreign concurrent edits must not be
-        // mistaken for a clean T14b measurement (the clean-worktree run is the
-        // authoritative artifact).
-        "git_dirty": command_output("git", &["status", "--porcelain"]) != "unknown"
-            && !command_output("git", &["status", "--porcelain"]).is_empty(),
+        // `null` when git is unavailable, otherwise any worktree change means
+        // dirty. The authoritative artifact is run from a clean worktree.
+        "git_dirty": git_status_porcelain().map(|status| !status.trim().is_empty()),
         "cpu_model": cpu_model(),
         "arch": std::env::consts::ARCH,
         "seconds": seconds,
         "warmup_seconds": warmup,
-        "measured_seconds": measured_seconds,
+        "audio_window_seconds": audio_seconds,
+        "video_window_seconds": video_seconds,
+        "audio_measured_seconds": audio_measured_seconds,
+        "video_measured_seconds": video_measured_seconds,
         "participants": participants,
         "frame": {"width": FRAME_WIDTH, "height": FRAME_HEIGHT, "format": "I420"},
         "audio": {
             "attempts": audio.attempts,
             "successful_ticks": audio.ticks,
+            "first_successes": audio.first_successes,
             "throttled": audio.throttled,
             "second_call_successes": audio.second_call_successes,
             "effective_hz": audio_hz,
@@ -394,6 +426,7 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
         "video": {
             "attempts": video.attempts,
             "successful_ticks": video.ticks,
+            "first_successes": video.first_successes,
             "throttled": video.throttled,
             "second_call_successes": video.second_call_successes,
             "engine_frames_dropped_delta": dropped,
@@ -416,10 +449,10 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
         },
         "command": format!(
             "VKS_MCU_TICK_METRICS=1 VKS_SOAK_SECONDS={seconds} VKS_SOAK_WARMUP={warmup} \
-             VKS_SOAK_PARTICIPANTS={participants} cargo test --release -p vks-media-mcu \
-             --test mcu_tick_soak -- --ignored --nocapture"
+             VKS_SOAK_PARTICIPANTS={participants} VKS_SOAK_OUT={out} \
+             cargo test --release -p vks-media-mcu --test mcu_tick_soak -- --ignored --nocapture"
         ),
-        "notes": "In-process engine only: no RTP, SIP, decode/encode, resize_i420, WebRTC fan-out or live DB. One room; audio and video threads share the room mutex, so this is an optimistic multi-room latency bound. Frames are real 1280x720 I420. Each audio/video period makes one deliberate same-timestamp duplicate call that must be throttled; video throttles increment engine frames_dropped.",
+        "notes": "In-process engine only: no RTP, SIP, decode/encode, resize_i420, WebRTC fan-out or live DB. Audio and video are measured in separate sequential windows in one room: today's global room mutex would let video compose block the audio tick, and per-room actors/multi-room concurrency are S20. Frames are real 1280x720 I420. Each period makes one deliberate same-timestamp duplicate call that must be throttled; video throttles increment engine frames_dropped.",
     });
     let text = serde_json::to_string_pretty(&report).expect("serialize soak report");
     if let Some(parent) = std::path::Path::new(&out).parent() {
@@ -435,14 +468,36 @@ fn mcu_tick_soak_audio_slo_and_video_budget() {
     assert_eq!(video_delta.count, video.ticks, "video histogram must count exactly the rendered ticks");
     assert_eq!(audio.second_call_successes, 0, "same-timestamp audio duplicate must be throttled");
     assert_eq!(video.second_call_successes, 0, "same-timestamp video duplicate must be throttled");
-    assert_eq!(audio.attempts.saturating_sub(audio.ticks), audio.throttled);
-    assert_eq!(video.attempts.saturating_sub(video.ticks), video.throttled);
+    // Up to 1% of scheduled periods may miss the engine throttle because of OS
+    // scheduling jitter; the cadence floors below still catch systemic loss.
+    let audio_periods = audio.attempts / 2;
+    let video_periods = video.attempts / 2;
+    assert!(
+        audio.first_successes * 100 >= audio_periods * 99,
+        "audio lost more than 1% of scheduled periods: {} of {audio_periods}",
+        audio.first_successes
+    );
+    assert!(
+        video.first_successes * 100 >= video_periods * 99,
+        "video lost more than 1% of scheduled periods: {} of {video_periods}",
+        video.first_successes
+    );
+    assert_eq!(
+        audio.attempts.saturating_sub(audio.ticks),
+        audio.throttled,
+        "every rejected audio attempt must be accounted for"
+    );
+    assert_eq!(
+        video.attempts.saturating_sub(video.ticks),
+        video.throttled,
+        "every rejected video attempt must be accounted for"
+    );
     assert_eq!(video.throttled, dropped, "every throttled video attempt must be visible as frames_dropped");
     assert_eq!(admin_pollution, 0, "admin rebuild paths must not be recorded as ticks");
     assert!(
         audio_hz >= AUDIO_CADENCE_FLOOR_HZ,
-        "audio cadence too low: {} ticks / {measured_seconds:.3}s = {audio_hz:.2} Hz (floor {AUDIO_CADENCE_FLOOR_HZ})",
-        audio.ticks
+        "audio cadence too low: {} ticks / {audio_measured_seconds:.3}s = {audio_hz:.2} Hz (floor {AUDIO_CADENCE_FLOOR_HZ})",
+        audio.first_successes
     );
     assert!(
         effective_video_fps >= VIDEO_CADENCE_FLOOR_FPS,

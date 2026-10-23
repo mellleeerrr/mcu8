@@ -31,8 +31,9 @@ impl Compositor {
     /// (slot key → target rect).
     ///
     /// - Each frame is scaled to its rect with a uniform scale
-    ///   (letterbox) and drawn centered inside the rect; the rest of the
-    ///   rect stays black.
+    ///   (letterbox) and drawn centered inside the rect. Letterbox bars are not
+    ///   painted: they keep whatever the canvas already holds (background for
+    ///   the first layer, lower-z content for a PiP).
     /// - Slots with no frame are left black.
     /// - Rects are clamped to the canvas.
     /// - Overlapping rects: higher `z` wins; equal `z` falls back to slot key
@@ -82,9 +83,10 @@ impl Compositor {
     /// Scales `frame` into `rect` (uniform fit, centered) in the canvas.
     ///
     /// Nearest-neighbour mapping is exact integer floor math:
-    /// `fx = dx * fw / dw`, `fy = dy * fh / dh` (the previous `f64` version
-    /// truncated `dx / s` and could shift sampling by one source pixel). The
-    /// horizontal index is advanced incrementally so no division runs per pixel.
+    /// `fx = dx * fw / dw`, `fy = dy * fh / dh`. The earlier 16.16 fixed-point
+    /// sampler truncated `dx / s` and could pick a source column one to the left;
+    /// the horizontal index is now advanced incrementally, so no division runs
+    /// per pixel and the mapping is exactly `floor(dx*fw/dw)`.
     fn blit(canvas: &mut Frame, frame: &Frame, rect: &PixelRect) {
         let (cw, ch) = (CANVAS_WIDTH as usize, CANVAS_HEIGHT as usize);
         // Visible region = intersection of `rect` with the canvas [0..W]×[0..H].
@@ -99,7 +101,7 @@ impl Compositor {
         }
         let fw = frame.width as usize;
         let fh = frame.height as usize;
-        // Uniform (letterbox) fit, matching vks_layout::Renderer, in integer math:
+        // Uniform (letterbox) fit, matching the room layout convention, in integer math:
         // width-limited when rw/fw <= rh/fh, else height-limited. The free axis is
         // rounded half-up exactly like the former `f64::round`.
         let (dw, dh) = if rw * fh <= rh * fw {
@@ -107,9 +109,6 @@ impl Compositor {
         } else {
             (((fw * rh + fh / 2) / fh).max(1), rh)
         };
-        if dw == 0 || dh == 0 {
-            return;
-        }
         let ox = rx + rw.saturating_sub(dw) / 2;
         let oy = ry + rh.saturating_sub(dh) / 2;
         let step_x = fw / dw;
@@ -180,17 +179,22 @@ mod tests {
     use super::*;
 
     fn gradient_i420(width: usize, height: usize) -> Frame {
-        // Horizontal gradient pins the exact sampled source column; a uniform
-        // fill cannot detect a nearest-neighbour regression.
+        // 2-D luma and per-axis chroma gradients: a uniform or horizontal-only
+        // fill cannot detect a vertical `fy` regression or a chroma mapping bug.
         let mut data = vec![0u8; width * height * 3 / 2];
         for y in 0..height {
             for x in 0..width {
-                data[y * width + x] = (x % 251) as u8;
+                data[y * width + x] = ((x + 3 * y) % 251) as u8;
             }
         }
         let chroma = width * height / 4;
-        data[width * height..width * height + chroma].fill(100);
-        data[width * height + chroma..].fill(200);
+        let (cw, ch) = (width / 2, height / 2);
+        for y in 0..ch {
+            for x in 0..cw {
+                data[width * height + y * cw + x] = (40 + x % 200) as u8;
+                data[width * height + chroma + y * cw + x] = (60 + 3 * y % 180) as u8;
+            }
+        }
         Frame::new(width as u32, height as u32, data)
     }
 
@@ -203,17 +207,31 @@ mod tests {
         let rects = BTreeMap::from([(0u32, PixelRect::new(0, 0, 960, 540))]);
         let out = Compositor.compose(&frames, &rects);
         let canvas_w = CANVAS_WIDTH as usize;
-        for dx in [0usize, 1, 2, 4, 9, 100, 359, 719] {
-            let expected = (dx * 320 / 720) % 251;
-            assert_eq!(out.data[dx + 120], expected as u8, "dx={dx} must sample source column {}", dx * 320 / 720);
+        for dy in [0usize, 1, 2, 7, 269, 539] {
+            for dx in [0usize, 1, 2, 4, 9, 100, 359, 719] {
+                let sx = dx * 320 / 720;
+                let sy = dy * 240 / 540;
+                let expected = ((sx + 3 * sy) % 251) as u8;
+                let index = dy * canvas_w + 120 + dx;
+                assert_eq!(out.data[index], expected, "dx={dx},dy={dy} must sample source ({sx},{sy})");
+            }
         }
         // Chroma planes use the same exact mapping on their own resolution:
-        // dw/2 = 360 columns start at ox/2 = 60; U plane is 100, V plane 200.
+        // dw/2 = 360 columns start at ox/2 = 60. U varies by x, V by y, so both
+        // chroma axes are pinned.
         let chroma_offset = canvas_w * CANVAS_HEIGHT as usize;
         let chroma_plane = (canvas_w / 2) * (CANVAS_HEIGHT as usize / 2);
-        for dx in [0usize, 1, 179, 359] {
-            assert_eq!(out.data[chroma_offset + 60 + dx], 100, "U plane at dx={dx}");
-            assert_eq!(out.data[chroma_offset + chroma_plane + 60 + dx], 200, "V plane at dx={dx}");
+        let chroma_stride = canvas_w / 2;
+        for dy in [0usize, 1, 269] {
+            let sy = dy * 120 / 270;
+            let v_expected = (60 + 3 * sy % 180) as u8;
+            for dx in [0usize, 1, 179, 359] {
+                let sx = dx * 160 / 360;
+                let u_expected = (40 + sx % 200) as u8;
+                let index = chroma_offset + dy * chroma_stride + 60 + dx;
+                assert_eq!(out.data[index], u_expected, "U plane at dx={dx},dy={dy}");
+                assert_eq!(out.data[index + chroma_plane], v_expected, "V plane at dx={dx},dy={dy}");
+            }
         }
     }
 
@@ -233,6 +251,26 @@ mod tests {
         assert_eq!(out.data[120 + 720], 0, "right pillar is black");
         assert_eq!(out.data[(540 - 1) * canvas_w + 120], 77, "no vertical letterbox in the fitted image");
         assert_eq!(out.data[540 * canvas_w + 120], 0, "bottom band outside 540-row image stays black");
+    }
+
+    /// A PiP over an existing frame must not clear its letterbox bars: the bars
+    /// keep the lower-z layer (documented contract), while the fitted frame wins
+    /// inside the image area.
+    #[test]
+    fn pip_letterbox_bars_keep_lower_layer() {
+        let lower = Arc::new(Frame::filled(1920, 1080, 10));
+        let pip = Arc::new(Frame::filled(640, 480, 77));
+        let frames = BTreeMap::from([(0u32, lower), (1u32, pip)]);
+        let rects = BTreeMap::from([
+            (0u32, PixelRect::new(0, 0, 1920, 1080)),
+            (1u32, PixelRect::new(0, 0, 960, 540).with_z(1)),
+        ]);
+        let out = Compositor.compose(&frames, &rects);
+        assert_eq!(out.data[0], 10, "left bar of a 720x540 PiP keeps the lower layer");
+        assert_eq!(out.data[119], 10);
+        assert_eq!(out.data[120], 77, "fitted PiP starts at the centered offset");
+        assert_eq!(out.data[120 + 719], 77);
+        assert_eq!(out.data[120 + 720], 10, "right bar keeps the lower layer");
     }
 
     #[test]
