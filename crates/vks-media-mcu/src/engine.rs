@@ -43,9 +43,6 @@ pub struct McuRenderStats {
 /// Per-room MCU state.
 #[derive(Debug)]
 struct RoomState {
-    /// Режим комнаты (для отчёта через `MediaEngine::mode` при per-room override).
-    #[allow(dead_code)]
-    mode: RoomMode,
     caps: RoomCaps,
     /// Publisher → their tracks (kept for listing / future decode).
     publisher_tracks: BTreeMap<ParticipantId, Vec<MediaTrack>>,
@@ -100,9 +97,8 @@ struct RoomState {
 }
 
 impl RoomState {
-    fn new(mode: RoomMode, caps: RoomCaps) -> Self {
+    fn new(caps: RoomCaps) -> Self {
         Self {
-            mode,
             caps,
             publisher_tracks: BTreeMap::new(),
             join_order: Vec::new(),
@@ -983,7 +979,7 @@ impl McuEngine {
             sanitize_assignments(layout);
         }
         let mut g = self.rooms.lock().unwrap();
-        let state = g.entry(room).or_insert_with(|| RoomState::new(RoomMode::Mcu, RoomCaps::default()));
+        let state = g.entry(room).or_insert_with(|| RoomState::new(RoomCaps::default()));
         // Pending применяется только к пустой комнате: более новая раскладка
         // не должна откатываться stale-значением.
         if state.layout.is_none() {
@@ -999,7 +995,7 @@ impl McuEngine {
         // с apply_layout (rooms → pending).
         let pending = self.pending_layouts.lock().unwrap().remove(&room);
         let mut g = self.rooms.lock().unwrap();
-        let state = g.entry(room).or_insert_with(|| RoomState::new(RoomMode::Mcu, RoomCaps::default()));
+        let state = g.entry(room).or_insert_with(|| RoomState::new(RoomCaps::default()));
         state.subscribers.insert(pid);
         // Pending применяем и к audio-only bridge: SIP/H.323 может прийти без
         // видео (или видео деградировало), но выбранная до дозвона раскладка
@@ -1021,7 +1017,7 @@ impl McuEngine {
     pub fn seat_publisher(&self, room: RoomId, pid: ParticipantId, tracks: Vec<MediaTrack>) {
         let pending = self.pending_layouts.lock().unwrap().remove(&room);
         let mut g = self.rooms.lock().unwrap();
-        let state = g.entry(room).or_insert_with(|| RoomState::new(RoomMode::Mcu, RoomCaps::default()));
+        let state = g.entry(room).or_insert_with(|| RoomState::new(RoomCaps::default()));
         if state.layout.is_none() {
             if let Some(layout) = pending {
                 state.adopt_layout(layout);
@@ -1153,7 +1149,7 @@ impl MediaEngine for McuEngine {
         if g.contains_key(&cfg.room_id) {
             return Err(MediaEngineError::RoomAlreadyExists(cfg.room_id));
         }
-        let mut state = RoomState::new(RoomMode::Mcu, cfg.caps);
+        let mut state = RoomState::new(cfg.caps);
         // Сохранённая до моста раскладка не должна теряться: adopt pending
         // здесь, иначе первый зритель увидит пустую сетку, пока не придёт
         // следующий apply_layout. Порядок локов rooms → pending (как у

@@ -70,12 +70,6 @@ pub struct BweEstimator {
     bytes_per_packet: u64,
     /// Оконный буфер прибужших пакетов (arrival order).
     window: VecDeque<TwccReportedPacket>,
-    /// Последний прибужший пакет (для delta времени).
-    #[allow(dead_code)]
-    last_arrival: Option<Instant>,
-    /// Последний transport-wide seq.
-    #[allow(dead_code)]
-    last_sent_seq: Option<u16>,
     /// Текуте оценка bps.
     bps: u64,
 }
@@ -95,14 +89,7 @@ impl BweEstimator {
     /// Создаёт estimator с конфигурацией.
     pub fn with_config(config: BweConfig) -> Self {
         let start = config.start_bps;
-        Self {
-            config,
-            bytes_per_packet: 1200,
-            window: VecDeque::with_capacity(config.window_packets),
-            last_arrival: None,
-            last_sent_seq: None,
-            bps: start,
-        }
+        Self { config, bytes_per_packet: 1200, window: VecDeque::with_capacity(config.window_packets), bps: start }
     }
 
     /// Задаёт средний размер RTP-пакета (bytes). Используется при расчёте
@@ -127,8 +114,6 @@ impl BweEstimator {
     pub fn report(&mut self, reported: &[TwccReportedPacket]) -> BweResult {
         for p in reported {
             self.window.push_back(*p);
-            self.last_arrival = Some(p.arrival);
-            self.last_sent_seq = Some(p.sent_seq);
         }
         self.trim_window();
         self.recompute();
@@ -140,8 +125,6 @@ impl BweEstimator {
     /// Обнуляет состояние (новая сессия / reconnect).
     pub fn reset(&mut self) {
         self.window.clear();
-        self.last_arrival = None;
-        self.last_sent_seq = None;
         self.bps = self.config.start_bps;
     }
 
