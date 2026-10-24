@@ -172,6 +172,14 @@ pub struct LayoutDescriptor {
     /// Точная геометрия ячеек; пусто — движок выбирает сетку сам (legacy/SFU).
     #[serde(default)]
     pub geometry: Vec<LayoutSlot>,
+    /// T10a: id пресета из админ-состояния (`vks_grid_9`, `codian_07`, …).
+    /// Справочно для провода; геометрия авторитетна. "" = нет/неизвестно.
+    #[serde(default)]
+    pub preset: String,
+    /// T10a: режим редактора (`auto`/`dynamic`/`manual`), нормализованный.
+    /// Это не топология комнаты (для неё `RoomModeChanged`). "" = неизвестно.
+    #[serde(default)]
+    pub mode: String,
 }
 
 /// Порт MediaEngine — единый интерфейс для SFU и MCU.

@@ -50,11 +50,11 @@ pub fn install(state: &Arc<AppState>, mcu: &Arc<McuEngine>) {
                 state.room_hub.broadcast(&room, None, payload.into());
             }
             RoomEvent::LayoutChanged { version } => {
-                let Some(layout) = engine.current_layout(room) else {
+                let Some(snapshot) = engine.layout_snapshot(room) else {
                     return;
                 };
-                debug_assert_eq!(layout.version, version, "событие пересадки и раскладка разошлись");
-                let message = crate::layout_signal::layout_changed(&layout);
+                debug_assert_eq!(snapshot.layout.version, version, "событие пересадки и раскладка разошлись");
+                let message = crate::layout_signal::layout_changed(&snapshot.layout, &snapshot.preset, &snapshot.mode);
                 let payload = vks_signaling::envelope::Envelope::new(message).encode();
                 tracing::debug!(%room, version, "раскладка перестроена голосовой активацией");
                 state.room_hub.broadcast(&room, None, payload.into());
@@ -129,6 +129,8 @@ mod tests {
                 version: 1,
                 assignments: [(a, 0u32), (b, 1u32)].into_iter().collect(),
                 geometry: Vec::new(),
+                preset: "codian_07".into(),
+                mode: "manual".into(),
             },
         )
         .await
@@ -143,24 +145,6 @@ mod tests {
         }
 
         let messages = drain(rx);
-        eprintln!("DEBUG messages={}", messages.len());
-        for m in &messages {
-            match &m.payload {
-                Some(ReplyPayload::LayoutChanged(e)) => eprintln!(
-                    "DEBUG layout msg slots={:?}",
-                    e.layout.as_ref().map(|l| l
-                        .slots
-                        .iter()
-                        .map(|s| (s.id, s.participant_id.clone(), s.rect.as_ref().map(|r| (r.w, r.h))))
-                        .collect::<Vec<_>>())
-                ),
-                Some(ReplyPayload::SpeakingStateChanged(e)) => {
-                    eprintln!("DEBUG speaking {:?} {}", e.participant_id, e.speaking)
-                }
-                Some(other) => eprintln!("DEBUG other {:?}", std::mem::discriminant(other)),
-                None => {}
-            }
-        }
         let speaking = messages
             .iter()
             .find_map(|message| match &message.payload {
@@ -179,6 +163,8 @@ mod tests {
                 _ => None,
             })
             .expect("LayoutChanged должен уйти клиентам");
+        assert_eq!(layout.mode, "manual", "VAD-пересадка не теряет режим раскладки");
+        assert_eq!(layout.preset, "codian_07", "VAD-пересадка не теряет preset раскладки");
         // Площадь в тысячных долях: приведение 0.75 к целому дало бы 0 и
         // уравняло главное окно с полосой миниатюр.
         let main = layout.slots.iter().max_by_key(|slot| {

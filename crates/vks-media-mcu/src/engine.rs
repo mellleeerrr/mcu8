@@ -586,6 +586,19 @@ fn sanitize_assignments(layout: &mut LayoutDescriptor) {
     layout.assignments.retain(|_, slot| geometry.contains(slot));
 }
 
+/// Атомарный снимок раскладки: эффективная геометрия + справочные метаданные
+/// применённого дескриптора (T10a). Один лок на комнату — версия геометрии и
+/// метаданные всегда из одного применения.
+#[derive(Debug, Clone)]
+pub struct LayoutSnapshot {
+    /// То, что реально рисует композитор (`LayoutChanged.slots`).
+    pub layout: vks_layout::Layout,
+    /// Id пресета из админ-состояния; "" = нет/неизвестно.
+    pub preset: String,
+    /// Режим редактора (`auto`/`dynamic`/`manual`); "" = неизвестно.
+    pub mode: String,
+}
+
 impl McuEngine {
     /// Creates an empty MCU engine.
     pub fn new() -> Self {
@@ -872,13 +885,29 @@ impl McuEngine {
     /// прийти без геометрии (режим auto), и тогда «провод» и «композит»
     /// разошлись бы.
     pub fn current_layout(&self, room: RoomId) -> Option<vks_layout::Layout> {
+        // Один источник истины — `layout_snapshot` (включая pending-комнаты).
+        self.layout_snapshot(room).map(|snapshot| snapshot.layout)
+    }
+
+    /// Снимок раскладки для провода: эффективная геометрия и метаданные
+    /// одного и того же применения (T10a). В отличие от пары
+    /// `current_layout` + `layout_descriptor`, оба значения читаются под одним
+    /// локом и не могут разъехаться по версии.
+    pub fn layout_snapshot(&self, room: RoomId) -> Option<LayoutSnapshot> {
         if let Some(state) = self.rooms.lock().unwrap().get(&room) {
-            return Some(state.current_layout.clone());
+            let (preset, mode) = state
+                .layout
+                .as_ref()
+                .map(|descriptor| (descriptor.preset.clone(), descriptor.mode.clone()))
+                .unwrap_or_default();
+            return Some(LayoutSnapshot { layout: state.current_layout.clone(), preset, mode });
         }
-        // Комната ещё не создана: раскладка лежит в pending и будет применена
-        // при первом бридже. Клиент всё равно должен получить её снимок.
         let pending = self.pending_layouts.lock().unwrap().get(&room).cloned()?;
-        Some(RoomState::layout_from_descriptor(&pending))
+        Some(LayoutSnapshot {
+            layout: RoomState::layout_from_descriptor(&pending),
+            preset: pending.preset,
+            mode: pending.mode,
+        })
     }
 
     /// The current crossfaded slot rects of a room (test/inspector).
@@ -1019,6 +1048,8 @@ impl McuEngine {
             version: 0,
             assignments: BTreeMap::new(),
             geometry: Vec::new(),
+            mode: "auto".into(),
+            ..Default::default()
         });
         if seat_participant(descriptor, pid) {
             descriptor.version = descriptor.version.saturating_add(1);
@@ -1402,7 +1433,8 @@ mod tests {
         let mut assignments = std::collections::BTreeMap::new();
         assignments.insert(a, 0);
         assignments.insert(b, 1);
-        let layout = LayoutDescriptor { layout_id: "custom".into(), version: 1, assignments, geometry };
+        let layout =
+            LayoutDescriptor { layout_id: "custom".into(), version: 1, assignments, geometry, ..Default::default() };
         e.apply_layout(rid, layout).await.unwrap();
         for _ in 0..12 {
             e.tick(rid);
@@ -1487,6 +1519,7 @@ mod tests {
                 version: 1,
                 assignments: assignments.iter().copied().collect(),
                 geometry: Vec::new(),
+                ..Default::default()
             },
         )
         .await
@@ -1698,6 +1731,7 @@ mod tests {
                 version: 1,
                 assignments: std::collections::BTreeMap::new(),
                 geometry: Vec::new(),
+                ..Default::default()
             },
         )
         .await
@@ -1722,7 +1756,13 @@ mod tests {
         let mut assignments = std::collections::BTreeMap::new();
         assignments.insert(a, 0);
         assignments.insert(b, 1);
-        let layout = LayoutDescriptor { layout_id: "L".into(), version: 1, assignments, geometry: Vec::new() };
+        let layout = LayoutDescriptor {
+            layout_id: "L".into(),
+            version: 1,
+            assignments,
+            geometry: Vec::new(),
+            ..Default::default()
+        };
         e.apply_layout(rid, layout).await.unwrap();
         e.add_subscriber(rid, p(100), sub_req()).await.unwrap();
 
@@ -1844,7 +1884,13 @@ mod tests {
         // Custom slot assignment: presenter to slot 0, audience to slot 1
         assignments.insert(presenter, 0);
         assignments.insert(audience, 1);
-        let layout = LayoutDescriptor { layout_id: "focus".into(), version: 1, assignments, geometry: Vec::new() };
+        let layout = LayoutDescriptor {
+            layout_id: "focus".into(),
+            version: 1,
+            assignments,
+            geometry: Vec::new(),
+            ..Default::default()
+        };
         e.apply_layout(rid, layout).await.unwrap();
 
         let rects = e.slot_rects(rid).expect("slot rects");
@@ -1936,7 +1982,13 @@ mod tests {
         let mut assignments = std::collections::BTreeMap::new();
         assignments.insert(a, 0);
         assignments.insert(b, 1);
-        let layout = LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments, geometry: Vec::new() };
+        let layout = LayoutDescriptor {
+            layout_id: "grid".into(),
+            version: 1,
+            assignments,
+            geometry: Vec::new(),
+            ..Default::default()
+        };
         e.apply_layout(rid, layout).await.unwrap();
 
         // Feed frames for slot 0 (a) and slot 1 (b)
@@ -1983,7 +2035,13 @@ mod tests {
         let mut assignments = std::collections::BTreeMap::new();
         assignments.insert(a, 7);
         assignments.insert(b, 42);
-        let layout = LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments, geometry: Vec::new() };
+        let layout = LayoutDescriptor {
+            layout_id: "grid".into(),
+            version: 1,
+            assignments,
+            geometry: Vec::new(),
+            ..Default::default()
+        };
         e.apply_layout(rid, layout).await.unwrap();
 
         // Under M0.4 / M3.2, sparse slot IDs must create exactly 2 slots without 40+ holes
@@ -2018,7 +2076,13 @@ mod tests {
         assignments.insert(b, 1);
         e.apply_layout(
             rid,
-            LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments, geometry: Vec::new() },
+            LayoutDescriptor {
+                layout_id: "grid".into(),
+                version: 1,
+                assignments,
+                geometry: Vec::new(),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -2032,7 +2096,13 @@ mod tests {
         swapped.insert(b, 0);
         e.apply_layout(
             rid,
-            LayoutDescriptor { layout_id: "grid".into(), version: 2, assignments: swapped, geometry: Vec::new() },
+            LayoutDescriptor {
+                layout_id: "grid".into(),
+                version: 2,
+                assignments: swapped,
+                geometry: Vec::new(),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -2060,7 +2130,13 @@ mod tests {
         let a = p(3);
         let mut assignments = std::collections::BTreeMap::new();
         assignments.insert(a, 3);
-        let layout = LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments, geometry: Vec::new() };
+        let layout = LayoutDescriptor {
+            layout_id: "grid".into(),
+            version: 1,
+            assignments,
+            geometry: Vec::new(),
+            ..Default::default()
+        };
         e.apply_layout(rid, layout).await.unwrap();
 
         e.bridge_participant(rid, a, vec![video_track(a)]);
@@ -2090,7 +2166,13 @@ mod tests {
         let late = p(2);
         let mut assignments = std::collections::BTreeMap::new();
         assignments.insert(seated, 3);
-        let layout = LayoutDescriptor { layout_id: "grid".into(), version: 1, assignments, geometry: Vec::new() };
+        let layout = LayoutDescriptor {
+            layout_id: "grid".into(),
+            version: 1,
+            assignments,
+            geometry: Vec::new(),
+            ..Default::default()
+        };
         e.apply_layout(rid, layout).await.unwrap();
 
         e.bridge_participant(rid, late, vec![video_track(late)]);
@@ -2128,6 +2210,7 @@ mod tests {
             version: 1,
             assignments,
             geometry: vec![LayoutSlot { slot: 0, x: 960, y: 540, width: 960, height: 540, z_order: 0 }],
+            ..Default::default()
         };
         e.apply_layout(rid, layout).await.unwrap();
         e.bridge_participant(rid, a, vec![video_track(a)]);
@@ -2178,6 +2261,7 @@ mod tests {
                 version: 2,
                 assignments: std::collections::BTreeMap::new(),
                 geometry,
+                ..Default::default()
             },
         )
         .await
@@ -2199,6 +2283,71 @@ mod tests {
         assert_eq!(composite.data[270 * CANVAS_SIZE.0 as usize + 480], 99, "новый кадр виден в верхней левой ячейке");
     }
 
+    /// T10a: авто-сетка, созданная самим движком (без apply из админки),
+    /// помечается `mode:"auto"`, preset пуст — иначе клиент не отличил бы её
+    /// от legacy-кадра.
+    #[tokio::test]
+    async fn register_publisher_marks_auto_mode() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        let pid = p(1);
+        e.bridge_participant(rid, pid, vec![video_track(pid)]);
+        let snapshot = e.layout_snapshot(rid).expect("snapshot after publisher");
+        assert_eq!(snapshot.mode, "auto");
+        assert_eq!(snapshot.preset, "");
+    }
+
+    /// T10a: снимок провода несёт справочные метаданные применённого
+    /// дескриптора вместе с эффективной геометрией.
+    #[tokio::test]
+    async fn layout_snapshot_carries_preset_and_mode() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.ensure_room(rid);
+        e.apply_layout(
+            rid,
+            LayoutDescriptor {
+                layout_id: "codian-auto".into(),
+                version: 1,
+                assignments: BTreeMap::new(),
+                geometry: Vec::new(),
+                preset: "codian_07".into(),
+                mode: "manual".into(),
+            },
+        )
+        .await
+        .expect("layout applied");
+        let snapshot = e.layout_snapshot(rid).expect("snapshot");
+        assert_eq!(snapshot.preset, "codian_07");
+        assert_eq!(snapshot.mode, "manual");
+        assert_eq!(snapshot.layout.version, 1, "геометрия и метаданные из одного применения");
+    }
+
+    /// T10a: pending-раскладка до создания комнаты тоже отдаёт метаданные —
+    /// иначе первый зритель получил бы снимок без режима.
+    #[tokio::test]
+    async fn layout_snapshot_for_pending_room_preserves_metadata() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.apply_layout(
+            rid,
+            LayoutDescriptor {
+                layout_id: "pending".into(),
+                version: 4,
+                assignments: BTreeMap::new(),
+                geometry: Vec::new(),
+                preset: "vks_grid_9".into(),
+                mode: "manual".into(),
+            },
+        )
+        .await
+        .expect("pending layout staged");
+        let snapshot = e.layout_snapshot(rid).expect("pending snapshot");
+        assert_eq!(snapshot.preset, "vks_grid_9");
+        assert_eq!(snapshot.mode, "manual");
+        assert_eq!(snapshot.layout.version, 4);
+    }
+
     /// T12: pending-раскладка, пришедшая до создания комнаты, подхватывается
     /// `create_room` (а не только первым мостом): первый зритель не видит
     /// пустую сетку, версия/геометрия сохранены, pending очищен.
@@ -2216,6 +2365,7 @@ mod tests {
                 version: 7,
                 assignments: Default::default(),
                 geometry,
+                ..Default::default()
             },
         )
         .await
@@ -2259,6 +2409,7 @@ mod tests {
                 version: 1,
                 assignments: Default::default(),
                 geometry,
+                ..Default::default()
             },
         )
         .await
@@ -2294,6 +2445,7 @@ mod tests {
                 version: 1,
                 assignments: BTreeMap::new(),
                 geometry: Vec::new(),
+                ..Default::default()
             },
         )
         .await
@@ -2305,6 +2457,7 @@ mod tests {
                 version: 99,
                 assignments: BTreeMap::new(),
                 geometry: Vec::new(),
+                ..Default::default()
             },
         );
         e.ensure_room(rid);
@@ -2336,6 +2489,7 @@ mod tests {
                 version: 1,
                 assignments: Default::default(),
                 geometry,
+                ..Default::default()
             },
         )
         .await
@@ -2370,9 +2524,18 @@ mod tests {
             LayoutSlot { slot: 0, x: 0, y: 0, width: 960, height: 540, z_order: 0 },
             LayoutSlot { slot: 1, x: 960, y: 0, width: 960, height: 540, z_order: 1 },
         ];
-        e.apply_layout(rid, LayoutDescriptor { layout_id: "preset_equal_2".into(), version: 1, assignments, geometry })
-            .await
-            .unwrap();
+        e.apply_layout(
+            rid,
+            LayoutDescriptor {
+                layout_id: "preset_equal_2".into(),
+                version: 1,
+                assignments,
+                geometry,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         let second = p(11);
         e.bridge_participant(rid, second, vec![video_track(second)]);
         let layout = e.layout_descriptor(rid).expect("layout");

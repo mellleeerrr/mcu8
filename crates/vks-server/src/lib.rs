@@ -1083,9 +1083,15 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                 // клиент успевал нарисовать авто-сетку.
                                                 res.layout = ctx
                                                     .mcu_engine
-                                                    .current_layout(rid)
+                                                    .layout_snapshot(rid)
                                                     .as_ref()
-                                                    .map(crate::layout_signal::proto_layout);
+                                                    .map(|snapshot| {
+                                                        crate::layout_signal::proto_layout(
+                                                            &snapshot.layout,
+                                                            &snapshot.preset,
+                                                            &snapshot.mode,
+                                                        )
+                                                    });
                                             }
                                         }
 

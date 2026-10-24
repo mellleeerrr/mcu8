@@ -249,11 +249,13 @@ message LayoutChanged {
   Layout layout = 1;
 }
 
-// Layout (из vks-layout, protobuf serialization)
+// Layout (эффективная геометрия из vks-layout + метаданные админки)
 message Layout {
   uint32 version = 1;
   repeated Slot slots = 2;
   string kind     = 3;  // "grid" | "focus" | "speaker" | "custom"
+  string preset   = 4;  // T10a: raw id схемы из админки; "" = неизвестно
+  string mode     = 5;  // T10a: "auto" | "dynamic" | "manual"; "" = неизвестно
 }
 message Slot {
   uint32 id        = 1;
@@ -289,7 +291,7 @@ Pull — снимок раскладки в `JoinRoomResult` (для поздн�
 > (`vks-cluster`) — межузловая рассылка раскладки не реализована.
 >
 > **Источник истины:** на провод уходит **эффективная раскладка композитора**
-> (`McuEngine::current_layout`), а не дескриптор: в режиме `auto` дескриптор
+> (`McuEngine::layout_snapshot`), а не дескриптор: в режиме `auto` дескриптор
 > приходит без геометрии (её строит движок по числу участников), и клиент
 > получил бы пустой экран. Прямоугольники композитора уже кламплены в холст.
 >
@@ -303,7 +305,23 @@ Pull — снимок раскладки в `JoinRoomResult` (для поздн�
 > **Значение `assignment`:** `PINNED` — закреплённый слот, `FIXED` — занятый
 > участником, `AUTO` — свободный.
 >
-> Полный контракт — `docs/decisions/0030-layout-signaling-contract.md`.
+> **Метаданные схемы (T10a, ADR-0032):** `Layout.preset`/`Layout.mode` — это
+> справочная проекция админ-состояния (raw `preset`, нормализованный `mode`),
+> а не вторая истина: геометрия авторитетна. `mode` — зеркало редактора, а не
+> топология комнаты (`RoomModeChanged`) и не «как построена геометрия»:
+> `auto + явный preset` (Codian/конструктор) даёт `mode:"auto"` и геометрию
+> пресета. Авто-сетка, созданная самим движком, тоже помечается `mode:"auto"`
+> (`register_publisher`) — это провенанс «сетку построил движок», а не выбор
+> пользователя. `preset` — raw-id хранимой схемы; `size` на провод не
+> выводится, полный id/число окон клиент восстанавливает по `slots.len()`.
+> Пустая строка = «сервер не сообщает» (legacy-кадр), не `auto`.
+> `layout_id` на провод не выводится (COW-нестабильный UUID админ-записи).
+> `preset` длиннее 128 байт нормализуется в `""` (unknown).
+> Обновление — только в одном `LayoutChanged` (без отдельного
+> `LayoutModeChanged`), источник — атомарный `McuEngine::layout_snapshot`.
+>
+> Полный контракт — `docs/decisions/0030-layout-signaling-contract.md`,
+> `docs/decisions/0032-layout-metadata-on-the-wire.md`.
 
 ## 10. Quality / Error / Ack
 

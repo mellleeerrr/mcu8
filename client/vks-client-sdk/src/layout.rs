@@ -66,6 +66,7 @@ mod tests {
                     participant_id: None,
                 },
             ],
+            ..Default::default()
         };
         let layout = normalized_layout_from_proto(&proto);
         assert_eq!(layout.version, 4);
@@ -93,6 +94,7 @@ mod tests {
                 assignment: SlotAssignment::Auto as i32,
                 participant_id: None,
             }],
+            ..Default::default()
         };
         let layout = normalized_layout_from_proto(&proto);
         let canvas = vks_layout::Canvas::new(800, 600);

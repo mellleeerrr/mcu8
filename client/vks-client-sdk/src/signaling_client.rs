@@ -375,6 +375,7 @@ mod tests {
                             assignment: vks_proto::signaling::SlotAssignment::Auto as i32,
                             participant_id: None,
                         }],
+                        ..Default::default()
                     }),
                 },
             )),

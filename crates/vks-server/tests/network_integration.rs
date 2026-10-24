@@ -1414,8 +1414,14 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
     let mut assignments = std::collections::BTreeMap::new();
     assignments.insert(alice_pid_core, 0);
     assignments.insert(bob_pid_core, 1);
-    let layout_desc =
-        vks_core::LayoutDescriptor { layout_id: "grid_2x2".into(), version: 1, assignments, geometry: Vec::new() };
+    let layout_desc = vks_core::LayoutDescriptor {
+        layout_id: "grid_2x2".into(),
+        version: 1,
+        assignments,
+        geometry: Vec::new(),
+        preset: "vks_grid_4".into(),
+        mode: "manual".into(),
+    };
     use vks_core::ports::media_engine::MediaEngine;
     mcu_engine.apply_layout(room_id, layout_desc).await.expect("apply_layout");
 
@@ -1478,6 +1484,10 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
         Some(Payload::JoinRoomResult(res)) => {
             let layout = res.layout.as_ref().expect("поздний участник получает снимок раскладки");
             assert!(!layout.slots.is_empty(), "снимок раскладки непуст");
+            // Позитивный случай третьего производителя: снимок `JoinRoomResult`
+            // несёт те же метаданные, что и применённый дескриптор (T10a).
+            assert_eq!(layout.mode, "manual", "снимок позднего участника несёт режим");
+            assert_eq!(layout.preset, "vks_grid_4", "снимок несёт raw preset");
             assert_eq!(layout.slots[0].id, 0, "slot id — 0-based");
             let rect = layout.slots[0].rect.as_ref().expect("нормализованный rect");
             assert!(rect.w > 0.0 && rect.h > 0.0, "у слота есть размер");

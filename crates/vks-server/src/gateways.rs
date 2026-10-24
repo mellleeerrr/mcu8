@@ -746,18 +746,36 @@ impl GatewayManager {
         let Some(mcu) = &self.mcu_engine else {
             return;
         };
-        let Some(layout) = mcu.current_layout(room_id) else {
+        let Some(snapshot) = mcu.layout_snapshot(room_id) else {
             return;
         };
         let Some(state) = self.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
         else {
             return;
         };
-        let message = crate::layout_signal::layout_changed(&layout);
+        let message = crate::layout_signal::layout_changed(&snapshot.layout, &snapshot.preset, &snapshot.mode);
         let payload = vks_signaling::envelope::Envelope::new(message).encode();
-        tracing::debug!(%room_id, slots = layout.slots.len(), "раскладка отправлена участникам комнаты");
+        tracing::debug!(%room_id, slots = snapshot.layout.slots.len(), "раскладка отправлена участникам комнаты");
         state.room_hub.broadcast(&room_id, None, payload.into());
     }
+}
+
+/// T10a: метаданные раскладки для провода (`LayoutChanged.preset/mode`).
+///
+/// `mode` — зеркало админ-режима, а не «как построена геометрия»: для
+/// `auto + явный preset` геометрия авторитетна, но режим остаётся `auto`
+/// (ADR-0032). Неизвестное/пустое значение нормализуется в `""` = unknown.
+/// Возвращает `(mode, preset)` в порядке аргументов. `preset` — raw-строка
+/// редактора (не resolved): resolved-вариант уже
+/// вычисляется для геометрии и второй источник истины не нужен.
+fn layout_meta(mode: &str, preset: &str) -> (String, String) {
+    let mode = mode.trim().to_ascii_lowercase();
+    let mode = if matches!(mode.as_str(), "auto" | "dynamic" | "manual") { mode } else { String::new() };
+    let preset = preset.trim();
+    // Строка уходит всем участникам комнаты: ограничиваем длину, чтобы
+    // невалидированный generic PATCH не раздувал кадр.
+    let preset = if preset.len() <= 128 { preset.to_string() } else { String::new() };
+    (mode, preset)
 }
 
 /// PCM sample rate the bridge works with for this payload type (G722 is
@@ -1592,13 +1610,22 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         // Реальные PNM-раскладки хранят только `position`/`role`; геометрия
         // задаётся `payload.preset` (`preset_equal_25`, `preset_selected_b_4_(2)`…).
         // Без этого MCU рисовал sqrt-сетку и выбранная схема терялась.
-        let mode = layout["payload"]["mode"].as_str().unwrap_or_default();
+        // T10a: справочные метаданные (mode/preset) для `LayoutChanged`; они
+        // не влияют на геометрию и не являются второй истиной — это проекция
+        // применённого дескриптора. Нормализация — ровно здесь, на границе, и
+        // геометрическая ветка ниже использует то же нормализованное значение
+        // (иначе `" AUTO "` дал бы на проводе `auto`, а геометрию — по
+        // preset-ветке).
+        let stored_preset_raw = layout["payload"]["preset"].as_str().unwrap_or_default();
+        let (meta_mode, meta_preset) =
+            layout_meta(layout["payload"]["mode"].as_str().unwrap_or_default(), stored_preset_raw);
+        let mode = meta_mode.as_str();
         // AUTO (`mode=="auto"`) оставляет geometry пустым: движок строит сетку
         // по числу забридженных паблишеров (фиксированные 13 ячеек
         // `preset_default_13` давали участнику плитку 480×270). Для
         // manual/dynamic геометрия берётся из `payload.preset`.
         let mut geometry: Vec<LayoutSlot> = Vec::new();
-        let stored_preset = layout["payload"]["preset"].as_str().unwrap_or_default();
+        let stored_preset = stored_preset_raw;
         // Явно выбранная схема Codian или конструктора — это ручная раскладка,
         // даже если клиент забыл `mode:"manual"`: иначе геометрия пресета
         // молча терялась (`preset_default_13` — дефолт «Общей», его в auto
@@ -1693,9 +1720,12 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
         }
         // Если MCU-комнаты ещё нет, движок сохранит pending layout и применит
         // его на первом bridge — пустая SFU-сессия не аллоцирует композит.
-        mcu.apply_layout(room_id, LayoutDescriptor { layout_id, version, assignments, geometry })
-            .await
-            .map_err(|error| format!("MCU layout apply failed: {error}"))?;
+        mcu.apply_layout(
+            room_id,
+            LayoutDescriptor { layout_id, version, assignments, geometry, preset: meta_preset, mode: meta_mode },
+        )
+        .await
+        .map_err(|error| format!("MCU layout apply failed: {error}"))?;
         // S9: раскладка — единственный источник истины о геометрии плиток, её
         // нужно донести до клиентов: `LayoutChanged` объявлен в протоколе, но
         // раньше никогда не отправлялся, и клиент рисовал свою авто-сетку.
@@ -4176,6 +4206,8 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             Some(expected.as_str()),
             "участник привязан к своему слоту"
         );
+        assert_eq!(layout.preset, "", "legacy-payload без preset: \"\" = неизвестно");
+        assert_eq!(layout.mode, "", "legacy-payload без mode: \"\" = неизвестно");
     }
 
     /// S9: в режиме auto дескриптор приходит без геометрии, но клиент всё
@@ -4213,10 +4245,132 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         };
         let layout = changed.layout.clone().expect("layout");
         assert_eq!(layout.slots.len(), 1, "auto-сетка по одному участнику");
+        assert_eq!(layout.mode, "auto", "T10a: режим редактора доезжает до клиента");
+        assert_eq!(layout.preset, "preset_default_13", "T10a: raw preset доезжает до клиента");
         assert_eq!(layout.slots[0].id, 0);
         let rect = layout.slots[0].rect.as_ref().expect("нормализованный rect");
         assert!((rect.w - 1.0).abs() < 1e-5, "единственный участник занимает весь холст, w={}", rect.w);
         assert!((rect.h - 1.0).abs() < 1e-5, "h={}", rect.h);
+    }
+
+    /// T10a: ручная схема Codian — на проводе `mode:"manual"` и raw preset,
+    /// при этом геометрия остаётся эффективной (из пресета, не из auto-сетки).
+    #[tokio::test]
+    async fn layout_broadcast_carries_admin_metadata() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let state = Arc::new(vks_admin::state::AppState::new());
+        manager.bind_state(Arc::downgrade(&state));
+        let room = RoomId::new();
+        mcu.ensure_room(room);
+        let mut rx = state.room_hub.subscribe(&room);
+        let preset = "codian_07";
+        let layout = serde_json::json!({
+            "id": "codian-manual",
+            "payload": {"mode": "manual", "preset": preset, "type": "individual", "size": 13, "slots": []}
+        });
+        manager.apply_layout(room, layout).await.expect("manual layout applied");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("LayoutChanged must be broadcast")
+            .expect("broadcast event");
+        let envelope = vks_signaling::envelope::Envelope::decode(&event.payload).expect("protobuf envelope");
+        let Some(vks_proto::signaling::signaling_message::Payload::LayoutChanged(changed)) = envelope.payload() else {
+            panic!("ожидался LayoutChanged, получено {:?}", envelope.payload());
+        };
+        let wire = changed.layout.clone().expect("layout");
+        assert_eq!(wire.mode, "manual");
+        assert_eq!(wire.preset, preset);
+        let expected_windows = vks_layout::codian::slot_count(preset).expect("slot_count Codian");
+        assert_eq!(wire.slots.len(), expected_windows, "на проводе все окна Codian, не fallback-сетка");
+        let expected_first = vks_layout::codian::geometry(preset, 1920.0, 1080.0).expect("геометрия Codian")[0].rect;
+        let first = wire.slots[0].rect.as_ref().expect("rect первого окна");
+        assert!(
+            (f64::from(first.w) - expected_first.width / 1920.0).abs() < 1e-5,
+            "ширина первого окна из codian::geometry, получено {}",
+            first.w
+        );
+    }
+
+    /// T10a/ADR-0032 §6: на провод уходит raw-preset (`preset_equal`), а не
+    /// resolved (`preset_equal_4`); `size` на провод не выводится — число окон
+    /// клиент видит по `slots.len()`.
+    #[tokio::test]
+    async fn raw_preset_is_not_resolved_on_the_wire() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let state = Arc::new(vks_admin::state::AppState::new());
+        manager.bind_state(Arc::downgrade(&state));
+        let room = RoomId::new();
+        mcu.ensure_room(room);
+        let mut rx = state.room_hub.subscribe(&room);
+        let layout = serde_json::json!({
+            "id": "dynamic-4",
+            "payload": {"mode": "dynamic", "preset": "preset_equal", "size": 4, "type": "individual", "slots": []}
+        });
+        manager.apply_layout(room, layout).await.expect("dynamic layout applied");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("LayoutChanged must be broadcast")
+            .expect("broadcast event");
+        let envelope = vks_signaling::envelope::Envelope::decode(&event.payload).expect("protobuf envelope");
+        let Some(vks_proto::signaling::signaling_message::Payload::LayoutChanged(changed)) = envelope.payload() else {
+            panic!("ожидался LayoutChanged, получено {:?}", envelope.payload());
+        };
+        let wire = changed.layout.clone().expect("layout");
+        assert_eq!(wire.preset, "preset_equal", "raw-preset, не resolved и не size-суффикс");
+        assert_eq!(wire.slots.len(), 4, "size 4 восстановим по числу окон");
+    }
+
+    /// T10a: регистр/пробелы в `mode` нормализуются до геометрической ветки,
+    /// поэтому `" AUTO "` — авто-сетка движка, а не 13-ячеечный preset.
+    #[tokio::test]
+    async fn spaced_auto_mode_is_normalized_before_geometry() {
+        use vks_admin::state::OutboundDialer;
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let state = Arc::new(vks_admin::state::AppState::new());
+        manager.bind_state(Arc::downgrade(&state));
+        let room = RoomId::new();
+        let mut rx = state.room_hub.subscribe(&room);
+        mcu.ensure_room(room);
+        let pid = vks_core::ParticipantId::new();
+        mcu.bridge_participant(room, pid, vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)]);
+        let layout = serde_json::json!({
+            "id": "auto-spaced",
+            "payload": {
+                "mode": " AUTO ", "preset": "preset_default_13", "type": "default", "size": 13,
+                "slots": [{"position": 1, "contact_id": pid.to_string()}]
+            }
+        });
+        manager.apply_layout(room, layout).await.expect("spaced auto applied");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("LayoutChanged must be broadcast")
+            .expect("broadcast event");
+        let envelope = vks_signaling::envelope::Envelope::decode(&event.payload).expect("protobuf envelope");
+        let Some(vks_proto::signaling::signaling_message::Payload::LayoutChanged(changed)) = envelope.payload() else {
+            panic!("ожидался LayoutChanged, получено {:?}", envelope.payload());
+        };
+        let wire = changed.layout.clone().expect("layout");
+        assert_eq!(wire.mode, "auto", "нормализованный режим на проводе");
+        assert_eq!(wire.slots.len(), 1, "авто-сетка по одному участнику, не 13 ячеек");
+        let rect = wire.slots[0].rect.as_ref().expect("rect");
+        assert!((rect.w - 1.0).abs() < 1e-5 && (rect.h - 1.0).abs() < 1e-5, "full canvas");
+    }
+
+    /// T10a: `mode` нормализуется (trim/lowercase), неизвестное значение
+    /// становится "" (unknown), а не подменяется на `auto`.
+    #[test]
+    fn layout_meta_normalizes_mode_and_limits_preset() {
+        assert_eq!(layout_meta(" AUTO ", " codian_07 "), ("auto".to_string(), "codian_07".to_string()));
+        assert_eq!(layout_meta("Manual", "vks_grid_9"), ("manual".to_string(), "vks_grid_9".to_string()));
+        assert_eq!(layout_meta("", ""), (String::new(), String::new()));
+        assert_eq!(layout_meta("garbage", "x"), (String::new(), "x".to_string()));
+        let long = "p".repeat(200);
+        assert_eq!(layout_meta("dynamic", &long), ("dynamic".to_string(), String::new()));
     }
 
     /// T03/B1: auto-«Общая» в существующей комнате строит сетку по числу
@@ -4295,6 +4449,8 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert_eq!(descriptor.geometry.len(), expected.len(), "геометрия макета, не авто-сетка");
         assert_eq!(descriptor.geometry[0].width, expected[0].rect.width.round() as u32, "ширина первого окна");
         assert_eq!(descriptor.geometry[0].height, expected[0].rect.height.round() as u32, "высота первого окна");
+        assert_eq!(descriptor.preset, id, "T10a: raw preset сохранён в дескрипторе");
+        assert_eq!(descriptor.mode, "auto", "T10a: mode — зеркало админки, геометрия авторитетна");
     }
 
     /// T13: параметрический id конструктора на 100 окон доезжает до MCU
@@ -4317,6 +4473,8 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         });
         manager.apply_layout(room, layout).await.expect("100-window layout applied");
         let descriptor = mcu.layout_descriptor(room).expect("layout applied to MCU");
+        assert_eq!(descriptor.preset, id);
+        assert_eq!(descriptor.mode, "manual");
         let expected = vks_layout::grids::geometry(id, 1920.0, 1080.0).expect("геометрия 100 окон");
         assert_eq!(descriptor.geometry.len(), 100, "все 100 окон доехали до композитора");
         assert_eq!(descriptor.geometry.len(), expected.len());

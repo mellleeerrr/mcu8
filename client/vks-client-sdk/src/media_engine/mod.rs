@@ -226,6 +226,7 @@ mod tests {
                 assignment: vks_proto::signaling::SlotAssignment::Fixed as i32,
                 participant_id: Some(participant.to_string()),
             }],
+            ..Default::default()
         };
         e.set_layout(crate::layout::normalized_layout_from_proto(&proto));
         e.render(&[], &surface);

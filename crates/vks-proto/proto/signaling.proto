@@ -183,6 +183,11 @@ message Layout {
   uint32 version = 1;
   repeated Slot slots = 2;
   string kind = 3; // "grid" | "focus" | "speaker" | "custom"
+  // T10a: схема из админ-состояния (справочно; геометрия авторитетна).
+  // "" = нет/неизвестно (legacy-кадр); не путать с kind и RoomModeChanged.
+  string preset = 4;
+  // "auto" | "dynamic" | "manual"; "" = неизвестно (legacy).
+  string mode = 5;
 }
 message Slot {
   uint32 id = 1;

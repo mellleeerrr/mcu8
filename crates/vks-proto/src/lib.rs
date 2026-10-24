@@ -101,10 +101,45 @@ mod tests {
                 participant_id: None,
             }],
             kind: "grid".into(),
+            preset: "codian_07".into(),
+            mode: "manual".into(),
         };
         let bytes = layout.encode_to_vec();
         let back = signaling::Layout::decode(&bytes[..]).expect("decode");
         assert_eq!(back.slots.len(), 1);
+        assert_eq!(back.kind, "grid");
+        assert_eq!(back.preset, "codian_07", "T10a: preset админ-состояния на проводе");
+        assert_eq!(back.mode, "manual", "T10a: режим редактора на проводе");
+    }
+
+    /// T10a: теги 4/5 не переиспользуются (аддитивная эволюция): кодируем
+    /// минимальный Layout с preset/mode и пиним байты.
+    #[test]
+    fn layout_metadata_wire_tags_are_stable() {
+        let layout = signaling::Layout {
+            version: 1,
+            slots: Vec::new(),
+            kind: "grid".into(),
+            preset: "x".into(),
+            mode: "auto".into(),
+        };
+        let bytes = layout.encode_to_vec();
+        assert_eq!(
+            bytes,
+            vec![0x08, 0x01, 0x1a, 0x04, b'g', b'r', b'i', b'd', 0x22, 0x01, b'x', 0x2a, 0x04, b'a', b'u', b't', b'o'],
+            "preset=4 (0x22), mode=5 (0x2a)"
+        );
+    }
+
+    /// T10a: additive-эволюция — старый кадр без `preset/mode` декодируется
+    /// ровно как раньше, неизвестные поля = "" (не `auto`).
+    #[test]
+    fn legacy_layout_without_metadata_decodes_to_empty_strings() {
+        let layout = signaling::Layout { version: 2, slots: Vec::new(), kind: "grid".into(), ..Default::default() };
+        let bytes = layout.encode_to_vec();
+        let back = signaling::Layout::decode(&bytes[..]).expect("decode");
+        assert_eq!(back.preset, "");
+        assert_eq!(back.mode, "");
         assert_eq!(back.kind, "grid");
     }
 

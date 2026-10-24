@@ -507,6 +507,7 @@ mod tests {
                         assignment: SlotAssignment::Fixed as i32,
                         participant_id: Some("00000000-0000-0000-0000-0000000000aa".into()),
                     }],
+                    ..Default::default()
                 }),
             })),
         };

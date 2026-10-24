@@ -7,7 +7,7 @@
 //! после каждого `apply_layout` она рассылается участникам комнаты.
 //!
 //! **Источник истины — эффективная раскладка композитора**
-//! (`McuEngine::current_layout`), а не дескриптор: композитор считает
+//! (`McuEngine::layout_snapshot`), а не дескриптор: композитор считает
 //! авто-сетку сам, клампит прямоугольники в холст и раскладывает участников
 //! по слотам. Дескриптор без геометрии (режим auto) дал бы клиенту пустой
 //! список слотов — то есть пустой экран.
@@ -29,7 +29,7 @@ use vks_proto::signaling::{Layout, LayoutChanged, Rect, SignalingMessage, Slot, 
 /// Нормализация — через `vks_layout` (`Layout::to_normalized`), чтобы сервер
 /// и клиент считали координаты одним кодом.
 #[must_use]
-pub fn proto_layout(layout: &vks_layout::Layout) -> Layout {
+pub fn proto_layout(layout: &vks_layout::Layout, preset: &str, mode: &str) -> Layout {
     let (canvas_w, canvas_h) = vks_media_mcu::CANVAS_SIZE;
     let canvas = Canvas::new(canvas_w, canvas_h);
     let normalized = layout.to_normalized(&canvas);
@@ -60,16 +60,22 @@ pub fn proto_layout(layout: &vks_layout::Layout) -> Layout {
             }
         })
         .collect();
-    Layout { version: layout.version, slots, kind: layout.kind.as_str().to_string() }
+    Layout {
+        version: layout.version,
+        slots,
+        kind: layout.kind.as_str().to_string(),
+        preset: preset.to_string(),
+        mode: mode.to_string(),
+    }
 }
 
 /// Сообщение `LayoutChanged` для раскладки комнаты.
 #[must_use]
-pub fn layout_changed(layout: &vks_layout::Layout) -> SignalingMessage {
+pub fn layout_changed(layout: &vks_layout::Layout, preset: &str, mode: &str) -> SignalingMessage {
     SignalingMessage {
         msg_id: 0,
         reply_to: 0,
-        payload: Some(Payload::LayoutChanged(LayoutChanged { layout: Some(proto_layout(layout)) })),
+        payload: Some(Payload::LayoutChanged(LayoutChanged { layout: Some(proto_layout(layout, preset, mode)) })),
     }
 }
 
@@ -98,10 +104,12 @@ mod tests {
 
     #[test]
     fn slots_are_zero_based_and_normalized() {
-        let proto = proto_layout(&layout());
+        let proto = proto_layout(&layout(), "codian_07", "manual");
         assert_eq!(proto.version, 3);
         assert_eq!(proto.kind, "grid");
         assert_eq!(proto.slots.len(), 2);
+        assert_eq!(proto.preset, "codian_07", "T10a: preset доезжает до провода");
+        assert_eq!(proto.mode, "manual", "T10a: mode доезжает до провода");
         assert_eq!(proto.slots[0].id, 0);
         assert_eq!(proto.slots[1].id, 1);
         let rect = proto.slots[1].rect.as_ref().expect("rect");
@@ -113,7 +121,7 @@ mod tests {
 
     #[test]
     fn participant_is_bound_to_its_slot() {
-        let proto = proto_layout(&layout());
+        let proto = proto_layout(&layout(), "codian_07", "manual");
         let first = proto.slots[0].participant_id.as_deref().expect("participant");
         let second = proto.slots[1].participant_id.as_deref().expect("participant");
         assert_ne!(first, second);
@@ -124,18 +132,20 @@ mod tests {
     fn pinned_slot_is_marked_pinned() {
         let mut layout = layout();
         layout.slots[0].pinned = true;
-        let proto = proto_layout(&layout);
+        let proto = proto_layout(&layout, "", "");
         assert_eq!(proto.slots[0].assignment, SlotAssignment::Pinned as i32);
         assert_eq!(proto.slots[1].assignment, SlotAssignment::Fixed as i32);
     }
 
     #[test]
     fn message_carries_layout_changed_payload() {
-        let message = layout_changed(&layout());
+        let message = layout_changed(&layout(), "preset_equal_25", "dynamic");
         match message.payload {
             Some(Payload::LayoutChanged(changed)) => {
                 let proto = changed.layout.expect("layout");
                 assert_eq!(proto.slots.len(), 2);
+                assert_eq!(proto.preset, "preset_equal_25");
+                assert_eq!(proto.mode, "dynamic");
             }
             other => panic!("unexpected payload: {other:?}"),
         }

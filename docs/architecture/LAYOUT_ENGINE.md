@@ -211,6 +211,8 @@ stack_keys.sort_unstable_by_key(|key| (rects[key].z, *key));
 | Storage → signaling (NATS broadcast) | NATAS — заглушка (`vks-cluster`) |
 | `LayoutChanged` → клиенты | работает (рассылка по комнате, источник — эффективная раскладка композитора) |
 | Snapshot при входе в комнату | работает: снимок в поле `JoinRoomResult.layout` (ADR-0030) |
+| Метаданные схемы (`preset`, `mode`) | работают: поля 4/5 `Layout`, атомарный `McuEngine::layout_snapshot` (ADR-0032) |
+| `layout_id` на проводе | сознательно отсутствует: COW-нестабильный UUID админ-записи (ADR-0032) |
 
 Полная карта разрывов — `ARCHITECTURE_PLAN_2026-10-23.md`, шаг 3.
 
