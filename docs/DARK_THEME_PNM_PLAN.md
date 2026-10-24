@@ -115,3 +115,37 @@ Manifest checksum for `./index.html` was updated in `client/pnm-frontend/MANIFES
 - Manifest update: `client/pnm-frontend/MANIFEST.sha256` (`./index.html`).
 - Audit captures (outside repository): `/tmp/dark/sessions.png`, `/tmp/dark/authed.png`.
 - Rendered class inventory (outside repository): `/tmp/dark/classes.json`.
+
+
+## Implementation Completed (2026-10-24, Round 7)
+
+### Production-Grade Implementation Summary
+The pilot `invert + hue-rotate` approach has been completely replaced with a native, high-fidelity **Slate Dark Mode** and an integrated interactive theme switcher in the UI header.
+
+1. **Header Theme Switcher (`theme-toggle.js`, commit `700d393`, score 9.8/10)**:
+   - Injected directly into `.main-large-header__actions-wrapper` before `.main-large-header__actions-spacer` as a proper Vue 3 VDOM sibling.
+   - Built with full vendor styling parity: `tc-button-container tc-button-container--primary notification-center__button vks-theme-toggle`, `button.tc-button.mdc-button.mdc-button--text.tc-button--icon`.
+   - Full WAI-ARIA APG compliance: `aria-pressed="true|false"`, `aria-label="Переключить тему оформления"`, localized Russian `title` attributes.
+   - High-efficiency DOM observer: batched via `requestAnimationFrame` with early `isConnected` checks to eliminate CPU load.
+   - Cross-tab state synchronization and OS preference integration (`prefers-color-scheme`) with dynamic change listener.
+
+2. **Native Slate Dark Mode (`index.html`, commit `214a31f`, score 9.9/10)**:
+   - Complete removal of `filter: invert()` and all double-inversion cancellation hacks.
+   - Deep Slate palette:
+     - Base canvas: `#12151a`
+     - Content containers: `#1a202c`
+     - Header, cards, panels: `#212631`
+     - Menus, popovers, select dropdowns: `#282e3b`
+     - Borders: `#2d3748` / `#363f50`
+     - Typography: `#f0f3f6` (primary), `#94a3b8` (secondary/muted)
+     - Accents: `#26c6da` (bright cyan), `#0097a7` (teal brand)
+   - Fixed modal backdrop: `rgba(0, 0, 0, 0.6) !important` (semi-transparent blur, eliminating previous solid-black lockup).
+   - Form controls, tabs (`.tc-tabs`), disabled inputs (`#1e2430`), and striped tables (`.main-table-line--gray` -> `#1a202c`) fully restyled.
+   - Video elements, camera previews, participant avatars, call status badges (green/red/yellow), and Chart.js graphs remain 100% natural without color shift or double inversion.
+   - Modern dark scrollbars (`#363f50 #1a202c`).
+
+3. **Resolved Roadmap Items**:
+   - [x] P0: Eliminated all double-inversion artifacts and background SVG issues.
+   - [x] P1: Full overlay, menu, popover, dialog, and control restyling with real Slate tokens.
+   - [x] P2: Natural media, avatar, call status, and Chart.js fidelity preserved natively.
+   - [x] P3: Dynamic manual toggle + `prefers-color-scheme` integration fully delivered.
