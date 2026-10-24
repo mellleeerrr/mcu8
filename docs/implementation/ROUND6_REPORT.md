@@ -53,6 +53,19 @@
   начнётся после `QWEN_BASE_URL`.
 
 
+## T10a/T10c: агенты, ревью, решения (2026-10-24)
+
+| Агент | Задача (промпт, суть) | Итог | Разногласие | Мнение Lead |
+|---|---|---|---|---|
+| t10a-review-A | ревью proto-метаданных `preset/mode`, нормализация, тесты | 8/10; P1 clippy `needless_update`; P2.1 raw preset на проводе, P2.2 порядок `layout_meta`, P2.3 `" AUTO "`; P3 доки/PartialEq | считал, что на проводе нужен resolved preset (клиенту проще); не видел смысла `mode:"auto"` у `register_publisher` | Принял P1/P2/P3; сохранил raw preset (зеркало хранимого, size выводится из `slots.len()`) и задокументировал auto как провенанс движка |
+| t10a-review-B | второй ревьюер: ADR/семантика/провод | 7.5/10; P1 ADR врал про SDK; P2 неполный join-снимок | требовал не закрывать T10a до починки ADR | Принял: ADR переписан как обязательство T10c, join-фикстура сделана позитивной |
+| t10a-delta | дельта-ревью исправлений | **9.5/10 ПРИНИМАЮ**; P3-1 §2.2, P3-2 «два писателя», P3-3 pending-тест | спорил с формулировкой «заполняются в одной точке»; join-фикстура — плумбинг, не продюсер гейтвея | Принял все три правки; join-снимок оставлен как проверка провода (продюсер гейтвея покрыт отдельно) |
+| t10c-design | подводные камни/минимальный дизайн | 7.5/10 плану Lead → 9/10 после 4 поправок; LOC 60–65; PNM WS — YAGNI | настаивал: не хранить `layout_version` (источник — `media.layout().version`), stale не отдавать в UI, хранить join-meta, reconnect-эпоха | Принял все 4; PNM WS отклонён как дубль без JS-потребителя |
+| t10c-review-A | корректность guard/API/тесты | 7/10; P1 fmt; P2 очередь чистится на resume, мёртвый `on_layout_changed`, слабый empty-meta тест, None-ветка | настаивал, что resume без снимка нельзя совмещать с очисткой только layout | Принял: очередь чистится только на rejoin; resume чистит layout/meta и выбрасывает queued layout-кадры |
+| t10c-review-B | потребители/регрессии/доки | 8.5/10; P1 fmt+resume; P2 docs/evidence, mode-баг отдельно | не принимал «reconnect закрыт»; требовал ADR/README/evidence | Принял; RoomModeChanged-баг починен в том же коммите с явной пометкой и тестом |
+| t10c-delta | дельта после исправлений | 9.4/10: остались противоречие resume («очистить layout, но сохранить кадры эпохи») и ложный rustdoc | предлагал удалить resume-ветку целиком (меньше кода) | Выбрал минимальный инвариант: stale layout-кадры тоже отбрасываются, mode-события сохраняются; доки переписаны |
+| t10c-final | финальная верификация | **9.5/10 ПРИНИМАЮ**; P3 только (редакция docs, дубль конструктора, inline wrapper, тест v1 после resume) | не подтвердил буквально «доки везде исправлены» (signaling_client) и «конструктор без дубля» | Принял P3, внёс правки до коммита; resume-сброс в auto-grid зафиксирован в ADR как вынужденный до появления §7-resume |
+
 ## Итог R6 (2026-10-24)
 
 Закрыты (коммиты/review): T1 `c36f973`/`3c6124c` (9.5), T2 `ebce17a`/`f2546d4`
@@ -63,18 +76,24 @@ T8 `12f2983`+`fc8d165` (abonent_id/статус/allowlist), T9 `840ff9c` (PG+CI)
 T10b `f9b0a1b` (id-only apply), T11 `9eb2f4e` (golden/спека 43/46),
 T12 `9efd5be` (create_room-adopt/calculate/G722), T13 `ef0019f`→`91dd55c`→
 `0a495b4`→`806d6ad` (T13.4 **9.6/10 ПРИНИМАЮ**: счётчик 1..100, a11y/outline,
-кламп, выход из конструктора без потери Codian-схемы).
+кламп, выход из конструктора без потери Codian-схемы), T10a `a753799`
+(proto `preset=4`/`mode=5`, атомарный `layout_snapshot`, ADR-0032,
+**9.5/10**), T10c `43bfa9f` (SDK: metadata снимка/push, version-guard,
+reconnect-эпоха, RoomModeChanged-маппинг, **9.5/10**).
 
 Отложены/открыты с решениями:
 - T4b — вне R6; T5b — снята зависимость (T10b сделал id-only apply без
   trait-половины core_layouts), удаление после появления потребителя;
   T5c — только по отдельному решению владельца (self-view/SDK задел R7).
-- T10a/T10c — ОТКРЫТЫ: proto-поля `layout_id/preset/mode` + `LayoutModeChanged`
-  и прод-потребитель LayoutChanged в PNM WS/SDK; это контрактное изменение
-  (proto+клиенты), не входит в мандат владельца п.7 (конструктор) и требует
-  отдельного ADR/раунда.
+  Это осознанные решения, не незакрытые работы.
+- T10a/T10c закрыты в продолжение раунда: ADR-0032 (без `layout_id` и
+  `LayoutModeChanged`), SDK-потребитель с version-guard. PNM admin-WS событие
+  не добавлялось: в PNM нет JS-подписчика на layout, редактор читает
+  REST/resources; «PNM WS / SDK» в мастер-плане — альтернатива.
 
-Гейты финального HEAD `3cc9f2d`: `cargo fmt --all -- --check` 0;
-`cargo clippy --workspace --all-features --all-targets --locked -D warnings` 0;
-`cargo test --workspace --all-targets --locked` — **1317 passed, 0 failed,
-8 ignored**; MANIFEST 214/214; live JS=git; рабочее дерево чистое.
+Гейты финального HEAD `43bfa9f` (docs-коммит следом): `cargo fmt --all --
+--check` 0; `cargo clippy --workspace --all-features --all-targets --locked
+-D warnings` 0; `cargo test --workspace --all-targets --locked` — **1333
+passed, 0 failed, 8 ignored**; `cargo check -p vks-client-sdk --target
+wasm32-unknown-unknown --locked` 0; MANIFEST 214/214; live JS=git; рабочее
+дерево чистое. Ревью-порог ≥9.5 достигнут: T10a 9.5, T10c 9.5 (T13 9.6).

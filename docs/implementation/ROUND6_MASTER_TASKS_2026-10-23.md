@@ -406,8 +406,9 @@ preset на вендорский — зафиксировать поведени
 - [x] T10a — `a753799`: `preset/mode` в `Layout` (ADR-0032), атомарный
   `layout_snapshot`, три производителя + тесты; ре-ревью **9.5/10, ПРИНИМАЮ**.
 - [x] T10b — `f9b0a1b`: id-only apply, тесты vks_grid_9/codian_07, auto-сброс.
-- [x] T10c — SDK-потребитель `LayoutChanged` (metadata + version-guard +
-  reconnect-эпоха); PNM WS не нужен (нет JS-потребителя). См. evidence/t10c.
+- [x] T10c — `43bfa9f`: SDK-потребитель `LayoutChanged` (metadata +
+  version-guard + reconnect-эпоха); PNM WS не нужен (нет JS-потребителя);
+  принято **9.5/10**. См. evidence/t10c.
 - [x] T11 — `9eb2f4e`: SUPERSEDED 43/46/49, fixtures+5 тестов, golden
   174 id/2178 окон (84 passed/1 ignored).
 - [x] T12 — `9efd5be`: create_room-adopt pending, calculate id конструктора,
