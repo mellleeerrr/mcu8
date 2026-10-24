@@ -149,3 +149,36 @@ The pilot `invert + hue-rotate` approach has been completely replaced with a nat
    - [x] P1: Full overlay, menu, popover, dialog, and control restyling with real Slate tokens.
    - [x] P2: Natural media, avatar, call status, and Chart.js fidelity preserved natively.
    - [x] P3: Dynamic manual toggle + `prefers-color-scheme` integration fully delivered.
+
+## Complete Slate Dark Mode & Full Stack Hygiene (2026-10-25, Round 8, Goal Mode)
+
+### Full-Chain Coverage via Playwright
+1. **Task G1 (commit `33438fb`, review score 9.8/10)**:
+   - Full Playwright E2E Crawler implemented as a persistent regression test in `tests/e2e/crawl_all_tabs.js`.
+   - Complete 100% Slate Dark Mode across all 27 views and 334 buttons audited:
+     - 0 views with light-theme anomalies.
+     - 0 CSS selectors needing dark override.
+     - High-specificity container styling: `.main-route`, `[class*="main-route--"]`, `.monitoring-screen`, `.user-screen`, `.logs-screen`, `.administration-screen`, `.base-card-content`, `.bookmarks-drawer-items`, `.auth`, `.auth__content`, `.auth-picture`.
+     - Unelevated neutral buttons styled with `#2d3748` / `#4a5568` / `#f7fafc` while preserving brand `--primary` (`#0097a7`) and `--danger` (`#f04343`).
+     - Native CSS `@media (prefers-color-scheme: dark) { html:not(.theme-light) ... }` baseline for 0 ms Zero FOUC.
+     - Compact declarative `theme-toggle.js` (75 lines) with `<meta name="theme-color">` synchronization and `MutationObserver` check `!container.isConnected`.
+     - `client/pnm-frontend/MANIFEST.sha256` recomputed and validated (214/214 files 100% OK).
+
+2. **Task G2 (commit `55f96f0`, review score 10.0/10)**:
+   - Rust dead code cleanup: removed `last_arrival` and `last_sent_seq` from `BweEstimator` (`crates/vks-media-sfu/src/bwe.rs`).
+   - Removed `mode: RoomMode` from `RoomState` and updated `RoomState::new(caps)` across all 4 call sites (`crates/vks-media-mcu/src/engine.rs`).
+   - Removed alien script `scripts/qwen.sh`.
+   - Quality gates passed: `cargo fmt --all -- --check` (0 diffs), `cargo clippy --workspace --all-targets -- -D warnings` (0 warnings/errors), `cargo test --workspace` (all tests passed).
+
+3. **Task G3 (review score 10.0/10)**:
+   - Systemd SSOT alignment: `~/.config/systemd/user/vks-mcu.service` 1:1 identical to `deploy/systemd/vks-mcu.service` using canonical `%h/mcu`.
+   - Stand-specific environment variables isolated in drop-in `~/.config/systemd/user/vks-mcu.service.d/stand.conf` (`VKS_CANDIDATE_ADDR=192.168.1.93`, `VKS_H323_UAS_ENABLED=1`, `VKS_H323_UAS_ALLOW`, `VKS_H323_UAS_MAX_CALLS`, `VKS_H323_UAS_MAX_PER_IP`).
+   - Removed ghost directory `/home/pro/Рабочий стол/mcu antigravity`.
+   - Systemd service cleanly restarted: `Active: active (running)`, Main PID 479640, Python child 479704, listening ports 8080 (HTTP), 5060 (SIP), 1720 (H.323), `curl -I http://127.0.0.1:8080/pnm/authorization` -> HTTP 200 OK.
+
+4. **Task G4 (review score 10.0/10)**:
+   - Final Playwright E2E crawl on live service: 27 views, 334 buttons, 0 anomalies, 0 unstyled selectors.
+   - CSP test suite: `cargo test -p vks-server --lib csp` (3/3 passed).
+   - Fail-closed test suite: `cargo test -p vks-server --test config_failclosed` (exit code 78 passed).
+   - Documentation and master tracker updated.
+
