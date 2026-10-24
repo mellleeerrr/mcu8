@@ -100,7 +100,11 @@ payload писался `preset_default_13` / `preset_equal_{inferred_size}` ⇒ 
 Стало: `let explicit_codian = !stored_preset.is_empty() && vks_layout::codian::is_codian_preset(stored_preset);
 if mode != "auto" || explicit_codian` — поведение «Общей»/auto не меняется.
 
-### L-6. `LayoutChanged` не несёт id схемы (остаётся)
+### L-6. `LayoutChanged` не несёт id схемы — ИСПРАВЛЕНО (T10a, a753799, ADR-0032)
+
+Стало: `Layout.preset=4`/`Layout.mode=5` — справочная проекция админ-состояния
+(raw preset, нормализованный mode); `layout_id` сознательно не выводится
+(COW-нестабильный UUID), `LayoutModeChanged` отклонён.
 
 `crates/vks-server/src/layout_signal.rs:32-64` → `Layout { version, slots, kind }`; для codian-пути
 `engine.rs:162` строит `Layout::new(LayoutKind::Custom)` ⇒ клиент получает `kind="custom"` и

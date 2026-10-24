@@ -80,6 +80,6 @@ cargo build --release -p vks-server
 в приёмку T1–T3.
 
 - Workspace: Rust 2021, MSRV 1.94, 16 крейтов.
-- Тесты: `1317` (`cargo test --workspace --all-targets`, 0 сбоев, 8 ignored).
+- Тесты: `1326` (`cargo test --workspace --all-targets`, 0 сбоев, 8 ignored).
 - `cargo fmt --check` и `cargo clippy --workspace --all-targets -- -D warnings` —
   0 замечаний.

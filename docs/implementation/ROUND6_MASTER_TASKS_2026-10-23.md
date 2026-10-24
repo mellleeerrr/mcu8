@@ -226,7 +226,14 @@ CI service postgres, `--locked`.
 - локальная live-проверка PG невозможна (нет сервера/докера) — критерий
   «PG-тест зелёный в CI» закрывается первым запуском job'а; sqlite зелёный.
 
-## T10a. Proto-поля `layout_id/preset/mode` + LayoutModeChanged (ADR)
+## T10a. Метаданные раскладки на проводе: `preset/mode` (ADR-0032)
+Реализовано (a753799): в `Layout` добавлены `preset=4`/`mode=5` (additive);
+`layout_id` и `LayoutModeChanged` отклонены ADR-0032 (COW-id без потребителя;
+смена режима всегда даёт `LayoutChanged`). Метаданные хранятся одной копией в
+`LayoutDescriptor`, движок отдаёт атомарный `layout_snapshot`, три
+производителя (broadcast, VAD-пересадка, снимок `JoinRoomResult`) заполняют
+поля. Тесты: proto roundtrip + байты тегов, snapshot (existing/pending/auto),
+raw-preset, `" AUTO "`-нормализация, Codian manual на проводе, join-снимок.
 ## T10b. id-only apply (без `payload.slots`) — не требует proto
 Реализовано (f9b0a1b): `payload.slots` необязателен; без него assignments
 пусты, геометрия — из `payload.preset` (grids/Codian/ручной пресет), окна
@@ -387,8 +394,8 @@ preset на вендорский — зафиксировать поведени
 - [x] T8 — `12f2983` + `fc8d165`: приоритет abonent_id, честный статус шлюзов
   (ActiveFlag), allowlist из одного источника; vks-server 108/3 + 22/0.
 - [x] T9 — `840ff9c`: PG TEXT→uuid bind/cast, живой PG-тест в CI (`test-postgres`).
-- [ ] T10a — ОТКРЫТА: proto-поля `layout_id/preset/mode` + `LayoutModeChanged`
-  (ADR) не реализованы; требует proto/WS-контракта и потребителей.
+- [x] T10a — `a753799`: `preset/mode` в `Layout` (ADR-0032), атомарный
+  `layout_snapshot`, три производителя + тесты; ре-ревью **9.5/10, ПРИНИМАЮ**.
 - [x] T10b — `f9b0a1b`: id-only apply, тесты vks_grid_9/codian_07, auto-сброс.
 - [ ] T10c — ОТКРЫТА вслед за T10a: прод-потребитель LayoutChanged в PNM WS/SDK.
 - [x] T11 — `9eb2f4e`: SUPERSEDED 43/46/49, fixtures+5 тестов, golden
