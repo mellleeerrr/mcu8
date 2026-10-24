@@ -1,7 +1,8 @@
-//! SDK event types (для async-канал → Dioxus signals).
+//! SDK event types: события конференции для UI.
 //!
-//! В8 — `Conference` эмитит events через `flume`-async-канал;
-//! Dioxus подписывается через signals.
+//! `Conference` складывает их в очередь ([`crate::Conference::drain_events`]);
+//! stale-кадры раскладки (`version <=` применённой) отфильтровываются в
+//! `drain_events`, поэтому в UI не возвращаются.
 
 /// События конференции (для UI).
 #[derive(Debug, Clone, PartialEq)]
@@ -15,7 +16,15 @@ pub enum ConferenceEvent {
     /// Изменение режима (SFU ↔ MCU).
     ModeChanged { mode: String },
     /// Новая раскладка комнаты (сервер — источник истины о геометрии плиток).
-    LayoutChanged { layout: vks_layout::NormalizedLayout },
+    LayoutChanged {
+        layout: vks_layout::NormalizedLayout,
+        /// Raw-id схемы из админ-состояния (`codian_07`, `vks_grid_9`).
+        /// `""` — сервер не сообщил (legacy-кадр); не подставлять `auto`.
+        preset: String,
+        /// Режим редактора: `auto` | `dynamic` | `manual`; `""` — unknown.
+        /// Не путать с `ModeChanged` (топология SFU/MCU).
+        mode: String,
+    },
     /// Новый участник.
     ParticipantJoined { id: String },
     /// Участник вышел.

@@ -128,7 +128,7 @@
   - [x] `signaling_client.rs` — WS/WebTransport клиент + auto-reconnect (exponential backoff, max 5).
   - [x] `media_engine/sfu_renderer.rs` — микширование N треков через vks-layout.
   - [x] `webrtc_glue.rs` — WebRTC glue (Q8: браузер vs str0m).
-  - [x] Events: async channel (flume) → Dioxus signals.
+  - [x] Events: очередь `Conference::drain_events()` → Dioxus signals.
   - [x] QoE: QualityReport (MOS, jitter, RTT, loss).
 - [x] Первый видеозвонок браузер↔браузер.
 

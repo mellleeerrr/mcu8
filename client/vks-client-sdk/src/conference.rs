@@ -7,7 +7,8 @@
 //! - создаёт сессию через `SignalingClient` (join→ServerHello),
 //! - переключает `MediaEngine` (SFU/MCU) на `RoomModeChanged`,
 //! - auto-reconnect (exponential backoff, max 5) при потере соединения,
-//! - эмитит `ConferenceEvent`s в async-канал (flume) → Dioxus signals.
+//! - складывает `ConferenceEvent`s в очередь; приложение забирает её через
+//!   [`Conference::drain_events`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,6 +60,10 @@ pub struct Conference {
     /// push-хендлер транспорта только кладёт событие в очередь, приложение
     /// забирает очередь через [`Conference::drain_events`].
     events: Arc<std::sync::Mutex<std::collections::VecDeque<crate::types::ConferenceEvent>>>,
+    /// Метаданные последней применённой раскладки (T10c): raw `preset` и
+    /// `mode` админки. `""` = сервер не сообщил; не подставлять `auto`.
+    layout_preset: String,
+    layout_mode: String,
 }
 
 impl Conference {
@@ -73,6 +78,8 @@ impl Conference {
             join_nonce: None,
             nonce_acquired_at: None,
             events: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            layout_preset: String::new(),
+            layout_mode: String::new(),
         }
     }
 
@@ -88,25 +95,50 @@ impl Conference {
 
     /// Забирает события, накопленные push-сообщениями сервера, и применяет
     /// их к media engine (режим, раскладка).
+    ///
+    /// Устаревшие кадры раскладки (`version <=` уже применённой) не
+    /// применяются и не отдаются в UI. Метаданные снимка `JoinRoomResult`/rejoin
+    /// событием не дублируются — их отдают [`Self::layout_preset`] и
+    /// [`Self::layout_mode`].
     pub fn drain_events(&mut self) -> Vec<crate::types::ConferenceEvent> {
-        let events: Vec<crate::types::ConferenceEvent> = {
+        let mut events: Vec<crate::types::ConferenceEvent> = {
             let mut queue = self.events.lock().expect("events lock");
             queue.drain(..).collect()
         };
-        for event in &events {
-            match event {
-                crate::types::ConferenceEvent::ModeChanged { mode } => {
-                    if let Some(mode) = parse_room_mode(mode) {
-                        self.media.switch_mode(mode);
-                    }
+        // T10c/ADR-0032: кадр с version <= применённой — устаревший
+        // (VAD-пересадка и admin-apply конкурируют). Не применяем его и не
+        // отдаём в UI, иначе подпись preset/mode откатится на старую.
+        events.retain_mut(|event| match event {
+            crate::types::ConferenceEvent::ModeChanged { mode } => {
+                if let Some(mode) = RoomMode::parse(mode) {
+                    self.media.switch_mode(mode);
                 }
-                crate::types::ConferenceEvent::LayoutChanged { layout } => {
-                    self.media.set_layout(layout.clone());
-                }
-                _ => {}
+                true
             }
-        }
+            crate::types::ConferenceEvent::LayoutChanged { layout, preset, mode } => {
+                if self.media.layout().is_some_and(|current| layout.version <= current.version) {
+                    return false;
+                }
+                self.media.set_layout(layout.clone());
+                self.layout_preset.clone_from(preset);
+                self.layout_mode.clone_from(mode);
+                true
+            }
+            _ => true,
+        });
         events
+    }
+
+    /// Raw-id схемы последней применённой раскладки (`""` = unknown).
+    #[must_use]
+    pub fn layout_preset(&self) -> &str {
+        &self.layout_preset
+    }
+
+    /// Режим редактора последней применённой раскладки (`""` = unknown).
+    #[must_use]
+    pub fn layout_mode(&self) -> &str {
+        &self.layout_mode
     }
 
     /// Текущее состояние.
@@ -137,6 +169,25 @@ impl Conference {
     #[must_use]
     pub fn join_nonce(&self) -> Option<&str> {
         self.join_nonce.as_deref()
+    }
+
+    /// Применяет снимок раскладки из `JoinRoomResult` (join и rejoin):
+    /// геометрию — в media engine, raw-метаданные — в поля конференции.
+    fn apply_layout_snapshot(&mut self, layout: Option<&vks_proto::signaling::Layout>) {
+        match layout {
+            Some(layout) => {
+                self.media.set_layout(crate::layout::normalized_layout_from_proto(layout));
+                self.layout_preset.clone_from(&layout.preset);
+                self.layout_mode.clone_from(&layout.mode);
+            }
+            None => {
+                // Rejoin/resume попал в перезапущенный движок без раскладки:
+                // старую версию хранить нельзя.
+                self.media.clear_layout();
+                self.layout_preset.clear();
+                self.layout_mode.clear();
+            }
+        }
     }
 
     /// Проверка, истёк ли join_nonce (TTL 60 сек по SIGNALING_PROTOCOL §7).
@@ -186,7 +237,7 @@ impl Conference {
         // с push-сообщением (поздний участник иначе рисовал бы авто-сетку до
         // следующего изменения раскладки).
         if let Some(layout) = join_result.layout.as_ref() {
-            self.media.set_layout(crate::layout::normalized_layout_from_proto(layout));
+            self.apply_layout_snapshot(Some(layout));
         }
 
         // 4. Media engine → active.
@@ -202,11 +253,20 @@ impl Conference {
                 Some(vks_proto::signaling::signaling_message::Payload::LayoutChanged(changed)) => {
                     changed.layout.as_ref().map(|layout| crate::types::ConferenceEvent::LayoutChanged {
                         layout: crate::layout::normalized_layout_from_proto(layout),
+                        preset: layout.preset.clone(),
+                        mode: layout.mode.clone(),
                     })
                 }
                 Some(vks_proto::signaling::signaling_message::Payload::RoomModeChanged(changed)) => {
-                    vks_proto::media::RoomMode::try_from(changed.new_mode).ok().map(|mode| {
-                        crate::types::ConferenceEvent::ModeChanged { mode: mode.as_str_name().to_lowercase() }
+                    vks_proto::media::RoomMode::try_from(changed.new_mode).ok().and_then(|mode| {
+                        // as_str_name() даёт ROOM_MODE_MCU — для события нужен
+                        // "mcu"/"sfu" (иначе RoomMode::parse не разбирает).
+                        let mode = match mode {
+                            vks_proto::media::RoomMode::Sfu => "sfu",
+                            vks_proto::media::RoomMode::Mcu => "mcu",
+                            vks_proto::media::RoomMode::Unspecified => return None,
+                        };
+                        Some(crate::types::ConferenceEvent::ModeChanged { mode: mode.into() })
                     })
                 }
                 _ => None,
@@ -221,21 +281,6 @@ impl Conference {
     /// Начинает join: idle → joining → (signaling handshake) → active (sync wrapper).
     pub fn start(&mut self, client: &mut SignalingClient) -> Result<(), ConferenceError> {
         crate::sync_helper::block_on(self.start_async(client))
-    }
-
-    /// Реакция на RoomModeChanged (SFU ↔ MCU) — переключает renderer.
-    pub fn on_mode_changed(&mut self, mode: RoomMode) {
-        if self.state == ConferenceState::Active {
-            self.media.switch_mode(mode);
-        }
-    }
-
-    /// Реакция на LayoutChanged — раскладка сервера становится источником
-    /// геометрии плиток (вместо авто-сетки клиента).
-    pub fn on_layout_changed(&mut self, layout: vks_layout::NormalizedLayout) {
-        if self.state == ConferenceState::Active {
-            self.media.set_layout(layout);
-        }
     }
 
     /// Потеря соединения → Reconnecting (auto-reconnect по backoff — фаза 8).
@@ -280,6 +325,17 @@ impl Conference {
                 if !self.is_nonce_expired() {
                     if let Ok(hello) = client.hello_with_resume_async(&self.cfg.token, Some(nonce)).await {
                         if !hello.server_version.is_empty() {
+                            // Resume не несёт снимка раскладки (сервер пока
+                            // игнорирует nonce; §7-снимок не реализован), а
+                            // эпоха версий неизвестна: старую раскладку и
+                            // накопленные layout-кадры прежней эпохи хранить
+                            // нельзя, иначе guard заморозит рендер. Не-layout
+                            // события (например RoomModeChanged) сохраняем.
+                            self.apply_layout_snapshot(None);
+                            self.events
+                                .lock()
+                                .expect("events lock")
+                                .retain(|event| !matches!(event, crate::types::ConferenceEvent::LayoutChanged { .. }));
                             self.state = ConferenceState::Active;
                             client.reset_reconnect();
                             return Ok(());
@@ -290,11 +346,15 @@ impl Conference {
             self.join_nonce = None;
             self.nonce_acquired_at = None;
 
-            // 2. Fallback: чистый Re-Join
+            // 2. Fallback: чистый Re-Join. Очередь чистим только здесь:
+            // кадры до обрыва относятся к прежней эпохе версий, а rejoin
+            // снимок её сбрасывает.
+            self.events.lock().expect("events lock").clear();
             if client.hello_async(&self.cfg.token).await.is_ok() {
                 if let Ok(jr) = client.join_room_async(&self.cfg.room_id, &self.cfg.display_name).await {
                     self.join_nonce = Some(jr.join_nonce);
                     self.nonce_acquired_at = Some(std::time::Instant::now());
+                    self.apply_layout_snapshot(jr.layout.as_ref());
                     self.state = ConferenceState::Active;
                     client.reset_reconnect();
                     return Ok(());
@@ -353,11 +413,6 @@ impl Default for QoeConfig {
     fn default() -> Self {
         Self { report_interval: Duration::from_secs(5), mos_warn: 3.0 }
     }
-}
-
-/// Разбор режима комнаты из строки (`sfu` | `mcu`).
-fn parse_room_mode(value: &str) -> Option<RoomMode> {
-    RoomMode::parse(value)
 }
 
 /// Пауза backoff: tokio на native, `setTimeout` на wasm (tokio там недоступен).
@@ -425,14 +480,33 @@ mod tests {
         assert!(matches!(c.start(&mut client), Err(ConferenceError::BadServerHello)));
     }
 
-    /// Транспорт, умеющий доставить push-сообщение сервера.
+    /// Транспорт, умеющий доставить push-сообщение сервера и вернуть
+    /// заданный снимок раскладки в `JoinRoomResult`.
     struct PushTransport {
         handler: std::sync::Mutex<Option<Arc<dyn crate::signaling_client::PushHandler>>>,
+        join_layout: std::sync::Mutex<Option<vks_proto::signaling::Layout>>,
+        resume_ok: std::sync::Mutex<bool>,
     }
 
     impl PushTransport {
         fn new() -> Self {
-            Self { handler: std::sync::Mutex::new(None) }
+            Self {
+                handler: std::sync::Mutex::new(None),
+                join_layout: std::sync::Mutex::new(None),
+                resume_ok: std::sync::Mutex::new(false),
+            }
+        }
+
+        fn with_join_layout(layout: vks_proto::signaling::Layout) -> Self {
+            Self { join_layout: std::sync::Mutex::new(Some(layout)), ..Self::new() }
+        }
+
+        fn set_join_layout(&self, layout: Option<vks_proto::signaling::Layout>) {
+            *self.join_layout.lock().expect("join layout lock") = layout;
+        }
+
+        fn allow_resume(&self) {
+            *self.resume_ok.lock().expect("resume flag lock") = true;
         }
 
         fn deliver(&self, message: &vks_proto::signaling::SignalingMessage) {
@@ -457,6 +531,19 @@ mod tests {
             })
         }
 
+        async fn client_hello_with_resume(
+            &self,
+            token: &str,
+            _resume_nonce: Option<&str>,
+        ) -> Result<crate::signaling_client::ServerHello, crate::signaling_client::SignalingError> {
+            if *self.resume_ok.lock().expect("resume flag lock") {
+                crate::signaling_client::SignalingTransport::client_hello(self, token).await
+            } else {
+                // По умолчанию reconnect идёт через rejoin (снимок эпохи).
+                Err(crate::signaling_client::SignalingError::Transport("resume disabled".into()))
+            }
+        }
+
         async fn join_room(
             &self,
             room_id: &str,
@@ -467,7 +554,7 @@ mod tests {
                 participant_id: "p1".into(),
                 join_nonce: "nonce-1".into(),
                 participants: vec!["p1".into()],
-                layout: None,
+                layout: self.join_layout.lock().expect("join layout lock").clone(),
             })
         }
 
@@ -523,19 +610,19 @@ mod tests {
     }
 
     #[test]
-    fn mode_switch_when_active() {
+    fn live_mode_push_switches_renderer() {
+        let transport = Arc::new(PushTransport::new());
+        let mut client = SignalingClient::with_transport(transport.clone());
         let mut c = Conference::new(test_cfg());
-        let mut client = SignalingClient::with_transport(Arc::new(MockSignaling::ok()));
         c.start(&mut client).unwrap();
-        c.on_mode_changed(RoomMode::Mcu);
-        assert_eq!(c.media.mode(), RoomMode::Mcu);
-    }
-
-    #[test]
-    fn mode_switch_ignored_when_idle() {
-        let mut c = Conference::new(test_cfg());
-        c.on_mode_changed(RoomMode::Mcu); // не Active → не меняется
-        assert_eq!(c.media.mode(), RoomMode::Sfu);
+        transport.deliver(&mode_push(vks_proto::media::RoomMode::Mcu));
+        let events = c.drain_events();
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], crate::types::ConferenceEvent::ModeChanged { mode } if mode == "mcu"),
+            "wire-имя режима должно разбираться RoomMode::parse"
+        );
+        assert_eq!(c.media().mode(), RoomMode::Mcu);
     }
 
     #[test]
@@ -628,5 +715,202 @@ mod tests {
         c.reconnect_async(&mut client).await.unwrap();
         assert_eq!(c.state(), ConferenceState::Active);
         assert_eq!(c.join_nonce(), Some(nonce.as_str()));
+    }
+
+    /// T10c: join-снимок применяет и геометрию, и метаданные (поздний
+    /// участник не получит push до следующего изменения раскладки).
+    #[test]
+    fn join_snapshot_applies_layout_and_metadata() {
+        let transport = Arc::new(PushTransport::with_join_layout(layout_proto(7, "a", "codian_07", "manual")));
+        let mut client = SignalingClient::with_transport(transport.clone());
+        let mut c = Conference::new(test_cfg());
+        c.start(&mut client).expect("join ok");
+        assert_eq!(c.media().layout().expect("layout applied").version, 7);
+        assert_eq!(c.layout_preset(), "codian_07");
+        assert_eq!(c.layout_mode(), "manual");
+        assert!(c.drain_events().is_empty(), "снимок не дублируется событием");
+    }
+
+    /// T10c: снимок version=0 (proto-default/legacy) применяется и не
+    /// блокирует следующий кадр (guard только на `<=` при наличии layout).
+    #[test]
+    fn v0_snapshot_does_not_freeze_updates() {
+        let transport = Arc::new(PushTransport::with_join_layout(layout_proto(0, "a", "codian_07", "manual")));
+        let mut client = SignalingClient::with_transport(transport.clone());
+        let mut c = Conference::new(test_cfg());
+        c.start(&mut client).expect("join ok");
+        assert_eq!(c.media().layout().expect("v0 snapshot").version, 0);
+        transport.deliver(&layout_push(layout_proto(1, "b", "vks_grid_4", "manual")));
+        assert_eq!(c.drain_events().len(), 1);
+        assert_eq!(c.media().layout().expect("v1 applied").version, 1);
+    }
+
+    /// T10c: живой push доносит raw-строки без нормализации/подмены.
+    #[test]
+    fn live_push_carries_raw_metadata() {
+        let transport = Arc::new(PushTransport::new());
+        let mut client = SignalingClient::with_transport(transport.clone());
+        let mut c = Conference::new(test_cfg());
+        c.start(&mut client).expect("join ok");
+        transport.deliver(&layout_push(layout_proto(5, "a", "preset_equal", "dynamic")));
+        let events = c.drain_events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            crate::types::ConferenceEvent::LayoutChanged { preset, mode, .. }
+                if preset == "preset_equal" && mode == "dynamic"
+        ));
+        assert_eq!(c.layout_preset(), "preset_equal");
+        assert_eq!(c.layout_mode(), "dynamic");
+    }
+
+    /// T10c: устаревший кадр не применяется и не отдаётся в UI; следующий
+    /// монотонный кадр снова применяется.
+    #[test]
+    fn stale_layout_push_is_ignored_end_to_end() {
+        let transport = Arc::new(PushTransport::with_join_layout(layout_proto(5, "a", "codian_07", "manual")));
+        let mut client = SignalingClient::with_transport(transport.clone());
+        let mut c = Conference::new(test_cfg());
+        c.start(&mut client).expect("join ok");
+
+        transport.deliver(&layout_push(layout_proto(5, "b", "vks_grid_9", "manual")));
+        assert!(c.drain_events().is_empty(), "равная версия — retransmit, не применяем");
+        transport.deliver(&layout_push(layout_proto(4, "b", "vks_grid_9", "manual")));
+        assert!(c.drain_events().is_empty(), "меньшая версия — stale");
+        assert_eq!(c.media().layout().expect("layout").version, 5);
+        assert_eq!(c.layout_preset(), "codian_07", "метаданные не откатились");
+        let surface = crate::render_surface::RecordingSurface::new();
+        c.media().render(&["a".into(), "b".into()], &surface);
+        let cmds = surface.take();
+        assert_eq!(cmds[0].participant_id, participant_uuid("a"), "рендер остался на применённой раскладке");
+
+        transport.deliver(&layout_push(layout_proto(6, "b", "vks_grid_9", "manual")));
+        assert_eq!(c.drain_events().len(), 1, "монотонный кадр применяется");
+        assert_eq!(c.media().layout().expect("layout").version, 6);
+        assert_eq!(c.layout_preset(), "vks_grid_9");
+    }
+
+    /// T10c/ADR-0032: пустые метаданные = unknown, не `auto`.
+    #[test]
+    fn empty_metadata_means_unknown() {
+        let transport = Arc::new(PushTransport::with_join_layout(layout_proto(5, "a", "codian_07", "manual")));
+        let mut client = SignalingClient::with_transport(transport.clone());
+        let mut c = Conference::new(test_cfg());
+        c.start(&mut client).expect("join ok");
+        assert_eq!(c.layout_preset(), "codian_07");
+        transport.deliver(&layout_push(layout_proto(6, "a", "", "")));
+        assert_eq!(c.drain_events().len(), 1);
+        assert_eq!(c.layout_preset(), "");
+        assert_eq!(c.layout_mode(), "", "unknown не подменяется на auto и не оставляет старое");
+    }
+
+    /// T10c: rejoin в перезапущенный движок без раскладки очищает снимок,
+    /// и следующая (новая) эпоха версий снова принимается.
+    #[test]
+    fn rejoin_without_snapshot_clears_layout() {
+        let transport = Arc::new(PushTransport::with_join_layout(layout_proto(5, "a", "codian_07", "manual")));
+        let mut client = SignalingClient::with_transport(transport.clone());
+        let mut c = Conference::new(test_cfg());
+        c.start(&mut client).expect("join ok");
+        transport.set_join_layout(None);
+        c.on_connection_lost();
+        c.reconnect(&mut client).expect("rejoin ok");
+        assert!(c.media().layout().is_none(), "старая эпоха не переживает rejoin");
+        assert_eq!(c.layout_preset(), "");
+        assert_eq!(c.layout_mode(), "");
+        transport.deliver(&layout_push(layout_proto(1, "b", "vks_grid_4", "manual")));
+        assert_eq!(c.drain_events().len(), 1, "version=1 принимается после сброса");
+        assert_eq!(c.media().layout().expect("layout").version, 1);
+    }
+
+    /// T10c: успешный resume не несёт снимка и не сохраняет эпоху версий —
+    /// layout-кадры прежней эпохи отбрасываются, не-layout события остаются.
+    #[test]
+    fn resume_success_drops_stale_layout_frames_but_keeps_mode_events() {
+        let transport = Arc::new(PushTransport::with_join_layout(layout_proto(5, "a", "codian_07", "manual")));
+        let mut client = SignalingClient::with_transport(transport.clone());
+        let mut c = Conference::new(test_cfg());
+        c.start(&mut client).expect("join ok");
+        transport.deliver(&layout_push(layout_proto(7, "b", "vks_grid_9", "manual")));
+        transport.deliver(&mode_push(vks_proto::media::RoomMode::Mcu));
+        transport.allow_resume();
+        c.on_connection_lost();
+        c.reconnect(&mut client).expect("resume ok");
+        assert!(c.media().layout().is_none(), "resume без снимка не сохраняет старую версию");
+        assert_eq!(c.layout_preset(), "");
+        let events = c.drain_events();
+        assert_eq!(events.len(), 1, "layout-кадр прежней эпохи отброшен, mode — сохранён");
+        assert!(matches!(&events[0], crate::types::ConferenceEvent::ModeChanged { .. }));
+        assert_eq!(c.media().mode(), RoomMode::Mcu);
+        transport.deliver(&layout_push(layout_proto(1, "e", "preset_equal", "dynamic")));
+        assert_eq!(c.drain_events().len(), 1, "после resume принимается любой layout-кадр");
+        assert_eq!(c.media().layout().expect("layout").version, 1);
+    }
+
+    /// T10c: rejoin после рестарта движка сбрасывает эпоху версий —
+    /// иначе version-guard заморозил бы рендер навсегда.
+    #[tokio::test]
+    async fn reconnect_rejoin_resets_version_epoch() {
+        let transport = Arc::new(PushTransport::with_join_layout(layout_proto(5, "a", "codian_07", "manual")));
+        let mut client = SignalingClient::with_transport(transport.clone());
+        let mut c = Conference::new(test_cfg());
+        c.start_async(&client).await.expect("join ok");
+        // Кадр до обрыва остаётся в очереди и не должен пережить rejoin.
+        transport.deliver(&layout_push(layout_proto(7, "b", "vks_grid_9", "manual")));
+        transport.set_join_layout(Some(layout_proto(2, "c", "preset_equal", "dynamic")));
+        c.on_connection_lost();
+        c.reconnect_async(&mut client).await.expect("rejoin ok");
+        assert_eq!(c.state(), ConferenceState::Active);
+        assert_eq!(c.media().layout().expect("snapshot applied").version, 2);
+        assert_eq!(c.layout_preset(), "preset_equal");
+        assert!(c.drain_events().is_empty(), "очередь очищена на reconnect");
+        transport.deliver(&layout_push(layout_proto(3, "d", "codian_01", "manual")));
+        assert_eq!(c.drain_events().len(), 1, "новая эпоха версий принимается");
+        assert_eq!(c.media().layout().expect("layout").version, 3);
+    }
+
+    fn layout_proto(version: u32, participant: &str, preset: &str, mode: &str) -> vks_proto::signaling::Layout {
+        use vks_proto::signaling::{Layout, Rect, Slot, SlotAssignment};
+        Layout {
+            version,
+            slots: vec![Slot {
+                id: 0,
+                rect: Some(Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }),
+                z: 0,
+                assignment: SlotAssignment::Fixed as i32,
+                participant_id: Some(participant_uuid(participant)),
+            }],
+            kind: "custom".into(),
+            preset: preset.into(),
+            mode: mode.into(),
+        }
+    }
+
+    fn participant_uuid(name: &str) -> String {
+        let byte = name.as_bytes().first().copied().unwrap_or(0);
+        format!("00000000-0000-0000-0000-0000000000{byte:02x}")
+    }
+
+    fn mode_push(mode: vks_proto::media::RoomMode) -> vks_proto::signaling::SignalingMessage {
+        use vks_proto::signaling::signaling_message::Payload;
+        vks_proto::signaling::SignalingMessage {
+            msg_id: 0,
+            reply_to: 0,
+            payload: Some(Payload::RoomModeChanged(vks_proto::signaling::RoomModeChanged {
+                new_mode: mode as i32,
+                caps: None,
+                switch_epoch: 0,
+                graceful: true,
+            })),
+        }
+    }
+
+    fn layout_push(layout: vks_proto::signaling::Layout) -> vks_proto::signaling::SignalingMessage {
+        use vks_proto::signaling::signaling_message::Payload;
+        vks_proto::signaling::SignalingMessage {
+            msg_id: 0,
+            reply_to: 0,
+            payload: Some(Payload::LayoutChanged(vks_proto::signaling::LayoutChanged { layout: Some(layout) })),
+        }
     }
 }

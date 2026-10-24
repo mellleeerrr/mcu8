@@ -240,7 +240,16 @@ raw-preset, `" AUTO "`-нормализация, Codian manual на провод
 заполняет MCU; auto без назначений/геометрии по-прежнему доходит до движка
 пустым дескриптором (сброс на авто-сетку). Тест `id_only_apply_uses_preset_
 geometry_without_slots` (vks_grid_9→9, codian_07→13).
-## T10c. Прод-потребитель LayoutChanged (PNM WS / SDK) — после T10a/b
+## T10c. Прод-потребитель LayoutChanged в SDK (PNM WS — YAGNI)
+Реализовано: `ConferenceEvent::LayoutChanged { layout, preset, mode }`;
+`Conference` хранит metadata последнего снимка (`layout_preset/layout_mode`),
+version-guard `<=` в `drain_events` (stale не применяется и не отдаётся в UI),
+rejoin сбрасывает эпоху (снимок/очистка), успешный resume без снимка чистит
+layout/meta и отбрасывает queued layout-кадры прежней эпохи (mode-события
+сохраняются). Попутно исправлен `RoomModeChanged`-маппинг (`ROOM_MODE_MCU` →
+`mcu`, ранее push-переключение режима молча не работало). PNM admin-WS событие не добавлялось: у
+PNM нет JS-подписчика, REST/resources — источник редактора; мастер-план
+допускает «PNM WS **или** SDK». Доказательства: `docs/progress/evidence/t10c/`.
 
 ## T11. Evidence/golden
 `codian_table.json:1227/1381/1591` → SUPERSEDED.md, фиксация 49 (0.4),
@@ -397,7 +406,8 @@ preset на вендорский — зафиксировать поведени
 - [x] T10a — `a753799`: `preset/mode` в `Layout` (ADR-0032), атомарный
   `layout_snapshot`, три производителя + тесты; ре-ревью **9.5/10, ПРИНИМАЮ**.
 - [x] T10b — `f9b0a1b`: id-only apply, тесты vks_grid_9/codian_07, auto-сброс.
-- [ ] T10c — ОТКРЫТА вслед за T10a: прод-потребитель LayoutChanged в PNM WS/SDK.
+- [x] T10c — SDK-потребитель `LayoutChanged` (metadata + version-guard +
+  reconnect-эпоха); PNM WS не нужен (нет JS-потребителя). См. evidence/t10c.
 - [x] T11 — `9eb2f4e`: SUPERSEDED 43/46/49, fixtures+5 тестов, golden
   174 id/2178 окон (84 passed/1 ignored).
 - [x] T12 — `9efd5be`: create_room-adopt pending, calculate id конструктора,

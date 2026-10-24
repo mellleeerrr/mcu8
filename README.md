@@ -56,7 +56,7 @@ cargo build --release -p vks-server
 |---|---|
 | [`docs/PROJECT_RULES.md`](docs/PROJECT_RULES.md) | обязательные правила разработки |
 | [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) | архитектура, инварианты, стек |
-| [`docs/decisions/DECISIONS.md`](docs/decisions/DECISIONS.md) | реестр ADR (0001–0031) |
+| [`docs/decisions/DECISIONS.md`](docs/decisions/DECISIONS.md) | реестр ADR (0001–0032) |
 | [`docs/progress/MASTER_TASK_LIST.md`](docs/progress/MASTER_TASK_LIST.md) | **единственный живой трекер** задач и приёмки |
 | [`docs/progress/evidence/`](docs/progress/evidence/) | воспроизводимые evidence-прогоны (summary.json + PNG) |
 | [`docs/rules/`](docs/rules/) | backend/frontend/code-style стандарты |
@@ -80,6 +80,6 @@ cargo build --release -p vks-server
 в приёмку T1–T3.
 
 - Workspace: Rust 2021, MSRV 1.94, 16 крейтов.
-- Тесты: `1326` (`cargo test --workspace --all-targets`, 0 сбоев, 8 ignored).
+- Тесты: `1333` (`cargo test --workspace --all-targets`, 0 сбоев, 8 ignored).
 - `cargo fmt --check` и `cargo clippy --workspace --all-targets -- -D warnings` —
   0 замечаний.

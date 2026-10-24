@@ -95,8 +95,8 @@
 - Конфликты → в пользу SDK (re-sync по event).
 
 ### 6.2. Events (SDK → UI)
-- SDK events: async channel (flume).
-- Dioxus: `use_signal_from_channel(conf.events())`.
+- SDK events: очередь внутри `Conference`, забирается `drain_events()`.
+- Dioxus: poll/interval → `drain_events()` → обновление signals.
 - Каждый event → соответствующий signal.
 
 ### 6.3. Commands (UI → SDK)

@@ -124,8 +124,8 @@ impl SignalingClient {
 
     /// Регистрирует обработчик push-сообщений сервера.
     ///
-    /// Приложение получает `LayoutChanged`/`RoomModeChanged` и передаёт их в
-    /// конференцию (`Conference::on_layout_changed` / `on_mode_changed`).
+    /// Конференция копит события (`LayoutChanged`/`RoomModeChanged`) сама;
+    /// приложение забирает их через `Conference::drain_events`.
     /// Снимок раскладки на момент входа приходит в `JoinRoomResult.layout`,
     /// поэтому отдельного кэша в SDK не нужно.
     pub fn set_push_handler(&self, handler: Arc<dyn PushHandler>) {
@@ -348,7 +348,8 @@ mod tests {
 
     #[test]
     /// Push-сообщения доходят до обработчика приложения: SDK не кэширует
-    /// раскладку сам — её применяет конференция (`on_layout_changed`).
+    /// раскладку сам — её применяет конференция, приложение забирает события
+    /// через `Conference::drain_events`.
     fn layout_push_reaches_the_application_handler() {
         use vks_proto::signaling::signaling_message::Payload;
         let transport = Arc::new(PushTransport::new());

@@ -89,6 +89,12 @@ impl MediaEngine {
         self.layout.as_ref()
     }
 
+    /// Сбрасывает раскладку (рестарт/перезапуск движка: версии начинаются
+    /// заново, поэтому старый version-guard заморозил бы рендер навсегда).
+    pub fn clear_layout(&mut self) {
+        self.layout = None;
+    }
+
     /// Рендерит кадр: SFU → N треков через layout; MCU → 1 композитный.
     pub fn render(&self, participants: &[String], surface: &dyn RenderSurface) {
         match self.mode {

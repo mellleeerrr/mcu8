@@ -102,13 +102,34 @@ T10c требует прод-потребителя `LayoutChanged`. Такой 
 
 ## Последствия (Consequences)
 
-- T10a гарантирует только провод. T10c (следующая задача) обязан расширить
-  consumer API SDK (`NormalizedLayout`/`ConferenceEvent`) полями `preset/mode`
-  и добавить version-guard: кадры с `version` не больше текущей игнорируются
-  (защита от гонки VAD-пересадки и admin-apply). До T10c поля на проводе
-  есть, но SDK их осознанно отбрасывает.
+- **T10a:** метаданные есть на проводе; три продюсера (broadcast, VAD,
+  join-снимок) заполняют их из одного `layout_snapshot`.
+- **T10c (SDK):** consumer API расширен `ConferenceEvent::LayoutChanged
+  { layout, preset, mode }`; `Conference` хранит metadata последнего снимка
+  (getters `layout_preset()/layout_mode()`, `""` = unknown) — снимок
+  `JoinRoomResult`/rejoin событием не дублируется. `NormalizedLayout` и
+  горячий путь `vks-layout` не тронуты (см. «Отклонено»).
+- **Version-guard в SDK:** кадры с `version <=` уже применённой не
+  применяются и не возвращаются из `drain_events` (equal — retransmit,
+  конкуренция VAD-пересадки и admin-apply). Источник истины о версии —
+  `media().layout().version`, отдельного поля нет.
+- **Reconnect:** rejoin снимок сбрасывает эпоху версий (очередь чистится,
+  снимок применяется; пустой снимок очищает layout/meta). Успешный resume
+  снимка не несёт, поэтому layout/meta очищаются, а накопленные
+  `LayoutChanged` прежней эпохи отбрасываются (не-layout события, например
+  `RoomModeChanged`, сохраняются). Пока серверный resume (`handler.rs`)
+  игнорирует nonce, это единственный безопасный вариант; при появлении
+  настоящего resume снимок в ответе — часть контракта §7.
+- **Известное ограничение:** `version` — `u32` с saturating-инкрементом;
+  при насыщении `u32::MAX` равные версии навсегда отбрасываются (патология,
+  реабилитация — рестарт комнаты/эпохи). Отдельно: `payload.version`
+  клиента всё ещё влияет на floor движка — hardening вне T10c.
 - Поля 6/81 остаются свободными; `LayoutModeChanged` — только при появлении
   конкретного потребителя режима без геометрии.
-- Тесты-гейты: proto roundtrip/legacy, `layout_snapshot` (в т.ч. pending),
-  Codian manual на проводе, auto с raw preset, нормализация mode/preset,
-  снимок позднего участника в `network_integration`.
+- Тесты-гейты: proto roundtrip/legacy + байты тегов 4/5, `layout_snapshot`
+  (existing/pending/auto), Codian manual на проводе, raw preset, нормализация
+  mode/preset, снимок позднего участника в `network_integration`; SDK:
+  join-снимок, raw push, stale (equal/lower), v0, unknown metadata, rejoin
+  epoch, resume без снимка. PNM admin-WS событие не добавляется: у PNM нет
+  JS-подписчика на layout (редактор читает REST), событие дублировало бы
+  VAD-каналы без общей версии.
