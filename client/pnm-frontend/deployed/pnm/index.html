@@ -254,266 +254,288 @@
 <style id="prostor-pnm-dark-theme">
 /* ==========================================================================
    PROSTOR PNM - Telegram.org Design System Dark Theme
-   Official Telegram Desktop/Web Dark Palette:
-   - Primary: #0088CC (Telegram Steel Blue)
-   - Accent / Links: #2AABEE (Telegram Light Blue)
-   - Canvas / Background: #0E1621 (Deep Midnight Blue)
-   - Surface / Cards / Header: #17212B (Telegram Surface)
-   - Surface Card / Modals: #242F3D (Elevated Surface)
-   - Hover / Surface Light: #202B36 (Noticeable Row Hover, dE ~ 8.5)
-   - Text Primary: #FFFFFF (Contrast 18.18:1 on Canvas)
-   - Text Secondary / Muted: #9BB1C9 (WCAG AA 5.2:1 on Surface, 4.7:1 on Modals)
-   - Text Active / Selected: #FFFFFF (Contrast 8.14:1 on Selected)
-   - Borders: #243342 (Inputs, Selects, Cards)
-   - Dividers: #0F1C26 (Subtle Row Lines)
-   - Active / Selected: #2B5278 (Telegram Message Bubble / Selected Row)
+   Unified Property-Grouped Rules with Strict Terminal Targeting & Semantic Guards
    ========================================================================== */
 
-:root {
-  --tg-primary: #0088cc;
-  --tg-accent: #2aabee;
-  --tg-bg: #0e1621;
-  --tg-surface: #17212b;
-  --tg-surface-card: #242f3d;
-  --tg-surface-hover: #202b36;
-  --tg-text: #ffffff;
-  --tg-text-muted: #9bb1c9;
-  --tg-text-selected: #ffffff;
-  --tg-border: #243342;
-  --tg-border-light: #323e4d;
-  --tg-divider: #0f1c26;
-  --tg-active: #2b5278;
+html.theme-dark {
+  --c-bg: #0e1621;
+  --c-surface: #17212b;
+  --c-surface-card: #242f3d;
+  --c-surface-hover: #202b36;
+  --c-border: #243342;
+  --c-divider: #0f1c26;
+  --c-text: #ffffff;
+  --c-text-muted: #7f8b99;
+  --c-primary: #0088cc;
+  --c-accent: #2aabee;
+  --c-icon-sidebar: #a5d5ee;
+  --c-active: #2b5278;
 }
 
-/* 1. Global Shell & Screens */
+/* 1. Global Shell & Screen Surfaces */
 html.theme-dark,
-html.theme-dark body,
-html.theme-dark #root,
-html.theme-dark .main,
-html.theme-dark .main-route,
-html.theme-dark .auth,
-html.theme-dark .auth__content,
-html.theme-dark .main-blank,
-html.theme-dark .monitoring-screen,
-html.theme-dark .user-screen,
-html.theme-dark .logs-screen,
-html.theme-dark .administration-screen {
-  background-color: var(--tg-bg) !important;
-  color: var(--tg-text) !important;
+html.theme-dark :is(body, #root, .main, .main-route, .auth, .auth__content, .main-blank,
+  .monitoring-screen, .user-screen, .logs-screen, .administration-screen) {
+  background-color: var(--c-bg) !important;
+  color: var(--c-text) !important;
 }
 html.theme-dark .auth-picture { background-color: #0b111a !important; }
 html.theme-dark .main__background { display: none !important; }
+html.theme-dark .server-info-block .pn-brand { color: var(--c-text) !important; }
 
-/* Brand Logo Contrast Fix (18.18:1 vs 1.24:1) */
-html.theme-dark .server-info-block .pn-brand {
-  color: var(--tg-text) !important;
-}
-
-/* Auth Form Header Layout */
+/* Auth Header */
 .auth-form__header {
   display: flex !important;
   justify-content: space-between !important;
   align-items: center !important;
 }
 
-/* 2. Headers, Sidebars, Cards & Inner Contents */
-html.theme-dark .main-large-header,
-html.theme-dark .main-compact-header,
-html.theme-dark .main-card,
-html.theme-dark .base-card,
-html.theme-dark .tc-card,
-html.theme-dark .monitoring-list,
-html.theme-dark .main-list,
-html.theme-dark .main-list-content,
-html.theme-dark .main-card-content,
-html.theme-dark .base-card-content,
-html.theme-dark .bookmarks-drawer-items {
-  background-color: var(--tg-surface) !important;
-  border-color: var(--tg-border) !important;
-  color: var(--tg-text) !important;
+/* 2. Headers, Sidebars, Cards & Panels */
+html.theme-dark :is(.main-large-header, .main-compact-header, .main-card, .base-card, .tc-card,
+  .monitoring-list, .main-list, .main-list-content, .main-card-content, .base-card-content,
+  .bookmarks-drawer-items, .main-card-header, .monitoring-list-header) {
+  background-color: var(--c-surface) !important;
+  border-color: var(--c-border) !important;
+  color: var(--c-text) !important;
 }
-html.theme-dark .main-card-header,
-html.theme-dark .monitoring-list-header {
-  background-color: var(--tg-surface) !important;
-  border-bottom: 1px solid var(--tg-divider) !important;
-}
-html.theme-dark .main-card-header__title,
-html.theme-dark .monitoring-list-header__title,
-html.theme-dark .base-card__title {
-  color: var(--tg-text) !important;
+html.theme-dark :is(.main-card-header, .monitoring-list-header) {
+  border-bottom: 1px solid var(--c-divider) !important;
 }
 
 /* 3. Popovers, Modals & Dropdowns */
-html.theme-dark .mdc-menu-surface,
-html.theme-dark .tc-context-menu,
-html.theme-dark .notification-center__menu,
-html.theme-dark .header-profile__menu,
-html.theme-dark .bookmarks-drawer,
-html.theme-dark .tc-modal,
-html.theme-dark .mdc-dialog__surface,
-html.theme-dark .the-confirmer-popup,
-html.theme-dark .the-confirmer-popup__content,
-html.theme-dark .notifier__container .tc-notification,
-html.theme-dark .password-validate-popup {
-  background-color: var(--tg-surface-card) !important;
-  border: 1px solid var(--tg-border) !important;
-  color: var(--tg-text) !important;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .45) !important;
+html.theme-dark :is(.mdc-menu-surface, .tc-context-menu, .notification-center__menu,
+  .header-profile__menu, .bookmarks-drawer, .tc-modal, .mdc-dialog__surface,
+  .the-confirmer-popup, .the-confirmer-popup__content, .tc-notification, .password-validate-popup) {
+  background-color: var(--c-surface-card) !important;
+  border: 1px solid var(--c-border) !important;
+  color: var(--c-text) !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5) !important;
 }
-html.theme-dark .tc-modal-wrapper,
-html.theme-dark .mdc-dialog__scrim {
+html.theme-dark :is(.tc-modal-wrapper, .mdc-dialog__scrim) {
   background-color: rgba(0, 0, 0, .65) !important;
 }
 
-/* 4. Inputs, Selects & Form Controls */
-html.theme-dark input,
-html.theme-dark textarea,
-html.theme-dark select,
-html.theme-dark .mdc-select__anchor,
-html.theme-dark .mdc-text-field--filled,
-html.theme-dark .tc-select {
-  background-color: var(--tg-bg) !important;
-  border: 1px solid var(--tg-border) !important;
-  color: var(--tg-text) !important;
-}
-html.theme-dark input:focus,
-html.theme-dark textarea:focus,
-html.theme-dark .mdc-text-field--focused {
-  border-color: var(--tg-primary) !important;
-  outline: 1px solid var(--tg-primary) !important;
-}
-html.theme-dark .tc-checkbox__text,
-html.theme-dark .tc-switch__text,
-html.theme-dark .tc-radio__text,
-html.theme-dark .mdc-form-field {
-  color: var(--tg-text) !important;
+/* 4. Primary Typography (Direct Terminal Targeting - forces #FFFFFF) */
+html.theme-dark :is(.administration__title, .administration-button__text, .action-card__title,
+  .main-table-el, .main-table-el__text--primary, .main-table-el__text strong,
+  .main-list-item, .main-list-item__title, .main-list-item__text--primary, .main-list-item__text,
+  .monitoring-list-item__name, .user-list-item__name, .user-list-item__login,
+  .conference-info-main-row-item__text--primary, .conference-info-main-row-item__text,
+  .conference-info__value, .tc-modal__title, .the-confirmer-popup__title,
+  .main-blank__title, .main-blank__text--primary,
+  .main-card-header__title, .monitoring-list-header__title, .base-card__title,
+  .tc-checkbox__text, .tc-switch__text, .tc-radio__text, .mdc-form-field,
+  th, td, .main-table-head, .main-table-el--head) {
+  color: var(--c-text) !important;
 }
 
-/* 5. Tabs & Navigation (Accent for AA Contrast 5.8:1) */
-html.theme-dark .tc-tab-bar,
-html.theme-dark .mdc-tab-bar {
-  background-color: var(--tg-surface) !important;
-  border-bottom: 1px solid var(--tg-divider) !important;
+/* 5. Secondary Typography & Labels (#7F8B99) */
+html.theme-dark :is(.main-form__subheader-text, .action-card__hint, .main-table-el__text--secondary,
+  .main-list-item__text--secondary, .conference-info-main-row-item--fixed-width,
+  .conference-info-main-row-item__text--secondary, .conference-info__label,
+  .main-blank__text--secondary, .main-blank__text,
+  .mdc-floating-label:not(.mdc-floating-label--float-above), .tc-select__placeholder,
+  .history-card-pagination__button, .map-hint, .role-user__chip) {
+  color: var(--c-text-muted) !important;
 }
-html.theme-dark .tc-tab,
-html.theme-dark .mdc-tab {
-  color: var(--tg-text-muted) !important;
+html.theme-dark ::placeholder {
+  color: var(--c-text-muted) !important;
 }
-html.theme-dark .tc-tab--active,
-html.theme-dark .mdc-tab--active,
+html.theme-dark .main-form__subheader:after {
+  background: var(--c-divider) !important;
+}
+
+/* 6. Semantic Status & Validation Guards (Prevent washing out reds/greens/yellows) */
+html.theme-dark :is(.main-table-el__text--danger, .text--danger, .tc-icon--red,
+  .mdc-text-field-helper-text--validation-msg, .tc-text-field__helper-text--validation-msg,
+  .main-form-row__error) {
+  color: #f04343 !important;
+}
+html.theme-dark :is(.text--warning, .tc-icon--orange, .tc-icon--yellow) {
+  color: #ff9800 !important;
+}
+html.theme-dark :is(.text--success, .tc-icon--green, .monitoring-list-item--green:before) {
+  color: #4caf50 !important;
+}
+html.theme-dark .mdc-checkbox__checkmark-path { stroke: #ffffff !important; }
+
+/* 7. Icons: Content (#A5D5EE) vs Header (#FFFFFF) with Deep Parent Guards */
+html.theme-dark :is(.main-card, .main-list, .main-table, .administration-screen, .monitoring-screen)
+  :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo)):not([class*="--danger"]):not([class*="--warning"]):not([class*="--success"]):not([class*="--red"]):not([class*="--green"]):not([class*="--yellow"]):not(.audio-power *):not(.audio-level *):not(:is([class*="--danger"], [class*="--warning"], [class*="--success"], [class*="--red"], [class*="--green"], [class*="--yellow"], .audio-power, .audio-level, .tc-chip, [class*="title-chip"], .server-status-icon, [class*="avatar-status"]) *) {
+  color: var(--c-icon-sidebar) !important;
+  fill: var(--c-icon-sidebar) !important;
+}
+html.theme-dark :is(.main-large-header, .main-compact-header)
+  :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo), #vks-theme-toggle-btn svg, #vks-theme-toggle-btn .material-icons) {
+  color: #ffffff !important;
+  fill: #ffffff !important;
+}
+
+/* 8. Tables, Lists, Hover & Active States */
+html.theme-dark :is(.main-table-head, thead) {
+  background-color: var(--c-divider) !important;
+  border-bottom: 1px solid var(--c-border) !important;
+}
+html.theme-dark :is(.main-table-line, .main-list-item, .main-table-line--gray) {
+  background-color: var(--c-surface) !important;
+  border-bottom: 1px solid var(--c-divider) !important;
+  color: var(--c-text) !important;
+}
+html.theme-dark :is(.main-table-line--hoverable:not(.main-table-line--active):hover,
+  .main-list-item:not(.main-list-item--active):not(.main-list-item--selected):hover,
+  .tc-context-menu-item:hover, .mdc-deprecated-list-item:hover) {
+  background-color: var(--c-surface-hover) !important;
+}
+html.theme-dark :is(.main-table-line--active, .main-list-item--active, .main-list-item--selected) {
+  background-color: var(--c-active) !important;
+  color: var(--c-text) !important;
+}
+html.theme-dark :is(.main-table-line--active, .main-list-item--active, .main-list-item--selected)
+  :is(.main-table-el__text--secondary, .main-list-item__text--secondary, .tc-icon__icon) {
+  color: var(--c-text) !important;
+  fill: var(--c-text) !important;
+}
+
+/* 9. Administration Button Tiles */
+html.theme-dark .administration-button {
+  background-color: var(--c-surface) !important;
+  border: 1px solid var(--c-border) !important;
+}
+html.theme-dark .administration-button:hover {
+  background-color: var(--c-surface-hover) !important;
+  border-color: var(--c-accent) !important;
+}
+html.theme-dark .administration-button :is(.tc-button__icon, .material-icons) {
+  color: var(--c-icon-sidebar) !important;
+}
+
+/* 10. Power Action Cards - Warning (Amber) & Danger (Crimson) */
+html.theme-dark :is(.action-card--warning, .action-card--warning.action-card--filled) .action-card__content {
+  background-color: rgba(245, 127, 23, 0.12) !important;
+  border: 1px solid rgba(245, 127, 23, 0.4) !important;
+}
+html.theme-dark .action-card--warning :is(.action-card__title, .action-card__hint, p, span) {
+  color: var(--c-text) !important;
+}
+html.theme-dark .action-card--warning .action-card__icon {
+  background-color: #f57f17 !important;
+  color: #ffffff !important;
+}
+html.theme-dark .action-card--warning .action-card__button :is(.mdc-button--tone, .mdc-button--outlined, .tc-button) {
+  background-color: rgba(245, 127, 23, 0.25) !important;
+  border: 1px solid #f57f17 !important;
+  color: #ffffff !important;
+}
+
+html.theme-dark :is(.action-card--danger, .action-card--danger.action-card--filled) .action-card__content {
+  background-color: rgba(244, 67, 54, 0.12) !important;
+  border: 1px solid rgba(244, 67, 54, 0.4) !important;
+}
+html.theme-dark .action-card--danger :is(.action-card__title, .action-card__hint, p, span) {
+  color: var(--c-text) !important;
+}
+html.theme-dark .action-card--danger .action-card__icon {
+  background-color: #d32f2f !important;
+  color: #ffffff !important;
+}
+html.theme-dark .action-card--danger .action-card__button :is(.mdc-button--tone, .mdc-button--outlined, .tc-button) {
+  background-color: #f44336 !important;
+  border: 1px solid #f44336 !important;
+  color: #ffffff !important;
+}
+
+/* 11. Tabs & Navigation */
+html.theme-dark :is(.tc-tab-bar, .mdc-tab-bar) {
+  background-color: var(--c-surface) !important;
+  border-bottom: 1px solid var(--c-divider) !important;
+}
+html.theme-dark :is(.tc-tab, .mdc-tab) .mdc-tab__text-label {
+  color: var(--c-text-muted) !important;
+}
+html.theme-dark :is(.tc-tab--active, .mdc-tab--active) .mdc-tab__text-label {
+  color: var(--c-text) !important;
+}
+html.theme-dark :is(.tc-tab--active, .mdc-tab--active) {
+  background-color: var(--c-surface) !important;
+  border-bottom: 2px solid var(--c-accent) !important;
+}
 html.theme-dark .mdc-tab-indicator--active .mdc-tab-indicator__content {
-  color: var(--tg-accent) !important;
-  border-color: var(--tg-accent) !important;
+  border-color: var(--c-accent) !important;
 }
 
-/* 6. Tables & Lists */
-html.theme-dark .main-table,
-html.theme-dark .main-table-el {
-  background-color: transparent !important;
-  color: var(--tg-text) !important;
+/* 12. Inputs, Selects & Disabled States */
+html.theme-dark :is(input, textarea, select, .mdc-select__anchor, .mdc-text-field--filled, .tc-select) {
+  background-color: var(--c-bg) !important;
+  border: 1px solid var(--c-border) !important;
+  color: var(--c-text) !important;
 }
-html.theme-dark .main-table-head {
-  background-color: transparent !important;
-  border-bottom: 1px solid var(--tg-divider) !important;
-  color: var(--tg-text-muted) !important;
+html.theme-dark :is(input, textarea):focus,
+html.theme-dark .mdc-text-field--focused {
+  border-color: var(--c-accent) !important;
+  outline: 1px solid var(--c-accent) !important;
 }
-html.theme-dark .main-table-line,
-html.theme-dark .main-list-item,
-html.theme-dark .main-table-line--gray {
-  border-bottom: 1px solid var(--tg-divider) !important;
-  background-color: var(--tg-surface) !important;
-}
-html.theme-dark .main-table-line--hoverable:hover,
-html.theme-dark .main-list-item:hover,
-html.theme-dark .tc-context-menu-item:hover,
-html.theme-dark .mdc-deprecated-list-item:hover {
-  background-color: var(--tg-surface-hover) !important;
-}
-html.theme-dark .main-table-line--active,
-html.theme-dark .main-list-item--active {
-  background-color: var(--tg-active) !important;
-  color: var(--tg-text-selected) !important;
-}
-html.theme-dark .main-table-line--active .main-table-el__text--secondary,
-html.theme-dark .main-list-item--active .main-list-item__text--secondary {
-  color: var(--tg-text-selected) !important;
+html.theme-dark :is(input, textarea, select):disabled {
+  color: var(--c-text-muted) !important;
+  opacity: 0.6 !important;
+  cursor: not-allowed !important;
 }
 
-/* 7. Buttons, Chips & Hints */
+/* 13. Buttons & Elevation Overlays */
 html.theme-dark .tc-button.mdc-button--unelevated:not([class*="--primary"]):not([class*="--danger"]):not(:disabled),
-html.theme-dark .tc-button.mdc-button--outlined {
-  background-color: var(--tg-surface-hover) !important;
-  border: 1px solid var(--tg-border) !important;
-  color: var(--tg-text) !important;
+html.theme-dark .tc-button.mdc-button--outlined:not(:disabled) {
+  background-color: var(--c-surface-hover) !important;
+  border: 1px solid var(--c-border) !important;
+  color: var(--c-text) !important;
 }
 html.theme-dark .tc-button.mdc-button--unelevated[class*="--primary"],
 html.theme-dark .tc-button-container[class*="--primary"] :is(.mdc-button--unelevated, .mdc-button--raised),
 html.theme-dark [data-qa="authorization-sign-in-button"] {
-  background-color: var(--tg-primary) !important;
-  color: var(--tg-text) !important;
+  background-color: var(--c-primary) !important;
+  color: var(--c-text) !important;
   border: none !important;
 }
-html.theme-dark .tc-chip-container .tc-chip:not([class*="--red"]):not([class*="--yellow"]):not([class*="--purple"]):not([class*="--orange"]):not([class*="--green"]):not([class*="--primary"]),
-html.theme-dark .map-hint,
-html.theme-dark .role-user__chip {
-  background-color: var(--tg-surface-card) !important;
-  color: var(--tg-text-muted) !important;
-  border: 1px solid var(--tg-border) !important;
-}
-html.theme-dark .mdc-elevation-overlay,
-html.theme-dark .mdc-switch__shadow .mdc-elevation-overlay {
+html.theme-dark :is(.mdc-elevation-overlay, .mdc-switch__shadow .mdc-elevation-overlay) {
   display: none !important;
   opacity: 0 !important;
 }
 
-/* 8. Codian Layouts Schemes (54 Layout Schemes) */
-html.theme-dark .codian-layout-scheme,
-html.theme-dark .layout-scheme-item {
-  background-color: var(--tg-surface) !important;
-  border: 1px solid var(--tg-border) !important;
+/* 14. Codian Layout Schemes (54 Layout Schemes) */
+html.theme-dark :is(.codian-layout-scheme, .layout-scheme-item) {
+  background-color: var(--c-surface) !important;
+  border: 1px solid var(--c-border) !important;
 }
-html.theme-dark .codian-layout-scheme:hover,
-html.theme-dark .layout-scheme-item:hover {
-  border-color: var(--tg-accent) !important;
+html.theme-dark :is(.codian-layout-scheme, .layout-scheme-item):hover {
+  border-color: var(--c-accent) !important;
 }
-html.theme-dark .codian-layout-scheme--active,
-html.theme-dark .layout-scheme-item--active {
-  border-color: var(--tg-primary) !important;
+html.theme-dark :is(.codian-layout-scheme--active, .layout-scheme-item--active) {
+  border-color: var(--c-primary) !important;
   background-color: rgba(0, 136, 204, .25) !important;
 }
 
-/* 9. Typography, Icons & Scrollbars */
-html.theme-dark .material-icons,
-html.theme-dark .tc-icon__icon,
-html.theme-dark .main-table-el__text--secondary,
-html.theme-dark .main-blank__text--secondary,
-html.theme-dark input::placeholder {
-  color: var(--tg-text-muted) !important;
-}
-html.theme-dark .main-table-el__text--primary,
-html.theme-dark .main-blank__text--primary {
-  color: var(--tg-text) !important;
-}
-html.theme-dark a,
-html.theme-dark .pn-link {
-  color: var(--tg-accent) !important;
+/* 15. Scrollbars, Links, Chips & Focus Rings */
+html.theme-dark .main-table-el a,
+html.theme-dark .pn-link,
+html.theme-dark .server-info-block .pn-link {
+  color: var(--c-accent) !important;
+  text-decoration: underline;
   background-color: transparent !important;
-  border-color: var(--tg-border) !important;
+}
+html.theme-dark :is(.map-hint, .role-user__chip, .role-user__chip--undeletable) {
+  background-color: var(--c-surface-card) !important;
+  color: var(--c-text-muted) !important;
+  border: 1px solid var(--c-border) !important;
 }
 html.theme-dark *::-webkit-scrollbar {
   width: 8px !important;
   height: 8px !important;
-  background-color: var(--tg-bg) !important;
+  background-color: var(--c-bg) !important;
 }
 html.theme-dark *::-webkit-scrollbar-thumb {
-  background-color: var(--tg-border) !important;
+  background-color: var(--c-border) !important;
   border-radius: 4px !important;
 }
-html.theme-dark *::-webkit-scrollbar-thumb:hover {
-  background-color: var(--tg-border-light) !important;
-}
 html.theme-dark *:focus-visible {
-  outline: 2px solid var(--tg-accent) !important;
+  outline: 2px solid var(--c-accent) !important;
   outline-offset: 2px !important;
 }
 </style>
