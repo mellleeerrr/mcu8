@@ -329,7 +329,12 @@ html.theme-dark :is(.administration__title, .administration-button__text, .actio
   .main-blank__title, .main-blank__text--primary,
   .main-card-header__title, .monitoring-list-header__title, .base-card__title,
   .tc-checkbox__text, .tc-switch__text, .tc-radio__text, .mdc-form-field,
-  th, td, .main-table-head, .main-table-el--head) {
+  th, td, .main-table-head, .main-table-el--head,
+  .mdc-select__selected-text, .tc-select__selected-text, .tc-select__value,
+  .mdc-select__anchor span, .tc-select .tc-text-field__input--readonly-special,
+  .tc-select-container input,
+  .mdc-select__menu :is(.mdc-deprecated-list-item__text, .mdc-list-item__text, .tc-select__option-text),
+  .tc-select__context-menu :is(.tc-context-menu-item__text, .mdc-deprecated-list-item__text, .tc-select__option-text)) {
   color: var(--c-text) !important;
 }
 
@@ -338,7 +343,8 @@ html.theme-dark :is(.main-form__subheader-text, .action-card__hint, .main-table-
   .main-list-item__text--secondary, .conference-info-main-row-item--fixed-width,
   .conference-info-main-row-item__text--secondary, .conference-info__label,
   .main-blank__text--secondary, .main-blank__text,
-  .mdc-floating-label:not(.mdc-floating-label--float-above), .tc-select__placeholder,
+  .mdc-floating-label, .mdc-floating-label--float-above, .tc-floating-label,
+  .tc-text-field__label, .tc-select__label, .tc-select__placeholder,
   .history-card-pagination__button, .map-hint, .role-user__chip) {
   color: var(--c-text-muted) !important;
 }
@@ -353,8 +359,12 @@ html.theme-dark :is(.main-form__subheader:after, .sidebar-panel__divider) {
 /* 6. Semantic Status & Validation Guards (Prevent washing out reds/greens/yellows) */
 html.theme-dark :is(.main-table-el__text--danger, .text--danger, .tc-icon--red,
   .mdc-text-field-helper-text--validation-msg, .tc-text-field__helper-text--validation-msg,
-  .main-form-row__error) {
+  .main-form-row__error,
+  :is(.tc-text-field--error, .mdc-text-field--invalid, .tc-select-container--error) :is(.mdc-floating-label, .tc-floating-label)) {
   color: #f04343 !important;
+}
+html.theme-dark :is(.tc-text-field--error, .mdc-text-field--invalid, .tc-select-container--error) :is(.mdc-notched-outline__leading, .mdc-notched-outline__notch, .mdc-notched-outline__trailing) {
+  border-color: #f04343 !important;
 }
 html.theme-dark :is(.text--warning, .tc-icon--orange, .tc-icon--yellow) {
   color: #ff9800 !important;
@@ -579,20 +589,70 @@ html.theme-dark .mdc-tab-indicator--active .mdc-tab-indicator__content {
 }
 
 /* 12. Inputs, Selects & Disabled States */
-html.theme-dark :is(input, textarea, select, .mdc-select__anchor, .mdc-text-field--filled, .tc-select) {
+html.theme-dark :is(input:not(.tc-text-field__input), textarea, select, .mdc-select__anchor, .mdc-text-field--filled) {
   background-color: var(--c-bg) !important;
   border: 1px solid var(--c-border) !important;
   color: var(--c-text) !important;
 }
-html.theme-dark :is(input, textarea):focus,
-html.theme-dark .mdc-text-field--focused {
-  border-color: var(--c-accent) !important;
-  outline: 1px solid var(--c-accent) !important;
+html.theme-dark .tc-text-field .tc-text-field__input {
+  background-color: transparent !important;
+  border: none !important;
+  color: var(--c-text) !important;
 }
-html.theme-dark :is(input, textarea, select):disabled {
-  color: var(--c-text-muted) !important;
+
+/* Notched Outline Borders (Outlined Text Fields & Selects) */
+html.theme-dark :is(.mdc-notched-outline__leading, .mdc-notched-outline__notch, .mdc-notched-outline__trailing) {
+  border-color: var(--c-border) !important;
+}
+html.theme-dark :is(.tc-text-field, .tc-select, .mdc-text-field):not([class*="--disabled"]):not(.mdc-text-field--focused):hover
+  :is(.mdc-notched-outline__leading, .mdc-notched-outline__notch, .mdc-notched-outline__trailing) {
+  border-color: var(--c-text-muted) !important;
+}
+html.theme-dark :is(.mdc-text-field--focused, .tc-text-field--focused, .tc-select--open, .mdc-select--focused)
+  :is(.mdc-notched-outline__leading, .mdc-notched-outline__notch, .mdc-notched-outline__trailing) {
+  border-color: var(--c-accent) !important;
+}
+
+/* Focused Floating Labels */
+html.theme-dark :is(.mdc-text-field--focused, .tc-text-field--focused, .tc-select--open, .mdc-select--focused, .mdc-select--activated)
+  :is(.mdc-floating-label, .tc-floating-label) {
+  color: var(--c-accent) !important;
+}
+
+/* Select Dropdown Chevron Icons */
+html.theme-dark :is(.mdc-select__dropdown-icon, .tc-select :is(.tc-text-field__postfix-container, .tc-select__postfix))
+  :is(svg, path, .material-icons, .tc-icon__icon) {
+  color: var(--c-icon-sidebar) !important;
+  fill: var(--c-icon-sidebar) !important;
+}
+
+/* Browser Autofill Inset Box-Shadow & Typography */
+html.theme-dark input:-webkit-autofill,
+html.theme-dark input:-webkit-autofill:hover,
+html.theme-dark input:-webkit-autofill:focus,
+html.theme-dark input:-webkit-autofill:active,
+html.theme-dark textarea:-webkit-autofill,
+html.theme-dark select:-webkit-autofill,
+html.theme-dark input:autofill,
+html.theme-dark input:autofill:hover,
+html.theme-dark input:autofill:focus,
+html.theme-dark input:autofill:active {
+  -webkit-box-shadow: 0 0 0 1000px var(--c-bg) inset !important;
+  box-shadow: 0 0 0 1000px var(--c-bg) inset !important;
+  -webkit-text-fill-color: var(--c-text) !important;
+  caret-color: var(--c-text) !important;
+  border-color: var(--c-border) !important;
+  transition: background-color 50000s ease-in-out 0s !important;
+}
+
+/* Disabled Form Controls */
+html.theme-dark :is(input, textarea, select):disabled,
+html.theme-dark :is(.tc-text-field--disabled, .mdc-text-field--disabled, .tc-select--disabled, .tc-select-container--disabled),
+html.theme-dark :is(.tc-text-field--disabled, .mdc-text-field--disabled, .tc-select--disabled)
+  :is(input, textarea, select, .tc-text-field__input, .mdc-floating-label, .tc-floating-label, .tc-icon__icon, .material-icons) {
   opacity: 0.6 !important;
   cursor: not-allowed !important;
+  color: var(--c-text-muted) !important;
 }
 
 /* 13. Buttons & Elevation Overlays */
