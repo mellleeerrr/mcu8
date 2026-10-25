@@ -330,11 +330,13 @@ html.theme-dark :is(.administration__title, .administration-button__text, .actio
   .main-card-header__title, .monitoring-list-header__title, .base-card__title,
   .tc-checkbox__text, .tc-switch__text, .tc-radio__text, .mdc-form-field,
   th, td, .main-table-head, .main-table-el--head,
+  .main-list-tools__main-text, .main-card-header__text,
+  .conference-mode-selector-item__text--primary,
   .mdc-select__selected-text, .tc-select__selected-text, .tc-select__value,
   .mdc-select__anchor span, .tc-select .tc-text-field__input--readonly-special,
   .tc-select-container input,
   .mdc-select__menu :is(.mdc-deprecated-list-item__text, .mdc-list-item__text, .tc-select__option-text),
-  .tc-select__context-menu :is(.tc-context-menu-item__text, .mdc-deprecated-list-item__text, .tc-select__option-text)) {
+  .tc-select__context-menu :is(.tc-context-menu-item__text, .tc-context-menu-item__text--primary, .mdc-deprecated-list-item__text, .tc-select__option-text)) {
   color: var(--c-text) !important;
 }
 
@@ -345,7 +347,9 @@ html.theme-dark :is(.main-form__subheader-text, .action-card__hint, .main-table-
   .main-blank__text--secondary, .main-blank__text,
   .mdc-floating-label, .mdc-floating-label--float-above, .tc-floating-label,
   .tc-text-field__label, .tc-select__label, .tc-select__placeholder,
-  .history-card-pagination__button, .map-hint, .role-user__chip) {
+  .history-card-pagination__button, .map-hint, .role-user__chip,
+  .monitoring-list-header__text, .conference-mode-selector-item__text--secondary,
+  .main-form__hint, .main-form-row__hint, .tc-checkbox__text span, .main-form-row-desc) {
   color: var(--c-text-muted) !important;
 }
 html.theme-dark ::placeholder {
@@ -423,7 +427,8 @@ html.theme-dark :is(.server-stats, .server-stats-compact) :is(.server-stats__ico
 }
 
 /* Safe SVG Rect Artifact Elimination */
-html.theme-dark svg :is(g[id*="Active_conferences"], [id*="Active_conferences"], svg) > rect:is([id*="Прямоугольник_3050"], [width="24"][height="24"]:first-child):is([fill="#fff"], [fill="#ffffff"], [fill="white"]) {
+html.theme-dark svg :is(g[id*="Active_conferences"], [id*="Active_conferences"], svg) > rect:is([id*="Прямоугольник_3050"], [width="24"][height="24"]:first-child):is([fill="#fff"], [fill="#ffffff"], [fill="white"]),
+html.theme-dark :is(.main-form-row, .main-form) svg rect[width="24"][height="24"]:first-child:is([fill="#fff"], [fill="#ffffff"], [fill="white"]) {
   fill: transparent !important;
 }
 
@@ -577,6 +582,12 @@ html.theme-dark :is(.tc-tab-bar, .mdc-tab-bar) {
 html.theme-dark :is(.tc-tab, .mdc-tab) .mdc-tab__text-label {
   color: var(--c-text-muted) !important;
 }
+html.theme-dark :is(.tc-tab, .mdc-tab):not(.tc-tab--active):not(.mdc-tab--active):hover {
+  background-color: var(--c-surface-hover) !important;
+}
+html.theme-dark :is(.tc-tab, .mdc-tab):not(.tc-tab--active):not(.mdc-tab--active):hover .mdc-tab__text-label {
+  color: #ffffff !important;
+}
 html.theme-dark :is(.tc-tab--active, .mdc-tab--active) .mdc-tab__text-label {
   color: var(--c-text) !important;
 }
@@ -645,14 +656,20 @@ html.theme-dark input:autofill:active {
   transition: background-color 50000s ease-in-out 0s !important;
 }
 
-/* Disabled Form Controls */
+/* Disabled Form Controls & Buttons */
 html.theme-dark :is(input, textarea, select):disabled,
 html.theme-dark :is(.tc-text-field--disabled, .mdc-text-field--disabled, .tc-select--disabled, .tc-select-container--disabled),
 html.theme-dark :is(.tc-text-field--disabled, .mdc-text-field--disabled, .tc-select--disabled)
-  :is(input, textarea, select, .tc-text-field__input, .mdc-floating-label, .tc-floating-label, .tc-icon__icon, .material-icons) {
+  :is(input, textarea, select, .tc-text-field__input, .mdc-floating-label, .tc-floating-label, .tc-icon__icon, .material-icons),
+html.theme-dark :is(button, .mdc-button):disabled,
+html.theme-dark :is(button, .mdc-button)[disabled] {
   opacity: 0.6 !important;
   cursor: not-allowed !important;
   color: var(--c-text-muted) !important;
+}
+html.theme-dark :is(.mdc-button--unelevated, .mdc-button--raised):disabled,
+html.theme-dark :is(.mdc-button--unelevated, .mdc-button--raised)[disabled] {
+  background-color: rgba(255, 255, 255, 0.12) !important;
 }
 
 /* 13. Buttons & Elevation Overlays */
@@ -662,9 +679,16 @@ html.theme-dark .tc-button.mdc-button--outlined:not(.navigation-menu-button *):n
   border: 1px solid var(--c-border) !important;
   color: var(--c-text) !important;
 }
-html.theme-dark .tc-button.mdc-button--unelevated[class*="--primary"],
-html.theme-dark .tc-button-container[class*="--primary"]:not(.navigation-menu-button) :is(.mdc-button--unelevated, .mdc-button--raised),
-html.theme-dark [data-qa="authorization-sign-in-button"] {
+html.theme-dark button.tc-button:is(.mdc-button--text):not(.tc-button--icon):not([class*="--danger"]):not(:disabled) {
+  color: var(--c-text-muted) !important;
+}
+html.theme-dark button.tc-button:is(.mdc-button--text):not(.tc-button--icon):not([class*="--danger"]):not(:disabled):hover {
+  color: #ffffff !important;
+  background-color: var(--c-surface-hover) !important;
+}
+html.theme-dark .tc-button.mdc-button--unelevated[class*="--primary"]:not(:disabled),
+html.theme-dark .tc-button-container[class*="--primary"]:not(.navigation-menu-button) :is(.mdc-button--unelevated, .mdc-button--raised):not(:disabled),
+html.theme-dark [data-qa="authorization-sign-in-button"]:not(:disabled) {
   background-color: var(--c-primary) !important;
   color: var(--c-text) !important;
   border: none !important;
@@ -674,7 +698,7 @@ html.theme-dark :is(.mdc-elevation-overlay, .mdc-switch__shadow .mdc-elevation-o
   opacity: 0 !important;
 }
 
-/* 14. Codian Layout Schemes (54 Layout Schemes) */
+/* 14. Codian Layout Schemes, Divider, Recording Options & Sliders */
 html.theme-dark :is(.codian-layout-scheme, .layout-scheme-item) {
   background-color: var(--c-surface) !important;
   border: 1px solid var(--c-border) !important;
@@ -685,6 +709,79 @@ html.theme-dark :is(.codian-layout-scheme, .layout-scheme-item):hover {
 html.theme-dark :is(.codian-layout-scheme--active, .layout-scheme-item--active) {
   border-color: var(--c-primary) !important;
   background-color: rgba(0, 136, 204, .25) !important;
+}
+
+/* Layout Audio Channels Divider Line (Neutralizes #dfdfdf in overrides) */
+html.theme-dark :is(.main-card-body.conference-audio-channels, .main-card-body.session-audio-channels) {
+  border-top-color: var(--c-divider) !important;
+}
+
+/* Presentation Cards ("Запись и трансляция") */
+html.theme-dark .recording-option {
+  background-color: var(--c-surface-card) !important;
+  border: 1px solid var(--c-border) !important;
+  color: var(--c-text-muted) !important;
+}
+html.theme-dark .recording-option:not(.recording-option--selected):hover {
+  background-color: var(--c-surface-hover) !important;
+  border-color: var(--c-accent) !important;
+}
+html.theme-dark .recording-option--selected {
+  background-color: var(--c-active) !important;
+  border-color: var(--c-accent) !important;
+  color: var(--c-text) !important;
+}
+html.theme-dark .recording-option__radio {
+  border-color: var(--c-text-muted) !important;
+}
+html.theme-dark .recording-option__radio--selected {
+  border-color: var(--c-accent) !important;
+}
+html.theme-dark .recording-option__radio--selected:after {
+  background-color: var(--c-accent) !important;
+}
+html.theme-dark .recording-option__icon:not(.recording-option__icon--active) svg {
+  fill: var(--c-icon-sidebar) !important;
+}
+html.theme-dark .recording-option--selected .recording-option__icon svg {
+  fill: #ffffff !important;
+}
+
+/* Conference Mode Cards ("Основное") */
+html.theme-dark .conference-mode-selector-item {
+  background-color: var(--c-surface) !important;
+  border: 1px solid var(--c-border) !important;
+}
+html.theme-dark .conference-mode-selector-item:hover:not(.conference-mode-selector-item--active) {
+  background-color: var(--c-surface-hover) !important;
+}
+html.theme-dark .conference-mode-selector-item--active {
+  background-color: var(--c-active) !important;
+  border-color: var(--c-accent) !important;
+}
+html.theme-dark .conference-mode-selector-item--active .conference-mode-selector-item__text--secondary {
+  color: #ffffff !important;
+}
+
+/* Sliders, Tracks & Value Markers */
+html.theme-dark .tc-slider-container .tc-slider .mdc-slider__track--active_fill {
+  border-color: var(--c-accent) !important;
+}
+html.theme-dark .tc-slider-container .tc-slider .mdc-slider__track--inactive {
+  background-color: var(--c-border) !important;
+  opacity: 1 !important;
+}
+html.theme-dark .tc-slider-container .mdc-slider__thumb-knob {
+  background-color: var(--c-accent) !important;
+  border-color: var(--c-accent) !important;
+}
+html.theme-dark .tc-slider-container .mdc-slider__pin {
+  background-color: var(--c-surface-card) !important;
+  color: var(--c-text) !important;
+  border: 1px solid var(--c-border) !important;
+}
+html.theme-dark .tc-slider-container .mdc-slider__pin-value-marker {
+  color: var(--c-text) !important;
 }
 
 /* 15. Scrollbars, Links, Chips & Focus Rings */
