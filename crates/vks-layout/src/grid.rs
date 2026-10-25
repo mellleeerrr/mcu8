@@ -72,7 +72,7 @@ fn grid_rects(n: usize, canvas: &Canvas) -> Vec<Rect> {
     let mut y = 0u32;
     for (r, &count) in row_counts.iter().enumerate() {
         let row_h = row_heights[r];
-        let base_w = if count > 0 { w / count } else { 0 };
+        let base_w = w.checked_div(count).unwrap_or(0);
         let mut x_cursor = 0u32;
         for c in 0..count {
             let tile_w = if c + 1 == count {

@@ -120,11 +120,7 @@ impl CircuitBreaker {
     /// Текущий fail rate в окне (для метрик).
     pub fn fail_rate_pct(&self) -> u64 {
         let (f, t) = self.fail_rate();
-        if t == 0 {
-            0
-        } else {
-            f * 100 / t
-        }
+        (f * 100).checked_div(t).unwrap_or(0)
     }
 
     /// Tick, до которого Open (если state == Open).

@@ -50,8 +50,13 @@ async function runAudit() {
   await page.addInitScript(() => {
     try {
       localStorage.setItem('VKS_PNM_THEME', 'dark');
-      document.documentElement.classList.add('theme-dark');
     } catch (_) {}
+  });
+
+  const pageErrors = [];
+  page.on('pageerror', err => {
+    console.error('[Playwright Audit] UNCAUGHT PAGE ERROR:', err.message);
+    pageErrors.push(err.message);
   });
 
   const report = {
@@ -198,7 +203,7 @@ async function runAudit() {
 
     report.routesVisited.push(domAudit);
     report.buttonsAudited += domAudit.buttons.length;
-    if (domAudit.lightBackgroundElements.length > 0) {
+    if (routeKey !== "21_theme_toggled_to_light" && domAudit.lightBackgroundElements.length > 0) {
       report.anomalies.push({
         route: routeKey,
         issues: domAudit.lightBackgroundElements
@@ -421,27 +426,29 @@ async function runAudit() {
   } catch (e) {}
 
   // 9. Test Theme Toggle Switch (Dark -> Light -> Dark)
-  try {
-    const toggleBtn = await page.$('#vks-theme-toggle-btn, .vks-theme-toggle button');
-    if (toggleBtn) {
-      console.log('[Playwright Audit] Toggling theme to Light mode...');
-      await toggleBtn.click();
-      await page.waitForTimeout(700);
-      await auditCurrentView('21_theme_toggled_to_light');
-
-      console.log('[Playwright Audit] Toggling theme BACK to Slate Dark mode...');
-      await toggleBtn.click();
-      await page.waitForTimeout(700);
-      await auditCurrentView('22_theme_toggled_back_to_dark');
-    }
-  } catch (e) {
-    console.warn('[Playwright Audit] Theme toggle error:', e.message);
-  }
-
+  console.log('[Playwright Audit] Verifying theme toggle button in header...');
+  const toggleBtn = await page.waitForSelector('.main-large-header__actions-wrapper #vks-theme-toggle-btn', { timeout: 5000 });
+  if (!toggleBtn) throw new Error('Theme toggle button not found in header!');
+  console.log('[Playwright Audit] Toggling theme to Light mode...');
+  await toggleBtn.click();
+  await page.waitForTimeout(700);
+  const isLight = await page.evaluate(() => document.documentElement.classList.contains('theme-light'));
+  if (!isLight) throw new Error('Theme did not switch to theme-light after click!');
+  await auditCurrentView('21_theme_toggled_to_light');
+  console.log('[Playwright Audit] Toggling theme BACK to Telegram Dark mode...');
+  await toggleBtn.click();
+  await page.waitForTimeout(700);
+  const isDark = await page.evaluate(() => document.documentElement.classList.contains('theme-dark'));
+  if (!isDark) throw new Error('Theme did not switch back to theme-dark after click!');
+  await auditCurrentView('22_theme_toggled_back_to_dark');
   await browser.close();
 
+  report.pageErrors = pageErrors;
   const reportFile = path.join(OUT_DIR, 'audit_report.json');
   fs.writeFileSync(reportFile, JSON.stringify(report, null, 2));
+  if (pageErrors.length > 0) {
+    throw new Error(`Audit failed with ${pageErrors.length} uncaught page errors: ${pageErrors.join("; ")}`);
+  }
   console.log(`[Playwright Audit] Audit complete! Report written to: ${reportFile}`);
   console.log(`[Playwright Audit] Views Audited: ${report.routesVisited.length}`);
   console.log(`[Playwright Audit] Total Buttons Audited: ${report.buttonsAudited}`);

@@ -159,14 +159,13 @@ pub fn parse(id: &str) -> Option<GridScheme> {
             }
             seen_gap = true;
             options.gap = parse_option(value)?;
-        } else if let Some(value) = token.strip_prefix('m') {
+        } else {
+            let value = token.strip_prefix('m')?;
             if seen_margin {
-                return None; // дубль
+                return None; // ?????
             }
             seen_margin = true;
             options.margin = parse_option(value)?;
-        } else {
-            return None;
         }
     }
     Some(GridScheme { count, pin, options })
