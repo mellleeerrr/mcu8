@@ -79,10 +79,12 @@
   color: #00a1f2;
   border-color: #00a1f2;
 }
-/* Калибровка (T1.1): прячем кнопку раздела Calibration на экране Administration
-   и первую плитку статистики в шапке (HeaderLarge/HeaderCompact) — оба ведут
-   на /administration/calibration; deep-link уводит серверный 308. */
+/* Калибровка (T1.1): прячем кнопку раздела Calibration на экране Administration,
+   ее родительский контейнер-рамку в сетке Administration и первую плитку статистики
+   в шапке (HeaderLarge/HeaderCompact) — оба ведут на /administration/calibration;
+   deep-link уводит серверный 308. */
 [data-qa="administration-calibration-button"],
+.administration-button:has(> [data-qa="administration-calibration-button"]),
 .server-stats .server-stats__item:first-child {
   display: none !important;
 }
@@ -332,6 +334,8 @@ html.theme-dark :is(.administration__title, .administration-button__text, .actio
   th, td, .main-table-head, .main-table-el--head,
   .main-list-tools__main-text, .main-card-header__text,
   .conference-mode-selector-item__text--primary,
+  .logs__title, .info-main__text--secondary, .tc-modal__header-desc,
+  .the-confirmer-popup__content-text, .tc-date-picker__month-name,
   .mdc-select__selected-text, .tc-select__selected-text, .tc-select__value,
   .mdc-select__anchor span, .tc-select .tc-text-field__input--readonly-special,
   .tc-select-container input,
@@ -347,9 +351,11 @@ html.theme-dark :is(.main-form__subheader-text, .action-card__hint, .main-table-
   .main-blank__text--secondary, .main-blank__text,
   .mdc-floating-label, .mdc-floating-label--float-above, .tc-floating-label,
   .tc-text-field__label, .tc-select__label, .tc-select__placeholder,
-  .history-card-pagination__button, .map-hint, .role-user__chip,
+  .history-card-pagination__button, .map-hint,
   .monitoring-list-header__text, .conference-mode-selector-item__text--secondary,
-  .main-form__hint, .main-form-row__hint, .tc-checkbox__text span, .main-form-row-desc) {
+  .main-form__hint, .main-form-row__hint, .tc-checkbox__text span, .main-form-row-desc,
+  .info-main__text--primary, .user-info-additional__title,
+  .tc-date-picker__weekdays, .tc-date-picker__weekdays .tc-date-picker__cell) {
   color: var(--c-text-muted) !important;
 }
 html.theme-dark ::placeholder {
@@ -379,10 +385,18 @@ html.theme-dark :is(.text--success, .tc-icon--green, .monitoring-list-item--gree
 html.theme-dark .mdc-checkbox__checkmark-path { stroke: #ffffff !important; }
 
 /* 7. Icons: Content (#A5D5EE) vs Header (#FFFFFF) with Deep Parent Guards */
-html.theme-dark :is(.main-card, .main-list, .main-table, .administration-screen, .monitoring-screen)
-  :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo)):not(:is([class*="--danger"], [class*="--warning"], [class*="--success"], [class*="--red"], [class*="--green"], [class*="--yellow"], .audio-power, .audio-level, .tc-chip, [class*="title-chip"], .server-status-icon, [class*="avatar-status"]) *) {
+html.theme-dark :is(.main-card, .main-list, .main-table, .administration-screen, .monitoring-screen, .tc-modal, .mdc-dialog, [role="dialog"], .user-card)
+  :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo)):not(:is([class*="--danger"], [class*="--warning"], [class*="--success"], [class*="--red"], [class*="--green"], [class*="--yellow"], .audio-power, .audio-level, .tc-chip, [class*="title-chip"], .server-status-icon, [class*="avatar-status"], .tc-modal__header-button, .tc-modal__close, [data-qa*="close"]) *) {
   color: var(--c-icon-sidebar) !important;
   fill: var(--c-icon-sidebar) !important;
+}
+html.theme-dark :is(.tc-modal, .mdc-dialog) :is(.tc-modal__header-button, .tc-modal__close, [data-qa*="close"]) :is(button, .material-icons, .tc-icon__icon, svg) {
+  color: var(--c-text-muted) !important;
+  fill: var(--c-text-muted) !important;
+}
+html.theme-dark :is(.tc-modal, .mdc-dialog) :is(.tc-modal__header-button, .tc-modal__close, [data-qa*="close"]):hover :is(button, .material-icons, .tc-icon__icon, svg) {
+  color: #ffffff !important;
+  fill: #ffffff !important;
 }
 html.theme-dark :is(.main-large-header, .main-compact-header)
   :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo), #vks-theme-toggle-btn svg, #vks-theme-toggle-btn .material-icons):not(:is(.navigation-menu-button:not(.navigation-menu-button--active) *, .server-stats *, .header-profile-menu__item--danger *)) {
@@ -792,10 +806,13 @@ html.theme-dark .server-info-block .pn-link {
   text-decoration: underline;
   background-color: transparent !important;
 }
-html.theme-dark :is(.map-hint, .role-user__chip, .role-user__chip--undeletable) {
+html.theme-dark :is(.map-hint, .role-user__chip, .role-user__chip--undeletable, .tc-chip, .user-info-additional__chip .tc-chip, .role-chip) {
   background-color: var(--c-surface-card) !important;
-  color: var(--c-text-muted) !important;
+  color: var(--c-text) !important;
   border: 1px solid var(--c-border) !important;
+}
+html.theme-dark :is(.tc-chip, .user-info-additional__chip .tc-chip, .role-chip) :is(.tc-chip__text, .tc-chip__content) {
+  color: var(--c-text) !important;
 }
 html.theme-dark *::-webkit-scrollbar {
   width: 8px !important;
@@ -809,6 +826,74 @@ html.theme-dark *::-webkit-scrollbar-thumb {
 html.theme-dark *:focus-visible {
   outline: 2px solid var(--c-accent) !important;
   outline-offset: 2px !important;
+}
+
+/* 16. Date Picker Cells & Active States (History & Schedules) */
+html.theme-dark .tc-date-picker__grid .tc-date-picker__cell:not(.tc-date-picker__cell--disabled):not(.tc-date-picker__cell--unavailable) {
+  color: var(--c-text) !important;
+}
+html.theme-dark .tc-date-picker__grid .tc-date-picker__cell:is(.tc-date-picker__cell--disabled, .tc-date-picker__cell--unavailable) {
+  color: rgba(255, 255, 255, 0.28) !important;
+}
+html.theme-dark .tc-date-picker__grid .tc-date-picker__cell:hover:not(.tc-date-picker__cell--disabled):not(.tc-date-picker__cell--unavailable) {
+  background-color: var(--c-surface-hover) !important;
+  border-color: var(--c-accent) !important;
+}
+html.theme-dark .tc-date-picker__cell--today {
+  color: var(--c-accent) !important;
+  background-color: rgba(42, 171, 238, 0.15) !important;
+}
+html.theme-dark .tc-date-picker :is(.tc-date-picker__cell--selected, .tc-date-picker__cell--selected-area) {
+  background-color: var(--c-primary) !important;
+  color: #ffffff !important;
+}
+html.theme-dark .tc-date-picker__button :is(.material-icons, .tc-icon__icon) {
+  color: var(--c-icon-sidebar) !important;
+}
+
+/* 17. Toasts, Snackbars & Clipboard Notifications */
+html.theme-dark .notifier__item-container:not(.notifier__item-container--success):not(.notifier__item-container--danger) {
+  background-color: var(--c-surface-card) !important;
+  border: 1px solid var(--c-border) !important;
+  color: var(--c-text) !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5) !important;
+}
+html.theme-dark .notifier__item-container :is(.notifier__text-content, .notifier__text-content p, .notifier__text-content span) {
+  color: var(--c-text) !important;
+}
+html.theme-dark .notifier__item-container .notifier__text-content a {
+  color: var(--c-accent) !important;
+}
+html.theme-dark .notifier__item-container .notifier__close-button :is(.material-icons, .tc-icon__icon, svg) {
+  color: var(--c-text-muted) !important;
+}
+html.theme-dark .notifier__item-container .notifier__close-button:hover :is(.material-icons, .tc-icon__icon, svg) {
+  color: #ffffff !important;
+}
+html.theme-dark .notifier__item-container--success {
+  background-color: #2e7d32 !important;
+  border: 1px solid #4caf50 !important;
+  color: #ffffff !important;
+}
+html.theme-dark .notifier__item-container--danger {
+  background-color: #c62828 !important;
+  border: 1px solid #f44336 !important;
+  color: #ffffff !important;
+}
+html.theme-dark :is(.tc-notifier-container .tc-notifier__item--default, .mdc-snackbar__surface) {
+  background-color: var(--c-surface-card) !important;
+  border: 1px solid var(--c-border) !important;
+  color: var(--c-text) !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5) !important;
+}
+html.theme-dark :is(.tc-notifier-container .tc-notifier__item-header-text, .tc-notifier-container .tc-notifier__item-content, .mdc-snackbar__label) {
+  color: var(--c-text) !important;
+}
+html.theme-dark .tc-notifier-container .tc-notifier__item-header-button :is(.material-icons, .tc-icon__icon, svg) {
+  color: var(--c-text-muted) !important;
+}
+html.theme-dark .mdc-snackbar__actions .mdc-button {
+  color: var(--c-accent) !important;
 }
 </style>
 </head>
