@@ -293,13 +293,17 @@ html.theme-dark .server-info-block .pn-brand { color: var(--c-text) !important; 
 /* 2. Headers, Sidebars, Cards & Panels */
 html.theme-dark :is(.main-large-header, .main-compact-header, .main-card, .base-card, .tc-card,
   .monitoring-list, .main-list, .main-list-content, .main-card-content, .base-card-content,
-  .bookmarks-drawer-items, .main-card-header, .monitoring-list-header) {
+  .bookmarks-drawer-items, .main-card-header, .monitoring-list-header, .sidebar-panel) {
   background-color: var(--c-surface) !important;
   border-color: var(--c-border) !important;
   color: var(--c-text) !important;
 }
 html.theme-dark :is(.main-card-header, .monitoring-list-header) {
   border-bottom: 1px solid var(--c-divider) !important;
+}
+html.theme-dark .sidebar-panel {
+  border-right: 1px solid var(--c-border) !important;
+  box-shadow: 4px 0 16px rgba(0, 0, 0, 0.4) !important;
 }
 
 /* 3. Popovers, Modals & Dropdowns */
@@ -311,7 +315,7 @@ html.theme-dark :is(.mdc-menu-surface, .tc-context-menu, .notification-center__m
   color: var(--c-text) !important;
   box-shadow: 0 8px 24px rgba(0, 0, 0, .5) !important;
 }
-html.theme-dark :is(.tc-modal-wrapper, .mdc-dialog__scrim) {
+html.theme-dark :is(.tc-modal-wrapper, .mdc-dialog__scrim, .sidebar-overlay) {
   background-color: rgba(0, 0, 0, .65) !important;
 }
 
@@ -341,8 +345,9 @@ html.theme-dark :is(.main-form__subheader-text, .action-card__hint, .main-table-
 html.theme-dark ::placeholder {
   color: var(--c-text-muted) !important;
 }
-html.theme-dark .main-form__subheader:after {
+html.theme-dark :is(.main-form__subheader:after, .sidebar-panel__divider) {
   background: var(--c-divider) !important;
+  border-color: var(--c-divider) !important;
 }
 
 /* 6. Semantic Status & Validation Guards (Prevent washing out reds/greens/yellows) */
@@ -372,24 +377,24 @@ html.theme-dark :is(.main-large-header, .main-compact-header)
 }
 
 /* 7b. Header Navigation & Server Stats (Task D1) */
-html.theme-dark :is(.main-large-header, .main-compact-header) .navigation-menu-button:is(.navigation-menu-button--active, .active, [aria-current="page"], .router-link-active) .tc-button {
+html.theme-dark :is(.main-large-header, .main-compact-header, .sidebar-panel) .navigation-menu-button:is(.navigation-menu-button--active, .active, [aria-current="page"], .router-link-active) .tc-button {
   background-color: var(--c-bg) !important;
 }
-html.theme-dark :is(.main-large-header, .main-compact-header) .navigation-menu-button:is(.navigation-menu-button--active, .active, [aria-current="page"], .router-link-active) :is(.tc-button__text, .mdc-button__label, .tc-button__icon, .mdc-button__icon, .material-icons, svg, path) {
+html.theme-dark :is(.main-large-header, .main-compact-header, .sidebar-panel) .navigation-menu-button:is(.navigation-menu-button--active, .active, [aria-current="page"], .router-link-active) :is(.tc-button__text, .mdc-button__label, .tc-button__icon, .mdc-button__icon, .material-icons, svg, path) {
   color: #ffffff !important;
   fill: #ffffff !important;
 }
-html.theme-dark :is(.main-large-header, .main-compact-header) .navigation-menu-button:not(.navigation-menu-button--active):not(.active):not([aria-current="page"]):not(.router-link-active) .tc-button {
+html.theme-dark :is(.main-large-header, .main-compact-header, .sidebar-panel) .navigation-menu-button:not(.navigation-menu-button--active):not(.active):not([aria-current="page"]):not(.router-link-active) .tc-button {
   background-color: transparent !important;
 }
-html.theme-dark :is(.main-large-header, .main-compact-header) .navigation-menu-button:not(.navigation-menu-button--active):not(.active):not([aria-current="page"]):not(.router-link-active) :is(.tc-button__text, .mdc-button__label, .tc-button__icon, .mdc-button__icon, .material-icons, svg, path) {
+html.theme-dark :is(.main-large-header, .main-compact-header, .sidebar-panel) .navigation-menu-button:not(.navigation-menu-button--active):not(.active):not([aria-current="page"]):not(.router-link-active) :is(.tc-button__text, .mdc-button__label, .tc-button__icon, .mdc-button__icon, .material-icons, svg, path) {
   color: var(--c-text-muted) !important;
   fill: var(--c-text-muted) !important;
 }
-html.theme-dark :is(.main-large-header, .main-compact-header) .navigation-menu-button:not(.navigation-menu-button--active):not(.active):not([aria-current="page"]):not(.router-link-active):hover .tc-button {
+html.theme-dark :is(.main-large-header, .main-compact-header, .sidebar-panel) .navigation-menu-button:not(.navigation-menu-button--active):not(.active):not([aria-current="page"]):not(.router-link-active):hover .tc-button {
   background-color: var(--c-surface-hover) !important;
 }
-html.theme-dark :is(.main-large-header, .main-compact-header) .navigation-menu-button:not(.navigation-menu-button--active):not(.active):not([aria-current="page"]):not(.router-link-active):hover :is(.tc-button__text, .mdc-button__label, .tc-button__icon, .mdc-button__icon, .material-icons, svg, path) {
+html.theme-dark :is(.main-large-header, .main-compact-header, .sidebar-panel) .navigation-menu-button:not(.navigation-menu-button--active):not(.active):not([aria-current="page"]):not(.router-link-active):hover :is(.tc-button__text, .mdc-button__label, .tc-button__icon, .mdc-button__icon, .material-icons, svg, path) {
   color: #ffffff !important;
   fill: #ffffff !important;
 }
@@ -439,6 +444,46 @@ html.theme-dark .header-profile-menu__item--danger :is(.header-profile-menu__ite
 }
 html.theme-dark .header-profile-menu__item--danger:hover {
   background-color: rgba(240, 67, 67, 0.15) !important;
+}
+
+
+/* 7c. Classic Drawer Navigation (Task D2) */
+html.theme-dark .sidebar-panel .profile-preview-info__button-compact {
+  background-color: var(--c-surface-card) !important;
+  border: 1px solid var(--c-border) !important;
+}
+html.theme-dark .sidebar-panel .profile-preview-info__button-compact:hover {
+  background-color: var(--c-surface-hover) !important;
+}
+html.theme-dark .sidebar-panel .profile-preview-info__text {
+  color: var(--c-text) !important;
+}
+html.theme-dark .sidebar-panel .tc-avatar__name-icon {
+  color: var(--c-icon-sidebar) !important;
+}
+html.theme-dark :is(.language-accordeon-switcher, .language-accordeon-list__item):hover {
+  background-color: var(--c-surface-hover) !important;
+}
+html.theme-dark :is(.language-accordeon-switcher__text, .language-accordeon-list__item-text, .navigation-mode-switch__text) {
+  color: var(--c-text) !important;
+}
+html.theme-dark :is(.language-accordeon-switcher__icon, .language-accordeon-switcher__arrow, .language-accordeon-list__item-icon) :is(.tc-icon__icon, .material-icons) {
+  color: var(--c-icon-sidebar) !important;
+}
+html.theme-dark .language-accordeon-list__item--active {
+  background-color: var(--c-active) !important;
+}
+html.theme-dark .language-accordeon-list__item--active :is(.language-accordeon-list__item-text, .tc-icon__icon, .material-icons) {
+  color: #ffffff !important;
+}
+html.theme-dark .sidebar-panel__logout-button {
+  color: #f04343 !important;
+}
+html.theme-dark .sidebar-panel__logout-button:hover {
+  background-color: rgba(240, 67, 67, 0.15) !important;
+}
+html.theme-dark .sidebar-panel__logout-button :is(.material-icons, .tc-icon__icon) {
+  color: #f04343 !important;
 }
 
 /* 8. Tables, Lists, Hover & Active States */
@@ -558,7 +603,7 @@ html.theme-dark .tc-button.mdc-button--outlined:not(.navigation-menu-button *):n
   color: var(--c-text) !important;
 }
 html.theme-dark .tc-button.mdc-button--unelevated[class*="--primary"],
-html.theme-dark .tc-button-container[class*="--primary"] :is(.mdc-button--unelevated, .mdc-button--raised),
+html.theme-dark .tc-button-container[class*="--primary"]:not(.navigation-menu-button) :is(.mdc-button--unelevated, .mdc-button--raised),
 html.theme-dark [data-qa="authorization-sign-in-button"] {
   background-color: var(--c-primary) !important;
   color: var(--c-text) !important;
