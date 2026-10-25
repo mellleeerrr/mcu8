@@ -361,14 +361,84 @@ html.theme-dark .mdc-checkbox__checkmark-path { stroke: #ffffff !important; }
 
 /* 7. Icons: Content (#A5D5EE) vs Header (#FFFFFF) with Deep Parent Guards */
 html.theme-dark :is(.main-card, .main-list, .main-table, .administration-screen, .monitoring-screen)
-  :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo)):not([class*="--danger"]):not([class*="--warning"]):not([class*="--success"]):not([class*="--red"]):not([class*="--green"]):not([class*="--yellow"]):not(.audio-power *):not(.audio-level *):not(:is([class*="--danger"], [class*="--warning"], [class*="--success"], [class*="--red"], [class*="--green"], [class*="--yellow"], .audio-power, .audio-level, .tc-chip, [class*="title-chip"], .server-status-icon, [class*="avatar-status"]) *) {
+  :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo)):not(:is([class*="--danger"], [class*="--warning"], [class*="--success"], [class*="--red"], [class*="--green"], [class*="--yellow"], .audio-power, .audio-level, .tc-chip, [class*="title-chip"], .server-status-icon, [class*="avatar-status"]) *) {
   color: var(--c-icon-sidebar) !important;
   fill: var(--c-icon-sidebar) !important;
 }
 html.theme-dark :is(.main-large-header, .main-compact-header)
-  :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo), #vks-theme-toggle-btn svg, #vks-theme-toggle-btn .material-icons) {
+  :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo), #vks-theme-toggle-btn svg, #vks-theme-toggle-btn .material-icons):not(:is(.navigation-menu-button:not(.navigation-menu-button--active) *, .server-stats *, .header-profile-menu__item--danger *)) {
   color: #ffffff !important;
   fill: #ffffff !important;
+}
+
+/* 7b. Header Navigation & Server Stats (Task D1) */
+html.theme-dark :is(.main-large-header, .main-compact-header) .navigation-menu-button:is(.navigation-menu-button--active, .active, [aria-current="page"], .router-link-active) .tc-button {
+  background-color: var(--c-bg) !important;
+}
+html.theme-dark :is(.main-large-header, .main-compact-header) .navigation-menu-button:is(.navigation-menu-button--active, .active, [aria-current="page"], .router-link-active) :is(.tc-button__text, .mdc-button__label, .tc-button__icon, .mdc-button__icon, .material-icons, svg, path) {
+  color: #ffffff !important;
+  fill: #ffffff !important;
+}
+html.theme-dark :is(.main-large-header, .main-compact-header) .navigation-menu-button:not(.navigation-menu-button--active):not(.active):not([aria-current="page"]):not(.router-link-active) .tc-button {
+  background-color: transparent !important;
+}
+html.theme-dark :is(.main-large-header, .main-compact-header) .navigation-menu-button:not(.navigation-menu-button--active):not(.active):not([aria-current="page"]):not(.router-link-active) :is(.tc-button__text, .mdc-button__label, .tc-button__icon, .mdc-button__icon, .material-icons, svg, path) {
+  color: var(--c-text-muted) !important;
+  fill: var(--c-text-muted) !important;
+}
+html.theme-dark :is(.main-large-header, .main-compact-header) .navigation-menu-button:not(.navigation-menu-button--active):not(.active):not([aria-current="page"]):not(.router-link-active):hover .tc-button {
+  background-color: var(--c-surface-hover) !important;
+}
+html.theme-dark :is(.main-large-header, .main-compact-header) .navigation-menu-button:not(.navigation-menu-button--active):not(.active):not([aria-current="page"]):not(.router-link-active):hover :is(.tc-button__text, .mdc-button__label, .tc-button__icon, .mdc-button__icon, .material-icons, svg, path) {
+  color: #ffffff !important;
+  fill: #ffffff !important;
+}
+
+/* Server Statistics Counters & Cyan Icons */
+html.theme-dark :is(.server-stats, .server-stats-compact) {
+  border-color: var(--c-border) !important;
+  color: var(--c-text-muted) !important;
+}
+html.theme-dark :is(.server-stats, .server-stats-compact) :is(.server-stats__desc, .server-stats__value, .server-stats__count) {
+  color: #ffffff !important;
+}
+html.theme-dark :is(.server-stats, .server-stats-compact) :is(.server-stats__icon, .tc-icon__icon, .material-icons, svg, path) {
+  color: var(--c-icon-sidebar) !important;
+  fill: var(--c-icon-sidebar) !important;
+}
+
+/* Safe SVG Rect Artifact Elimination */
+html.theme-dark svg :is(g[id*="Active_conferences"], [id*="Active_conferences"], svg) > rect:is([id*="Прямоугольник_3050"], [width="24"][height="24"]:first-child):is([fill="#fff"], [fill="#ffffff"], [fill="white"]) {
+  fill: transparent !important;
+}
+
+/* Profile Dropdown Menu & User Preview */
+html.theme-dark .header-profile-info {
+  background-color: var(--c-surface-card) !important;
+}
+html.theme-dark .profile-preview-info__button {
+  background-color: var(--c-surface) !important;
+}
+html.theme-dark .profile-preview-info__button:hover {
+  background-color: var(--c-surface-hover) !important;
+}
+html.theme-dark :is(.profile-preview-info__text, .header-profile-menu__header-text, .header-profile-menu__item:not([class*="--danger"]) :is(.header-profile-menu__item-text, .tc-icon__icon, .material-icons, svg, path)) {
+  color: #ffffff !important;
+  fill: #ffffff !important;
+}
+html.theme-dark .header-profile-menu__item:not([class*="--danger"]):hover {
+  background-color: var(--c-surface-hover) !important;
+}
+html.theme-dark .header-profile__divider {
+  border-top-color: var(--c-border) !important;
+}
+html.theme-dark .header-profile-menu__item--danger,
+html.theme-dark .header-profile-menu__item--danger :is(.header-profile-menu__item-text, .tc-icon__icon, .material-icons, svg, path) {
+  color: #f04343 !important;
+  fill: #f04343 !important;
+}
+html.theme-dark .header-profile-menu__item--danger:hover {
+  background-color: rgba(240, 67, 67, 0.15) !important;
 }
 
 /* 8. Tables, Lists, Hover & Active States */
@@ -481,8 +551,8 @@ html.theme-dark :is(input, textarea, select):disabled {
 }
 
 /* 13. Buttons & Elevation Overlays */
-html.theme-dark .tc-button.mdc-button--unelevated:not([class*="--primary"]):not([class*="--danger"]):not(:disabled),
-html.theme-dark .tc-button.mdc-button--outlined:not(:disabled) {
+html.theme-dark .tc-button.mdc-button--unelevated:not([class*="--primary"]):not([class*="--danger"]):not(.navigation-menu-button *):not(:disabled),
+html.theme-dark .tc-button.mdc-button--outlined:not(.navigation-menu-button *):not(:disabled) {
   background-color: var(--c-surface-hover) !important;
   border: 1px solid var(--c-border) !important;
   color: var(--c-text) !important;

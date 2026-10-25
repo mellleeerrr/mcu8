@@ -224,7 +224,7 @@ async function runValidation() {
     // ZONE 6: Header & Toggle
     console.log('[TDD Audit] Auditing Zone 6: Header & Toggle...');
     const zone6 = { name: 'Header Icons & Toggle', checks: [] };
-    const headerIcons = await page.locator('.main-large-header .material-icons, .main-large-header .tc-icon__icon').all();
+    const headerIcons = await page.locator('.main-large-header__actions-wrapper .material-icons, .main-large-header__actions-wrapper .tc-icon__icon, #vks-theme-toggle-btn svg, .navigation-menu-button--active .tc-button__icon').all();
     if (headerIcons.length > 0) {
       const hColor = await headerIcons[0].evaluate(el => window.getComputedStyle(el).color);
       zone6.checks.push({ check: 'Header icon is white #FFFFFF', color: hColor, pass: isWhiteOrNearWhite(hColor) });
