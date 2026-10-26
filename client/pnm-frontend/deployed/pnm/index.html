@@ -348,6 +348,9 @@ html.theme-dark :is(.mdc-menu-surface, .tc-context-menu, .notification-center__m
 html.theme-dark :is(.tc-modal-wrapper, .mdc-dialog__scrim, .sidebar-overlay) {
   background-color: rgba(0, 0, 0, .65) !important;
 }
+html.theme-dark .address-manager .tc-modal__content {
+  border-bottom: 1px solid var(--c-divider) !important;
+}
 
 /* 4. Primary Typography (Direct Terminal Targeting - forces #FFFFFF) */
 html.theme-dark :is(.administration__title, .administration-button__text, .action-card__title,
@@ -395,7 +398,9 @@ html.theme-dark :is(.administration__title, .administration-button__text, .actio
   .terminal-card-info-row__value-text,
   .terminal-card__title,
   .statistics-card__header-value,
-  .about-version-popup__text--primary) {
+  .about-version-popup__text--primary,
+  .address-manager-general-autocomplete-item__title,
+  .address-manager-general-autocomplete-item__subtitle strong) {
   color: var(--c-text) !important;
 }
 
@@ -443,11 +448,15 @@ html.theme-dark :is(.main-form__subheader-text, .action-card__hint, .main-table-
   .conference-audiochannel-listeners-blank__text,
   .conference-audiochannel-speakers-blank__text,
   .session-audiochannel-listeners-blank__text,
-  .session-audiochannel-speakers-blank__text) {
+  .session-audiochannel-speakers-blank__text,
+  .address-manager-general-autocomplete-item__subtitle) {
   color: var(--c-text-muted) !important;
 }
 html.theme-dark ::placeholder {
   color: var(--c-text-muted) !important;
+}
+html.theme-dark :is(.main-form__subheader--no-line, .main-form-subheader--no-line):after {
+  display: none !important;
 }
 html.theme-dark :is(.main-form__subheader:after, .sidebar-panel__divider, .group-list-item__separator,
   .dynamic-layout-configurator-selector, .dynamic-layout-configurator-counter,
@@ -468,8 +477,10 @@ html.theme-dark :is(.tc-text-field--error, .mdc-text-field--invalid, .tc-select-
       .tc-notched-outline__leading, .tc-notched-outline__notch, .tc-notched-outline__trailing) {
   border-color: #f04343 !important;
 }
-html.theme-dark :is(.text--warning, .tc-icon--orange, .tc-icon--yellow) {
+html.theme-dark :is(.text--warning, .tc-icon--orange, .tc-icon--yellow, .checkbox-form__checkbox-icon, .checkbox-form__checkbox-icon *) {
   color: #ff9800 !important;
+  fill: #ff9800 !important;
+  fill-opacity: 1 !important;
 }
 html.theme-dark :is(.text--success, .tc-icon--green, .monitoring-list-item--green:before) {
   color: #4caf50 !important;
@@ -517,7 +528,7 @@ html.theme-dark .mdc-radio .mdc-radio__native-control:enabled + .mdc-radio__back
 
 /* 7. Icons: Content (#A5D5EE) vs Header (#FFFFFF) */
 html.theme-dark :is(.main-card, .main-list, .main-table, .administration-screen, .monitoring-screen, .tc-modal, .mdc-dialog, [role="dialog"], .user-card, .base-layout-configurator, .event-list-info)
-  :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo)):not(:is([class*="--danger"], [class*="--warning"], [class*="--success"], [class*="--red"], [class*="--green"], [class*="--yellow"], .audio-power, .audio-level, .tc-chip, [class*="title-chip"], .server-status-icon, [class*="avatar-status"], .tc-modal__header-button, .tc-modal__close, [data-qa*="close"]) *) {
+  :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo)):not(:is([class*="--danger"], [class*="--warning"], [class*="--success"], [class*="--red"], [class*="--green"], [class*="--yellow"], .checkbox-form__checkbox-icon, .audio-power, .audio-level, .tc-chip, [class*="title-chip"], .server-status-icon, [class*="avatar-status"], .tc-modal__header-button, .tc-modal__close, [data-qa*="close"]) *) {
   color: var(--c-icon-sidebar) !important;
   fill: var(--c-icon-sidebar) !important;
 }
@@ -546,6 +557,12 @@ html.theme-dark :is(.main-large-header, .main-compact-header)
   :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo), #vks-theme-toggle-btn svg, #vks-theme-toggle-btn .material-icons):not(:is(.navigation-menu-button:not(.navigation-menu-button--active) *, .server-stats *, .header-profile-menu__item--danger *)) {
   color: #ffffff !important;
   fill: #ffffff !important;
+}
+
+/* SVG Fill Normalization for hardcoded black fills (overrides vendor inline black attributes) */
+html.theme-dark path:is([fill="black"], [fill="#000000"]):not(:is([class*="--danger"], [class*="--warning"], [class*="--success"], [class*="--red"], [class*="--green"], [class*="--yellow"], [class*="--orange"], .checkbox-form__checkbox-icon, .tc-modal__close, [data-qa*="close"], .brand-logo) *) {
+  fill: var(--c-icon-sidebar) !important;
+  fill-opacity: 1 !important;
 }
 
 /* SVG Stroke Normalization (Inherits currentColor across all states with safety exclusions) */
@@ -681,10 +698,11 @@ html.theme-dark :is(.main-table-line, .main-list-item, .main-table-line--gray) {
 }
 html.theme-dark :is(.main-table-line--hoverable:not(.main-table-line--active):hover,
   .main-list-item:not(.main-list-item--active):not(.main-list-item--selected):hover,
-  .tc-context-menu-item:hover, .mdc-deprecated-list-item:hover) {
+  .tc-context-menu-item:hover, .mdc-deprecated-list-item:hover,
+  .address-manager-general-autocomplete-item:hover) {
   background-color: var(--c-surface-hover) !important;
 }
-html.theme-dark :is(.main-table-line--active, .main-list-item--active, .main-list-item--selected) {
+html.theme-dark :is(.main-table-line--active, .main-list-item--active, .main-list-item--selected, .tc-context-menu-item--selected, .tc-context-menu-item[aria-selected="true"]) {
   background-color: var(--c-active) !important;
   color: var(--c-text) !important;
 }
@@ -747,9 +765,10 @@ html.theme-dark .action-card--danger .action-card__button :is(.mdc-button--tone,
 }
 
 /* 11. Tabs & Navigation */
-html.theme-dark :is(.tc-tab-bar, .mdc-tab-bar) {
+html.theme-dark :is(.tc-tabs, .tc-tab-bar, .mdc-tab-bar) {
   background-color: var(--c-surface) !important;
   border-bottom: 1px solid var(--c-divider) !important;
+  box-shadow: none !important;
 }
 html.theme-dark :is(.tc-tab, .mdc-tab) .mdc-tab__text-label {
   color: var(--c-text-muted) !important;
@@ -876,7 +895,7 @@ html.theme-dark :is(.tc-select, .tc-select-container, .tc-text-field, .tc-text-f
 }
 
 /* 13. Buttons & Elevation Overlays */
-html.theme-dark .tc-button.mdc-button--unelevated:not([class*="--primary"]):not([class*="--danger"]):not(.navigation-menu-button *):not(:disabled),
+html.theme-dark .tc-button.mdc-button--unelevated:not([class*="--primary"]):not([class*="--danger"]):not(.navigation-menu-button *):not(.radiobutton-item *):not(:disabled),
 html.theme-dark .tc-button.mdc-button--outlined:not(.navigation-menu-button *):not(:disabled) {
   background-color: var(--c-surface-hover) !important;
   border: 1px solid var(--c-border) !important;
@@ -895,6 +914,21 @@ html.theme-dark [data-qa="authorization-sign-in-button"]:not(:disabled) {
   background-color: var(--c-primary) !important;
   color: var(--c-text) !important;
   border: none !important;
+}
+html.theme-dark .address-manager-general__button .tc-button.mdc-button--outlined:not(:disabled) {
+  background-color: var(--c-surface-hover) !important;
+  border-color: var(--c-border) !important;
+}
+html.theme-dark .address-manager-general__button .tc-button.mdc-button--outlined:not(:disabled):hover {
+  border-color: var(--c-accent) !important;
+}
+html.theme-dark .address-manager-general__button .tc-button.mdc-button--outlined:not(:disabled):hover :is(svg, path) {
+  color: #ffffff !important;
+  fill: #ffffff !important;
+}
+html.theme-dark .address-manager-general__button .tc-button.mdc-button--outlined svg path:is(.line, [fill*="E85D4E"], [fill*="F04343"]) {
+  fill: #f04343 !important;
+  color: #f04343 !important;
 }
 html.theme-dark .mdc-elevation-overlay {
   display: none !important;
@@ -915,13 +949,42 @@ html.theme-dark :is(.codian-layout-scheme--active, .layout-scheme-item--active, 
 html.theme-dark .layout-size-range-selector__item--saved .tc-button:not([disabled]) {
   border-color: var(--c-border) !important;
 }
-html.theme-dark .radiobutton-item--active .tc-button:not([disabled]) {
+html.theme-dark .radiobutton-content {
+  background-color: var(--c-surface) !important;
+  box-shadow: inset 0 0 0 1px var(--c-border) !important;
+}
+html.theme-dark .radiobutton-item:not(.radiobutton-item--active) .tc-button:not([disabled]) {
+  background-color: transparent !important;
+  border-color: transparent !important;
+}
+html.theme-dark .radiobutton-item .tc-button:not([disabled]) :is(.mdc-button__label, .tc-button__text, .tc-button__icon, .material-icons, svg, path) {
+  color: var(--c-text-muted) !important;
+  fill: var(--c-text-muted) !important;
+}
+html.theme-dark .radiobutton-item:hover:not(.radiobutton-item--active) .tc-button:not([disabled]) {
+  background-color: var(--c-surface-hover) !important;
+}
+html.theme-dark .radiobutton-item:not(:first-child, .radiobutton-item--active):before {
+  background: var(--c-divider) !important;
+}
+html.theme-dark :is(.radiobutton-item, [class*="radiobutton-item"]).radiobutton-item--active .tc-button:not([disabled]) {
   background-color: var(--c-active) !important;
   border-color: var(--c-accent) !important;
 }
-html.theme-dark :is(.layout-scheme-selector-item--active svg *, .radiobutton-item--active .tc-button:not([disabled]) :is(.mdc-button__label, .tc-button__text, .tc-button__icon, .material-icons, svg, path)) {
+html.theme-dark :is(
+  .layout-scheme-selector-item--active svg *,
+  .radiobutton-item:is(:hover:not(.radiobutton-item--active), .radiobutton-item--active) .tc-button:not([disabled]) :is(.mdc-button__label, .tc-button__text, .tc-button__icon, .material-icons, svg, path)
+) {
   color: #ffffff !important;
   fill: #ffffff !important;
+}
+html.theme-dark .radiobutton-item .tc-button:disabled {
+  border-color: transparent !important;
+}
+html.theme-dark .radiobutton-item .tc-button:disabled :is(.mdc-button__label, .tc-button__text, .tc-button__icon, .material-icons, svg, path) {
+  color: var(--c-text-muted) !important;
+  fill: var(--c-text-muted) !important;
+  opacity: 0.6 !important;
 }
 html.theme-dark :is(.layouts-item__icon, .layout-scheme-selector-item--active) svg .overlap {
   fill: var(--c-surface) !important;

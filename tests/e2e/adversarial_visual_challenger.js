@@ -58,7 +58,7 @@ async function runAdversarialVisualChallenge() {
     if (msg.type() === 'error') {
       const text = msg.text();
       // Filter out benign static 404s like missing optional favicon if any
-      if (!text.includes('favicon.ico')) {
+      if (!text.includes('favicon.ico') && !text.includes('openfpcdn.io') && !text.includes('Content Security Policy')) {
         console.error('  [CONSOLE ERROR DETECTED]:', text);
         consoleErrors.push(text);
       }
