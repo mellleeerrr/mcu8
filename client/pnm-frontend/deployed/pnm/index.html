@@ -291,6 +291,8 @@ html.theme-dark {
   --c-accent: #2aabee;
   --c-icon-sidebar: #a5d5ee;
   --c-active: #2b5278;
+  --mdc-checkbox-unchecked-color: var(--c-text-muted);
+  --mdc-checkbox-checked-color: var(--c-primary);
 }
 
 /* 1. Global Shell & Screen Surfaces */
@@ -308,8 +310,8 @@ html.theme-dark .server-info-block .pn-brand { color: var(--c-text) !important; 
 html.theme-dark :is(.main-large-header, .main-compact-header, .main-card, .base-card, .tc-card,
   .monitoring-list, .main-list, .main-list-content, .main-card-content, .base-card-content,
   .bookmarks-drawer-items, .main-card-header, .monitoring-list-header, .sidebar-panel,
-  .base-layout-configurator-side-panel, .base-layout-configurator-content,
-  .auto-layout-configurator-content, .dynamic-layout-configurator-content,
+  [class*="-layout-configurator-side-panel"], [class*="-layout-configurator-content"],
+  .layout-body, .layout-body-content,
   .skeleton-layout, .monitoring-address-book__header, .event-list-info__invoker-block) {
   background-color: var(--c-surface) !important;
   background: var(--c-surface) !important;
@@ -327,6 +329,9 @@ html.theme-dark .event-list-info__invoker-block {
   background-color: var(--c-surface-card) !important;
   background: var(--c-surface-card) !important;
   border: 1px solid var(--c-border) !important;
+}
+html.theme-dark :is(.conference-layouts-item, .session-layouts-item):hover {
+  background-color: var(--c-surface-hover) !important;
 }
 
 /* 3. Popovers, Modals & Dropdowns */
@@ -364,6 +369,8 @@ html.theme-dark :is(.administration__title, .administration-button__text, .actio
   .mdc-select__menu :is(.mdc-deprecated-list-item__text, .mdc-list-item__text, .tc-select__option-text),
   .tc-select__context-menu :is(.tc-context-menu-item__text, .tc-context-menu-item__text--primary, .mdc-deprecated-list-item__text, .tc-select__option-text),
   .layout-header-info__title, .layout-mode-selector-item__text,
+  .layout-size-range-selector__text, .dynamic-layout-configurator-counter__text,
+  .layout-grid-slot__header p, .layout-grid-slot-dn__text,
   .base-layout-configurator .tc-tab__content,
   .main-route--monitoring-conferences-layouts .navigation-menu-button .tc-button__content,
   .license-information-item__title,
@@ -427,18 +434,29 @@ html.theme-dark :is(.main-form__subheader-text, .action-card__hint, .main-table-
   .statistics-memory__content--desc,
   .statistics-network__content-name--title,
   .statistics-network__content--desc,
-  .media-preview-plug__hint) {
+  .media-preview-plug__hint,
+  .layout-header-info__desc,
+  .layout-mode-selector-item:not(.layout-mode-selector-item--active) .layout-mode-selector-item__description,
+  .auto-layout-configurator-side-panel__text,
+  .auto-layout-configurator-content__text,
+  .dynamic-layout-configurator-content__text,
+  .conference-audiochannel-listeners-blank__text,
+  .conference-audiochannel-speakers-blank__text,
+  .session-audiochannel-listeners-blank__text,
+  .session-audiochannel-speakers-blank__text) {
   color: var(--c-text-muted) !important;
 }
 html.theme-dark ::placeholder {
   color: var(--c-text-muted) !important;
 }
-html.theme-dark :is(.main-form__subheader:after, .sidebar-panel__divider, .group-list-item__separator) {
+html.theme-dark :is(.main-form__subheader:after, .sidebar-panel__divider, .group-list-item__separator,
+  .dynamic-layout-configurator-selector, .dynamic-layout-configurator-counter,
+  .manual-layout-configurator-side-panel .layout-scheme-selector__row:not(:last-child):after) {
   background: var(--c-divider) !important;
   border-color: var(--c-divider) !important;
 }
 
-/* 6. Semantic Status & Validation Guards */
+/* 6. Semantic Status, Checkboxes & Radio Controls */
 html.theme-dark :is(.main-table-el__text--danger, .text--danger, .tc-icon--red,
   .mdc-text-field-helper-text--validation-msg, .tc-text-field__helper-text--validation-msg,
   .main-form-row__error,
@@ -456,7 +474,46 @@ html.theme-dark :is(.text--warning, .tc-icon--orange, .tc-icon--yellow) {
 html.theme-dark :is(.text--success, .tc-icon--green, .monitoring-list-item--green:before) {
   color: #4caf50 !important;
 }
-html.theme-dark .mdc-checkbox__checkmark-path { stroke: #ffffff !important; }
+
+/* Checkboxes (MDC & TC) */
+html.theme-dark .mdc-checkbox .mdc-checkbox__native-control:enabled:not(:checked):not(:indeterminate):not([data-indeterminate="true"]) ~ .mdc-checkbox__background {
+  border-color: var(--c-border) !important;
+  background-color: transparent !important;
+}
+html.theme-dark .mdc-checkbox:hover .mdc-checkbox__native-control:enabled:not(:checked):not(:indeterminate):not([data-indeterminate="true"]) ~ .mdc-checkbox__background {
+  border-color: var(--c-accent) !important;
+}
+html.theme-dark :is(.mdc-checkbox, .main-list-multi-tools__checkbox .tc-checkbox) .mdc-checkbox__native-control:enabled:is(:checked, :indeterminate, [data-indeterminate="true"]) ~ .mdc-checkbox__background {
+  background-color: var(--c-primary) !important;
+  border-color: var(--c-primary) !important;
+}
+html.theme-dark .mdc-checkbox .mdc-checkbox__native-control:is(:disabled, [disabled]):not(:checked):not(:indeterminate):not([data-indeterminate="true"]) ~ .mdc-checkbox__background {
+  border-color: rgba(255, 255, 255, 0.2) !important;
+  background-color: transparent !important;
+}
+html.theme-dark .mdc-checkbox .mdc-checkbox__native-control:is(:disabled, [disabled]):is(:checked, :indeterminate, [data-indeterminate="true"]) ~ .mdc-checkbox__background {
+  background-color: rgba(255, 255, 255, 0.15) !important;
+  border-color: transparent !important;
+}
+html.theme-dark :is(.mdc-checkbox__checkmark-path, .main-list-multi-tools__checkbox .tc-checkbox .tc-checkbox__loader svg) {
+  stroke: #ffffff !important;
+}
+html.theme-dark :is(.mdc-checkbox__mixedmark, .main-list-multi-tools__checkbox .mdc-checkbox__mixedmark) {
+  border-color: #ffffff !important;
+}
+html.theme-dark .main-list-multi-tools__checkbox :is(.mdc-checkbox__checkmark, .mdc-checkbox__mixedmark) {
+  color: #ffffff !important;
+  fill: #ffffff !important;
+}
+
+/* Radios (MDC) */
+html.theme-dark .mdc-radio .mdc-radio__native-control:enabled:not(:checked) + .mdc-radio__background .mdc-radio__outer-circle {
+  border-color: var(--c-text-muted) !important;
+}
+html.theme-dark .mdc-radio .mdc-radio__native-control:enabled:checked + .mdc-radio__background .mdc-radio__outer-circle,
+html.theme-dark .mdc-radio .mdc-radio__native-control:enabled + .mdc-radio__background .mdc-radio__inner-circle {
+  border-color: var(--c-primary) !important;
+}
 
 /* 7. Icons: Content (#A5D5EE) vs Header (#FFFFFF) */
 html.theme-dark :is(.main-card, .main-list, .main-table, .administration-screen, .monitoring-screen, .tc-modal, .mdc-dialog, [role="dialog"], .user-card, .base-layout-configurator, .event-list-info)
@@ -470,7 +527,9 @@ html.theme-dark :is(
   .https-config-file-dropzone-placeholder-icon .tc-icon__icon,
   .event-list-item__category-icon.event-list-item__category-icon--base .tc-icon__icon,
   .event-list-info__category.event-list-info__category--base .event-list-info__category-icon .tc-icon__icon,
-  .main-route--monitoring-conferences-layouts .layout-header-info .material-icons
+  .main-route--monitoring-conferences-layouts .layout-header-info .material-icons,
+  .layouts-item__icon svg *,
+  .layout-scheme-selector-item:not(.layout-scheme-selector-item--active) svg *
 ) {
   color: var(--c-icon-sidebar) !important;
   fill: var(--c-icon-sidebar) !important;
@@ -487,6 +546,20 @@ html.theme-dark :is(.main-large-header, .main-compact-header)
   :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo), #vks-theme-toggle-btn svg, #vks-theme-toggle-btn .material-icons):not(:is(.navigation-menu-button:not(.navigation-menu-button--active) *, .server-stats *, .header-profile-menu__item--danger *)) {
   color: #ffffff !important;
   fill: #ffffff !important;
+}
+
+/* SVG Stroke Normalization (Inherits currentColor across all states with safety exclusions) */
+html.theme-dark svg [stroke]:not([stroke="none"]):not([stroke="#fff"]):not([stroke*="e85d4e"]):not(.mdc-checkbox__checkmark-path):not(.mdc-slider__track--active_fill) {
+  stroke: currentColor !important;
+}
+html.theme-dark :is([id*="feather-copy"], [data-name*="feather-copy"], .conference-info-main-row-item__icon, .conference-info-main-row-item--pointer)
+  :is(svg, path):not(:is([class*="--danger"], [class*="--warning"], [class*="--success"], [class*="--red"], [class*="--green"], [class*="--yellow"], .audio-power, .audio-level, .tc-icon__icon--loading) *) {
+  stroke: var(--c-icon-sidebar) !important;
+  fill: none !important;
+}
+html.theme-dark :is(button:not(:disabled), .tc-button:not([disabled]):not(:disabled), .conference-info-main-row-item--pointer, [role="button"]:not([aria-disabled="true"])):hover
+  :is([id*="feather-copy"], [data-name*="feather-copy"], .conference-info-main-row-item__icon) :is(svg, path) {
+  stroke: #ffffff !important;
 }
 
 /* 7b. Header Navigation & Server Stats */
@@ -735,7 +808,7 @@ html.theme-dark :is(.mdc-text-field--focused, .tc-text-field--focused, .tc-selec
 }
 
 /* Select Dropdown Chevron Icons */
-html.theme-dark :is(.mdc-select__dropdown-icon, .tc-select :is(.tc-text-field__postfix-container, .tc-select__postfix))
+html.theme-dark :is(.tc-select, .mdc-select):not([class*="--disabled"]) :is(.mdc-select__dropdown-icon, .tc-text-field__postfix-container, .tc-select__postfix)
   :is(svg, path, .material-icons, .tc-icon__icon) {
   color: var(--c-icon-sidebar) !important;
   fill: var(--c-icon-sidebar) !important;
@@ -772,9 +845,11 @@ html.theme-dark :is(button, .mdc-button)[disabled] {
 
 /* Disabled Form Controls Children (Semantic muted color without compound opacity) */
 html.theme-dark :is(.tc-text-field--disabled, .mdc-text-field--disabled, .tc-select--disabled, .tc-select-container--disabled)
-  :is(input, textarea, select, .tc-text-field__input, .mdc-floating-label, .tc-floating-label, .tc-icon__icon, .material-icons) {
+  :is(input, textarea, select, .tc-text-field__input, .mdc-floating-label, .tc-floating-label, .tc-icon__icon, .material-icons, svg, path),
+html.theme-dark .tc-text-field__icon--disabled {
   opacity: 1 !important;
   color: var(--c-text-muted) !important;
+  fill: var(--c-text-muted) !important;
   cursor: not-allowed !important;
 }
 
@@ -791,11 +866,13 @@ html.theme-dark :is(.mdc-button--unelevated, .mdc-button--raised)[disabled] {
 }
 
 /* Select Selected Text Value & Readonly Value Contrast Enforcement */
-html.theme-dark :is(.tc-select, .tc-select-container):not([class*="--disabled"])
-  :is(input, .tc-text-field__input, .tc-text-field__input--readonly-special, .tc-select__selected-text, .tc-select__value, .mdc-select__selected-text),
-html.theme-dark :is(.tc-text-field-container, .tc-text-field):not([class*="--disabled"])
-  :is(.tc-text-field__input--readonly-special, .tc-select__selected-text, .tc-select__value, .mdc-select__selected-text) {
+html.theme-dark :is(.tc-select, .tc-select-container, .tc-text-field, .tc-text-field-container):not([class*="--disabled"])
+  :is(input, .tc-text-field__input, .tc-text-field__input--readonly-special, .tc-select__selected-text, .tc-select__value, .mdc-select__selected-text) {
   color: var(--c-text) !important;
+}
+html.theme-dark :is(.tc-select, .tc-select-container, .tc-text-field, .tc-text-field-container):is([class*="--disabled"])
+  .tc-text-field__input--readonly-special {
+  color: var(--c-text-muted) !important;
 }
 
 /* 13. Buttons & Elevation Overlays */
@@ -823,17 +900,88 @@ html.theme-dark .mdc-elevation-overlay {
   display: none !important;
 }
 
-/* 14. Codian Layout Schemes, Divider, Recording Options & Sliders */
-html.theme-dark :is(.codian-layout-scheme, .layout-scheme-item) {
+/* 14. Layout Schemes, Configurator, Slots & Radiobuttons */
+html.theme-dark :is(.codian-layout-scheme, .layout-scheme-item, .layout-scheme-selector-item) {
   background-color: var(--c-surface) !important;
   border: 1px solid var(--c-border) !important;
 }
-html.theme-dark :is(.codian-layout-scheme, .layout-scheme-item):hover {
+html.theme-dark :is(.codian-layout-scheme, .layout-scheme-item, .layout-scheme-selector-item):hover:not([class*="--active"]) {
   border-color: var(--c-accent) !important;
 }
-html.theme-dark :is(.codian-layout-scheme--active, .layout-scheme-item--active) {
-  border-color: var(--c-primary) !important;
-  background-color: rgba(0, 136, 204, .25) !important;
+html.theme-dark :is(.codian-layout-scheme--active, .layout-scheme-item--active, .layout-scheme-selector-item--active) {
+  border-color: var(--c-accent) !important;
+  background-color: var(--c-active) !important;
+}
+html.theme-dark .layout-size-range-selector__item--saved .tc-button:not([disabled]) {
+  border-color: var(--c-border) !important;
+}
+html.theme-dark .radiobutton-item--active .tc-button:not([disabled]) {
+  background-color: var(--c-active) !important;
+  border-color: var(--c-accent) !important;
+}
+html.theme-dark :is(.layout-scheme-selector-item--active svg *, .radiobutton-item--active .tc-button:not([disabled]) :is(.mdc-button__label, .tc-button__text, .tc-button__icon, .material-icons, svg, path)) {
+  color: #ffffff !important;
+  fill: #ffffff !important;
+}
+html.theme-dark :is(.layouts-item__icon, .layout-scheme-selector-item--active) svg .overlap {
+  fill: var(--c-surface) !important;
+}
+
+/* Conference & Layout Mode Cards ("Основное", "Конструктор") */
+html.theme-dark :is(.conference-mode-selector-item, .layout-mode-selector-item) {
+  background-color: var(--c-surface) !important;
+  border: 1px solid var(--c-border) !important;
+}
+html.theme-dark :is(.conference-mode-selector-item, .layout-mode-selector-item):hover:not([class*="--active"]) {
+  background-color: var(--c-surface-hover) !important;
+}
+html.theme-dark :is(.conference-mode-selector-item--active, .layout-mode-selector-item--active) {
+  background-color: var(--c-active) !important;
+  border-color: var(--c-accent) !important;
+}
+html.theme-dark :is(.conference-mode-selector-item--active, .layout-mode-selector-item--active)
+  :is(.conference-mode-selector-item__text--secondary, .layout-mode-selector-item__description) {
+  color: #ffffff !important;
+}
+
+/* Layout Grid Slots, Headers & Icons */
+html.theme-dark .layout-grid-slot__header {
+  background-color: rgba(0, 0, 0, 0.5) !important;
+}
+html.theme-dark .layout-grid-slot__header p {
+  color: #ffffff !important;
+}
+html.theme-dark .layout-grid-slot__icon :is(.tc-icon__icon, svg) {
+  color: var(--c-icon-sidebar) !important;
+  fill: var(--c-icon-sidebar) !important;
+}
+html.theme-dark .layout-grid-slot-wrapper {
+  border-color: var(--c-border) !important;
+}
+
+/* Counter +/- Controls */
+html.theme-dark .counter__button .mdc-button:not(:disabled) {
+  background-color: var(--c-surface-card) !important;
+  border: 1px solid var(--c-border) !important;
+  color: var(--c-text) !important;
+}
+html.theme-dark .counter__button .mdc-button:not(:disabled) :is(.mdc-button__icon, svg) {
+  color: var(--c-icon-sidebar) !important;
+  fill: var(--c-icon-sidebar) !important;
+}
+html.theme-dark .counter__button .mdc-button:not(:disabled):hover {
+  background-color: var(--c-surface-hover) !important;
+  border-color: var(--c-accent) !important;
+}
+html.theme-dark .counter__button .mdc-button:not(:disabled):hover :is(.mdc-button__icon, svg) {
+  color: #ffffff !important;
+  fill: #ffffff !important;
+}
+html.theme-dark .counter__button .mdc-button:disabled {
+  background-color: transparent !important;
+  border: 1px solid var(--c-border) !important;
+  opacity: 0.35 !important;
+  cursor: not-allowed !important;
 }
 
 /* Layout Audio Channels Divider Line (Neutralizes #dfdfdf in overrides) */
@@ -873,22 +1021,6 @@ html.theme-dark .recording-option--selected .recording-option__icon svg {
 }
 html.theme-dark .recording-option :is(.recording-options__title, .recording-option__title) {
   color: inherit !important;
-}
-
-/* Conference Mode Cards ("Основное") */
-html.theme-dark .conference-mode-selector-item {
-  background-color: var(--c-surface) !important;
-  border: 1px solid var(--c-border) !important;
-}
-html.theme-dark .conference-mode-selector-item:hover:not(.conference-mode-selector-item--active) {
-  background-color: var(--c-surface-hover) !important;
-}
-html.theme-dark .conference-mode-selector-item--active {
-  background-color: var(--c-active) !important;
-  border-color: var(--c-accent) !important;
-}
-html.theme-dark .conference-mode-selector-item--active .conference-mode-selector-item__text--secondary {
-  color: #ffffff !important;
 }
 
 /* Sliders, Tracks & Value Markers */
@@ -934,7 +1066,8 @@ html.theme-dark :is(
   .layout-table-item-receiver,
   .waiting-room-connect-link,
   .session-abonent-parallel-preview,
-  .session-broadcast-popup-untuned-hint
+  .session-broadcast-popup-untuned-hint,
+  .layout-scheme-selector-item__badge
 ) {
   background-color: var(--c-surface-card) !important;
   border: 1px solid var(--c-border) !important;
