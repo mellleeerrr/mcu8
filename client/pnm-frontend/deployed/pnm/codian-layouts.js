@@ -74,7 +74,7 @@
   var ITEM_ATTR = 'data-codian-id';
   var PREVIEW_WIDTH = 320;
   var PREVIEW_HEIGHT = 180;
-  var ITEMS_PER_LINE = 8;
+  var ITEMS_PER_LINE = 2;
   // Счётчик «Количество видеокон» конструктора: диапазон и вендорская
   // разметка `.dynamic-layout-configurator-counter` (1:1 с 2.2.1.66).
   var MAX_COUNT = 100;
@@ -83,6 +83,7 @@
   // (`vks_grid_9`, `vks_pin_r_8`) — геометрию из id считает сервер, поэтому
   // превью (calculate) и применение (apply_layout) всегда совпадают.
   var CONSTRUCTOR_ATTR = 'data-vks-constructor';
+  var CONSTRUCTOR_MODES_ATTR = 'data-vks-constructor-modes';
   // Пункт «Конструктор» в вендорском селекторе режимов раскладки: та же
   // разметка/классы, что у auto/dynamic/manual, вставляется после «Ручная
   // настройка». Клик переводит редактор в ручной режим и раскрывает секцию
@@ -460,23 +461,25 @@
     var section = document.createElement('div');
     section.className = 'main-form-section-16';
     section.setAttribute(GROUP_ATTR, '1');
+    section.style.cssText = 'display:flex;flex-direction:column;flex:1 1 0;min-height:0;margin-top:12px;overflow:hidden;';
 
     var selector = document.createElement('div');
-    selector.className = 'layout-scheme-selector';
+    selector.className = 'layout-scheme-selector manual-layout-configurator-side-panel';
     selector.setAttribute('role', 'group');
     selector.setAttribute('aria-label', GROUP_TITLE);
+    selector.style.cssText = 'overflow-y:auto;overflow-x:hidden;flex:1 1 0;min-height:0;max-height:360px;overscroll-behavior:contain;padding-right:2px;';
     for (var i = 0; i < catalog.length; i += ITEMS_PER_LINE) {
+      var row = document.createElement('div');
+      row.className = 'layout-scheme-selector__row';
       var group = document.createElement('div');
       group.className = 'layout-scheme-selector__group';
       for (var j = i; j < Math.min(i + ITEMS_PER_LINE, catalog.length); j += 1) {
         group.appendChild(buildItem(catalog[j]));
       }
-      selector.appendChild(group);
+      row.appendChild(group);
+      selector.appendChild(row);
     }
     section.appendChild(selector);
-
-    section.addEventListener('click', onActivate);
-    section.addEventListener('keydown', onKeydown);
     return section;
   }
 
@@ -535,17 +538,17 @@
     syncCounter(count);
     syncModeTile();
     syncActive();
-    syncConstructorActive();
     subscribe(editor);
   }
 
   function syncActive() {
     var editor = layoutEditor();
     var preset = editor && editor.modifiedValue ? editor.modifiedValue.preset : null;
-    var items = document.querySelectorAll('[' + ITEM_ATTR + ']');
+    var items = document.querySelectorAll('[' + ITEM_ATTR + '], [' + CONSTRUCTOR_MODE_ATTR + ']');
     for (var i = 0; i < items.length; i += 1) {
       var item = items[i];
-      var active = preset !== null && item.getAttribute(ITEM_ATTR) === preset;
+      var isCodian = item.hasAttribute(ITEM_ATTR);
+      var active = preset !== null && (isCodian ? item.getAttribute(ITEM_ATTR) === preset : item.getAttribute('data-preset') === preset);
       if (active) {
         if (!item.classList.contains('layout-scheme-selector-item--active')) {
           item.classList.add('layout-scheme-selector-item--active');
@@ -857,7 +860,17 @@
       else if (action === 'inc') applyCount(current + 1);
       return;
     }
-    onConstructorActivate(event);
+    var ctorItem = closestConstructorItem(event.target);
+    if (ctorItem) {
+      event.preventDefault();
+      selectConstructor(ctorItem.getAttribute('data-preset'));
+      return;
+    }
+    var codianItem = closestItem(event.target);
+    if (codianItem) {
+      event.preventDefault();
+      select(codianItem.getAttribute(ITEM_ATTR));
+    }
   }
 
   // Ввод с клавиатуры: не пересоздаём input на каждую цифру (фокус терялся),
@@ -897,6 +910,7 @@
     selector.className = 'layout-scheme-selector manual-layout-configurator-side-panel';
     selector.setAttribute('role', 'group');
     selector.setAttribute('aria-label', 'Схема расположения участников');
+    selector.setAttribute(CONSTRUCTOR_MODES_ATTR, '1');
     for (var i = 0; i < CONSTRUCTOR_MODES.length; i += 2) {
       var row = document.createElement('div');
       row.className = 'layout-scheme-selector__row';
@@ -912,26 +926,15 @@
     return selector;
   }
 
-  function syncConstructorActive() {
-    var editor = layoutEditor();
-    var preset = editor && editor.modifiedValue ? editor.modifiedValue.preset : null;
-    var items = document.querySelectorAll('[' + CONSTRUCTOR_MODE_ATTR + ']');
-    for (var i = 0; i < items.length; i += 1) {
-      var item = items[i];
-      var active = preset !== null && item.getAttribute('data-preset') === preset;
-      if (active) item.classList.add('layout-scheme-selector-item--active');
-      else item.classList.remove('layout-scheme-selector-item--active');
-      item.setAttribute('aria-pressed', active ? 'true' : 'false');
-    }
-  }
-
   function ensureConstructor() {
     var host = document.querySelector(HOST_SELECTOR);
     if (!host) return;
 
-    // 1. Очистка старой секции из ручного режима в основном теле страницы
-    var legacy = host.querySelector('.main-form-section-16[' + CONSTRUCTOR_ATTR + ']');
-    if (legacy) legacy.remove();
+    // 1. Очистка старых/лишних секций в основном теле страницы
+    var legacyCtor = host.querySelector(':scope > .main-form-section-16[' + CONSTRUCTOR_ATTR + ']');
+    if (legacyCtor) legacyCtor.remove();
+    var legacyGroup = host.querySelector(':scope > .main-form-section-16[' + GROUP_ATTR + ']');
+    if (legacyGroup) legacyGroup.remove();
 
     var isCtor = isConstructor();
     var sidePanel = host.querySelector('.base-layout-configurator-side-panel');
@@ -947,6 +950,8 @@
     if (!isCtor) {
       if (vendorSelector) vendorSelector.style.display = '';
       if (ctorPanel) ctorPanel.style.display = 'none';
+      var oldCodian = sidePanel.querySelector('[' + GROUP_ATTR + ']');
+      if (oldCodian) oldCodian.style.display = 'none';
       return;
     }
 
@@ -965,6 +970,7 @@
       ctorPanel = document.createElement('div');
       ctorPanel.className = 'dynamic-layout-configurator-side-panel';
       ctorPanel.setAttribute(CONSTRUCTOR_ATTR, '1');
+      ctorPanel.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;';
       ctorPanel.addEventListener('click', onSectionClick);
       ctorPanel.addEventListener('keydown', onConstructorKeydown);
       ctorPanel.addEventListener('input', onCounterInput);
@@ -973,30 +979,39 @@
     }
     ctorPanel.style.display = '';
 
-    // 4. Идемпотентная перерисовка содержимого
-    var rendered = ctorPanel.getAttribute('data-count');
-    var items = ctorPanel.querySelectorAll('[' + CONSTRUCTOR_MODE_ATTR + ']');
-    if (
-      rendered === String(count) &&
-      items.length === CONSTRUCTOR_MODES.length &&
-      ctorPanel.querySelector('[data-vks-counter]')
-    ) {
-      syncConstructorActive();
-      syncCounter(count);
-      return;
-    }
-
-    ctorPanel.setAttribute('data-count', String(count));
+    // 4. Монтирование счётчика (если ещё не создан)
     var counter = ctorPanel.querySelector('[data-vks-counter]');
     if (!counter) {
       counter = buildCounter(count);
       ctorPanel.appendChild(counter);
     }
-    var selector = ctorPanel.querySelector('.layout-scheme-selector');
-    if (selector && selector.parentNode) selector.parentNode.removeChild(selector);
-    ctorPanel.appendChild(buildConstructorSelector(count));
 
-    syncConstructorActive();
+    // 5. Идемпотентное обновление селектора динамических режимов
+    var rendered = ctorPanel.getAttribute('data-count');
+    var modesSelector = ctorPanel.querySelector('[' + CONSTRUCTOR_MODES_ATTR + ']');
+    if (rendered !== String(count) || !modesSelector) {
+      ctorPanel.setAttribute('data-count', String(count));
+      var newModes = buildConstructorSelector(count);
+      if (modesSelector && modesSelector.parentNode) {
+        modesSelector.parentNode.replaceChild(newModes, modesSelector);
+      } else {
+        var codianGroup = ctorPanel.querySelector('[' + GROUP_ATTR + ']');
+        if (codianGroup) ctorPanel.insertBefore(newModes, codianGroup);
+        else ctorPanel.appendChild(newModes);
+      }
+    }
+
+    // 6. Монтирование каталога Codian (ровно 1 раз — с сохранением скролла!)
+    if (catalogState === 'ready') {
+      var codianGroup = ctorPanel.querySelector('[' + GROUP_ATTR + ']');
+      if (!codianGroup) {
+        codianGroup = buildGroup();
+        ctorPanel.appendChild(codianGroup);
+      }
+      codianGroup.style.display = '';
+    }
+
+    syncActive();
     syncCounter(count);
   }
 
@@ -1022,10 +1037,17 @@
       return;
     }
     if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
-    var item = closestConstructorItem(event.target);
-    if (!item) return;
-    event.preventDefault();
-    selectConstructor(item.getAttribute('data-preset'));
+    var ctorItem = closestConstructorItem(event.target);
+    if (ctorItem) {
+      event.preventDefault();
+      selectConstructor(ctorItem.getAttribute('data-preset'));
+      return;
+    }
+    var codianItem = closestItem(event.target);
+    if (codianItem) {
+      event.preventDefault();
+      select(codianItem.getAttribute(ITEM_ATTR));
+    }
   }
 
   /* Наш id кодирует число окон: вендорский геттер сам синтезирует `ss(id)`
@@ -1042,7 +1064,6 @@
       return;
     }
     syncActive();
-    syncConstructorActive();
     subscribe(editor);
   }
 
@@ -1234,15 +1255,7 @@
 
   function ensureGroup() {
     if (catalogState !== 'ready') return;
-    var host = document.querySelector(HOST_SELECTOR);
-    if (!host) return; // ручной режим не открыт (auto/dynamic или другая страница)
-    var group = host.querySelector('[' + GROUP_ATTR + ']');
-    if (!group) {
-      group = buildGroup();
-      host.appendChild(group);
-    }
-    group.style.display = isConstructor() ? '' : 'none';
-    syncActive();
+    ensureConstructor();
   }
 
   function schedule() {
@@ -1258,12 +1271,11 @@
         var host = document.querySelector(HOST_SELECTOR);
         if (!host) return;
         if (catalogState === 'idle') loadCatalog();
-        if (catalogState === 'ready') ensureGroup();
         if (catalogState === 'ready') ensureConstructor();
         reAdopt();
       } catch (e) {
         /* вендорская страница важнее нашей группы, но поломка не должна быть невидимой */
-        console.warn('codian-layouts: группа Codian не вставлена', e);
+        console.warn('codian-layouts: ошибка цикла', e);
       }
     };
     if (typeof window.requestAnimationFrame === 'function') {
