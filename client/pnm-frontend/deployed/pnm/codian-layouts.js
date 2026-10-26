@@ -74,7 +74,7 @@
   var ITEM_ATTR = 'data-codian-id';
   var PREVIEW_WIDTH = 320;
   var PREVIEW_HEIGHT = 180;
-  var ITEMS_PER_LINE = 2;
+  var ITEMS_PER_LINE = 5;
   // Счётчик «Количество видеокон» конструктора: диапазон и вендорская
   // разметка `.dynamic-layout-configurator-counter` (1:1 с 2.2.1.66).
   var MAX_COUNT = 100;
@@ -467,12 +467,14 @@
     selector.className = 'layout-scheme-selector manual-layout-configurator-side-panel';
     selector.setAttribute('role', 'group');
     selector.setAttribute('aria-label', GROUP_TITLE);
-    selector.style.cssText = 'overflow-y:auto;overflow-x:hidden;flex:1 1 0;min-height:0;max-height:360px;overscroll-behavior:contain;padding-right:2px;';
+    selector.style.cssText = 'overflow-y:auto;overflow-x:hidden;flex:1 1 0;min-height:0;max-height:360px;overscroll-behavior:contain;display:flex;flex-direction:column;gap:6px;padding:0;scrollbar-width:thin;';
     for (var i = 0; i < catalog.length; i += ITEMS_PER_LINE) {
       var row = document.createElement('div');
       row.className = 'layout-scheme-selector__row';
+      row.style.cssText = 'display:flex;flex-flow:row nowrap;gap:2px;justify-content:flex-start;width:100%;';
       var group = document.createElement('div');
       group.className = 'layout-scheme-selector__group';
+      group.style.cssText = 'display:flex;flex-flow:row nowrap;gap:2px;justify-content:flex-start;width:100%;';
       for (var j = i; j < Math.min(i + ITEMS_PER_LINE, catalog.length); j += 1) {
         group.appendChild(buildItem(catalog[j]));
       }
@@ -911,18 +913,19 @@
     selector.setAttribute('role', 'group');
     selector.setAttribute('aria-label', 'Схема расположения участников');
     selector.setAttribute(CONSTRUCTOR_MODES_ATTR, '1');
-    for (var i = 0; i < CONSTRUCTOR_MODES.length; i += 2) {
-      var row = document.createElement('div');
-      row.className = 'layout-scheme-selector__row';
-      var group = document.createElement('div');
-      group.className = 'layout-scheme-selector__group';
-      for (var j = i; j < Math.min(i + 2, CONSTRUCTOR_MODES.length); j += 1) {
-        var mode = CONSTRUCTOR_MODES[j];
-        group.appendChild(buildConstructorItem(mode, constructorSlots[mode.key], count));
-      }
-      row.appendChild(group);
-      selector.appendChild(row);
+    selector.style.cssText = 'display:flex;flex-direction:column;gap:6px;';
+    var row = document.createElement('div');
+    row.className = 'layout-scheme-selector__row';
+    row.style.cssText = 'display:flex;flex-flow:row nowrap;gap:2px;justify-content:flex-start;width:100%;';
+    var group = document.createElement('div');
+    group.className = 'layout-scheme-selector__group';
+    group.style.cssText = 'display:flex;flex-flow:row nowrap;gap:2px;justify-content:flex-start;width:100%;';
+    for (var i = 0; i < CONSTRUCTOR_MODES.length; i += 1) {
+      var mode = CONSTRUCTOR_MODES[i];
+      group.appendChild(buildConstructorItem(mode, constructorSlots[mode.key], count));
     }
+    row.appendChild(group);
+    selector.appendChild(row);
     return selector;
   }
 
@@ -970,7 +973,7 @@
       ctorPanel = document.createElement('div');
       ctorPanel.className = 'dynamic-layout-configurator-side-panel';
       ctorPanel.setAttribute(CONSTRUCTOR_ATTR, '1');
-      ctorPanel.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;';
+      ctorPanel.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;margin:0 -4px;padding:0 4px;';
       ctorPanel.addEventListener('click', onSectionClick);
       ctorPanel.addEventListener('keydown', onConstructorKeydown);
       ctorPanel.addEventListener('input', onCounterInput);

@@ -126,7 +126,19 @@ const { chromium } = require('playwright');
     const counter = ctorPanel ? ctorPanel.querySelector('[data-vks-counter="1"]') : null;
     const counterInput = counter ? counter.querySelector('[data-counter-input]') : null;
     const cards = ctorPanel ? Array.from(ctorPanel.querySelectorAll('[data-vks-constructor-mode]')) : [];
-    const rows = ctorPanel ? Array.from(ctorPanel.querySelectorAll('.layout-scheme-selector__row')) : [];
+    const modesContainer = ctorPanel ? ctorPanel.querySelector('[data-vks-constructor-modes="1"]') : null;
+    const modesRows = modesContainer ? Array.from(modesContainer.querySelectorAll('.layout-scheme-selector__row')) : [];
+
+    const codianRows = codianSelector ? Array.from(codianSelector.querySelectorAll('.layout-scheme-selector__row')) : [];
+    const codianRowLengths = codianRows.map(r => r.querySelectorAll('[data-codian-id]').length);
+    const isCodianDistributionValid = codianRowLengths.length === 11 &&
+      codianRowLengths.slice(0, 10).every(len => len === 5) &&
+      codianRowLengths[10] === 4;
+
+    const modesRects = cards.map(c => c.getBoundingClientRect());
+    const areModesInOneLine = modesRects.length === 5 && modesRects.every(r => Math.abs(r.top - modesRects[0].top) < 2);
+    const modesNoOverflow = modesContainer ? modesContainer.scrollWidth <= modesContainer.clientWidth + 1 : false;
+    const codianNoOverflow = codianSelector ? codianSelector.scrollWidth <= codianSelector.clientWidth + 1 : false;
 
     const tile = document.querySelector('[data-vks-constructor-tile="1"]');
     const isTileActive = tile ? tile.classList.contains('layout-mode-selector-item--active') : false;
@@ -152,12 +164,18 @@ const { chromium } = require('playwright');
       isCodianLeftOfContent,
       isCodianScrollable,
       codianCardsCount: codianCards.length,
+      codianRowsCount: codianRows.length,
+      isCodianDistributionValid,
+      codianRowLengths,
+      codianNoOverflow,
+      areModesInOneLine,
+      modesNoOverflow,
+      modesRowsCount: modesRows.length,
       sizeChipsHidden: sizeChips ? window.getComputedStyle(sizeChips).display === 'none' : true,
       hasCounter: !!counter,
       counterValue: counterInput ? counterInput.value : null,
       cardsCount: cards.length,
       cardsModes: cards.map(c => c.getAttribute('data-vks-constructor-mode')),
-      rowsCount: rows.length,
       sidePanelWidth: sidePanelRect ? sidePanelRect.width : 0,
       ctorPanelWidth: ctorPanelRect ? ctorPanelRect.width : 0,
       baseHeight: baseRect ? baseRect.height : 0,
@@ -184,7 +202,12 @@ const { chromium } = require('playwright');
   assert(ctorState.sizeChipsHidden, 'Vendor size range chips are cleanly hidden in Constructor mode');
   assert(ctorState.hasCounter, 'Video windows counter is present inside sidebar panel');
   assert(ctorState.cardsCount === 5, `All 5 constructor layout presets present in sidebar (found: ${ctorState.cardsCount})`);
-  assert(ctorState.rowsCount >= 2, `Cards organized in rows for 300px sidebar width (found ${ctorState.rowsCount} rows)`);
+  assert(ctorState.modesRowsCount === 1, `Constructor modes organized into exactly 1 row (got ${ctorState.modesRowsCount} rows)`);
+  assert(ctorState.areModesInOneLine, 'All 5 constructor modes positioned strictly in 1 single row');
+  assert(ctorState.modesNoOverflow, 'Constructor modes: zero horizontal overflow in sidebar');
+  assert(ctorState.codianRowsCount === 11, `Codian catalog organized into exactly 11 rows (got ${ctorState.codianRowsCount} rows)`);
+  assert(ctorState.isCodianDistributionValid, `Codian catalog: rows 1-10 have 5 cards, row 11 has 4 cards (lengths: ${ctorState.codianRowLengths.slice(0, 3).join(',')}...${ctorState.codianRowLengths[10]})`);
+  assert(ctorState.codianNoOverflow, 'Codian catalog: zero horizontal overflow in sidebar');
 
   await page.screenshot({ path: '/tmp/test_constructor_step2_active.png' });
 
@@ -299,7 +322,7 @@ const { chromium } = require('playwright');
     const sel = document.querySelector('[data-vks-codian-group="1"] .layout-scheme-selector');
     return sel ? sel.scrollTop : 0;
   });
-  assert(scrollPosBeforeClick > 200, `Catalog scrolled down to reach codian_52 (scrollTop: ${scrollPosBeforeClick}px > 200px)`);
+  assert(scrollPosBeforeClick > 50, `Catalog scrolled down to reach codian_52 (scrollTop: ${scrollPosBeforeClick}px > 50px)`);
 
   await codian52.click();
   await page.waitForTimeout(600);
@@ -312,8 +335,8 @@ const { chromium } = require('playwright');
     return sel ? sel.scrollTop : 0;
   });
   assert(
-    scrollPosAfterClick > 200,
-    `Scroll position preserved after selection without jumping to top (scrollTop: ${scrollPosAfterClick}px)`
+    scrollPosAfterClick > 50 && Math.abs(scrollPosAfterClick - scrollPosBeforeClick) < 2,
+    `Scroll position preserved after selection without jumping to top (before: ${scrollPosBeforeClick}px, after: ${scrollPosAfterClick}px)`
   );
 
   const counterVal52 = await page.evaluate(() => {
