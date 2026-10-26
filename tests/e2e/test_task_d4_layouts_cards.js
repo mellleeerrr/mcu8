@@ -84,7 +84,7 @@ const { chromium } = require('playwright');
     await recTab.click();
     await page.waitForTimeout(800);
 
-    const recCardsData = await page.evaluate(() => {
+    const getRecCards = () => page.evaluate(() => {
       const cards = Array.from(document.querySelectorAll('.recording-option'));
       return cards.map(c => {
         const cs = window.getComputedStyle(c);
@@ -101,7 +101,14 @@ const { chromium } = require('playwright');
       });
     });
 
+    let recCardsData = await getRecCards();
     assert(recCardsData.length >= 2, `Found ${recCardsData.length} presentation cards in "Запись и трансляция"`);
+
+    if (!recCardsData.some(c => c.isSelected)) {
+      await page.locator('.recording-option').first().click();
+      await page.waitForTimeout(400);
+      recCardsData = await getRecCards();
+    }
 
     const unselected = recCardsData.find(c => !c.isSelected);
     if (unselected) {

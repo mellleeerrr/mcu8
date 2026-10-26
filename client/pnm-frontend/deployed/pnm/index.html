@@ -252,11 +252,30 @@
 .main-card-body__container:has(> .main-card-body.session-audio-channels) {
   overflow-y: auto;
 }
+/* Auth Header: Flex alignment for #vks-theme-toggle-container in both themes */
+.auth-form__header {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+}
 </style>
 <style id="prostor-pnm-dark-theme">
 /* ==========================================================================
    PROSTOR PNM - Telegram.org Design System Dark Theme
    Unified Property-Grouped Rules with Strict Terminal Targeting & Semantic Guards
+   Official Telegram Desktop/Web Dark Palette:
+   - Primary: #0088CC (Telegram Steel Blue)
+   - Accent / Links: #2AABEE (Telegram Light Blue)
+   - Canvas / Background: #0E1621 (Deep Midnight Blue)
+   - Surface / Cards / Header: #17212B (Telegram Surface)
+   - Surface Card / Modals: #242F3D (Elevated Surface)
+   - Hover / Surface Light: #202B36 (Noticeable Row Hover)
+   - Text Primary: #FFFFFF (Contrast 18.18:1 on Canvas)
+   - Text Secondary / Muted: #7F8B99 (WCAG AA 4.7:1 on Modals, 5.2:1 on Canvas)
+   - Borders: #243342 (Inputs, Selects, Cards)
+   - Dividers: #0F1C26 (Subtle Row Lines)
+   - Active / Selected: #2B5278 (Telegram Message Bubble / Selected Row)
+   - Content Icons: #A5D5EE (Cyan Accent)
    ========================================================================== */
 
 html.theme-dark {
@@ -285,18 +304,15 @@ html.theme-dark .auth-picture { background-color: #0b111a !important; }
 html.theme-dark .main__background { display: none !important; }
 html.theme-dark .server-info-block .pn-brand { color: var(--c-text) !important; }
 
-/* Auth Header */
-.auth-form__header {
-  display: flex !important;
-  justify-content: space-between !important;
-  align-items: center !important;
-}
-
 /* 2. Headers, Sidebars, Cards & Panels */
 html.theme-dark :is(.main-large-header, .main-compact-header, .main-card, .base-card, .tc-card,
   .monitoring-list, .main-list, .main-list-content, .main-card-content, .base-card-content,
-  .bookmarks-drawer-items, .main-card-header, .monitoring-list-header, .sidebar-panel) {
+  .bookmarks-drawer-items, .main-card-header, .monitoring-list-header, .sidebar-panel,
+  .base-layout-configurator-side-panel, .base-layout-configurator-content,
+  .auto-layout-configurator-content, .dynamic-layout-configurator-content,
+  .skeleton-layout, .monitoring-address-book__header, .event-list-info__invoker-block) {
   background-color: var(--c-surface) !important;
+  background: var(--c-surface) !important;
   border-color: var(--c-border) !important;
   color: var(--c-text) !important;
 }
@@ -307,11 +323,18 @@ html.theme-dark .sidebar-panel {
   border-right: 1px solid var(--c-border) !important;
   box-shadow: 4px 0 16px rgba(0, 0, 0, 0.4) !important;
 }
+html.theme-dark .event-list-info__invoker-block {
+  background-color: var(--c-surface-card) !important;
+  background: var(--c-surface-card) !important;
+  border: 1px solid var(--c-border) !important;
+}
 
 /* 3. Popovers, Modals & Dropdowns */
 html.theme-dark :is(.mdc-menu-surface, .tc-context-menu, .notification-center__menu,
   .header-profile__menu, .bookmarks-drawer, .tc-modal, .mdc-dialog__surface,
-  .the-confirmer-popup, .the-confirmer-popup__content, .tc-notification, .password-validate-popup) {
+  .the-confirmer-popup, .the-confirmer-popup__content, .tc-notification, .password-validate-popup,
+  .call-info-popup-content, .abonent-info-popup, .abonent-dtmf-popup,
+  .abonent-info-popup-row, .backup-db-export-select-popup) {
   background-color: var(--c-surface-card) !important;
   border: 1px solid var(--c-border) !important;
   color: var(--c-text) !important;
@@ -337,10 +360,35 @@ html.theme-dark :is(.administration__title, .administration-button__text, .actio
   .logs__title, .info-main__text--secondary, .tc-modal__header-desc,
   .the-confirmer-popup__content-text, .tc-date-picker__month-name,
   .mdc-select__selected-text, .tc-select__selected-text, .tc-select__value,
-  .mdc-select__anchor span, .tc-select .tc-text-field__input--readonly-special,
-  .tc-select-container input,
+  .mdc-select__anchor span,
   .mdc-select__menu :is(.mdc-deprecated-list-item__text, .mdc-list-item__text, .tc-select__option-text),
-  .tc-select__context-menu :is(.tc-context-menu-item__text, .tc-context-menu-item__text--primary, .mdc-deprecated-list-item__text, .tc-select__option-text)) {
+  .tc-select__context-menu :is(.tc-context-menu-item__text, .tc-context-menu-item__text--primary, .mdc-deprecated-list-item__text, .tc-select__option-text),
+  .layout-header-info__title, .layout-mode-selector-item__text,
+  .base-layout-configurator .tc-tab__content,
+  .main-route--monitoring-conferences-layouts .navigation-menu-button .tc-button__content,
+  .license-information-item__title,
+  .styles-rectangle-position__hints-text,
+  .auto-finish-rules__hint,
+  .droppable-area__text--primary,
+  .role-list-item__info-item-text,
+  .role-user__chip-text,
+  .pin-timeout__hint-marker--before,
+  .https-config-file-dropzone-title,
+  .https-config-file-dropzone-desc b,
+  .event-list-info__id-value,
+  .event-list-info__category-label,
+  .event-list-info__event-info--base,
+  .event-list-info__title,
+  .license-renew-popup__text,
+  .license-restrictions-popup__text,
+  .license-eula-popup__text,
+  .terminal-card-addresses-item__title-text,
+  .terminal-card-info__title,
+  .terminal-card-info-row__title-text,
+  .terminal-card-info-row__value-text,
+  .terminal-card__title,
+  .statistics-card__header-value,
+  .about-version-popup__text--primary) {
   color: var(--c-text) !important;
 }
 
@@ -349,31 +397,57 @@ html.theme-dark :is(.main-form__subheader-text, .action-card__hint, .main-table-
   .main-list-item__text--secondary, .conference-info-main-row-item--fixed-width,
   .conference-info-main-row-item__text--secondary, .conference-info__label,
   .main-blank__text--secondary, .main-blank__text,
-  .mdc-floating-label, .mdc-floating-label--float-above, .tc-floating-label,
+  .mdc-floating-label, .mdc-floating-label--float-above, .tc-floating-label, .tc-floating-label--float-above,
   .tc-text-field__label, .tc-select__label, .tc-select__placeholder,
   .history-card-pagination__button, .map-hint,
   .monitoring-list-header__text, .conference-mode-selector-item__text--secondary,
   .main-form__hint, .main-form-row__hint, .tc-checkbox__text span, .main-form-row-desc,
   .info-main__text--primary, .user-info-additional__title,
-  .tc-date-picker__weekdays, .tc-date-picker__weekdays .tc-date-picker__cell) {
+  .tc-date-picker__weekdays, .tc-date-picker__weekdays .tc-date-picker__cell,
+  .main-table-plug > p, .main-table-plug__text, .main-table-plug__text--secondary,
+  .main-list-plug__text, .main-list-plug__text--secondary,
+  .calls-sip__state-text, .calls-sip__state-text--gray,
+  .pin-timeout__hint-marker, .tc-checkbox__desc,
+  .license-information-item__description,
+  .droppable-area__text, .droppable-area__text--secondary,
+  .role-user-card-description, .role-user-blank__text,
+  .tc-text-field-helper-text:not(.tc-text-field-helper-text--error):not([class*="--validation-msg"]),
+  .mdc-text-field-helper-text:not(.tc-text-field-helper-text--error):not([class*="--validation-msg"]),
+  .administration-date-time__status .administration-date-time__status-value,
+  .administration-date-time__status-value,
+  .styles-rectangle-show-mode__hint,
+  .styles-rectangle-position__hints-text--inactive,
+  .styles-rectangle-position__hints-text--disabled,
+  .network-manager-card__text--primary,
+  .about-version-popup__text--secondary,
+  .event-list-info__id, .event-list-info__time, .event-list-info__text--secondary,
+  .https-config-file-dropzone-desc,
+  .terminal-card-addresses-item__description-text,
+  .statistics-disk__content--desc,
+  .statistics-memory__content--desc,
+  .statistics-network__content-name--title,
+  .statistics-network__content--desc,
+  .media-preview-plug__hint) {
   color: var(--c-text-muted) !important;
 }
 html.theme-dark ::placeholder {
   color: var(--c-text-muted) !important;
 }
-html.theme-dark :is(.main-form__subheader:after, .sidebar-panel__divider) {
+html.theme-dark :is(.main-form__subheader:after, .sidebar-panel__divider, .group-list-item__separator) {
   background: var(--c-divider) !important;
   border-color: var(--c-divider) !important;
 }
 
-/* 6. Semantic Status & Validation Guards (Prevent washing out reds/greens/yellows) */
+/* 6. Semantic Status & Validation Guards */
 html.theme-dark :is(.main-table-el__text--danger, .text--danger, .tc-icon--red,
   .mdc-text-field-helper-text--validation-msg, .tc-text-field__helper-text--validation-msg,
   .main-form-row__error,
   :is(.tc-text-field--error, .mdc-text-field--invalid, .tc-select-container--error) :is(.mdc-floating-label, .tc-floating-label)) {
   color: #f04343 !important;
 }
-html.theme-dark :is(.tc-text-field--error, .mdc-text-field--invalid, .tc-select-container--error) :is(.mdc-notched-outline__leading, .mdc-notched-outline__notch, .mdc-notched-outline__trailing) {
+html.theme-dark :is(.tc-text-field--error, .mdc-text-field--invalid, .tc-select-container--error)
+  :is(.mdc-notched-outline__leading, .mdc-notched-outline__notch, .mdc-notched-outline__trailing,
+      .tc-notched-outline__leading, .tc-notched-outline__notch, .tc-notched-outline__trailing) {
   border-color: #f04343 !important;
 }
 html.theme-dark :is(.text--warning, .tc-icon--orange, .tc-icon--yellow) {
@@ -384,9 +458,20 @@ html.theme-dark :is(.text--success, .tc-icon--green, .monitoring-list-item--gree
 }
 html.theme-dark .mdc-checkbox__checkmark-path { stroke: #ffffff !important; }
 
-/* 7. Icons: Content (#A5D5EE) vs Header (#FFFFFF) with Deep Parent Guards */
-html.theme-dark :is(.main-card, .main-list, .main-table, .administration-screen, .monitoring-screen, .tc-modal, .mdc-dialog, [role="dialog"], .user-card)
+/* 7. Icons: Content (#A5D5EE) vs Header (#FFFFFF) */
+html.theme-dark :is(.main-card, .main-list, .main-table, .administration-screen, .monitoring-screen, .tc-modal, .mdc-dialog, [role="dialog"], .user-card, .base-layout-configurator, .event-list-info)
   :is(.material-icons, .tc-icon__icon, svg:not(.brand-logo)):not(:is([class*="--danger"], [class*="--warning"], [class*="--success"], [class*="--red"], [class*="--green"], [class*="--yellow"], .audio-power, .audio-level, .tc-chip, [class*="title-chip"], .server-status-icon, [class*="avatar-status"], .tc-modal__header-button, .tc-modal__close, [data-qa*="close"]) *) {
+  color: var(--c-icon-sidebar) !important;
+  fill: var(--c-icon-sidebar) !important;
+}
+html.theme-dark :is(
+  .droppable-area__icon .tc-icon__icon,
+  .network-manager-card__copyable-icon .tc-icon__icon,
+  .https-config-file-dropzone-placeholder-icon .tc-icon__icon,
+  .event-list-item__category-icon.event-list-item__category-icon--base .tc-icon__icon,
+  .event-list-info__category.event-list-info__category--base .event-list-info__category-icon .tc-icon__icon,
+  .main-route--monitoring-conferences-layouts .layout-header-info .material-icons
+) {
   color: var(--c-icon-sidebar) !important;
   fill: var(--c-icon-sidebar) !important;
 }
@@ -404,7 +489,7 @@ html.theme-dark :is(.main-large-header, .main-compact-header)
   fill: #ffffff !important;
 }
 
-/* 7b. Header Navigation & Server Stats (Task D1) */
+/* 7b. Header Navigation & Server Stats */
 html.theme-dark :is(.main-large-header, .main-compact-header, .sidebar-panel) .navigation-menu-button:is(.navigation-menu-button--active, .active, [aria-current="page"], .router-link-active) .tc-button {
   background-color: var(--c-bg) !important;
 }
@@ -441,7 +526,7 @@ html.theme-dark :is(.server-stats, .server-stats-compact) :is(.server-stats__ico
 }
 
 /* Safe SVG Rect Artifact Elimination */
-html.theme-dark svg :is(g[id*="Active_conferences"], [id*="Active_conferences"], svg) > rect:is([id*="Прямоугольник_3050"], [width="24"][height="24"]:first-child):is([fill="#fff"], [fill="#ffffff"], [fill="white"]),
+html.theme-dark svg :is([id*="Active_conferences"], svg) > rect:is([id*="Прямоугольник_3050"], [width="24"][height="24"]:first-child):is([fill="#fff"], [fill="#ffffff"], [fill="white"]),
 html.theme-dark :is(.main-form-row, .main-form) svg rect[width="24"][height="24"]:first-child:is([fill="#fff"], [fill="#ffffff"], [fill="white"]) {
   fill: transparent !important;
 }
@@ -475,8 +560,7 @@ html.theme-dark .header-profile-menu__item--danger:hover {
   background-color: rgba(240, 67, 67, 0.15) !important;
 }
 
-
-/* 7c. Classic Drawer Navigation (Task D2) */
+/* 7c. Classic Drawer Navigation */
 html.theme-dark .sidebar-panel .profile-preview-info__button-compact {
   background-color: var(--c-surface-card) !important;
   border: 1px solid var(--c-border) !important;
@@ -505,14 +589,11 @@ html.theme-dark .language-accordeon-list__item--active {
 html.theme-dark .language-accordeon-list__item--active :is(.language-accordeon-list__item-text, .tc-icon__icon, .material-icons) {
   color: #ffffff !important;
 }
-html.theme-dark .sidebar-panel__logout-button {
+html.theme-dark :is(.sidebar-panel__logout-button, .sidebar-panel__logout-button :is(.material-icons, .tc-icon__icon)) {
   color: #f04343 !important;
 }
 html.theme-dark .sidebar-panel__logout-button:hover {
   background-color: rgba(240, 67, 67, 0.15) !important;
-}
-html.theme-dark .sidebar-panel__logout-button :is(.material-icons, .tc-icon__icon) {
-  color: #f04343 !important;
 }
 
 /* 8. Tables, Lists, Hover & Active States */
@@ -535,9 +616,13 @@ html.theme-dark :is(.main-table-line--active, .main-list-item--active, .main-lis
   color: var(--c-text) !important;
 }
 html.theme-dark :is(.main-table-line--active, .main-list-item--active, .main-list-item--selected)
-  :is(.main-table-el__text--secondary, .main-list-item__text--secondary, .tc-icon__icon) {
+  :is(.main-table-el__text--secondary, .main-list-item__text--secondary) {
   color: var(--c-text) !important;
-  fill: var(--c-text) !important;
+}
+html.theme-dark :is(.monitoring-list-item, .main-list-item, .monitoring-list)
+  :is(.monitoring-list-item__additional-icon, .monitoring-list-item__additional-icon :is(.material-icons, .tc-icon__icon, svg), .material-icons, .tc-icon__icon, svg):not(:is([class*="--danger"], [class*="--warning"], .tc-avatar-container, .tc-avatar) *) {
+  color: var(--c-icon-sidebar) !important;
+  fill: var(--c-icon-sidebar) !important;
 }
 
 /* 9. Administration Button Tiles */
@@ -554,7 +639,7 @@ html.theme-dark .administration-button :is(.tc-button__icon, .material-icons) {
 }
 
 /* 10. Power Action Cards - Warning (Amber) & Danger (Crimson) */
-html.theme-dark :is(.action-card--warning, .action-card--warning.action-card--filled) .action-card__content {
+html.theme-dark .action-card--warning .action-card__content {
   background-color: rgba(245, 127, 23, 0.12) !important;
   border: 1px solid rgba(245, 127, 23, 0.4) !important;
 }
@@ -571,7 +656,7 @@ html.theme-dark .action-card--warning .action-card__button :is(.mdc-button--tone
   color: #ffffff !important;
 }
 
-html.theme-dark :is(.action-card--danger, .action-card--danger.action-card--filled) .action-card__content {
+html.theme-dark .action-card--danger .action-card__content {
   background-color: rgba(244, 67, 54, 0.12) !important;
   border: 1px solid rgba(244, 67, 54, 0.4) !important;
 }
@@ -626,21 +711,26 @@ html.theme-dark .tc-text-field .tc-text-field__input {
 }
 
 /* Notched Outline Borders (Outlined Text Fields & Selects) */
-html.theme-dark :is(.mdc-notched-outline__leading, .mdc-notched-outline__notch, .mdc-notched-outline__trailing) {
+html.theme-dark :is(.tc-text-field, .tc-select, .mdc-text-field):not(.tc-text-field--error):not(.mdc-text-field--invalid):not(.tc-select-container--error)
+  :is(.mdc-notched-outline__leading, .mdc-notched-outline__notch, .mdc-notched-outline__trailing,
+      .tc-notched-outline__leading, .tc-notched-outline__notch, .tc-notched-outline__trailing) {
   border-color: var(--c-border) !important;
 }
-html.theme-dark :is(.tc-text-field, .tc-select, .mdc-text-field):not([class*="--disabled"]):not(.mdc-text-field--focused):hover
-  :is(.mdc-notched-outline__leading, .mdc-notched-outline__notch, .mdc-notched-outline__trailing) {
+html.theme-dark :is(.tc-text-field, .tc-select, .mdc-text-field):not([class*="--disabled"]):not(.mdc-text-field--focused):not(.tc-text-field--error):not(.mdc-text-field--invalid):not(.tc-select-container--error):hover
+  :is(.mdc-notched-outline__leading, .mdc-notched-outline__notch, .mdc-notched-outline__trailing,
+      .tc-notched-outline__leading, .tc-notched-outline__notch, .tc-notched-outline__trailing) {
   border-color: var(--c-text-muted) !important;
 }
-html.theme-dark :is(.mdc-text-field--focused, .tc-text-field--focused, .tc-select--open, .mdc-select--focused)
-  :is(.mdc-notched-outline__leading, .mdc-notched-outline__notch, .mdc-notched-outline__trailing) {
+/* Focused Notched Outline (Guarded against Error States) */
+html.theme-dark :is(.mdc-text-field--focused, .tc-text-field--focused, .tc-select--open, .mdc-select--focused):not(.tc-text-field--error):not(.mdc-text-field--invalid):not(.tc-select-container--error)
+  :is(.mdc-notched-outline__leading, .mdc-notched-outline__notch, .mdc-notched-outline__trailing,
+      .tc-notched-outline__leading, .tc-notched-outline__notch, .tc-notched-outline__trailing) {
   border-color: var(--c-accent) !important;
 }
 
-/* Focused Floating Labels */
-html.theme-dark :is(.mdc-text-field--focused, .tc-text-field--focused, .tc-select--open, .mdc-select--focused, .mdc-select--activated)
-  :is(.mdc-floating-label, .tc-floating-label) {
+/* Focused Floating Labels (Guarded against Error States) */
+html.theme-dark :is(.mdc-text-field--focused, .tc-text-field--focused, .tc-select--open, .mdc-select--focused, .mdc-select--activated):not(.tc-text-field--error):not(.mdc-text-field--invalid):not(.tc-select-container--error)
+  :is(.mdc-floating-label, .tc-floating-label, .tc-text-field__label) {
   color: var(--c-accent) !important;
 }
 
@@ -670,20 +760,42 @@ html.theme-dark input:autofill:active {
   transition: background-color 50000s ease-in-out 0s !important;
 }
 
-/* Disabled Form Controls & Buttons */
+/* Disabled Form Controls & Buttons (Opacity applied ONCE at container level) */
 html.theme-dark :is(input, textarea, select):disabled,
 html.theme-dark :is(.tc-text-field--disabled, .mdc-text-field--disabled, .tc-select--disabled, .tc-select-container--disabled),
-html.theme-dark :is(.tc-text-field--disabled, .mdc-text-field--disabled, .tc-select--disabled)
-  :is(input, textarea, select, .tc-text-field__input, .mdc-floating-label, .tc-floating-label, .tc-icon__icon, .material-icons),
 html.theme-dark :is(button, .mdc-button):disabled,
 html.theme-dark :is(button, .mdc-button)[disabled] {
+  color: var(--c-text-muted) !important;
   opacity: 0.6 !important;
   cursor: not-allowed !important;
+}
+
+/* Disabled Form Controls Children (Semantic muted color without compound opacity) */
+html.theme-dark :is(.tc-text-field--disabled, .mdc-text-field--disabled, .tc-select--disabled, .tc-select-container--disabled)
+  :is(input, textarea, select, .tc-text-field__input, .mdc-floating-label, .tc-floating-label, .tc-icon__icon, .material-icons) {
+  opacity: 1 !important;
   color: var(--c-text-muted) !important;
+  cursor: not-allowed !important;
+}
+
+/* Disabled Button Children (Guards text and icons from Section 7 cyan override) */
+html.theme-dark :is(button, .mdc-button):is(:disabled, [disabled])
+  :is(.tc-button__text, .mdc-button__label, .tc-button__icon, .material-icons, svg, path) {
+  color: var(--c-text-muted) !important;
+  fill: var(--c-text-muted) !important;
+  cursor: not-allowed !important;
 }
 html.theme-dark :is(.mdc-button--unelevated, .mdc-button--raised):disabled,
 html.theme-dark :is(.mdc-button--unelevated, .mdc-button--raised)[disabled] {
   background-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+/* Select Selected Text Value & Readonly Value Contrast Enforcement */
+html.theme-dark :is(.tc-select, .tc-select-container):not([class*="--disabled"])
+  :is(input, .tc-text-field__input, .tc-text-field__input--readonly-special, .tc-select__selected-text, .tc-select__value, .mdc-select__selected-text),
+html.theme-dark :is(.tc-text-field-container, .tc-text-field):not([class*="--disabled"])
+  :is(.tc-text-field__input--readonly-special, .tc-select__selected-text, .tc-select__value, .mdc-select__selected-text) {
+  color: var(--c-text) !important;
 }
 
 /* 13. Buttons & Elevation Overlays */
@@ -707,9 +819,8 @@ html.theme-dark [data-qa="authorization-sign-in-button"]:not(:disabled) {
   color: var(--c-text) !important;
   border: none !important;
 }
-html.theme-dark :is(.mdc-elevation-overlay, .mdc-switch__shadow .mdc-elevation-overlay) {
+html.theme-dark .mdc-elevation-overlay {
   display: none !important;
-  opacity: 0 !important;
 }
 
 /* 14. Codian Layout Schemes, Divider, Recording Options & Sliders */
@@ -760,6 +871,9 @@ html.theme-dark .recording-option__icon:not(.recording-option__icon--active) svg
 html.theme-dark .recording-option--selected .recording-option__icon svg {
   fill: #ffffff !important;
 }
+html.theme-dark .recording-option :is(.recording-options__title, .recording-option__title) {
+  color: inherit !important;
+}
 
 /* Conference Mode Cards ("Основное") */
 html.theme-dark .conference-mode-selector-item {
@@ -798,21 +912,47 @@ html.theme-dark .tc-slider-container .mdc-slider__pin-value-marker {
   color: var(--c-text) !important;
 }
 
-/* 15. Scrollbars, Links, Chips & Focus Rings */
+/* 15. Scrollbars, Links, Chips, Badges & Focus Rings */
 html.theme-dark .main-table-el a,
-html.theme-dark .pn-link,
-html.theme-dark .server-info-block .pn-link {
+html.theme-dark .pn-link {
   color: var(--c-accent) !important;
   text-decoration: underline;
   background-color: transparent !important;
 }
-html.theme-dark :is(.map-hint, .role-user__chip, .role-user__chip--undeletable, .tc-chip, .user-info-additional__chip .tc-chip, .role-chip) {
+html.theme-dark :is(.map-hint, .role-user__chip, .role-user__chip--undeletable, .tc-chip, .role-chip) {
   background-color: var(--c-surface-card) !important;
   color: var(--c-text) !important;
   border: 1px solid var(--c-border) !important;
 }
-html.theme-dark :is(.tc-chip, .user-info-additional__chip .tc-chip, .role-chip) :is(.tc-chip__text, .tc-chip__content) {
+html.theme-dark :is(.tc-chip, .role-chip) :is(.tc-chip__text, .tc-chip__content) {
   color: var(--c-text) !important;
+}
+/* Audio Channel Counters, Receivers & Operational Badges */
+html.theme-dark :is(
+  .conference-audio-channel-item-counter,
+  .session-audio-channel-item-counter,
+  .layout-table-item-receiver,
+  .waiting-room-connect-link,
+  .session-abonent-parallel-preview,
+  .session-broadcast-popup-untuned-hint
+) {
+  background-color: var(--c-surface-card) !important;
+  border: 1px solid var(--c-border) !important;
+  color: var(--c-text) !important;
+}
+
+/* Avatar Null/Default Background Neutralization */
+html.theme-dark :is(.tc-avatar.tc-avatar-status--null:not([style*="gradient"]), .tc-avatar--null) {
+  background-color: var(--c-surface-card) !important;
+  background-image: none !important;
+}
+html.theme-dark .tc-avatar.tc-avatar-status--null:not([style*="gradient"]) :is(.tc-avatar__name-icon, .material-icons, svg) {
+  color: var(--c-icon-sidebar) !important;
+  fill: var(--c-icon-sidebar) !important;
+}
+html.theme-dark .tc-avatar[style*="gradient"] :is(.tc-avatar__name-icon, .material-icons, svg) {
+  color: #ffffff !important;
+  fill: #ffffff !important;
 }
 html.theme-dark *::-webkit-scrollbar {
   width: 8px !important;
@@ -852,22 +992,30 @@ html.theme-dark .tc-date-picker__button :is(.material-icons, .tc-icon__icon) {
 }
 
 /* 17. Toasts, Snackbars & Clipboard Notifications */
-html.theme-dark .notifier__item-container:not(.notifier__item-container--success):not(.notifier__item-container--danger) {
+html.theme-dark :is(
+  .notifier__item-container:not(.notifier__item-container--success):not(.notifier__item-container--danger),
+  .tc-notifier-container .tc-notifier__item--default,
+  .mdc-snackbar__surface
+) {
   background-color: var(--c-surface-card) !important;
   border: 1px solid var(--c-border) !important;
   color: var(--c-text) !important;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5) !important;
 }
-html.theme-dark .notifier__item-container :is(.notifier__text-content, .notifier__text-content p, .notifier__text-content span) {
+html.theme-dark :is(
+  .notifier__item-container :is(.notifier__text-content, .notifier__text-content p, .notifier__text-content span),
+  .tc-notifier-container :is(.tc-notifier__item-header-text, .tc-notifier__item-content),
+  .mdc-snackbar__label
+) {
   color: var(--c-text) !important;
 }
 html.theme-dark .notifier__item-container .notifier__text-content a {
   color: var(--c-accent) !important;
 }
-html.theme-dark .notifier__item-container .notifier__close-button :is(.material-icons, .tc-icon__icon, svg) {
+html.theme-dark :is(.notifier__item-container .notifier__close-button, .tc-notifier-container .tc-notifier__item-header-button) :is(.material-icons, .tc-icon__icon, svg) {
   color: var(--c-text-muted) !important;
 }
-html.theme-dark .notifier__item-container .notifier__close-button:hover :is(.material-icons, .tc-icon__icon, svg) {
+html.theme-dark :is(.notifier__item-container .notifier__close-button, .tc-notifier-container .tc-notifier__item-header-button):hover :is(.material-icons, .tc-icon__icon, svg) {
   color: #ffffff !important;
 }
 html.theme-dark .notifier__item-container--success {
@@ -879,18 +1027,6 @@ html.theme-dark .notifier__item-container--danger {
   background-color: #c62828 !important;
   border: 1px solid #f44336 !important;
   color: #ffffff !important;
-}
-html.theme-dark :is(.tc-notifier-container .tc-notifier__item--default, .mdc-snackbar__surface) {
-  background-color: var(--c-surface-card) !important;
-  border: 1px solid var(--c-border) !important;
-  color: var(--c-text) !important;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5) !important;
-}
-html.theme-dark :is(.tc-notifier-container .tc-notifier__item-header-text, .tc-notifier-container .tc-notifier__item-content, .mdc-snackbar__label) {
-  color: var(--c-text) !important;
-}
-html.theme-dark .tc-notifier-container .tc-notifier__item-header-button :is(.material-icons, .tc-icon__icon, svg) {
-  color: var(--c-text-muted) !important;
 }
 html.theme-dark .mdc-snackbar__actions .mdc-button {
   color: var(--c-accent) !important;
