@@ -106,6 +106,7 @@
   // поставил 25 вместо исходного N). Выполняется из reAdopt, когда вендор
   // выставил свой preset_*, или из страховочного таймера (медленный вендор).
   var pendingAdopt = null;
+  var pendingAdoptTimer = null;
   var identityName = ''; // displayName серверной раскладки: вендор может обнулить
   var constructorState = 'idle'; // idle | loading | ready | failed
   var constructorSlots = Object.create(null);
@@ -180,6 +181,14 @@
     return store('layout-editor');
   }
 
+  function isConstructor() {
+    var editor = layoutEditor();
+    var val = editor && editor.modifiedValue;
+    if (!val || val.mode !== 'manual') return false;
+    var preset = typeof val.preset === 'string' ? val.preset : '';
+    return modeTileEngaged || preset.indexOf('vks_') === 0;
+  }
+
   function subscribe(editor) {
     if (!editor || editor === subscribedStore || typeof editor.$subscribe !== 'function') return;
     subscribedStore = editor;
@@ -215,11 +224,15 @@
       if (preset.indexOf('preset_') === 0) {
         var runAdopt = pendingAdopt;
         pendingAdopt = null;
+        if (pendingAdoptTimer) {
+          clearTimeout(pendingAdoptTimer);
+          pendingAdoptTimer = null;
+        }
         runAdopt();
       }
       return;
     }
-    if (!modeTileEngaged) return;
+    if (!isConstructor()) return;
     // Только вендорские preset_* — Codian-карточки не перехватываем.
     if (preset.indexOf('preset_') !== 0) return;
     var count = currentCount();
@@ -721,7 +734,7 @@
     if (!section) return;
     var value = Math.max(1, Math.min(MAX_COUNT, count));
     var input = section.querySelector('[data-counter-input]');
-    if (input) input.value = String(value);
+    if (input && document.activeElement !== input) input.value = String(value);
     var buttons = section.querySelectorAll('[data-counter-action]');
     for (var i = 0; i < buttons.length; i += 1) {
       var action = buttons[i].getAttribute('data-counter-action');
@@ -746,7 +759,7 @@
     var side = savedSide ? savedSide[1] : constructorSide;
     modeTileEngaged = true;
     function apply() {
-      if (!modeTileEngaged) return;
+      if (!isConstructor()) return;
       var current = editor.modifiedValue || {};
       var currentPreset = typeof current.preset === 'string' ? current.preset : '';
       // В ручном режиме (в т.ч. codian_*/preset_equal_*) вендорский сброс уже
@@ -754,6 +767,10 @@
       // вендорский preset_* после переключения.
       if (current.mode !== 'manual' && currentPreset.indexOf('preset_') !== 0 && currentPreset.indexOf('vks_') !== 0) return;
       pendingAdopt = null;
+      if (pendingAdoptTimer) {
+        clearTimeout(pendingAdoptTimer);
+        pendingAdoptTimer = null;
+      }
       rememberIdentity(current);
       restoreIdentity(editor);
       selectConstructor('vks_' + (side === 'grid' ? 'grid' : 'pin_' + side) + '_' + count);
@@ -771,7 +788,9 @@
       }
       syncModeTile();
       schedule();
-      setTimeout(function () {
+      if (pendingAdoptTimer) clearTimeout(pendingAdoptTimer);
+      pendingAdoptTimer = setTimeout(function () {
+        pendingAdoptTimer = null;
         var run = pendingAdopt;
         if (!run) return;
         pendingAdopt = null;
@@ -839,16 +858,21 @@
 
   function buildConstructorSelector(count) {
     var selector = document.createElement('div');
-    selector.className = 'layout-scheme-selector';
+    selector.className = 'layout-scheme-selector manual-layout-configurator-side-panel';
     selector.setAttribute('role', 'group');
     selector.setAttribute('aria-label', 'Схема расположения участников');
-    var group = document.createElement('div');
-    group.className = 'layout-scheme-selector__group';
-    for (var i = 0; i < CONSTRUCTOR_MODES.length; i += 1) {
-      var mode = CONSTRUCTOR_MODES[i];
-      group.appendChild(buildConstructorItem(mode, constructorSlots[mode.key], count));
+    for (var i = 0; i < CONSTRUCTOR_MODES.length; i += 2) {
+      var row = document.createElement('div');
+      row.className = 'layout-scheme-selector__row';
+      var group = document.createElement('div');
+      group.className = 'layout-scheme-selector__group';
+      for (var j = i; j < Math.min(i + 2, CONSTRUCTOR_MODES.length); j += 1) {
+        var mode = CONSTRUCTOR_MODES[j];
+        group.appendChild(buildConstructorItem(mode, constructorSlots[mode.key], count));
+      }
+      row.appendChild(group);
+      selector.appendChild(row);
     }
-    selector.appendChild(group);
     return selector;
   }
 
@@ -868,6 +892,30 @@
   function ensureConstructor() {
     var host = document.querySelector(HOST_SELECTOR);
     if (!host) return;
+
+    // 1. Очистка старой секции из ручного режима в основном теле страницы
+    var legacy = host.querySelector('.main-form-section-16[' + CONSTRUCTOR_ATTR + ']');
+    if (legacy) legacy.remove();
+
+    var isCtor = isConstructor();
+    var sidePanel = host.querySelector('.base-layout-configurator-side-panel');
+    var sizeChips = host.querySelector('.layout-size-range-selector');
+    if (sizeChips) sizeChips.style.display = isCtor ? 'none' : '';
+
+    if (!sidePanel) return;
+
+    var vendorSelector = sidePanel.querySelector('.layout-scheme-selector.manual-layout-configurator-side-panel');
+    var ctorPanel = sidePanel.querySelector('[' + CONSTRUCTOR_ATTR + ']');
+
+    // 2. Декларативное управление видимостью сайдбара
+    if (!isCtor) {
+      if (vendorSelector) vendorSelector.style.display = '';
+      if (ctorPanel) ctorPanel.style.display = 'none';
+      return;
+    }
+
+    if (vendorSelector) vendorSelector.style.display = 'none';
+
     var count = currentCount();
     if (count < 1) return;
     if (constructorCount !== count) {
@@ -875,43 +923,43 @@
       return;
     }
     if (constructorState !== 'ready') return;
-    var section = host.querySelector('[' + CONSTRUCTOR_ATTR + ']');
-    var firstGroup = host.querySelector('[' + GROUP_ATTR + ']');
-    if (!section) {
-      section = document.createElement('div');
-      section.className = 'main-form-section-16';
-      section.setAttribute(CONSTRUCTOR_ATTR, '1');
-      section.addEventListener('click', onSectionClick);
-      section.addEventListener('keydown', onConstructorKeydown);
-      section.addEventListener('input', onCounterInput);
-      section.addEventListener('change', onCounterChange);
-      // Секция конструктора ставится перед группой Codian: при переходе на
-      // пункт «Конструктор» она видна сразу, без прокрутки 54 карточек.
-      if (firstGroup && firstGroup.parentNode === host) host.insertBefore(section, firstGroup);
-      else host.appendChild(section);
+
+    // 3. Создание панели конструктора в сайдбаре (с вендорным классом .dynamic-layout-configurator-side-panel)
+    if (!ctorPanel) {
+      ctorPanel = document.createElement('div');
+      ctorPanel.className = 'dynamic-layout-configurator-side-panel';
+      ctorPanel.setAttribute(CONSTRUCTOR_ATTR, '1');
+      ctorPanel.addEventListener('click', onSectionClick);
+      ctorPanel.addEventListener('keydown', onConstructorKeydown);
+      ctorPanel.addEventListener('input', onCounterInput);
+      ctorPanel.addEventListener('change', onCounterChange);
+      sidePanel.appendChild(ctorPanel);
     }
-    // Перерисовываем только при смене числа окон: MutationObserver ловит наши
-    // же вставки, поэтому безусловный innerHTML дал бы бесконечный цикл.
-    var rendered = section.getAttribute('data-count');
-    var items = section.querySelectorAll('[' + CONSTRUCTOR_MODE_ATTR + ']');
+    ctorPanel.style.display = '';
+
+    // 4. Идемпотентная перерисовка содержимого
+    var rendered = ctorPanel.getAttribute('data-count');
+    var items = ctorPanel.querySelectorAll('[' + CONSTRUCTOR_MODE_ATTR + ']');
     if (
       rendered === String(count) &&
       items.length === CONSTRUCTOR_MODES.length &&
-      section.querySelector('[data-vks-counter]')
+      ctorPanel.querySelector('[data-vks-counter]')
     ) {
       syncConstructorActive();
       syncCounter(count);
       return;
     }
-    section.setAttribute('data-count', String(count));
-    var counter = section.querySelector('[data-vks-counter]');
+
+    ctorPanel.setAttribute('data-count', String(count));
+    var counter = ctorPanel.querySelector('[data-vks-counter]');
     if (!counter) {
       counter = buildCounter(count);
-      section.insertBefore(counter, section.firstChild);
+      ctorPanel.appendChild(counter);
     }
-    var selector = section.querySelector('.layout-scheme-selector');
+    var selector = ctorPanel.querySelector('.layout-scheme-selector');
     if (selector && selector.parentNode) selector.parentNode.removeChild(selector);
-    section.appendChild(buildConstructorSelector(count));
+    ctorPanel.appendChild(buildConstructorSelector(count));
+
     syncConstructorActive();
     syncCounter(count);
   }
@@ -1045,10 +1093,6 @@
     // текущий preset может быть codian_*/preset_equal_* — ставим сразу.
     if (startValue.mode === 'manual') {
       adoptNow();
-      var manualSection = document.querySelector('[' + CONSTRUCTOR_ATTR + ']');
-      if (manualSection && typeof manualSection.scrollIntoView === 'function') {
-        manualSection.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      }
       return;
     }
     if (!(startCount > 0)) return;
@@ -1057,19 +1101,14 @@
     // schedule() по MutationObserver после вендорских перерисовок) — таймер
     // только страховка для нестандартного пути; target-N уже зафиксирован.
     pendingAdopt = adoptNow;
-    setTimeout(function () {
-      // Вендор не успел за 400 мс: выбираем наше N сами (startCount уже
-      // зафиксирован в adoptNow). Поздний сброс вендора после этого — вне
-      // защиты: live он не воспроизводится (сброс ~100–350 мс).
+    if (pendingAdoptTimer) clearTimeout(pendingAdoptTimer);
+    pendingAdoptTimer = setTimeout(function () {
+      pendingAdoptTimer = null;
       var run = pendingAdopt;
       if (!run) return;
       pendingAdopt = null;
       run();
     }, 400);
-    var section = document.querySelector('[' + CONSTRUCTOR_ATTR + ']');
-    if (section && typeof section.scrollIntoView === 'function') {
-      section.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
   }
 
   function syncModeTile() {
@@ -1078,9 +1117,8 @@
     var editor = layoutEditor();
     var value = editor && editor.modifiedValue ? editor.modifiedValue : null;
     var mode = value ? value.mode : null;
-    var preset = value ? value.preset : null;
     if (mode !== 'manual') modeTileEngaged = false;
-    var active = modeTileEngaged || (typeof preset === 'string' && preset.indexOf('vks_') === 0);
+    var active = isConstructor();
     if (active) {
       tile.classList.add('layout-mode-selector-item--active');
       var actives = document.querySelectorAll('.layout-mode-selector-item--active');
@@ -1125,8 +1163,15 @@
     // запись equal_25 теряла выбранную Codian-схему (регресс T13.3).
     var wasConstructor = modeTileEngaged || preset.indexOf('vks_') === 0;
     modeTileEngaged = false;
+    if (pendingAdoptTimer) {
+      clearTimeout(pendingAdoptTimer);
+      pendingAdoptTimer = null;
+    }
     pendingAdopt = null;
-    if (!wasConstructor || tile.getAttribute('data-qa') !== 'layout-mode-selector-manual') return;
+    if (!wasConstructor || tile.getAttribute('data-qa') !== 'layout-mode-selector-manual') {
+      schedule();
+      return;
+    }
     if (!editor || typeof editor.editValueField !== 'function') return;
     try {
       editor.editValueField('preset', 'preset_equal_25');
@@ -1134,6 +1179,7 @@
     } catch (e) {
       /* вендор сам выставит дефолт manual */
     }
+    schedule();
   }
 
   function ensureModeTile() {
@@ -1153,11 +1199,12 @@
     if (catalogState !== 'ready') return;
     var host = document.querySelector(HOST_SELECTOR);
     if (!host) return; // ручной режим не открыт (auto/dynamic или другая страница)
-    if (host.querySelector('[' + GROUP_ATTR + ']')) {
-      syncActive();
-      return;
+    var group = host.querySelector('[' + GROUP_ATTR + ']');
+    if (!group) {
+      group = buildGroup();
+      host.appendChild(group);
     }
-    host.appendChild(buildGroup());
+    group.style.display = isConstructor() ? 'none' : '';
     syncActive();
   }
 
