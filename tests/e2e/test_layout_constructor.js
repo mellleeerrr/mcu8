@@ -95,7 +95,7 @@ const { chromium } = require('playwright');
   assert(!manualState.hasLegacyBottomCounter, 'Zero legacy counters in main body during Manual mode');
   assert(manualState.vendorSelectorVisible, 'Vendor manual scheme selector in sidebar is visible');
   assert(!manualState.ctorPanelVisible, 'Constructor sidebar panel is hidden during Manual mode');
-  assert(manualState.codianGroupVisible, 'Codian MCU 4200 group in main body is visible during Manual mode');
+  assert(!manualState.codianGroupVisible, 'Codian MCU 4200 group in main body is cleanly hidden during Manual mode');
   assert(manualState.sizeChipsVisible, 'Vendor size range chips are visible during Manual mode');
 
   await page.screenshot({ path: '/tmp/test_constructor_step1_manual.png' });
@@ -116,6 +116,7 @@ const { chromium } = require('playwright');
     const vendorSelector = sidePanel ? sidePanel.querySelector('.layout-scheme-selector.manual-layout-configurator-side-panel') : null;
     const ctorPanel = sidePanel ? sidePanel.querySelector('[data-vks-constructor="1"]') : null;
     const codianGroup = host ? host.querySelector('[data-vks-codian-group="1"]') : null;
+    const codianCards = codianGroup ? Array.from(codianGroup.querySelectorAll('[data-codian-id]')) : [];
     const sizeChips = host ? host.querySelector('.layout-size-range-selector') : null;
 
     const counter = ctorPanel ? ctorPanel.querySelector('[data-vks-counter="1"]') : null;
@@ -135,7 +136,8 @@ const { chromium } = require('playwright');
       hasLegacyBottomCtor: !!legacyBottomCtor,
       vendorSelectorHidden: vendorSelector ? window.getComputedStyle(vendorSelector).display === 'none' : true,
       ctorPanelVisible: ctorPanel ? window.getComputedStyle(ctorPanel).display !== 'none' : false,
-      codianGroupHidden: codianGroup ? window.getComputedStyle(codianGroup).display === 'none' : true,
+      codianGroupVisible: codianGroup ? window.getComputedStyle(codianGroup).display !== 'none' : false,
+      codianCardsCount: codianCards.length,
       sizeChipsHidden: sizeChips ? window.getComputedStyle(sizeChips).display === 'none' : true,
       hasCounter: !!counter,
       counterValue: counterInput ? counterInput.value : null,
@@ -151,7 +153,8 @@ const { chromium } = require('playwright');
   assert(!ctorState.hasLegacyBottomCtor, 'Zero legacy constructor sections in main body during Constructor mode');
   assert(ctorState.vendorSelectorHidden, 'Vendor manual scheme selector is hidden in Constructor mode');
   assert(ctorState.ctorPanelVisible, 'Constructor panel is mounted and visible in sidebar');
-  assert(ctorState.codianGroupHidden, 'Codian MCU 4200 group is cleanly hidden in Constructor mode');
+  assert(ctorState.codianGroupVisible, 'Codian MCU 4200 group is mounted and visible in Constructor mode');
+  assert(ctorState.codianCardsCount === 54, `All 54 Codian layout cards present in Constructor mode (found: ${ctorState.codianCardsCount})`);
   assert(ctorState.sizeChipsHidden, 'Vendor size range chips are cleanly hidden in Constructor mode');
   assert(ctorState.hasCounter, 'Video windows counter is present inside sidebar panel');
   assert(ctorState.cardsCount === 5, `All 5 constructor layout presets present in sidebar (found: ${ctorState.cardsCount})`);
@@ -206,6 +209,56 @@ const { chromium } = require('playwright');
   );
 
   // ==========================================
+  // STEP 3b: Verify Codian Card Selection & State
+  // ==========================================
+  console.log('\n--- Step 3b: Verify Codian Card Selection in Constructor ---');
+  const codian07 = page.locator('[data-codian-id="codian_07"]');
+  assert(await codian07.count() > 0, 'Codian card "codian_07" exists in catalog');
+  await codian07.click();
+  await page.waitForTimeout(600);
+
+  const codian07Active = await codian07.evaluate(el => el.classList.contains('layout-scheme-selector-item--active'));
+  assert(codian07Active, 'Codian card "codian_07" becomes active after click');
+
+  // Verify constructor sidebar parametric card is not active
+  const anyParametricActive = await page.evaluate(() => {
+    return !!document.querySelector('.dynamic-layout-configurator-side-panel .layout-scheme-selector-item--active');
+  });
+  assert(!anyParametricActive, 'Parametric sidebar cards lose active state when Codian card is selected');
+
+  // Verify counter syncs to codian_07 windows (13)
+  const counterValAfterCodian = await page.evaluate(() => {
+    const input = document.querySelector('.dynamic-layout-configurator-side-panel [data-counter-input]');
+    return input ? parseInt(input.value, 10) : 0;
+  });
+  assert(counterValAfterCodian === 13, `Counter synced to Codian card window count (13, got: ${counterValAfterCodian})`);
+
+  // Verify preset in store is codian_07
+  const presetAfterCodian = await page.evaluate(() => {
+    const root = document.getElementById('root') || document.getElementById('app');
+    const store = root && root.__vue_app__ && root.__vue_app__.config.globalProperties.$pinia._s.get('layout-editor');
+    return store && store.modifiedValue ? store.modifiedValue.preset : null;
+  });
+  assert(presetAfterCodian === 'codian_07', `Store preset set to codian_07 (got: ${presetAfterCodian})`);
+
+  // Verify Constructor tile remains active
+  const ctorTileStillActive = await page.evaluate(() => {
+    const tile = document.querySelector('[data-vks-constructor-tile="1"]');
+    return tile ? tile.classList.contains('layout-mode-selector-item--active') : false;
+  });
+  assert(ctorTileStillActive, 'Constructor mode tile remains active with Codian preset');
+
+  // Verify re-clicking Constructor tab is a safe no-op (Bug 1 guard)
+  await ctorTab.click();
+  await page.waitForTimeout(400);
+  const presetAfterReClick = await page.evaluate(() => {
+    const root = document.getElementById('root') || document.getElementById('app');
+    const store = root && root.__vue_app__ && root.__vue_app__.config.globalProperties.$pinia._s.get('layout-editor');
+    return store && store.modifiedValue ? store.modifiedValue.preset : null;
+  });
+  assert(presetAfterReClick === 'codian_07', `Re-clicking Constructor tab preserves codian_07 without resetting (got: ${presetAfterReClick})`);
+
+  // ==========================================
   // STEP 4: Verify Clean Exit back to Manual
   // ==========================================
   console.log('\n--- Step 4: Verify Clean Exit back to Manual ---');
@@ -236,7 +289,7 @@ const { chromium } = require('playwright');
   assert(!backManualState.hasLegacyBottomCtor, 'Zero legacy constructor sections in main body after exit');
   assert(backManualState.vendorSelectorVisible, 'Vendor manual scheme selector is restored in sidebar');
   assert(!backManualState.ctorPanelVisible, 'Constructor sidebar panel is hidden after exit');
-  assert(backManualState.codianGroupVisible, 'Codian MCU 4200 group is restored in main body');
+  assert(!backManualState.codianGroupVisible, 'Codian MCU 4200 group is cleanly hidden in Manual mode');
 
   // Verify page errors
   assert(pageErrors.length === 0, 'Zero page errors during execution', `errors: ${pageErrors.length}`);

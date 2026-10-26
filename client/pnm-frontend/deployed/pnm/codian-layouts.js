@@ -110,6 +110,7 @@
   var identityName = ''; // displayName серверной раскладки: вендор может обнулить
   var constructorState = 'idle'; // idle | loading | ready | failed
   var constructorSlots = Object.create(null);
+  var constructorCache = Object.create(null);
   var counterValue = 0;
 
   var catalog = [];
@@ -186,7 +187,7 @@
     var val = editor && editor.modifiedValue;
     if (!val || val.mode !== 'manual') return false;
     var preset = typeof val.preset === 'string' ? val.preset : '';
-    return modeTileEngaged || preset.indexOf('vks_') === 0;
+    return modeTileEngaged || preset.indexOf('vks_') === 0 || preset.indexOf('codian_') === 0;
   }
 
   function subscribe(editor) {
@@ -214,6 +215,11 @@
     if (preset.indexOf('vks_') === 0) {
       var side = /^vks_pin_([lrtb])_/.exec(preset);
       constructorSide = side ? side[1] : 'grid';
+      modeTileEngaged = true;
+      return;
+    }
+    // Сохранённая codian_* (reopen) — это тоже конструктор: остаёмся в нём!
+    if (preset.indexOf('codian_') === 0) {
       modeTileEngaged = true;
       return;
     }
@@ -512,6 +518,13 @@
     if (!slots.length) {
       for (var i = 1; i <= count; i += 1) slots.push({ position: i, role: 'AUTO' });
     }
+    // Сохраняем состояние Конструктора и гасим ожидающие таймеры ДО мутации стора
+    modeTileEngaged = true;
+    pendingAdopt = null;
+    if (pendingAdoptTimer) {
+      clearTimeout(pendingAdoptTimer);
+      pendingAdoptTimer = null;
+    }
     try {
       editor.editValueField('preset', id);
       editor.setSlots(id, slots);
@@ -519,12 +532,10 @@
       console.warn('codian-layouts: не удалось выбрать схему ' + id, e);
       return;
     }
-    // Явный выбор Codian-схемы выводит из конструктора: иначе reAdopt вернул бы
-    // наш vks_* и карточка каталога осталась бы без active и без сохранения.
-    modeTileEngaged = false;
-    pendingAdopt = null;
+    syncCounter(count);
     syncModeTile();
     syncActive();
+    syncConstructorActive();
     subscribe(editor);
   }
 
@@ -558,11 +569,24 @@
     var value = editor && editor.modifiedValue;
     if (!value) return 0;
     var preset = typeof value.preset === 'string' ? value.preset : '';
-    var slots = value.slots;
-    if (Array.isArray(slots) && slots.length > 0 && slots.length <= MAX_COUNT) return slots.length;
+
+    // 1. Для vks_* точное N находится в конце имени пресета
+    var vksMatch = /^vks_(?:grid|pin_[lrtb])_(\d+)$/.exec(preset);
+    if (vksMatch) {
+      var vksCount = Number(vksMatch[1]);
+      if (vksCount >= 1 && vksCount <= MAX_COUNT) return vksCount;
+    }
+
+    // 2. Для codian_* N берется строго из каталога (защита от аномалии codian_52)
     var entry = findEntry(preset);
     if (entry && entry.windows > 0) return entry.windows;
-    var tail = /_(\d+)$/.exec(preset);
+
+    // 3. Фактические слоты черновика
+    var slots = value.slots;
+    if (Array.isArray(slots) && slots.length > 0 && slots.length <= MAX_COUNT) return slots.length;
+
+    // 4. Вендорские пресеты preset_*
+    var tail = /^preset_/.test(preset) ? /_(\d+)$/.exec(preset) : null;
     if (tail) {
       var fromId = Number(tail[1]);
       if (fromId >= 1 && fromId <= MAX_COUNT) return fromId;
@@ -573,8 +597,15 @@
   }
 
   /* Превью всех вариантов конструктора: один calculate на вариант (как у
-   * вендора), ответ кэшируется до смены числа окон. */
+   * вендора), ответ кэшируется по числу окон. */
   function loadConstructor(count) {
+    if (constructorCache[count]) {
+      constructorCount = count;
+      constructorSlots = constructorCache[count];
+      constructorState = 'ready';
+      ensureConstructor();
+      return;
+    }
     if (constructorState === 'loading' && constructorCount === count) return;
     constructorCount = count;
     constructorState = 'loading';
@@ -598,8 +629,13 @@
       for (var key in results) {
         if (Object.prototype.hasOwnProperty.call(results, key) && results[key]) ready += 1;
       }
-      constructorSlots = results;
-      constructorState = ready > 0 ? 'ready' : 'failed';
+      if (ready > 0) {
+        constructorCache[count] = results;
+        constructorSlots = results;
+        constructorState = 'ready';
+      } else {
+        constructorState = 'failed';
+      }
       ensureConstructor();
     });
   }
@@ -1037,6 +1073,7 @@
 
   function onModeTileActivate(event) {
     event.preventDefault();
+    if (isConstructor()) return; // уже в Конструкторе — no-op (не перезаписывать выбранную схему Codian на vks_*)
     var editor = layoutEditor();
     if (!editor) return;
     modeTileEngaged = true;
@@ -1159,9 +1196,9 @@
     var value = editor && editor.modifiedValue ? editor.modifiedValue : null;
     var preset = value && typeof value.preset === 'string' ? value.preset : '';
     // Сброс дефолта — только при выходе ИЗ конструктора. Клик по уже
-    // активному manual-тайлу в manual+codian — вендорский no-op; безусловная
-    // запись equal_25 теряла выбранную Codian-схему (регресс T13.3).
-    var wasConstructor = modeTileEngaged || preset.indexOf('vks_') === 0;
+    // активному manual-тайлу в manual — вендорский no-op; безусловная
+    // запись equal_25 теряла выбранную схему.
+    var wasConstructor = modeTileEngaged || preset.indexOf('vks_') === 0 || preset.indexOf('codian_') === 0;
     modeTileEngaged = false;
     if (pendingAdoptTimer) {
       clearTimeout(pendingAdoptTimer);
@@ -1204,7 +1241,7 @@
       group = buildGroup();
       host.appendChild(group);
     }
-    group.style.display = isConstructor() ? 'none' : '';
+    group.style.display = isConstructor() ? '' : 'none';
     syncActive();
   }
 
