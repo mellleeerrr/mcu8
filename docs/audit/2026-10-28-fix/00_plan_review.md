@@ -462,6 +462,25 @@ suffix «последние 36») → фильтр `:1773`. Фикс: один �
 
 ---
 
+## 8. Ход исполнения (обновление 2026-10-28, HEAD `0c83d6e` + рабочие правки)
+
+| Stage | Статус | Коммиты / доказательства |
+|---|---|---|
+| S0 провенанс | **готово** | 01/02/04 обновлены: срез 17:52 помечен WIP, хэши привязаны к `645120d`/`22aac56`/`26c300a`/HEAD, интервалы записей переписаны; evidence-предупреждение в 04 |
+| S1 инвариант «Общая» | **готово** | `22aac56` (identity по `payload.type`, type immutable, repair), `7694a0c` (M1-R1: один default на scope), `26c300a` (cross-scope: видимый scope union), `f3009ff` (M1-R2: идемпотентный re-attach в COW, alias-aware guard) |
+| S2 `-in`/`part-room-` id | **готово** (в WIP-коммитах) | `embedded_uuid` + `parse_participant_id`, тесты `network_integration` |
+| S3 auth `/metrics` + `/api/v3/*` | **готово** (в WIP-коммитах) | `metrics_guard` (loopback или токен; оба заголовка), auth+Moderator на служебных API, `metrics_tokens` unit-тест |
+| S4 T2a перехват calculate | **готово** | `501354e` (удалены fetch/XHR-перехваты и `formatCalculatedSlots`, −117) |
+| S5 T2b клиентский движок | **готово** | `501354e` (удалён `buildSymmetricLayout`/`computeSlots`, −337; серверный `serverGeometry` + parity/UI e2e) |
+| S6 T3a `WASTE_WEIGHT` | **не начато** | решение отложено: меняет кадры MCU, нужен golden 1..100 до изменения; текущий серверный `grids.rs` — единственный источник геометрии |
+| S7 назначения (unique/size) | **не начато** | план: 409 на дубль position и `layout_size()`-хелпер; текущий `attach_layout_abonent` уже проверяет `occupied >= limit` |
+| S8 честный статус apply | **не начато** | план: `x-vks-layout-applied` + метрика `vks_layout_apply_total` |
+| S9 гигиена | **частично** | `77e36a1` (viewer.rs, MockVideo*/трейты, openapi.json, `onConstructorActivate`), `951e68b` (stopPropagation, шапка, MANIFEST), `scripts/smoke_v3.sh` (individual вместо второго default); осталось: CI-джобы manifest/patch/golden, `.cargo/config.toml` target-cpu, 42/44 env-переменные |
+| S10 шлюзы audio/DTMF | **не начато** | по плану — только после изолированного контура (живой 8080 не трогать) |
+| S11 финал/релиз | **гейты, без рестарта** | `cargo test --workspace --locked` — 49/49 ok; network_integration 23/23; clippy/fmt clean; release собран 19:21; MANIFEST 214/214; Playwright: guard clean/legacy, parity, constructor 20/20. Живой бинарь (PID 1814143) **не перезапускался** — нужен согласованный restart-gate |
+
+**Найденные по ходу ревью дефекты, закрытые вне исходного плана:** ложнозелёные e2e (pageerror-whitelist и provenance иконок — `0c83d6e`), двойной `select()` Codian (`951e68b`), JWT в argv bench (`951e68b`, `f3009ff`), метрики: неверный Bearer глушил корректный `X-Metrics-Token`, stale target dir с `CARGO_MANIFEST_DIR=/tmp/...` (чинится `cargo clean -p vks-gateway-h323`).
+
 ## Вердикт
 
 **План v1 — не принят: 5.3/10** (полнота 6.0, порядок 4.0, риск 5.5, элегантность 4.5, проверяемость 6.5).

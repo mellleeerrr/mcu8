@@ -167,7 +167,9 @@ jq -e --arg id "$CHANNEL_ID" 'all(.audiochannels[]; .id != $id)' <<<"$HTTP_BODY"
     && ok "audiochannel detached" || fail "audiochannel still attached: $HTTP_BODY"
 
 # --- раскладка и слот ----------------------------------------------------
-req POST /api/v3/ui/video_layouts '{"display_name":"smoke layout","payload":{"mode":"auto","type":"default"}}'
+# type=individual: в сессии уже есть унаследованная «Общая», второй default
+# по инварианту даёт 409 (и «Общую» нельзя detach'ить для очистки).
+req POST /api/v3/ui/video_layouts '{"display_name":"smoke layout","payload":{"mode":"auto","type":"individual"}}'
 LAYOUT_ID=$(jq -r '.video_layout.id' <<<"$HTTP_BODY")
 [ -n "$LAYOUT_ID" ] && [ "$LAYOUT_ID" != "null" ] || fail "create layout: $HTTP_BODY"
 ok "layout created ($LAYOUT_ID)"
