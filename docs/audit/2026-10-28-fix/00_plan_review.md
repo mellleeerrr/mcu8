@@ -462,7 +462,7 @@ suffix «последние 36») → фильтр `:1773`. Фикс: один �
 
 ---
 
-## 8. Ход исполнения (обновление 2026-10-28 22:00 MSK; снимок писался на `0c83d6e`, затем `f8589dd`…`43d3347`)
+## 8. Ход исполнения (обновление 2026-10-28 22:40 MSK; снимок `0c83d6e`/`43d3347`, затем `8d44b9c`…`8116855`)
 
 | Stage | Статус | Коммиты / доказательства |
 |---|---|---|
@@ -472,11 +472,11 @@ suffix «последние 36») → фильтр `:1773`. Фикс: один �
 | S3 auth `/metrics` + `/api/v3/*` | **готово** (в WIP-коммитах) | `metrics_guard` (loopback или токен; оба заголовка), auth+Moderator на служебных API, `metrics_tokens` unit-тест |
 | S4 T2a перехват calculate | **готово** | `501354e` (удалены fetch/XHR-перехваты и `formatCalculatedSlots`, −117) |
 | S5 T2b клиентский движок | **готово** | `501354e` (удалён `buildSymmetricLayout`/`computeSlots`, −337; серверный `serverGeometry` + parity/UI e2e) |
-| S6 T3a `WASTE_WEIGHT` | **не начато** | решение отложено: меняет кадры MCU, нужен golden 1..100 до изменения; текущий серверный `grids.rs` — единственный источник геометрии |
-| S7 назначения (unique/size) | **не начато** | план: 409 на дубль position и `layout_size()`-хелпер; текущий `attach_layout_abonent` уже проверяет `occupied >= limit` |
-| S8 честный статус apply | **не начато** | план: `x-vks-layout-applied` + метрика `vks_layout_apply_total` |
-| S9 гигиена | **частично** | `77e36a1` (viewer.rs, MockVideo*/трейты, openapi.json, `onConstructorActivate`), `951e68b` (stopPropagation, шапка, MANIFEST), `scripts/smoke_v3.sh` (individual вместо второго default); осталось: CI-джобы manifest/patch/golden, `.cargo/config.toml` target-cpu, 42/44 env-переменные |
-| S10 шлюзы audio/DTMF | **не начато** | по плану — только после изолированного контура (живой 8080 не трогать) |
+| S6 T3a `WASTE_WEIGHT` + центрирование | **готово** | `35a8a24` (WASTE_WEIGHT 20→0, golden N=1..100: 696 id; 36 значений 43–96 меняют rows×cols, 43: 5×9→7×7), `e6ab3c8` (неполный ряд — ширина колонки, по центру; tiny-canvas fallback; docs-инвариант «покрытие при n % cols == 0»; тесты N=43/57/73 на 1920×1080/1281×721/1000×1000). Ревью 9.0 → MUST-FIX закрыты |
+| S7 назначения (unique/size) | **готово** | `8d44b9c`: `layout_size`/`derived_layout_size`, `preset_size` (explicit-size контракт, `preset_equal` → None), 409 на дубль/вне размера, attach сверх окон; тесты `t00_*` + HTTP |
+| S8 честный статус apply | **готово** | `8d44b9c`: `LayoutApply{engine,pending,saved-only}`, заголовок `x-vks-layout-applied` на layout-эндпоинтах, метрика `vks_layout_apply_total{result}`; тесты 4 исхода + HTTP + `/metrics` |
+| S9 гигиена | **готово** | `77e36a1`, `951e68b`, `scripts/smoke_v3.sh`; `2e27225` — CI-джоба `frontend-integrity` (MANIFEST 214, patch `--check`, patch-lib unit); golden — в `cargo test`; `target-cpu=native` зафиксирован и обоснован в `.cargo/config.toml` (стенд), deps-пункт снят как рискованный |
+| S10 шлюзы audio/DTMF | **частично** | `8116855`: reason-коды `payload_type_mismatch/source_changed/ssrc_changed/malformed_rtp` вместо общего «codec/PT mismatch», DTMF-тон 10×20 мс = 200 мс на 8-кГц клоке + unit-тесты; H.323 late video/UII — только живой контур, по плану вне CI |
 | S11 финал/релиз | **гейты, без рестарта** | `cargo test --workspace --locked` — 49/49 ok; network_integration 23/23; clippy/fmt clean; release собран 19:21; MANIFEST 214/214; Playwright: guard clean/legacy, parity, constructor 20/20. Живой бинарь (PID 1814143) **не перезапускался** — нужен согласованный restart-gate |
 
 **Найденные по ходу ревью дефекты, закрытые вне исходного плана:** ложнозелёные e2e — provenance иконок (`0c83d6e`) и pageerror: allowlist по форме оказался обходим crafted-объектом; итог — `window.reportError` ставится неизменяемым (`writable:false, configurable:false`) в каждом фрейме, вызовы классифицируются по маркерам настоящей axios-ошибки (`status 400`, `config.url=…/calculate`, `config.data` с `preset_default_13`, `request`) и **аккумулируются в Node через `context.exposeBinding` в момент вызова**, поэтому удалённый/навигированный iframe не теряет данные; требование «0 pageerror, ровно 1 400, ровно 1 разрешённый reportError, 0 неожиданных» (`27e7348`…`43d3347`; контроли: injected Error, пустые slots, craft-объект, лишний 400, wrapper после init, подделка config, задержка вендорского вызова, reportError из iframe с удалением — все exit 1). **Граница модели угроз:** тест ловит регрессии приложения, а не тамперацию страницы — подмена `XMLHttpRequest`/`fetch` с подделкой axios-объекта (подавление реального вызова + craft) в модель не входит и задокументирована как вне области, двойной `select()` Codian (`951e68b`), JWT в argv bench (`951e68b`, `f3009ff`), метрики: неверный Bearer глушил корректный `X-Metrics-Token`, stale target dir с `CARGO_MANIFEST_DIR=/tmp/...` (чинится `cargo clean -p vks-gateway-h323`).
