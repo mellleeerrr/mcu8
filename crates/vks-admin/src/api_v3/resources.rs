@@ -397,11 +397,12 @@ pub(crate) fn layout_size(payload: &Value) -> Option<usize> {
 /// могли остаться от прежней раскладки), затем слоты, затем вендорский preset.
 fn derived_layout_size(payload: &Value) -> Option<usize> {
     let preset = payload.get("preset").and_then(Value::as_str);
+    // Только явный размер из id: `PresetId::parse("preset_equal")` вернул бы
+    // дефолтные 13 и затёр бы payload.size (4), сломав wire-контракт.
     preset
         .and_then(vks_layout::grids::slot_count)
         .or_else(|| payload.get("slots").and_then(Value::as_array).map(Vec::len).filter(|count| *count > 0))
-        .or_else(|| preset.and_then(vks_layout::preset::PresetId::parse).map(|preset| usize::from(preset.size)))
-        .or_else(|| preset.and_then(vks_layout::codian::slot_count))
+        .or_else(|| preset.and_then(vks_layout::preset_size))
 }
 
 /// `speakers`/`listeners` в записи — счётчики для таблицы UI; источник истины —
@@ -983,9 +984,7 @@ pub async fn attach_layout_abonent(
         slot["contact_type"] = contact_type;
         slot["display_name"] = json!(participant.display_name);
     } else {
-        let occupied =
-            slots.iter().filter(|slot| slot["abonent_id"].as_str().is_some_and(|id| !id.is_empty())).count() as u64;
-        // Сетка хранит и свободные окна (role=AUTO): занимаем первое из них, позицию не меняем.
+        // Сетка хранит и свободные окна (role=AUTO): занимаем первое из них.
         let free = slots.iter().position(|slot| slot["abonent_id"].as_str().is_none_or(str::is_empty));
         if let Some(index) = free {
             let position = slots[index]["position"].clone();
@@ -1000,10 +999,18 @@ pub async fn attach_layout_abonent(
                 "display_name": participant.display_name,
             });
         } else {
-            if occupied >= limit {
-                return error_json(409, "Layout is full");
+            // Слоты могут быть разрозненными (занята только позиция 4 из 4) —
+            // берём минимальную свободную позицию в пределах ёмкости, а не
+            // max+1 (иначе запись становится невалидной для PATCH/движка).
+            let mut taken = std::collections::HashSet::new();
+            for slot in slots.iter() {
+                if let Some(position) = slot["position"].as_u64() {
+                    taken.insert(position);
+                }
             }
-            let position = slots.iter().filter_map(|slot| slot["position"].as_u64()).max().unwrap_or(0) + 1;
+            let Some(position) = (1..=limit).find(|position| !taken.contains(position)) else {
+                return error_json(409, "Layout is full");
+            };
             slots.push(json!({
                 "position": position,
                 "role": "PEER",
@@ -1433,7 +1440,10 @@ fn validate_layout_assignments(payload: &Value) -> Result<(), UpdateError> {
         .or_else(|| layout_size(payload));
     let mut seen = std::collections::HashSet::new();
     for slot in slots.iter().filter(|slot| slot.is_object()) {
-        let Some(position) = slot.get("position").and_then(Value::as_u64) else { continue };
+        let Some(raw_position) = slot.get("position") else { continue };
+        let Some(position) = raw_position.as_u64() else {
+            return Err(UpdateError::Invalid("slot position must be an integer".to_string()));
+        };
         if position == 0 {
             return Err(UpdateError::Conflict("slot position must be >= 1".to_string()));
         }
@@ -1651,14 +1661,21 @@ pub async fn edit_global(
         return response;
     }
     drop(resources);
+    let mut applied = None;
     if kind == "video_layouts" {
+        // refs.len() > 1 уже отсечён 409, поэтому статус определён единственным
+        // применением; глобальный PATCH — layout-эндпоинт и обязан его отдавать.
         for room in rooms {
             if let Ok(room) = room.parse::<vks_core::RoomId>() {
-                let _ = super::sessions::push_layout_to_engine(&state, room).await;
+                applied.get_or_insert(super::sessions::push_layout_to_engine(&state, room).await);
             }
         }
     }
-    Json(json!({singular(kind):draft})).into_response()
+    let response = Json(json!({singular(kind):draft})).into_response();
+    match applied {
+        Some(applied) => super::sessions::with_layout_apply(response, applied),
+        None => response,
+    }
 }
 
 pub async fn remove_global(

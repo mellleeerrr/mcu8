@@ -2471,12 +2471,92 @@ async fn t00_attach_beyond_layout_size_is_conflict() {
     assert_eq!(response.status(), StatusCode::CONFLICT, "второй абонент не влезает в 1 окно");
 }
 
-/// S7: `layout_size` — единая реализация размера; preset важнее закэшированного size.
+/// S7: контракт `layout_size` — явный size, затем preset, затем слоты.
 #[test]
-fn pnm_layout_size_prefers_preset_and_falls_back_to_slots() {
+fn pnm_layout_size_prefers_explicit_size_over_preset() {
     assert_eq!(super::layout_size(&json!({"preset":"vks_grid_25","size":7})), Some(7));
     assert_eq!(super::layout_size(&json!({"preset":"preset_default_13"})), Some(13));
     assert_eq!(super::layout_size(&json!({"size":7})), Some(7));
     assert_eq!(super::layout_size(&json!({"slots":[{"position":1},{"position":2}]})), Some(2));
     assert_eq!(super::layout_size(&json!({})), None);
+}
+
+/// S7-регрессия: `preset_equal` без числа не должен раздувать явный `size` до
+/// дефолтных 13 (`PresetId::parse` даёт 13, explicit-only helper — None).
+#[test]
+fn pnm_preset_equal_keeps_explicit_size() {
+    let record = normalize_resource(
+        "video_layouts",
+        &json!({"payload":{"mode":"dynamic","preset":"preset_equal","size":4,"type":"individual","slots":[]}}),
+        "creator",
+    );
+    assert_eq!(record["payload"]["size"], 4, "id без размера не переопределяет payload.size");
+}
+
+/// S7-регрессия: разрозненные слоты не должны давать позицию вне ёмкости;
+/// attach занимает минимальную свободную позицию, запись остаётся PATCH-able.
+#[tokio::test]
+async fn t00_attach_into_sparse_layout_uses_free_position() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Sparse layout room").await.unwrap();
+    state.room_hub.register_participant(&room.id, participant("sip-1@sip-gateway", "First"));
+    state.room_hub.register_participant(&room.id, participant("sip-2@sip-gateway", "Second"));
+    let layout_id = create_layout(
+        &state,
+        "Sparse",
+        json!({"mode":"manual","preset":"vks_grid_4","type":"individual","slots":[{"position":4,"role":"AUTO"}]}),
+    )
+    .await;
+    let base = format!("/api/v3/sessions/{}/video_layouts/{}", room.id, layout_id);
+    let response =
+        attach(State(state.clone()), Extension(operator()), uri(&base), Path((room.id.to_string(), layout_id.clone())))
+            .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    for participant_id in ["sip-1@sip-gateway", "sip-2@sip-gateway"] {
+        let response = attach_abonent_call(state.clone(), room.id, layout_id.clone(), participant_id).await;
+        assert_eq!(response.status(), StatusCode::OK, "позиция не должна выходить за vks_grid_4");
+    }
+    // Запись не отравлена: PATCH только display_name проходит (раньше был 409).
+    let mut record = {
+        let resources = state.api_v3.resources.lock().await;
+        resources.layouts.get(&layout_id).cloned().expect("layout exists")
+    };
+    assert!(
+        record["payload"]["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|slot| slot["position"].as_u64())
+            .all(|position| position <= 4),
+        "все позиции в пределах ёмкости: {record}"
+    );
+    update_resource(&mut record, &json!({"display_name":"Sparse renamed"})).expect("запись остаётся валидной");
+}
+
+/// S8: глобальный PATCH раскладки (один scope) отдаёт честный apply-статус.
+#[tokio::test]
+async fn t00_edit_global_exposes_apply_header() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Global edit room").await.unwrap();
+    let layout_id = create_layout(
+        &state,
+        "Global",
+        json!({"mode":"manual","preset":"preset_equal_4","type":"individual","slots":[]}),
+    )
+    .await;
+    let base = format!("/api/v3/sessions/{}/video_layouts/{}", room.id, layout_id);
+    let response =
+        attach(State(state.clone()), Extension(operator()), uri(&base), Path((room.id.to_string(), layout_id.clone())))
+            .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = edit_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/video_layouts/{layout_id}")),
+        Path(layout_id.clone()),
+        Json(json!({"display_name":"Global renamed"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-vks-layout-applied"], "pending", "dialer'а нет — pending");
 }

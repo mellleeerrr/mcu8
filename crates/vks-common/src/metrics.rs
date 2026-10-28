@@ -23,8 +23,8 @@ static INIT: std::sync::Once = std::sync::Once::new();
 ///
 /// Labels: `result` — `engine` (движок принял), `pending` (сохранено, но
 /// движка/канала ещё нет либо применение сорвалось), `saved-only` (в комнате
-/// нет раскладки, применять нечего). Основание: `docs/rules/API_V3_CONTRACT.md`
-/// — ответ PATCH/attach не должен выдавать «сохранено» за «применено».
+/// нет раскладки, применять нечего). Основание: `docs/rules/BACKEND_RULES.md`
+/// §4 — ответ PATCH/attach не должен выдавать «сохранено» за «применено».
 pub static LAYOUT_APPLY: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!("vks_layout_apply_total", "Layout apply attempts by result", &["result"])
         .expect("vks_layout_apply_total must register once")

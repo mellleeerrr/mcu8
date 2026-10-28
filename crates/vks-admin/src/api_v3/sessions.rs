@@ -486,6 +486,9 @@ async fn current_layout_json(state: &SharedState, room_id: &RoomId) -> Option<Va
 }
 
 /// Итог применения раскладки к медиа-движку — честный статус для UI.
+/// `#[must_use]`: молчаливое отбрасывание статуса — ровно тот дефект, который
+/// закрывает S8.
+#[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LayoutApply {
     /// Движок принял раскладку.
@@ -592,7 +595,7 @@ pub async fn start_session(
     // Выбранная раскладка проводится в медиа-движок ДО первого моста/дозвона:
     // MCU получает assignments, поэтому абонент попадает в свою ячейку, а не
     // в первый свободный слот. Ошибка движка старт сессии не ломает.
-    push_layout_to_engine(&state, room.id).await;
+    let _ = push_layout_to_engine(&state, room.id).await;
     let contacts = state.api_v3.resources.lock().await.contacts.get(&room.id.to_string()).cloned().unwrap_or_default();
     let autocall = state
         .api_v3
