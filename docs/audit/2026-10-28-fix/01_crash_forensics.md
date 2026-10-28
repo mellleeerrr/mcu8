@@ -18,7 +18,10 @@
 **Воспроизводимые хэши (md5, `git show <commit>:<path>`):** на `645120d` —
 `resources.rs` `36831347…`, `resource_tests.rs` `ac2e7359…`, `shell.rs`
 (`crates/vks-admin/src/api_v3/shell.rs`) `c5406874…`, `codian-layouts.js` `c91bb08e…`;
-на HEAD (после фиксов) — `resources.rs` `a85c56d5…`, `resource_tests.rs` `8978dcc0…`;
+на `22aac56` — `resources.rs` `a85c56d5…`, `resource_tests.rs` `8978dcc0…`;
+на HEAD после cross-scope M1 (`26c300a`) — `resources.rs` `21530208…`, `resource_tests.rs`
+`0412cf63…`, `codian-layouts.js` `03cfb280…` (после T2 и гигиены; проверка:
+`git show HEAD:<path> | md5sum`);
 вендорские бандлы `index6` `6aa06b9c…`, `index-legacy6` `9f4ef0f2…` совпадают во всех срезах.
 **Тесты:** в 17:57 я прогнал `cargo test -p vks-admin --lib` — **302 passed, 0 failed**; отдельно
 `t00_` — **5 passed**, включая retype, дедуп двух default и «рестарт не даёт вторую Общую».
@@ -212,7 +215,9 @@ editor.editValueField('type','individual');
 retype-политику (клон `2caea6d1` → `default`), `t00_session_restart…` — что inherit больше не плодит
 вторую «Общую». То есть retype — осознанное поведение кода, а не случайность; вопрос ниже — продуктовый.
 
-**Критично:** исход зависит от **порядка рестартов**:
+**Критично (pre-fix снимок; после `f8f3f91` политика детерминирована —**
+**room-фильтр `target_is_local` и дедуп видимого scope, см. 02 R-03):** исход зависел от
+**порядка рестартов**:
 
 - **Сначала рестарт сервера** → `repair_scope_defaults` перетипирует `2caea6d1` в `default`; в сессии
   одна «Общая» с геометрией Codian 07, **имя «Codian 07 — 13 окон» в UI исчезает** (computed
