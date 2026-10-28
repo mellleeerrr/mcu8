@@ -94,7 +94,10 @@ async function api(token, method, path, body) {
     // preset в config.data). Любой другой вызов (в т.ч. crafted-объект) —
     // fail; allowlist по форме ошибки/окну времени не используется.
     await context.addInitScript(() => {
-      window.__vendorReport = { expected: 0, unexpected: 0 };
+      // Счётчики в замыкании и неизменяемые: код страницы не может ни
+      // переопределить reportError, ни обнулить/подделать счётчики.
+      let expectedCalls = 0;
+      let unexpectedCalls = 0;
       const wrapper = (error) => {
         let expected = false;
         try {
@@ -103,15 +106,16 @@ async function api(token, method, path, body) {
             && /\/video_layouts\/calculate/.test(String(config.url || ''))
             && String(config.data || '').includes('preset_default_13');
         } catch (e) { expected = false; }
-        window.__vendorReport[expected ? 'expected' : 'unexpected'] += 1;
+        if (expected) expectedCalls += 1;
+        else unexpectedCalls += 1;
       };
-      // Обёртка должна быть неизменяемой: иначе код страницы (в т.ч. тестовая
-      // инъекция) может переопределить reportError, спрятать реальный вызов
-      // или подделать провенанс. Счётчики читаются по ВСЕМ фреймам.
+      const read = () => ({ expected: expectedCalls, unexpected: unexpectedCalls });
       try {
         Object.defineProperty(window, 'reportError', { value: wrapper, writable: false, configurable: false });
+        Object.defineProperty(window, '__readVendorReport', { value: read, writable: false, configurable: false });
       } catch (e) {
         window.reportError = wrapper;
+        window.__readVendorReport = read;
       }
     });
     const calculateResponses = [];
@@ -303,7 +307,9 @@ async function api(token, method, path, body) {
     const reported = { expected: 0, unexpected: 0 };
     for (const frame of page.frames()) {
       try {
-        const counters = await frame.evaluate(() => window.__vendorReport || { expected: 0, unexpected: 0 });
+        const counters = await frame.evaluate(() => (typeof window.__readVendorReport === 'function'
+          ? window.__readVendorReport()
+          : { expected: 0, unexpected: 0 }));
         reported.expected += Number(counters.expected || 0);
         reported.unexpected += Number(counters.unexpected || 0);
       } catch (e) { /* фрейм уже закрыт */ }
