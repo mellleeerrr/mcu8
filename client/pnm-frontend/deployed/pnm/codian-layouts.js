@@ -79,6 +79,43 @@
   // разметка `.dynamic-layout-configurator-counter` (1:1 с 2.2.1.66).
   var MAX_COUNT = 100;
 
+  /* Вендорский конструктор красит окно и рисует иконку только по `slot.role`
+   * (UPPERCASE: EMPTY/ACTIVE/AUTO/PEER/ROLL/PRESENTATION). Серверный каталог
+   * Codian и старые сохранённые payload'ы роль не содержали — окна были
+   * прозрачными. Нормализуем на границе UI: известные роли не трогаем,
+   * пустым окнам — AUTO, занятым — PEER, наложенным PiP — PRESENTATION. */
+  function uiSlotRole(slot) {
+    var role = slot && typeof slot.role === 'string' ? slot.role : '';
+    if (role === 'EMPTY' || role === 'ACTIVE' || role === 'AUTO' || role === 'PEER' ||
+        role === 'ROLL' || role === 'PRESENTATION') {
+      return role;
+    }
+    // В store редактора занятость встречается и в camelCase (contactId/
+    // abonentId): без этого занятое окно получило бы AUTO и «заполнить
+    // свободные» перезаписало бы участника.
+    if (slot && (slot.abonent_id || slot.contact_id || slot.abonentId || slot.contactId ||
+                 slot.call_string_id || slot.callStringId)) {
+      return 'PEER';
+    }
+    return Number(slot && slot.z_order) > 0 ? 'PRESENTATION' : 'AUTO';
+  }
+
+  function normalizeSlots(slots) {
+    var out = [];
+    if (!Array.isArray(slots)) return out;
+    for (var i = 0; i < slots.length; i += 1) {
+      var slot = slots[i];
+      if (!slot || typeof slot !== 'object') continue;
+      var copy = {};
+      for (var key in slot) {
+        if (Object.prototype.hasOwnProperty.call(slot, key)) copy[key] = slot[key];
+      }
+      copy.role = uiSlotRole(slot);
+      out.push(copy);
+    }
+    return out;
+  }
+
   // Конструктор «Схема расположения участников»: параметрические id
   // (`vks_grid_9`, `vks_pin_r_8`) — геометрию из id считает сервер, поэтому
   // превью (calculate) и применение (apply_layout) всегда совпадают.
@@ -87,31 +124,25 @@
   // Пункт «Конструктор» в вендорском селекторе режимов раскладки: та же
   // разметка/классы, что у auto/dynamic/manual, вставляется после «Ручная
   // настройка». Клик переводит редактор в ручной режим и раскрывает секцию
-  // конструктора (схемы vks_grid_* / vks_pin_*).
+  // конструктора (15 динамических раскладок).
   var MODE_SELECTOR = '.layout-mode-selector';
   var MODE_TILE_ATTR = 'data-vks-constructor-tile';
   var modeTileEngaged = false;
   var CONSTRUCTOR_MODE_ATTR = 'data-vks-constructor-mode';
   var CONSTRUCTOR_MODES = [
     { key: 'grid', title: 'Равномерная сетка', id: function (count) { return 'vks_grid_' + count; } },
-    { key: 'pin_l', title: 'Крупный слева, лента справа', id: function (count) { return 'vks_pin_l_' + count; } },
-    { key: 'pin_r', title: 'Крупный справа, лента слева', id: function (count) { return 'vks_pin_r_' + count; } },
-    { key: 'pin_t', title: 'Крупный сверху, лента снизу', id: function (count) { return 'vks_pin_t_' + count; } },
-    { key: 'pin_b', title: 'Крупный снизу, лента сверху', id: function (count) { return 'vks_pin_b_' + count; } }
+    { key: 'pin_l', title: 'Главный слева', id: function (count) { return 'vks_pin_l_' + count; } },
+    { key: 'pin_r', title: 'Главный справа', id: function (count) { return 'vks_pin_r_' + count; } },
+    { key: 'pin_t', title: 'Главный сверху', id: function (count) { return 'vks_pin_t_' + count; } },
+    { key: 'pin_b', title: 'Главный снизу', id: function (count) { return 'vks_pin_b_' + count; } },
+    { key: 'dual', title: 'Два главных докладчика', id: function (count) { return 'vks_dual_' + count; } }
   ];
 
   var constructorCount = 0;
-  var constructorSide = 'grid'; // grid | l | r | t | b (последняя выбранная схема)
-  // Однократный отложенный выбор после переключения в ручной режим: пока он
-  // не null, reAdopt молчит (иначе принял бы вендорский preset_equal_25 и
-  // поставил 25 вместо исходного N). Выполняется из reAdopt, когда вендор
-  // выставил свой preset_*, или из страховочного таймера (медленный вендор).
+  var constructorArchetype = 'grid'; // последняя выбранная схема конструктора
   var pendingAdopt = null;
   var pendingAdoptTimer = null;
   var identityName = ''; // displayName серверной раскладки: вендор может обнулить
-  var constructorState = 'idle'; // idle | loading | ready | failed
-  var constructorSlots = Object.create(null);
-  var constructorCache = Object.create(null);
   var counterValue = 0;
 
   var catalog = [];
@@ -188,7 +219,7 @@
     var val = editor && editor.modifiedValue;
     if (!val || val.mode !== 'manual') return false;
     var preset = typeof val.preset === 'string' ? val.preset : '';
-    return modeTileEngaged || preset.indexOf('vks_') === 0 || preset.indexOf('codian_') === 0;
+    return modeTileEngaged || preset.indexOf('vks_') === 0;
   }
 
   function subscribe(editor) {
@@ -202,7 +233,7 @@
   }
 
   /* Вендорские чипы «Количество видеоокон»/пресеты ставят свой preset поверх
-   * нашего. Пока «Конструктор» активен, возвращаем vks_<side>_<N> с новым N:
+   * нашего. Пока «Конструктор» активен, возвращаем vks_<archetype>_<N> с новым N:
    * иначе сохранится вендорский preset, а карточки останутся без active. */
   function reAdopt() {
     var editor = layoutEditor();
@@ -211,16 +242,11 @@
     rememberIdentity(value);
     if (value.mode !== 'manual') return;
     var preset = typeof value.preset === 'string' ? value.preset : '';
-    // Сохранённая vks_* (reopen) — это уже конструктор: запоминаем сторону и
+    // Сохранённая vks_* (reopen) — это уже конструктор: запоминаем схему и
     // считаем тайл активным, иначе первый же вендорский чип сломает раскладку.
     if (preset.indexOf('vks_') === 0) {
-      var side = /^vks_pin_([lrtb])_/.exec(preset);
-      constructorSide = side ? side[1] : 'grid';
-      modeTileEngaged = true;
-      return;
-    }
-    // Сохранённая codian_* (reopen) — это тоже конструктор: остаёмся в нём!
-    if (preset.indexOf('codian_') === 0) {
+      var m = /^vks_([a-z0-9_]+)_/.exec(preset);
+      constructorArchetype = m ? m[1] : 'grid';
       modeTileEngaged = true;
       return;
     }
@@ -246,7 +272,7 @@
     if (!(count > 0)) return;
     // Без дедупликации: повторный клик того же чипа тоже обязан вернуть vks_*
     // (после adopt preset становится vks_*, и следующий subscribe выходит выше).
-    selectConstructor('vks_' + (constructorSide === 'grid' ? 'grid' : 'pin_' + constructorSide) + '_' + count);
+    selectConstructor('vks_' + constructorArchetype + '_' + count);
   }
 
   function round(value) {
@@ -369,9 +395,12 @@
     badge.textContent = String(count);
   }
 
-  /* Вендор обнуляет displayName/type при переходе в manual (канонический auto
-   * имеет type:"default"). Держим серверное имя и возвращаем его перед выбором
-   * схемы; type конструктора всегда individual. */
+  /* Вендор обнуляет displayName при переходе в manual. Держим серверное имя и
+   * возвращаем его перед выбором схемы. `payload.type` НЕ трогаем: в store это
+   * отдельный ref, инициализированный из серверной раскладки, а запись
+   * `editValueField('type', …)` кладёт поле в черновик режима и перекрывает его.
+   * Именно так «Общая» (default) превращалась в individual, сессия оставалась
+   * без default, и UI падал на `sessionLayoutListByType.default.some(...)`. */
   function rememberIdentity(value) {
     if (value && typeof value.displayName === 'string' && value.displayName) identityName = value.displayName;
   }
@@ -379,7 +408,6 @@
   function restoreIdentity(editor) {
     try {
       if (identityName) editor.editValueField('displayName', identityName);
-      editor.editValueField('type', 'individual');
     } catch (e) { /* поля недоступны — останутся вендорские */ }
   }
 
@@ -440,6 +468,7 @@
     item.setAttribute('role', 'button');
     item.setAttribute('tabindex', '0');
     item.setAttribute('aria-pressed', 'false');
+    item.style.cssText = 'width:52px;min-width:52px;max-width:52px;box-sizing:border-box;';
     // Одно доступное имя для title/aria: число окон — в нём, а бейдж
     // помечен aria-hidden (декоративный дубль).
     var label = entry.windows > 0 ? entry.title + ' — ' + entry.windows + ' ' + windowsWord(entry.windows) : entry.title;
@@ -462,6 +491,8 @@
     section.className = 'main-form-section-16';
     section.setAttribute(GROUP_ATTR, '1');
     section.style.cssText = 'display:flex;flex-direction:column;flex:1 1 0;min-height:0;margin-top:12px;overflow:hidden;';
+    section.addEventListener('click', onActivate);
+    section.addEventListener('keydown', onKeydown);
 
     var selector = document.createElement('div');
     selector.className = 'layout-scheme-selector manual-layout-configurator-side-panel';
@@ -521,10 +552,15 @@
     var existing = Array.isArray(value.slots) && value.preset === id ? value.slots : null;
     var slots = Array.isArray(existing) && existing.length === count ? existing : [];
     if (!slots.length) {
-      for (var i = 1; i <= count; i += 1) slots.push({ position: i, role: 'AUTO' });
+      if (entry.slots && entry.slots.length) {
+        slots = entry.slots;
+      } else {
+        for (var i = 1; i <= count; i += 1) slots.push({ position: i, role: 'AUTO' });
+      }
     }
-    // Сохраняем состояние Конструктора и гасим ожидающие таймеры ДО мутации стора
-    modeTileEngaged = true;
+    // Каталог отдаёт геометрию без role: без роли вендорский редактор рисует
+    // окно прозрачным и без иконки. Копируем слоты и достраиваем роль.
+    slots = normalizeSlots(slots);
     pendingAdopt = null;
     if (pendingAdoptTimer) {
       clearTimeout(pendingAdoptTimer);
@@ -532,12 +568,20 @@
     }
     try {
       editor.editValueField('preset', id);
-      editor.setSlots(id, slots);
+      if (typeof editor.setSlots === 'function') {
+        editor.setSlots(id, slots);
+      } else {
+        editor.editValueField('slots', slots);
+      }
     } catch (e) {
       console.warn('codian-layouts: не удалось выбрать схему ' + id, e);
       return;
     }
-    syncCounter(count);
+    if (isConstructor()) {
+      counterValue = count;
+      syncCounter(count);
+      ensureConstructor();
+    }
     syncModeTile();
     syncActive();
     subscribe(editor);
@@ -576,7 +620,7 @@
     var preset = typeof value.preset === 'string' ? value.preset : '';
 
     // 1. Для vks_* точное N находится в конце имени пресета
-    var vksMatch = /^vks_(?:grid|pin_[lrtb])_(\d+)$/.exec(preset);
+    var vksMatch = /^vks_[a-z0-9_]+_(\d+)$/.exec(preset);
     if (vksMatch) {
       var vksCount = Number(vksMatch[1]);
       if (vksCount >= 1 && vksCount <= MAX_COUNT) return vksCount;
@@ -601,48 +645,387 @@
     return 0;
   }
 
-  /* Превью всех вариантов конструктора: один calculate на вариант (как у
-   * вендора), ответ кэшируется по числу окон. */
-  function loadConstructor(count) {
-    if (constructorCache[count]) {
-      constructorCount = count;
-      constructorSlots = constructorCache[count];
-      constructorState = 'ready';
-      ensureConstructor();
-      return;
+  /* Чистый синхронный расчет геометрии слотов по модульной матрице C x R.
+   * Нормализованное 16:9 пространство холста: 1280x720. */
+  var CANVAS_W = 1280;
+  var CANVAS_H = 720;
+
+  function getProminentConfig(count) {
+    if (count <= 6)  return { cols: 3, rows: 3, mainW: 2, mainH: 2 };
+    if (count <= 8)  return { cols: 4, rows: 4, mainW: 3, mainH: 3 };
+    if (count <= 10) return { cols: 5, rows: 5, mainW: 4, mainH: 4 };
+    if (count <= 12) return { cols: 5, rows: 4, mainW: 3, mainH: 3 };
+    if (count <= 13) return { cols: 4, rows: 4, mainW: 2, mainH: 2 };
+    if (count <= 17) return { cols: 5, rows: 5, mainW: 3, mainH: 3 };
+    if (count <= 22) return { cols: 5, rows: 5, mainW: 2, mainH: 2 };
+    if (count <= 28) return { cols: 6, rows: 6, mainW: 3, mainH: 3 };
+    if (count <= 33) return { cols: 6, rows: 6, mainW: 2, mainH: 2 };
+    if (count <= 38) return { cols: 7, rows: 6, mainW: 2, mainH: 2 };
+    if (count <= 46) return { cols: 7, rows: 7, mainW: 2, mainH: 2 };
+    if (count <= 53) return { cols: 8, rows: 7, mainW: 2, mainH: 2 };
+    if (count <= 61) return { cols: 8, rows: 8, mainW: 2, mainH: 2 };
+    if (count <= 73) return { cols: 9, rows: 9, mainW: 3, mainH: 3 };
+    if (count <= 82) return { cols: 10, rows: 9, mainW: 3, mainH: 3 };
+    if (count <= 92) return { cols: 10, rows: 10, mainW: 3, mainH: 3 };
+    return { cols: 11, rows: 10, mainW: 3, mainH: 3 };
+  }
+
+  function getDualConfig(count) {
+    if (count <= 2)  return { cols: 2, rows: 1, mainW: 1, mainH: 1 };
+    if (count <= 6)  return { cols: 4, rows: 3, mainW: 2, mainH: 2 };
+    if (count <= 10) return { cols: 4, rows: 4, mainW: 2, mainH: 2 };
+    if (count <= 14) return { cols: 4, rows: 5, mainW: 2, mainH: 2 };
+    if (count <= 18) return { cols: 6, rows: 4, mainW: 2, mainH: 2 };
+    if (count <= 24) return { cols: 6, rows: 5, mainW: 2, mainH: 2 };
+    if (count <= 30) return { cols: 6, rows: 6, mainW: 2, mainH: 2 };
+    if (count <= 36) return { cols: 7, rows: 6, mainW: 2, mainH: 2 };
+    if (count <= 50) return { cols: 8, rows: 7, mainW: 2, mainH: 2 };
+    if (count <= 66) return { cols: 9, rows: 8, mainW: 2, mainH: 2 };
+    if (count <= 84) return { cols: 10, rows: 9, mainW: 2, mainH: 2 };
+    return { cols: 11, rows: 10, mainW: 2, mainH: 2 };
+  }
+
+  function getGridEdges(start, count, cell_size, gap) {
+    var edges = [];
+    for (var i = 0; i <= count; i += 1) {
+      edges.push(Math.round(start + i * (cell_size + gap)));
     }
-    if (constructorState === 'loading' && constructorCount === count) return;
-    constructorCount = count;
-    constructorState = 'loading';
-    constructorSlots = Object.create(null);
-    var results = Object.create(null);
-    var requests = [];
-    CONSTRUCTOR_MODES.forEach(function (mode) {
-      requests.push(
-        request('/api/v3/ui/video_layouts/calculate', {
-          method: 'POST',
-          body: JSON.stringify({ preset: mode.id(count), width: PREVIEW_WIDTH, height: PREVIEW_HEIGHT })
-        }).then(
-          function (data) { results[mode.key] = data && Array.isArray(data.slots) ? data.slots : null; },
-          function () { results[mode.key] = null; }
-        )
-      );
-    });
-    Promise.all(requests).then(function () {
-      if (constructorCount !== count) return;
-      var ready = 0;
-      for (var key in results) {
-        if (Object.prototype.hasOwnProperty.call(results, key) && results[key]) ready += 1;
+    return edges;
+  }
+
+  function buildSymmetricLayout(count, mode, canvasW, canvasH, gap) {
+    if (mode === undefined) mode = 'pin_l';
+    if (canvasW === undefined) canvasW = CANVAS_W;
+    if (canvasH === undefined) canvasH = CANVAS_H;
+    if (gap === undefined) gap = 0;
+
+    count = Math.max(1, Math.min(MAX_COUNT, Math.floor(Number(count)) || 1));
+    if (count <= 1) {
+      return [{ position: 1, role: 'AUTO', x: 0, y: 0, width: canvasW, height: canvasH, z_order: 0 }];
+    }
+
+    if (mode === 'grid') {
+      if (count === 2) {
+        var w2 = Math.round((canvasW - gap) / 2);
+        return [
+          { position: 1, role: 'AUTO', x: 0, y: 0, width: w2, height: canvasH, z_order: 0 },
+          { position: 2, role: 'AUTO', x: w2 + gap, y: 0, width: canvasW - w2 - gap, height: canvasH, z_order: 0 }
+        ];
       }
-      if (ready > 0) {
-        constructorCache[count] = results;
-        constructorSlots = results;
-        constructorState = 'ready';
-      } else {
-        constructorState = 'failed';
+      var cols = Math.ceil(Math.sqrt(count * (16 / 9) / (canvasW / canvasH)));
+      var rows = Math.ceil(count / cols);
+      var cellW = (canvasW - gap * (cols - 1)) / cols;
+      var cellH = (canvasH - gap * (rows - 1)) / rows;
+      var rowEdges = getGridEdges(0, rows, cellH, gap);
+      var boxes = [];
+
+      for (var i = 0; i < count; i += 1) {
+        var r = Math.floor(i / cols);
+        var c = i % cols;
+        var itemsInRow = (r === rows - 1) ? (count - r * cols) : cols;
+        var rowWidth = itemsInRow * cellW + (itemsInRow - 1) * gap;
+        var rowOffsetX = (canvasW - rowWidth) / 2;
+        var colEdges = getGridEdges(rowOffsetX, itemsInRow, cellW, gap);
+
+        boxes.push({
+          position: i + 1,
+          role: 'AUTO',
+          x: colEdges[c],
+          y: rowEdges[r],
+          width: Math.max(1, colEdges[c + 1] - colEdges[c] - gap),
+          height: Math.max(1, rowEdges[r + 1] - rowEdges[r] - gap),
+          z_order: 0
+        });
       }
-      ensureConstructor();
-    });
+      return boxes;
+    }
+
+    if (mode === 'dual') {
+      if (count === 2) {
+        var halfW = Math.round((canvasW - gap) / 2);
+        return [
+          { position: 1, role: 'AUTO', x: 0, y: 0, width: halfW, height: canvasH, z_order: 0 },
+          { position: 2, role: 'AUTO', x: halfW + gap, y: 0, width: canvasW - halfW - gap, height: canvasH, z_order: 0 }
+        ];
+      }
+      var dCfg = getDualConfig(count);
+      var dCols = dCfg.cols;
+      var dRows = dCfg.rows;
+      var dMainW = dCfg.mainW;
+      var dMainH = dCfg.mainH;
+      var dUnitW = (canvasW - gap * (dCols - 1)) / dCols;
+      var dUnitH = (canvasH - gap * (dRows - 1)) / dRows;
+      var colEdges = getGridEdges(0, dCols, dUnitW, gap);
+      var rowEdges = getGridEdges(0, dRows, dUnitH, gap);
+
+      var dBoxes = [];
+      dBoxes.push({
+        position: 1, role: 'AUTO',
+        x: colEdges[0], y: rowEdges[0],
+        width: Math.max(1, colEdges[dMainW] - colEdges[0] - gap),
+        height: Math.max(1, rowEdges[dMainH] - rowEdges[0] - gap),
+        z_order: 0
+      });
+      dBoxes.push({
+        position: 2, role: 'AUTO',
+        x: colEdges[dCols - dMainW], y: rowEdges[0],
+        width: Math.max(1, colEdges[dCols] - colEdges[dCols - dMainW] - gap),
+        height: Math.max(1, rowEdges[dMainH] - rowEdges[0] - gap),
+        z_order: 0
+      });
+
+      var dRemaining = count - 2;
+      var midSlots = [];
+      for (var r = 0; r < dMainH; r += 1) {
+        for (var c = dMainW; c < dCols - dMainW; c += 1) {
+          midSlots.push({ r: r, c: c });
+        }
+      }
+      var useMid = Math.min(dRemaining, midSlots.length);
+      for (var i = 0; i < useMid; i += 1) {
+        var slot = midSlots[i];
+        dBoxes.push({
+          position: dBoxes.length + 1, role: 'AUTO',
+          x: colEdges[slot.c],
+          y: rowEdges[slot.r],
+          width: Math.max(1, colEdges[slot.c + 1] - colEdges[slot.c] - gap),
+          height: Math.max(1, rowEdges[slot.r + 1] - rowEdges[slot.r] - gap),
+          z_order: 0
+        });
+      }
+      dRemaining -= useMid;
+
+      var dBottomRows = dRows - dMainH;
+      for (var rIdx = 0; rIdx < dBottomRows && dRemaining > 0; rIdx += 1) {
+        var rNum = dMainH + rIdx;
+        var take = Math.min(dRemaining, dCols);
+        var rowWidth = take * dUnitW + (take - 1) * gap;
+        var rowOffsetX = (canvasW - rowWidth) / 2;
+        var bColEdges = getGridEdges(rowOffsetX, take, dUnitW, gap);
+        for (var cIdx = 0; cIdx < take; cIdx += 1) {
+          dBoxes.push({
+            position: dBoxes.length + 1, role: 'AUTO',
+            x: bColEdges[cIdx],
+            y: rowEdges[rNum],
+            width: Math.max(1, bColEdges[cIdx + 1] - bColEdges[cIdx] - gap),
+            height: Math.max(1, rowEdges[rNum + 1] - rowEdges[rNum] - gap),
+            z_order: 0
+          });
+        }
+        dRemaining -= take;
+      }
+      return dBoxes;
+    }
+
+    var cfg = getProminentConfig(count);
+    var cols = cfg.cols;
+    var rows = cfg.rows;
+    var mainW = cfg.mainW;
+    var mainH = cfg.mainH;
+    var unitW = (canvasW - gap * (cols - 1)) / cols;
+    var unitH = (canvasH - gap * (rows - 1)) / rows;
+    var colEdges = getGridEdges(0, cols, unitW, gap);
+    var rowEdges = getGridEdges(0, rows, unitH, gap);
+
+    var boxes = [];
+
+    if (mode === 'pin_l') {
+      boxes.push({
+        position: 1, role: 'AUTO',
+        x: colEdges[0], y: rowEdges[0],
+        width: Math.max(1, colEdges[mainW] - colEdges[0] - gap),
+        height: Math.max(1, rowEdges[mainH] - rowEdges[0] - gap),
+        z_order: 0
+      });
+      var rightSlots = [];
+      for (var r = 0; r < mainH; r += 1) {
+        for (var c = mainW; c < cols; c += 1) rightSlots.push({ r: r, c: c });
+      }
+      var remaining = count - 1;
+      var useRight = Math.min(remaining, rightSlots.length);
+      for (var i = 0; i < useRight; i += 1) {
+        var s = rightSlots[i];
+        boxes.push({
+          position: boxes.length + 1, role: 'AUTO',
+          x: colEdges[s.c], y: rowEdges[s.r],
+          width: Math.max(1, colEdges[s.c + 1] - colEdges[s.c] - gap),
+          height: Math.max(1, rowEdges[s.r + 1] - rowEdges[s.r] - gap),
+          z_order: 0
+        });
+      }
+      remaining -= useRight;
+
+      var bottomRowCount = rows - mainH;
+      for (var rIdx = 0; rIdx < bottomRowCount && remaining > 0; rIdx += 1) {
+        var rNum = mainH + rIdx;
+        var takeInRow = Math.min(remaining, cols);
+        var rowWidth = takeInRow * unitW + (takeInRow - 1) * gap;
+        var rowOffsetX = (canvasW - rowWidth) / 2;
+        var bColEdges = getGridEdges(rowOffsetX, takeInRow, unitW, gap);
+        for (var cIdx = 0; cIdx < takeInRow; cIdx += 1) {
+          boxes.push({
+            position: boxes.length + 1, role: 'AUTO',
+            x: bColEdges[cIdx], y: rowEdges[rNum],
+            width: Math.max(1, bColEdges[cIdx + 1] - bColEdges[cIdx] - gap),
+            height: Math.max(1, rowEdges[rNum + 1] - rowEdges[rNum] - gap),
+            z_order: 0
+          });
+        }
+        remaining -= takeInRow;
+      }
+      return boxes;
+    }
+
+    if (mode === 'pin_r') {
+      boxes.push({
+        position: 1, role: 'AUTO',
+        x: colEdges[cols - mainW], y: rowEdges[0],
+        width: Math.max(1, colEdges[cols] - colEdges[cols - mainW] - gap),
+        height: Math.max(1, rowEdges[mainH] - rowEdges[0] - gap),
+        z_order: 0
+      });
+      var leftCols = cols - mainW;
+      var leftSlots = [];
+      for (var r = 0; r < mainH; r += 1) {
+        for (var c = 0; c < leftCols; c += 1) leftSlots.push({ r: r, c: c });
+      }
+      var remaining = count - 1;
+      var useLeft = Math.min(remaining, leftSlots.length);
+      for (var i = 0; i < useLeft; i += 1) {
+        var s = leftSlots[i];
+        boxes.push({
+          position: boxes.length + 1, role: 'AUTO',
+          x: colEdges[s.c], y: rowEdges[s.r],
+          width: Math.max(1, colEdges[s.c + 1] - colEdges[s.c] - gap),
+          height: Math.max(1, rowEdges[s.r + 1] - rowEdges[s.r] - gap),
+          z_order: 0
+        });
+      }
+      remaining -= useLeft;
+
+      var bottomRowCount = rows - mainH;
+      for (var rIdx = 0; rIdx < bottomRowCount && remaining > 0; rIdx += 1) {
+        var rNum = mainH + rIdx;
+        var takeInRow = Math.min(remaining, cols);
+        var rowWidth = takeInRow * unitW + (takeInRow - 1) * gap;
+        var rowOffsetX = (canvasW - rowWidth) / 2;
+        var bColEdges = getGridEdges(rowOffsetX, takeInRow, unitW, gap);
+        for (var cIdx = 0; cIdx < takeInRow; cIdx += 1) {
+          boxes.push({
+            position: boxes.length + 1, role: 'AUTO',
+            x: bColEdges[cIdx], y: rowEdges[rNum],
+            width: Math.max(1, bColEdges[cIdx + 1] - bColEdges[cIdx] - gap),
+            height: Math.max(1, rowEdges[rNum + 1] - rowEdges[rNum] - gap),
+            z_order: 0
+          });
+        }
+        remaining -= takeInRow;
+      }
+      return boxes;
+    }
+
+    if (mode === 'pin_t') {
+      var mainColOffset = Math.floor((cols - mainW) / 2);
+      boxes.push({
+        position: 1, role: 'AUTO',
+        x: colEdges[mainColOffset], y: rowEdges[0],
+        width: Math.max(1, colEdges[mainColOffset + mainW] - colEdges[mainColOffset] - gap),
+        height: Math.max(1, rowEdges[mainH] - rowEdges[0] - gap),
+        z_order: 0
+      });
+      var topSideSlots = [];
+      for (var r = 0; r < mainH; r += 1) {
+        for (var c = 0; c < mainColOffset; c += 1) topSideSlots.push({ r: r, c: c });
+        for (var c = mainColOffset + mainW; c < cols; c += 1) topSideSlots.push({ r: r, c: c });
+      }
+      var remaining = count - 1;
+      var useTopSide = Math.min(remaining, topSideSlots.length);
+      for (var i = 0; i < useTopSide; i += 1) {
+        var s = topSideSlots[i];
+        boxes.push({
+          position: boxes.length + 1, role: 'AUTO',
+          x: colEdges[s.c], y: rowEdges[s.r],
+          width: Math.max(1, colEdges[s.c + 1] - colEdges[s.c] - gap),
+          height: Math.max(1, rowEdges[s.r + 1] - rowEdges[s.r] - gap),
+          z_order: 0
+        });
+      }
+      remaining -= useTopSide;
+
+      var bottomRowCount = rows - mainH;
+      for (var rIdx = 0; rIdx < bottomRowCount && remaining > 0; rIdx += 1) {
+        var rNum = mainH + rIdx;
+        var takeInRow = Math.min(remaining, cols);
+        var rowWidth = takeInRow * unitW + (takeInRow - 1) * gap;
+        var rowOffsetX = (canvasW - rowWidth) / 2;
+        var bColEdges = getGridEdges(rowOffsetX, takeInRow, unitW, gap);
+        for (var cIdx = 0; cIdx < takeInRow; cIdx += 1) {
+          boxes.push({
+            position: boxes.length + 1, role: 'AUTO',
+            x: bColEdges[cIdx], y: rowEdges[rNum],
+            width: Math.max(1, bColEdges[cIdx + 1] - bColEdges[cIdx] - gap),
+            height: Math.max(1, rowEdges[rNum + 1] - rowEdges[rNum] - gap),
+            z_order: 0
+          });
+        }
+        remaining -= takeInRow;
+      }
+      return boxes;
+    }
+
+    if (mode === 'pin_b') {
+      var mainColOffset = Math.floor((cols - mainW) / 2);
+      var mainRowOffset = rows - mainH;
+      boxes.push({
+        position: 1, role: 'AUTO',
+        x: colEdges[mainColOffset], y: rowEdges[mainRowOffset],
+        width: Math.max(1, colEdges[mainColOffset + mainW] - colEdges[mainColOffset] - gap),
+        height: Math.max(1, rowEdges[rows] - rowEdges[mainRowOffset] - gap),
+        z_order: 0
+      });
+
+      var remaining = count - 1;
+      for (var r = 0; r < mainRowOffset && remaining > 0; r += 1) {
+        var takeInRow = Math.min(remaining, cols);
+        var rowWidth = takeInRow * unitW + (takeInRow - 1) * gap;
+        var rowOffsetX = (canvasW - rowWidth) / 2;
+        var bColEdges = getGridEdges(rowOffsetX, takeInRow, unitW, gap);
+        for (var c = 0; c < takeInRow; c += 1) {
+          boxes.push({
+            position: boxes.length + 1, role: 'AUTO',
+            x: bColEdges[c], y: rowEdges[r],
+            width: Math.max(1, bColEdges[c + 1] - bColEdges[c] - gap),
+            height: Math.max(1, rowEdges[r + 1] - rowEdges[r] - gap),
+            z_order: 0
+          });
+        }
+        remaining -= takeInRow;
+      }
+
+      var bottomSideSlots = [];
+      for (var r = mainRowOffset; r < rows; r += 1) {
+        for (var c = 0; c < mainColOffset; c += 1) bottomSideSlots.push({ r: r, c: c });
+        for (var c = mainColOffset + mainW; c < cols; c += 1) bottomSideSlots.push({ r: r, c: c });
+      }
+      var useBottomSide = Math.min(remaining, bottomSideSlots.length);
+      for (var i = 0; i < useBottomSide; i += 1) {
+        var s = bottomSideSlots[i];
+        boxes.push({
+          position: boxes.length + 1, role: 'AUTO',
+          x: colEdges[s.c], y: rowEdges[s.r],
+          width: Math.max(1, colEdges[s.c + 1] - colEdges[s.c] - gap),
+          height: Math.max(1, rowEdges[s.r + 1] - rowEdges[s.r] - gap),
+          z_order: 0
+        });
+      }
+      return boxes;
+    }
+
+    return boxes;
+  }
+
+  function computeSlots(archetype, N) {
+    return buildSymmetricLayout(N, archetype, CANVAS_W, CANVAS_H, 0);
   }
 
   function buildConstructorItem(mode, slots, count) {
@@ -656,6 +1039,7 @@
     item.setAttribute('aria-pressed', 'false');
     item.setAttribute('aria-label', mode.title + ' — ' + count + ' ' + windowsWord(count));
     item.setAttribute('title', mode.title + ' — ' + count + ' ' + windowsWord(count));
+    item.style.cssText = 'width:52px;min-width:52px;max-width:52px;box-sizing:border-box;';
     var container = document.createElement('span');
     container.className = 'tc-icon-container layout-scheme-selector-item__icon';
     var icon = document.createElement('i');
@@ -796,8 +1180,8 @@
     if (!editor) return;
     var value = editor.modifiedValue || {};
     var preset = typeof value.preset === 'string' ? value.preset : '';
-    var savedSide = /^vks_pin_([lrtb])_/.exec(preset);
-    var side = savedSide ? savedSide[1] : constructorSide;
+    var m = /^vks_([a-z0-9_]+)_/.exec(preset);
+    var arch = m ? m[1] : constructorArchetype;
     modeTileEngaged = true;
     function apply() {
       if (!isConstructor()) return;
@@ -814,7 +1198,8 @@
       }
       rememberIdentity(current);
       restoreIdentity(editor);
-      selectConstructor('vks_' + (side === 'grid' ? 'grid' : 'pin_' + side) + '_' + count);
+      selectConstructor('vks_' + arch + '_' + count);
+      ensureConstructor();
     }
     if (value.mode !== 'manual') {
       // Вендор после mode='manual' асинхронно ставит preset_equal_25; пока он
@@ -913,19 +1298,22 @@
     selector.setAttribute('role', 'group');
     selector.setAttribute('aria-label', 'Схема расположения участников');
     selector.setAttribute(CONSTRUCTOR_MODES_ATTR, '1');
-    selector.style.cssText = 'display:flex;flex-direction:column;gap:6px;';
-    var row = document.createElement('div');
-    row.className = 'layout-scheme-selector__row';
-    row.style.cssText = 'display:flex;flex-flow:row nowrap;gap:2px;justify-content:flex-start;width:100%;';
-    var group = document.createElement('div');
-    group.className = 'layout-scheme-selector__group';
-    group.style.cssText = 'display:flex;flex-flow:row nowrap;gap:2px;justify-content:flex-start;width:100%;';
-    for (var i = 0; i < CONSTRUCTOR_MODES.length; i += 1) {
-      var mode = CONSTRUCTOR_MODES[i];
-      group.appendChild(buildConstructorItem(mode, constructorSlots[mode.key], count));
+    selector.style.cssText = 'display:flex;flex-direction:column;gap:6px;width:100%;overflow-x:hidden;';
+    for (var i = 0; i < CONSTRUCTOR_MODES.length; i += 5) {
+      var row = document.createElement('div');
+      row.className = 'layout-scheme-selector__row';
+      row.style.cssText = 'display:flex;flex-flow:row nowrap;gap:2px;justify-content:flex-start;width:100%;';
+      var group = document.createElement('div');
+      group.className = 'layout-scheme-selector__group';
+      group.style.cssText = 'display:flex;flex-flow:row nowrap;gap:2px;justify-content:flex-start;width:100%;';
+      for (var j = i; j < Math.min(i + 5, CONSTRUCTOR_MODES.length); j += 1) {
+        var mode = CONSTRUCTOR_MODES[j];
+        var slots = computeSlots(mode.key, count);
+        group.appendChild(buildConstructorItem(mode, slots, count));
+      }
+      row.appendChild(group);
+      selector.appendChild(row);
     }
-    row.appendChild(group);
-    selector.appendChild(row);
     return selector;
   }
 
@@ -948,27 +1336,33 @@
 
     var vendorSelector = sidePanel.querySelector('.layout-scheme-selector.manual-layout-configurator-side-panel');
     var ctorPanel = sidePanel.querySelector('[' + CONSTRUCTOR_ATTR + ']');
+    var codianGroup = sidePanel.querySelector('[' + GROUP_ATTR + ']');
+
+    // Создаем каталог Codian один раз, если каталог готов
+    if (catalogState === 'ready' && !codianGroup) {
+      if (ctorPanel) codianGroup = ctorPanel.querySelector('[' + GROUP_ATTR + ']');
+      if (!codianGroup) codianGroup = buildGroup();
+    }
 
     // 2. Декларативное управление видимостью сайдбара
     if (!isCtor) {
       if (vendorSelector) vendorSelector.style.display = '';
       if (ctorPanel) ctorPanel.style.display = 'none';
-      var oldCodian = sidePanel.querySelector('[' + GROUP_ATTR + ']');
-      if (oldCodian) oldCodian.style.display = 'none';
+      if (codianGroup) {
+        if (codianGroup.parentNode !== sidePanel) {
+          sidePanel.appendChild(codianGroup);
+        }
+        codianGroup.style.display = '';
+      }
+      syncActive();
       return;
     }
 
     if (vendorSelector) vendorSelector.style.display = 'none';
 
-    var count = currentCount();
-    if (count < 1) return;
-    if (constructorCount !== count) {
-      loadConstructor(count);
-      return;
-    }
-    if (constructorState !== 'ready') return;
+    var count = countForCounter();
 
-    // 3. Создание панели конструктора в сайдбаре (с вендорным классом .dynamic-layout-configurator-side-panel)
+    // 3. Создание панели конструктора в сайдбаре
     if (!ctorPanel) {
       ctorPanel = document.createElement('div');
       ctorPanel.className = 'dynamic-layout-configurator-side-panel';
@@ -982,14 +1376,14 @@
     }
     ctorPanel.style.display = '';
 
-    // 4. Монтирование счётчика (если ещё не создан)
+    // 4. Монтирование счётчика
     var counter = ctorPanel.querySelector('[data-vks-counter]');
     if (!counter) {
       counter = buildCounter(count);
       ctorPanel.appendChild(counter);
     }
 
-    // 5. Идемпотентное обновление селектора динамических режимов
+    // 5. Идемпотентное обновление селектора динамических режимов (6 модульных раскладок)
     var rendered = ctorPanel.getAttribute('data-count');
     var modesSelector = ctorPanel.querySelector('[' + CONSTRUCTOR_MODES_ATTR + ']');
     if (rendered !== String(count) || !modesSelector) {
@@ -998,17 +1392,13 @@
       if (modesSelector && modesSelector.parentNode) {
         modesSelector.parentNode.replaceChild(newModes, modesSelector);
       } else {
-        var codianGroup = ctorPanel.querySelector('[' + GROUP_ATTR + ']');
-        if (codianGroup) ctorPanel.insertBefore(newModes, codianGroup);
-        else ctorPanel.appendChild(newModes);
+        ctorPanel.appendChild(newModes);
       }
     }
 
-    // 6. Монтирование каталога Codian (ровно 1 раз — с сохранением скролла!)
-    if (catalogState === 'ready') {
-      var codianGroup = ctorPanel.querySelector('[' + GROUP_ATTR + ']');
-      if (!codianGroup) {
-        codianGroup = buildGroup();
+    // 6. Монтирование каталога Codian прямо внутри ctorPanel под 6 карточками модульных режимов
+    if (codianGroup) {
+      if (codianGroup.parentNode !== ctorPanel) {
         ctorPanel.appendChild(codianGroup);
       }
       codianGroup.style.display = '';
@@ -1053,20 +1443,29 @@
     }
   }
 
-  /* Наш id кодирует число окон: вендорский геттер сам синтезирует `ss(id)`
-   * AUTO-слотов из хвоста, поэтому достаточно записать preset. */
+  /* Запись схемы конструктора: вычисляем слоты и записываем preset и slots в store редактора. */
   function selectConstructor(preset) {
     var editor = layoutEditor();
     if (!editor || !preset) return;
-    var side = /^vks_pin_([lrtb])_/.exec(preset);
-    constructorSide = side ? side[1] : 'grid';
+    var m = /^vks_([a-z0-9_]+)_(\d+)$/.exec(preset);
+    var arch = m ? m[1] : 'grid';
+    var count = m ? Number(m[2]) : countForCounter();
+    constructorArchetype = arch;
+    modeTileEngaged = true;
+    var slots = computeSlots(arch, count);
     try {
       editor.editValueField('preset', preset);
+      if (typeof editor.setSlots === 'function') {
+        editor.setSlots(preset, slots);
+      } else {
+        editor.editValueField('slots', slots);
+      }
     } catch (e) {
       console.warn('codian-layouts: не удалось выбрать схему конструктора ' + preset, e);
       return;
     }
     syncActive();
+    syncCounter(count);
     subscribe(editor);
   }
 
@@ -1083,7 +1482,7 @@
     text.textContent = 'Конструктор';
     var description = document.createElement('p');
     description.className = 'layout-mode-selector-item__description';
-    description.textContent = 'Схема расположения участников: сетка или крупный участник с лентой';
+    description.textContent = 'Схема расположения участников: 6 динамических раскладок';
     tile.appendChild(text);
     tile.appendChild(description);
     tile.addEventListener('click', onModeTileActivate);
@@ -1121,9 +1520,9 @@
     }
     if (!(startCount > 0)) startCount = Number(startValue.size) || 0;
     var startName = startValue.displayName || '';
-    // Сохранённая pin-раскладка задаёт сторону конструктора после reopen.
-    var savedSide = /^vks_pin_([lrtb])_/.exec(startPreset);
-    var startSide = savedSide ? savedSide[1] : constructorSide;
+    // Сохранённая раскладка задаёт схему конструктора после reopen.
+    var savedArch = /^vks_([a-z0-9_]+)_/.exec(startPreset);
+    var startArch = savedArch ? savedArch[1] : constructorArchetype;
     // Вендорский `mode` — свойство редактора (reactivity store), не поле формы:
     // `editValueField('mode')` пишет в черновик раскладки и портит payload.
     try {
@@ -1134,11 +1533,11 @@
     syncModeTile();
     schedule();
     // Вкладка «Конструктор» — наш конструктор: после перерисовки ручного
-    // режима (слоты появляются не сразу) один раз подставляем vks_grid_<N>.
+    // режима (слоты появляются не сразу) один раз подставляем vks_<archetype>_<N>.
     // Тихий fallback на 1 окно запрещён: при N=0 остаёмся на вендорском preset.
     var keepName = startName;
     function family() {
-      return 'vks_' + (startSide === 'grid' ? 'grid' : 'pin_' + startSide) + '_';
+      return 'vks_' + startArch + '_';
     }
     function adoptNow() {
       pendingAdopt = null;
@@ -1208,7 +1607,8 @@
    * В manual-режиме клик по тайлу не меняет store, поэтому preset оставался
    * vks_* и наш тайл снова становился active: клик «Ручная настройка» после
    * конструктора был no-op. Сбрасываем engaged/pending и, для manual,
-   * возвращаем вендорский дефолт (preset_equal_25/individual), как у вендора. */
+   * возвращаем вендорский геометрический дефолт (preset_equal_25), сохраняя
+   * серверный `payload.type` как есть. */
   function onVendorModeClick(event) {
     var target = event.target;
     if (!target || !target.closest) return;
@@ -1222,7 +1622,7 @@
     // Сброс дефолта — только при выходе ИЗ конструктора. Клик по уже
     // активному manual-тайлу в manual — вендорский no-op; безусловная
     // запись equal_25 теряла выбранную схему.
-    var wasConstructor = modeTileEngaged || preset.indexOf('vks_') === 0 || preset.indexOf('codian_') === 0;
+    var wasConstructor = modeTileEngaged || preset.indexOf('vks_') === 0;
     modeTileEngaged = false;
     if (pendingAdoptTimer) {
       clearTimeout(pendingAdoptTimer);
@@ -1236,7 +1636,6 @@
     if (!editor || typeof editor.editValueField !== 'function') return;
     try {
       editor.editValueField('preset', 'preset_equal_25');
-      editor.editValueField('type', 'individual');
     } catch (e) {
       /* вендор сам выставит дефолт manual */
     }
@@ -1274,7 +1673,7 @@
         var host = document.querySelector(HOST_SELECTOR);
         if (!host) return;
         if (catalogState === 'idle') loadCatalog();
-        if (catalogState === 'ready') ensureConstructor();
+        ensureConstructor();
         reAdopt();
       } catch (e) {
         /* вендорская страница важнее нашей группы, но поломка не должна быть невидимой */
@@ -1288,6 +1687,72 @@
     }
   }
 
+  function formatCalculatedSlots(preset, width, height) {
+    var reqW = Number(width) || CANVAS_W;
+    var reqH = Number(height) || CANVAS_H;
+    var raw = [];
+    if (typeof preset === 'string' && preset.indexOf('vks_') === 0) {
+      var m = /^vks_([a-z0-9_]+)_(\d+)$/.exec(preset);
+      var arch = m ? m[1] : 'grid';
+      var count = m ? Number(m[2]) : 1;
+      raw = computeSlots(arch, count);
+    } else if (typeof preset === 'string' && preset.indexOf('codian_') === 0) {
+      var entry = findEntry(preset);
+      if (entry && entry.slots && entry.slots.length) {
+        raw = entry.slots;
+      } else {
+        var count = entry && entry.windows > 0 ? entry.windows : 1;
+        var cols = Math.ceil(Math.sqrt(count));
+        var rows = Math.ceil(count / cols);
+        var cw = CANVAS_W / cols;
+        var ch = CANVAS_H / rows;
+        for (var i = 0; i < count; i += 1) {
+          raw.push({ position: i + 1, x: (i % cols) * cw, y: Math.floor(i / cols) * ch, width: cw, height: ch, z_order: 0 });
+        }
+      }
+    }
+    var scaleX = reqW / CANVAS_W;
+    var scaleY = reqH / CANVAS_H;
+    var res = [];
+    for (var j = 0; j < raw.length; j += 1) {
+      var s = raw[j];
+      res.push({
+        position: Number(s.position) || (j + 1),
+        role: uiSlotRole(s),
+        x: Math.round((Number(s.x) || 0) * scaleX),
+        y: Math.round((Number(s.y) || 0) * scaleY),
+        width: Math.round((Number(s.width) || 0) * scaleX),
+        height: Math.round((Number(s.height) || 0) * scaleY),
+        z_order: Number(s.z_order) || 0
+      });
+    }
+    return res;
+  }
+
+  function synthXhr(xhr, status, text) {
+    window.setTimeout(function () {
+      if (xhr.__vksAborted) return;
+      try {
+        Object.defineProperty(xhr, 'readyState', { value: 4, configurable: true });
+        Object.defineProperty(xhr, 'status', { value: status, configurable: true });
+        Object.defineProperty(xhr, 'statusText', { value: status === 200 ? 'OK' : 'Error', configurable: true });
+        Object.defineProperty(xhr, 'responseText', { value: text, configurable: true });
+        Object.defineProperty(xhr, 'response', {
+          value: xhr.responseType === 'json' ? JSON.parse(text) : text,
+          configurable: true,
+        });
+        xhr.getAllResponseHeaders = function () { return 'content-type: application/json\n'; };
+        xhr.getResponseHeader = function () { return 'application/json'; };
+        xhr.__vksSynthetic = true;
+        xhr.dispatchEvent(new Event('readystatechange'));
+        xhr.dispatchEvent(new ProgressEvent('load'));
+        xhr.dispatchEvent(new ProgressEvent('loadend'));
+      } catch (e) {
+        try { xhr.dispatchEvent(new Event('readystatechange')); } catch (ignored) {}
+      }
+    }, 0);
+  }
+
   /* После сохранения раскладки серверный payload меняется: сбрасываем кэш
    * числа окон, иначе «Конструктор» после save+auto возьмёт старое N.
    * Вендор сохраняет и через fetch, и через XHR (axios) — перехватываем оба. */
@@ -1295,9 +1760,27 @@
     if (typeof window.fetch === 'function' && !window.fetch.__vksCodianWrapped) {
       var nativeFetch = window.fetch;
       var wrapped = function (input, init) {
-        var result = nativeFetch.apply(this, arguments);
         var url = typeof input === 'string' ? input : (input && input.url) || '';
         var method = String((init && init.method) || 'GET').toUpperCase();
+        if (method === 'POST' && /\/video_layouts\/calculate/.test(url)) {
+          var fBody = null;
+          try {
+            fBody = typeof (init && init.body) === 'string' ? JSON.parse(init.body) : (init && init.body);
+          } catch (e) {}
+          if (fBody && typeof fBody.preset === 'string' &&
+              (fBody.preset.indexOf('vks_') === 0 || fBody.preset.indexOf('codian_') === 0)) {
+            var fSlots = formatCalculatedSlots(fBody.preset, fBody.width, fBody.height);
+            var fPayload = JSON.stringify({ slots: fSlots });
+            if (typeof Response === 'function') {
+              return Promise.resolve(new Response(fPayload, {
+                status: 200,
+                statusText: 'OK',
+                headers: { 'Content-Type': 'application/json' }
+              }));
+            }
+          }
+        }
+        var result = nativeFetch.apply(this, arguments);
         if (method !== 'GET' && /\/video_layouts\//.test(url) && !/calculate/.test(url) && result && result.then) {
           result.then(function (response) {
             if (response && response.ok) {
@@ -1320,10 +1803,25 @@
       this.__vksCodianUrl = String(url || '');
       return nativeOpen.apply(this, arguments);
     };
-    xhrProto.send = function () {
+    xhrProto.send = function (data) {
       var xhr = this;
       var method = xhr.__vksCodianMethod;
       var url = xhr.__vksCodianUrl || '';
+
+      if (method === 'POST' && /\/video_layouts\/calculate/.test(url)) {
+        var body = null;
+        try {
+          body = typeof data === 'string' ? JSON.parse(data) : data;
+        } catch (e) {}
+        if (body && typeof body.preset === 'string' &&
+            (body.preset.indexOf('vks_') === 0 || body.preset.indexOf('codian_') === 0)) {
+          var slots = formatCalculatedSlots(body.preset, body.width, body.height);
+          var respText = JSON.stringify({ slots: slots });
+          synthXhr(xhr, 200, respText);
+          return;
+        }
+      }
+
       if (method !== 'GET' && /\/video_layouts\//.test(url) && !/calculate/.test(url)) {
         xhr.addEventListener('load', function () {
           if (xhr.status >= 200 && xhr.status < 300) {

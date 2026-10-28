@@ -1377,7 +1377,10 @@ async fn m4_abonents_lifecycle_and_commands() {
     let mode_body = json_body(mode_switch).await;
     assert_eq!(mode_body["payload"]["mode"], "manual");
     assert_eq!(mode_body["payload"]["preset"], "preset_equal_4");
-    assert_eq!(mode_body["payload"]["type"], "individual");
+    // `type` immutable: вендорский редактор шлёт type=individual при смене
+    // режима «Общей», но раскладка остаётся default (иначе сессия теряла
+    // «Общую» и UI падал на sessionLayoutListByType.default.some).
+    assert_eq!(mode_body["payload"]["type"], "default");
     assert!(mode_body["abonents"]["abonents"]["abonents"].is_array());
 
     let unknown_layout = send(
@@ -2534,6 +2537,11 @@ async fn pnm_video_layouts_calculate_parses_preset_suffix() {
     // live на TrueConf MCU 2.2.1.66), не 0..N-1.
     assert_eq!(slots[0]["position"], 1);
     assert_eq!(slots[3]["position"], 4);
+    assert_eq!(slots[0]["role"], "AUTO", "calculate обязан отдавать UI-роль");
+    for slot in slots {
+        let role = slot["role"].as_str().unwrap_or_default();
+        assert!(!role.is_empty(), "у каждого слота calculate есть role");
+    }
     // `selected_b_4_(2)` — эталонная схема 5/9 + полоса 4/9, а не равномерная 2×2.
     let first_width = slots[0]["width"].as_f64().expect("ширина первого слота");
     let first_height = slots[0]["height"].as_f64().expect("высота первого слота");
@@ -2745,6 +2753,15 @@ async fn video_layout_presets_catalog_covers_vendor_and_codian() {
                         assert!(slot[key].is_number(), "поле {key} слота каталога у {id}");
                     }
                     assert!(slot["width"].as_f64().unwrap() > 0.0 && slot["height"].as_f64().unwrap() > 0.0);
+                    // UI-роль обязательна: без неё вендорский редактор рисует
+                    // окно прозрачным (базовый .layout-grid-slot без фона).
+                    let role = slot["role"].as_str().unwrap_or_default();
+                    assert!(
+                        ["EMPTY", "ACTIVE", "AUTO", "PEER", "ROLL", "PRESENTATION"].contains(&role),
+                        "неизвестная UI-роль {role:?} у {id}"
+                    );
+                    let expected = if slot["z_order"].as_u64().unwrap_or(0) > 0 { "PRESENTATION" } else { "AUTO" };
+                    assert_eq!(role, expected, "роль слота каталога у {id}");
                 }
             }
             other => panic!("неизвестный source {other:?} у {id}"),

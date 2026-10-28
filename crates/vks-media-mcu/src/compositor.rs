@@ -36,17 +36,38 @@ impl Compositor {
     /// - Overlapping rects: higher `z` wins; equal `z` falls back to slot key
     ///   (deterministic order).
     pub fn compose(&self, frames: &BTreeMap<u32, Arc<Frame>>, rects: &BTreeMap<u32, PixelRect>) -> Frame {
-        let pixels = CANVAS_WIDTH as usize * CANVAS_HEIGHT as usize;
-        let yuv_canvas = frames.values().any(|frame| frame.is_yuv420p());
+        self.compose_sized(CANVAS_WIDTH, CANVAS_HEIGHT, frames, rects)
+    }
+
+    /// Как [`Compositor::compose`], но на холсте произвольного размера.
+    ///
+    /// `O1`: холст комнаты = выходной профиль (720p/360p/1080p), а не всегда
+    /// 1920×1080. Тогда egress-`resize_i420` при совпадении холста с профилем
+    /// становится `memcpy` (0.26 мс на 1080p вместо 18.8–20.9 мс скалярного
+    /// сэмплера). Нечётные размеры дают grayscale-холст: YUV420 требует
+    /// чётности, а профили шлюза всегда чётные — это защитная ветка.
+    pub fn compose_sized(
+        &self,
+        width: u32,
+        height: u32,
+        frames: &BTreeMap<u32, Arc<Frame>>,
+        rects: &BTreeMap<u32, PixelRect>,
+    ) -> Frame {
+        if width == 0 || height == 0 {
+            return Frame::new(width, height, Vec::new());
+        }
+        let pixels = width as usize * height as usize;
+        let yuv_canvas =
+            frames.values().any(|frame| frame.is_yuv420p()) && width.is_multiple_of(2) && height.is_multiple_of(2);
         // Build the canvas in one allocation: a YUV canvas starts at limited
         // range (16/128), a grayscale one at black. `filled` + `resize` used to
         // touch and copy the 3 MB buffer twice per tick.
         let mut canvas = if yuv_canvas {
             let mut data = vec![128u8; pixels * 3 / 2];
             data[..pixels].fill(16);
-            Frame::new(CANVAS_WIDTH, CANVAS_HEIGHT, data)
+            Frame::new(width, height, data)
         } else {
-            Frame::new(CANVAS_WIDTH, CANVAS_HEIGHT, vec![0u8; pixels])
+            Frame::new(width, height, vec![0u8; pixels])
         };
         // Overlap/PiP: z_index задаёт порядок отрисовки, ключ — стабильный
         // tie-break. BTreeMap сам по себе сортировал только по slot id.
@@ -71,7 +92,7 @@ impl Compositor {
     /// the horizontal index is now advanced incrementally, so no division runs
     /// per pixel and the mapping is exactly `floor(dx*fw/dw)`.
     pub fn blit(canvas: &mut Frame, frame: &Frame, rect: &PixelRect) {
-        let (cw, ch) = (CANVAS_WIDTH as usize, CANVAS_HEIGHT as usize);
+        let (cw, ch) = (canvas.width as usize, canvas.height as usize);
         // Visible region = intersection of `rect` with the canvas [0..W]×[0..H].
         let right = (rect.x.saturating_add(rect.w) as usize).min(cw);
         let bottom = (rect.y.saturating_add(rect.h) as usize).min(ch);
@@ -195,7 +216,7 @@ impl Compositor {
     /// серого). Используется персональной сборкой: ячейка зрителя в общей
     /// сетке освобождается под самопросмотр.
     pub fn clear(canvas: &mut Frame, rect: &PixelRect) {
-        let (cw, ch) = (CANVAS_WIDTH as usize, CANVAS_HEIGHT as usize);
+        let (cw, ch) = (canvas.width as usize, canvas.height as usize);
         let right = (rect.x.saturating_add(rect.w) as usize).min(cw);
         let bottom = (rect.y.saturating_add(rect.h) as usize).min(ch);
         let rx = (rect.x as usize).min(cw);
@@ -378,6 +399,24 @@ mod tests {
                 assert_eq!(*pixel, source[dx * fw / dw], "luma mismatch at dx={dx}, fw/dw={fw}/{dw}");
             }
         }
+    }
+
+    #[test]
+    fn compose_sized_uses_requested_canvas() {
+        let frames = BTreeMap::from([(0u32, Arc::new(Frame::new(64, 64, vec![7u8; 64 * 64])))]);
+        let rects = BTreeMap::from([(0u32, PixelRect::new(0, 0, 1280, 720).with_z(0))]);
+        let out = Compositor.compose_sized(1280, 720, &frames, &rects);
+        assert_eq!((out.width, out.height), (1280, 720));
+        assert_eq!(out.data.len(), 1280 * 720, "grayscale-холст для серого кадра");
+        let out = Compositor.compose_sized(160, 90, &frames, &rects);
+        assert_eq!((out.width, out.height), (160, 90));
+        assert_eq!(out.data.len(), 160 * 90);
+        assert_eq!(out.data[45 * 160 + 80], 7, "кадр попал в масштабированный rect");
+        // Нечётный холст: YUV420 невозможен → grayscale, без паники.
+        let out = Compositor.compose_sized(161, 91, &frames, &rects);
+        assert_eq!(out.data.len(), 161 * 91);
+        // Нулевой холст не паникует.
+        assert!(Compositor.compose_sized(0, 0, &frames, &rects).data.is_empty());
     }
 
     #[test]

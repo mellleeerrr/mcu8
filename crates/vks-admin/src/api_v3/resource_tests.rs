@@ -832,6 +832,7 @@ async fn pnm_calculate_uses_reference_preset_geometry() {
     );
     assert_eq!(selected[1]["width"], 426.0);
     assert_eq!(selected[2]["width"], 427.0);
+    assert_eq!(selected[0]["role"], "AUTO", "calculate отдаёт UI-роль для редактора");
 
     let equal_two = calculate_geometry("preset_equal_2").await["slots"].as_array().unwrap().clone();
     assert_eq!(equal_two[0]["y"], 180.0, "equal_2 центрирован по вертикали");
@@ -1460,6 +1461,234 @@ async fn t02_read_path_resolves_old_id_to_cow_clone_and_list_has_no_duplicate() 
     assert!(!ids.contains(&layout.as_str()), "оригинал не должен дублироваться в списке сессии");
 }
 
+/// T0 crash: редактирование «Общей» раскладки не должно менять её тип.
+/// Вендорский редактор при переходе в manual пишет в черновик `type=individual`;
+/// до фикса PATCH сохранял это поле, default исчезал из сессии, и UI падал на
+/// `sessionLayoutListByType.default.some(...)`.
+#[tokio::test]
+async fn t00_layout_type_is_immutable_and_session_keeps_default_after_edit() {
+    let state = state();
+    let room = Rooms::create_async(&state, "immutable layout type").await.unwrap();
+    let default_id = create_layout(&state, "", json!({"type":"default"})).await;
+    assert_eq!(attach_to(&state, &room, &default_id).await, StatusCode::NO_CONTENT);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        inherit_and_ensure_default_layout(&mut resources, &room.id.to_string(), "tester");
+    }
+    let response = edit_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{default_id}", room.id)),
+        Path((room.id.to_string(), default_id.clone())),
+        Json(json!({"payload":{"type":"individual","mode":"manual","preset":"vks_pin_l_13","size":13}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let edited = body(response).await["video_layout"].clone();
+    assert_eq!(edited["payload"]["type"], "default", "type раскладки не меняется редактированием");
+    assert_eq!(edited["payload"]["mode"], "manual", "остальная геометрия сохраняется");
+    assert_eq!(edited["payload"]["preset"], "vks_pin_l_13");
+
+    let response = list_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts", room.id)),
+        Path(room.id.to_string()),
+        Query(std::collections::HashMap::new()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = body(response).await;
+    let defaults = listed["video_layouts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["payload"]["type"].as_str() == Some("default"))
+        .count();
+    assert_eq!(defaults, 1, "после редактирования сессия обязана сохранить ровно один default");
+}
+
+/// T0 durable repair: состояние живой сессии `49b599d7…` — в session-scope
+/// только COW-клон, потерявший type=default, а alias `session|default -> clone`
+/// доказывает его происхождение. Загрузка документа обязана вернуть клону тип
+/// default, иначе UI падает на `sessionLayoutListByType.default.some(...)`.
+#[tokio::test]
+async fn t00_normalize_loaded_restores_default_from_alias_evidence() {
+    let state = state();
+    let room = Rooms::create_async(&state, "broken session default").await.unwrap();
+    let default_id = create_layout(&state, "", json!({"type":"default"})).await;
+    let clone_id = create_layout(
+        &state,
+        "Codian 07 — 13 окон",
+        json!({"type":"individual","mode":"manual","preset":"vks_pin_l_13","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    let session_key = format!("sessions:{}:video_layouts", room.id);
+    let conference_key = format!("conferences:{}:video_layouts", room.id);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.links.insert(conference_key, vec![default_id.clone()]);
+        resources.links.insert(session_key.clone(), vec![clone_id.clone()]);
+        resources.layout_aliases.insert(format!("{session_key}|{default_id}"), clone_id.clone());
+        resources.active_layouts.insert(session_key.clone(), clone_id.clone());
+        normalize_loaded(&mut resources);
+        // Клон получил исходный тип, отдельная pristine-«Общая» не добавилась.
+        assert_eq!(resources.layouts[&clone_id]["payload"]["type"], "default");
+        assert_eq!(resources.links[&session_key], vec![clone_id.clone()]);
+        assert_eq!(resources.active_layouts[&session_key], clone_id);
+        // Идемпотентность: повторная загрузка ничего не меняет.
+        normalize_loaded(&mut resources);
+        assert_eq!(resources.links[&session_key], vec![clone_id.clone()]);
+    }
+    let response = list_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts", room.id)),
+        Path(room.id.to_string()),
+        Query(std::collections::HashMap::new()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = body(response).await;
+    assert_eq!(listed["count"], 1);
+    assert_eq!(listed["video_layouts"][0]["id"], clone_id.as_str());
+    assert_eq!(listed["video_layouts"][0]["payload"]["type"], "default");
+}
+
+/// T0 durable repair: старый inherit мог добавить pristine-канон к COW-клону
+/// «Общей» — в БД уже есть такая сессия (`1e0337c6…`, две default). Загрузка
+/// оставляет одну (активную), вторую только отвязывает от scope.
+#[tokio::test]
+async fn t00_normalize_loaded_dedupes_two_defaults_keeping_active() {
+    let state = state();
+    let room = Rooms::create_async(&state, "double default").await.unwrap();
+    let canonical_id = create_layout(&state, "", json!({"type":"default"})).await;
+    let clone_id = create_layout(&state, "", json!({"type":"default","mode":"manual","preset":"vks_pin_l_13"})).await;
+    let session_key = format!("sessions:{}:video_layouts", room.id);
+    let conference_key = format!("conferences:{}:video_layouts", room.id);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.links.insert(conference_key.clone(), vec![canonical_id.clone()]);
+        resources.links.insert(session_key.clone(), vec![clone_id.clone(), canonical_id.clone()]);
+        resources.layout_aliases.insert(format!("{session_key}|{canonical_id}"), clone_id.clone());
+        resources.active_layouts.insert(session_key.clone(), clone_id.clone());
+        normalize_loaded(&mut resources);
+        assert_eq!(resources.links[&session_key], vec![clone_id.clone()]);
+        assert_eq!(resources.active_layouts[&session_key], clone_id);
+        // Канон остаётся глобальным и в конференции — сессия его лишь не дублирует.
+        assert_eq!(resources.links[&conference_key], vec![canonical_id.clone()]);
+        assert!(resources.layouts.contains_key(&canonical_id));
+    }
+}
+
+/// T0 hole: identity «Общей» — по `payload.type`, а не по побайтовому канону.
+/// Иначе COW-клон «Общей» с правленой геометрией перестаёт считаться default,
+/// и повторный старт сессии добавляет вторую «Общую» («Для всех участников (2)»).
+#[tokio::test]
+async fn t00_session_restart_does_not_add_second_default_after_edit() {
+    let state = state();
+    let room = Rooms::create_async(&state, "restart default identity").await.unwrap();
+    let default_id = create_layout(&state, "", json!({"type":"default"})).await;
+    assert_eq!(attach_to(&state, &room, &default_id).await, StatusCode::NO_CONTENT);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        inherit_and_ensure_default_layout(&mut resources, &room.id.to_string(), "tester");
+    }
+    let edited = edit_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{default_id}", room.id)),
+        Path((room.id.to_string(), default_id.clone())),
+        Json(json!({"payload":{"type":"individual","mode":"manual","preset":"vks_pin_l_13","size":13}})),
+    )
+    .await;
+    assert_eq!(edited.status(), StatusCode::OK);
+    assert_eq!(body(edited).await["video_layout"]["payload"]["type"], "default");
+    let session_key = format!("sessions:{}:video_layouts", room.id);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        // Рестарт сессии: inherit обязан увидеть существующую «Общую».
+        inherit_and_ensure_default_layout(&mut resources, &room.id.to_string(), "tester");
+        let defaults =
+            resources.links[&session_key].iter().filter(|id| is_default_layout(&resources, id.as_str())).count();
+        assert_eq!(defaults, 1, "рестарт не должен добавлять вторую «Общую»");
+    }
+}
+
+/// T0 create: `payload.type` — закрытый словарь. Иначе запись с произвольным
+/// type невидима для UI-группировки и роняет `.default.some(...)`.
+/// Легаси-документы без валидного type чинятся при загрузке.
+#[tokio::test]
+async fn t00_layout_type_is_validated_on_create_and_repaired_on_load() {
+    let state = state();
+    let response = create(
+        State(state.clone()),
+        Extension(operator()),
+        uri("/api/v3/video_layouts"),
+        Json(json!({"payload":{"type":"foo"}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let legacy_id = create_layout(&state, "Legacy", json!({"type":"individual"})).await;
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.layouts.get_mut(&legacy_id).unwrap()["payload"].as_object_mut().unwrap().remove("type");
+        normalize_loaded(&mut resources);
+        assert_eq!(resources.layouts[&legacy_id]["payload"]["type"], "default");
+    }
+}
+
+/// T0 determinism: даже если старый inherit успел добавить pristine-канон к
+/// COW-клону (сессия рестартовала до деплоя), ремонт обязан перетипировать
+/// клон по alias-доказательству и схлопнуть лишнюю «Общую» — исход не зависит
+/// от порядка рестартов.
+#[tokio::test]
+async fn t00_normalize_loaded_prefers_alias_clone_over_pristine_default() {
+    let state = state();
+    let room = Rooms::create_async(&state, "session-first repair").await.unwrap();
+    let canonical_id = create_layout(&state, "", json!({"type":"default"})).await;
+    let clone_id = create_layout(
+        &state,
+        "Codian 07 — 13 окон",
+        json!({"type":"individual","mode":"manual","preset":"vks_pin_l_13","size":13}),
+    )
+    .await;
+    let session_key = format!("sessions:{}:video_layouts", room.id);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.links.insert(format!("conferences:{}:video_layouts", room.id), vec![canonical_id.clone()]);
+        resources.links.insert(session_key.clone(), vec![canonical_id.clone(), clone_id.clone()]);
+        resources.layout_aliases.insert(format!("{session_key}|{canonical_id}"), clone_id.clone());
+        resources.active_layouts.insert(session_key.clone(), clone_id.clone());
+        normalize_loaded(&mut resources);
+        assert_eq!(resources.layouts[&clone_id]["payload"]["type"], "default");
+        assert_eq!(resources.links[&session_key], vec![clone_id.clone()]);
+        assert_eq!(resources.active_layouts[&session_key], clone_id);
+    }
+}
+
+/// T0 create: новая раскладка без явного type — индивидуальная (canonical
+/// payload только seed полей). Иначе рождались «Общие» с чужим preset
+/// («T7 Dup Layout» в БД).
+#[tokio::test]
+async fn t00_create_without_type_is_individual_except_canonical_seed() {
+    let state = state();
+    let response = create(
+        State(state.clone()),
+        Extension(operator()),
+        uri("/api/v3/video_layouts"),
+        Json(json!({"display_name":"Named","payload":{"mode":"manual","preset":"vks_pin_l_6"}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(body(response).await["video_layout"]["payload"]["type"], "individual");
+    let seed =
+        create(State(state.clone()), Extension(operator()), uri("/api/v3/video_layouts"), Json(json!({"payload":{}})))
+            .await;
+    assert_eq!(seed.status(), StatusCode::CREATED);
+    assert_eq!(body(seed).await["video_layout"]["payload"]["type"], "default");
+}
+
 #[tokio::test]
 async fn t02_detach_clone_does_not_leave_alias_404() {
     let state = state();
@@ -1804,4 +2033,31 @@ fn recalc_layout_size_распознаёт_конструктор() {
     let mut codian = json!({"payload": {"mode": "manual", "preset": "codian_07"}});
     recalc_layout_size(&mut codian);
     assert_eq!(codian["payload"]["size"], 13, "Codian-схема по-прежнему даёт свой размер");
+}
+
+/// Вендорский редактор раскрашивает окно только по `slot.role` (UPPERCASE);
+/// без роли окно прозрачное. Старые payload'ы и каталог Codian роли не имели —
+/// проверяем идемпотентную достройку без перезаписи известных ролей.
+#[test]
+fn ensure_slot_roles_backfills_legacy_payloads() {
+    let mut record = json!({"payload": {"slots": [
+        {"position": 1},
+        {"position": 2, "abonent_id": "peer-1"},
+        {"position": 3, "contact_id": "h323-peer"},
+        {"position": 4, "z_order": 1},
+        {"position": 5, "role": "ACTIVE"},
+        {"position": 6, "role": ""},
+        {"position": 7, "role": "auto"},
+        {"position": 8, "role": "MEDIA", "abonent_id": "peer-2"},
+    ]}});
+    ensure_slot_roles(&mut record);
+    let slots = record["payload"]["slots"].as_array().unwrap();
+    assert_eq!(slots[0]["role"], "AUTO", "пустое окно — autofill");
+    assert_eq!(slots[1]["role"], "PEER", "занятое окно — участник");
+    assert_eq!(slots[2]["role"], "PEER", "contact_id тоже признак занятости");
+    assert_eq!(slots[3]["role"], "PRESENTATION", "PiP-наложение");
+    assert_eq!(slots[4]["role"], "ACTIVE", "известная роль не перезаписывается");
+    assert_eq!(slots[5]["role"], "AUTO", "пустая строка роли — как отсутствие");
+    assert_eq!(slots[6]["role"], "AUTO", "роль вне закрытого словаря (auto) — как отсутствие");
+    assert_eq!(slots[7]["role"], "PEER", "неизвестная роль у занятого окна — PEER");
 }

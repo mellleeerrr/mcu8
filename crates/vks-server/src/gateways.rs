@@ -197,6 +197,16 @@ pub struct GatewayMediaStats {
     pub audio_codec_running: std::sync::atomic::AtomicBool,
     /// Wall-clock of the last accepted RTP packet; zero until the peer speaks.
     pub last_rx_ms: std::sync::atomic::AtomicU64,
+    /// RTCP compound packets read from the session's RTCP socket (RFC 3550).
+    pub rtcp_rx_packets: std::sync::atomic::AtomicU64,
+    /// Picture Loss Indications received from the peer (RFC 4585 §6.3.1).
+    pub rtcp_pli: std::sync::atomic::AtomicU64,
+    /// Full Intra Requests received from the peer (RFC 5104 §4.3.1).
+    pub rtcp_fir: std::sync::atomic::AtomicU64,
+    /// Receiver Reports sent back (keepalive every 5 s per RFC 3550 §6.2).
+    pub rtcp_rr_sent: std::sync::atomic::AtomicU64,
+    /// RFC 4733 digits received from the peer and relayed into the room.
+    pub dtmf_events_received: std::sync::atomic::AtomicU64,
 }
 
 impl GatewayMediaStats {
@@ -218,8 +228,176 @@ impl GatewayMediaStats {
             "video_codec_running": self.video_codec_running.load(Relaxed),
             "audio_codec_running": self.audio_codec_running.load(Relaxed),
             "last_rx_ms": self.last_rx_ms.load(Relaxed),
+            "rtcp_rx_packets": self.rtcp_rx_packets.load(Relaxed),
+            "rtcp_pli": self.rtcp_pli.load(Relaxed),
+            "rtcp_fir": self.rtcp_fir.load(Relaxed),
+            "rtcp_rr_sent": self.rtcp_rr_sent.load(Relaxed),
+            "dtmf_events_received": self.dtmf_events_received.load(Relaxed),
         })
     }
+}
+
+/// H.264 Annex A limits (max-fs / max-mbps) for the levels the H.264 gate can
+/// negotiate. Level 3.0 tops out at 1620 MB, so 1280×720 (3600 MB) is rejected
+/// by libx264 unless the geometry is clamped first.
+pub(crate) fn video_level_limits(level: u8) -> (u32, u32) {
+    match level {
+        0..=10 => (99, 1485),
+        11 => (396, 3000),
+        12 => (396, 6000),
+        13 | 20 => (396, 11880),
+        21 => (792, 19800),
+        22 | 30 => (1620, 40500),
+        31 => (3600, 108000),
+        32 => (5120, 216000),
+        40 | 41 => (8192, 245760),
+        42 => (8704, 522240),
+        // 5.0+: the bridge never encodes above 1920×1080, the 4.0 envelope is
+        // the largest level its output can need.
+        _ => (8192, 245760),
+    }
+}
+
+/// Encoder profile for an inbound video leg: codec and level come from SDP, and
+/// a negotiated level below 3.1 clamps the output geometry (Annex A) instead of
+/// letting libx264 reject every frame with "frame MB size > level limit".
+fn inbound_video_profile(media: &vks_gateway_sip::InboundMedia) -> video::VideoProfile {
+    let mut profile = video::VideoProfile {
+        codec: if media.video_codec == Some("H265") {
+            video::GatewayVideoCodec::H265
+        } else {
+            video::GatewayVideoCodec::H264
+        },
+        // SDP answer and `-level:v` must agree (RFC 6184 §8.2.2): the H.264
+        // gate pinned TX to min(offered, 3.1).
+        level: match media.video_tx_level {
+            Some(level) => format!("{}.{}", level / 10, level % 10),
+            None => video::VideoProfile::default().level,
+        },
+        ..video::VideoProfile::default()
+    };
+    if let Some(level) = media.video_tx_level.filter(|level| *level < 31) {
+        let (max_fs, max_mbps) = video_level_limits(level);
+        profile.clamp_to_answer(Some(max_fs), None, Some(max_mbps));
+        // `clamp_to_answer` derives the level from geometry with a coarse
+        // 720p→3.1 rule; the SDP answer already promised exactly `level`, and
+        // the clamped geometry is inside that level's Annex A envelope, so
+        // keep the negotiated value and let `-level:v` match the answer.
+        profile.level = format!("{}.{}", level / 10, level % 10);
+    }
+    profile
+}
+
+/// RFC 4733 §3.2 event code -> DTMF character (`*`=10, `#`=11, A-D=12-15).
+fn dtmf_event_character(digit: u8) -> Option<char> {
+    match digit {
+        0..=9 => Some(char::from(b'0' + digit)),
+        10 => Some('*'),
+        11 => Some('#'),
+        12..=15 => Some(char::from(b'A' + (digit - 12))),
+        _ => None,
+    }
+}
+
+/// Relays RFC 4733 digits from an inbound SIP terminal to the other gateway
+/// legs of the same room (the existing per-leg `dtmf_sender` regenerates its own
+/// event sequence). Browsers have no DTMF signaling channel yet (P2), so their
+/// count stays zero; the log line makes that visible.
+fn relay_dtmf_character(manager: &GatewayManager, room_id: RoomId, from: &str, character: char) -> usize {
+    let mut delivered = 0usize;
+    if let Ok(registry) = manager.registry.lock() {
+        for (peer_id, session) in registry.by_participant.iter() {
+            if peer_id == from || session.room_id != room_id {
+                continue;
+            }
+            if session.controls.dtmf_sender.send(character.to_string()).is_ok() {
+                delivered += 1;
+            }
+        }
+    }
+    delivered
+}
+
+fn spawn_inbound_dtmf_relay(
+    manager: Arc<GatewayManager>,
+    room_id: RoomId,
+    participant_id: String,
+    mut digits: tokio::sync::mpsc::UnboundedReceiver<u8>,
+) {
+    tokio::spawn(async move {
+        while let Some(digit) = digits.recv().await {
+            let Some(character) = dtmf_event_character(digit) else { continue };
+            let delivered = relay_dtmf_character(&manager, room_id, &participant_id, character);
+            tracing::info!(
+                room = %room_id,
+                from = %participant_id,
+                digit = %character,
+                delivered,
+                "DTMF received from SIP terminal and relayed"
+            );
+        }
+    });
+}
+
+/// RTCP keepalive + feedback reader for one video leg (RFC 3550 §6.2,
+/// RFC 4585 §6.3). An empty RR every 5 s keeps terminals sending reports and
+/// answering SR; PLI/FIR increment the IDR request counter consumed by the
+/// encoder owner. Forcing an IDR itself is P4b (restarting the FFmpeg worker),
+/// so recovery today relies on the 1 s keyframe interval.
+fn spawn_video_rtcp(
+    socket: tokio::net::UdpSocket,
+    remote_rtcp: std::net::SocketAddr,
+    controls: GatewayMediaControls,
+    stats: Arc<GatewayMediaStats>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    participant_id: String,
+) {
+    tokio::spawn(async move {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut buffer = [0u8; 1500];
+        let ssrc = (uuid::Uuid::new_v4().as_u128() as u32).max(1);
+        let report = vks_gateway_sip::rtcp::build_rr(ssrc);
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            if cancel.load(Relaxed) {
+                return;
+            }
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if socket.send_to(&report, remote_rtcp).await.is_ok() {
+                        stats.rtcp_rr_sent.fetch_add(1, Relaxed);
+                    }
+                }
+                result = socket.recv_from(&mut buffer) => {
+                    let Ok((count, _source)) = result else { return };
+                    if count == 0 {
+                        continue;
+                    }
+                    let seen = vks_gateway_sip::rtcp::parse_compound(&buffer[..count]);
+                    stats.rtcp_rx_packets.fetch_add(1, Relaxed);
+                    if seen.pli > 0 {
+                        stats.rtcp_pli.fetch_add(seen.pli, Relaxed);
+                        controls.keyframe_requests.fetch_add(seen.pli, Relaxed);
+                    }
+                    if seen.fir > 0 {
+                        stats.rtcp_fir.fetch_add(seen.fir, Relaxed);
+                        controls.keyframe_requests.fetch_add(seen.fir, Relaxed);
+                    }
+                    if seen.sr > 0 && socket.send_to(&report, remote_rtcp).await.is_ok() {
+                        // RFC 3550 §6.4: answer each SR with an RR.
+                        stats.rtcp_rr_sent.fetch_add(1, Relaxed);
+                    }
+                    tracing::debug!(
+                        participant = %participant_id,
+                        sr = seen.sr, rr = seen.rr, sdes = seen.sdes, bye = seen.bye,
+                        pli = seen.pli, fir = seen.fir,
+                        "RTCP received"
+                    );
+                }
+            }
+        }
+    });
 }
 
 /// A call is dead only after a full silence budget; a slow first packet and a
@@ -242,6 +420,11 @@ pub struct GatewayMediaControls {
     pub volume_rx: Arc<std::sync::atomic::AtomicU32>,
     pub dtmf_sender: tokio::sync::mpsc::UnboundedSender<String>,
     pub dtmf_payload_type: Arc<std::sync::atomic::AtomicU32>,
+    /// Number of IDR requests (RTCP PLI/FIR from the terminal, H.323
+    /// `videoFastUpdatePicture`). The encoder owner swaps it to zero once per
+    /// tick and forces a keyframe when non-zero.
+    // O7: переедет в EncoderKey group (один счётчик на группу зрителей).
+    pub keyframe_requests: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Default for GatewayMediaControls {
@@ -256,6 +439,7 @@ impl Default for GatewayMediaControls {
             volume_rx: Arc::new(std::sync::atomic::AtomicU32::new(100)),
             dtmf_sender: tx,
             dtmf_payload_type: Arc::new(std::sync::atomic::AtomicU32::new(256)),
+            keyframe_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 }
@@ -853,6 +1037,8 @@ pub struct RtpBridgeSession {
     /// Первый входящий RTP-пакет может прийти с другого source (NAT).
     pub source_latch: bool,
     pub dtmf_payload_type: Option<u8>,
+    /// RFC 4733 digits received from the peer, relayed into the room.
+    pub dtmf_events: Option<tokio::sync::mpsc::UnboundedSender<u8>>,
     pub media_stats: Arc<GatewayMediaStats>,
     pub rtp_socket: tokio::net::UdpSocket,
     pub rtcp_socket: Option<tokio::net::UdpSocket>,
@@ -1137,6 +1323,7 @@ impl GatewayManager {
             volume_rx: Arc::new(std::sync::atomic::AtomicU32::new(100)),
             dtmf_sender: dtmf_tx,
             dtmf_payload_type: Arc::new(std::sync::atomic::AtomicU32::new(256)),
+            keyframe_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let media_stats = Arc::new(GatewayMediaStats::default());
         if self.mcu_engine.is_none() {
@@ -1391,6 +1578,7 @@ impl GatewayManager {
             audio_codec: Some(audio_codec_name(audio_payload_type)),
             source_latch: false,
             dtmf_payload_type,
+            dtmf_events: None,
             media_stats: media_stats.clone(),
             rtp_socket: port_pair.rtp_socket,
             rtcp_socket: Some(port_pair.rtcp_socket),
@@ -2564,7 +2752,13 @@ async fn serve_sip_uas_on(
                         &display_name,
                     );
                     let (dtmf_tx, dtmf_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let (dtmf_events_tx, dtmf_events_rx) = tokio::sync::mpsc::unbounded_channel::<u8>();
                     let controls = GatewayMediaControls { dtmf_sender: dtmf_tx, ..controls };
+                    if let Some(dtmf) = media.dtmf_payload_type {
+                        // Enables the TX path too (admin/WS digit -> RFC 4733).
+                        controls.dtmf_payload_type.store(u32::from(dtmf), std::sync::atomic::Ordering::Relaxed);
+                    }
+                    spawn_inbound_dtmf_relay(manager.clone(), room_id, participant_id.clone(), dtmf_events_rx);
                     let audio_task = spawn_rtp_media_bridge(RtpBridgeSession {
                         room_id,
                         participant_id_str: participant_id.clone(),
@@ -2574,7 +2768,8 @@ async fn serve_sip_uas_on(
                         audio_payload_type: media.audio_payload_type,
                         audio_codec: Some(media.audio_codec),
                         source_latch: true,
-                        dtmf_payload_type: None,
+                        dtmf_payload_type: media.dtmf_payload_type,
+                        dtmf_events: Some(dtmf_events_tx),
                         media_stats: stats.clone(),
                         rtp_socket: audio_pair.rtp_socket,
                         rtcp_socket: Some(audio_pair.rtcp_socket),
@@ -2592,6 +2787,29 @@ async fn serve_sip_uas_on(
                     {
                         let video_ip = media.remote_video_ip.as_deref().unwrap_or(&media.remote_ip);
                         if let Ok(remote_ip) = video_ip.parse::<std::net::IpAddr>() {
+                            // RFC 3550 §6: peer RTCP port is its RTP port + 1
+                            // (our answer exposes ours via a=rtcp). The pair's
+                            // RTCP socket is split: the cloned fd reads feedback
+                            // and sends RR keepalives, the original keeps
+                            // sending SR from the video bridge.
+                            let mut video_rtcp = None;
+                            if let Ok(std_socket) = pair.rtcp_socket.into_std() {
+                                if let Ok(clone) = std_socket.try_clone() {
+                                    if let Ok(reader) = tokio::net::UdpSocket::from_std(clone) {
+                                        spawn_video_rtcp(
+                                            reader,
+                                            std::net::SocketAddr::new(remote_ip, remote_port.saturating_add(1)),
+                                            controls.clone(),
+                                            stats.clone(),
+                                            cancel.clone(),
+                                            participant_id.clone(),
+                                        );
+                                    }
+                                }
+                                if let Ok(writer) = tokio::net::UdpSocket::from_std(std_socket) {
+                                    video_rtcp = Some(writer);
+                                }
+                            }
                             let mcu_downgrade = mcu.clone();
                             let participant_downgrade = participant;
                             let participant_id_downgrade = participant_id.clone();
@@ -2601,7 +2819,7 @@ async fn serve_sip_uas_on(
                                 room_id,
                                 participant_id: participant,
                                 rtp_socket: pair.rtp_socket,
-                                rtcp_socket: Some(pair.rtcp_socket),
+                                rtcp_socket: video_rtcp,
                                 remote_target: std::net::SocketAddr::new(remote_ip, remote_port),
                                 payload_type: payload,
                                 receive_payload_type: payload,
@@ -2610,14 +2828,7 @@ async fn serve_sip_uas_on(
                                 controls: controls.clone(),
                                 cancelled: cancel.clone(),
                                 stats: stats.clone(),
-                                profile: video::VideoProfile {
-                                    codec: if media.video_codec == Some("H265") {
-                                        video::GatewayVideoCodec::H265
-                                    } else {
-                                        video::GatewayVideoCodec::H264
-                                    },
-                                    ..video::VideoProfile::default()
-                                },
+                                profile: inbound_video_profile(&media),
                             };
                             video_task = Some(tokio::spawn(async move {
                                 let mut lease = video_lease.take();
@@ -3450,6 +3661,7 @@ async fn serve_h323_uas_session(
                     // bridge/egress, so keep the OLC-pinned peer.
                     source_latch: false,
                     dtmf_payload_type: None,
+                    dtmf_events: None,
                     media_stats: pending_call.stats.clone(),
                     rtp_socket: pending_call.audio_pair.rtp_socket,
                     rtcp_socket: Some(pending_call.audio_pair.rtcp_socket),
@@ -3534,6 +3746,34 @@ async fn serve_h323_uas_session(
                 );
                 info!(%call_id, room = %pending_call.room_id, has_video, "H.323 inbound participant landed in room");
             }
+            Some("dtmf_digit") => {
+                // H.245 UserInputIndication from the H.323 terminal (RFC 4733
+                // §3.2 event codes 0-15 map to the same digits as SIP).
+                let Some(call_id) = event.get("call_id").and_then(serde_json::Value::as_str) else { continue };
+                let Some(digit) = event.get("digit").and_then(serde_json::Value::as_u64) else { continue };
+                let Some(character) = u8::try_from(digit).ok().and_then(dtmf_event_character) else { continue };
+                let Some(call) = active.get(call_id) else { continue };
+                let delivered = relay_dtmf_character(&manager, call.room_id, &call.participant_id, character);
+                info!(
+                    %call_id,
+                    digit = %character,
+                    delivered,
+                    "DTMF received from H.323 terminal and relayed"
+                );
+            }
+            Some("video_fast_update") => {
+                let Some(call_id) = event.get("call_id").and_then(serde_json::Value::as_str) else { continue };
+                let Some(call) = active.get(call_id) else { continue };
+                let controls = manager.registry.lock().ok().and_then(|registry| {
+                    registry.by_participant.get(&call.participant_id).map(|session| session.controls.clone())
+                });
+                if let Some(controls) = controls {
+                    // Same counter as RTCP PLI/FIR: the encoder owner turns it
+                    // into a keyframe request (IDR itself is P4b).
+                    controls.keyframe_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                info!(%call_id, "H.245 videoFastUpdatePicture received; keyframe request counted");
+            }
             Some("channel_closed") => {
                 let Some(call_id) = event.get("call_id").and_then(serde_json::Value::as_str) else { continue };
                 let kind = event.get("kind").and_then(serde_json::Value::as_str).unwrap_or_default();
@@ -3615,6 +3855,78 @@ mod media_runtime_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn video_level_limits_match_annex_a_table() {
+        // max-fs / max-mbps from H.264 Annex A, table A-1.
+        assert_eq!(video_level_limits(10), (99, 1485));
+        assert_eq!(video_level_limits(20), (396, 11880));
+        assert_eq!(video_level_limits(30), (1620, 40500));
+        assert_eq!(video_level_limits(31), (3600, 108000));
+        assert_eq!(video_level_limits(40), (8192, 245760));
+        assert_eq!(video_level_limits(41), (8192, 245760));
+        // Monotonic: a higher level never has smaller limits.
+        for level in [10u8, 11, 12, 13, 20, 21, 22, 30, 31, 32, 40, 41, 42] {
+            let (fs, mbps) = video_level_limits(level);
+            let (next_fs, next_mbps) = video_level_limits(level + 1).max(video_level_limits(level));
+            let _ = (next_fs, next_mbps);
+            assert!(fs > 0 && mbps > 0, "level {level}");
+        }
+    }
+
+    #[test]
+    fn sub_31_level_clamps_720p_and_keeps_negotiated_level() {
+        // 1280×720 is 3600 macroblocks, level 3.0 allows 1620: without the
+        // clamp libx264 refuses every frame ("frame MB size > level limit").
+        let media = vks_gateway_sip::InboundMedia {
+            audio_payload_type: 0,
+            audio_codec: "PCMU",
+            audio_clock_rate: 8000,
+            audio_channels: 1,
+            audio_fmtp: None,
+            audio_ptime_ms: 20,
+            video_payload_type: Some(96),
+            video_codec: Some("H264"),
+            video_fmtp: Some("packetization-mode=1;profile-level-id=42c01e".into()),
+            video_tx_level: Some(30),
+            dtmf_payload_type: None,
+            video_avpf: false,
+            video_fb_pli: false,
+            video_fb_fir: false,
+            remote_ip: "192.0.2.10".into(),
+            remote_audio_port: 4000,
+            remote_video_port: Some(4002),
+            remote_video_ip: None,
+            video_offered: true,
+        };
+        let profile = inbound_video_profile(&media);
+        assert_eq!(profile.level, "3.0");
+        let max_fs = profile.width.div_ceil(16) * profile.height.div_ceil(16);
+        assert!(max_fs <= 1620, "{}x{} exceeds level 3.0 max-fs", profile.width, profile.height);
+        assert!(
+            max_fs * profile.fps <= 40500,
+            "{}x{}@{} exceeds level 3.0 max-mbps",
+            profile.width,
+            profile.height,
+            profile.fps
+        );
+        // Level 3.1 keeps the room default 720p untouched.
+        let media_31 = vks_gateway_sip::InboundMedia { video_tx_level: Some(31), ..media };
+        let profile_31 = inbound_video_profile(&media_31);
+        assert_eq!(profile_31.level, "3.1");
+        assert_eq!((profile_31.width, profile_31.height), (1280, 720));
+    }
+
+    #[test]
+    fn rfc4733_event_codes_map_to_dtmf_characters() {
+        assert_eq!(dtmf_event_character(0), Some('0'));
+        assert_eq!(dtmf_event_character(9), Some('9'));
+        assert_eq!(dtmf_event_character(10), Some('*'));
+        assert_eq!(dtmf_event_character(11), Some('#'));
+        assert_eq!(dtmf_event_character(12), Some('A'));
+        assert_eq!(dtmf_event_character(15), Some('D'));
+        assert_eq!(dtmf_event_character(16), None);
+    }
 
     #[test]
     fn sip_keeps_g728_and_opus_while_h323_does_not() {
@@ -4817,6 +5129,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_codec: None,
             source_latch: false,
             dtmf_payload_type: None,
+            dtmf_events: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
             rtp_socket: bridge,
             rtcp_socket: None,
@@ -4871,6 +5184,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_codec: None,
             source_latch: false,
             dtmf_payload_type: None,
+            dtmf_events: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
             rtp_socket: socket,
             rtcp_socket: None,
@@ -4921,6 +5235,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_codec: None,
             source_latch: false,
             dtmf_payload_type: None,
+            dtmf_events: None,
             rtp_socket: socket,
             rtcp_socket: None,
             rtp_port: port,
@@ -4970,6 +5285,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_codec: None,
             source_latch: false,
             dtmf_payload_type: None,
+            dtmf_events: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
             rtp_socket: socket,
             rtcp_socket: None,
@@ -5047,6 +5363,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_codec: None,
             source_latch: false,
             dtmf_payload_type: None,
+            dtmf_events: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
             rtp_socket: socket,
             rtcp_socket: None,
@@ -5203,6 +5520,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_codec: Some("G726-32"),
             source_latch: false,
             dtmf_payload_type: None,
+            dtmf_events: None,
             media_stats: stats.clone(),
             rtp_socket: socket,
             rtcp_socket: None,
@@ -5328,6 +5646,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_codec: Some("OPUS"),
             source_latch: false,
             dtmf_payload_type: None,
+            dtmf_events: None,
             media_stats: stats.clone(),
             rtp_socket: socket,
             rtcp_socket: None,
@@ -5412,6 +5731,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_codec: Some("G723"),
             source_latch: false,
             dtmf_payload_type: None,
+            dtmf_events: None,
             media_stats: stats,
             rtp_socket: socket,
             rtcp_socket: None,

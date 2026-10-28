@@ -31,6 +31,7 @@ pub mod g726;
 pub mod g728;
 pub mod h265;
 pub mod opus;
+pub mod rtcp;
 pub mod rtp_bridge;
 pub mod sip_message;
 pub mod uac;

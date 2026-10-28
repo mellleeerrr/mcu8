@@ -48,11 +48,16 @@ fn golden() -> Golden {
 fn base_schemes() -> Vec<GridScheme> {
     let mut schemes = Vec::new();
     for count in [1usize, 2, 3, 4, 5, 6, 7, 8, 9, 13, 16, 25, 100] {
-        schemes.push(GridScheme { count, pin: None, options: GridOptions { gap: 0, margin: 0 } });
+        schemes.push(GridScheme { count, pin: None, is_dual: false, options: GridOptions { gap: 0, margin: 0 } });
     }
     for count in [2usize, 5, 9, 25] {
         for pin in [PinSide::Left, PinSide::Right, PinSide::Top, PinSide::Bottom] {
-            schemes.push(GridScheme { count, pin: Some(pin), options: GridOptions { gap: 0, margin: 0 } });
+            schemes.push(GridScheme {
+                count,
+                pin: Some(pin),
+                is_dual: false,
+                options: GridOptions { gap: 0, margin: 0 },
+            });
         }
     }
     schemes

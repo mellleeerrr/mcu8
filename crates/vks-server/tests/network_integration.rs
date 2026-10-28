@@ -2037,3 +2037,107 @@ async fn test_step5_h323_rejects_invented_faststart_eof_and_timeout() {
     terminal.abort();
     let _ = terminal.await;
 }
+
+/// `P4a`: ферма энкодеров видна в `/metrics` (`encoder_group_*`, `viewer_rtp_*`)
+/// и в JSON `/api/v3/mcu/farm`, а после ухода зрителя серии исчезают.
+#[tokio::test]
+async fn test_farm_metrics_and_api_v3_snapshot_reflect_encoder_group_lifecycle() {
+    use std::sync::atomic::Ordering;
+
+    use vks_media_mcu::{EncoderSpec, FarmCodec, McuEngine};
+
+    // Тест требует реальный FFmpeg (лимит 1 группа: `acquire` поднимает child).
+    if std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    }
+
+    let engine = Arc::new(McuEngine::new());
+    let room = vks_core::RoomId::new();
+    let pid = vks_core::ParticipantId::new();
+    engine.bridge_participant(room, pid, vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Video)]);
+    let spec = EncoderSpec {
+        codec: FarmCodec::H264,
+        width: 640,
+        height: 360,
+        fps: 30,
+        bitrate_kbps: 1024,
+        maxrate_kbps: 1024,
+        bufsize_kbps: 2048,
+        profile: "baseline".into(),
+        level: "3.1".into(),
+        keyint: 30,
+        encoder_params: "repeat-headers=1:aud=1:scenecut=0".into(),
+    };
+    let viewer = engine.acquire_video_viewer(room, &spec).await.expect("farm encoder must start");
+    assert_eq!(viewer.rtp_snapshot(), (0, 0, 0), "новый зритель без RTP");
+    // Эмулируем per-viewer RTP-обвязчик: 5 пакетов / 500 байт и 2 потерянных кадра.
+    viewer.note_rtp(5, 500);
+    viewer.note_dropped(2);
+    assert_eq!(viewer.rtp_snapshot(), (5, 500, 2));
+
+    let state = Arc::new(AppState::new());
+    let frontend = Frontend::load(&frontend_fixture_dir());
+    let app = vks_server::build_app_with_services(
+        state,
+        &frontend,
+        HandlerConfig::default_test(),
+        Arc::new(vks_media_sfu::SfuEngine::new()),
+        engine.clone(),
+        None,
+        Arc::new(vks_server::GatewayManager::new().with_mcu(engine.clone())),
+        Arc::new(vks_server::RecorderManager::new()),
+        Arc::new(vks_server::ClusterManager::new("vks-node-1")),
+    );
+
+    let metrics = app
+        .clone()
+        .oneshot(Request::builder().uri("/metrics").body(axum::body::Body::empty()).expect("request"))
+        .await
+        .expect("oneshot /metrics");
+    assert_eq!(metrics.status(), StatusCode::OK);
+    let body =
+        String::from_utf8(axum::body::to_bytes(metrics.into_body(), 1 << 20).await.expect("metrics body").to_vec())
+            .expect("utf8 metrics");
+    // Text-формат Prometheus сортирует метки по имени.
+    let labels = format!("codec=\"h264\",height=\"360\",room=\"{room}\",width=\"640\"");
+    assert!(body.contains("encoder_group_active"), "нет encoder_group_active:\n{body}");
+    assert!(body.contains(&labels), "нет метки группы {labels}:\n{body}");
+    assert!(body.contains(&format!("viewer_rtp_packets{{{labels}}} 5")), "viewer_rtp_packets должен быть 5:\n{body}");
+    assert!(
+        body.contains(&format!("viewer_rtp_dropped_frames{{{labels}}} 2")),
+        "viewer_rtp_dropped_frames должен быть 2"
+    );
+
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri("/api/v3/mcu/farm").body(axum::body::Body::empty()).expect("request"))
+        .await
+        .expect("oneshot /api/v3/mcu/farm");
+    assert_eq!(response.status(), StatusCode::OK, "снимок фермы должен отвечать 200");
+    let json_bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.expect("json body");
+    let json: serde_json::Value = serde_json::from_slice(&json_bytes).expect("json");
+    let groups = json["groups"].as_array().expect("groups array");
+    let group = groups
+        .iter()
+        .find(|group| group["room"] == serde_json::json!(room.to_string()))
+        .expect("группа комнаты должна быть в снимке");
+    assert_eq!(group["viewers"], serde_json::json!(1));
+    assert_eq!(group["viewer_rtp"]["packets"], serde_json::json!(5));
+    assert!(json["totals"]["groups"].as_u64().unwrap_or(0) >= 1, "в totals должен быть хотя бы один группа");
+
+    // Зритель ушёл → группа ретируется, серии из /metrics исчезают.
+    assert_eq!(viewer.refcount(), 2, "зритель + энкодер до release");
+    drop(viewer);
+    let metrics = app
+        .oneshot(Request::builder().uri("/metrics").body(axum::body::Body::empty()).expect("request"))
+        .await
+        .expect("oneshot /metrics");
+    let body =
+        String::from_utf8(axum::body::to_bytes(metrics.into_body(), 1 << 20).await.expect("metrics body").to_vec())
+            .expect("utf8 metrics");
+    assert!(!body.contains(&room.to_string()), "серии ретированной группы не должны оставаться в /metrics");
+    assert_eq!(engine.video_farm_stats().len(), 0, "группа должна быть удалена из фермы");
+    // Против «оптимизации» с неиспользуемым импортом.
+    let _ = Ordering::Relaxed;
+}

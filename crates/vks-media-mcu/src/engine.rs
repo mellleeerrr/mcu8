@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use vks_core::ports::media_engine::{
-    LayoutDescriptor, MediaEngine, MediaEngineError, MediaTrack, PublisherHandle, RoomCaps, RoomMediaCfg,
+    LayoutDescriptor, LayoutSlot, MediaEngine, MediaEngineError, MediaTrack, PublisherHandle, RoomCaps, RoomMediaCfg,
     RoomMediaHandle, SubscribeRequest, SubscriberHandle,
 };
 use vks_core::{ParticipantId, RoomId, RoomMode};
@@ -25,8 +25,9 @@ use vks_layout::{Canvas, Layout, LayoutKind};
 
 use crate::audio_mixer::AudioMixer;
 use crate::compositor::{Compositor, CANVAS_SIZE};
+use crate::farm::{EncoderFarm, EncoderSpec, FarmError, GroupStat, GroupViewer};
 use crate::frame::Frame;
-use crate::layout_bridge::{LayoutBridge, SlotRects};
+use crate::layout_bridge::{LayoutBridge, PixelRect, SlotRects};
 use crate::vad::Vad;
 
 /// MCU media rendering and backpressure statistics (M3.6).
@@ -70,8 +71,12 @@ struct RoomState {
     last_audio_ms: Option<u64>,
     /// Rendering and backpressure statistics.
     stats: McuRenderStats,
+    /// Размер холста комнаты (`O1`): по умолчанию 1920×1080, но
+    /// `ensure_composite_size` ставит его равным выходному профилю первой
+    /// сессии, чтобы egress-`resize_i420` стал identity-`memcpy`.
+    canvas: (u32, u32),
     /// Last composed frame, per subscriber (mock: the same composite for
-    /// every subscriber).
+    /// every subscriber). Размер всегда равен [`RoomState::canvas`].
     composite: Arc<Frame>,
     /// Кадры участников по слотам (последний тик) — нужны персональной
     /// сборке кадра для самопросмотра (ADR-0029, фаза 2).
@@ -114,6 +119,7 @@ impl RoomState {
             stats: McuRenderStats::default(),
             frames: BTreeMap::new(),
             self_view: false,
+            canvas: CANVAS_SIZE,
             composite: Arc::new(Frame::new(
                 CANVAS_SIZE.0,
                 CANVAS_SIZE.1,
@@ -132,6 +138,79 @@ impl RoomState {
     /// The current (crossfaded) slot rects for the current layout.
     fn slot_rects(&self) -> SlotRects {
         self.bridge.current(self.elapsed_ms)
+    }
+
+    /// Видео-участники в порядке прихода (S12) — тот же порядок, что в
+    /// `apply_layout`, поэтому сетка стабильна между расширениями.
+    fn video_participants_in_join_order(&self) -> Vec<ParticipantId> {
+        let mut bridged: Vec<ParticipantId> = self
+            .join_order
+            .iter()
+            .copied()
+            .filter(|pid| self.publisher_tracks.get(pid).is_some_and(|tracks| layout_has_video(tracks)))
+            .collect();
+        for (pid, tracks) in &self.publisher_tracks {
+            if layout_has_video(tracks) && !bridged.contains(pid) {
+                bridged.push(*pid);
+            }
+        }
+        bridged
+    }
+
+    /// Сажает видео-участника в слот; при нехватке окон авто-расширяет
+    /// раскладку равной сеткой (функциональный блокер 20+).
+    ///
+    /// `true` — раскладку (geometry/назначения/версию) нужно применить заново.
+    fn seat_video_or_expand(&mut self, pid: ParticipantId) -> bool {
+        let descriptor = self.layout.get_or_insert_with(|| LayoutDescriptor {
+            layout_id: "grid".into(),
+            version: 0,
+            assignments: BTreeMap::new(),
+            geometry: Vec::new(),
+            mode: "auto".into(),
+            ..Default::default()
+        });
+        if descriptor.assignments.contains_key(&pid) {
+            return false;
+        }
+        if seat_participant(descriptor, pid) {
+            descriptor.version = descriptor.version.saturating_add(1);
+            return true;
+        }
+        let mut bridged = self.video_participants_in_join_order();
+        if !bridged.contains(&pid) {
+            bridged.push(pid);
+        }
+        let descriptor = self.layout.as_mut().expect("layout created above");
+        regrid_for_video(descriptor, &bridged)
+    }
+
+    /// Rects раскладки (пространство 1920×1080) → пространство холста комнаты.
+    ///
+    /// `O1`: масштабируем обе границы «half-up» и берём разность, чтобы тайлы
+    /// стыковались без щелей и не выходили за холст (независимое округление
+    /// `x` и `w` давало бы дырки в 1 px). Для дефолтного холста — без работы.
+    fn scaled_slot_rects(&self) -> SlotRects {
+        let rects = self.slot_rects();
+        let (cw, ch) = self.canvas;
+        if (cw, ch) == CANVAS_SIZE {
+            return rects;
+        }
+        let scale = |value: u32, source: u32, target: u32| -> u32 {
+            ((u64::from(value) * u64::from(target) + u64::from(source) / 2) / u64::from(source)) as u32
+        };
+        rects
+            .into_iter()
+            .map(|(key, rect)| {
+                let x0 = scale(rect.x, CANVAS_SIZE.0, cw);
+                let y0 = scale(rect.y, CANVAS_SIZE.1, ch);
+                let x1 = scale(rect.x.saturating_add(rect.w), CANVAS_SIZE.0, cw).min(cw);
+                let y1 = scale(rect.y.saturating_add(rect.h), CANVAS_SIZE.1, ch).min(ch);
+                let w = x1.saturating_sub(x0).clamp(1, cw);
+                let h = y1.saturating_sub(y0).clamp(1, ch);
+                (key, PixelRect::new(x0.min(cw.saturating_sub(1)), y0.min(ch.saturating_sub(1)), w, h).with_z(rect.z))
+            })
+            .collect()
     }
 
     /// Builds a [`vks_layout::Layout`] from the core [`LayoutDescriptor`]:
@@ -296,8 +375,9 @@ impl RoomState {
 
     fn process_video(&mut self, frames: &BTreeMap<u32, Arc<Frame>>) {
         let t0 = std::time::Instant::now();
-        let rects = self.slot_rects();
-        self.composite = Arc::new(Compositor.compose(frames, &rects));
+        let rects = self.scaled_slot_rects();
+        let (width, height) = self.canvas;
+        self.composite = Arc::new(Compositor.compose_sized(width, height, frames, &rects));
         // Кадры сохраняются для персональной сборки (самопросмотр): сам композит
         // уже собран, а личная дельта нужна отдельно.
         self.frames.clone_from(frames);
@@ -523,6 +603,28 @@ impl std::fmt::Debug for SinkSlot {
     }
 }
 
+/// `P1`: потолок коэффициента битрейта группы — 25 % к базовому.
+pub const GROUP_BITRATE_CEILING_PCT: u32 = 125;
+
+/// `P1`: битрейт группы по числу видимых окон композита.
+///
+/// Правило (утверждено Lead'ом):
+/// `bitrate = clamp(base × (1 + 0.02 × (visible − 1)), base, 1.25 × base)`,
+/// `visible = 0` → `base`. Пустые/одно окно не поднимают битрейт: общий
+/// энкодер на 20 окон требует больше полосы (BENCHMARK §10: +8.6 %), но не
+/// больше 25 % сверх базового — иначе группа «съедает» полосу зрителей.
+#[must_use]
+pub fn group_bitrate_kbps(base_kbps: u32, visible_windows: usize) -> u32 {
+    if visible_windows <= 1 {
+        return base_kbps;
+    }
+    let extra_pct = 2u64 * (visible_windows as u64 - 1);
+    let scaled = (u64::from(base_kbps) * (100 + extra_pct) / 100) as u32;
+    let ceiling = u64::from(base_kbps) * u64::from(GROUP_BITRATE_CEILING_PCT) / 100;
+    let ceiling = u32::try_from(ceiling).unwrap_or(u32::MAX);
+    scaled.clamp(base_kbps, ceiling)
+}
+
 /// MCU engine (impl [`MediaEngine`]).
 /// Room → (slot → frame): pluggable mock frame source.
 type FrameSource = Arc<Mutex<BTreeMap<RoomId, BTreeMap<u32, Arc<Frame>>>>>;
@@ -532,6 +634,10 @@ type AudioSource = Arc<Mutex<BTreeMap<RoomId, BTreeMap<ParticipantId, Vec<f32>>>
 #[derive(Debug, Default)]
 pub struct McuEngine {
     rooms: Arc<Mutex<BTreeMap<RoomId, RoomState>>>,
+    /// `P1`: авторитетный канал числа видимых окон на комнату (один на комнату,
+    /// пишет только движок через [`McuEngine::refresh_visible_windows`], сессии
+    /// лишь читают). Устраняет thrash от per-session писателей.
+    visible: Mutex<BTreeMap<RoomId, Arc<VisibleWindows>>>,
     /// Pluggable frame source (mock by default).
     frames: FrameSource,
     /// Pluggable audio source (mock).
@@ -542,6 +648,9 @@ pub struct McuEngine {
     pending_layouts: Arc<Mutex<BTreeMap<RoomId, LayoutDescriptor>>>,
     /// Приёмник событий комнат (S12): ставится сервером один раз.
     event_sink: SinkSlot,
+    /// `O7`: ферма энкодеров — один энкодер на группу (комната + профиль + холст).
+    /// Живёт рядом с раскладкой: это свойство медиаядра, а не HTTP-слоя.
+    farm: EncoderFarm,
 }
 
 fn layout_has_video(tracks: &[MediaTrack]) -> bool {
@@ -564,7 +673,9 @@ fn seat_participant(layout: &mut LayoutDescriptor, pid: ParticipantId) -> bool {
         return false;
     }
     let Some(slot) = free_layout_slot(layout) else {
-        tracing::warn!(%pid, "layout has no free geometry slot; participant stays unassigned");
+        // Не финальная ошибка: вызывающий обязан расширить раскладку
+        // (`regrid_for_video`) — инвариант «видео-участник без слота не бывает».
+        tracing::debug!(%pid, "no free geometry slot; auto-expanding the layout");
         return false;
     };
     layout.assignments.insert(pid, slot);
@@ -582,6 +693,52 @@ fn sanitize_assignments(layout: &mut LayoutDescriptor) {
     layout.assignments.retain(|_, slot| geometry.contains(slot));
 }
 
+/// Перестраивает раскладку в равную сетку на всех видео-участников.
+///
+/// Функциональный блокер 20+: с сервера приходят раскладки на меньшее число
+/// окон (пресет `preset_default_13`; либо `geometry` из одного окна, когда
+/// `assignments` пуст и `slot_count = max(assignments)+1 = 1`). Лишние
+/// участники оставались без слота — их кадры молча отбрасывались
+/// (`set_participant_frame` → `false`), и 7–8 из 20 не попадали в композит.
+///
+/// Раскладка перестраивается целиком: `geometry` — из `GridLayout::compute`,
+/// назначения — по порядку прихода (S12). Сохранять rect'ы первых N окон
+/// нельзя: они от пресета другого размера, и новые окна перекрывали бы их.
+/// `preset` очищается, чтобы прежний пресет не «возвращал» малое число окон.
+fn regrid_for_video(layout: &mut LayoutDescriptor, bridged: &[ParticipantId]) -> bool {
+    if bridged.is_empty() {
+        return false;
+    }
+    let previous_windows = layout.geometry.len();
+    let canvas = Canvas::new(CANVAS_SIZE.0, CANVAS_SIZE.1);
+    let rects = GridLayout::compute(&canvas, bridged.len());
+    if rects.len() < bridged.len() {
+        return false;
+    }
+    layout.geometry = rects
+        .iter()
+        .enumerate()
+        .map(|(index, rect)| LayoutSlot {
+            slot: index as u32,
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            z_order: 0,
+        })
+        .collect();
+    layout.assignments = bridged.iter().enumerate().map(|(index, pid)| (*pid, index as u32)).collect();
+    layout.preset = String::new();
+    layout.mode = "auto".into();
+    layout.version = layout.version.saturating_add(1);
+    tracing::info!(
+        participants = bridged.len(),
+        previous_windows,
+        "layout auto-expanded to an equal grid: geometry windows < video participants"
+    );
+    true
+}
+
 /// Атомарный снимок раскладки: эффективная геометрия + справочные метаданные
 /// применённого дескриптора (T10a). Один лок на комнату — версия геометрии и
 /// метаданные всегда из одного применения.
@@ -593,6 +750,42 @@ pub struct LayoutSnapshot {
     pub preset: String,
     /// Режим редактора (`auto`/`dynamic`/`manual`); "" = неизвестно.
     pub mode: String,
+}
+
+/// `P1`: авторитетное значение числа видимых окон + дебаунс публикации.
+///
+/// Сессии не пишут значение сами (иначе 10 render-тасков перетирают `watch`
+/// переходными числами); пишет только движок, и только когда новое число
+/// держится стабильно дольше [`VISIBLE_WINDOWS_STABLE`].
+#[derive(Debug)]
+struct VisibleWindows {
+    tx: tokio::sync::watch::Sender<usize>,
+    inner: Mutex<VisibleWindowsInner>,
+}
+
+#[derive(Debug)]
+struct VisibleWindowsInner {
+    current: usize,
+    pending: usize,
+    since: std::time::Instant,
+}
+
+/// `P1`: сколько число видимых окон должно продержаться, прежде чем сменить
+/// битрейт группы (гистерезис против флаппинга при входе/выходе участников).
+pub const VISIBLE_WINDOWS_STABLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+impl VisibleWindows {
+    fn new(initial: usize) -> Self {
+        let (tx, _) = tokio::sync::watch::channel(initial);
+        Self {
+            tx,
+            inner: Mutex::new(VisibleWindowsInner {
+                current: initial,
+                pending: initial,
+                since: std::time::Instant::now(),
+            }),
+        }
+    }
 }
 
 impl McuEngine {
@@ -776,7 +969,8 @@ impl McuEngine {
         let mut g = self.rooms.lock().unwrap();
         let state = g.get_mut(&room)?;
         let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
-        if state.tick_video_at(now_ms, &frames) {
+        let rendered = state.tick_video_at(now_ms, &frames);
+        if rendered {
             Some(state.composite.clone())
         } else {
             None
@@ -811,7 +1005,7 @@ impl McuEngine {
         if !state.self_view {
             return Some(base);
         }
-        let rects = state.slot_rects();
+        let rects = state.scaled_slot_rects();
         // Ячейка зрителя в общей сетке.
         // Идентификаторы участников в раскладке и в ядре — разные типы с одним
         // UUID, поэтому сравниваем по нему.
@@ -845,6 +1039,126 @@ impl McuEngine {
             Compositor::blit(&mut canvas, camera, self_rect);
         }
         Some(Arc::new(canvas))
+    }
+
+    /// Размер холста комнаты (`O1`), если комната существует.
+    pub fn composite_size(&self, room: RoomId) -> Option<(u32, u32)> {
+        self.rooms.lock().unwrap().get(&room).map(|state| state.canvas)
+    }
+
+    /// `O1`: выставляет холст комнаты явно (тест/админка).
+    ///
+    /// `false`, если комнаты нет или размер нулевой. Композит заменяется
+    /// чёрным кадром нужного размера, чтобы egress не получил кадр с чужими
+    /// размерами до ближайшего тика (resize всё равно бы справился, но так
+    /// проще рассуждать).
+    pub fn set_composite_size(&self, room: RoomId, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let changed = {
+            let mut rooms = self.rooms.lock().unwrap();
+            let Some(state) = rooms.get_mut(&room) else {
+                return false;
+            };
+            let changed = state.canvas != (width, height);
+            Self::resize_canvas(state, width, height);
+            changed
+        };
+        if changed {
+            self.farm.invalidate_room(room);
+        }
+        true
+    }
+
+    /// `O1`: делает холст комнаты равным выходному профилю, если комната ещё
+    /// не рендерила ни кадра.
+    ///
+    /// Первая сессия задаёт холст (типовой случай: все участники комнаты
+    /// договариваются об одном профиле), дальше размер не меняется — иначе
+    /// уже отдаваемые кадры меняли бы геометрию на ходу. Зритель с другим
+    /// профилем по-прежнему получает обычный `resize_i420`.
+    pub fn ensure_composite_size(&self, room: RoomId, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let mut rooms = self.rooms.lock().unwrap();
+        let Some(state) = rooms.get_mut(&room) else {
+            return false;
+        };
+        // Признак «комната уже отдавала кадры»: счётчик рендеров, а не
+        // `last_render_ms` — синхронный `tick()` (тесты/инпут) его не ставит.
+        if state.stats.frames_rendered > 0 {
+            return false;
+        }
+        let changed = state.canvas != (width, height);
+        Self::resize_canvas(state, width, height);
+        drop(rooms);
+        if changed {
+            self.farm.invalidate_room(room);
+        }
+        true
+    }
+
+    /// Заменяет холст комнаты и её текущий композит чёрным кадром размера
+    /// `width×height` (YUV420, если размеры чётные).
+    fn resize_canvas(state: &mut RoomState, width: u32, height: u32) {
+        if state.canvas == (width, height) {
+            return;
+        }
+        state.canvas = (width, height);
+        let pixels = width as usize * height as usize;
+        let data = if width.is_multiple_of(2) && height.is_multiple_of(2) {
+            let mut data = vec![128u8; pixels * 3 / 2];
+            data[..pixels].fill(16);
+            data
+        } else {
+            vec![0u8; pixels]
+        };
+        state.composite = Arc::new(Frame::new(width, height, data));
+    }
+
+    /// `O7`: ферма энкодеров (диагностика/метрики/тесты).
+    pub fn video_farm(&self) -> &EncoderFarm {
+        &self.farm
+    }
+
+    /// Включён ли самопросмотр в комнате: ферма и self-view несовместимы
+    /// (разным зрителям нужен разный кадр), такой зритель идёт старым путём.
+    pub fn self_view(&self, room: RoomId) -> bool {
+        self.rooms.lock().unwrap().get(&room).is_some_and(|state| state.self_view)
+    }
+
+    /// `O7`: подписка зрителя на групповой энкодер.
+    ///
+    /// Ключ = комната + выходной профиль + версия холста; вход группы — холст
+    /// комнаты (egress-resize, если профиль отличается, делает сам FFmpeg).
+    pub async fn acquire_video_viewer(&self, room: RoomId, spec: &EncoderSpec) -> Result<GroupViewer, FarmError> {
+        let canvas = self.composite_size(room).unwrap_or((spec.width, spec.height));
+        let key = spec.key(room, self.farm.canvas_version(room));
+        self.farm.acquire(key, canvas).await
+    }
+
+    /// `O7`: публикует общий кадр комнаты всем её группам (дедуп по кадру).
+    pub fn publish_video_frame(&self, room: RoomId, frame: &Arc<Frame>) -> usize {
+        self.farm.publish(room, frame)
+    }
+
+    /// `O7`: PLI/FIR любого зрителя → запрос keyframe группе (v1: учитывается,
+    /// IDR приходит по keyint ≤1 с; форс-IDR — P4b).
+    pub fn request_video_keyframe(&self, room: RoomId) {
+        self.farm.request_keyframe(room);
+    }
+
+    /// `O7`: диагностика групп (refcount/fps/keyframes/restarts).
+    pub fn video_farm_stats(&self) -> Vec<GroupStat> {
+        let mut stats = self.farm.snapshot();
+        // `P1`: число видимых окон — свойство комнаты, не группы; ферма о
+        // раскладке ничего не знает, поэтому обогащаем снимок здесь.
+        for stat in &mut stats {
+            stat.visible_windows = self.visible_windows(stat.key.room);
+        }
+        stats
     }
 
     /// Включает самопросмотр в комнате (ADR-0029, фаза 2).
@@ -909,6 +1223,74 @@ impl McuEngine {
     /// The current crossfaded slot rects of a room (test/inspector).
     pub fn slot_rects(&self, room: RoomId) -> Option<SlotRects> {
         self.rooms.lock().unwrap().get(&room).map(|s| s.slot_rects())
+    }
+
+    /// `P1`: число **занятых** ячеек композита — окно, в которое посажен
+    /// участник с видео (есть назначение слота в текущей геометрии).
+    ///
+    /// Основание: правило битрейта группы ([`group_bitrate_kbps`] — решение
+    /// Lead'а по BENCHMARK §10: общий энкодер на 20 окон даёт +8.6 % битрейта).
+    /// Считаем именно занятость ячеек, а не наличие декодированного кадра:
+    /// ячейка с чёрным/ещё не декодированным кадром — всё равно окно
+    /// композита (и окно энкодера), а пустая ячейка (участник без видео) —
+    /// нет. Пустые слоты в геометрию не попадают, поэтому двойная проверка
+    /// `assignments ∩ geometry` отсекает назначения вне сетки.
+    /// `0` — видеопубликаторов в комнате нет (или комнаты нет).
+    #[must_use]
+    pub fn visible_windows(&self, room: RoomId) -> usize {
+        let rooms = self.rooms.lock().unwrap();
+        let Some(state) = rooms.get(&room) else { return 0 };
+        // Эффективная раскладка композитора: ячейка видима, если в ней есть
+        // участник. `current_layout` — ровно то, что применяет `LayoutBridge`
+        // (descriptor.geometry для авто-сетки пуст, поэтому считаем по Layout).
+        state.current_layout.slots.iter().filter(|slot| slot.participant_id.is_some()).count()
+    }
+
+    /// `P1`: подписка на авторитетное число видимых окон комнаты.
+    ///
+    /// Возвращает текущее значение (для spec в прологе моста); изменения
+    /// публикует только [`Self::refresh_visible_windows`] — один источник на
+    /// комнату, поэтому сессии не перетирают друг другу канал.
+    #[must_use]
+    pub fn visible_windows_receiver(&self, room: RoomId) -> tokio::sync::watch::Receiver<usize> {
+        let current = self.visible_windows(room);
+        let mut map = self.visible.lock().unwrap();
+        let entry = map.entry(room).or_insert_with(|| Arc::new(VisibleWindows::new(current)));
+        entry.tx.subscribe()
+    }
+
+    /// `P1`: пересчитывает окна комнаты и публикует смену, если новое значение
+    /// стабильно дольше [`VISIBLE_WINDOWS_STABLE`] (гистерезис).
+    ///
+    /// Дёргается из render-тасков сессий (это и есть тик дебаунса); значение
+    /// считается по общему состоянию движка, поэтому все сессии видят одно
+    /// и то же число и не могут «перетереть» канал разными значениями.
+    /// `Some(n)` — канал обновлён, `None` — ещё рано/без изменений.
+    pub fn refresh_visible_windows(&self, room: RoomId) -> Option<usize> {
+        let visible = self.visible_windows(room);
+        let state = {
+            let mut map = self.visible.lock().unwrap();
+            map.entry(room).or_insert_with(|| Arc::new(VisibleWindows::new(visible))).clone()
+        };
+        let mut inner = state.inner.lock().unwrap();
+        if visible == inner.current {
+            inner.pending = visible;
+            return None;
+        }
+        if inner.pending != visible {
+            inner.pending = visible;
+            inner.since = std::time::Instant::now();
+            tracing::debug!(%room, visible, current = inner.current, "visible windows changed; waiting for stability");
+            return None;
+        }
+        if inner.since.elapsed() < VISIBLE_WINDOWS_STABLE {
+            return None;
+        }
+        inner.current = visible;
+        drop(inner);
+        let _ = state.tx.send(visible);
+        tracing::info!(%room, visible, "visible windows stable; encoder groups may re-key");
+        Some(visible)
     }
 
     /// Returns the personal N-1 mix-minus audio for a participant in the room.
@@ -1039,16 +1421,8 @@ impl McuEngine {
         if !has_video {
             return;
         }
-        let descriptor = state.layout.get_or_insert_with(|| LayoutDescriptor {
-            layout_id: "grid".into(),
-            version: 0,
-            assignments: BTreeMap::new(),
-            geometry: Vec::new(),
-            mode: "auto".into(),
-            ..Default::default()
-        });
-        if seat_participant(descriptor, pid) {
-            descriptor.version = descriptor.version.saturating_add(1);
+        if state.seat_video_or_expand(pid) {
+            let descriptor = state.layout.as_ref().expect("layout set by seat_video_or_expand");
             let layout = RoomState::layout_from_descriptor(descriptor);
             state.bridge.apply(&layout);
             state.current_layout = layout;
@@ -1294,10 +1668,17 @@ impl MediaEngine for McuEngine {
             }
         }
         let version_floor = state.layout.as_ref().map_or(0, |old| old.version.saturating_add(1));
-        for pid in bridged {
-            if !layout.assignments.contains_key(&pid) {
-                seat_participant(&mut layout, pid);
+        let mut unseated = false;
+        for &pid in &bridged {
+            if !layout.assignments.contains_key(&pid) && !seat_participant(&mut layout, pid) {
+                unseated = true;
             }
+        }
+        if unseated {
+            // Окон в присланной geometry меньше, чем видео-участников:
+            // расширяем раскладку равной сеткой, иначе часть людей не попадает
+            // в композит (функциональный блокер 20+, `preset_default_13`).
+            regrid_for_video(&mut layout, &bridged);
         }
         // Версия монотонна: даже auto/default без смены назначений должна
         // перестроить композитор. Repair больше не бампает отдельно, поэтому
@@ -1351,6 +1732,10 @@ mod tests {
     fn sub_req() -> SubscribeRequest {
         SubscribeRequest { track_ids: Vec::new(), audio_only: false }
     }
+    /// YUV420-кадр с равномерной luma/chroma (проверка O1-холста).
+    fn yuv_frame(width: u32, height: u32, value: u8) -> Frame {
+        Frame::new(width, height, vec![value; (width * height * 3 / 2) as usize])
+    }
 
     #[tokio::test]
     async fn mode_is_mcu() {
@@ -1386,6 +1771,174 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&first, &second), "зрители делят один кадр");
         assert!(std::sync::Arc::ptr_eq(&first, &composite), "кадр зрителя — общий композит");
         assert_eq!(first.data, composite.data, "байты не изменились");
+    }
+
+    /// `O1`: холст комнаты = выходной профиль, rects раскладки масштабируются
+    /// под него без щелей, а размер фиксируется после первого рендера.
+    #[tokio::test]
+    async fn composite_canvas_follows_output_profile() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(1);
+        let b = p(2);
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.add_publisher(rid, b, vec![video_track(b)]).await.unwrap();
+        // 2 тайла 960×540 в пространстве раскладки 1920×1080.
+        let mut assignments = std::collections::BTreeMap::new();
+        assignments.insert(a, 0);
+        assignments.insert(b, 1);
+        let layout = LayoutDescriptor {
+            layout_id: "L".into(),
+            version: 1,
+            assignments,
+            geometry: Vec::new(),
+            ..Default::default()
+        };
+        e.apply_layout(rid, layout).await.unwrap();
+        e.set_frame(rid, 0, yuv_frame(320, 180, 10));
+        e.set_frame(rid, 1, yuv_frame(320, 180, 20));
+
+        assert_eq!(e.composite_size(rid), Some(CANVAS_SIZE), "до первой сессии — дефолтный холст");
+        assert!(e.ensure_composite_size(rid, 1280, 720), "первая сессия задаёт холст");
+        assert_eq!(e.composite_size(rid), Some((1280, 720)));
+
+        e.tick(rid);
+        let out = e.composite_frame(rid).expect("composite");
+        assert_eq!((out.width, out.height), (1280, 720));
+        assert_eq!(out.data.len(), 1280 * 720 * 3 / 2, "YUV-холст профиля");
+        // Холст 1280×720: два тайла по 640×720 (2 колонки), кадр 16:9
+        // вписывается в 640×360 и центрируется по вертикали → контент y∈[180,540).
+        // Стык колонок ровно на x=640, без щели.
+        let row = 300 * 1280;
+        let (left, right) = (out.data[row + 100], out.data[row + 640 + 100]);
+        assert!(
+            (left == 10 && right == 20) || (left == 20 && right == 10),
+            "оба тайла отрисованы: left={left}, right={right}"
+        );
+        assert_eq!(out.data[row + 639], left, "левый тайл доходит до стыка");
+        assert_eq!(out.data[row + 640], right, "правый тайл начинается на стыке");
+        assert_eq!(out.data[10 * 1280 + 100], 16, "letterbox-полоса не закрашена");
+
+        // После первого рендера холст фиксируется: другая сессия с иным
+        // профилем получает обычный resize, геометрия на ходу не меняется.
+        assert!(!e.ensure_composite_size(rid, 1920, 1080));
+        assert_eq!(e.composite_size(rid), Some((1280, 720)));
+
+        // Явный сеттер работает и после рендера, нулевой размер отвергается.
+        assert!(e.set_composite_size(rid, 640, 360));
+        assert_eq!(e.composite_size(rid), Some((640, 360)));
+        assert!(!e.set_composite_size(rid, 0, 0));
+        assert!(!e.set_composite_size(RoomId::new(), 640, 360), "нет комнаты — false");
+    }
+
+    /// Функциональный блокер 20+: в раскладке из админки 13 окон
+    /// (`preset_default_13`), а видео-участников 20 — все обязаны получить слот.
+    /// До правки 7–8 человек молча оставались без окна и не попадали в композит.
+    #[tokio::test]
+    async fn twenty_participants_fit_a_thirteen_window_preset() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let participants: Vec<ParticipantId> = (1..=20).map(p).collect();
+        for &pid in &participants {
+            e.add_publisher(rid, pid, vec![video_track(pid)]).await.unwrap();
+        }
+        let canvas = Canvas::new(CANVAS_SIZE.0, CANVAS_SIZE.1);
+        let preset_rects = GridLayout::compute(&canvas, 13);
+        let geometry: Vec<LayoutSlot> = preset_rects
+            .iter()
+            .enumerate()
+            .map(|(index, rect)| LayoutSlot {
+                slot: index as u32,
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
+                height: rect.h,
+                z_order: 0,
+            })
+            .collect();
+        e.apply_layout(
+            rid,
+            LayoutDescriptor {
+                layout_id: "preset_default_13".into(),
+                version: 1,
+                assignments: BTreeMap::new(),
+                geometry,
+                preset: "preset_default_13".into(),
+                mode: "manual".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let snapshot = e.layout_snapshot(rid).expect("snapshot");
+        assert_eq!(snapshot.layout.slots.len(), 20, "сетка расширена под всех участников");
+        // `vks_layout::ParticipantId` и `vks_core::ParticipantId` — разные типы
+        // с общим UUID, поэтому сверяем по uuid.
+        let mut assigned = BTreeSet::new();
+        for slot in &snapshot.layout.slots {
+            if let Some(pid) = slot.participant_id {
+                assert!(assigned.insert(pid.as_u128()), "участник назначен дважды: {pid:?}");
+            }
+        }
+        assert_eq!(assigned.len(), 20, "ни один видео-участник не остался без окна");
+        for &pid in &participants {
+            assert!(assigned.contains(&pid.as_uuid().as_u128()), "нет слота для {pid:?}");
+        }
+        for i in 0..snapshot.layout.slots.len() {
+            for j in (i + 1)..snapshot.layout.slots.len() {
+                assert!(
+                    !snapshot.layout.slots[i].rect.intersects(&snapshot.layout.slots[j].rect),
+                    "окна {i} и {j} перекрываются"
+                );
+            }
+        }
+        assert!(snapshot.preset.is_empty(), "пресет сброшен: геометрия больше не пресетная");
+
+        // Каждый кадр принимается и виден в своей ячейке (значение = 20 + индекс).
+        let value_of = |index: usize| 20 + index as u8;
+        for (index, &pid) in participants.iter().enumerate() {
+            assert!(
+                e.set_participant_frame(rid, pid, yuv_frame(320, 180, value_of(index))),
+                "кадр участника {pid:?} должен приниматься (слот есть)"
+            );
+        }
+        for _ in 0..12 {
+            e.tick(rid);
+        }
+        let composite = e.composite_frame(rid).expect("composite");
+        let cw = CANVAS_SIZE.0 as usize;
+        let center_of = |rect: &vks_layout::Rect| {
+            (rect.y as usize + rect.h as usize / 2) * cw + rect.x as usize + rect.w as usize / 2
+        };
+        for slot in &snapshot.layout.slots {
+            let pid = slot.participant_id.expect("все слоты заняты");
+            let index =
+                participants.iter().position(|p| p.as_uuid().as_u128() == pid.as_u128()).expect("участник из списка");
+            assert_eq!(
+                composite.data[center_of(&slot.rect)],
+                value_of(index),
+                "в ячейке {pid:?} должно быть его видео"
+            );
+        }
+
+        // Self-view ON: своя ячейка освобождается, камера уходит в ячейку
+        // низшего приоритета (максимальный id = 19).
+        let viewer = participants[0];
+        e.set_self_view(rid, true);
+        e.tick(rid);
+        let own_slot = snapshot
+            .layout
+            .slots
+            .iter()
+            .find(|slot| slot.participant_id.is_some_and(|pid| pid.as_u128() == viewer.as_uuid().as_u128()))
+            .expect("own slot");
+        let self_slot = snapshot.layout.slots.iter().max_by_key(|slot| slot.id.as_u32()).expect("self slot");
+        let personal = e.frame_for_viewer(rid, viewer).expect("кадр зрителя");
+        assert_ne!(personal.data, composite.data, "персональный кадр отличается от общего");
+        assert_eq!(personal.data[center_of(&own_slot.rect)], 16, "своя ячейка очищена");
+        assert_eq!(personal.data[center_of(&self_slot.rect)], value_of(0), "своя камера в ячейке низшего приоритета");
     }
 
     /// ADR-0029, фаза 2: самопросмотр выключен по умолчанию — поведение
@@ -2055,6 +2608,90 @@ mod tests {
         assert_eq!(r42.h, 1080);
     }
 
+    /// `P1`: правило битрейта группы — кламп [base, 1.25×base], visible=0 → base.
+    #[test]
+    fn group_bitrate_scales_by_visible_windows_and_clamps() {
+        assert_eq!(group_bitrate_kbps(2048, 0), 2048, "пустая комната — базовый битрейт");
+        assert_eq!(group_bitrate_kbps(2048, 1), 2048, "одно окно — базовый битрейт");
+        assert_eq!(group_bitrate_kbps(2048, 2), 2088, "2 окна: floor(base × 1.02)");
+        assert_eq!(group_bitrate_kbps(2048, 20), 2560, "20 окон: 1.25 × base (кламп)");
+        assert_eq!(group_bitrate_kbps(2048, 100), 2560, "кламп не превышается");
+        assert_eq!(group_bitrate_kbps(1000, 20), 1250);
+        for visible in 0..64 {
+            let bitrate = group_bitrate_kbps(2048, visible);
+            assert!(bitrate >= 2048, "битрейт не ниже базового (visible={visible})");
+            assert!(bitrate <= 2048 * GROUP_BITRATE_CEILING_PCT / 100, "не выше 1.25×base");
+        }
+    }
+
+    /// `P1`: видимые окна = занятые ячейки композита (участник с видео посажен
+    /// в слот текущей геометрии). Наличие кадра не требуется: «чёрное» или ещё
+    /// не декодированное окно — всё равно окно композита; пустые и аудио-только
+    /// ячейки не считаются. Это production-семантика: не зависит от мок-источника
+    /// кадров (`set_participant_frame` пишет кадры, но раскладка их не ждёт).
+    #[tokio::test]
+    async fn visible_windows_counts_occupied_composite_cells() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        assert_eq!(e.visible_windows(rid), 0, "пустая комната — 0 окон");
+        let a = p(1);
+        let b = p(2);
+        let audio_only = p(3);
+        // Production-путь: `bridge_participant` — ровно то, что зовёт
+        // `bridge_gateway_participant_media` для SIP/H.323-участника.
+        e.bridge_participant(rid, a, vec![video_track(a)]);
+        assert_eq!(e.visible_windows(rid), 1, "видео-участник занимает окно");
+        e.bridge_participant(rid, b, vec![video_track(b)]);
+        assert_eq!(e.visible_windows(rid), 2, "два видео-участника — два окна");
+        e.bridge_participant(rid, audio_only, vec![Track::new(audio_only, TrackKind::Audio)]);
+        assert_eq!(e.visible_windows(rid), 2, "аудио-только участник окна не занимает");
+        e.unbridge_participant(rid, b);
+        assert_eq!(e.visible_windows(rid), 1, "ушёл участник — окно освободилось");
+        assert_eq!(e.visible_windows(RoomId::new()), 0, "нет комнаты — 0 окон");
+    }
+
+    /// `P1`: канал видимых окон дебаунсится 500 мс и публикуется один раз,
+    /// а не на каждый тик рендера (иначе десятки групп от churn зрителей).
+    #[tokio::test]
+    async fn visible_windows_channel_debounces_and_publishes_once() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(1);
+        let b = p(2);
+        e.bridge_participant(rid, a, vec![video_track(a)]);
+        let rx = e.visible_windows_receiver(rid);
+        assert_eq!(*rx.borrow(), 1, "текущее значение — 1 окно");
+        e.bridge_participant(rid, b, vec![video_track(b)]);
+        assert_eq!(e.refresh_visible_windows(rid), None, "сразу после смены — ждём стабильности");
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert_eq!(e.refresh_visible_windows(rid), Some(2), "стабильно ≥500 мс — публикуем");
+        assert_eq!(*rx.borrow(), 2);
+        assert_eq!(e.refresh_visible_windows(rid), None, "повторный тик не публикует");
+    }
+
+    /// `P1`: флаппинг вверх-вниз не публикуется: значение вернулось к текущему —
+    /// канал молчит (гистерезис не даёт пере-ключений на каждый вход/выход).
+    #[tokio::test]
+    async fn visible_windows_channel_ignores_flapping() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let a = p(1);
+        let b = p(2);
+        e.bridge_participant(rid, a, vec![video_track(a)]);
+        let rx = e.visible_windows_receiver(rid);
+        e.bridge_participant(rid, b, vec![video_track(b)]);
+        assert_eq!(e.refresh_visible_windows(rid), None);
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        e.unbridge_participant(rid, b);
+        assert_eq!(e.refresh_visible_windows(rid), None, "вернулись к текущему — сброс pending");
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert_eq!(e.refresh_visible_windows(rid), None, "флаппинг не публикуется");
+        assert_eq!(*rx.borrow(), 1, "канал остался на стабильном значении");
+    }
+
     /// Кадр принадлежит участнику, а не номеру слота: после перестановки
     /// участников в раскладке в окне должно быть видео нового владельца.
     #[tokio::test]
@@ -2381,9 +3018,12 @@ mod tests {
     }
 
     /// T03: pending-раскладка не создаёт комнату, но применяется на первом
-    /// bridge; лишний паблишер не получает full-canvas вне geometry.
+    /// bridge. Поведение изменено (блокер 20+): если geometry-ячеек меньше, чем
+    /// видео-участников, раскладка авто-расширяется равной сеткой, а не
+    /// оставляет лишних без слота (раньше пятый паблишер получал full-canvas
+    /// или вообще терял кадры).
     #[tokio::test]
-    async fn pending_layout_applies_on_first_bridge_without_extra_full_canvas() {
+    async fn pending_layout_applies_on_first_bridge_and_expands_for_extra_publishers() {
         use vks_core::ports::media_engine::LayoutSlot;
 
         let e = McuEngine::new();
@@ -2421,10 +3061,11 @@ mod tests {
             e.tick(rid);
         }
         let rects = e.slot_rects(rid).expect("room created on first bridge");
-        assert_eq!(rects.len(), 4, "ровно 4 geometry-ячейки, пятый не получает full-canvas");
+        assert_eq!(rects.len(), 5, "geometry расширена сеткой под всех видео-участников");
         let layout = e.layout_descriptor(rid).expect("layout");
-        assert_eq!(layout.assignments.len(), 4, "пятый паблишер остаётся без слота");
-        assert!(layout.assignments.values().all(|slot| *slot < 4));
+        assert_eq!(layout.assignments.len(), 5, "каждый видео-участник получил слот");
+        assert_eq!(layout.assignments.values().copied().collect::<BTreeSet<_>>().len(), 5, "номера слотов уникальны");
+        assert!(layout.preset.is_empty(), "после авто-расширения геометрия не пресетная");
     }
 
     /// T03: stale pending не должен перезаписывать уже применённую раскладку

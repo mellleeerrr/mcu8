@@ -43,9 +43,20 @@ pub struct InboundMedia {
     /// Negotiated video codec name (`H264`/`H265`), mirroring
     /// [`InboundMedia::video_payload_type`].
     pub video_codec: Option<&'static str>,
-    /// Exact `a=fmtp` to mirror in the answer for the selected video payload;
-    /// RFC 6184/7798 require the same profile/packetization configuration.
+    /// Exact `a=fmtp` our sender announces in the answer for the selected
+    /// video payload. RFC 6184 §8.2.2: this describes the *answerer's* stream,
+    /// so it is our Baseline TX profile, not a copy of the offer's.
     pub video_fmtp: Option<String>,
+    /// Decimal H.264 level our encoder must run at (31 = level 3.1); the
+    /// answer's `profile-level-id` and `-level:v` have to agree.
+    pub video_tx_level: Option<u8>,
+    /// Negotiated RFC 4733 `telephone-event` payload type (only when offered).
+    pub dtmf_payload_type: Option<u8>,
+    /// The video section was offered as `RTP/AVPF` (RFC 4585 feedback usable).
+    pub video_avpf: bool,
+    /// The offer listed `a=rtcp-fb:<pt> nack pli` / `ccm fir` for our payload.
+    pub video_fb_pli: bool,
+    pub video_fb_fir: bool,
     pub remote_ip: String,
     pub remote_audio_port: u16,
     pub remote_video_port: Option<u16>,
@@ -201,9 +212,12 @@ fn negotiate_with(offer: &str, aac_available: bool) -> Option<InboundMedia> {
         .find_map(|payload| bridgeable_audio(audio, payload, aac_available).map(|codec| (payload, codec)))?;
     let video_section = media_section(offer, "video");
     let video_offered = video_section.is_some();
+    // RFC 4585 §3: AVPF feedback is only meaningful when the m-line itself was
+    // offered as RTP/AVPF; a plain RTP/AVP section keeps working unchanged.
     let video = video_section
-        .filter(|section| media_proto(section) == Some("RTP/AVP"))
+        .filter(|section| matches!(media_proto(section), Some("RTP/AVP") | Some("RTP/AVPF")))
         .filter(|section| media_port(section).is_some_and(|port| port > 0));
+    let video_avpf = video.is_some_and(|section| media_proto(section) == Some("RTP/AVPF"));
     let video_codec = video.and_then(|section| {
         select_video(
             section,
@@ -212,6 +226,12 @@ fn negotiate_with(offer: &str, aac_available: bool) -> Option<InboundMedia> {
         )
     });
     let video_payload_type = video_codec.as_ref().map(|selected| selected.payload);
+    let video_tx_level = video_codec.as_ref().and_then(|selected| selected.tx_level);
+    let (video_fb_pli, video_fb_fir) = match (video, video_payload_type) {
+        (Some(section), Some(payload)) if video_avpf => offered_feedback(section, payload),
+        _ => (false, false),
+    };
+    let dtmf_payload_type = telephone_event_payload(audio, bridge_audio.clock);
     let remote_video_port = video.and_then(media_port);
     let audio_ip = section_ip(audio, &session_ip);
     if audio_ip.is_empty() {
@@ -228,6 +248,11 @@ fn negotiate_with(offer: &str, aac_available: bool) -> Option<InboundMedia> {
         video_payload_type,
         video_codec: video_codec.as_ref().map(|selected| selected.codec),
         video_fmtp: video_codec.map(|selected| selected.fmtp),
+        video_tx_level,
+        dtmf_payload_type,
+        video_avpf,
+        video_fb_pli,
+        video_fb_fir,
         remote_ip: audio_ip,
         remote_audio_port: audio_port,
         remote_video_port,
@@ -244,9 +269,15 @@ pub fn build_answer(
     video_port: Option<u16>,
     media: &InboundMedia,
 ) -> String {
+    // Answer formats must be a subset of the offer (RFC 3264 §6.1): the
+    // telephone-event PT is appended only when the peer offered it.
+    let mut audio_formats = media.audio_payload_type.to_string();
+    if let Some(dtmf) = media.dtmf_payload_type {
+        audio_formats.push(' ');
+        audio_formats.push_str(&dtmf.to_string());
+    }
     let mut sdp = format!(
-        "v=0\r\no=- {session_id} {session_id} IN IP4 {local_ip}\r\ns=VKS MCU\r\nc=IN IP4 {local_ip}\r\nt=0 0\r\nm=audio {audio_port} RTP/AVP {}\r\n",
-        media.audio_payload_type
+        "v=0\r\no=- {session_id} {session_id} IN IP4 {local_ip}\r\ns=VKS MCU\r\nc=IN IP4 {local_ip}\r\nt=0 0\r\nm=audio {audio_port} RTP/AVP {audio_formats}\r\n"
     );
     let wire_name = if media.audio_codec == "OPUS" { "opus" } else { media.audio_codec };
     let channels = if media.audio_channels > 1 { format!("/{}", media.audio_channels) } else { String::new() };
@@ -266,17 +297,36 @@ pub fn build_answer(
         // G.723.1 can pack multiple 30 ms frames; the bridge decodes one.
         sdp.push_str("a=maxptime:30\r\n");
     }
+    // RFC 3605: name the RTCP port explicitly instead of relying on the
+    // implicit "+1" convention; the gateway binds the odd port of the pair.
+    sdp.push_str(&format!("a=rtcp:{}\r\n", audio_port.saturating_add(1)));
+    if let Some(dtmf) = media.dtmf_payload_type {
+        // RFC 4733 §2.5: events 0-15 are the DTMF digits; the payload carries
+        // one event at a time, so no redundancy parameters are advertised.
+        sdp.push_str(&format!("a=rtpmap:{dtmf} telephone-event/{}\r\na=fmtp:{dtmf} 0-15\r\n", media.audio_clock_rate));
+    }
     if media.video_offered {
         if let (Some(port), Some(payload)) = (video_port, media.video_payload_type) {
             let (name, fmtp) = match (media.video_codec, media.video_fmtp.as_deref()) {
                 (Some("H265"), Some(fmtp)) => ("H265", fmtp.to_string()),
                 (Some("H265"), None) => ("H265", "profile-id=1".to_string()),
                 (_, Some(fmtp)) => ("H264", fmtp.to_string()),
-                _ => ("H264", "packetization-mode=1;profile-level-id=42e01f".to_string()),
+                _ => ("H264", "packetization-mode=1;profile-level-id=42c01f".to_string()),
             };
+            // RFC 4585 §3: AVPF is only used when the offer itself was AVPF;
+            // the feedback types echoed back are limited to the offered ones
+            // (§4.2: an answer must not enable unsupported feedback).
+            let proto = if media.video_avpf { "RTP/AVPF" } else { "RTP/AVP" };
             sdp.push_str(&format!(
-                "m=video {port} RTP/AVP {payload}\r\na=rtpmap:{payload} {name}/90000\r\na=fmtp:{payload} {fmtp}\r\n"
+                "m=video {port} {proto} {payload}\r\na=rtpmap:{payload} {name}/90000\r\na=fmtp:{payload} {fmtp}\r\na=rtcp:{}\r\n",
+                port.saturating_add(1)
             ));
+            if media.video_avpf && media.video_fb_pli {
+                sdp.push_str(&format!("a=rtcp-fb:{payload} nack pli\r\n"));
+            }
+            if media.video_avpf && media.video_fb_fir {
+                sdp.push_str(&format!("a=rtcp-fb:{payload} ccm fir\r\n"));
+            }
         } else {
             // Оффер содержал video, но совместимого H.264/H.265 нет: сохраняем
             // число m-line и явно отключаем поток (RFC 3264 §6).
@@ -567,6 +617,8 @@ struct VideoSelection {
     payload: u8,
     codec: &'static str,
     fmtp: String,
+    /// H.264 transmit level (decimal) when the codec is H.264.
+    tx_level: Option<u8>,
 }
 
 /// Picks the first video codec the host can actually bridge *and* whose SDP
@@ -656,10 +708,23 @@ fn fmtp_get<'a>(parameters: &'a [(String, String)], name: &str) -> Option<&'a st
     parameters.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| value.as_str())
 }
 
+/// H.264 profiles whose 8-bit 4:2:0 stream survives the gateway pipeline and
+/// the FFmpeg decoder behind it: Baseline (66), Main (77), High (100).
+/// High 10 / 4:2:2 / 4:4:4 (110/122/244) are rejected: the MCU canvas is yuv420p.
+fn h264_bridgeable_profile(profile_idc: u8) -> bool {
+    matches!(profile_idc, 66 | 77 | 100)
+}
+
+/// Our H.264 sender: x264 Baseline emits constraint_set0/1, i.e. `42c0XX`
+/// (matches `VideoProfile::profile_level_id` in `gateway_video`).
+/// Level 3.1 is the highest the bridge encoder is provisioned for.
+const H264_TX_LEVEL_MAX: u8 = 31;
+
 fn h264_payload(section: &str) -> Option<VideoSelection> {
-    // Our sender emits FU-A (packetization-mode=1) and Baseline profile. RFC
-    // 6184 §8.2.2 forbids echoing the offer's PT with a different config, so
-    // reject offers without an explicit mode=1 baseline fmtp.
+    // Our sender emits FU-A (packetization-mode=1). An offer that only signals
+    // mode 0 (the RFC 6184 default when the fmtp is absent) cannot receive
+    // FU-A, and the answer may not claim a mode the offer did not allow
+    // (RFC 6184 §8.2.2) — such an offer deliberately stays video-less.
     video_payloads(section, "H264").into_iter().find_map(|payload| {
         let parameters = fmtp_parameters(section, payload);
         if fmtp_get(&parameters, "packetization-mode") != Some("1") {
@@ -667,16 +732,71 @@ fn h264_payload(section: &str) -> Option<VideoSelection> {
         }
         let profile_level_id = fmtp_get(&parameters, "profile-level-id")?;
         let bytes = parse_profile_level_id(profile_level_id)?;
-        // Baseline profile (66) and level >= 3.1 (our minimum bridge profile).
-        if bytes[0] != 66 || bytes[2] < 31 {
+        if !h264_bridgeable_profile(bytes[0]) || bytes[2] < 10 {
             return None;
         }
-        Some(VideoSelection {
-            payload,
-            codec: "H264",
-            fmtp: format!("packetization-mode=1;profile-level-id={profile_level_id}"),
-        })
+        // The answer's profile-level-id describes our TX stream (RFC 6184
+        // §8.2.2). Without `level-asymmetry-allowed=1` it must not exceed the
+        // offered level, so the encoder is pinned to min(offered, 3.1).
+        let asymmetry = fmtp_get(&parameters, "level-asymmetry-allowed") == Some("1");
+        let tx_level = if asymmetry { H264_TX_LEVEL_MAX } else { bytes[2].min(H264_TX_LEVEL_MAX) };
+        let mut fmtp = format!("packetization-mode=1;profile-level-id=42c0{tx_level:02x}");
+        if asymmetry {
+            fmtp.push_str(";level-asymmetry-allowed=1");
+        }
+        Some(VideoSelection { payload, codec: "H264", fmtp, tx_level: Some(tx_level) })
     })
+}
+
+/// RFC 4733 `telephone-event` payload type from the offer, if any. Only the
+/// clock rate matching the negotiated audio codec is usable, and the
+/// conventional 101 wins over other dynamic numbers.
+fn telephone_event_payload(section: &str, clock_rate: u32) -> Option<u8> {
+    let mut best: Option<(u8, u8)> = None;
+    for line in section.lines() {
+        let Some(rest) = line.trim().strip_prefix("a=rtpmap:") else { continue };
+        let Some((payload, encoding)) = rest.split_once(' ') else { continue };
+        let Ok(payload) = payload.parse::<u8>() else { continue };
+        let mut parts = encoding.split('/');
+        let Some(name) = parts.next() else { continue };
+        let Some(clock) = parts.next().and_then(|value| value.parse::<u32>().ok()) else { continue };
+        if !name.eq_ignore_ascii_case("telephone-event") || clock != clock_rate {
+            continue;
+        }
+        let preference = if payload == 101 {
+            0
+        } else if payload >= 96 {
+            1
+        } else {
+            2
+        };
+        match best {
+            None => best = Some((preference, payload)),
+            Some((existing, _)) if preference < existing => best = Some((preference, payload)),
+            _ => {}
+        }
+    }
+    best.map(|(_, payload)| payload)
+}
+
+/// Which RTCP feedback types the offer allows for the selected payload
+/// (RFC 4585 §4; `*` covers every payload).
+fn offered_feedback(section: &str, payload: u8) -> (bool, bool) {
+    let mut pli = false;
+    let mut fir = false;
+    for line in section.lines() {
+        let Some(rest) = line.trim().strip_prefix("a=rtcp-fb:") else { continue };
+        let Some((pt, feedback)) = rest.split_once(' ') else { continue };
+        if pt != "*" && pt.parse::<u8>().ok() != Some(payload) {
+            continue;
+        }
+        match feedback.trim() {
+            "nack pli" => pli = true,
+            "ccm fir" => fir = true,
+            _ => {}
+        }
+    }
+    (pli, fir)
 }
 
 fn parse_profile_level_id(value: &str) -> Option<[u8; 3]> {
@@ -704,7 +824,7 @@ fn h265_payload(section: &str) -> Option<VideoSelection> {
         if fmtp_get(&parameters, "sprop-max-don-diff").is_some_and(|value| value.parse::<u32>().ok() != Some(0)) {
             return None;
         }
-        Some(VideoSelection { payload, codec: "H265", fmtp: "profile-id=1".to_string() })
+        Some(VideoSelection { payload, codec: "H265", fmtp: "profile-id=1".to_string(), tx_level: None })
     })
 }
 
@@ -752,7 +872,7 @@ Content-Type: application/sdp\r\nContent-Length: %LEN%\r\n\r\n%SDP%";
     }
 
     #[test]
-    fn incompatible_video_fmtp_is_not_answered() {
+    fn video_fmtp_gate_accepts_baseline_main_high() {
         let base = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
         let video = |fmtp: &str| format!("{base}m=video 5006 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n{fmtp}");
         // Default packetization-mode is 0; our sender emits FU-A (mode 1).
@@ -765,22 +885,99 @@ Content-Type: application/sdp\r\nContent-Length: %LEN%\r\n\r\n%SDP%";
             negotiate(&video("a=fmtp:96 packetization-mode=2;profile-level-id=42e01f\r\n")).unwrap().video_codec,
             None
         );
-        // High profile (idc 100) and level below our 3.1 bridge profile.
+        // Baseline/Main/High all decode into the yuv420 MCU pipeline. The answer
+        // declares *our* Baseline TX profile (RFC 6184 §8.2.2), and the encoder
+        // level follows the offered level unless level-asymmetry is allowed.
+        for (offered, expected, level) in [
+            ("42e01f", "packetization-mode=1;profile-level-id=42c01f", 31u8),
+            ("42e01e", "packetization-mode=1;profile-level-id=42c01e", 30),
+            ("4d001f", "packetization-mode=1;profile-level-id=42c01f", 31),
+            ("64001f", "packetization-mode=1;profile-level-id=42c01f", 31),
+        ] {
+            let offer = video(&format!("a=fmtp:96 packetization-mode=1;profile-level-id={offered}\r\n"));
+            let media = negotiate(&offer).unwrap();
+            assert_eq!(media.video_codec, Some("H264"), "{offered}");
+            assert_eq!(media.video_fmtp.as_deref(), Some(expected), "{offered}");
+            assert_eq!(media.video_tx_level, Some(level), "{offered}");
+        }
+        // High 10 (idc 110) needs a 10-bit decoder outside the yuv420 pipeline.
         assert_eq!(
-            negotiate(&video("a=fmtp:96 packetization-mode=1;profile-level-id=64001f\r\n")).unwrap().video_codec,
+            negotiate(&video("a=fmtp:96 packetization-mode=1;profile-level-id=6e001f\r\n")).unwrap().video_codec,
             None
         );
-        assert_eq!(
-            negotiate(&video("a=fmtp:96 packetization-mode=1;profile-level-id=42e01e\r\n")).unwrap().video_codec,
-            None
-        );
-        let valid = negotiate(&video("a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n")).unwrap();
-        assert_eq!(valid.video_codec, Some("H264"));
-        assert_eq!(valid.video_fmtp.as_deref(), Some("packetization-mode=1;profile-level-id=42e01f"));
         let h265 = |fmtp: &str| format!("{base}m=video 5006 RTP/AVP 125\r\na=rtpmap:125 H265/90000\r\n{fmtp}");
         assert_eq!(negotiate(&h265("a=fmtp:125 profile-id=2\r\n")).unwrap().video_codec, None);
         assert_eq!(negotiate(&h265("a=fmtp:125 profile-id=1;tier-flag=1\r\n")).unwrap().video_codec, None);
         assert_eq!(negotiate(&h265("")).unwrap().video_codec, Some("H265"));
+    }
+
+    #[test]
+    fn level_asymmetry_lets_us_announce_31_for_low_level_offer() {
+        let base = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+        let offer = format!(
+            "{base}m=video 5006 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1;profile-level-id=42e01e;level-asymmetry-allowed=1\r\n"
+        );
+        let media = negotiate(&offer).unwrap();
+        assert_eq!(media.video_tx_level, Some(31));
+        assert_eq!(
+            media.video_fmtp.as_deref(),
+            Some("packetization-mode=1;profile-level-id=42c01f;level-asymmetry-allowed=1")
+        );
+        let answer = build_answer("192.168.1.93", 7, 41000, Some(41002), &media);
+        assert!(
+            answer.contains("a=fmtp:96 packetization-mode=1;profile-level-id=42c01f;level-asymmetry-allowed=1"),
+            "{answer}"
+        );
+    }
+
+    #[test]
+    fn avpf_answer_echoes_only_offered_feedback() {
+        let base = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+        let offer = format!(
+            "{base}m=video 5006 RTP/AVPF 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\na=rtcp-fb:96 nack pli\r\na=rtcp-fb:96 ccm fir\r\na=rtcp-fb:96 nack\r\n"
+        );
+        let media = negotiate(&offer).unwrap();
+        assert!(media.video_avpf && media.video_fb_pli && media.video_fb_fir);
+        let answer = build_answer("192.168.1.93", 7, 41000, Some(41002), &media);
+        assert!(answer.contains("m=video 41002 RTP/AVPF 96"), "{answer}");
+        assert!(answer.contains("a=rtcp-fb:96 nack pli"), "{answer}");
+        assert!(answer.contains("a=rtcp-fb:96 ccm fir"), "{answer}");
+        assert!(answer.contains("a=rtcp:41003"), "{answer}");
+        // A plain RTP/AVP offer cannot use AVPF feedback even if it lists rtcp-fb.
+        let avp = offer.replace("RTP/AVPF", "RTP/AVP");
+        let media = negotiate(&avp).unwrap();
+        assert!(!media.video_avpf && !media.video_fb_pli && !media.video_fb_fir);
+        let answer = build_answer("192.168.1.93", 7, 41000, Some(41002), &media);
+        assert!(answer.contains("m=video 41002 RTP/AVP 96"), "{answer}");
+        assert!(!answer.contains("rtcp-fb"), "{answer}");
+    }
+
+    #[test]
+    fn telephone_event_is_answered_only_when_offered() {
+        let base = "v=0\r\no=- 1 1 IN IP4 192.168.1.132\r\ns=-\r\nc=IN IP4 192.168.1.132\r\nt=0 0\r\n";
+        let with_events = format!(
+            "{base}m=audio 5004 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\n"
+        );
+        let media = negotiate(&with_events).unwrap();
+        assert_eq!(media.dtmf_payload_type, Some(101));
+        let answer = build_answer("192.168.1.93", 7, 41000, None, &media);
+        assert!(answer.contains("m=audio 41000 RTP/AVP 0 101"), "{answer}");
+        assert!(answer.contains("a=rtpmap:101 telephone-event/8000"), "{answer}");
+        assert!(answer.contains("a=fmtp:101 0-15"), "{answer}");
+        // No telephone-event in the offer => the answer must not introduce it
+        // (RFC 3264 §6.1: answer formats are a subset of the offer).
+        let plain = format!("{base}m=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n");
+        let media = negotiate(&plain).unwrap();
+        assert_eq!(media.dtmf_payload_type, None);
+        let answer = build_answer("192.168.1.93", 7, 41000, None, &media);
+        assert!(!answer.contains("telephone-event"), "{answer}");
+        // Opus runs on a 48 kHz clock, so only telephone-event/48000 matches.
+        let opus = format!(
+            "{base}m=audio 5004 RTP/AVP 96 101\r\na=rtpmap:96 opus/48000/2\r\na=fmtp:96 minptime=10;useinbandfec=1\r\na=rtpmap:101 telephone-event/48000\r\n"
+        );
+        let media = negotiate(&opus).unwrap();
+        assert_eq!(media.audio_codec, "OPUS");
+        assert_eq!(media.dtmf_payload_type, Some(101));
     }
 
     #[test]

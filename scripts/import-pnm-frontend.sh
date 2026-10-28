@@ -269,7 +269,7 @@ PYEOF
 fi
 
 log "применение вендорских патчей"
-for patch in "$ROOT/scripts/patch-pnm-chartjs.py" "$ROOT/scripts/patch-pnm-audio-in-layouts.py"; do
+for patch in "$ROOT/scripts/patch-pnm-chartjs.py" "$ROOT/scripts/patch-pnm-audio-in-layouts.py" "$ROOT/scripts/patch-pnm-layout-crash.py"; do
     [ -f "$patch" ] || { echo "нет патч-скрипта: $patch" >&2; exit 1; }
     log "  патч: $(basename "$patch")"
     if ! python3 "$patch" --root "$ROOT"; then

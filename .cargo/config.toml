@@ -6,3 +6,15 @@
 # rustflags здесь (один источник истины).
 
 # Профили сборки — в корневом Cargo.toml (единственное место).
+
+# R-26 (P0, аудит 2026-10-25): флаги кодогенерации — часть определения сборки.
+# До этого флага `-C target-cpu=native` жил только в env замеряющего, поэтому
+# один commit+lock давал разные sha256. Теперь флаг зафиксирован здесь, и
+# sha256 бинаря воспроизводим: `cargo build --release` без env.
+#
+# Только x86_64-linux: на wasm32/aarch64 флаг невалиден. Стенд — 2×Xeon
+# E5-2699 v3 (Haswell, AVX2, без AVX-512), поэтому native = haswell.
+# ВНИМАНИЕ: бинарь с native НЕ переносим на другой CPU. Для прода —
+# x86-64-v3 (см. docs/architecture/ARCHITECTURE_MASTER_PLAN.md, §3); для стенда native.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native"]

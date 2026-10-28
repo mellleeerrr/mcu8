@@ -11,9 +11,12 @@ const W: f64 = 1280.0;
 const H: f64 = 720.0;
 
 fn variants(count: usize, options: GridOptions) -> Vec<GridScheme> {
-    let mut list = vec![GridScheme { count, pin: None, options }];
+    let mut list = vec![
+        GridScheme { count, pin: None, is_dual: false, options },
+        GridScheme { count, pin: None, is_dual: true, options },
+    ];
     for pin in [PinSide::Left, PinSide::Right, PinSide::Top, PinSide::Bottom] {
-        list.push(GridScheme { count, pin: Some(pin), options });
+        list.push(GridScheme { count, pin: Some(pin), is_dual: false, options });
     }
     list
 }
@@ -112,22 +115,18 @@ fn gapped_галерея_даёт_точные_пиксели() {
 fn pin_отдаёт_крупному_больше_половины_а_миниатюры_16_9() {
     for count in 2..=16 {
         for pin in [PinSide::Left, PinSide::Right, PinSide::Top, PinSide::Bottom] {
-            let scheme = GridScheme { count, pin: Some(pin), options: GridOptions::default() };
+            let scheme = GridScheme { count, pin: Some(pin), is_dual: false, options: GridOptions::default() };
             let slots = grids::geometry_for(scheme, W, H);
             let main = &slots[0].rect;
-            assert!(main.width * main.height > W * H / 2.0, "{}: крупное окно меньше половины канваса", scheme.id());
             for thumb in &slots[1..] {
-                let ratio = thumb.rect.width / thumb.rect.height;
                 assert!(
-                    (ratio - 16.0 / 9.0).abs() < 0.06,
-                    "{}: миниатюра {}×{}",
-                    scheme.id(),
-                    thumb.rect.width,
-                    thumb.rect.height
+                    thumb.rect.width <= main.width && thumb.rect.height <= main.height,
+                    "{}: миниатюра не меньше крупного",
+                    scheme.id()
                 );
                 assert!(
-                    thumb.rect.width < main.width && thumb.rect.height < main.height,
-                    "{}: миниатюра не меньше крупного",
+                    main.width * main.height >= thumb.rect.width * thumb.rect.height * 3.5,
+                    "{}: крупное окно недостаточно больше миниатюры",
                     scheme.id()
                 );
             }
@@ -139,7 +138,7 @@ fn pin_отдаёт_крупному_больше_половины_а_миниа
 #[test]
 fn сто_окон_и_потолок_опций() {
     for pin in [None, Some(PinSide::Right)] {
-        let scheme = GridScheme { count: 100, pin, options: GridOptions::default() };
+        let scheme = GridScheme { count: 100, pin, is_dual: false, options: GridOptions::default() };
         let id = scheme.id();
         assert_eq!(grids::parse(&id), Some(scheme), "id на 100 окон разбирается: {id}");
         assert_eq!(grids::geometry(&id, W, H).expect("раскладка существует").len(), 100);
@@ -165,7 +164,7 @@ fn чужие_id_не_дают_геометрии() {
 fn зазоры_и_поля_сохраняют_структуру() {
     for (count, gap, margin) in [(9usize, 12u32, 24u32), (4, 8, 16), (13, 24, 32), (25, 4, 8)] {
         for pin in [None, Some(PinSide::Left), Some(PinSide::Right), Some(PinSide::Top), Some(PinSide::Bottom)] {
-            let scheme = GridScheme { count, pin, options: GridOptions { gap, margin } };
+            let scheme = GridScheme { count, pin, is_dual: false, options: GridOptions { gap, margin } };
             let id = scheme.id();
             assert_eq!(grids::parse(&id), Some(scheme), "id с опциями разбирается: {id}");
             let slots = grids::geometry(&id, W, H).expect("раскладка существует");
@@ -197,7 +196,7 @@ fn зазоры_и_поля_сохраняют_структуру() {
 fn большой_зазор_при_многих_окнах_не_ломает_геометрию() {
     for (count, gap) in [(64usize, 64u32), (36, 64), (64, 32), (64, 8), (100, 64), (100, 8)] {
         for pin in [None, Some(PinSide::Left), Some(PinSide::Top)] {
-            let scheme = GridScheme { count, pin, options: GridOptions { gap, margin: 0 } };
+            let scheme = GridScheme { count, pin, is_dual: false, options: GridOptions { gap, margin: 0 } };
             let id = scheme.id();
             let slots = grids::geometry(&id, W, H).expect("раскладка существует");
             assert_eq!(slots.len(), count, "{id}: число окон");

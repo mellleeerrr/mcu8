@@ -42,6 +42,7 @@ pub mod audio_mixer;
 pub mod codec_worker;
 pub mod compositor;
 pub mod engine;
+pub mod farm;
 pub mod frame;
 pub mod layout_bridge;
 pub mod vad;
@@ -53,7 +54,10 @@ pub use codec_worker::{
     WorkerPool,
 };
 pub use compositor::{Compositor, CANVAS_SIZE};
-pub use engine::{EventSink, LayoutSnapshot, McuEngine, RoomEvent};
+pub use engine::{group_bitrate_kbps, EventSink, LayoutSnapshot, McuEngine, RoomEvent, GROUP_BITRATE_CEILING_PCT};
+pub use farm::{
+    AccessUnit, EncoderFarm, EncoderKey, EncoderSpec, FarmCodec, FarmError, GroupStat, GroupViewer, ViewerRtp,
+};
 pub use frame::{CodecError, Frame, MockVideoDecoder, MockVideoEncoder, VideoDecoder, VideoEncoder};
 pub use layout_bridge::{LayoutBridge, PixelRect, SlotKey, SlotRects, CROSSFADE_MS};
 pub use vad::{Vad, VadConfig, VadState, DEBOUNCE_MS, FRAME_MS, FRAME_SAMPLES};

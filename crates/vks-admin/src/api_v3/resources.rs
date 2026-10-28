@@ -430,6 +430,7 @@ fn normalize_resource(kind: &str, body: &Value, creator: &str) -> Value {
         result["abonents"] = layout_record_abonents(Vec::new());
         result["contacts"] = json!({"count":0,"contacts":[]});
         recalc_layout_size(&mut result);
+        ensure_slot_roles(&mut result);
     } else {
         recalc_audio_counts(&mut result);
     }
@@ -534,6 +535,7 @@ fn resolved_layout_abonents(state: &SharedState, room_id: &vks_core::RoomId, lay
 }
 
 pub(crate) fn with_layout_abonents(state: &SharedState, record: &mut Value, room_id: &vks_core::RoomId) {
+    ensure_slot_roles(record);
     let abonents = resolved_layout_abonents(state, room_id, record);
     record["abonents"] = layout_record_abonents(abonents);
 }
@@ -605,9 +607,7 @@ fn fallback_layout_for_scope(resources: &ResourceState, scope_key: &str, room_id
     if let Some(id) = ids.iter().find(|id| resources.layouts.get(*id).is_some_and(is_canonical_default)) {
         return Some(id.clone());
     }
-    if let Some(id) = ids.iter().rev().find(|id| {
-        resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
-    }) {
+    if let Some(id) = ids.iter().rev().find(|id| is_default_layout(resources, id.as_str())) {
         return Some(id.clone());
     }
     ids.last().cloned()
@@ -700,6 +700,79 @@ fn ensure_canonical_default(resources: &mut ResourceState, scope_key: &str, room
     id
 }
 
+/// «Общая» раскладка — по `payload.type`, а не по побайтовому канону:
+/// COW-клон «Общей» с правленой геометрией остаётся default.
+fn is_default_layout(resources: &ResourceState, id: &str) -> bool {
+    resources.layouts.get(id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
+}
+
+/// Durable-ремонт инварианта «в непустом scope ровно одна „Общая“».
+/// Старые сборки позволяли PATCH'ем сменить тип «Общей»: COW-клон получал
+/// `type=individual`, сессия оставалась без default, и UI падал на
+/// `sessionLayoutListByType.default.some(...)`. Alias `scope|id -> clone`
+/// доказывает, что клон родился из «Общей», — возвращаем ему тип default;
+/// без такого доказательства добираем переиспользуемую каноническую.
+/// Из двух «Общих» (старый inherit добавил pristine-канон к клону) оставляем
+/// активную, остальные только отвязываем от scope (записи глобальны).
+fn repair_scope_defaults(resources: &mut ResourceState) {
+    let keys: Vec<String> = resources.links.keys().filter(|key| key.ends_with(":video_layouts")).cloned().collect();
+    for key in keys {
+        // Пустой scope — комната без раскладок, а не потерянная «Общая».
+        if resources.links.get(&key).is_none_or(Vec::is_empty) {
+            continue;
+        }
+        // Шаг 1: alias `scope|default-id -> clone` доказывает, что клон родился
+        // из «Общей», но сохранился с type=individual. Это делаем всегда, а не
+        // только при отсутствии default: иначе исход зависел бы от того, успел
+        // ли старый inherit добавить pristine-канон до рестарта.
+        let source_prefix = format!("{key}|");
+        let retype: Vec<String> = resources
+            .layout_aliases
+            .iter()
+            .filter_map(|(alias, target)| {
+                let source = alias.strip_prefix(&source_prefix)?;
+                let target_is_local = resources.links.iter().all(|(scope, ids)| scope == &key || !ids.contains(target));
+                let target_is_individual = resources
+                    .layouts
+                    .get(target)
+                    .is_some_and(|layout| layout["payload"]["type"].as_str() == Some("individual"));
+                (is_default_layout(resources, source) && target_is_local && target_is_individual)
+                    .then(|| target.clone())
+            })
+            .collect();
+        for id in retype {
+            if let Some(layout) = resources.layouts.get_mut(&id) {
+                layout["payload"]["type"] = json!("default");
+                tracing::warn!(scope = %key, layout = %id, "restored layout type=default from COW alias evidence");
+            }
+        }
+        // Шаг 2: ровно одна «Общая» на scope; при отсутствии — переиспользуем
+        // каноническую. Из двух «Общих» (старый inherit добавил pristine-канон
+        // к COW-клону) оставляем активную, остальные лишь отвязываем от scope.
+        let mut defaults: Vec<String> =
+            resources.links[&key].iter().filter(|id| is_default_layout(resources, id)).cloned().collect();
+        if defaults.is_empty() {
+            let id = canonical_layout_id(resources);
+            resources.links.entry(key.clone()).or_default().push(id.clone());
+            defaults.push(id);
+        }
+        let keep = resources
+            .active_layouts
+            .get(&key)
+            .filter(|active| defaults.contains(active))
+            .cloned()
+            .or_else(|| {
+                resources.layout_aliases.iter().find_map(|(alias, target)| {
+                    (alias.starts_with(&source_prefix) && defaults.contains(target)).then(|| target.clone())
+                })
+            })
+            .unwrap_or_else(|| defaults[0].clone());
+        if let Some(ids) = resources.links.get_mut(&key) {
+            ids.retain(|id| !defaults.contains(id) || *id == keep);
+        }
+    }
+}
+
 /// Чинит active только если он отсутствует/невалиден. Единая точка вместо
 /// повторяющихся `if valid { ... }` в detach/remove_global.
 fn repair_active_layout(resources: &mut ResourceState, scope_key: &str, room_id: &str) {
@@ -714,25 +787,18 @@ fn repair_active_layout(resources: &mut ResourceState, scope_key: &str, room_id:
     set_active(resources, scope_key, &active);
 }
 
-/// «Общая» раскладка комнаты (canonical → legacy default → первый link).
+/// «Общая» раскладка комнаты (canonical → любой default → первый link).
+/// Приоритет — внутри scope: иначе COW-клон «Общей» в сессии проигрывал
+/// pristine-канону конференции, и `video_layout_id` участника не совпадал
+/// с тем id, который показывает список сессии.
 fn default_layout_id(resources: &ResourceState, room_id: &vks_core::RoomId) -> Option<String> {
     for scope in ["sessions", "conferences"] {
         let key = format!("{scope}:{room_id}:video_layouts");
-        if let Some(id) = resources
-            .links
-            .get(&key)
-            .into_iter()
-            .flatten()
-            .find(|id| resources.layouts.get(*id).is_some_and(is_canonical_default))
-        {
+        let Some(ids) = resources.links.get(&key) else { continue };
+        if let Some(id) = ids.iter().find(|id| resources.layouts.get(*id).is_some_and(is_canonical_default)) {
             return Some(id.clone());
         }
-    }
-    for scope in ["sessions", "conferences"] {
-        let key = format!("{scope}:{room_id}:video_layouts");
-        if let Some(id) = resources.links.get(&key).into_iter().flatten().find(|id| {
-            resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
-        }) {
+        if let Some(id) = ids.iter().find(|id| is_default_layout(resources, id.as_str())) {
             return Some(id.clone());
         }
     }
@@ -964,15 +1030,9 @@ fn legacy_effective_layout(resources: &ResourceState, key: &str) -> Option<Strin
     let ids = resources.links.get(key)?;
     ids.iter()
         .rev()
-        .find(|id| {
-            resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() != Some("default"))
-        })
+        .find(|id| !is_default_layout(resources, id.as_str()))
         .or_else(|| ids.iter().find(|id| resources.layouts.get(*id).is_some_and(is_canonical_default)))
-        .or_else(|| {
-            ids.iter().rev().find(|id| {
-                resources.layouts.get(*id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
-            })
-        })
+        .or_else(|| ids.iter().rev().find(|id| is_default_layout(resources, id.as_str())))
         .or_else(|| ids.first())
         .cloned()
 }
@@ -983,13 +1043,17 @@ pub fn normalize_loaded(resources: &mut ResourceState) {
             return false;
         }
         if !layout["payload"].is_object() {
-            layout["payload"] = json!({
-                "mode":"auto","preset":"preset_default_13","type":"default","slots":[],
-                "size":13,"autoscroll":0
-            });
+            layout["payload"] = canonical_default_payload();
+        }
+        // Инвариант: у каждой раскладки валидный `payload.type`. Легаси-записи
+        // без поля или с чужим значением UI группирует под undefined и падает
+        // на `sessionLayoutListByType.default`. Чиним при загрузке документа.
+        if !matches!(layout["payload"]["type"].as_str(), Some("default") | Some("individual")) {
+            layout["payload"]["type"] = json!("default");
         }
         let slots = layout["payload"]["slots"].as_array().cloned().unwrap_or_default();
         layout["payload"]["slots"] = json!(slots.into_iter().filter(Value::is_object).collect::<Vec<_>>());
+        ensure_slot_roles(layout);
         layout["abonents"] = layout_record_abonents(Vec::new());
         if !layout.get("contacts").is_some_and(Value::is_object) {
             layout["contacts"] = json!({"count": 0, "contacts": []});
@@ -1016,6 +1080,9 @@ pub fn normalize_loaded(resources: &mut ResourceState) {
     resources.layout_aliases.retain(|key, target| {
         layout_ids.contains(target) && key.split('|').next().is_some_and(|scope| resources.links.contains_key(scope))
     });
+    // Ремонт «Общих» делаем до вывода active: он может добавить default,
+    // на который дальше должна опереться active-эвристика.
+    repair_scope_defaults(resources);
     // Для существующего документа выводим active из links (не пишем до первого commit).
     let keys: Vec<String> = resources.links.keys().filter(|key| key.ends_with(":video_layouts")).cloned().collect();
     for key in keys {
@@ -1126,31 +1193,39 @@ pub fn inherit_and_ensure_default_layout(resources: &mut ResourceState, room_id:
         .get(&inherit_key)
         .cloned()
         .filter(|id| conference_ids.contains(id) && resources.layouts.contains_key(id));
-    let session_ids = resources.links.entry(key.clone()).or_default();
+    // Рестарт конференции не должен терять индивидуальные раскладки прошлого
+    // запуска, но и не должен возвращать оригинал, который уже представлен
+    // COW-клоном (alias scope|id -> clone): иначе в links копятся две «Общие»,
+    // и клон с правленой геометрией конкурирует с pristine-каноном.
+    let mut inherited = Vec::new();
+    let session_ids = resources.links.get(&key).cloned().unwrap_or_default();
     for id in conference_ids {
-        // Рестарт конференции не должен терять индивидуальные раскладки прошлого запуска.
-        if !session_ids.contains(&id) && resources.layouts.contains_key(&id) {
-            session_ids.push(id);
+        if session_ids.contains(&id) || !resources.layouts.contains_key(&id) {
+            continue;
+        }
+        let resolved = resolve_layout_alias(resources, &key, &id);
+        if resolved != id && session_ids.contains(&resolved) {
+            continue;
+        }
+        if !inherited.contains(&id) {
+            inherited.push(id);
         }
     }
-    let has_default = resources
+    resources.links.entry(key.clone()).or_default().extend(inherited);
+    // «Общая» в сессии — любая раскладка с `type == default`, а не только
+    // побайтовый канон: после COW-правки геометрии клон остаётся default,
+    // и повторное добавление pristine-канона дало бы две «Общие».
+    let session_default = resources
         .links
         .get(&key)
-        .is_some_and(|ids| ids.iter().any(|id| resources.layouts.get(id).is_some_and(is_canonical_default)));
-    if has_default {
-        let canonical = resources.links[&key]
-            .iter()
-            .find(|id| resources.layouts.get(*id).is_some_and(is_canonical_default))
-            .cloned();
-        if let Some(id) = canonical {
-            let valid = resources.active_layouts.get(&key).is_some_and(|active| {
-                resources.layouts.contains_key(active)
-                    && resources.links.get(&key).is_some_and(|ids| ids.contains(active))
-            });
-            if !valid {
-                let fallback = conference_active.clone().unwrap_or(id);
-                set_active(resources, &key, &fallback);
-            }
+        .and_then(|ids| ids.iter().find(|id| is_default_layout(resources, id.as_str())).cloned());
+    if let Some(id) = session_default {
+        let valid = resources.active_layouts.get(&key).is_some_and(|active| {
+            resources.layouts.contains_key(active) && resources.links.get(&key).is_some_and(|ids| ids.contains(active))
+        });
+        if !valid {
+            let fallback = conference_active.clone().unwrap_or(id);
+            set_active(resources, &key, &fallback);
         }
         return;
     }
@@ -1169,6 +1244,13 @@ pub fn inherit_and_ensure_default_layout(resources: &mut ResourceState, room_id:
 }
 
 fn validate_layout_payload(payload: &Value) -> Result<(), String> {
+    // Закрытый словарь: UI группирует раскладки по `payload.type` и падает на
+    // любом значении, кроме default/individual (undefined-ветка `.default`).
+    if let Some(layout_type) = payload.get("type") {
+        if !matches!(layout_type.as_str(), Some("default") | Some("individual")) {
+            return Err("payload.type must be \"default\" or \"individual\"".to_string());
+        }
+    }
     if let Some(slots) = payload.get("slots") {
         let Some(slots) = slots.as_array() else {
             return Err("payload.slots must be an array".to_string());
@@ -1178,6 +1260,33 @@ fn validate_layout_payload(payload: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Вендорский конструктор PNM рисует окно только по `slot.role`
+/// (UPPERCASE: `EMPTY`/`ACTIVE`/`AUTO`/`PEER`/`ROLL`/`PRESENTATION`); без роли
+/// или с ролью вне закрытого словаря фон прозрачный. Достраиваем роль по факту
+/// занятости, не перезаписывая валидные роли.
+const UI_SLOT_ROLES: [&str; 6] = ["EMPTY", "ACTIVE", "AUTO", "PEER", "ROLL", "PRESENTATION"];
+
+fn ensure_slot_roles(record: &mut Value) {
+    let Some(slots) = record["payload"]["slots"].as_array_mut() else { return };
+    for slot in slots.iter_mut().filter(|slot| slot.is_object()) {
+        let current = slot.get("role").and_then(Value::as_str).unwrap_or_default();
+        if UI_SLOT_ROLES.contains(&current) {
+            continue;
+        }
+        let occupied = ["abonent_id", "contact_id", "abonentId", "contactId", "call_string_id", "callStringId"]
+            .iter()
+            .any(|key| slot.get(*key).and_then(Value::as_str).is_some_and(|id| !id.is_empty()));
+        let role = if occupied {
+            "PEER"
+        } else if slot.get("z_order").and_then(Value::as_i64).unwrap_or(0) > 0 {
+            "PRESENTATION"
+        } else {
+            "AUTO"
+        };
+        slot["role"] = json!(role);
+    }
 }
 
 fn recalc_layout_size(record: &mut Value) {
@@ -1230,6 +1339,11 @@ fn merge_layout_slots(previous: &[Value], incoming: &[Value]) -> Vec<Value> {
 }
 
 fn update_resource(record: &mut Value, body: &Value) -> Result<(), String> {
+    // `payload.type` — свойство создания, а не редактирования. Вендорский
+    // редактор PNM пишет в черновик `type` при смене режима, и без этого
+    // PATCH превращал «Общую» (default) в individual: сессия оставалась без
+    // default, а UI падал на `sessionLayoutListByType.default.some(...)`.
+    let created_type = record["payload"]["type"].as_str().map(str::to_string);
     if let Some(name) = body.get("display_name") {
         record["display_name"] = name.clone();
     }
@@ -1243,10 +1357,14 @@ fn update_resource(record: &mut Value, body: &Value) -> Result<(), String> {
         if let Some(incoming) = payload["slots"].as_array() {
             record["payload"]["slots"] = json!(merge_layout_slots(&previous_slots, incoming));
         }
+        if let Some(created_type) = created_type {
+            record["payload"]["type"] = json!(created_type);
+        }
     }
     if record["id"].is_string() && record["payload"].is_object() {
         recalc_layout_size(record);
         recalc_audio_counts(record);
+        ensure_slot_roles(record);
     }
     Ok(())
 }
@@ -1270,7 +1388,16 @@ pub async fn create(
             return error_json(422, &message);
         }
     }
-    let record = normalize_resource(kind, &body, &auth.subject);
+    let mut record = normalize_resource(kind, &body, &auth.subject);
+    if kind == "video_layouts"
+        && body.get("payload").and_then(|payload| payload.get("type")).is_none()
+        && !is_canonical_default(&record)
+    {
+        // New layout без явного type — индивидуальная: canonical payload лишь
+        // seed для полей, и без этого создавалась «Общая» с чужим preset
+        // (в БД уже есть такие «T7 Dup Layout»).
+        record["payload"]["type"] = json!("individual");
+    }
     let id = record["id"].as_str().unwrap().to_string();
     let mut resources = state.api_v3.resources.lock().await;
     // Каноническая «Общая» — одна запись на документ. UI создаёт её перед
@@ -1307,7 +1434,12 @@ pub async fn list_global(
     }
     let kind = kind(uri.path());
     let resources = state.api_v3.resources.lock().await;
-    let items: Vec<_> = collection(&resources, kind).values().cloned().collect();
+    let mut items: Vec<_> = collection(&resources, kind).values().cloned().collect();
+    if kind == "video_layouts" {
+        for item in &mut items {
+            ensure_slot_roles(item);
+        }
+    }
     let (count, items) = page_records(items, &params);
     Json(json!({kind:items,"count":count})).into_response()
 }
@@ -1336,7 +1468,12 @@ pub async fn get_global(
     }
     let kind = kind(uri.path());
     match collection(&*state.api_v3.resources.lock().await, kind).get(&id).cloned() {
-        Some(record) => Json(json!({singular(kind):record})).into_response(),
+        Some(mut record) => {
+            if kind == "video_layouts" {
+                ensure_slot_roles(&mut record);
+            }
+            Json(json!({singular(kind):record})).into_response()
+        }
         None => error_json(404, "Resource not found"),
     }
 }
@@ -1422,8 +1559,7 @@ pub async fn remove_global(
     if kind == "video_layouts" && refs.len() > 1 {
         return error_json(409, "Layout is attached to multiple rooms; detach it from each room first");
     }
-    let is_default =
-        resources.layouts.get(&id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"));
+    let is_default = is_default_layout(&resources, &id);
     if kind == "video_layouts" && is_default && !refs.is_empty() {
         return error_json(409, "The default layout cannot be deleted while it is attached");
     }
@@ -2169,14 +2305,7 @@ pub async fn templates(
                         .get(*id)
                         .is_some_and(|layout| layout["payload"]["type"].as_str() != Some("default"))
                 })
-                .or_else(|| {
-                    attached.iter().find(|id| {
-                        resources
-                            .layouts
-                            .get(*id)
-                            .is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
-                    })
-                })
+                .or_else(|| attached.iter().find(|id| is_default_layout(&resources, id.as_str())))
                 .or_else(|| attached.first())
                 .cloned();
             selected.and_then(|id| resources.layouts.get(&id).cloned())
@@ -2190,6 +2319,8 @@ pub async fn templates(
             // UI ждёт полноценную запись раскладки (id/display_name/
             // creator_id/created_at/payload), а не только preview-payload:
             // по id он открывает редактор, по created_at сортирует.
+            let mut layout = layout;
+            ensure_slot_roles(&mut layout);
             vec![layout]
         }
         _ => Vec::new(),

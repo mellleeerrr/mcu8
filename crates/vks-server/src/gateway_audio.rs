@@ -222,6 +222,7 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
     } else {
         RtpSource::new(target, session.audio_payload_type)
     };
+    validator.accept_dtmf_payload_type(session.dtmf_payload_type);
     if matches!(bridge_codec, AudioBridgeCodec::Opus(_)) {
         validator.allow_empty_payloads();
     }
@@ -232,6 +233,9 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
     const AUDIO_QUEUE_LIMIT: usize = vks_gateway_sip::opus::MAX_FRAME_SAMPLES;
     let mut queue = std::collections::VecDeque::<f32>::with_capacity(AUDIO_QUEUE_LIMIT);
     let mut dtmf = std::collections::VecDeque::<u8>::new();
+    // Last inbound (event, RTP timestamp) already relayed: repeated packets of
+    // the same keypress share the timestamp, the next digit starts a new one.
+    let mut last_inbound_dtmf: Option<(u8, u32)> = None;
     let mut dtmf_active: Option<(u8, usize, u32)> = None;
     let mut dtmf_gap = 0;
     let mut sequence = 1u16;
@@ -293,6 +297,21 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 };
                 if session.source_latch {
                     egress = source;
+                }
+                if session.dtmf_payload_type == Some(packet.payload_type) {
+                    if let Some(event) = parse_telephone_event(packet.payload) {
+                        let key = (event, packet.timestamp);
+                        if last_inbound_dtmf != Some(key) {
+                            last_inbound_dtmf = Some(key);
+                            session.media_stats.dtmf_events_received.fetch_add(1, Relaxed);
+                            if let Some(events) = &session.dtmf_events {
+                                // Bounded consumer: a blocked relay must never
+                                // stall the 20 ms audio tick.
+                                let _ = events.send(event);
+                            }
+                        }
+                    }
+                    continue;
                 }
                 // 40 ms G.711/G.722 ptime and 20/30/40 ms G.726 ptime are
                 // legal per RFC 4566/3551; never truncate the second half.
@@ -520,12 +539,19 @@ pub(super) fn encode_sample(payload_type: u8, value: f32) -> u8 {
 pub(super) struct RtpSource {
     target: std::net::SocketAddr,
     payload_type: u8,
+    /// RFC 4733 telephone-event PT; accepted in addition to the audio PT and
+    /// never fed to the codec decoder.
+    dtmf_payload_type: Option<u8>,
     ssrc: Option<u32>,
     sequence: Option<u16>,
     /// Входящий вызов: первый валидный RTP-latch с SDP-target разрешён,
     /// дальше источник фиксируется (NAT/перемаршрутизация порта).
     latch: bool,
     allow_empty: bool,
+    /// Видео: переупорядоченные пакеты (seq меньше последнего) не отбрасывать
+    /// здесь — их ставит на место входной reorder-буфер (`VideoReorderBuffer`).
+    /// Аудио оставляет строгий порядок: у микшера нет своего reorder-буфера.
+    reordered: bool,
 }
 
 pub(super) struct RtpPayload<'a> {
@@ -541,7 +567,27 @@ impl RtpSource {
         self.ssrc
     }
     pub(super) fn new(target: std::net::SocketAddr, payload_type: u8) -> Self {
-        Self { target, payload_type, ssrc: None, sequence: None, latch: false, allow_empty: false }
+        Self {
+            target,
+            payload_type,
+            dtmf_payload_type: None,
+            ssrc: None,
+            sequence: None,
+            latch: false,
+            allow_empty: false,
+            reordered: false,
+        }
+    }
+
+    /// Видео-вход: разрешить переупорядоченные последовательности (jitter
+    /// bot→MCU). Дубликаты (seq == последний) по-прежнему отбрасываются.
+    pub(super) fn accept_reordered(&mut self) {
+        self.reordered = true;
+    }
+
+    /// Enables RFC 4733 reception alongside the negotiated audio payload.
+    pub(super) fn accept_dtmf_payload_type(&mut self, payload_type: Option<u8>) {
+        self.dtmf_payload_type = payload_type;
     }
 
     /// UAS-вызов: разрешает первый валидный пакет с другого source и
@@ -568,7 +614,10 @@ impl RtpSource {
         // cross-vendor MCUs (TrueConf) commonly answer PCMU but transmit PCMA.
         // Video/dynamic PTs still require exact match.
         let g711_interchange = matches!(pt, 0 | 8) && matches!(self.payload_type, 0 | 8);
-        if pt != self.payload_type && !g711_interchange {
+        // RFC 4733 events share the RTP session but use their own PT; they are
+        // routed to the DTMF parser instead of the codec (RFC 4733 §2.5).
+        let is_dtmf = self.dtmf_payload_type == Some(pt);
+        if !is_dtmf && pt != self.payload_type && !g711_interchange {
             return None;
         }
         let padding = if packet[0] & 0x20 != 0 {
@@ -586,7 +635,13 @@ impl RtpSource {
         }
         if self.sequence.is_some_and(|last| {
             let distance = seq.wrapping_sub(last);
-            distance == 0 || distance >= 0x8000
+            if distance == 0 {
+                return true;
+            }
+            // Аудио: пакет «старше последнего» — дубль/реплей, вход закрыт.
+            // Видео: это reorder от джиттера, его разложит `VideoReorderBuffer`
+            // (иначе при RTT-джиттере вход терял 90 %+ пакетов и видео падало).
+            !self.reordered && distance >= 0x8000
         }) {
             return None;
         }
@@ -602,9 +657,49 @@ impl RtpSource {
     }
 }
 
+/// Minimal RFC 4733 §2.3 parser: returns the DTMF event code (0-15, `*`=10,
+/// `#`=11, A-D=12-15). The end bit and duration are validated but the relay
+/// regenerates its own event sequence, so only the digit is returned.
+fn parse_telephone_event(payload: &[u8]) -> Option<u8> {
+    // event(1) + E|R|volume(1) + duration(2); longer payloads carry redundant
+    // encodings, which must not change the event identity.
+    if payload.len() < 4 {
+        return None;
+    }
+    let event = payload[0];
+    if event > 15 {
+        return None;
+    }
+    Some(event)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rtp_source_video_accepts_reordered_but_audio_keeps_strict_order() {
+        let target = "127.0.0.1:5000".parse().unwrap();
+        let mut packet = [0u8; 172];
+        // Видео: reorder разрешён (джиттер bot→MCU), дубликаты по-прежнему нет.
+        let mut video = RtpSource::new(target, 96);
+        video.accept_reordered();
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 96, 10, 0, 42, false);
+        assert!(video.accept(target, &packet).is_some());
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 96, 12, 3000, 42, false);
+        assert!(video.accept(target, &packet).is_some(), "вперёд");
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 96, 11, 0, 42, false);
+        assert!(video.accept(target, &packet).is_some(), "reorder назад: видео принимает");
+        assert!(video.accept(target, &packet).is_none(), "точный дубль отброшен");
+        // Аудио: строгий порядок, «старше последнего» — реплей/дубль.
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 20, 0, 7, false);
+        let mut audio = RtpSource::new(target, 0);
+        assert!(audio.accept(target, &packet).is_some());
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 21, 160, 7, false);
+        assert!(audio.accept(target, &packet).is_some());
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 20, 0, 7, false);
+        assert!(audio.accept(target, &packet).is_none(), "аудио reorder не принимает");
+    }
 
     #[test]
     fn rtp_source_rejects_replay_ssrc_change_and_invalid_padding() {
@@ -726,5 +821,40 @@ mod tests {
         packet[1] = 0;
         vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 2, 160, 42, false);
         assert_eq!(source.accept(target, &packet).unwrap().payload_type, 0);
+    }
+
+    #[test]
+    fn telephone_event_parser_returns_digit_and_ignores_redundancy() {
+        // event=5, E=0, volume=10, duration=160.
+        assert_eq!(parse_telephone_event(&[5, 0x0a, 0x00, 0xa0]), Some(5));
+        // End packet: E=1.
+        assert_eq!(parse_telephone_event(&[5, 0x8a, 0x05, 0x60]), Some(5));
+        // Redundant encoding appended: first event wins.
+        assert_eq!(parse_telephone_event(&[12, 0x0a, 0x00, 0xa0, 9, 0x0a, 0x00, 0xa0]), Some(12));
+        // Star/hash map to 10/11 per RFC 4733 §3.2.
+        assert_eq!(parse_telephone_event(&[10, 0x0a, 0x00, 0xa0]), Some(10));
+        assert_eq!(parse_telephone_event(&[11, 0x0a, 0x00, 0xa0]), Some(11));
+        // Out-of-range event and truncated packets are rejected.
+        assert_eq!(parse_telephone_event(&[16, 0x0a, 0x00, 0xa0]), None);
+        assert_eq!(parse_telephone_event(&[5, 0x0a, 0x00]), None);
+    }
+
+    #[test]
+    fn source_accepts_telephone_event_only_when_negotiated() {
+        let target: std::net::SocketAddr = "192.0.2.10:4000".parse().unwrap();
+        let dtmf_packet = {
+            let packet = vec![0x80, 101, 0, 1, 0, 0, 0, 1, 0, 0, 0, 5, 5, 0x0a, 0x00, 0xa0];
+            packet
+        };
+        let mut source = RtpSource::new(target, 0);
+        assert!(source.accept(target, &dtmf_packet).is_none(), "DTMF must not pass before negotiation");
+        source.accept_dtmf_payload_type(Some(101));
+        let accepted = source.accept(target, &dtmf_packet).expect("negotiated DTMF passes");
+        assert_eq!(accepted.payload_type, 101);
+        assert_eq!(parse_telephone_event(accepted.payload), Some(5));
+        // A PT that is neither audio nor DTMF is still dropped.
+        let mut other = dtmf_packet.clone();
+        other[1] = 111;
+        assert!(source.accept(target, &other).is_none());
     }
 }

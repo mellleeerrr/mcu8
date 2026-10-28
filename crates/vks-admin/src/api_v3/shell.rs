@@ -691,6 +691,18 @@ pub async fn update_settings_video(
     Json(json!({ "payload": payload })).into_response()
 }
 
+/// UI-роль окна в словаре вендорского конструктора PNM (строго UPPERCASE:
+/// `EMPTY`/`ACTIVE`/`AUTO`/`PEER`/`ROLL`/`PRESENTATION`). Редактор раскрашивает
+/// окно и рисует иконку только по `slot.role`; без роли окно прозрачное.
+/// Пустые окна шаблона — `AUTO` (autofill), наложенные PiP — `PRESENTATION`.
+fn ui_slot_role(z_order: u8) -> &'static str {
+    if z_order > 0 {
+        "PRESENTATION"
+    } else {
+        "AUTO"
+    }
+}
+
 /// `POST /api/v3/ui/video_layouts/calculate` — геометрия слотов для превью.
 ///
 /// Два словаря, id не пересекаются:
@@ -754,6 +766,7 @@ pub async fn video_layouts_calculate(Json(body): Json<serde_json::Value>) -> Res
         .map(|(position, slot)| {
             json!({
                 "position": position + 1,
+                "role": ui_slot_role(slot.z_order),
                 "x": slot.rect.x,
                 "y": slot.rect.y,
                 "width": slot.rect.width,
@@ -789,6 +802,7 @@ pub async fn video_layout_presets() -> Response {
             .map(|(position, slot)| {
                 json!({
                     "position": position + 1,
+                    "role": ui_slot_role(slot.z_order),
                     "x": slot.rect.x,
                     "y": slot.rect.y,
                     "width": slot.rect.width,
@@ -946,12 +960,11 @@ pub async fn switch_video_layout_mode(
     patch.insert("mode".to_string(), json!(layout_mode));
     // T7: mode-only запрос не должен затирать топологию. `Boe` шлёт preset/type
     // при смене схемы; если их нет — сохраняем прежние значения из payload.
+    // `type` не переносим: он immutable (resources::update_resource) — иначе
+    // «Общая» через mode-эндпоинт снова становилась individual.
     let preset_present = preset_field.is_some();
     if let Some(preset) = preset_field {
         patch.insert("preset".to_string(), preset);
-    }
-    if let Some(layout_type) = field("type") {
-        patch.insert("type".to_string(), layout_type);
     }
     if size.is_some() || slots.is_some() || preset_present {
         patch.insert("size".to_string(), json!(inferred_size));

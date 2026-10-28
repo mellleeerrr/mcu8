@@ -255,6 +255,43 @@ class CommandQueue:
         return self.pending.popleft() if self.pending else None
 
 
+DTMF_EVENT_BY_SYMBOL = {
+    **{str(digit): digit for digit in range(10)},
+    "*": 10,
+    "#": 11,
+    "A": 12,
+    "B": 13,
+    "C": 14,
+    "D": 15,
+}
+
+
+def user_input_digits(value) -> list[int]:
+    """RFC 4733 event codes from a decoded H.245 UserInputIndication.
+
+    `signal` carries one IA5 symbol ("5", "#", "*", A-D); `alphanumeric` can
+    carry a whole string, one event per character. Everything else (encrypted
+    strings, updates, unknown choices) is ignored.
+    """
+    if not (isinstance(value, tuple) and len(value) == 2):
+        return []
+    kind, payload = value
+    if kind == "signal" and isinstance(payload, dict):
+        symbols = [payload.get("signalType") or ""]
+    elif kind == "alphanumeric" and isinstance(payload, str):
+        symbols = list(payload)
+    else:
+        return []
+    codes = []
+    for symbol in symbols:
+        if not isinstance(symbol, str):
+            continue
+        code = DTMF_EVENT_BY_SYMBOL.get(symbol.strip().upper()[:1])
+        if code is not None:
+            codes.append(code)
+    return codes
+
+
 class InboundCall:
     def __init__(self, signal, remote, setup):
         self.signal = signal
@@ -534,8 +571,32 @@ class InboundCall:
                             self.audio_fallback_channel += 1
                             return
                     raise ProtocolError("Peer rejected the negotiated audio channel")
-        elif category == "command" and name == "endSessionCommand":
-            self.reason, self.closed = "remote_end_session", True
+        elif category == "indication":
+            if name == "userInput":
+                for digit in user_input_digits(params):
+                    fields = {"call_ref": self.ref, "digit": digit, "direction": "inbound"}
+                    if self.event_sink is not None:
+                        self.event_sink("dtmf_digit", **fields)
+                    else:
+                        emit("dtmf_digit", call_id=str(self.call_id), **fields)
+        elif category == "command":
+            if name == "endSessionCommand":
+                self.reason, self.closed = "remote_end_session", True
+            elif name == "miscellaneousCommand":
+                # H.245 §MiscellaneousCommand: a receiver that lost sync asks
+                # the sender for an I-frame. The Rust side turns this into an
+                # IDR request for the encoder (same counter as RTCP PLI/FIR).
+                command = params.get("type") or (None, None)
+                if command[0] == "videoFastUpdatePicture":
+                    fields = {
+                        "call_ref": self.ref,
+                        "direction": "inbound",
+                        "logical_channel": params.get("logicalChannelNumber"),
+                    }
+                    if self.event_sink is not None:
+                        self.event_sink("video_fast_update", **fields)
+                    else:
+                        emit("video_fast_update", call_id=str(self.call_id), **fields)
 
     def open_channels(self):
         if self.channels_opened or not (self.tcs_acked and self.master_determined and self.remote_tcs_seen):

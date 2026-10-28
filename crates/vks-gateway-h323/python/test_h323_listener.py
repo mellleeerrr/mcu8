@@ -1,5 +1,6 @@
 """Contract tests for the inbound H.323 UAS glue (no network, no real calls)."""
 import unittest
+import uuid
 
 import ipaddress
 import h323_listener as listener
@@ -41,6 +42,69 @@ class InboundContractTests(unittest.TestCase):
         _, _, _, information, _, called = listener.parse_q931(q931_setup("room-uuid", "4d313d01-8300-450c-ab08"))
         setup = information["h323-uu-pdu"]["h323-message-body"][1]
         self.assertEqual(listener.setup_alias(setup) or called, "room-uuid")
+
+    def test_user_input_indication_signal_maps_to_dtmf_event(self):
+        # H.245 UserInputIndication.signal → RFC 4733 event code → room relay.
+        call = object.__new__(listener.InboundCall)
+        call.call_id = uuid.UUID(int=1)
+        call.ref = 0x1234
+        call.events = []
+        call.event_sink = lambda event, **fields: call.events.append((event, fields))
+        payload = listener.encode(
+            asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage,
+            ("indication", ("userInput", ("signal", {"signalType": "5"}))),
+        )
+        call._on_control(payload)
+        self.assertEqual(call.events[0][0], "dtmf_digit")
+        self.assertEqual(call.events[0][1]["digit"], 5)
+        self.assertEqual(call.events[0][1]["call_ref"], 0x1234)
+
+    def test_user_input_indication_alphanumeric_maps_each_digit(self):
+        call = object.__new__(listener.InboundCall)
+        call.call_id = uuid.UUID(int=1)
+        call.ref = 0x1234
+        call.events = []
+        call.event_sink = lambda event, **fields: call.events.append((event, fields))
+        payload = listener.encode(
+            asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage,
+            ("indication", ("userInput", ("alphanumeric", "1#*D"))),
+        )
+        call._on_control(payload)
+        self.assertEqual([fields["digit"] for _event, fields in call.events], [1, 11, 10, 15])
+        self.assertTrue(all(event == "dtmf_digit" for event, _fields in call.events))
+
+    def test_user_input_indication_ignores_unknown_choice(self):
+        call = object.__new__(listener.InboundCall)
+        call.call_id = uuid.UUID(int=1)
+        call.ref = 0x1234
+        call.events = []
+        call.event_sink = lambda event, **fields: call.events.append((event, fields))
+        call._on_control(listener.encode(
+            asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage,
+            ("indication", ("userInput", ("signal", {"signalType": "!"}))),
+        ))
+        self.assertEqual(call.events, [])
+
+    def test_video_fast_update_command_is_reported_for_idr(self):
+        # H.245 MiscellaneousCommand -> Rust counter -> encoder keyframe (P4b).
+        call = object.__new__(listener.InboundCall)
+        call.call_id = uuid.UUID(int=1)
+        call.ref = 0x1234
+        call.events = []
+        call.event_sink = lambda event, **fields: call.events.append((event, fields))
+        payload = listener.encode(
+            asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage,
+            ("command", ("miscellaneousCommand", {
+                "logicalChannelNumber": 2,
+                "type": ("videoFastUpdatePicture", 0),
+            })),
+        )
+        call._on_control(payload)
+        self.assertEqual(len(call.events), 1)
+        event, fields = call.events[0]
+        self.assertEqual(event, "video_fast_update")
+        self.assertEqual(fields["call_ref"], 0x1234)
+        self.assertEqual(fields["logical_channel"], 2)
 
     def test_video_channel_close_keeps_audio_call_alive(self):
         call = object.__new__(listener.InboundCall)

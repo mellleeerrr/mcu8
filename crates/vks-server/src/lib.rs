@@ -6,6 +6,7 @@
 //! Используется и `main.rs` (композиционный корень), и интеграционными тестами.
 
 pub mod cluster;
+pub mod farm_metrics;
 pub mod frontend;
 pub mod gateways;
 pub mod layout_signal;
@@ -130,6 +131,10 @@ pub fn build_app_with_services(
     state.set_dialer(gateways.clone());
     // S12: события движка (речь, пересадка главного окна) доходят до клиентов.
     room_events::install(&state, &mcu_engine);
+    // `P4a`: метрики фермы энкодеров (`encoder_group_*`/`viewer_rtp_*`) и
+    // JSON-снимок `/api/v3/mcu/farm` для этого движка.
+    farm_metrics::install(&mcu_engine);
+    let farm_engine = mcu_engine.clone();
 
     let csp = frontend.csp.clone();
     let ws_ctx = WsContext {
@@ -157,6 +162,13 @@ pub fn build_app_with_services(
                         "h323": gw.h323_status()
                     }))
                 }
+            }),
+        )
+        .route(
+            "/api/v3/mcu/farm",
+            get(move || {
+                let engine = farm_engine.clone();
+                async move { Json(farm_metrics::json_from_stats(&engine.video_farm_stats())) }
             }),
         )
         .route(
@@ -256,6 +268,9 @@ async fn http_metrics_middleware(request: Request, next: Next) -> Response {
 
 /// Эндпоинт сбора Prometheus-метрик.
 async fn metrics_handler() -> Response {
+    // `P4a`: снимок фермы перед выгрузкой (гейджи текущих групп; серии
+    // ретированных групп удаляются внутри `update`).
+    farm_metrics::update();
     (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], encode_metrics())
         .into_response()
 }
