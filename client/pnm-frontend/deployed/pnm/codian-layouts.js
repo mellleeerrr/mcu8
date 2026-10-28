@@ -31,9 +31,11 @@
  *    id/title/windows/slots — геометрия уже в ответе, один запрос на всё);
  *    токен UI — localStorage["TrueConfMCU_AccessToken"], заголовок
  *    `Authorization: Bearer …` (тот же, что у axios-интерсептора в бандле);
- *  - превью: SVG-иконка карточки рисуется из `slots` каталога (позиции
- *    1-based, z_order — порядок отрисовки), цвета и размеры — вендорскими
- *    CSS-правилами `.layout-scheme-selector-item__icon`;
+ *  - превью: у каталога Codian SVG-иконка карточки рисуется из `slots`
+ *    каталога (позиции 1-based, z_order — порядок отрисовки); у конструктора —
+ *    из ответа `POST /api/v3/ui/video_layouts/calculate` (локального движка
+ *    нет), цвета и размеры — вендорскими CSS-правилами
+ *    `.layout-scheme-selector-item__icon`;
  *  - размещение: отдельной секцией под `.base-layout-configurator` внутри
  *    `.manual-layout-configurator`. В левую панель схем (300 px) группа не
  *    влезает: 54 карточки делают её вдвое выше предпросмотра, а
@@ -48,10 +50,11 @@
  *    выдумываем свой запрос; сохранение/применение делает штатная кнопка
  *    «Создать»/«Сохранить»/«Применить», которая отправляет payload.preset и
  *    доходит до `gateways.apply_layout` → `vks_layout::codian::geometry`.
- *  - слоты: вендорский фолбэк числа окон — хвост id (`ss(preset)`), у
- *    `codian_52` это 52 окна вместо реальных. Поэтому вместе с preset кладём
- *    массив слотов ровно по `windows` из каталога: иначе сетка предпросмотра
- *    нарисует лишние окна.
+ *  - слоты: у каталога Codian вендорский фолбэк числа окон (`ss(preset)`) для
+ *    `codian_52` даёт 52 окна вместо реальных, поэтому `select` кладёт массив
+ *    слотов ровно по `windows` из каталога. Конструктор, наоборот, пишет только
+ *    preset: вендорский фолбэк даёт ровно N позиций/AUTO, превью приходит из
+ *    calculate, а геометрию при применении считает сервер по preset id.
  *
  * Деградация: нет `.manual-layout-configurator` (другая страница/режим
  * auto|dynamic), нет токена, 401/404/400 каталога — молча ничего не
@@ -124,7 +127,7 @@
   // Пункт «Конструктор» в вендорском селекторе режимов раскладки: та же
   // разметка/классы, что у auto/dynamic/manual, вставляется после «Ручная
   // настройка». Клик переводит редактор в ручной режим и раскрывает секцию
-  // конструктора (15 динамических раскладок).
+  // конструктора (6 режимов × N окон).
   var MODE_SELECTOR = '.layout-mode-selector';
   var MODE_TILE_ATTR = 'data-vks-constructor-tile';
   var modeTileEngaged = false;
@@ -528,6 +531,9 @@
     var item = closestItem(event.target);
     if (!item) return;
     event.preventDefault();
+    // Секция каталога лежит внутри ctorPanel, чей делегированный обработчик
+    // иначе обработает тот же клик вторым вызовом select/setSlots.
+    event.stopPropagation();
     select(item.getAttribute(ITEM_ATTR));
   }
 
@@ -536,6 +542,7 @@
     var item = closestItem(event.target);
     if (!item) return;
     event.preventDefault();
+    event.stopPropagation();
     select(item.getAttribute(ITEM_ATTR));
   }
 

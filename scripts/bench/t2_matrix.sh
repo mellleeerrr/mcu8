@@ -83,8 +83,17 @@ PROFILES=(
     "T2-5b-rtt300-limit|limit 100000 delay 150ms"
 )
 
+# Bearer не должен попадать в argv процессов (ps/proc): пишем заголовок в файл
+# 0600 и отдаём curl'у `-H @file`.
+auth_header() {
+    local file=/tmp/vks-bench.auth
+    printf 'Authorization: Bearer %s\n' "$(cat /tmp/vks.token 2>/dev/null)" > "$file"
+    chmod 600 "$file"
+    printf '@%s' "$file"
+}
+
 room_abonents() {
-    curl -s -m 3 -H "Authorization: Bearer $(cat /tmp/vks.token 2>/dev/null)" \
+    curl -s -m 3 -H "$(auth_header)" \
         "http://127.0.0.1:8080/api/v3/sessions" 2>/dev/null | python3 -c '
 import json, sys
 try:
@@ -155,6 +164,7 @@ cleanup() {
     [ "$PLAN" -eq 1 ] && return 0
     sudo -n tc qdisc del dev veth-bench root 2>/dev/null || true
     sudo -n ip netns exec "$NETNS" tc qdisc del dev veth-mcu root 2>/dev/null || true
+    rm -f /tmp/vks-bench.auth
 }
 trap cleanup EXIT INT TERM
 
@@ -198,7 +208,7 @@ for entry in "${PROFILES[@]}"; do
     if [ "$PLAN" -eq 0 ]; then
         { sudo -n tc -s qdisc show dev veth-bench; } > "$dir/tc-host.txt" 2>&1 || true
         { sudo -n ip netns exec "$NETNS" tc -s qdisc show dev veth-mcu; } > "$dir/tc-netns.txt" 2>&1 || true
-        curl -s -m 3 -H "Authorization: Bearer $(cat /tmp/vks.token 2>/dev/null)" \
+        curl -s -m 3 -H "$(auth_header)" \
             "http://127.0.0.1:8080/api/v3/mcu/farm" > "$dir/farm-idle.json" || true
     fi
     MPID="$(mcu_pid)"
