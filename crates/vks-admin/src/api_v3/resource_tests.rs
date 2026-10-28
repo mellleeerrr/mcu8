@@ -1667,6 +1667,86 @@ async fn t00_normalize_loaded_prefers_alias_clone_over_pristine_default() {
     }
 }
 
+/// Массовый случай из ревью: COW на конференции при живой сессии зеркалит
+/// клон в оба scope. Ремонт обязан перетипировать клон по alias-доказательству,
+/// а не откатывать правку пользователя к pristine-канону.
+#[tokio::test]
+async fn t00_normalize_loaded_retypes_mirrored_clone_in_both_scopes() {
+    let state = state();
+    let room = Rooms::create_async(&state, "mirrored clone repair").await.unwrap();
+    let canonical_id = create_layout(&state, "", json!({"type":"default"})).await;
+    let clone_id = create_layout(
+        &state,
+        "Codian 07 — 13 окон",
+        json!({"type":"individual","mode":"manual","preset":"vks_pin_l_13","size":13}),
+    )
+    .await;
+    let conf_key = format!("conferences:{}:video_layouts", room.id);
+    let sess_key = format!("sessions:{}:video_layouts", room.id);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.links.insert(conf_key.clone(), vec![clone_id.clone()]);
+        resources.links.insert(sess_key.clone(), vec![clone_id.clone()]);
+        resources.layout_aliases.insert(format!("{conf_key}|{canonical_id}"), clone_id.clone());
+        resources.layout_aliases.insert(format!("{sess_key}|{canonical_id}"), clone_id.clone());
+        resources.active_layouts.insert(conf_key.clone(), clone_id.clone());
+        resources.active_layouts.insert(sess_key.clone(), clone_id.clone());
+        normalize_loaded(&mut resources);
+        assert_eq!(resources.layouts[&clone_id]["payload"]["type"], "default");
+        assert_eq!(resources.links[&conf_key], vec![clone_id.clone()]);
+        assert_eq!(resources.links[&sess_key], vec![clone_id.clone()]);
+        assert!(!resources.links[&sess_key].contains(&canonical_id));
+        assert!(!resources.links[&conf_key].contains(&canonical_id));
+    }
+}
+
+/// Раскладка, привязанная к двум разным room: ремонт одной комнаты не имеет
+/// права ретипать её по alias чужой комнаты (иначе вторая комната получает
+/// 2 default при первом load и молчаливую отвязку при втором).
+#[tokio::test]
+async fn t00_normalize_loaded_does_not_touch_clone_shared_with_other_room() {
+    let state = state();
+    let room_a = Rooms::create_async(&state, "room a").await.unwrap();
+    let room_b = Rooms::create_async(&state, "room b").await.unwrap();
+    let canonical_id = create_layout(&state, "", json!({"type":"default"})).await;
+    let clone_id = create_layout(
+        &state,
+        "Codian 07 — 13 окон",
+        json!({"type":"individual","mode":"manual","preset":"vks_pin_l_13","size":13}),
+    )
+    .await;
+    let conf_a = format!("conferences:{}:video_layouts", room_a.id);
+    let sess_b = format!("sessions:{}:video_layouts", room_b.id);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.links.insert(conf_a.clone(), vec![clone_id.clone()]);
+        resources.links.insert(sess_b.clone(), vec![clone_id.clone()]);
+        resources.layout_aliases.insert(format!("{conf_a}|{canonical_id}"), clone_id.clone());
+        resources.active_layouts.insert(conf_a.clone(), clone_id.clone());
+        resources.active_layouts.insert(sess_b.clone(), clone_id.clone());
+        normalize_loaded(&mut resources);
+        // Чужая комната не пострадала: клон остался individual и привязанным.
+        assert_eq!(resources.layouts[&clone_id]["payload"]["type"], "individual");
+        assert!(resources.links[&sess_b].contains(&clone_id), "кросс-комнатный клон отвязан");
+        assert_eq!(resources.active_layouts[&sess_b], clone_id.clone());
+        // Комната A получила один pristine-канон, клон не отвязан.
+        assert_eq!(resources.layouts[&canonical_id]["payload"]["type"], "default");
+        assert!(resources.links[&conf_a].contains(&clone_id), "локальный клон отвязан");
+        assert_eq!(resources.links[&conf_a].iter().filter(|id| **id == canonical_id).count(), 1);
+        assert_eq!(resources.links[&sess_b].iter().filter(|id| **id == canonical_id).count(), 1);
+    }
+    // Идемпотентность: повторный load не меняет привязки и не плодит default.
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        let links = resources.links.clone();
+        let active = resources.active_layouts.clone();
+        normalize_loaded(&mut resources);
+        assert_eq!(resources.layouts[&clone_id]["payload"]["type"], "individual");
+        assert_eq!(resources.links, links);
+        assert_eq!(resources.active_layouts, active);
+    }
+}
+
 /// T0 create: новая раскладка без явного type — индивидуальная (canonical
 /// payload только seed полей). Иначе рождались «Общие» с чужим preset
 /// («T7 Dup Layout» в БД).
@@ -1687,6 +1767,17 @@ async fn t00_create_without_type_is_individual_except_canonical_seed() {
             .await;
     assert_eq!(seed.status(), StatusCode::CREATED);
     assert_eq!(body(seed).await["video_layout"]["payload"]["type"], "default");
+    // M1: именованная запись с payload:{} — НЕ canonical seed: иначе она
+    // застревает default'ом (attach → 2 «Общие», detach/DELETE → 409).
+    let named_seed = create(
+        State(state.clone()),
+        Extension(operator()),
+        uri("/api/v3/video_layouts"),
+        Json(json!({"display_name":"Именованная общая","payload":{}})),
+    )
+    .await;
+    assert_eq!(named_seed.status(), StatusCode::CREATED);
+    assert_eq!(body(named_seed).await["video_layout"]["payload"]["type"], "individual");
 }
 
 #[tokio::test]

@@ -724,18 +724,26 @@ fn repair_scope_defaults(resources: &mut ResourceState) {
         // Шаг 1: alias `scope|default-id -> clone` доказывает, что клон родился
         // из «Общей», но сохранился с type=individual. Это делаем всегда, а не
         // только при отсутствии default: иначе исход зависел бы от того, успел
-        // ли старый inherit добавить pristine-канон до рестарта.
+        // ли старый inherit добавить pristine-канон до рестарта. Ссылки клона в
+        // других scope того же room не мешают — COW на конференции при живой
+        // сессии зеркалит клон в оба scope, и этот массовый случай раньше
+        // откатывал правку «Общей». А вот раскладку, привязанную к другому room,
+        // не трогаем: иначе ремонт одной комнаты меняет данные другой.
         let source_prefix = format!("{key}|");
+        let room = key.split(':').nth(1);
         let retype: Vec<String> = resources
             .layout_aliases
             .iter()
             .filter_map(|(alias, target)| {
                 let source = alias.strip_prefix(&source_prefix)?;
-                let target_is_local = resources.links.iter().all(|(scope, ids)| scope == &key || !ids.contains(target));
                 let target_is_individual = resources
                     .layouts
                     .get(target)
                     .is_some_and(|layout| layout["payload"]["type"].as_str() == Some("individual"));
+                let target_is_local = resources
+                    .links
+                    .iter()
+                    .all(|(scope, ids)| scope == &key || !ids.contains(target) || scope.split(':').nth(1) == room);
                 (is_default_layout(resources, source) && target_is_local && target_is_individual)
                     .then(|| target.clone())
             })
@@ -1389,9 +1397,14 @@ pub async fn create(
         }
     }
     let mut record = normalize_resource(kind, &body, &auth.subject);
+    // Canonical seed — только безымянная «Общая»: именованную запись с
+    // payload:{} нельзя считать seed'ом, иначе она навсегда застревает
+    // default'ом (attach → 2 «Общие», detach/DELETE → 409).
+    let canonical_seed =
+        is_canonical_default(&record) && record["display_name"].as_str().unwrap_or_default().is_empty();
     if kind == "video_layouts"
         && body.get("payload").and_then(|payload| payload.get("type")).is_none()
-        && !is_canonical_default(&record)
+        && !canonical_seed
     {
         // New layout без явного type — индивидуальная: canonical payload лишь
         // seed для полей, и без этого создавалась «Общая» с чужим preset
