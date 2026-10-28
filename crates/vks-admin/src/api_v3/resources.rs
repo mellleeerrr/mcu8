@@ -706,6 +706,15 @@ fn is_default_layout(resources: &ResourceState, id: &str) -> bool {
     resources.layouts.get(id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
 }
 
+/// Другая «Общая», уже привязанная к scope (`None` — конфликта нет).
+/// Второй `type=default` в одном scope — stuck-state: detach/DELETE обоих дают
+/// 409, а UI показывает две «Общие» (forensics, путь #8).
+fn other_attached_default(resources: &ResourceState, scope_key: &str, resource_id: &str) -> Option<String> {
+    resources.links.get(scope_key).and_then(|ids| {
+        ids.iter().find(|id| id.as_str() != resource_id && is_default_layout(resources, id.as_str())).cloned()
+    })
+}
+
 /// Durable-ремонт инварианта «в непустом scope ровно одна „Общая“».
 /// Старые сборки позволяли PATCH'ем сменить тип «Общей»: COW-клон получал
 /// `type=individual`, сессия оставалась без default, и UI падал на
@@ -1207,6 +1216,10 @@ pub fn inherit_and_ensure_default_layout(resources: &mut ResourceState, room_id:
     // и клон с правленой геометрией конкурирует с pristine-каноном.
     let mut inherited = Vec::new();
     let session_ids = resources.links.get(&key).cloned().unwrap_or_default();
+    // В сессии допустима только одна «Общая»: если session-scope уже содержит
+    // default, второй из конференции не наследуем (legacy-состояние с двумя
+    // default'ами не должно размножаться при старте сессии).
+    let mut has_default = session_ids.iter().any(|id| is_default_layout(resources, id));
     for id in conference_ids {
         if session_ids.contains(&id) || !resources.layouts.contains_key(&id) {
             continue;
@@ -1214,6 +1227,12 @@ pub fn inherit_and_ensure_default_layout(resources: &mut ResourceState, room_id:
         let resolved = resolve_layout_alias(resources, &key, &id);
         if resolved != id && session_ids.contains(&resolved) {
             continue;
+        }
+        if is_default_layout(resources, &id) {
+            if has_default {
+                continue;
+            }
+            has_default = true;
         }
         if !inherited.contains(&id) {
             inherited.push(id);
@@ -1903,6 +1922,14 @@ pub async fn attach(
         return error_json(404, "Resource not found");
     }
     if kind == "video_layouts" {
+        // Инвариант «одна „Общая“ на scope»: привязка второй default'ной
+        // раскладки (явный type=default или legacy-именованной) запрещена —
+        // иначе detach/DELETE обоих навсегда 409, а UI показывает две «Общие».
+        if is_default_layout(&resources, &resource_id) {
+            if let Some(existing) = other_attached_default(&resources, &scope_key, &resource_id) {
+                return error_json(409, &format!("scope already has a default layout ({existing}); detach it first"));
+            }
+        }
         let list = resources.links.entry(scope_key.clone()).or_default();
         if !list.contains(&resource_id) {
             list.push(resource_id.clone());

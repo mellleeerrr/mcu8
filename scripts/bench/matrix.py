@@ -117,8 +117,9 @@ def api_token() -> str:
     """Bearer для служебных `/api/v3/*` (P1-7: auth+Moderator).
 
     Порядок: `VKS_API_TOKEN` (netns/CI) → `VKS_TOKEN_FILE` → `/tmp/vks.token`
-    (его пишут `scripts/bench/room.sh`/`t2_matrix.sh`). Нет токена — пустая
-    строка, farm-снимок просто останется `{}`, как и раньше при недоступном API.
+    (создаётся вручную/CI-логином; bench-скрипты его только читают). Нет
+    токена — пустая строка, farm-снимок останется `{}`, как и раньше при
+    недоступном API.
     """
     token = os.environ.get("VKS_API_TOKEN", "").strip()
     if token:

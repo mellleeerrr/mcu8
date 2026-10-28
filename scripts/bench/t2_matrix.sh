@@ -212,7 +212,7 @@ for entry in "${PROFILES[@]}"; do
         printf '{"profile":"%s","abonents":%s,"ffmpeg":%s,"base_ffmpeg":%s,"clean":%s}\n' \
             "$name" "$(room_abonents)" "$(mcu_ffmpeg_now)" "$BASE_FFMPEG" "$CLEAN" > "$dir/precheck.json"
     fi
-    run sudo -n ip netns exec "$NETNS" sh -c "umask 022; VKS_API_TOKEN='$(cat /tmp/vks.token 2>/dev/null)' exec python3 '$REPO/scripts/bench/matrix.py' \
+    run sudo -n ip netns exec "$NETNS" sh -c "umask 022; exec python3 '$REPO/scripts/bench/matrix.py' \
         --bots $BOTS --room $ROOM --host $HOST_MCU --local-ip 10.200.0.2 \
         --api $API --video-profile 720p30 --audio-codec PCMU \
         --duration $DURATION --idle-baseline $IDLE --connect-window $CONNECT \

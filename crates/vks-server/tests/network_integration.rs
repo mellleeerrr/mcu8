@@ -2079,6 +2079,10 @@ async fn test_farm_metrics_and_api_v3_snapshot_reflect_encoder_group_lifecycle()
 
     // P1-7: `/api/v3/*` служебные endpoint'ы теперь под auth+Moderator —
     // тесту нужен сконфигурированный issuer и записи в Users.
+    // VKS_METRICS_TOKEN из окружения CI сделал бы loopback-ветку токен-зависимой:
+    // изолируем env на время теста и вернём как было.
+    let saved_metrics_token = std::env::var_os("VKS_METRICS_TOKEN");
+    std::env::remove_var("VKS_METRICS_TOKEN");
     let mut state = AppState::new();
     let issuer = Arc::new(JwtIssuer::new(JwtConfig {
         secret: "farm_metrics_secret_123".to_string(),
@@ -2221,4 +2225,8 @@ async fn test_farm_metrics_and_api_v3_snapshot_reflect_encoder_group_lifecycle()
     assert_eq!(engine.video_farm_stats().len(), 0, "группа должна быть удалена из фермы");
     // Против «оптимизации» с неиспользуемым импортом.
     let _ = Ordering::Relaxed;
+    match saved_metrics_token {
+        Some(token) => std::env::set_var("VKS_METRICS_TOKEN", token),
+        None => std::env::remove_var("VKS_METRICS_TOKEN"),
+    }
 }

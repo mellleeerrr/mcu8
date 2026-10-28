@@ -235,13 +235,13 @@ async fn require_moderator(request: Request, next: Next) -> Response {
 /// - токен не задан → только loopback, иначе 403.
 fn metrics_access(
     expected: Option<&str>,
-    provided: Option<&str>,
+    provided: &[String],
     loopback: bool,
 ) -> Result<(), (StatusCode, &'static str)> {
     match expected {
         Some(expected) => {
             use sha2::{Digest, Sha256};
-            let matches = provided.is_some_and(|provided| {
+            let matches = provided.iter().any(|provided| {
                 !provided.is_empty() && Sha256::digest(expected.as_bytes()) == Sha256::digest(provided.as_bytes())
             });
             if matches {
@@ -264,16 +264,23 @@ fn metrics_access(
 async fn metrics_guard(request: Request, next: Next) -> Response {
     let expected =
         std::env::var("VKS_METRICS_TOKEN").ok().map(|token| token.trim().to_string()).filter(|token| !token.is_empty());
-    let provided = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .or_else(|| request.headers().get("x-metrics-token").and_then(|value| value.to_str().ok()))
-        .map(str::trim)
-        .filter(|token| !token.is_empty());
+    // Принимаем любой из заголовков: неверный Authorization не должен глушить
+    // корректный X-Metrics-Token (и наоборот).
+    let provided: Vec<String> = [
+        request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer ")),
+        request.headers().get("x-metrics-token").and_then(|value| value.to_str().ok()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|token| token.trim().to_string())
+    .filter(|token| !token.is_empty())
+    .collect();
     let loopback = request.extensions().get::<ConnectInfo<SocketAddr>>().is_some_and(|info| info.0.ip().is_loopback());
-    match metrics_access(expected.as_deref(), provided, loopback) {
+    match metrics_access(expected.as_deref(), &provided, loopback) {
         Ok(()) => next.run(request).await,
         Err((status, description)) => api_error(status, status.as_u16(), description),
     }
@@ -1436,12 +1443,14 @@ mod tests {
     #[test]
     fn metrics_access_enforces_token_and_loopback_rules() {
         // Токен не настроен: loopback можно, LAN нельзя.
-        assert!(metrics_access(None, None, true).is_ok());
-        assert_eq!(metrics_access(None, None, false).unwrap_err().0, StatusCode::FORBIDDEN);
+        assert!(metrics_access(None, &[], true).is_ok());
+        assert_eq!(metrics_access(None, &[], false).unwrap_err().0, StatusCode::FORBIDDEN);
         // Токен настроен: он обязателен и для loopback; неверный — 401.
-        assert!(metrics_access(Some("secret"), Some("secret"), true).is_ok());
-        assert!(metrics_access(Some("secret"), Some("secret"), false).is_ok());
-        assert_eq!(metrics_access(Some("secret"), None, true).unwrap_err().0, StatusCode::UNAUTHORIZED);
-        assert_eq!(metrics_access(Some("secret"), Some("nope"), true).unwrap_err().0, StatusCode::UNAUTHORIZED);
+        assert!(metrics_access(Some("secret"), &["secret".into()], true).is_ok());
+        assert!(metrics_access(Some("secret"), &["secret".into()], false).is_ok());
+        // Любой из двух заголовков достаточен: неверный Bearer не глушит X-Metrics-Token.
+        assert!(metrics_access(Some("secret"), &["wrong".into(), "secret".into()], true).is_ok());
+        assert_eq!(metrics_access(Some("secret"), &[], true).unwrap_err().0, StatusCode::UNAUTHORIZED);
+        assert_eq!(metrics_access(Some("secret"), &["nope".into()], true).unwrap_err().0, StatusCode::UNAUTHORIZED);
     }
 }

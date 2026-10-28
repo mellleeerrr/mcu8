@@ -1747,6 +1747,66 @@ async fn t00_normalize_loaded_does_not_touch_clone_shared_with_other_room() {
     }
 }
 
+/// M1-R1: второй `type=default` в одном scope запрещён на attach — иначе
+/// detach/DELETE обоих навсегда 409 (stuck-state, forensics путь #8).
+#[tokio::test]
+async fn t00_attach_second_default_is_conflict_per_scope() {
+    let state = state();
+    let room = Rooms::create_async(&state, "attach second default").await.unwrap();
+    let canonical = create_layout(&state, "", json!({"type":"default"})).await;
+    let named_default = create_layout(&state, "Именованная общая", json!({"type":"default"})).await;
+    assert_eq!(attach_to(&state, &room, &canonical).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        attach_to(&state, &room, &named_default).await,
+        StatusCode::CONFLICT,
+        "второй default в scope обязан быть 409, а не stuck-state"
+    );
+    let key = format!("conferences:{}:video_layouts", room.id);
+    {
+        let resources = state.api_v3.resources.lock().await;
+        let defaults: Vec<&String> =
+            resources.links[&key].iter().filter(|id| is_default_layout(&resources, id)).collect();
+        assert_eq!(defaults, vec![&canonical], "в scope осталась ровно одна «Общая»");
+    }
+    // В другом scope (другая комната) тот же именованный default привязать можно:
+    // инвариант локальный, а не глобальный.
+    let other = Rooms::create_async(&state, "attach second default other").await.unwrap();
+    assert_eq!(attach_to(&state, &other, &named_default).await, StatusCode::NO_CONTENT);
+}
+
+/// Наследование конференция → сессия не должно размножать legacy-состояние с
+/// двумя default'ами: в сессию попадает только один, повторный load идемпотентен.
+#[tokio::test]
+async fn t00_inherit_does_not_copy_second_default_from_conference() {
+    let state = state();
+    let room = Rooms::create_async(&state, "inherit single default").await.unwrap();
+    let canonical = create_layout(&state, "", json!({"type":"default"})).await;
+    let named_default = create_layout(&state, "Именованная общая", json!({"type":"default"})).await;
+    let conf_key = format!("conferences:{}:video_layouts", room.id);
+    let sess_key = format!("sessions:{}:video_layouts", room.id);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        // Legacy-состояние (до фикса attach): две «Общие» в conference-scope.
+        resources.links.insert(conf_key.clone(), vec![canonical.clone(), named_default.clone()]);
+        resources.active_layouts.insert(conf_key.clone(), named_default.clone());
+        inherit_and_ensure_default_layout(&mut resources, &room.id.to_string(), "tester");
+        let defaults: Vec<&String> =
+            resources.links[&sess_key].iter().filter(|id| is_default_layout(&resources, id)).collect();
+        assert_eq!(defaults, vec![&canonical], "в session-scope ровно один default");
+        // Первый load durable-ремонтирует legacy conference-scope (две «Общие»
+        // → одна, active сохранён), второй — уже идемпотентен.
+        normalize_loaded(&mut resources);
+        let conf_defaults = resources.links[&conf_key].iter().filter(|id| is_default_layout(&resources, id)).count();
+        assert_eq!(conf_defaults, 1, "legacy conference-scope отремонтирован до одной «Общей»");
+        assert_eq!(resources.links[&sess_key].iter().filter(|id| is_default_layout(&resources, id)).count(), 1);
+        let links = resources.links.clone();
+        let active = resources.active_layouts.clone();
+        normalize_loaded(&mut resources);
+        assert_eq!(resources.links, links, "повторный load не меняет привязки");
+        assert_eq!(resources.active_layouts, active);
+    }
+}
+
 /// T0 create: новая раскладка без явного type — индивидуальная (canonical
 /// payload только seed полей). Иначе рождались «Общие» с чужим preset
 /// («T7 Dup Layout» в БД).
