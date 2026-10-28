@@ -252,6 +252,25 @@ jobs:
         working-directory: scripts
         run: python -m unittest -v test_pnm_patch_lib
 
+  frontend-integrity:
+    name: PNM frontend integrity (manifest + vendor patches)
+    runs-on: ubuntu-24.04
+    # S9: целостность вендорского бандла и патчи — часть контракта UI.
+    # Раньше проверялись только вручную; дрейф MANIFEST или патча ловится здесь.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Manifest SHA256 of deployed PNM bundles
+        working-directory: client/pnm-frontend/deployed/pnm
+        run: sha256sum -c ../../MANIFEST.sha256
+      - name: Vendor patches are applied and idempotent
+        run: python3 scripts/patch-pnm-layout-crash.py --check
+      - name: Unit tests (PNM patch lib)
+        working-directory: scripts
+        run: python -m unittest -v test_pnm_patch_lib
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-24.04
