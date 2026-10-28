@@ -50,6 +50,7 @@ async function api(token, method, path, body) {
   let failure = '';
   let vendor400At = 0;
   let vendor400Count = 0;
+  let vendorWindowUsed = false;
   const vendorPageErrors = [];
   const geometry = new Map();
   try {
@@ -86,8 +87,12 @@ async function api(token, method, path, body) {
       // `preset_default_13` (400 по контракту). Допускаем его ТОЛЬКО в окне 3 с
       // после реального 400-ответа и не более одного на ответ; любой другой
       // pageerror (в т.ч. ручного режима) обязан провалить тест.
-      if (vendor400At && Date.now() - vendor400At <= 3000) {
-        vendor400At = 0;
+      // Вендорский reportError — это pageerror с пустыми name/message и
+      // стеком вендорского чанка; любая содержательная ошибка (в т.ч. наша)
+      // сюда не подходит. Один 400 = максимум одна такая ошибка.
+      const vendorShaped = detail.name === '' && detail.message === 'Object' && detail.stack === '' && detail.status === 0;
+      if (vendor400At && Date.now() - vendor400At <= 3000 && vendorShaped && !vendorWindowUsed) {
+        vendorWindowUsed = true;
         vendorPageErrors.push(JSON.stringify(detail));
       } else {
         pageErrors.push(JSON.stringify(detail));
@@ -110,8 +115,9 @@ async function api(token, method, path, body) {
       let preset = '';
       try { preset = JSON.parse(request.postData() || '{}').preset || ''; } catch (e) { preset = ''; }
       const status = response.status();
-      if (status === 400 && preset.indexOf('preset_') === 0) {
+      if (status === 400 && preset === 'preset_default_13') {
         vendor400At = Date.now();
+        vendorWindowUsed = false;
         vendor400Count += 1;
       }
       const entry = { preset, status, slots: null };
@@ -206,12 +212,34 @@ async function api(token, method, path, body) {
         && Array.isArray(entry.slots) && entry.slots.length === 12))) {
       await page.waitForTimeout(200);
     }
+    const rounded = (value) => Math.round(Number(value) * 100) / 100;
     const serverIcons = presets12.map((preset) => {
       const entry = calculateResponses.filter((item) => item.preset === preset && item.status === 200).pop();
       const slots = entry && Array.isArray(entry.slots) ? entry.slots : [];
-      const maxX = slots.reduce((max, slot) => Math.max(max, Number(slot.x) + Number(slot.width)), 0);
-      const maxY = slots.reduce((max, slot) => Math.max(max, Number(slot.y) + Number(slot.height)), 0);
-      return { mode: preset.replace(/^vks_|_12$/g, ''), count: slots.length, maxX, maxY, status: entry ? entry.status : 0 };
+      const valid = slots.filter((slot) => {
+        const values = [slot.x, slot.y, slot.width, slot.height].map(Number);
+        return values.every((value) => Number.isFinite(value)) && values[2] > 0 && values[3] > 0;
+      });
+      const maxX = valid.reduce((max, slot) => Math.max(max, Number(slot.x) + Number(slot.width)), 0);
+      const maxY = valid.reduce((max, slot) => Math.max(max, Number(slot.y) + Number(slot.height)), 0);
+      const halfX = Math.max(1, Math.round(maxX * 0.02));
+      const halfY = Math.max(1, Math.round(maxY * 0.02));
+      // Тот же расчёт, что svgFromSlots: полузазор 2% (иначе iw/ih <= 0 — без зазора).
+      const rects = valid.map((slot) => {
+        let x = Number(slot.x) + halfX;
+        let y = Number(slot.y) + halfY;
+        let width = Number(slot.width) - 2 * halfX;
+        let height = Number(slot.height) - 2 * halfY;
+        if (width <= 0 || height <= 0) {
+          x = Number(slot.x); y = Number(slot.y);
+          width = Number(slot.width); height = Number(slot.height);
+        }
+        return [rounded(x), rounded(y), rounded(width), rounded(height)].join(',');
+      }).sort();
+      return {
+        mode: preset.replace(/^vks_|_12$/g, ''), count: slots.length, maxX, maxY, rects,
+        status: entry ? entry.status : 0,
+      };
     });
     check('N=12: все 6 calculate вернули 200 и ровно 12 слотов',
       serverIcons.every((icon) => icon.status === 200 && icon.count === 12),
@@ -222,10 +250,12 @@ async function api(token, method, path, body) {
         const card = document.querySelector(`[data-vks-constructor="1"] [data-vks-constructor-mode="${icon.mode}"]`);
         const svg = card ? card.querySelector('svg') : null;
         const viewBox = svg ? String(svg.getAttribute('viewBox') || '').trim().split(/\s+/).map(Number) : [];
-        out[icon.mode] = {
-          rects: svg ? svg.querySelectorAll('rect').length : 0,
-          viewBox,
-        };
+        const boxes = svg
+          ? Array.from(svg.querySelectorAll('rect')).map((rect) => [
+            rect.getAttribute('x'), rect.getAttribute('y'), rect.getAttribute('width'), rect.getAttribute('height'),
+          ].map(Number).map((value) => Math.round(value * 100) / 100).join(',')).sort()
+          : [];
+        out[icon.mode] = { rects: boxes.length, viewBox, boxes };
       }
       return out;
     }, serverIcons);
@@ -233,9 +263,10 @@ async function api(token, method, path, body) {
       const got = rendered[icon.mode] || { rects: 0, viewBox: [] };
       return got.rects !== icon.count
         || Math.abs((got.viewBox[2] || 0) - icon.maxX) > 0.01
-        || Math.abs((got.viewBox[3] || 0) - icon.maxY) > 0.01;
+        || Math.abs((got.viewBox[3] || 0) - icon.maxY) > 0.01
+        || JSON.stringify(got.boxes) !== JSON.stringify(icon.rects);
     });
-    check('N=12: иконки отрисованы из ответа сервера (rect=N, viewBox=геометрия ответа)',
+    check('N=12: иконки отрисованы из ответа сервера (rect=N, viewBox и координаты = геометрия ответа)',
       serverIcons.every((icon) => icon.count === 12) && iconMismatch.length === 0,
       JSON.stringify(iconMismatch));
 
@@ -256,7 +287,7 @@ async function api(token, method, path, body) {
     check('счётчик остался 12 после клика', active.counter === '12', `${active.counter}`);
     check('нет crash-сигнатур в консоли', crashes.length === 0, crashes.slice(0, 2).join(' | '));
     check('нет pageerror в ручном режиме (кроме вендорского preset_default_13)',
-      pageErrors.length === 0 && vendorPageErrors.length <= vendor400Count,
+      pageErrors.length === 0 && vendorPageErrors.length === vendor400Count,
       `некоррелированные: ${pageErrors.slice(0, 2).join(' | ')}; вендорские: ${vendorPageErrors.length}/${vendor400Count}`);
     check('превью и иконки идут только серверным calculate', calculate.length >= 7);
   } catch (error) {

@@ -19,9 +19,9 @@
 `resources.rs` `36831347…`, `resource_tests.rs` `ac2e7359…`, `shell.rs`
 (`crates/vks-admin/src/api_v3/shell.rs`) `c5406874…`, `codian-layouts.js` `c91bb08e…`;
 на `22aac56` — `resources.rs` `a85c56d5…`, `resource_tests.rs` `8978dcc0…`;
-на HEAD после cross-scope M1 (`26c300a`) — `resources.rs` `21530208…`, `resource_tests.rs`
-`0412cf63…`, `codian-layouts.js` `03cfb280…` (после T2 и гигиены; проверка:
-`git show HEAD:<path> | md5sum`);
+на `26c300a` (cross-scope M1) — `resources.rs` `21530208…`, `resource_tests.rs` `0412cf63…`,
+`codian-layouts.js` `03cfb280…`; на HEAD `d039104` `codian-layouts.js` — `e583a09c…` (`951e68b`:
+stopPropagation и шапка; Rust-файлы не менялись). Проверка: `git show HEAD:<path> | md5sum`;
 вендорские бандлы `index6` `6aa06b9c…`, `index-legacy6` `9f4ef0f2…` совпадают во всех срезах.
 **Тесты:** в 17:57 я прогнал `cargo test -p vks-admin --lib` — **302 passed, 0 failed**; отдельно
 `t00_` — **5 passed**, включая retype, дедуп двух default и «рестарт не даёт вторую Общую».
@@ -182,7 +182,9 @@ editor.editValueField('type','individual');
   (`resources.rs:1534`). Значит default не «удалили» — его **вытеснили** COW.
 - конвертация на чтении (`resolve_read_layout_id`): не меняет payload, только id/поля ответа.
 
-### A5. `ensure` только на старте; рестарт сессии и рестарт сервера дают **разный** результат
+### A5. `ensure` только на старте: рестарт сессии и сервера давали **разный** результат
+**(pre-fix снимок; после `f8f3f91` repair room-scoped, второй default отвязывается, видимый scope
+дедуплицирован — см. 02 R-03 и `t00_normalize_loaded_retypes_mirrored_clone_in_both_scopes`)**
 
 - `prepare_session_resources` (`sessions.rs:439`) → `inherit_and_ensure_default_layout`
   (`resources.rs:1175`) вызывается на `POST /sessions` (551) и `quick` (642); в `edit_linked`,
@@ -304,7 +306,7 @@ DEL  /api/v3/ui/conferences/<cid>                             → 204 (purge)
 |---|---|---|---|---|---|
 | 1 | `type` immutable в `update_resource` | `1320–1341`; **+9** (есть) | низкий | mode-endpoint обходит; старый кэш-UI «сохраняет» constructor в «Общую» (semantic drift); нужен п. 8 | **обязательно** (есть) |
 | 2 | 422 при смене `type` в `edit_linked` | `1648+`; **+12** | средний | ломает 200-контракт и save-flow у клиентов со старым бандлом; вендорский `applyChanges` покажет ошибку | **не делать** |
-| 3 | durable-ремонт `repair_scope_defaults` (retype alias-клона + дедуп) | `717–766`; **+~50** (есть) | **средний/высокий по данным** | перетипирует пользовательскую individual-раскладку в «Общую»; имя скрывается computed'ом; `hasIndividualLayout`/меню абонента меняют смысл; исход зависит от порядка рестартов (§A5) | **есть; требует решения по политике** |
+| 3 | durable-ремонт `repair_scope_defaults` (retype alias-клона + дедуп) | `777–826`; **+~50** (есть) | **средний/высокий по данным** | перетипирует пользовательскую individual-раскладку в «Общую»; имя скрывается computed'ом; `hasIndividualLayout`/меню абонента меняют смысл; после `f8f3f91` исход детерминирован (A5 — pre-fix снимок) | **есть; политика принята** |
 | 4 | `ensure` после каждого COW/detach | `edit_linked`/`mode`/`attach*/detach*`; **+15–25** | средний | наивная версия (canonical) даёт **две** «Общие»; нужно дедуплицировать | **не нужно**: identity по типу (п. 9) + durable (3) закрывают |
 | 5 | frontend: не форсить `type` | `codian-layouts.js` **−2** (есть) | низкий | без п. 8 constructor-на-«Общей» делает «Общую» кастомной (имя скрыто) — теперь это осознанная политика | **обязательно как гигиена** (есть) |
 | 6 | vendor guard `(…||[])` | `index6:720524,913248`; `index-legacy6:842451,1032809`; скрипт **+142 строки** (есть) | низкий runtime / высокий maintenance | апгрейд вендора теряет патч; нужен `--check` в CI + MANIFEST | **обязательно как страховка** (есть), P2 |
@@ -433,7 +435,8 @@ DEL  /api/v3/ui/conferences/<cid>                             → 204 (purge)
    «починить одну строку» недостаточно.
 3. **«ensure только на старте ⇒ инвариант не поддерживается» — верно лишь для живой сессии.**
    Рестарт сессию **чинит** (наследование canonical), конференцию — нет. Более того, durable-ремонт
-   при рестарте сервера решает иначе, чем рестарт сессии: **исход зависит от порядка** (§A5), поэтому
+   при рестарте сервера решает иначе, чем рестарт сессии: **исход зависел от порядка** (§A5 —
+   pre-fix снимок; после `f8f3f91` repair room-scoped и детерминирован), поэтому
    «рестарт» нельзя предлагать как ремонт без фиксации политики.
 4. **Инвариант «ровно одна canonical default» в прежней формулировке противоречив.** «Общая» —
    редактируемая: её payload может уехать от канона. Держать identity по точному payload = дубли после
