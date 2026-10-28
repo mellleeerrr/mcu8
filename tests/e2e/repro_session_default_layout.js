@@ -45,6 +45,12 @@
  *       Это самый честный «после фикса»-режим: не зависит от того, запретил ли бэкенд
  *       менять payload.type.
  *
+ * Важно: если бэкенд уже иммутабелен (PATCH payload.type не меняет), боевой flip
+ * битый scope не создаёт. Тогда скрипт сам инжектит то же клиентское состояние на
+ * границе API (route вырезает type=default из ответа списка) и помечает
+ * `flip.forced = "api-route-strips-default"` в result.json. Это не меняет стенд —
+ * только ответы, видимые браузеру прогона.
+ *
  * Коды возврата:
  *   без флага       — 0 если крэш воспроизведён, 1 если нет (и при любой ошибке сценария);
  *   --expect-clean  — 0 если крэш НЕ воспроизведён и сценарий реально отработал, иначе 1.
@@ -222,6 +228,7 @@ async function installLegacyBundleRoute(context) {
  * (--legacy-bundle) падение здесь и есть доказательство чувствительности теста.
  */
 async function installBrokenLayoutsRoute(context) {
+  bundleState.layout_route_installed = true;
   await context.route('**/api/v3/ui/sessions/*/video_layouts*', async route => {
     const request = route.request();
     if (request.method() !== 'GET') return route.continue();
@@ -578,18 +585,24 @@ async function stopSipbot(bot) {
     check('diagnostic: flip outcome (default retained = backend immutable, absent = mutable)',
       hasDefault(layouts) || brokenScope,
       JSON.stringify({ types: flip.scope_after, immutable: flip.immutable }));
-    if (EXPECT_CLEAN && !GUARD_ONLY) {
-      // Пост-фикс сценарий допускает оба состояния бэкенда. Если default остался
-      // (иммутабельность уже ввели) — UI проверяется базовой линией; если пропал —
-      // проверяется guard. Для сильной проверки guard'а: --expect-clean --guard-only.
-      check('session: layout scope state is well-formed after flip',
-        hasDefault(layouts) || brokenScope,
-        JSON.stringify(flip.scope_after));
+
+    // Если бэкенд уже иммутабелен (payload.type не меняется), боевой PATCH битый
+    // scope не создаёт. Тогда нужное клиенту состояние (список session-раскладок
+    // без type=default) инжектится на границе API — тот же дефект, тот же рендер.
+    if (!brokenScope) {
+      await installBrokenLayoutsRoute(context);
+      flip.forced = 'api-route-strips-default';
     } else {
-      // До фикса (или при --legacy-bundle) нужен именно битый scope.
-      check('crash-arm: session scope has no default, only individual', brokenScope,
-        JSON.stringify({ types: flip.scope_after, immutable: flip.immutable }));
+      flip.forced = null;
     }
+    const armed = brokenScope || Boolean(bundleState.layout_route_installed);
+    check('crash-arm: session scope broken (API flip or client-side list injection)', armed,
+      JSON.stringify({
+        types: flip.scope_after,
+        immutable: flip.immutable,
+        forced: flip.forced,
+        layout_injection: bundleState.layout_injection || null,
+      }));
 
     // ── 8. Перезагрузка страницы: connected-строка + битый default ─────────
     crashArmed = true;
