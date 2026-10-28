@@ -1813,7 +1813,12 @@ async fn t00_reattach_after_cow_is_idempotent() {
         StatusCode::NO_CONTENT,
         "повторный attach уже привязанного оригинала в конференцию — no-op"
     );
-    // В session-view по-прежнему ровно одна «Общая».
+    // В session-view ровно одна «Общая»; session-links не размножились, active — клон.
+    {
+        let resources = state.api_v3.resources.lock().await;
+        assert_eq!(resources.links[&sess_key], vec![clone_id.clone()], "session-links без дубля");
+        assert_eq!(resources.active_layouts[&sess_key], clone_id.clone(), "active остаётся клоном");
+    }
     let response = list_linked(
         State(state.clone()),
         Extension(operator()),
@@ -1828,6 +1833,60 @@ async fn t00_reattach_after_cow_is_idempotent() {
         items.iter().filter(|item| item["payload"]["type"] == "default").count(),
         1,
         "COW-клон и оригинал — одна видимая «Общая»: {items:?}"
+    );
+}
+
+/// Alias-aware guard: оригинал и COW-клон — одна видимая «Общая», но только
+/// они; любой третий genuine default по-прежнему 409.
+#[tokio::test]
+async fn t00_alias_equivalent_default_is_not_second() {
+    let state = state();
+    let room = Rooms::create_async(&state, "alias equivalent default").await.unwrap();
+    let canonical = create_layout(&state, "", json!({"type":"default"})).await;
+    // payload отличается от canonical seed, иначе create переиспользует seed.
+    let clone = create_layout(
+        &state,
+        "Clone",
+        json!({"type":"default","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    let sess_key = format!("sessions:{}:video_layouts", room.id);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.links.insert(sess_key.clone(), vec![clone.clone()]);
+        resources.layout_aliases.insert(format!("{sess_key}|{canonical}"), clone.clone());
+    }
+    // Оригинал в конференцию при alias-эквивалентном клоне в сессии — 204.
+    assert_eq!(attach_to(&state, &room, &canonical).await, StatusCode::NO_CONTENT);
+    // А третий default — настоящая вторая «Общая» — 409.
+    let third = create_layout(&state, "Third", json!({"type":"default"})).await;
+    assert_eq!(attach_to(&state, &room, &third).await, StatusCode::CONFLICT);
+}
+
+/// Guard сканирует ВСЕ default, а не только первый: в уже-невалидном scope
+/// [alias-default, genuine-default] первый не должен маскировать второй.
+#[tokio::test]
+async fn t00_conflict_scan_does_not_stop_at_alias_first_default() {
+    let state = state();
+    let room = Rooms::create_async(&state, "scan all defaults").await.unwrap();
+    let canonical = create_layout(&state, "", json!({"type":"default"})).await;
+    let named = create_layout(&state, "Named default", json!({"type":"default"})).await;
+    let clone = create_layout(
+        &state,
+        "Clone",
+        json!({"type":"default","mode":"manual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    let sess_key = format!("sessions:{}:video_layouts", room.id);
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.links.insert(sess_key.clone(), vec![canonical.clone(), named.clone()]);
+        resources.layout_aliases.insert(format!("{sess_key}|{canonical}"), clone.clone());
+    }
+    assert_eq!(
+        attach_session_to(&state, &room, &clone).await,
+        StatusCode::CONFLICT,
+        "genuine default за alias-эквивалентным первым всё равно конфликт"
     );
 }
 

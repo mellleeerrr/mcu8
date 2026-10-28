@@ -706,15 +706,6 @@ fn is_default_layout(resources: &ResourceState, id: &str) -> bool {
     resources.layouts.get(id).is_some_and(|layout| layout["payload"]["type"].as_str() == Some("default"))
 }
 
-/// Другая «Общая», уже привязанная к scope (`None` — конфликта нет).
-/// Второй `type=default` в одном scope — stuck-state: detach/DELETE обоих дают
-/// 409, а UI показывает две «Общие» (forensics, путь #8).
-fn other_attached_default(resources: &ResourceState, scope_key: &str, resource_id: &str) -> Option<String> {
-    resources.links.get(scope_key).and_then(|ids| {
-        ids.iter().find(|id| id.as_str() != resource_id && is_default_layout(resources, id.as_str())).cloned()
-    })
-}
-
 /// Парный scope того же room: `sessions:R:kind` ↔ `conferences:R:kind`.
 fn sibling_scope(scope_key: &str) -> Option<String> {
     let mut parts = scope_key.splitn(3, ':');
@@ -733,8 +724,17 @@ fn sibling_scope(scope_key: &str) -> Option<String> {
 /// COW-клон — одна видимая раскладка (после правки «Общей» в сессии в links
 /// сессии клон, в конференции оригинал), второй «Общей» они не образуют.
 fn conflicts_with_default(resources: &ResourceState, scope_key: &str, resource_id: &str) -> Option<String> {
-    other_attached_default(resources, scope_key, resource_id).filter(|existing| {
-        resolve_layout_alias(resources, scope_key, existing) != resolve_layout_alias(resources, scope_key, resource_id)
+    // Сканируем ВСЕ default в scope: если первый окажется alias-эквивалентным
+    // запрошенному, более поздний genuine default всё равно должен дать 409.
+    let resolved = resolve_layout_alias(resources, scope_key, resource_id);
+    resources.links.get(scope_key).and_then(|ids| {
+        ids.iter()
+            .find(|id| {
+                id.as_str() != resource_id
+                    && is_default_layout(resources, id.as_str())
+                    && resolve_layout_alias(resources, scope_key, id.as_str()) != resolved
+            })
+            .cloned()
     })
 }
 
