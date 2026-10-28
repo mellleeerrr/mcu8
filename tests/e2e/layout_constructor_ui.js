@@ -269,6 +269,8 @@ async function api(token, method, path, body) {
     const iconMismatch = serverIcons.filter((icon) => {
       const got = rendered[icon.mode] || { rects: 0, viewBox: [] };
       return got.rects !== icon.count
+        || Math.abs((got.viewBox[0] || 0)) > 0.01
+        || Math.abs((got.viewBox[1] || 0)) > 0.01
         || Math.abs((got.viewBox[2] || 0) - icon.maxX) > 0.01
         || Math.abs((got.viewBox[3] || 0) - icon.maxY) > 0.01
         || JSON.stringify(got.boxes) !== JSON.stringify(icon.rects);

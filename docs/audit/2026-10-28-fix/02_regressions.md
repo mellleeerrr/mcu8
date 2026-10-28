@@ -34,7 +34,8 @@ backend (`crates/vks-admin/src/api_v3/resources.rs`, `shell.rs`), project-сло
 - `cargo fmt --all -- --check` — ok.
 - `cargo clippy -p vks-admin --locked --all-targets -- -D warnings` — ok.
 - `cargo test -p vks-admin --lib` — **304 passed, 0 failed** (в т.ч. 7 `t00_*`; срез 18:12). На `f8589dd`
-  — 311 passed/14 `t00_*`, на HEAD `ff8e73c` — **313 passed/16 `t00_*`** (после scan-all guard):
+  — 311 passed/14 `t00_*`, на Rust-HEAD `ff8e73c` — **313 passed/16 `t00_*`** (после scan-all guard; поздние
+  JS/docs-коммиты счётчики не меняют):
   `t00_layout_type_is_immutable_and_session_keeps_default_after_edit`,
   `t00_normalize_loaded_restores_default_from_alias_evidence`,
   `t00_normalize_loaded_dedupes_two_defaults_keeping_active`,

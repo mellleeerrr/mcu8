@@ -462,7 +462,7 @@ suffix «последние 36») → фильтр `:1773`. Фикс: один �
 
 ---
 
-## 8. Ход исполнения (обновление 2026-10-28 20:50 MSK; снимок писался на `0c83d6e`, затем `f8589dd`…`d401006`)
+## 8. Ход исполнения (обновление 2026-10-28 21:25 MSK; снимок писался на `0c83d6e`, затем `f8589dd`…`27e7348`)
 
 | Stage | Статус | Коммиты / доказательства |
 |---|---|---|
@@ -479,7 +479,7 @@ suffix «последние 36») → фильтр `:1773`. Фикс: один �
 | S10 шлюзы audio/DTMF | **не начато** | по плану — только после изолированного контура (живой 8080 не трогать) |
 | S11 финал/релиз | **гейты, без рестарта** | `cargo test --workspace --locked` — 49/49 ok; network_integration 23/23; clippy/fmt clean; release собран 19:21; MANIFEST 214/214; Playwright: guard clean/legacy, parity, constructor 20/20. Живой бинарь (PID 1814143) **не перезапускался** — нужен согласованный restart-gate |
 
-**Найденные по ходу ревью дефекты, закрытые вне исходного плана:** ложнозелёные e2e — provenance иконок (`0c83d6e`) и pageerror: allowlist по форме оказался обходим crafted-объектом; итог — перехват `window.reportError` с проверкой провенанса (axios `config.url=…/calculate`, `config.data` с `preset_default_13`) и требованием «0 pageerror, ровно 1 400, ровно 1 разрешённый reportError, 0 неожиданных» (`d401006`; негативные контроли — injected Error, пустые slots, craft-объект, лишний 400, задержанный/скрытый reportError — все exit 1), двойной `select()` Codian (`951e68b`), JWT в argv bench (`951e68b`, `f3009ff`), метрики: неверный Bearer глушил корректный `X-Metrics-Token`, stale target dir с `CARGO_MANIFEST_DIR=/tmp/...` (чинится `cargo clean -p vks-gateway-h323`).
+**Найденные по ходу ревью дефекты, закрытые вне исходного плана:** ложнозелёные e2e — provenance иконок (`0c83d6e`) и pageerror: allowlist по форме оказался обходим crafted-объектом; итог — `window.reportError` устанавливается неизменяемым (`writable:false, configurable:false`) в каждом фрейме, вызовы классифицируются по провенансу axios (`config.url=…/calculate`, `config.data` с `preset_default_13`), счётчики суммируются по всем фреймам; требование «0 pageerror, ровно 1 400, ровно 1 разрешённый reportError, 0 неожиданных» (`27e7348`; негативные контроли — injected Error, пустые slots, craft-объект, лишний 400, wrapper после init, подделка config, задержка вендорского вызова, reportError из iframe — все exit 1), двойной `select()` Codian (`951e68b`), JWT в argv bench (`951e68b`, `f3009ff`), метрики: неверный Bearer глушил корректный `X-Metrics-Token`, stale target dir с `CARGO_MANIFEST_DIR=/tmp/...` (чинится `cargo clean -p vks-gateway-h323`).
 
 ## Вердикт
 
