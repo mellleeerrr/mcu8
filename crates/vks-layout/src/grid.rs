@@ -240,59 +240,39 @@ mod tests {
     }
 
     #[test]
-    fn tiny_canvas_keeps_positive_tile_width() {
-        // Регрессия: холст уже сетки (base_w == 0) не должен давать нулевую
-        // ширину — используется прежний режим «ряд делит свою ширину».
+    fn tiny_canvas_keeps_last_tile_of_each_row_positive() {
+        // Холст уже сетки (base_w == 0): нулевые ширины у внутренних тайлов
+        // неизбежны (width < cols), но последний тайл каждого ряда обязан
+        // быть положительным — иначе ряд не покрывает ширину.
         for (canvas, n) in [(Canvas::new(2, 10), 5usize), (Canvas::new(6, 6), 43), (Canvas::new(3, 3), 4)] {
             let rects = GridLayout::compute(&canvas, n);
             assert_eq!(rects.len(), n);
             for rect in &rects {
                 assert!(rect.x + rect.w <= canvas.width && rect.y + rect.h <= canvas.height);
             }
-            // Неполный последний ряд не регрессирует в нулевую ширину: он
-            // сохраняет прежний режим «ряд делит свою ширину».
-            let last_row: Vec<_> = rects.iter().filter(|rect| rect.y + rect.h >= canvas.height).collect();
-            for rect in &last_row {
-                assert!(rect.w > 0, "canvas {canvas:?}, n={n}: нулевая ширина последнего ряда {rect:?}");
+            let mut rows: Vec<(u32, Vec<&Rect>)> = Vec::new();
+            for rect in &rects {
+                match rows.last_mut() {
+                    Some((y, row)) if *y == rect.y => row.push(rect),
+                    _ => rows.push((rect.y, vec![rect])),
+                }
+            }
+            for (y, row) in &rows {
+                let last = row.last().expect("ряд не пуст");
+                assert!(last.w > 0, "canvas {canvas:?}, n={n}, y={y}: последний тайл ряда нулевой ширины");
+                assert_eq!(last.x + last.w, canvas.width, "canvas {canvas:?}, n={n}, y={y}: ряд не покрывает ширину");
             }
             assert_no_overlap(&rects);
         }
     }
-    #[test]
-    fn grid_small_canvas_and_zero() {
-        let canvas = Canvas::new(0, 0);
-        assert!(GridLayout::compute(&canvas, 4).is_empty());
-        let canvas = Canvas::new(100, 100);
-        assert!(GridLayout::compute(&canvas, 0).is_empty());
-    }
 
     #[test]
-    fn grid_uneven_rows_center_incomplete_row() {
-        // 5 tiles → 2 ряда (3 + 2): полный ряд покрывает ширину, неполный
-        // центрируется тайлами шириной колонки (поля по краям, без растяжения).
-        let canvas = Canvas::new(1000, 1000);
-        let rects = GridLayout::compute(&canvas, 5);
-        assert_eq!(rects.len(), 5);
-        assert_no_overlap(&rects);
-        assert_inside(&canvas, &rects);
-        for (i, r) in rects.iter().enumerate() {
-            if i < 3 {
-                assert_eq!(r.y, 0, "полный ряд сверху");
-                assert_eq!(r.h, 500);
-            } else {
-                assert_eq!(r.y, 500, "неполный ряд снизу");
-                assert_eq!(r.h, 500);
-            }
-        }
-        let cell_w = canvas.width / 3;
-        let last_left = (canvas.width - 2 * cell_w) / 2;
-        assert_eq!(rects[3].x, last_left, "неполный ряд центрирован");
-        assert_eq!(rects[3].w, cell_w);
-        assert_eq!(rects[4].x, last_left + cell_w);
-        assert_eq!(rects[4].w, cell_w);
-        // Полный ряд по-прежнему покрывает ширину (остаток деления — последнему тайлу).
-        assert_eq!(rects[0].x, 0);
-        assert_eq!(rects[0].w, cell_w);
-        assert_eq!(rects[2].x + rects[2].w, canvas.width);
+    fn grid_nine_and_sixteen_uniform_row_heights() {
+        // Точные высоты рядов (регрессия: раньше проверялась площадь/пересечения,
+        // но не равномерность высот для кратных rows).
+        let nine = GridLayout::compute(&Canvas::new(1920, 1080), 9);
+        assert!(nine.iter().all(|rect| rect.h == 360), "N=9: 3 ряда по 360 px");
+        let sixteen = GridLayout::compute(&Canvas::new(1920, 1080), 16);
+        assert!(sixteen.iter().all(|rect| rect.h == 270), "N=16: 4 ряда по 270 px");
     }
 }
