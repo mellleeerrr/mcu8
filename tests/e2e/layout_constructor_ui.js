@@ -80,16 +80,33 @@ async function api(token, method, path, body) {
         status: (error && error.response && error.response.status) || 0,
         stack: error && error.stack ? String(error.stack).slice(0, 300) : '',
       };
-      // Единственный допустимый pageerror — вендорский reportError от calculate
-      // `preset_default_13` (400 по контракту). Допускаем его ТОЛЬКО в окне 3 с
-      // после реального 400-ответа и не более одного на ответ; любой другой
-      // pageerror (в т.ч. ручного режима) обязан провалить тест.
       pageErrors.push(JSON.stringify(detail));
     });
     page.on('console', (message) => {
       if (message.type() !== 'error') return;
       const text = message.text();
       if (/hasIndividualLayout|sessionLayoutListByType/.test(text)) crashes.push(text);
+    });
+    // Вендорский auto-превью шлёт calculate с `preset_default_13` (400 по
+    // контракту) и сообщает об ошибке через window.reportError. Перехватываем
+    // ЛЮБОЙ вызов reportError и проверяем его ПРОВЕНАНС: допустим ровно один
+    // вызов, и это должен быть axios-ошибка именно этого запроса (config.url +
+    // preset в config.data). Любой другой вызов (в т.ч. crafted-объект) —
+    // fail; allowlist по форме ошибки/окну времени не используется.
+    await context.addInitScript(() => {
+      window.__vendorReported = 0;
+      window.__unexpectedReported = 0;
+      window.reportError = (error) => {
+        let expected = false;
+        try {
+          const config = error && error.config;
+          expected = Boolean(config)
+            && /\/video_layouts\/calculate/.test(String(config.url || ''))
+            && String(config.data || '').includes('preset_default_13');
+        } catch (e) { expected = false; }
+        if (expected) window.__vendorReported += 1;
+        else window.__unexpectedReported += 1;
+      };
     });
     const calculateResponses = [];
     page.on('request', (request) => {
@@ -136,10 +153,8 @@ async function api(token, method, path, body) {
     await ctorTab.waitFor({ state: 'attached', timeout: 15000 });
     await ctorTab.click();
     await page.waitForTimeout(1500);
-    // Переход в manual перерисовывает вендорский LayoutGridConfigurator,
-    // который ещё шлёт calculate с auto-пресетом (`preset_default_13` → 400 по
-    // контракту сервера) и роняет vendor reportError. Это pre-existing фон, не
-    // связанный с нашим переключением; принимаем только его.
+    // Переход в manual перерисовывает вендорский LayoutGridConfigurator;
+    // его auto-пресет preset_default_13 даёт 400 и перехваченный reportError.
 
     const state = await page.evaluate(() => {
       const panel = document.querySelector('[data-vks-constructor="1"]');
@@ -272,16 +287,16 @@ async function api(token, method, path, body) {
     check('карточка pin_l активна', active.pressed === 'true' || active.active, JSON.stringify(active));
     check('счётчик остался 12 после клика', active.counter === '12', `${active.counter}`);
     check('нет crash-сигнатур в консоли', crashes.length === 0, crashes.slice(0, 2).join(' | '));
-    // Вендорский auto-превью один раз шлёт calculate preset_default_13 → 400
-    // и один reportError с объектом {log:[],name:""}. Это ЕДИНСТВЕННАЯ
-    // допустимая ошибка: ровно один 400 и ровно один pageerror ровно этой
-    // формы. Любая лишняя ошибка/лишний 400 (в т.ч. crafted-бросок) — fail;
-    // allowlist «в окне после любого 400» не используется.
-    const vendorShaped = pageErrors.length === 1
-      && pageErrors[0].includes('"message":"Object"') && pageErrors[0].includes('"name":""');
-    check('pageerror только вендорский (ровно один 400 preset_default_13 и один reportError)',
-      vendor400Count === 1 && vendorShaped,
-      `pageerrors: ${pageErrors.slice(0, 2).join(' | ')}; 400: ${vendor400Count}`);
+    // Ни один pageerror не допустим: вендорский шум перехвачен на
+    // window.reportError и посчитан отдельно; любой неперехваченный бросок
+    // (в т.ч. crafted-объект) обязан провалить тест.
+    const reported = await page.evaluate(() => ({
+      expected: Number(window.__vendorReported || 0),
+      unexpected: Number(window.__unexpectedReported || 0),
+    }));
+    check('нет pageerror; ровно один reportError и он от axios preset_default_13',
+      pageErrors.length === 0 && vendor400Count === 1 && reported.expected === 1 && reported.unexpected === 0,
+      `pageerrors: ${pageErrors.slice(0, 2).join(' | ')}; 400: ${vendor400Count}; reportError: ${JSON.stringify(reported)}`);
     check('превью и иконки идут только серверным calculate', calculate.length >= 7);
   } catch (error) {
     failure = String(error && error.stack ? error.stack : error);
