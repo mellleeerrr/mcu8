@@ -479,7 +479,7 @@ suffix «последние 36») → фильтр `:1773`. Фикс: один �
 | S10 шлюзы audio/DTMF | **не начато** | по плану — только после изолированного контура (живой 8080 не трогать) |
 | S11 финал/релиз | **гейты, без рестарта** | `cargo test --workspace --locked` — 49/49 ok; network_integration 23/23; clippy/fmt clean; release собран 19:21; MANIFEST 214/214; Playwright: guard clean/legacy, parity, constructor 20/20. Живой бинарь (PID 1814143) **не перезапускался** — нужен согласованный restart-gate |
 
-**Найденные по ходу ревью дефекты, закрытые вне исходного плана:** ложнозелёные e2e (pageerror-whitelist и provenance иконок — `0c83d6e`), двойной `select()` Codian (`951e68b`), JWT в argv bench (`951e68b`, `f3009ff`), метрики: неверный Bearer глушил корректный `X-Metrics-Token`, stale target dir с `CARGO_MANIFEST_DIR=/tmp/...` (чинится `cargo clean -p vks-gateway-h323`).
+**Найденные по ходу ревью дефекты, закрытые вне исходного плана:** ложнозелёные e2e — provenance иконок (`0c83d6e`) и pageerror: allowlist по форме оказался обходим crafted-объектом, заменён на строгую квоту «ровно один 400 `preset_default_13` + ровно один pageerror вендорской формы» (`60b11b1`, негативные контроли: лишний 400, craft-объект, craft-Error, пустые slots — все exit 1), двойной `select()` Codian (`951e68b`), JWT в argv bench (`951e68b`, `f3009ff`), метрики: неверный Bearer глушил корректный `X-Metrics-Token`, stale target dir с `CARGO_MANIFEST_DIR=/tmp/...` (чинится `cargo clean -p vks-gateway-h323`).
 
 ## Вердикт
 

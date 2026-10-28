@@ -5,10 +5,10 @@ backend (`crates/vks-admin/src/api_v3/resources.rs`, `shell.rs`), project-сло
 (`client/pnm-frontend/deployed/pnm/codian-layouts.js`) и вендорский бандл
 (`scripts/patch-pnm-layout-crash.py` + `MANIFEST.sha256`).
 
-**Актуальность:** таблица §2 обновлена после T1/T2/M1 (`26c300a`, `d039104`); разделы 5–7 —
-снимок анализа **до** фиксов (`f8f3f91`/`22aac56`), их формулировки «сейчас pristine»,
-«демотирует», «порядок рестартов» относятся к pre-fix поведению и опровергнуты кодом/тестами
-(`t00_*`). Для любого непустого `*:video_layouts` scope в session-ответе UI есть **ровно одна**
+**Актуальность:** таблица §2 обновлена после T1/T2/M1 (`26c300a`…`f3009ff`); разделы **1 и 5–7** —
+снимок анализа **до** фиксов (18:00, `f8f3f91`/`22aac56`), их формулировки «клиент перестал
+спрашивать сервер», «сейчас pristine», «демотирует», «порядок рестартов» относятся к pre-fix
+поведению и опровергнуты кодом/тестами (`t00_*`). Для любого непустого `*:video_layouts` scope в session-ответе UI есть **ровно одна**
 раскладка с `payload.type == "default"`; `payload.type` существующей раскладки
 иммутабелен; при COW «Общая» клонируется с `type=default`. Тогда
 `sessionLayoutListByType.default` всегда определён и `hasIndividualLayout()` /
@@ -33,7 +33,8 @@ backend (`crates/vks-admin/src/api_v3/resources.rs`, `shell.rs`), project-сло
 
 - `cargo fmt --all -- --check` — ok.
 - `cargo clippy -p vks-admin --locked --all-targets -- -D warnings` — ok.
-- `cargo test -p vks-admin --lib` — **304 passed, 0 failed** (в т.ч. 7 `t00_*`):
+- `cargo test -p vks-admin --lib` — **304 passed, 0 failed** (в т.ч. 7 `t00_*`; на HEAD `f8589dd` —
+  **311 passed**, 14 `t00_*`):
   `t00_layout_type_is_immutable_and_session_keeps_default_after_edit`,
   `t00_normalize_loaded_restores_default_from_alias_evidence`,
   `t00_normalize_loaded_dedupes_two_defaults_keeping_active`,
@@ -92,7 +93,7 @@ backend (`crates/vks-admin/src/api_v3/resources.rs`, `shell.rs`), project-сло
 инвариант «Общей»; часть B — регрессии остального коммита (фокус: цепочка UI↔calculate↔apply,
 серверные инварианты, дубли, тесты). Все измерения — по коду/фикстурам; живой API только чтение.
 
-## 1. TL;DR и оценка
+## 1. TL;DR и оценка (pre-fix снимок 18:00; R-01/R-02 закрыты в T2 — статусы в §2)
 
 Крэш и потеря «Общей» **закрыты по существу** (T1 подтвердил e2e: `--expect-clean`, `--guard-only`,
 `--legacy-bundle`; `payload.type` иммутабелен, guard `(…||[])` в обоих бандлах). Но в этой же дельте
@@ -110,7 +111,7 @@ backend (`crates/vks-admin/src/api_v3/resources.rs`, `shell.rs`), project-сло
    (`compositor.rs:108`). Тест `pin_отдаёт_крупному_больше_половины_а_миниатюры_16_9`
    (`tests/grids.rs:114`) сохранил имя и doc-комментарий, но проверку `|ratio−16/9|<0.06` из него удалили.
 3. **P2. `repair_scope_defaults` отключает собственный retype ровно в массовом сценарии.**
-   `target_is_local` (`resources.rs:777`) ложен, когда COW-клон «Общей» виден и в конференции, и в сессии
+   `target_is_local` (`resources.rs:786–789`) ложен, когда COW-клон «Общей» виден и в конференции, и в сессии
    (а `cow_replace` mirror-ит сессию, `:648–660`). Тогда шаг 1 не перетипирует клон, шаг 2 добавляет
    pristine-канон и `keep` выбирает его, а не активный клон → после рестарта отредактированная «Общая»
    исчезает из scope. Комментарий `:728–730` при этом утверждает «это делаем всегда».
@@ -131,7 +132,7 @@ backend (`crates/vks-admin/src/api_v3/resources.rs`, `shell.rs`), project-сло
 |---|-----|-----|----------------|------------------|-----|
 | R-01 | **P1** | `codian-layouts.js:715`, `:1690–1730`, `:1759–1830` | `var cols = Math.ceil(Math.sqrt(count*(16/9)/(canvasW/canvasH)));` vs `grids.rs:271–279` `deviation=(aspect−16/9).abs()*100; waste=(cols*rows−count)*20` → 36/100 сеток расходятся: `43,44,45,50–54,57–60,65–70,73–77,82–88,91–96`. `vks_grid_43`: JS 7×7 (183×103), Rust 9×5 (142×144), чёрного 12.5 % vs 46.9 %; `vks_grid_50`: 8×7 (160×103) vs 10×5 (128×144), 21.9 % vs 50.0 %. На 543bc7b расхождения не было: вендор получал серверный ответ (`loadConstructor`, 6 запросов), перехвата не было. | Удалить синтез и перехват (вернуть `loadConstructor`), либо портировать `gallery_cost` в JS дословно **и** добавить parity-тест N=1..100×6 режимов. **Статус: закрыто в T2** — движок и оба перехвата удалены (−430 строк), клиент рисует иконки из `calculate`; `tests/e2e/layout_geometry_parity.js` + `tests/e2e/layout_constructor_ui.js` фиксируют серверный источник. | −420/+48 (сделано) |
 | R-02 | P2 | `codian-layouts.js:623`, `:1450`, `:248`, `:1183`, `:1030`, `:1723` | `/^vks_[a-z0-9_]+_(\d+)$/` и захват `([a-z0-9_]+)` принимают `vks_grid_g12_m24_25`; `buildSymmetricLayout` не имеет ветки для `grid_g12_m24` → `computeSlots` возвращал `[]` (пустой стор/вечный прелоадер; воспроизводимого TypeError в этой ветке нет). Сервер опции поддерживает (`grids.rs:9–11`). | Нормализовать опции: `arch = arch.replace(/_g\d+(_m\d+)?$/, '')` + переносить `g/m` в `GridOptions`; тест на `vks_grid_g12_m24_25`. **Статус: закрыто в T2** — локального парсера нет, канонические опции считает сервер, неканонические id UI не создаёт. | 10 (сделано) |
-| R-03 | P2 | `resources.rs:777`, `:781`, `:788–795` | `let target_is_local = resources.links.iter().all(|(scope, ids)| scope == &key \|\| !ids.contains(target) \|\| scope.split(':').nth(1) == room);` + `cow_replace` mirror (`:648–660`) → при живой сессии клон в обоих scope → retype пропущен → `defaults` = [pristine] → `ids.retain(... keep)` выкидывает клон, `keep` = pristine (active-клон не в defaults). Комментарий `:728–730`: «Это делаем всегда». **Статус: закрыто `f8f3f91`** — `target_is_local` остался (это не удаление), но теперь клоны
+| R-03 | P2 | `resources.rs:777`, `:786–789`, `:822` | `let target_is_local = resources.links.iter().all(|(scope, ids)| scope == &key \|\| !ids.contains(target) \|\| scope.split(':').nth(1) == room);` + `cow_replace` mirror (`:648–660`) → при живой сессии клон в обоих scope → retype пропущен → `defaults` = [pristine] → `ids.retain(... keep)` выкидывает клон, `keep` = pristine (active-клон не в defaults). Комментарий `:728–730`: «Это делаем всегда». **Статус: закрыто `f8f3f91`** — `target_is_local` остался (это не удаление), но теперь клоны
 других комнат не считаются «своими»: `scope == &key || !ids.contains(target) || scope.split(':').nth(1) == room`.
 Retype по alias-доказательству выполняется для same-room mirror (конференция + живая сессия) и
 детерминирован: шаг 1 (`alias -> default`) не зависит от того, успел ли inherit добавить pristine-канон,
@@ -140,7 +141,7 @@ Retype по alias-доказательству выполняется для sam
 | R-04 | P2 | `resources.rs:1216–1236` | `if let Some(id) = session_default { ...; return; }` — возврат до учёта `conference_active`; вызов только при старте (`sessions.rs:448`), `stop_session` не чистит `active_layouts`/links. Смена раскладки на конференции при остановленной сессии не доедет до следующего старта. | Если сессия не была мостом/пользователь не менял active — `set_active(conference_active)`; зафиксировать политику и покрыть тестом «стоп→выбор на конф→старт». | 8 |
 | R-05 | P2 | `tests/e2e/test_layout_constructor.js:77`, `:345–380`, `:377` (файл удалён в T2) | На текущем стенде падает до ассертов: `locator('.conference-layouts-item')` timeout 30 s (у первой конференции нет раскладок; `addLayoutBtn.count()==0`). Оракул — `layout-editor.modifiedValue.slots` (та же JS-геометрия), а не DOM/`calculate`; `:377` закрепляет `256×180` (1.42) как «миниатюры 16:9». | Своя комната как в `repro_session_default_layout.js`; проверять bounding-box отрендеренных слотов против ответа сервера. | 60 |
 | R-06 | P2 | `tests/e2e/test_challenger*.js` (удалены в T2) | Скрипт падает `TypeError … reading '0'` (`function computeBalancedGrid` в JS нет); остальные ждут 15 карточек, в UI 6 (`CONSTRUCTOR_MODES`, e2e Step 2 ждёт 6). Файлы теперь в коммите, но ни один runner их не зовёт (03: H-08). | Удалить или переписать под 6 режимов и вписать в npm-скрипты. **Статус: сделано в T2** — 6 устаревших файлов удалены, вместо них `tests/e2e/layout_geometry_parity.js` (серверный контракт calculate для 6 режимов × 10 N + option-пресеты + статический guard «локального движка нет»). | −1200 |
-| R-07 | P3 | `codian-layouts.js:530–543` | `section.addEventListener('click', onActivate)` внутри `buildGroup`, а `ctorPanel.addEventListener('click', onSectionClick)` делегирует те же карточки → `select()` дважды за клик (и дважды за Enter: `onKeydown` + `onConstructorKeydown`). Раньше было идемпотентно, но `setSlots`/`syncCounter`/`ensureConstructor` вызывались дважды. | `event.stopPropagation()` в `onActivate`/`onKeydown`. **Статус: закрыто в `951e68b`** — ровно один `select`/`setSlots` на click/Enter/Space. | 4 |
+| R-07 | P3 | `codian-layouts.js:530–547` | `section.addEventListener('click', onActivate)` внутри `buildGroup`, а `ctorPanel.addEventListener('click', onSectionClick)` делегирует те же карточки → `select()` дважды за клик (и дважды за Enter: `onKeydown` + `onConstructorKeydown`). Раньше было идемпотентно, но `setSlots`/`syncCounter`/`ensureConstructor` вызывались дважды. | `event.stopPropagation()` в `onActivate`/`onKeydown`. **Статус: закрыто в `951e68b`** — ровно один `select`/`setSlots` на click/Enter/Space. | 4 |
 | R-08 | P3 | `codian-layouts.js:141`, `:574`, `:1734`, `:1746` | `constructorCount` — 1 вхождение; `__vksAborted` никогда не выставляется; `__vksSynthetic` никогда не читается; fallback `editValueField('slots', slots)` не только мёртв (в 2.2.1.66 есть `setSlots`), но и пишет массив в map `slots[preset]` → `T[preset]===undefined`. | Удалить. **Статус: частично в T2** — `constructorCount` удалён; `__vksAborted`/`__vksSynthetic` и fallback `editValueField('slots')` в `selectConstructor` удалены вместе с движком. | −10 (сделано) |
 | R-09 | P3 | `crates/vks-admin/src/api_v3/shell.rs:769`, `:805` | `"role": ui_slot_role(slot.z_order)` в calculate — вендор выбрасывает role (`Bee` в `index.bundle-2.2.1.66.js` мапит только `position,x,y,width,height,zIndex`), а наш перехватчик роль считает сам (`uiSlotRole`). Поле не нужно ни одному потребителю. | Убрать из calculate (оставить в presets/GET, где его читает `mI`). | −6 |
 | R-10 | P3 | `grids.rs:284–326`, `:328–358`; `tests/grids.rs:114–136` | Таблицы дают не-16:9 ячейки: 31/100 N на каждую pin-сторону (11–12: 768×540; 34–38: 366×240; 47–53; 74–82; 93–100) и 89/100 у dual (`vks_dual_2` 640×720 → 50 % чёрного, `3–6` 640×480 → 25–44 %). Композитор letterbox-ит (`compositor.rs:108–117`). Тест сохранил имя «…миниатюры 16:9» и doc-комментарий, но `ratio`-ассерт удалён (diff `@@ -112,22 +115,18 @@`), осталось `thumb ≤ main` и `main_area ≥ 3.5×thumb_area`. | Решить, что авторитетно: шапка `grids.rs:6–7` или letterbox-конвенция. Если 16:9 — править таблицы; если letterbox — переименовать тест/шапку и зафиксировать допустимый % чёрного. | 20 |
