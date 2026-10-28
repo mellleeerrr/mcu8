@@ -1026,6 +1026,17 @@ async fn attach_to(state: &SharedState, room: &crate::state::RoomRecord, layout_
     .status()
 }
 
+async fn attach_session_to(state: &SharedState, room: &crate::state::RoomRecord, layout_id: &str) -> StatusCode {
+    attach(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{layout_id}", room.id)),
+        Path((room.id.to_string(), layout_id.to_string())),
+    )
+    .await
+    .status()
+}
+
 #[tokio::test]
 async fn t02_attach_apply_sequence_uses_last_attached_without_reordering_links() {
     let dialer = Arc::new(RecordingLayoutDialer::default());
@@ -1772,6 +1783,52 @@ async fn t00_attach_second_default_is_conflict_per_scope() {
     // инвариант локальный, а не глобальный.
     let other = Rooms::create_async(&state, "attach second default other").await.unwrap();
     assert_eq!(attach_to(&state, &other, &named_default).await, StatusCode::NO_CONTENT);
+}
+
+/// M1-R2: после штатного COW-редактирования «Общей» в сессии (сессия — клон,
+/// конференция — оригинал, alias `session|C -> A`) повторный attach уже
+/// привязанного id идемпотентен (204) в обоих scope: это одна видимая
+/// раскладка, а не вторая «Общая».
+#[tokio::test]
+async fn t00_reattach_after_cow_is_idempotent() {
+    let state = state();
+    let room = Rooms::create_async(&state, "cow reattach").await.unwrap();
+    let canonical = create_layout(&state, "", json!({"type":"default"})).await;
+    assert_eq!(attach_to(&state, &room, &canonical).await, StatusCode::NO_CONTENT);
+    let sess_key = format!("sessions:{}:video_layouts", room.id);
+    // Живая сессия наследует «Общую», затем PATCH делает COW-клон в сессии.
+    let clone_id = {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.links.insert(sess_key.clone(), vec![canonical.clone()]);
+        let source = resources.layouts.get(&canonical).cloned().expect("canonical");
+        cow_replace(&mut resources, &sess_key, &canonical, source)
+    };
+    assert_eq!(
+        attach_session_to(&state, &room, &clone_id).await,
+        StatusCode::NO_CONTENT,
+        "повторный attach уже привязанного клона в сессию — no-op"
+    );
+    assert_eq!(
+        attach_to(&state, &room, &canonical).await,
+        StatusCode::NO_CONTENT,
+        "повторный attach уже привязанного оригинала в конференцию — no-op"
+    );
+    // В session-view по-прежнему ровно одна «Общая».
+    let response = list_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts", room.id)),
+        Path(room.id.to_string()),
+        Query(std::collections::HashMap::new()),
+    )
+    .await;
+    let body = body(response).await;
+    let items = body["video_layouts"].as_array().expect("video_layouts array");
+    assert_eq!(
+        items.iter().filter(|item| item["payload"]["type"] == "default").count(),
+        1,
+        "COW-клон и оригинал — одна видимая «Общая»: {items:?}"
+    );
 }
 
 /// M1 cross-scope: session-view — это union ссылок сессии и конференции

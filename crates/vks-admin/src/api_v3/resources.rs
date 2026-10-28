@@ -729,15 +729,24 @@ fn sibling_scope(scope_key: &str) -> Option<String> {
     Some(format!("{other}:{room}:{kind}"))
 }
 
+/// Конфликт «вторая Общая» в одном scope, с поправкой на alias: оригинал и его
+/// COW-клон — одна видимая раскладка (после правки «Общей» в сессии в links
+/// сессии клон, в конференции оригинал), второй «Общей» они не образуют.
+fn conflicts_with_default(resources: &ResourceState, scope_key: &str, resource_id: &str) -> Option<String> {
+    other_attached_default(resources, scope_key, resource_id).filter(|existing| {
+        resolve_layout_alias(resources, scope_key, existing) != resolve_layout_alias(resources, scope_key, resource_id)
+    })
+}
+
 /// Конфликт «вторая Общая» по ВИДИМОМУ scope: у сессии он union собственных
 /// ссылок и ссылок конференции (`list_linked`), поэтому guard обязан смотреть
 /// и в парный scope — иначе attach именованной «Общей» на конференции при
 /// живой сессии даёт две «Общие» в session-view и вечный 409 на detach/DELETE.
 fn other_visible_default(resources: &ResourceState, scope_key: &str, resource_id: &str) -> Option<String> {
-    if let Some(existing) = other_attached_default(resources, scope_key, resource_id) {
+    if let Some(existing) = conflicts_with_default(resources, scope_key, resource_id) {
         return Some(existing);
     }
-    sibling_scope(scope_key).and_then(|sibling| other_attached_default(resources, &sibling, resource_id))
+    sibling_scope(scope_key).and_then(|sibling| conflicts_with_default(resources, &sibling, resource_id))
 }
 
 /// Durable-ремонт инварианта «в непустом scope ровно одна „Общая“».
@@ -1963,6 +1972,23 @@ pub async fn attach(
     let resource_id = resolve_layout_alias(&resources, &scope_key, &resource_id);
     if !collection(&resources, kind).contains_key(&resource_id) {
         return error_json(404, "Resource not found");
+    }
+    // Повторный attach уже привязанной раскладки — идемпотентный no-op (204).
+    // Проверка обязана идти до guard'а «одна Общая»: в COW-состоянии сессия
+    // держит клон, конференция — оригинал, и guard по sibling scope иначе
+    // отдаёт 409 на законный повторный attach (контракт /api/v3 сломан).
+    if resources.links.get(&scope_key).is_some_and(|ids| ids.contains(&resource_id)) {
+        // Повторный attach — no-op по ссылкам, но «Применить» = сделать активной:
+        // A/B/A обязан оставить активной A и переопубликовать её в движок.
+        if kind == "video_layouts" {
+            set_active(&mut resources, &scope_key, &resource_id);
+            if let Err(response) = commit(&state, &mut resources, previous).await {
+                return response;
+            }
+            drop(resources);
+            super::sessions::push_layout_to_engine(&state, room.id).await;
+        }
+        return StatusCode::NO_CONTENT.into_response();
     }
     if kind == "video_layouts" {
         // Инвариант «одна „Общая“ на scope»: привязка второй default'ной

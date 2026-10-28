@@ -1979,7 +1979,9 @@ async fn test_step5_h323_rejects_invented_faststart_eof_and_timeout() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback terminal");
         let address = listener.local_addr().unwrap();
         let terminal = tokio::spawn(async move {
-            let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            // Запас на холодный старт python-sidecar (импорт pycrate): тест
+            // проверяет контракт негативного сценария, а не скорость спавна.
+            let (mut socket, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
                 .await
                 .expect("sidecar reached terminal")
                 .expect("accept");
