@@ -284,7 +284,7 @@ DEL  /api/v3/ui/conferences/<cid>                             → 204 (purge)
 | # | Scope | Триггер | Код | Что происходит | Крэш? |
 |---|---|---|---|---|---|
 | 1 | session | PATCH раскладки (UI save) при `owners>1` (conf+session) — **инцидент** | `edit_linked:1691`, `cow_replace:622` | clone замещает canonical в session-links, alias; canonical скрыт в `list_linked` | **да**, если в PATCH `type=individual` |
-| 2 | session | `POST /ui/video_layouts/mode` (вендорные тайлы режима) | `shell.rs:967` (type из body) + `1009` (COW) | COW + запись `type`; **не закрыто фиксом** | **да**, если клиент прислал `type=individual`; вендорный UI шлёт `originalValue.type` (`default`), старые кэши/API — могут `individual` |
+| 2 | session | `POST /ui/video_layouts/mode` (вендорные тайлы режима) | `shell.rs:967` (type из body) + `1009` (COW) | COW + запись `type`; **pre-fix** (закрыто: `shell.rs:962–966` type не переносит) | **да**, если клиент прислал `type=individual`; вендорный UI шлёт `originalValue.type` (`default`), старые кэши/API — могут `individual` |
 | 3 | session | attach/detach абонента в «Общей» при `owners>1` | `attach_layout_abonent:852` (COW 942), `detach_layout_abonent:954` (COW 996) | COW, `type` сохраняется | нет (после фикса типа); canonical payload теряется |
 | 4 | conference | PATCH «Общей» на экране конференции | `edit_linked:1691` + mirror `cow_replace:648–660` | clone в conference, mirror заменяет и session-link, alias в оба scope | **да** (воспроизведено): живая сессия теряет default |
 | 5 | conference | attach/detach контактов раскладки | `attach_layout_contact:1732` (COW 1777), `detach_layout_contact:1794` (COW 1825) | COW «Общей» при `owners>1`, тип сохраняется | нет; canonical payload теряется |
@@ -312,7 +312,7 @@ DEL  /api/v3/ui/conferences/<cid>                             → 204 (purge)
 
 | # | Исправление | Где / объём | Риск | Регрессии | Вердикт |
 |---|---|---|---|---|---|
-| 1 | `type` immutable в `update_resource` | `1320–1341`; **+9** (есть) | низкий | mode-endpoint обходит; старый кэш-UI «сохраняет» constructor в «Общую» (semantic drift); нужен п. 8 | **обязательно** (есть) |
+| 1 | `type` immutable в `update_resource` | `1320–1341`; **+9** (есть) | низкий | mode-endpoint (pre-fix; после фикса обход закрыт); старый кэш-UI «сохраняет» constructor в «Общую» (semantic drift); нужен п. 8 | **обязательно** (есть) |
 | 2 | 422 при смене `type` в `edit_linked` | `1648+`; **+12** | средний | ломает 200-контракт и save-flow у клиентов со старым бандлом; вендорский `applyChanges` покажет ошибку | **не делать** |
 | 3 | durable-ремонт `repair_scope_defaults` (retype alias-клона + дедуп) | `777–826`; **+~50** (есть) | **средний/высокий по данным** | перетипирует пользовательскую individual-раскладку в «Общую»; имя скрывается computed'ом; `hasIndividualLayout`/меню абонента меняют смысл; после `f8f3f91` исход детерминирован (A5 — pre-fix снимок) | **есть; политика принята** |
 | 4 | `ensure` после каждого COW/detach | `edit_linked`/`mode`/`attach*/detach*`; **+15–25** | средний | наивная версия (canonical) даёт **две** «Общие»; нужно дедуплицировать | **не нужно**: identity по типу (п. 9) + durable (3) закрывают |
@@ -340,7 +340,7 @@ DEL  /api/v3/ui/conferences/<cid>                             → 204 (purge)
    - **A. retype (сейчас в коде):** alias-клон «Общей» считается «Общей»; пользовательская раскладка
      `2caea6d1` станет `default`, имя «Codian 07 — 13 окон» в UI исчезнет, меню абонента изменит
      смысл. Плюс: одна строка, никакого «пустого General» рядом. Минус: скрытая реклассификация данных.
-   - **B. append (рекомендую):** добавить canonical `8a75f3e4` в session-links, клон оставить
+   - **B. append (pre-fix рекомендация; итог — принят A):** добавить canonical `8a75f3e4` в session-links, клон оставить
      `individual`; в списке две строки, active = Codian. Плюс: сохраняется пользовательская раскладка и
      её имя. Минус: две строки, нужен осознанный выбор active.
    Если выбирается A — добавить `tracing::warn!`/audit-строку со списком retype id (3 строки) и
@@ -464,8 +464,8 @@ DEL  /api/v3/ui/conferences/<cid>                             → 204 (purge)
    `displayName`), `hasIndividualLayout` начинает считать её default (меняется действие в меню
    абонента), а исход зависит от порядка рестартов. Правильнее **добавить canonical рядом**, сохранив
    individual. Признаю контраргумент: клон родился из «Общей», и если продукт считает редактирование
-   «Общей» её изменением, retype логичен. Это **продуктовое решение**, а не техническое; в коде оно
-   сейчас выбрано молча — его нужно зафиксировать и покрыть тестом.
+   «Общей» её изменением, retype логичен. Это **продуктовое решение**, а не техническое; **итог: принят
+   вариант A** (retype, `f8f3f91`/`7694a0c`; см. 02 R-03 и `t00_normalize_loaded_retypes_mirrored_clone_in_both_scopes`).
 9. **«Frontend-фикс не нужен»** — как единственный фикс не нужен; как гигиена (и чтобы старые кэши не
    продолжали слать `type=individual`) — нужен, уже сделан, стоит 2 строки.
 10. **Вендорский guard — не P0.** Это страховка представления; P0 закрывается серверным инвариантом.
