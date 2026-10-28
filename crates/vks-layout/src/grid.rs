@@ -46,8 +46,10 @@ fn best_rows_cols(n: usize, canvas: &Canvas) -> (usize, usize) {
 /// поэтому неполный последний ряд не растягивается на всю ширину, а
 /// центрируется (`row_left = (w - count*base_w) / 2`). Полные ряды занимают
 /// всю ширину (остаток деления отдан последнему тайлу); высота ряда — с
-/// остатком на последнем ряду. Пересечений нет; `total area == canvas.area`
-/// только когда `n` кратно `cols` (у неполного ряда остаются поля).
+/// остатком на последнем ряду. На холсте уже сетки (`w / cols == 0`) ширина
+/// колонки была бы нулевой, поэтому там сохраняется прежний режим: ряд делит
+/// свою ширину. Пересечений нет; `total area == canvas.area` когда `n` кратно
+/// `cols` (у неполного ряда остаются поля) или на таком узком холсте.
 fn grid_rects(n: usize, canvas: &Canvas) -> Vec<Rect> {
     let (rows, cols) = best_rows_cols(n, canvas);
     let (w, h) = (canvas.width, canvas.height);
@@ -198,32 +200,38 @@ mod tests {
 
     #[test]
     fn grid_incomplete_last_row_is_centered_without_stretching() {
-        // S6 DoD: N ≡ 1 (mod cols) на трёх холстах — последний тайл шириной
-        // колонки, по центру; полные ряды по-прежнему покрывают ширину.
-        for (width, height, n, rows, cols) in [
-            (1920u32, 1080u32, 43usize, 7usize, 7u32),
-            (1281, 721, 43, 7, 7),
-            (1000, 1000, 43, 7, 7),
-            (1920, 1080, 57, 8, 8),
-            (1000, 1000, 73, 9, 9),
+        // S6 DoD: N ≡ 1 (mod cols) на трёх холстах (1920×1080, 1281×721,
+        // 1000×1000) для N=43/57/73 — последний ряд из одного тайла шириной
+        // колонки, по центру; полные ряды покрывают ширину.
+        for (width, height, n) in [
+            (1920u32, 1080u32, 43usize),
+            (1281, 721, 43),
+            (1000, 1000, 43),
+            (1920, 1080, 57),
+            (1281, 721, 57),
+            (1000, 1000, 57),
+            (1920, 1080, 73),
+            (1281, 721, 73),
+            (1000, 1000, 73),
         ] {
             let canvas = Canvas::new(width, height);
-            let (actual_rows, actual_cols) = best_rows_cols(n, &canvas);
-            assert_eq!((actual_rows, actual_cols), (rows, cols as usize), "N={n} @ {width}x{height}");
+            let (rows, cols) = best_rows_cols(n, &canvas);
+            assert_eq!(n % cols, 1, "N={n} @ {width}x{height}: выбранный cols={cols} не даёт N≡1");
             let rects = GridLayout::compute(&canvas, n);
             assert_eq!(rects.len(), n, "N={n}: число тайлов");
             for rect in &rects {
                 assert!(rect.w > 0 && rect.h > 0, "N={n}: пустой тайл {rect:?}");
                 assert!(rect.x + rect.w <= width && rect.y + rect.h <= height, "N={n}: тайл за холстом");
             }
-            // Полный ряд (тайлы 0..cols) занимает всю ширину.
-            assert_eq!(rects[0].x, 0, "N={n}: полный ряд слева");
-            let full_row_right = rects[cols as usize - 1].x + rects[cols as usize - 1].w;
-            assert_eq!(full_row_right, width, "N={n}: полный ряд покрывает ширину");
+            // Полный ряд занимает всю ширину.
+            let first_row: Vec<_> = rects.iter().filter(|rect| rect.y == 0).collect();
+            assert_eq!(first_row.len(), cols, "N={n}: полный ряд");
+            assert_eq!(first_row[0].x, 0);
+            assert_eq!(first_row[cols - 1].x + first_row[cols - 1].w, width, "N={n}: полный ряд покрывает ширину");
             // Неполный последний ряд: один тайл шириной колонки, по центру.
             let last_row: Vec<_> = rects.iter().filter(|rect| rect.y + rect.h >= height).collect();
-            assert_eq!(last_row.len(), n - (rows - 1) * cols as usize, "N={n}: последний ряд неполный");
-            let cell_w = width / cols;
+            assert_eq!(last_row.len(), n - (rows - 1) * cols, "N={n}: последний ряд неполный");
+            let cell_w = width / cols as u32;
             assert_eq!(last_row[0].w, cell_w, "N={n}: ширина колонки без растяжения");
             assert_eq!(last_row[0].x, (width - cell_w) / 2, "N={n}: последний тайл центрирован");
             assert_inside(&canvas, &rects);

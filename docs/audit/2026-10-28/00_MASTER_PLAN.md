@@ -1,5 +1,7 @@
 # VKS MCU — мастер-отчёт и пошаговый план (2026-10-28)
 
+> **Исторический снимок (до S6/T3a):** пункты о полном покрытии сетки и `WASTE_WEIGHT` устарели; актуальный статус — `docs/audit/2026-10-28-fix/00_plan_review.md` §8.
+
 Аудит всей цепочки: PNM UI / конструктор → API v3 → SQLite/PostgreSQL → resources/push →
 `vks-layout` → MCU engine/compositor/farm → SIP/H.323/WebRTC → CI/конфиги/зависимости.
 Режим: **read-only** (агенты писали только свои отчёты `docs/audit/2026-10-28/01..05`), сервис не

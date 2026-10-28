@@ -24,7 +24,7 @@
 - Integration: mock-порты, без I/O.
 - E2E: chromiumoxide (реальный браузер).
 - Fuzzing: cargo-fuzz на vks-proto (deserialize), SDP parse, ICE parse.
-- Property-based: proptest для layout (инварианты: rects не пересекаются, покрывают canvas).
+- Property-based: proptest для layout (инварианты: rects не пересекаются; полные ряды покрывают ширину, неполный последний ряд центрируется).
 
 ## 5. Feature flags
 - Кодеки: `vp8`, `vp9`, `h264`, `h265`, `av1`, `opus`, `g722`, `g711`.

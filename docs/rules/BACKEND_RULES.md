@@ -130,6 +130,13 @@
 - Media instance dies: NATS heartbeat 10s → room re-assign → clients reconnect (30–60s).
 - NATS cluster: 3 nodes, HA-queue, JetStream (persistent).
 - PostgreSQL: primary + replica (streaming), Patroni (auto-failover).
+
+### 4.3. Честный статус применения раскладки
+- Ответы, которые меняют раскладку (PATCH/attach/detach layout, mode), не выдают
+  «сохранено» за «применено»: статус отдаётся заголовком `x-vks-layout-applied`
+  (`engine`/`pending`/`saved-only`) и метрикой `vks_layout_apply_total{result}`.
+- Нет dialer'а/движка — `pending`, нет раскладки — `saved-only`; `engine` только
+  после успешного `apply_layout`.
 - Split-brain: NATS lease 30s, lowest instance_id wins.
 
 ### 4.3. Health checks

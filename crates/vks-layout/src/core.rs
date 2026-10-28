@@ -258,7 +258,8 @@ pub enum LayoutError {
     /// Canvas имеет нулевой размер.
     #[error("canvas has zero size")]
     EmptyCanvas,
-    /// Раскладка не покрывает canvas полностью (grid).
+    /// Раскладка не покрывает canvas полностью (Focus/Speaker; у Grid поля
+    /// допустимы при `n % cols != 0` — неполный ряд центрируется).
     #[error("layout does not fully cover the canvas (gap of {0} px²)")]
     CoverageGap(u64),
     /// Два слота пересекаются (grid).
