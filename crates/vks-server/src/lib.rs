@@ -264,26 +264,30 @@ fn metrics_access(
 async fn metrics_guard(request: Request, next: Next) -> Response {
     let expected =
         std::env::var("VKS_METRICS_TOKEN").ok().map(|token| token.trim().to_string()).filter(|token| !token.is_empty());
-    // Принимаем любой из заголовков: неверный Authorization не должен глушить
-    // корректный X-Metrics-Token (и наоборот).
-    let provided: Vec<String> = [
-        request
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer ")),
-        request.headers().get("x-metrics-token").and_then(|value| value.to_str().ok()),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|token| token.trim().to_string())
-    .filter(|token| !token.is_empty())
-    .collect();
+    let provided = metrics_tokens(request.headers());
     let loopback = request.extensions().get::<ConnectInfo<SocketAddr>>().is_some_and(|info| info.0.ip().is_loopback());
     match metrics_access(expected.as_deref(), &provided, loopback) {
         Ok(()) => next.run(request).await,
         Err((status, description)) => api_error(status, status.as_u16(), description),
     }
+}
+
+/// Токены из запроса: `Authorization: Bearer …` и/или `X-Metrics-Token`.
+/// Принимаем любой из заголовков, поэтому неверный Bearer не глушит корректный
+/// `X-Metrics-Token` (и наоборот); пустые/пробельные значения отбрасываются.
+fn metrics_tokens(headers: &HeaderMap) -> Vec<String> {
+    [
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer ")),
+        headers.get("x-metrics-token").and_then(|value| value.to_str().ok()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|token| token.trim().to_string())
+    .filter(|token| !token.is_empty())
+    .collect()
 }
 
 /// Класс запроса для метрик (`vks_http_requests_total` и гистограмм).
@@ -1438,6 +1442,20 @@ mod tests {
         let infixed = format!("prefix-{}-audio-track", random_uuid);
         let pid_infixed = parse_participant_id(&infixed);
         assert_eq!(pid_infixed.to_string(), random_uuid.to_string());
+    }
+
+    #[test]
+    fn metrics_tokens_extracts_either_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer secret".parse().expect("header value"));
+        assert_eq!(metrics_tokens(&headers), vec!["secret".to_string()]);
+        headers.insert("x-metrics-token", " second ".parse().expect("header value"));
+        assert_eq!(metrics_tokens(&headers), vec!["secret".to_string(), "second".to_string()]);
+        headers.insert(header::AUTHORIZATION, "Bearer   ".parse().expect("header value"));
+        assert_eq!(metrics_tokens(&headers), vec!["second".to_string()], "empty/blank token dropped");
+        // Basic-схема не принимается как Bearer-токен.
+        headers.insert(header::AUTHORIZATION, "Basic dXNlcjpwYXNz".parse().expect("header value"));
+        assert_eq!(metrics_tokens(&headers), vec!["second".to_string()]);
     }
 
     #[test]

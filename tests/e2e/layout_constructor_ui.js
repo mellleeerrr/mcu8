@@ -48,7 +48,10 @@ async function api(token, method, path, body) {
   let sessionId = '';
   let browser = null;
   let failure = '';
-  let baselineErrors = 0;
+  let vendor400At = 0;
+  let vendor400Count = 0;
+  const vendorPageErrors = [];
+  const geometry = new Map();
   try {
     const login = await api('', 'POST', '/api/v3/login', { login: LOGIN, password: PASSWORD });
     token = login.doc.token || login.doc.access_token || '';
@@ -79,7 +82,16 @@ async function api(token, method, path, body) {
         status: (error && error.response && error.response.status) || 0,
         stack: error && error.stack ? String(error.stack).slice(0, 300) : '',
       };
-      pageErrors.push(JSON.stringify(detail));
+      // Единственный допустимый pageerror — вендорский reportError от calculate
+      // `preset_default_13` (400 по контракту). Допускаем его ТОЛЬКО в окне 3 с
+      // после реального 400-ответа и не более одного на ответ; любой другой
+      // pageerror (в т.ч. ручного режима) обязан провалить тест.
+      if (vendor400At && Date.now() - vendor400At <= 3000) {
+        vendor400At = 0;
+        vendorPageErrors.push(JSON.stringify(detail));
+      } else {
+        pageErrors.push(JSON.stringify(detail));
+      }
     });
     page.on('console', (message) => {
       if (message.type() !== 'error') return;
@@ -92,12 +104,25 @@ async function api(token, method, path, body) {
         try { calculate.push(JSON.parse(request.postData() || '{}').preset || ''); } catch (e) { calculate.push(''); }
       }
     });
-    page.on('response', (response) => {
+    page.on('response', async (response) => {
       const request = response.request();
       if (request.method() !== 'POST' || !/\/video_layouts\/calculate/.test(response.url())) return;
       let preset = '';
       try { preset = JSON.parse(request.postData() || '{}').preset || ''; } catch (e) { preset = ''; }
-      calculateResponses.push({ preset, status: response.status() });
+      const status = response.status();
+      if (status === 400 && preset.indexOf('preset_') === 0) {
+        vendor400At = Date.now();
+        vendor400Count += 1;
+      }
+      const entry = { preset, status, slots: null };
+      if (status === 200) {
+        try {
+          const doc = JSON.parse(await response.text());
+          entry.slots = Array.isArray(doc.slots) ? doc.slots : [];
+          geometry.set(preset, entry.slots);
+        } catch (e) { entry.slots = null; }
+      }
+      calculateResponses.push(entry);
     });
 
     await page.goto(`${BASE}/pnm/authorization`, { waitUntil: 'domcontentloaded' });
@@ -115,11 +140,6 @@ async function api(token, method, path, body) {
     if (!check('строка раскладки в списке', (await row.count()) > 0)) return 1;
     await row.click();
     await page.waitForTimeout(1500);
-    // Известный вендорский фон: превью auto-раскладки шлёт calculate с
-    // `preset_default_13`, который сервер по контракту отвергает (400) →
-    // vendor reportError. Pre-existing, не относится к конструктору;
-    // фиксируем как baseline после открытия редактора.
-    baselineErrors = pageErrors.length;
     const ctorTab = page.locator('[data-vks-constructor-tile="1"], [data-qa="layout-mode-selector-constructor"]').first();
     await ctorTab.waitFor({ state: 'attached', timeout: 15000 });
     await ctorTab.click();
@@ -128,10 +148,6 @@ async function api(token, method, path, body) {
     // который ещё шлёт calculate с auto-пресетом (`preset_default_13` → 400 по
     // контракту сервера) и роняет vendor reportError. Это pre-existing фон, не
     // связанный с нашим переключением; принимаем только его.
-    if (pageErrors.length > baselineErrors
-      && calculateResponses.some((entry) => entry.status >= 400 && entry.preset.indexOf('preset_') === 0)) {
-      baselineErrors = pageErrors.length;
-    }
 
     const state = await page.evaluate(() => {
       const panel = document.querySelector('[data-vks-constructor="1"]');
@@ -179,6 +195,50 @@ async function api(token, method, path, body) {
       n12.positions.length === 12 && n12.positions.every((position, index) => position === index + 1),
       n12.positions.join(','));
 
+    // Строгая проверка «иконки из ответа сервера»: 200, ровно N слотов,
+    // rect-count и viewBox совпадают с геометрией ответа (fallback-svg имеет
+    // другой viewBox 320x180 и не пройдёт).
+    const modes = ['grid', 'pin_l', 'pin_r', 'pin_t', 'pin_b', 'dual'];
+    const presets12 = modes.map((mode) => `vks_${mode}_12`);
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline
+      && !presets12.every((preset) => calculateResponses.some((entry) => entry.preset === preset && entry.status === 200
+        && Array.isArray(entry.slots) && entry.slots.length === 12))) {
+      await page.waitForTimeout(200);
+    }
+    const serverIcons = presets12.map((preset) => {
+      const entry = calculateResponses.filter((item) => item.preset === preset && item.status === 200).pop();
+      const slots = entry && Array.isArray(entry.slots) ? entry.slots : [];
+      const maxX = slots.reduce((max, slot) => Math.max(max, Number(slot.x) + Number(slot.width)), 0);
+      const maxY = slots.reduce((max, slot) => Math.max(max, Number(slot.y) + Number(slot.height)), 0);
+      return { mode: preset.replace(/^vks_|_12$/g, ''), count: slots.length, maxX, maxY, status: entry ? entry.status : 0 };
+    });
+    check('N=12: все 6 calculate вернули 200 и ровно 12 слотов',
+      serverIcons.every((icon) => icon.status === 200 && icon.count === 12),
+      JSON.stringify(serverIcons.map((icon) => [icon.mode, icon.status, icon.count])));
+    const rendered = await page.evaluate((expected) => {
+      const out = {};
+      for (const icon of expected) {
+        const card = document.querySelector(`[data-vks-constructor="1"] [data-vks-constructor-mode="${icon.mode}"]`);
+        const svg = card ? card.querySelector('svg') : null;
+        const viewBox = svg ? String(svg.getAttribute('viewBox') || '').trim().split(/\s+/).map(Number) : [];
+        out[icon.mode] = {
+          rects: svg ? svg.querySelectorAll('rect').length : 0,
+          viewBox,
+        };
+      }
+      return out;
+    }, serverIcons);
+    const iconMismatch = serverIcons.filter((icon) => {
+      const got = rendered[icon.mode] || { rects: 0, viewBox: [] };
+      return got.rects !== icon.count
+        || Math.abs((got.viewBox[2] || 0) - icon.maxX) > 0.01
+        || Math.abs((got.viewBox[3] || 0) - icon.maxY) > 0.01;
+    });
+    check('N=12: иконки отрисованы из ответа сервера (rect=N, viewBox=геометрия ответа)',
+      serverIcons.every((icon) => icon.count === 12) && iconMismatch.length === 0,
+      JSON.stringify(iconMismatch));
+
     const pinL = page.locator('[data-vks-constructor="1"] [data-vks-constructor-mode="pin_l"]').first();
     await pinL.click();
     await page.waitForTimeout(1500);
@@ -195,8 +255,9 @@ async function api(token, method, path, body) {
     check('карточка pin_l активна', active.pressed === 'true' || active.active, JSON.stringify(active));
     check('счётчик остался 12 после клика', active.counter === '12', `${active.counter}`);
     check('нет crash-сигнатур в консоли', crashes.length === 0, crashes.slice(0, 2).join(' | '));
-    check('нет новых pageerror в ручном режиме (baseline auto-превью: ' + baselineErrors + ')',
-      pageErrors.length === baselineErrors, pageErrors.slice(baselineErrors, baselineErrors + 2).join(' | '));
+    check('нет pageerror в ручном режиме (кроме вендорского preset_default_13)',
+      pageErrors.length === 0 && vendorPageErrors.length <= vendor400Count,
+      `некоррелированные: ${pageErrors.slice(0, 2).join(' | ')}; вендорские: ${vendorPageErrors.length}/${vendor400Count}`);
     check('превью и иконки идут только серверным calculate', calculate.length >= 7);
   } catch (error) {
     failure = String(error && error.stack ? error.stack : error);
