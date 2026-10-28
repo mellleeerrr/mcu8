@@ -209,7 +209,7 @@ mod tests {
         ] {
             let canvas = Canvas::new(width, height);
             let (actual_rows, actual_cols) = best_rows_cols(n, &canvas);
-            assert_eq!((actual_rows, actual_cols as usize), (rows, cols as usize), "N={n} @ {width}x{height}");
+            assert_eq!((actual_rows, actual_cols), (rows, cols as usize), "N={n} @ {width}x{height}");
             let rects = GridLayout::compute(&canvas, n);
             assert_eq!(rects.len(), n, "N={n}: число тайлов");
             for rect in &rects {
