@@ -5,7 +5,8 @@
 
 Стенд: `http://127.0.0.1:8080/pnm/`, vks-server PID 1814143 (release, старт 18:00:39 MSK;
 конфиг `configs/default.toml`), вендор UI 2.2.1.66 + project-слой, коммит фикса `645120d`.
-Проверки выполнены 28.10.2026, 17:43–18:12 MSK.
+Проверки выполнены 28.10.2026, 17:43–18:12 MSK; режимы A–D перепроверены на
+стабильном HEAD 19:00–19:05 MSK после T2 (все exit 0, см. примечание к матрице).
 
 ## 1. Крэш воспроизведён: ДА (на pre-fix коде), с точным стеком
 
@@ -28,8 +29,9 @@ TypeError: Cannot read properties of undefined (reading 'some')
 Первый живой крэш пойман 17:43:54 MSK ещё на **незафиксированном** бандле: 3 подряд
 `console.error` с этой сигнатурой (`/tmp/probe_crash.png`, стек — тот же).
 Ошибка повторяется на каждом цикле обновления таблицы абонентов: в финальном прогоне
-**9 записей** с шагом ~5 c (15:07:26.490Z … 15:07:46.366Z) — это и есть «падает при
-обновлении таблицы».
+**9 записей**, сгруппированных в **5 серий** (15:07:26.490Z … 15:07:46.366Z): внутри
+серии записи идут с интервалом 0.049–0.257 c, между сериями — 4.76–4.86 c. Это и есть
+«падает при обновлении таблицы».
 
 **Важная честная оговорка:** `pageerror` (window.onerror) = **0**. Vue 3 без error boundary
 перехватывает исключение render-функции и логирует его через `console.error` (`logError`),
@@ -107,8 +109,9 @@ node repro_session_default_layout.js --guard-only --legacy-bundle
 - Артефакты: `artifactsDir('repro-crash')` = `~/.local/state/vks/artifacts/repro-crash`
   (`result.json`, `network.json`, `pageerrors.json`, `01-session-baseline.png`,
   `02-session-after-flip.png`, `03-crash.png`/`03-no-crash.png`).
-  `sipbot.json` не появляется: e2e останавливает sipbot SIGTERM, а `sipbot.py`
-  пишет JSON только при нормальном завершении (см. `sipbot.py:_write_json`).
+  `sipbot.json` не появляется: e2e останавливает sipbot SIGTERM, а `_write_json`
+  вызывается лишь на пути завершения sipbot (в этих прогонах его не было; при
+  failed INVITE JSON тоже пишется — см. `sipbot.py`).
   Можно переопределить: `VKS_ARTIFACTS=/path node …`.
   Сырые артефакты финальных прогонов из таблицы ниже лежат в
   `repro-crash/evidence-{legacy,clean,guard-legacy,postfix-default}/`
@@ -118,12 +121,21 @@ node repro_session_default_layout.js --guard-only --legacy-bundle
   подтверждена повторным прогоном `--expect-clean --guard-only` (exit 0,
   `layout_injection="stripped 1 default(s)"`).
 
-### Матрица прогонов 18:07–18:12 (финальная версия скрипта)
+### Матрица прогонов 18:07–18:12
+
+> **Провенанс evidence.** Каталоги `evidence-{legacy,clean,guard-legacy,postfix-default}`
+> сняты 18:07–18:12 **до** ужесточения проверок в `22aac56` (их `result.json` содержит
+> прежние имена чеков: `bundle: pre-fix injection applied…` вместо
+> `pre-fix: guard removed in served bundle`, нет `guard-only: broken list really injected`,
+> `connected participant row present`, `live bundle guard active`, `crash-arm: …`).
+> Сами доказательства валидны, но относятся к предыдущей версии скрипта; на HEAD все
+> четыре режима перепроверены отдельными прогонами (см. `result.json` текущих артефактов),
+> негативные контроли — exit 1. Команды и коды ниже совпадают для обеих версий.
 
 | # | Команда | exit | Что получилось |
 |---|---------|------|----------------|
 | A | `--legacy-bundle` | **0** | `reproduced=true`, 9 записей `TypeError … reading 'some'` (пары с интервалом ~5 c), stack `index6…:1:720556`, сессия `5a559d7e…`, 51 c |
-| B | `--expect-clean` | **0** | `reproduced=false`, `scenario_ok=true`, 0 console-ошибок, connected-строка в DOM, сессия `57a7ec48…`, 80 c |
+| B | `--expect-clean` | **0** | `reproduced=false`, `scenario_ok=true`, 0 console-ошибок с crash-сигнатурой (безобидные 404/сетевые не считаются), connected-строка в DOM, сессия `57a7ec48…`, 80 c |
 | C | `--expect-clean --guard-only` | **0** | `guard-only-expect-clean`, `reproduced=false`, `layout_injection="stripped 1 default(s)"` |
 | D | `--guard-only --legacy-bundle` | **0** | `reproduced=true`, 9 записей, `bundle.injection="guard-removed"`, `layout_injection="stripped 1 default(s)"`, сессия `6d2ab33c…`, 31 c |
 | E | без флагов (fixed stand) | **1** | `reproduced=false`, `scenario_ok=true` — сценарий реально отработал (арминг + connected + reload), крэша нет; так и должно быть после фикса |

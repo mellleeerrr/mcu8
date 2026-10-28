@@ -11,10 +11,15 @@
 `MANIFEST.sha256` — 17:43–17:44; `scripts/patch-pnm-layout-crash.py` — 17:40. Между первым срезом
 (17:47) и финальным (17:52) соседний агент **добавил durable-ремонт** (`repair_scope_defaults`),
 **перевёл identity «Общей» на `payload.type`** и **убрал read-path fallback**; это учтено ниже.
-**Хэши финального среза (md5; в 02_regressions.md для бандлов используется sha256):**
+**Хэши среза 17:52 (md5) — uncommitted WIP, невоспроизводимы из git:**
 `resources.rs` `4176f96e…` (mtime 17:51:46), `resource_tests.rs` `be396a94…` (17:52:38),
-`shell.rs` `354afa6e…` (11:29), `codian-layouts.js` `c91bb08e…` (17:43), `index6` `6aa06b9c…`,
-`index-legacy6` `9f4ef0f2…`.
+`shell.rs` `354afa6e…` (11:29). Этот срез существовал только в рабочем дереве и после
+коммитов `645120d`/`f8f3f91` перестал соответствовать истории; в git его нет.
+**Воспроизводимые хэши (md5, `git show <commit>:<path>`):** на `645120d` —
+`resources.rs` `36831347…`, `resource_tests.rs` `ac2e7359…`, `shell.rs`
+(`crates/vks-admin/src/api_v3/shell.rs`) `c5406874…`, `codian-layouts.js` `c91bb08e…`;
+на HEAD (после фиксов) — `resources.rs` `a85c56d5…`, `resource_tests.rs` `8978dcc0…`;
+вендорские бандлы `index6` `6aa06b9c…`, `index-legacy6` `9f4ef0f2…` совпадают во всех срезах.
 **Тесты:** в 17:57 я прогнал `cargo test -p vks-admin --lib` — **302 passed, 0 failed**; отдельно
 `t00_` — **5 passed**, включая retype, дедуп двух default и «рестарт не даёт вторую Общую».
 
