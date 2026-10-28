@@ -228,6 +228,8 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
     }
     session.media_stats.audio_codec_running.store(true, Relaxed);
     let mut egress = target;
+    let expected_audio_pt = session.audio_payload_type;
+    let expected_dtmf_pt = session.dtmf_payload_type;
     // Holds one maximum-duration Opus packet (120 ms) so a peer using
     // 40/60/120 ms packetization is not truncated by the 20 ms consumer.
     const AUDIO_QUEUE_LIMIT: usize = vks_gateway_sip::opus::MAX_FRAME_SAMPLES;
@@ -280,17 +282,28 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                     continue;
                 };
                 recv_errors = 0;
+                let previous_source = validator.target();
+                let previous_ssrc = validator.ssrc();
                 let Some(packet) = validator.accept(source, &incoming[..count]) else {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed);
                     if rejected_logs < 3 {
                         rejected_logs += 1;
                         let header = vks_gateway_sip::parse_rtp_header(&incoming[..count]);
+                        let reason = reject_reason(
+                            expected_audio_pt,
+                            expected_dtmf_pt,
+                            source,
+                            previous_source,
+                            previous_ssrc,
+                            header,
+                        );
                         tracing::warn!(
                             participant = %session.participant_id_str,
-                            expected_payload = session.audio_payload_type,
+                            reason,
+                            expected_payload = expected_audio_pt,
                             received_payload = header.map(|(payload, _, _, _, _)| payload),
                             source = %source,
-                            "audio RTP rejected by source validator (codec/PT mismatch)"
+                            "audio RTP rejected by source validator"
                         );
                     }
                     continue;
@@ -434,18 +447,18 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                         timestamp = timestamp.wrapping_add(bridge_codec.timestamp_step());
                     }
                 }
-                if let Some(payload_type) = session.dtmf_payload_type {
+                if let Some(payload_type) = expected_dtmf_pt {
                     if dtmf_gap > 0 { dtmf_gap -= 1; }
                     else {
                         if dtmf_active.is_none() { dtmf_active = dtmf.pop_front().map(|event| (event, 0, dtmf_timestamp)); }
                         if let Some((event, step, started)) = dtmf_active {
-                            let duration = [160u16, 320, 480, 480, 480][step];
+                            let duration = DTMF_DURATIONS[step.min(DTMF_DURATIONS.len() - 1)];
                             let mut event_packet = [0; 16];
                             vks_gateway_sip::write_rtp_header(&mut event_packet[..12], payload_type, sequence, started, ssrc, step == 0);
                             sequence = sequence.wrapping_add(1); event_packet[12] = event; event_packet[13] = if step >= 2 { 0x8a } else { 0x0a };
                             event_packet[14..].copy_from_slice(&duration.to_be_bytes());
                             let _ = session.rtp_socket.send_to(&event_packet, egress).await;
-                            if step == 4 { dtmf_active = None; dtmf_gap = 2; } else { dtmf_active = Some((event, step + 1, started)); }
+                            if step + 1 == DTMF_DURATIONS.len() { dtmf_active = None; dtmf_gap = 2; } else { dtmf_active = Some((event, step + 1, started)); }
                         }
                     }
                 } else { dtmf.clear(); }
@@ -566,6 +579,10 @@ impl RtpSource {
     pub(super) fn ssrc(&self) -> Option<u32> {
         self.ssrc
     }
+    /// Текущий (возможно, уже залоченный) источник — для диагностики отказа.
+    pub(super) fn target(&self) -> std::net::SocketAddr {
+        self.target
+    }
     pub(super) fn new(target: std::net::SocketAddr, payload_type: u8) -> Self {
         Self {
             target,
@@ -660,6 +677,38 @@ impl RtpSource {
 /// Minimal RFC 4733 §2.3 parser: returns the DTMF event code (0-15, `*`=10,
 /// `#`=11, A-D=12-15). The end bit and duration are validated but the relay
 /// regenerates its own event sequence, so only the digit is returned.
+/// Длительности (в 8-кГц сэмплах) последовательных RFC 4733-пакетов одного
+/// нажатия: 10 × 160 = 1600 сэмплов = 200 мс тона. Шаг 20 мс совпадает с
+/// тиком моста; для Opus/48k телефонный клок остаётся 8 кГц (RFC 4733 §2.1).
+const DTMF_DURATIONS: [u16; 10] = [160, 320, 480, 640, 800, 960, 1120, 1280, 1440, 1600];
+
+/// Причина отказа RTP-валидатора. Раньше все отказы логировались как
+/// «codec/PT mismatch», хотя это мог быть чужой source или смена SSRC —
+/// политика `source_latch` должна быть видна в логе.
+fn reject_reason(
+    audio_pt: u8,
+    dtmf_pt: Option<u8>,
+    source: std::net::SocketAddr,
+    previous_source: std::net::SocketAddr,
+    previous_ssrc: Option<u32>,
+    header: Option<(u8, u16, u32, u32, usize)>,
+) -> &'static str {
+    let Some((pt, _, _, ssrc, _)) = header else {
+        return "malformed_rtp";
+    };
+    let g711_interchange = matches!(pt, 0 | 8) && matches!(audio_pt, 0 | 8);
+    if pt != audio_pt && Some(pt) != dtmf_pt && !g711_interchange {
+        return "payload_type_mismatch";
+    }
+    if source != previous_source {
+        return "source_changed";
+    }
+    if previous_ssrc.is_some_and(|registered| registered != ssrc) {
+        return "ssrc_changed";
+    }
+    "invalid_rtp"
+}
+
 fn parse_telephone_event(payload: &[u8]) -> Option<u8> {
     // event(1) + E|R|volume(1) + duration(2); longer payloads carry redundant
     // encodings, which must not change the event identity.
@@ -856,5 +905,48 @@ mod tests {
         let mut other = dtmf_packet.clone();
         other[1] = 111;
         assert!(source.accept(target, &other).is_none());
+    }
+
+    fn rtp_packet(payload_type: u8, ssrc: u32) -> Vec<u8> {
+        let mut packet = [0u8; 12];
+        vks_gateway_sip::write_rtp_header(&mut packet, payload_type, 1, 0, ssrc, false);
+        packet.to_vec()
+    }
+
+    #[test]
+    fn reject_reason_distinguishes_pt_source_and_ssrc() {
+        let source: std::net::SocketAddr = "192.0.2.10:4000".parse().unwrap();
+        let other: std::net::SocketAddr = "192.0.2.11:4000".parse().unwrap();
+        let header = |pt: u8, ssrc: u32| vks_gateway_sip::parse_rtp_header(&rtp_packet(pt, ssrc));
+
+        assert_eq!(reject_reason(0, None, source, source, None, None), "malformed_rtp");
+        assert_eq!(
+            reject_reason(0, None, source, source, None, header(96, 1)),
+            "payload_type_mismatch",
+            "динамический PT при G.711-аудио"
+        );
+        assert_ne!(
+            reject_reason(0, None, source, source, None, header(8, 1)),
+            "payload_type_mismatch",
+            "PCMU/PCMA interchange — не мисматч"
+        );
+        assert_ne!(
+            reject_reason(0, Some(101), source, source, None, header(101, 1)),
+            "payload_type_mismatch",
+            "telephone-event идёт своим PT"
+        );
+        assert_eq!(reject_reason(0, None, other, source, None, header(0, 1)), "source_changed");
+        assert_eq!(reject_reason(0, None, source, source, Some(7), header(0, 9)), "ssrc_changed");
+    }
+
+    #[test]
+    fn telephone_event_tone_lasts_about_200_ms_at_8k_clock() {
+        assert_eq!(DTMF_DURATIONS.len(), 10, "10 пакетов по 20 мс");
+        assert_eq!(DTMF_DURATIONS[0], 160, "первый пакет — 20 мс × 8 кГц");
+        assert_eq!(DTMF_DURATIONS[DTMF_DURATIONS.len() - 1], 1600, "200 мс × 8 кГц");
+        assert!(
+            DTMF_DURATIONS.windows(2).all(|pair| pair[1] - pair[0] == 160),
+            "каждый следующий пакет — +20 мс телефонного клока"
+        );
     }
 }
