@@ -42,7 +42,8 @@ MCU/SFU-прозрачности.
 
 ### Invariants
 
-- Grid: rects не пересекаются, `total area == canvas.size`.
+- Grid: rects не пересекаются; полные ряды покрывают ширину, неполный
+  последний ряд центрируется (`total area == canvas.size` при `n % cols == 0`).
 - Focus: фокус > 50% площади; остальные мелкие; `total area == canvas`.
 - Все rect внутри canvas.
 
