@@ -715,6 +715,31 @@ fn other_attached_default(resources: &ResourceState, scope_key: &str, resource_i
     })
 }
 
+/// Парный scope того же room: `sessions:R:kind` ↔ `conferences:R:kind`.
+fn sibling_scope(scope_key: &str) -> Option<String> {
+    let mut parts = scope_key.splitn(3, ':');
+    let prefix = parts.next()?;
+    let room = parts.next()?;
+    let kind = parts.next()?;
+    let other = match prefix {
+        "sessions" => "conferences",
+        "conferences" => "sessions",
+        _ => return None,
+    };
+    Some(format!("{other}:{room}:{kind}"))
+}
+
+/// Конфликт «вторая Общая» по ВИДИМОМУ scope: у сессии он union собственных
+/// ссылок и ссылок конференции (`list_linked`), поэтому guard обязан смотреть
+/// и в парный scope — иначе attach именованной «Общей» на конференции при
+/// живой сессии даёт две «Общие» в session-view и вечный 409 на detach/DELETE.
+fn other_visible_default(resources: &ResourceState, scope_key: &str, resource_id: &str) -> Option<String> {
+    if let Some(existing) = other_attached_default(resources, scope_key, resource_id) {
+        return Some(existing);
+    }
+    sibling_scope(scope_key).and_then(|sibling| other_attached_default(resources, &sibling, resource_id))
+}
+
 /// Durable-ремонт инварианта «в непустом scope ровно одна „Общая“».
 /// Старые сборки позволяли PATCH'ем сменить тип «Общей»: COW-клон получал
 /// `type=individual`, сессия оставалась без default, и UI падал на
@@ -1663,6 +1688,24 @@ pub async fn list_linked(
             }
         }
     }
+    if kind == "video_layouts" {
+        // Defense in depth для legacy/stuck-состояний: в видимом session-view
+        // остаётся не более одной «Общей» (первая по порядку ссылок сессии).
+        let mut seen_default = false;
+        ids.retain(|id| {
+            let is_default = collection(&resources, kind)
+                .get(id)
+                .is_some_and(|record| record["payload"]["type"].as_str() == Some("default"));
+            if !is_default {
+                return true;
+            }
+            if seen_default {
+                return false;
+            }
+            seen_default = true;
+            true
+        });
+    }
     let mut items: Vec<Value> = ids.iter().filter_map(|id| collection(&resources, kind).get(id).cloned()).collect();
     if kind == "video_layouts" {
         for record in &mut items {
@@ -1926,8 +1969,14 @@ pub async fn attach(
         // раскладки (явный type=default или legacy-именованной) запрещена —
         // иначе detach/DELETE обоих навсегда 409, а UI показывает две «Общие».
         if is_default_layout(&resources, &resource_id) {
-            if let Some(existing) = other_attached_default(&resources, &scope_key, &resource_id) {
-                return error_json(409, &format!("scope already has a default layout ({existing}); detach it first"));
+            if let Some(existing) = other_visible_default(&resources, &scope_key, &resource_id) {
+                return error_json(
+                    409,
+                    &format!(
+                        "scope already has a default layout ({existing}); edit it instead \
+                         (a default layout cannot be detached)"
+                    ),
+                );
             }
         }
         let list = resources.links.entry(scope_key.clone()).or_default();

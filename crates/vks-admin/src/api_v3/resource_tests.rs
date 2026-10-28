@@ -1774,6 +1774,70 @@ async fn t00_attach_second_default_is_conflict_per_scope() {
     assert_eq!(attach_to(&state, &other, &named_default).await, StatusCode::NO_CONTENT);
 }
 
+/// M1 cross-scope: session-view — это union ссылок сессии и конференции
+/// (`list_linked`), поэтому attach «Общей» в парный scope при живой сессии
+/// дал бы две «Общие» в UI и вечный 409 на detach/DELETE.
+#[tokio::test]
+async fn t00_attach_default_conflicts_with_sibling_scope() {
+    let state = state();
+    let room = Rooms::create_async(&state, "cross-scope default").await.unwrap();
+    let canonical = create_layout(&state, "", json!({"type":"default"})).await;
+    let named_default = create_layout(&state, "Именованная общая", json!({"type":"default"})).await;
+    let conf_key = format!("conferences:{}:video_layouts", room.id);
+    let sess_key = format!("sessions:{}:video_layouts", room.id);
+
+    // Живая сессия уже получила canonical (как после prepare_session_resources).
+    state.api_v3.resources.lock().await.links.insert(sess_key.clone(), vec![canonical.clone()]);
+    assert_eq!(
+        attach_to(&state, &room, &named_default).await,
+        StatusCode::CONFLICT,
+        "второй default в видимом session-view обязан быть 409"
+    );
+
+    // Обратное направление: canonical в конференции, attach в сессию — 409.
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.links.insert(conf_key.clone(), vec![canonical.clone()]);
+        resources.links.insert(sess_key.clone(), Vec::new());
+    }
+    let response = attach(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts/{named_default}", room.id)),
+        Path((room.id.to_string(), named_default.clone())),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+/// Defense in depth: legacy-состояние с двумя видимыми default'ами не должно
+/// доходить до UI (`sessionLayoutListByType.default.some`).
+#[tokio::test]
+async fn t00_session_list_shows_single_default_for_legacy_union() {
+    let state = state();
+    let room = Rooms::create_async(&state, "session view one default").await.unwrap();
+    let canonical = create_layout(&state, "", json!({"type":"default"})).await;
+    let named_default = create_layout(&state, "Именованная общая", json!({"type":"default"})).await;
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.links.insert(format!("sessions:{}:video_layouts", room.id), vec![canonical.clone()]);
+        resources.links.insert(format!("conferences:{}:video_layouts", room.id), vec![named_default.clone()]);
+    }
+    let response = list_linked(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/sessions/{}/video_layouts", room.id)),
+        Path(room.id.to_string()),
+        Query(std::collections::HashMap::new()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body(response).await;
+    let items = body["video_layouts"].as_array().expect("video_layouts array");
+    let defaults = items.iter().filter(|item| item["payload"]["type"] == "default").count();
+    assert_eq!(defaults, 1, "session-view показывает ровно одну «Общую»: {items:?}");
+}
+
 /// Наследование конференция → сессия не должно размножать legacy-состояние с
 /// двумя default'ами: в сессию попадает только один, повторный load идемпотентен.
 #[tokio::test]
@@ -1789,6 +1853,8 @@ async fn t00_inherit_does_not_copy_second_default_from_conference() {
         // Legacy-состояние (до фикса attach): две «Общие» в conference-scope.
         resources.links.insert(conf_key.clone(), vec![canonical.clone(), named_default.clone()]);
         resources.active_layouts.insert(conf_key.clone(), named_default.clone());
+        // Сессия уже имеет default до inherit: второй из конференции не наследуем.
+        resources.links.insert(sess_key.clone(), vec![canonical.clone()]);
         inherit_and_ensure_default_layout(&mut resources, &room.id.to_string(), "tester");
         let defaults: Vec<&String> =
             resources.links[&sess_key].iter().filter(|id| is_default_layout(&resources, id)).collect();
