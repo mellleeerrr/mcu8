@@ -1418,14 +1418,14 @@ fn merge_layout_slots(previous: &[Value], incoming: &[Value]) -> Vec<Value> {
 /// Ошибка PATCH: `Invalid` — 422 (структура payload), `Conflict` — 409
 /// (семантика раскладки: дубль/выход за размер).
 #[derive(Debug)]
-enum UpdateError {
+pub(super) enum UpdateError {
     Invalid(String),
     Conflict(String),
 }
 
 /// Уникальность и границы окон: позиции в `1..=size`, без дублей. Битые
 /// legacy-раскладки не ремонтируем молча — PATCH должен вернуть 409 с reason.
-fn validate_layout_assignments(payload: &Value) -> Result<(), UpdateError> {
+pub(super) fn validate_layout_assignments(payload: &Value) -> Result<(), UpdateError> {
     let Some(slots) = payload.get("slots").and_then(Value::as_array) else { return Ok(()) };
     // Ёмкость сетки: у пресета она больше числа сохранённых слотов (слоты
     // перечисляют только занятые/созданные окна, `position` — номер окна в сетке).

@@ -2649,3 +2649,111 @@ async fn t00_mode_switch_keeps_size_for_empty_slots() {
     let resources = state.api_v3.resources.lock().await;
     assert_eq!(resources.layouts[&layout]["payload"]["size"], 4, "пустой slots не должен обнулять ёмкость");
 }
+
+/// S7-регрессия: mode-эндпоинт — такая же запись назначений, как PATCH;
+/// дубли/позиции вне ёмкости не должны сохраняться (раньше 200 + отравление).
+#[tokio::test]
+async fn t00_mode_rejects_invalid_assignments() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Mode invalid room").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Mode invalid",
+        json!({"mode":"dynamic","preset":"preset_equal_4","size":4,"type":"individual","slots":[]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &layout).await, StatusCode::NO_CONTENT);
+    for (slots, expected) in [
+        (json!([{"position":1},{"position":1}]), StatusCode::CONFLICT),
+        (json!([{"position":9}]), StatusCode::CONFLICT),
+        (json!([{"position":"2"}]), StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        let mut extra = serde_json::Map::new();
+        extra.insert("slots".to_string(), slots);
+        let response = crate::api_v3::shell::switch_video_layout_mode(
+            State(state.clone()),
+            Extension(operator()),
+            Json(crate::api_v3::shell::SwitchVideoLayoutModeRequest {
+                session_id: Some(room.id.to_string()),
+                conference_id: None,
+                mode: Some("manual".into()),
+                video_layout_id: Some(layout.clone()),
+                extra,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), expected, "mode обязан валидировать назначения");
+    }
+}
+
+/// S7-регрессия: смена пресета через mode берёт ёмкость присланного id, а не
+/// закэшированный size (иначе attach разрешит лишние окна).
+#[tokio::test]
+async fn t00_mode_preset_switch_uses_preset_capacity() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Mode capacity room").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Default 13",
+        json!({"mode":"auto","preset":"preset_default_13","size":13,"type":"default","slots":[]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &layout).await, StatusCode::NO_CONTENT);
+    let mut extra = serde_json::Map::new();
+    extra.insert("preset".to_string(), json!("preset_equal_4"));
+    let response = crate::api_v3::shell::switch_video_layout_mode(
+        State(state.clone()),
+        Extension(operator()),
+        Json(crate::api_v3::shell::SwitchVideoLayoutModeRequest {
+            session_id: Some(room.id.to_string()),
+            conference_id: None,
+            mode: Some("manual".into()),
+            video_layout_id: Some(layout.clone()),
+            extra,
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body(response).await;
+    let target_id = body["id"].as_str().unwrap_or(&layout).to_string();
+    let resources = state.api_v3.resources.lock().await;
+    assert_eq!(resources.layouts[&target_id]["payload"]["size"], 4, "preset_equal_4: ёмкость 4, не закэшированные 13");
+}
+
+/// S7-регрессия: свободное AUTO-окно вне ёмкости не переиспользуется —
+/// attach берёт ближайшую валидную позицию, запись не отравляется.
+#[tokio::test]
+async fn t00_attach_skips_auto_outside_capacity() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Auto outside room").await.unwrap();
+    state.room_hub.register_participant(&room.id, participant("sip-1@sip-gateway", "First"));
+    state.room_hub.register_participant(&room.id, participant("sip-2@sip-gateway", "Second"));
+    let layout_id = create_layout(
+        &state,
+        "Legacy AUTO",
+        json!({"mode":"manual","preset":"vks_grid_4","type":"individual","slots":[]}),
+    )
+    .await;
+    // Имитируем legacy-запись до attach: свободное окно с позицией вне ёмкости.
+    {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.layouts.get_mut(&layout_id).unwrap()["payload"]["slots"] = json!([{"position":5,"role":"AUTO"}]);
+    }
+    assert_eq!(attach_to(&state, &room, &layout_id).await, StatusCode::NO_CONTENT);
+    for participant_id in ["sip-1@sip-gateway", "sip-2@sip-gateway"] {
+        let response = attach_abonent_call(state.clone(), room.id, layout_id.clone(), participant_id).await;
+        assert_eq!(response.status(), StatusCode::OK, "позиция 5 не должна заниматься");
+    }
+    let resources = state.api_v3.resources.lock().await;
+    // attach делает COW-клон в scope сессии (links также в конференции).
+    let session_key = format!("sessions:{}:video_layouts", room.id);
+    let target_id = resources.links[&session_key][0].clone();
+    let mut positions: Vec<u64> = resources.layouts[&target_id]["payload"]["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|slot| slot["position"].as_u64())
+        .collect();
+    positions.sort_unstable();
+    assert_eq!(positions, vec![1, 2, 5], "абоненты заняли валидные 1 и 2, окно 5 осталось свободным");
+}

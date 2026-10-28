@@ -983,16 +983,24 @@ pub async fn switch_video_layout_mode(
     if size.is_some() || slots.is_some() || preset_present {
         let inferred_size = size
             .filter(|size| *size > 0)
-            .or_else(|| slots.as_ref().map(|(_, len)| *len).filter(|len| *len > 0))
+            .or_else(|| {
+                slots
+                    .as_ref()
+                    .map(|(_, len)| *len)
+                    .filter(|len| *len > 0)
+                    .map(|len| len.min(vks_layout::grids::MAX_WINDOWS as u64))
+            })
+            // Ёмкость присланного пресета важнее закэшированного size: иначе
+            // переключение на preset_equal_4 на 13-оконной записи оставит size 13
+            // (attach разрешит лишние окна). Порядок: grids → Codian → preset_<n>.
+            .or_else(|| {
+                preset_field.as_ref().and_then(Value::as_str).and_then(vks_layout::grids::slot_count).map(|n| n as u64)
+            })
             .or_else(|| {
                 preset_field.as_ref().and_then(Value::as_str).and_then(vks_layout::codian::slot_count).map(|n| n as u64)
             })
             .or_else(|| {
-                preset_field
-                    .as_ref()
-                    .and_then(Value::as_str)
-                    .and_then(vks_layout::grids::parse)
-                    .map(|scheme| scheme.count as u64)
+                preset_field.as_ref().and_then(Value::as_str).and_then(vks_layout::preset_size).map(|n| n as u64)
             })
             .or_else(|| draft["payload"]["size"].as_u64().filter(|size| *size > 0))
             .or_else(|| draft["payload"]["preset"].as_str().and_then(vks_layout::preset_size).map(|size| size as u64))
@@ -1003,6 +1011,13 @@ pub async fn switch_video_layout_mode(
         for (key, value) in &patch {
             payload.insert(key.clone(), value.clone());
         }
+    }
+    // Mode — такая же запись назначений, как PATCH: дубли/позиции вне ёмкости
+    // не должны попадать в БД (иначе запись «отравлена» для attach/PATCH).
+    match super::resources::validate_layout_assignments(&draft["payload"]) {
+        Ok(()) => {}
+        Err(super::resources::UpdateError::Invalid(message)) => return super::error_json(422, &message),
+        Err(super::resources::UpdateError::Conflict(message)) => return super::error_json(409, &message),
     }
     let owners = resources.links.values().filter(|ids| ids.iter().any(|value| value == &layout_id)).count();
     let direct = resources.links.get(&scope_key).is_some_and(|ids| ids.iter().any(|value| value == &layout_id));
