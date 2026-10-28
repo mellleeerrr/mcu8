@@ -159,6 +159,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- шапка ----------------------------------------------------------------
+[ -s /tmp/vks.token ] || log "ВНИМАНИЕ: /tmp/vks.token отсутствует — farm-снимки будут пустыми (эндпоинт под Moderator)"
 log "SHA ожидаемый: ${SHA:-<plan>}"
 log "outdir: $OUT  (N=$BOTS, ${DURATION}s, боты $BOT_CORES, netns $NETNS)"
 if [ "$PLAN" -eq 0 ]; then
@@ -197,7 +198,8 @@ for entry in "${PROFILES[@]}"; do
     if [ "$PLAN" -eq 0 ]; then
         { sudo -n tc -s qdisc show dev veth-bench; } > "$dir/tc-host.txt" 2>&1 || true
         { sudo -n ip netns exec "$NETNS" tc -s qdisc show dev veth-mcu; } > "$dir/tc-netns.txt" 2>&1 || true
-        curl -s -m 3 "http://127.0.0.1:8080/api/v3/mcu/farm" > "$dir/farm-idle.json" || true
+        curl -s -m 3 -H "Authorization: Bearer $(cat /tmp/vks.token 2>/dev/null)" \
+            "http://127.0.0.1:8080/api/v3/mcu/farm" > "$dir/farm-idle.json" || true
     fi
     MPID="$(mcu_pid)"
     if [ "$PLAN" -eq 0 ]; then
@@ -210,7 +212,7 @@ for entry in "${PROFILES[@]}"; do
         printf '{"profile":"%s","abonents":%s,"ffmpeg":%s,"base_ffmpeg":%s,"clean":%s}\n' \
             "$name" "$(room_abonents)" "$(mcu_ffmpeg_now)" "$BASE_FFMPEG" "$CLEAN" > "$dir/precheck.json"
     fi
-    run sudo -n ip netns exec "$NETNS" sh -c "umask 022; exec python3 '$REPO/scripts/bench/matrix.py' \
+    run sudo -n ip netns exec "$NETNS" sh -c "umask 022; VKS_API_TOKEN='$(cat /tmp/vks.token 2>/dev/null)' exec python3 '$REPO/scripts/bench/matrix.py' \
         --bots $BOTS --room $ROOM --host $HOST_MCU --local-ip 10.200.0.2 \
         --api $API --video-profile 720p30 --audio-codec PCMU \
         --duration $DURATION --idle-baseline $IDLE --connect-window $CONNECT \

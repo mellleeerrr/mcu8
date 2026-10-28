@@ -113,10 +113,36 @@ def _farm_agg(doc: dict) -> dict:
     return agg
 
 
+def api_token() -> str:
+    """Bearer для служебных `/api/v3/*` (P1-7: auth+Moderator).
+
+    Порядок: `VKS_API_TOKEN` (netns/CI) → `VKS_TOKEN_FILE` → `/tmp/vks.token`
+    (его пишут `scripts/bench/room.sh`/`t2_matrix.sh`). Нет токена — пустая
+    строка, farm-снимок просто останется `{}`, как и раньше при недоступном API.
+    """
+    token = os.environ.get("VKS_API_TOKEN", "").strip()
+    if token:
+        return token
+    for path in (os.environ.get("VKS_TOKEN_FILE", ""), "/tmp/vks.token"):
+        if not path:
+            continue
+        try:
+            with open(path) as fh:
+                return fh.read().strip()
+        except OSError:
+            continue
+    return ""
+
+
 def farm_snapshot(api: str) -> dict:
     """Снимок фермы энкодеров (`P4a`) с таймаутом 2 с; `{}` — API недоступен."""
     try:
-        with urllib.request.urlopen(f"http://{api}/api/v3/mcu/farm", timeout=2.0) as resp:
+        headers = {}
+        token = api_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(f"http://{api}/api/v3/mcu/farm", headers=headers)
+        with urllib.request.urlopen(request, timeout=2.0) as resp:
             return _farm_agg(json.loads(resp.read().decode()))
     except Exception:
         return {}

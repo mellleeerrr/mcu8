@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message as AxumWsMsg, WebSocket, WebSocketUpgrade};
+use axum::extract::ConnectInfo;
 use axum::http::{header, Request, StatusCode};
 use axum::routing::get;
 use axum::Router;
@@ -2076,7 +2077,20 @@ async fn test_farm_metrics_and_api_v3_snapshot_reflect_encoder_group_lifecycle()
     viewer.note_dropped(2);
     assert_eq!(viewer.rtp_snapshot(), (5, 500, 2));
 
-    let state = Arc::new(AppState::new());
+    // P1-7: `/api/v3/*` служебные endpoint'ы теперь под auth+Moderator —
+    // тесту нужен сконфигурированный issuer и записи в Users.
+    let mut state = AppState::new();
+    let issuer = Arc::new(JwtIssuer::new(JwtConfig {
+        secret: "farm_metrics_secret_123".to_string(),
+        ttl_secs: 86_400,
+        issuer: "vks-integration".to_string(),
+    }));
+    vks_admin::users::Users::bootstrap_operator(&state, "admin");
+    vks_admin::users::Users::create(&state, "viewer", Role::Viewer);
+    state.jwt_issuer = Some(issuer.clone());
+    let admin_token = issuer.issue("admin", None).expect("issue admin token");
+    let viewer_token = issuer.issue("viewer", None).expect("issue viewer token");
+    let state = Arc::new(state);
     let frontend = Frontend::load(&frontend_fixture_dir());
     let app = vks_server::build_app_with_services(
         state,
@@ -2090,9 +2104,17 @@ async fn test_farm_metrics_and_api_v3_snapshot_reflect_encoder_group_lifecycle()
         Arc::new(vks_server::ClusterManager::new("vks-node-1")),
     );
 
+    // P1-7: служебные endpoint'ы loopback-only — тесту нужен ConnectInfo
+    // (в бою его кладёт `into_make_service_with_connect_info`).
     let metrics = app
         .clone()
-        .oneshot(Request::builder().uri("/metrics").body(axum::body::Body::empty()).expect("request"))
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))))
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
         .await
         .expect("oneshot /metrics");
     assert_eq!(metrics.status(), StatusCode::OK);
@@ -2111,7 +2133,13 @@ async fn test_farm_metrics_and_api_v3_snapshot_reflect_encoder_group_lifecycle()
 
     let response = app
         .clone()
-        .oneshot(Request::builder().uri("/api/v3/mcu/farm").body(axum::body::Body::empty()).expect("request"))
+        .oneshot(
+            Request::builder()
+                .uri("/api/v3/mcu/farm")
+                .header(header::AUTHORIZATION, format!("Bearer {admin_token}"))
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
         .await
         .expect("oneshot /api/v3/mcu/farm");
     assert_eq!(response.status(), StatusCode::OK, "снимок фермы должен отвечать 200");
@@ -2126,11 +2154,64 @@ async fn test_farm_metrics_and_api_v3_snapshot_reflect_encoder_group_lifecycle()
     assert_eq!(group["viewer_rtp"]["packets"], serde_json::json!(5));
     assert!(json["totals"]["groups"].as_u64().unwrap_or(0) >= 1, "в totals должен быть хотя бы один группа");
 
+    // P1-7: `/metrics` с LAN без токена — 403; три `/api/v3/*` — 401 анонимно,
+    // 403 для роли ниже Moderator и 200 для admin.
+    let forbidden = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .extension(ConnectInfo(SocketAddr::from(([192, 168, 1, 50], 40000))))
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot /metrics");
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN, "/metrics must be loopback-only without token");
+    for uri in ["/api/v3/mcu/farm", "/api/v3/gateways/status", "/api/v3/cluster/status"] {
+        let unauthorized = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(axum::body::Body::empty()).expect("request"))
+            .await
+            .expect("oneshot internal endpoint");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED, "{uri}: анонимный запрос обязан быть 401");
+        let low_role = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {viewer_token}"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot internal endpoint");
+        assert_eq!(low_role.status(), StatusCode::FORBIDDEN, "{uri}: Viewer не должен видеть операционные данные");
+        let allowed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {admin_token}"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot internal endpoint");
+        assert_eq!(allowed.status(), StatusCode::OK, "{uri}: Operator обязан получать данные");
+    }
+
     // Зритель ушёл → группа ретируется, серии из /metrics исчезают.
     assert_eq!(viewer.refcount(), 2, "зритель + энкодер до release");
     drop(viewer);
     let metrics = app
-        .oneshot(Request::builder().uri("/metrics").body(axum::body::Body::empty()).expect("request"))
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))))
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
         .await
         .expect("oneshot /metrics");
     let body =

@@ -18,11 +18,12 @@ pub use cluster::ClusterManager;
 pub use gateways::GatewayManager;
 pub use recorder::RecorderManager;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::Query;
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -183,20 +184,99 @@ pub fn build_app_with_services(
                     Json(cl.status(now_sec))
                 }
             }),
-        );
+        )
+        // P1-7: служебные endpoint'ы отдают топологию/статус → Moderator+.
+        // Анонимный запрос из LAN получает 401, а не 200 (было в аудите).
+        .route_layer(axum::middleware::from_fn(require_moderator))
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), vks_admin::api_v3::auth::token_middleware));
+
+    // `/metrics`: Prometheus на этом же узле скрейпит с loopback без токена;
+    // удалённый скрейп — через `VKS_METRICS_TOKEN` (Bearer или X-Metrics-Token).
+    let metrics_router =
+        Router::new().route("/metrics", get(metrics_handler)).route_layer(axum::middleware::from_fn(metrics_guard));
 
     vks_admin::handlers::router(state.clone())
         // Адаптер legacy UI `/api/v3/*` (ADR-0027, фазы 2–3 плана).
         .merge(vks_admin::api_v3::router(state))
         .merge(signaling)
         .merge(m5_api)
-        .route("/metrics", get(metrics_handler))
+        .merge(metrics_router)
         .merge(frontend.router())
         .layer(axum::middleware::from_fn(move |request: Request, next: Next| {
             let csp = csp.clone();
             async move { crate::frontend::with_security_headers(csp, request, next).await }
         }))
         .layer(axum::middleware::from_fn(http_metrics_middleware))
+}
+
+/// Конверт ошибки API v3 (совпадает по форме с `vks_admin::api_v3`).
+fn api_error(status: StatusCode, code: u16, description: &str) -> Response {
+    (status, Json(serde_json::json!({"error": {"code": code, "description": description}}))).into_response()
+}
+
+/// `m5_api` (`/api/v3/gateways/status`, `/api/v3/mcu/farm`, `/api/v3/cluster/status`):
+/// после `token_middleware` требуем Moderator+ — это операционные данные
+/// (топология комнат, статус шлюзов), а не публичный API.
+async fn require_moderator(request: Request, next: Next) -> Response {
+    let role = request.extensions().get::<vks_admin::auth_middleware::AuthContext>().map(|ctx| ctx.role);
+    match role {
+        Some(role) if role >= Role::Moderator => next.run(request).await,
+        Some(_) => api_error(StatusCode::FORBIDDEN, 403, "Forbidden: Moderator role required"),
+        // token_middleware всегда кладёт AuthContext при успехе; отсутствие —
+        // значит слой собран неверно, но fail-closed важнее диагностики.
+        None => api_error(StatusCode::UNAUTHORIZED, 401, "Unauthorized"),
+    }
+}
+
+/// Решение по доступу к `/metrics` (чистая функция — тестируется без env):
+/// - `expected` задан (`VKS_METRICS_TOKEN`) → токен обязателен для всех, включая
+///   loopback (иначе same-host reverse-proxy, отдающий запросы с 127.0.0.1,
+///   снова открыл бы метрики наружу); неверный/пустой — 401;
+/// - токен не задан → только loopback, иначе 403.
+fn metrics_access(
+    expected: Option<&str>,
+    provided: Option<&str>,
+    loopback: bool,
+) -> Result<(), (StatusCode, &'static str)> {
+    match expected {
+        Some(expected) => {
+            use sha2::{Digest, Sha256};
+            let matches = provided.is_some_and(|provided| {
+                !provided.is_empty() && Sha256::digest(expected.as_bytes()) == Sha256::digest(provided.as_bytes())
+            });
+            if matches {
+                Ok(())
+            } else {
+                Err((StatusCode::UNAUTHORIZED, "metrics token required"))
+            }
+        }
+        None if loopback => Ok(()),
+        None => Err((
+            StatusCode::FORBIDDEN,
+            "metrics are available from loopback only; set VKS_METRICS_TOKEN for remote scrape",
+        )),
+    }
+}
+
+/// `/metrics`: см. [`metrics_access`]. Токен принимается как
+/// `Authorization: Bearer <t>` или `X-Metrics-Token: <t>` (Prometheus умеет
+/// первое, ручной curl — второе).
+async fn metrics_guard(request: Request, next: Next) -> Response {
+    let expected =
+        std::env::var("VKS_METRICS_TOKEN").ok().map(|token| token.trim().to_string()).filter(|token| !token.is_empty());
+    let provided = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .or_else(|| request.headers().get("x-metrics-token").and_then(|value| value.to_str().ok()))
+        .map(str::trim)
+        .filter(|token| !token.is_empty());
+    let loopback = request.extensions().get::<ConnectInfo<SocketAddr>>().is_some_and(|info| info.0.ip().is_loopback());
+    match metrics_access(expected.as_deref(), provided, loopback) {
+        Ok(()) => next.run(request).await,
+        Err((status, description)) => api_error(status, status.as_u16(), description),
+    }
 }
 
 /// Класс запроса для метрик (`vks_http_requests_total` и гистограмм).
@@ -381,44 +461,45 @@ fn parse_ice_candidate_addr(candidate: &str) -> Option<std::net::SocketAddr> {
     }
 }
 
+/// Ищет UUID в произвольном идентификаторе: целиком, в токене или скользящим
+/// окном 36 байт (UTF-8-safe). `None` — UUID нет, вызывающий решает сам
+/// (хешировать нельзя: слот раскладки никогда не совпадёт с реальным участником).
+///
+/// Одного суффикса недостаточно: inbound-абонент — `sip-<uuid>-in@sip-gateway`,
+/// у него UUID не в конце строки.
+pub(crate) fn embedded_uuid(value: &str) -> Option<uuid::Uuid> {
+    if let Ok(uuid) = uuid::Uuid::parse_str(value) {
+        return Some(uuid);
+    }
+    // Токены `sip-<uuid>-in`, `part-room-<uuid>`, `urn:uuid:<uuid>`:
+    // разделитель — всё, что не hex-цифра и не дефис.
+    for token in value.split(|c: char| !(c.is_ascii_hexdigit() || c == '-')) {
+        if let Ok(uuid) = uuid::Uuid::parse_str(token) {
+            return Some(uuid);
+        }
+    }
+    // UUID «вклеен» в строку без разделителей — скользящее окно только по
+    // границам UTF-8 (byte-слайс на не-ASCII строке паниковал бы).
+    for start in 0..=value.len().saturating_sub(36) {
+        let Some(window) = value.get(start..start + 36) else { continue };
+        if let Ok(uuid) = uuid::Uuid::parse_str(window) {
+            return Some(uuid);
+        }
+    }
+    None
+}
+
 /// Извлекает стабильный ParticipantId из строки сессии (детерминированный UUIDv5 для псевдонимов).
 pub fn parse_participant_id(pid_str: &str) -> vks_core::ParticipantId {
-    let u = uuid::Uuid::parse_str(pid_str)
-        .ok()
-        .or_else(|| {
-            if pid_str.len() >= 36 {
-                // First check suffix (e.g. "part-room-uuid")
-                uuid::Uuid::parse_str(&pid_str[pid_str.len() - 36..])
-                    .ok()
-                    // Then scan token boundaries / sliding windows for embedded UUID
-                    .or_else(|| {
-                        for token in pid_str.split(['-', ':', '/', '@', '_']) {
-                            if token.len() == 36 {
-                                if let Ok(parsed) = uuid::Uuid::parse_str(token) {
-                                    return Some(parsed);
-                                }
-                            }
-                        }
-                        for i in 0..=pid_str.len().saturating_sub(36) {
-                            if let Ok(parsed) = uuid::Uuid::parse_str(&pid_str[i..i + 36]) {
-                                return Some(parsed);
-                            }
-                        }
-                        None
-                    })
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| {
-            use sha2::{Digest, Sha256};
-            let digest = Sha256::digest(pid_str.as_bytes());
-            let mut bytes = [0u8; 16];
-            bytes.copy_from_slice(&digest[..16]);
-            bytes[6] = (bytes[6] & 0x0f) | 0x50; // Version 5
-            bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variant RFC 4122
-            uuid::Uuid::from_bytes(bytes)
-        });
+    let u = embedded_uuid(pid_str).unwrap_or_else(|| {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(pid_str.as_bytes());
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x50; // Version 5
+        bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variant RFC 4122
+        uuid::Uuid::from_bytes(bytes)
+    });
     vks_core::ParticipantId::from_uuid(u)
 }
 
@@ -1350,5 +1431,17 @@ mod tests {
         let infixed = format!("prefix-{}-audio-track", random_uuid);
         let pid_infixed = parse_participant_id(&infixed);
         assert_eq!(pid_infixed.to_string(), random_uuid.to_string());
+    }
+
+    #[test]
+    fn metrics_access_enforces_token_and_loopback_rules() {
+        // Токен не настроен: loopback можно, LAN нельзя.
+        assert!(metrics_access(None, None, true).is_ok());
+        assert_eq!(metrics_access(None, None, false).unwrap_err().0, StatusCode::FORBIDDEN);
+        // Токен настроен: он обязателен и для loopback; неверный — 401.
+        assert!(metrics_access(Some("secret"), Some("secret"), true).is_ok());
+        assert!(metrics_access(Some("secret"), Some("secret"), false).is_ok());
+        assert_eq!(metrics_access(Some("secret"), None, true).unwrap_err().0, StatusCode::UNAUTHORIZED);
+        assert_eq!(metrics_access(Some("secret"), Some("nope"), true).unwrap_err().0, StatusCode::UNAUTHORIZED);
     }
 }

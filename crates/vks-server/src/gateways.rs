@@ -1277,11 +1277,7 @@ pub fn terminate_gateway_participant_in_room(
 /// их в синтетический UUID — такой слот раскладки никогда не совпадёт с
 /// реально забридженным участником и стал бы лишней пустой ячейкой композита.
 fn layout_identifier_has_uuid(value: &str) -> bool {
-    value.split(['@', ':', '/', '_', ' ']).any(|token| {
-        let token = token.trim();
-        let start = token.len().saturating_sub(36);
-        token.is_char_boundary(start) && uuid::Uuid::parse_str(&token[start..]).is_ok()
-    })
+    crate::embedded_uuid(value).is_some()
 }
 
 impl GatewayManager {
@@ -1770,7 +1766,7 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
                 .filter_map(|key| slot[*key].as_str())
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .find(|value| uuid::Uuid::parse_str(value).is_ok() || layout_identifier_has_uuid(value));
+                .find(|value| layout_identifier_has_uuid(value));
             if let Some(identifier) = identifier {
                 assignments.insert(crate::parse_participant_id(identifier), position);
             }
@@ -3753,7 +3749,7 @@ async fn serve_h323_uas_session(
                 let Some(digit) = event.get("digit").and_then(serde_json::Value::as_u64) else { continue };
                 let Some(character) = u8::try_from(digit).ok().and_then(dtmf_event_character) else { continue };
                 let Some(call) = active.get(call_id) else { continue };
-                let delivered = relay_dtmf_character(&manager, call.room_id, &call.participant_id, character);
+                let delivered = relay_dtmf_character(manager, call.room_id, &call.participant_id, character);
                 info!(
                     %call_id,
                     digit = %character,
@@ -4426,6 +4422,32 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert!(rects.contains_key(&0), "участник получил окно, а не остался без слота");
     }
 
+    /// S2 (DoD): входящий SIP/H.323 id (`sip-<uuid>-in@…`, `h323-<uuid>-in@…`)
+    /// обязан попадать в окно, а не молча отбрасываться: `apply_layout` не
+    /// возвращает ошибку при пустых assignments, поэтому без этого теста баг
+    /// «видео не в том окне» снова позеленит suite.
+    #[tokio::test]
+    async fn gateway_layout_accepts_inbound_gateway_identifier() {
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = GatewayManager::new().with_mcu(mcu.clone());
+        let room = RoomId::new();
+        mcu.ensure_room(room);
+        for participant in [
+            format!("sip-{}-in@sip-gateway", vks_core::ParticipantId::new().as_uuid()),
+            format!("h323-{}-in@h323-gateway", vks_core::ParticipantId::new().as_uuid()),
+        ] {
+            let pid = crate::parse_participant_id(&participant);
+            let layout = serde_json::json!({
+                "payload": {"mode": "manual", "preset": "preset_equal_1", "slots": [
+                    {"position": 1, "abonent_id": participant}
+                ]}
+            });
+            manager.apply_layout(room, layout).await.expect("layout reaches MCU");
+            let descriptor = mcu.layout_descriptor(room).expect("descriptor");
+            assert_eq!(descriptor.assignments.get(&pid), Some(&0), "входящий gateway id не занял окно 0");
+        }
+    }
+
     /// S10: слот без явной геометрии не теряет участника.
     ///
     /// Явная геометрия UI перекрывает базовую (пресетную) **по слоту**, а не
@@ -5095,9 +5117,29 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert!(layout_identifier_has_uuid(&format!("h323-{}@h323-gateway", pid.as_uuid())));
         assert!(layout_identifier_has_uuid(&format!("part-room-{}", pid.as_uuid())));
         assert!(layout_identifier_has_uuid(&pid.as_uuid().to_string()));
+        // Inbound-абонент: UUID не в конце строки (суффикс `-in`).
+        assert!(layout_identifier_has_uuid(&format!("sip-{}-in@sip-gateway", pid.as_uuid())));
         assert!(!layout_identifier_has_uuid("cs-1"));
         assert!(!layout_identifier_has_uuid("Terminal #2"));
         assert!(!layout_identifier_has_uuid(""));
+        assert!(!layout_identifier_has_uuid("sip-not-a-uuid-in@sip-gateway"));
+    }
+
+    /// Inbound и outbound SIP-участник с одним UUID должны давать один и тот же
+    /// `ParticipantId` — иначе слот раскладки, назначенный на `sip-<uuid>-in`,
+    /// не попадает в забридженного участника (пустое окно в композите).
+    #[test]
+    fn inbound_sip_identifier_maps_to_same_participant_as_outbound() {
+        let pid = vks_core::ParticipantId::new();
+        let inbound = format!("sip-{}-in@sip-gateway", pid.as_uuid());
+        let outbound = format!("sip-{}@sip-gateway", pid.as_uuid());
+        assert_eq!(crate::parse_participant_id(&inbound), crate::parse_participant_id(&outbound));
+        assert_eq!(crate::parse_participant_id(&inbound), pid);
+        // Длинный не-ASCII идентификатор без UUID не должен паниковать
+        // (byte-слайс по 36-байтовым окнам падал на не-char-boundary) и
+        // хешируется детерминированно.
+        let unicode = "Участник-с-длинным-именем-без-uuid-0123456789";
+        assert_eq!(crate::parse_participant_id(unicode), crate::parse_participant_id(unicode));
     }
 
     #[tokio::test]

@@ -170,6 +170,32 @@ TLS terminates at a reverse proxy (nginx/Caddy); the server itself listens on
 HTTP. Do not expose `listen_addr = "0.0.0.0:8080"` directly to untrusted
 networks.
 
+### Operational endpoints (P1-7)
+
+`/api/v3/mcu/farm`, `/api/v3/gateways/status` and `/api/v3/cluster/status`
+expose room topology and encoder/gateway state: they require
+`Authorization: Bearer <JWT>` with the Moderator role (401 anonymous,
+403 lower roles). The UI does not call them; use the admin token
+(`POST /api/v3/login`).
+
+`/metrics` (Prometheus text format) is scrapeable from loopback without
+credentials. For a remote scrape — including through a same-host reverse proxy,
+where every request appears to come from `127.0.0.1` — set the environment
+variable `VKS_METRICS_TOKEN`; when it is set, the token is mandatory for every
+request and is accepted as `Authorization: Bearer <token>` or
+`X-Metrics-Token: <token>`. Example scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: vks-mcu
+    static_configs: [{ targets: ["127.0.0.1:8080"] }]
+    # remote/proxied only:
+    # authorization: { type: Bearer, credentials_file: /etc/vks/metrics.token }
+```
+
+The benchmark harness (`scripts/bench/matrix.py`, `t2_matrix.sh`) passes the
+admin token to the farm endpoint via `VKS_API_TOKEN`/`/tmp/vks.token`.
+
 ### Escape hatch (dev/emergency only)
 
 `VKS_ALLOW_INSECURE_DEFAULTS=true` overrides the TOML flag. In that mode the
