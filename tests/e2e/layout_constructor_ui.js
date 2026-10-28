@@ -97,15 +97,11 @@ async function api(token, method, path, body) {
     });
     // Вендорский auto-превью шлёт calculate с `preset_default_13` (400 по
     // контракту) и сообщает об ошибке через window.reportError. Перехватываем
-    // ЛЮБОЙ вызов reportError и проверяем его ПРОВЕНАНС: допустим ровно один
-    // вызов, и это должен быть axios-ошибка именно этого запроса (config.url +
-    // preset в config.data). Любой другой вызов (в т.ч. crafted-объект) —
-    // fail; allowlist по форме ошибки/окну времени не используется.
+    // ЛЮБОЙ вызов reportError и проверяем, что это настоящая axios-ошибка этого
+    // запроса (status 400, config.url, preset в config.data, request). Любой
+    // другой вызов (в т.ч. crafted-объект) — fail; allowlist по форме ошибки или
+    // окну времени не используется.
     await context.addInitScript(() => {
-      // Счётчики в замыкании и неизменяемые: код страницы не может ни
-      // переопределить reportError, ни обнулить/подделать счётчики.
-      let expectedCalls = 0;
-      let unexpectedCalls = 0;
       const wrapper = (error) => {
         let expected = false;
         try {
@@ -115,19 +111,16 @@ async function api(token, method, path, body) {
             && String(config.data || '').includes('preset_default_13')
             // axios-маркеры настоящей HTTP-ошибки, а не произвольного объекта.
             && error.status === 400
-            && Boolean(error.config) && Boolean(error.request);
+            && Boolean(error.request);
         } catch (e) { expected = false; }
-        if (expected) expectedCalls += 1;
-        else unexpectedCalls += 1;
         try { window.__vksReport({ kind: expected ? 'expected' : 'unexpected' }); } catch (e) {}
       };
-      const read = () => ({ expected: expectedCalls, unexpected: unexpectedCalls });
+      // Обёртка неизменяема: код страницы не может переопределить reportError
+      // и спрятать/подделать вызов.
       try {
         Object.defineProperty(window, 'reportError', { value: wrapper, writable: false, configurable: false });
-        Object.defineProperty(window, '__readVendorReport', { value: read, writable: false, configurable: false });
       } catch (e) {
         window.reportError = wrapper;
-        window.__readVendorReport = read;
       }
     });
     const calculateResponses = [];
