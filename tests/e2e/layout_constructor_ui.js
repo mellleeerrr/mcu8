@@ -87,6 +87,14 @@ async function api(token, method, path, body) {
       const text = message.text();
       if (/hasIndividualLayout|sessionLayoutListByType/.test(text)) crashes.push(text);
     });
+    // Вызовы reportError аккумулируются в Node в момент вызова: счётчики
+    // живут не в странице/фрейме, а в процессе теста, поэтому удаление или
+    // навигация iframe не теряет данные.
+    const reported = { expected: 0, unexpected: 0 };
+    await context.exposeBinding('__vksReport', (_source, payload) => {
+      const kind = payload && payload.kind === 'expected' ? 'expected' : 'unexpected';
+      reported[kind] += 1;
+    });
     // Вендорский auto-превью шлёт calculate с `preset_default_13` (400 по
     // контракту) и сообщает об ошибке через window.reportError. Перехватываем
     // ЛЮБОЙ вызов reportError и проверяем его ПРОВЕНАНС: допустим ровно один
@@ -104,10 +112,14 @@ async function api(token, method, path, body) {
           const config = error && error.config;
           expected = Boolean(config)
             && /\/video_layouts\/calculate/.test(String(config.url || ''))
-            && String(config.data || '').includes('preset_default_13');
+            && String(config.data || '').includes('preset_default_13')
+            // axios-маркеры настоящей HTTP-ошибки, а не произвольного объекта.
+            && error.status === 400
+            && Boolean(error.config) && Boolean(error.request);
         } catch (e) { expected = false; }
         if (expected) expectedCalls += 1;
         else unexpectedCalls += 1;
+        try { window.__vksReport({ kind: expected ? 'expected' : 'unexpected' }); } catch (e) {}
       };
       const read = () => ({ expected: expectedCalls, unexpected: unexpectedCalls });
       try {
@@ -302,18 +314,6 @@ async function api(token, method, path, body) {
     // Ни один pageerror не допустим: вендорский шум перехвачен на
     // window.reportError и посчитан отдельно; любой неперехваченный бросок
     // (в т.ч. crafted-объект) обязан провалить тест.
-    // Счётчики суммируем по всем фреймам: reportError в same-origin iframe не
-    // всплывает как pageerror, поэтому иначе его вызов был бы невидим.
-    const reported = { expected: 0, unexpected: 0 };
-    for (const frame of page.frames()) {
-      try {
-        const counters = await frame.evaluate(() => (typeof window.__readVendorReport === 'function'
-          ? window.__readVendorReport()
-          : { expected: 0, unexpected: 0 }));
-        reported.expected += Number(counters.expected || 0);
-        reported.unexpected += Number(counters.unexpected || 0);
-      } catch (e) { /* фрейм уже закрыт */ }
-    }
     check('нет pageerror; ровно один reportError и он от axios preset_default_13',
       pageErrors.length === 0 && vendor400Count === 1 && reported.expected === 1 && reported.unexpected === 0,
       `pageerrors: ${pageErrors.slice(0, 2).join(' | ')}; 400: ${vendor400Count}; reportError: ${JSON.stringify(reported)}`);
