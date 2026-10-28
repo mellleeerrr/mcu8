@@ -1078,13 +1078,6 @@
     return null;
   }
 
-  function onConstructorActivate(event) {
-    var item = closestConstructorItem(event.target);
-    if (!item) return;
-    event.preventDefault();
-    selectConstructor(item.getAttribute('data-preset'));
-  }
-
   function onConstructorKeydown(event) {
     if (event.target && event.target.getAttribute && event.target.getAttribute('data-counter-input')) {
       if (event.key === 'Enter') onCounterChange(event);

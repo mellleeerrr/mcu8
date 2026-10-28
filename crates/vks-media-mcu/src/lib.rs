@@ -8,9 +8,7 @@
 //! ## Modules
 //! - [`engine`] — [`McuEngine`], impl `vks_core::MediaEngine` (MCU);
 //!   in-memory MCU wiring the compositor + mixer + VAD + layout bridge.
-//! - [`frame`] — `Frame` placeholder types +
-//!   `VideoEncoder` / `VideoDecoder` abstractions (mock codecs; the real
-//!   ones sit behind the `oxideav` feature, ADR-0004).
+//! - [`frame`] — `Frame` placeholder type (raw pixel buffer).
 //! - [`compositor`] — N frames + slot rects → 1920×1080 canvas
 //!   (nearest-neighbour letterbox; the real bilinear compositor is
 //!   feature-gated).
@@ -58,7 +56,7 @@ pub use engine::{group_bitrate_kbps, EventSink, LayoutSnapshot, McuEngine, RoomE
 pub use farm::{
     AccessUnit, EncoderFarm, EncoderKey, EncoderSpec, FarmCodec, FarmError, GroupStat, GroupViewer, ViewerRtp,
 };
-pub use frame::{CodecError, Frame, MockVideoDecoder, MockVideoEncoder, VideoDecoder, VideoEncoder};
+pub use frame::Frame;
 pub use layout_bridge::{LayoutBridge, PixelRect, SlotKey, SlotRects, CROSSFADE_MS};
 pub use vad::{Vad, VadConfig, VadState, DEBOUNCE_MS, FRAME_MS, FRAME_SAMPLES};
 

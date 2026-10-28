@@ -12,8 +12,5 @@
 `build.rs` использует `protobuf-src` — компилирует собственный `protoc` в `OUT_DIR`,
 системный `protoc` НЕ требуется (кросс-платформенно).
 
-## openapi.json
-Скелет OpenAPI 3.0 для admin REST — источник для `progenitor` (ADR-0013).
-
 ## Дерево зависимостей
 `vks-proto` — standalone (не зависит от внутренних крейтов, ARCHITECTURE.md §3).
