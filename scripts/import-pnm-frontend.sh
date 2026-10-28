@@ -286,7 +286,9 @@ log "  скриптом НЕ применяется. После импорта �
 log "  локали ru_RU/en_US) и примените ребренд вручную — см. NOTES.md, «Как обновлять»."
 
 # 4. MANIFEST.sha256.
-( cd "$DEST" && find . -type f -print0 | sort -z | xargs -0 sha256sum ) > "$MANIFEST"
+# LC_ALL=C: порядок должен совпадать с Python `sorted()` (codepoint), который
+# пишет patch-pnm-layout-crash.py; иначе локаль ru_RU переставляет 55 строк.
+( cd "$DEST" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum ) > "$MANIFEST"
 log "манифест: $MANIFEST ($(wc -l < "$MANIFEST") строк)"
 
 # 5. Опционально: source/.

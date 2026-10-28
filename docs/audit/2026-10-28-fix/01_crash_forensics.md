@@ -11,9 +11,10 @@
 `MANIFEST.sha256` — 17:43–17:44; `scripts/patch-pnm-layout-crash.py` — 17:40. Между первым срезом
 (17:47) и финальным (17:52) соседний агент **добавил durable-ремонт** (`repair_scope_defaults`),
 **перевёл identity «Общей» на `payload.type`** и **убрал read-path fallback**; это учтено ниже.
-**Хэши финального среза:** `resources.rs` `4176f96e…` (mtime 17:51:46), `resource_tests.rs`
-`be396a94…` (17:52:38), `shell.rs` `354afa6e…` (11:29), `codian-layouts.js` `c91bb08e…` (17:43),
-`index6` `6aa06b9c…`, `index-legacy6` `9f4ef0f2…`.
+**Хэши финального среза (md5; в 02_regressions.md для бандлов используется sha256):**
+`resources.rs` `4176f96e…` (mtime 17:51:46), `resource_tests.rs` `be396a94…` (17:52:38),
+`shell.rs` `354afa6e…` (11:29), `codian-layouts.js` `c91bb08e…` (17:43), `index6` `6aa06b9c…`,
+`index-legacy6` `9f4ef0f2…`.
 **Тесты:** в 17:57 я прогнал `cargo test -p vks-admin --lib` — **302 passed, 0 failed**; отдельно
 `t00_` — **5 passed**, включая retype, дедуп двух default и «рестарт не даёт вторую Общую».
 
@@ -296,7 +297,7 @@ DEL  /api/v3/ui/conferences/<cid>                             → 204 (purge)
 | 3 | durable-ремонт `repair_scope_defaults` (retype alias-клона + дедуп) | `717–766`; **+~50** (есть) | **средний/высокий по данным** | перетипирует пользовательскую individual-раскладку в «Общую»; имя скрывается computed'ом; `hasIndividualLayout`/меню абонента меняют смысл; исход зависит от порядка рестартов (§A5) | **есть; требует решения по политике** |
 | 4 | `ensure` после каждого COW/detach | `edit_linked`/`mode`/`attach*/detach*`; **+15–25** | средний | наивная версия (canonical) даёт **две** «Общие»; нужно дедуплицировать | **не нужно**: identity по типу (п. 9) + durable (3) закрывают |
 | 5 | frontend: не форсить `type` | `codian-layouts.js` **−2** (есть) | низкий | без п. 8 constructor-на-«Общей» делает «Общую» кастомной (имя скрыто) — теперь это осознанная политика | **обязательно как гигиена** (есть) |
-| 6 | vendor guard `(…||[])` | `index6:720524,913248`; `index-legacy6:842451,1032809`; скрипт **+70** (есть) | низкий runtime / высокий maintenance | апгрейд вендора теряет патч; нужен `--check` в CI + MANIFEST | **обязательно как страховка** (есть), P2 |
+| 6 | vendor guard `(…||[])` | `index6:720524,913248`; `index-legacy6:842451,1032809`; скрипт **+142 строки** (есть) | низкий runtime / высокий maintenance | апгрейд вендора теряет патч; нужен `--check` в CI + MANIFEST | **обязательно как страховка** (есть), P2 |
 | 7 | one-time ремонт БД | скрипт **+30–50** | высокий (мутация user data) | не защищает будущее; необратим; дублирует durable | **не делать** |
 | 8 | fork-on-type-change: PATCH default с `type=individual` → новая individual, «Общая» остаётся | `edit_linked` (+mode) **+25–30**, тесты | средний | UI после save рефетчит **старый id** → покажет «Общую» (нужен frontend-навигация, +10); список растёт | **рекомендуется, если constructor должен создавать отдельную раскладку**; иначе — п. 3 |
 | 9 | identity «Общей» по `payload.type` (не по канону) | `is_default_layout:705`, `inherit:1213`; **+3** (есть) | низкий | меняет смысл «canonical»: payload-seed больше не эталон per-scope; исчезают дубли после рестарта | **обязательно** (есть) |

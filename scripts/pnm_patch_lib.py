@@ -36,11 +36,18 @@ from pathlib import Path
 
 def atomic_write(path: Path, text: str) -> None:
     """Пишет файл атомарно: временный файл рядом + `os.replace`."""
+    # mkstemp создаёт 0600; для вендорского рантайма это 403 под nginx/другим
+    # пользователем — сохраняем исходный режим (или 0644 для нового файла).
+    try:
+        mode = path.stat().st_mode & 0o7777
+    except FileNotFoundError:
+        mode = 0o644
     fd, name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     tmp = Path(name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)

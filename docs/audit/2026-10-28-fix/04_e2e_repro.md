@@ -3,7 +3,7 @@
 Скрипт: [tests/e2e/repro_session_default_layout.js](../../../tests/e2e/repro_session_default_layout.js)
 (CommonJS, Playwright 1.64.1 / chromium-1243, SIP-абонент — `scripts/bench/sipbot.py`).
 
-Стенд: `http://127.0.0.1:8080/pnm/`, vks-server PID 1814143 (release, старт 18:00:21 MSK,
+Стенд: `http://127.0.0.1:8080/pnm/`, vks-server PID 1814143 (release, старт 18:00:39 MSK;
 конфиг `configs/default.toml`), вендор UI 2.2.1.66 + project-слой, коммит фикса `645120d`.
 Проверки выполнены 28.10.2026, 17:43–18:12 MSK.
 
@@ -56,7 +56,7 @@ TypeError: Cannot read properties of undefined (reading 'some')
 9. Cleanup: sipbot SIGTERM → `DELETE /api/v3/sessions/<id>` (204) →
    `DELETE /api/v3/conferences/<id>` (204, purge room-scoped раскладок).
 
-Начиная с 18:00:21 стенд перезапущен с полным фиксом: `PATCH payload.type` больше не меняет
+Начиная с 18:00:39 стенд перезапущен с полным фиксом: `PATCH payload.type` больше не меняет
 тип (иммутабельность), а legacy-сессия `49b599d7…` durable-отремонтирована (её единственная
 `individual` стала `default`). Поэтому state-step 7 на живом стенде битый scope не создаёт —
 скрипт в этом случае инжектит **то же клиентское состояние** на границе API
@@ -97,25 +97,32 @@ node repro_session_default_layout.js --guard-only --legacy-bundle
 ```
 
 - `--legacy-bundle` не трогает файлы: Playwright route подменяет в **ответе**
-  `**/chunks/*bundle-*.js*` `(this.sessionLayoutListByType.default||[])` →
-  `this.sessionLayoutListByType.default`. Нужен, когда фикс уже задеплоен: доказывает,
-  что тест ловит именно этот дефект.
+  `**/chunks/*bundle-*.js*` **все** вхождения guard'а
+  `(this.sessionLayoutListByType.default||[])` → `this.sessionLayoutListByType.default`
+  (в бандле их два: `hasIndividualLayout` и broadcast-popup). Нужен, когда фикс уже
+  задеплоен: доказывает, что тест ловит именно этот дефект.
 - `--guard-only` не мутирует бэкенд: route вырезает `type=default` из ответа
   `GET /api/v3/ui/sessions/*/video_layouts` и проверяет JS-guard на «битом» списке.
 - `--keep` оставляет конференцию/сессию для разбора; по умолчанию всё удаляется.
 - Артефакты: `artifactsDir('repro-crash')` = `~/.local/state/vks/artifacts/repro-crash`
   (`result.json`, `network.json`, `pageerrors.json`, `01-session-baseline.png`,
-  `02-session-after-flip.png`, `03-crash.png`/`03-no-crash.png`, `sipbot.json`).
+  `02-session-after-flip.png`, `03-crash.png`/`03-no-crash.png`).
+  `sipbot.json` не появляется: e2e останавливает sipbot SIGTERM, а `sipbot.py`
+  пишет JSON только при нормальном завершении (см. `sipbot.py:_write_json`).
   Можно переопределить: `VKS_ARTIFACTS=/path node …`.
   Сырые артефакты финальных прогонов из таблицы ниже лежат в
   `repro-crash/evidence-{legacy,clean,guard-legacy,postfix-default}/`
   (`evidence-legacy/03-crash.png`, `evidence-clean/result.json` и т.д.).
+  Для прогона C отдельного сохранённого каталога нет (он выполнялся как
+  guard-only проверка без копирования evidence); воспроизводимость C
+  подтверждена повторным прогоном `--expect-clean --guard-only` (exit 0,
+  `layout_injection="stripped 1 default(s)"`).
 
 ### Матрица прогонов 18:07–18:12 (финальная версия скрипта)
 
 | # | Команда | exit | Что получилось |
 |---|---------|------|----------------|
-| A | `--legacy-bundle` | **0** | `reproduced=true`, 9 записей `TypeError … reading 'some'`, stack `index6…:1:720556`, сессия `5a559d7e…`, 51 c |
+| A | `--legacy-bundle` | **0** | `reproduced=true`, 9 записей `TypeError … reading 'some'` (пары с интервалом ~5 c), stack `index6…:1:720556`, сессия `5a559d7e…`, 51 c |
 | B | `--expect-clean` | **0** | `reproduced=false`, `scenario_ok=true`, 0 console-ошибок, connected-строка в DOM, сессия `57a7ec48…`, 80 c |
 | C | `--expect-clean --guard-only` | **0** | `guard-only-expect-clean`, `reproduced=false`, `layout_injection="stripped 1 default(s)"` |
 | D | `--guard-only --legacy-bundle` | **0** | `reproduced=true`, 9 записей, `bundle.injection="guard-removed"`, `layout_injection="stripped 1 default(s)"`, сессия `6d2ab33c…`, 31 c |
@@ -137,7 +144,7 @@ Cleanup во всех прогонах: `sipbot: stopped (SIGTERM)`, `session: s
 - **Живой бандл к моменту финальных прогонов уже содержал guard** (правка 17:43:55,
   затем коммит `645120d`). Плейн-прогон после этого крэшить не может — отсюда
   `--legacy-bundle` (клиент) и `--guard-only` (состояние).
-- **После рестарта 18:00:21 бэкенд стал иммутабельным**: `PATCH payload.type=individual`
+- **После рестарта 18:00:39 бэкенд стал иммутабельным**: `PATCH payload.type=individual`
   отвечает 200, но сохраняет `default` (COW-клон), legacy-сессия отремонтирована.
   Поэтому «сломать» scope публичным API больше нельзя; скрипт инжектит битый список
   на границе API (только ответы браузеру прогона) и помечает `flip.forced`.

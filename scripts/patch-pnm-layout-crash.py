@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import sys
 from pathlib import Path
 
@@ -103,29 +104,38 @@ def main() -> int:
         targets.append((LEGACY, LEGACY_RULES))
 
     ok_all = True
+    changed = False
     for name, rules in targets:
         path = chunks / name
         print("  %s" % path)
+        before = path.read_bytes() if path.is_file() else b""
         ok, messages = apply_rules(path, rules, check_only=args.check)
+        changed = changed or (path.is_file() and path.read_bytes() != before)
         for message in messages:
             print(message)
         ok_all = ok_all and ok
 
-    if ok_all and not args.check:
+    if ok_all and not args.check and changed:
         # Патч меняет байты вендорского рантайма → MANIFEST.sha256 обязан
         # пересчитаться. Делаем это здесь же, иначе `sha256sum -c` краснеет
-        # до следующего полного импорта.
+        # до следующего полного импорта. При no-op манифест не трогаем
+        # (иначе каждый --check/повторный запуск шумит mtime и порядком строк).
         manifest = Path(args.root) / "client/pnm-frontend/MANIFEST.sha256"
         runtime = chunks.parent
         if manifest.parent.is_dir() and runtime.is_dir():
-            digest = hashlib.sha256()
             lines = []
             for path in sorted(p for p in runtime.rglob("*") if p.is_file()):
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
                 rel = path.relative_to(runtime).as_posix()
                 lines.append("%s  ./%s\n" % (digest, rel))
-            manifest.write_text("".join(lines), encoding="utf-8")
-            print("  манифест пересобран: %s строк" % len(lines))
+            content = "".join(lines)
+            if not manifest.is_file() or manifest.read_text(encoding="utf-8") != content:
+                tmp = manifest.with_name(manifest.name + ".tmp")
+                tmp.write_text(content, encoding="utf-8")
+                os.replace(tmp, manifest)
+                print("  манифест пересобран: %s строк" % len(lines))
+            else:
+                print("  манифест без изменений (%s строк)" % len(lines))
 
     # Проверка синтаксиса после записи уже выполнена внутри apply_rules; для
     # --check дополнительно убеждаемся, что итоговые файлы читаются node.

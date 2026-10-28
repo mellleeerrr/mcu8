@@ -201,9 +201,13 @@ async function installLegacyBundleRoute(context) {
       const file = url.split('/').pop().split('?')[0];
       let body = await response.text();
       let result;
-      if (body.includes(FIXED_GUARD)) {
-        body = body.replace(FIXED_GUARD, LEGACY_GUARD);
+      // В бандле ДВА места с guard'ом (hasIndividualLayout и broadcast):
+      // заменяем все, иначе --legacy-bundle воспроизводит дефект лишь наполовину.
+      const guardCount = body.split(FIXED_GUARD).length - 1;
+      if (guardCount > 0) {
+        body = body.split(FIXED_GUARD).join(LEGACY_GUARD);
         result = 'guard-removed';
+        bundleState.guard_occurrences_removed = guardCount;
       } else if (body.includes(`${LEGACY_GUARD}.some(`)) {
         result = 'already-legacy';
       } else {
@@ -424,9 +428,16 @@ async function stopSipbot(bot) {
     token = await page.evaluate(() => localStorage.getItem('TrueConfMCU_AccessToken') || '');
     check('login: token in localStorage', Boolean(token));
 
-    check('bundle: live guard state captured', bundleState.live_has_guard !== null, JSON.stringify(bundleState));
+    check('bundle: live guard captured', typeof bundleState.live_has_guard === 'boolean', JSON.stringify(bundleState));
+    // В пост-фикс режиме доказательство требует живого guard'а, а не просто
+    // «удалось прочитать бандл» (иначе зелёный без фикса).
+    if (EXPECT_CLEAN && !LEGACY_BUNDLE) {
+      check('guard: live bundle has (default||[]) protection', bundleState.live_has_guard === true, FIXED_GUARD);
+    }
     if (LEGACY_BUNDLE) {
-      check('bundle: pre-fix injection applied in browser response',
+      // Не "bundle:"-префикс: проверка участвует в scenario_ok, иначе
+      // --legacy-bundle мог «доказать» крэш без реальной подмены бандла.
+      check('pre-fix: guard removed in served bundle',
         ['guard-removed', 'already-legacy'].includes(bundleState.injection), JSON.stringify(bundleState));
     }
 
@@ -495,10 +506,20 @@ async function stopSipbot(bot) {
     // ── 5. Базовая линия: страница сессии с connected-абонентом НЕ падает ──
     if (GUARD_ONLY) {
       // Список раскладок уже битый (route вырезал default) — проверяем сам guard.
+      // Крэши считаем только после взведения: записи до него могут быть чужими.
+      crashRecords.length = 0;
       crashArmed = true;
       await page.goto(`${BASE}/pnm/monitoring/sessions/${sessionId}`, { waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(12000);
       baselineClean = crashRecords.length === 0;
+      const injected = /^stripped [1-9]/.test(String(bundleState.layout_injection || ''));
+      const rowVisible = (await page.locator('.abonent-item-connected-wrapper, .abonent-item-connected').count()) > 0;
+      check('guard-only: broken list really injected (route stripped default)', injected,
+        bundleState.layout_injection || 'none');
+      check('guard-only: connected participant row present', rowVisible);
+      if (EXPECT_CLEAN && !LEGACY_BUNDLE) {
+        check('guard-only: live bundle guard active', bundleState.live_has_guard === true, JSON.stringify(bundleState));
+      }
       check(EXPECT_CLEAN
         ? 'guard-only: broken layout list did not crash the session page (JS guard active)'
         : 'guard-only: broken layout list crashed the session page (pre-fix behavior)',
@@ -595,16 +616,12 @@ async function stopSipbot(bot) {
     } else {
       flip.forced = null;
     }
-    const armed = brokenScope || Boolean(bundleState.layout_route_installed);
-    check('crash-arm: session scope broken (API flip or client-side list injection)', armed,
-      JSON.stringify({
-        types: flip.scope_after,
-        immutable: flip.immutable,
-        forced: flip.forced,
-        layout_injection: bundleState.layout_injection || null,
-      }));
+    // Взведение проверяем ПОСЛЕ загрузки страницы: route-инъекция срабатывает
+    // на первом GET списка раскладок, поэтому до навигации layout_injection ещё
+    // пуст, и проверка «битый список» была бы ложной.
 
     // ── 8. Перезагрузка страницы: connected-строка + битый default ─────────
+    crashRecords.length = 0;
     crashArmed = true;
     await page.goto(`${BASE}/pnm/monitoring/sessions/${sessionId}`, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(12000);
@@ -623,6 +640,20 @@ async function stopSipbot(bot) {
       await page.goto(`${BASE}/pnm/monitoring/sessions/${sessionId}`, { waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(12000);
     }
+
+    // Битой состояние считается только по реальной подмене: API-flip (brokenScope)
+    // или фактически вырезанный default из ответа списка (route сработал на загрузке).
+    const injectedBrokenList = /^stripped [1-9]/.test(String(bundleState.layout_injection || ''));
+    const armed = brokenScope || injectedBrokenList;
+    check('crash-arm: broken list really injected', brokenScope || !flip.forced || injectedBrokenList,
+      JSON.stringify(bundleState));
+    check('crash-arm: session scope broken (API flip or client-side list injection)', armed,
+      JSON.stringify({
+        types: flip.scope_after,
+        immutable: flip.immutable,
+        forced: flip.forced,
+        layout_injection: bundleState.layout_injection || null,
+      }));
 
     const crash = crashRecords[0] || null;
     check(EXPECT_CLEAN
@@ -677,7 +708,10 @@ async function stopSipbot(bot) {
     const scenarioOk = checks
       .filter(item => !/^(constructor:|crash:|bundle:|mode:|diagnostic:)/.test(item.name))
       .every(item => item.ok);
-    const ok = EXPECT_CLEAN ? (scenarioOk && !reproduced) : reproduced;
+    // failure (исключение после зелёных чеков) обязан валить прогон в любом
+    // режиме, а expect-crash без отработавшего сценария — не доказательство.
+    const ok = !failure && (EXPECT_CLEAN ? (scenarioOk && !reproduced) : (scenarioOk && reproduced));
+    if (failure) checks.push({ name: 'scenario: no exception before verdict', ok: false, detail: String(failure.message || failure) });
     checks.push({ name: `mode: ${EXPECT_CLEAN ? 'expect-clean' : 'expect-crash'} satisfied`, ok, detail: `reproduced=${reproduced} scenario_ok=${scenarioOk}` });
 
     const result = {
