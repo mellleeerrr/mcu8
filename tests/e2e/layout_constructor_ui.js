@@ -48,10 +48,7 @@ async function api(token, method, path, body) {
   let sessionId = '';
   let browser = null;
   let failure = '';
-  let vendor400At = 0;
   let vendor400Count = 0;
-  let vendorWindowUsed = false;
-  const vendorPageErrors = [];
   const geometry = new Map();
   try {
     const login = await api('', 'POST', '/api/v3/login', { login: LOGIN, password: PASSWORD });
@@ -87,16 +84,7 @@ async function api(token, method, path, body) {
       // `preset_default_13` (400 по контракту). Допускаем его ТОЛЬКО в окне 3 с
       // после реального 400-ответа и не более одного на ответ; любой другой
       // pageerror (в т.ч. ручного режима) обязан провалить тест.
-      // Вендорский reportError — это pageerror с пустыми name/message и
-      // стеком вендорского чанка; любая содержательная ошибка (в т.ч. наша)
-      // сюда не подходит. Один 400 = максимум одна такая ошибка.
-      const vendorShaped = detail.name === '' && detail.message === 'Object' && detail.stack === '' && detail.status === 0;
-      if (vendor400At && Date.now() - vendor400At <= 3000 && vendorShaped && !vendorWindowUsed) {
-        vendorWindowUsed = true;
-        vendorPageErrors.push(JSON.stringify(detail));
-      } else {
-        pageErrors.push(JSON.stringify(detail));
-      }
+      pageErrors.push(JSON.stringify(detail));
     });
     page.on('console', (message) => {
       if (message.type() !== 'error') return;
@@ -116,8 +104,6 @@ async function api(token, method, path, body) {
       try { preset = JSON.parse(request.postData() || '{}').preset || ''; } catch (e) { preset = ''; }
       const status = response.status();
       if (status === 400 && preset === 'preset_default_13') {
-        vendor400At = Date.now();
-        vendorWindowUsed = false;
         vendor400Count += 1;
       }
       const entry = { preset, status, slots: null };
@@ -286,9 +272,16 @@ async function api(token, method, path, body) {
     check('карточка pin_l активна', active.pressed === 'true' || active.active, JSON.stringify(active));
     check('счётчик остался 12 после клика', active.counter === '12', `${active.counter}`);
     check('нет crash-сигнатур в консоли', crashes.length === 0, crashes.slice(0, 2).join(' | '));
-    check('нет pageerror в ручном режиме (кроме вендорского preset_default_13)',
-      pageErrors.length === 0 && vendorPageErrors.length === vendor400Count,
-      `некоррелированные: ${pageErrors.slice(0, 2).join(' | ')}; вендорские: ${vendorPageErrors.length}/${vendor400Count}`);
+    // Вендорский auto-превью один раз шлёт calculate preset_default_13 → 400
+    // и один reportError с объектом {log:[],name:""}. Это ЕДИНСТВЕННАЯ
+    // допустимая ошибка: ровно один 400 и ровно один pageerror ровно этой
+    // формы. Любая лишняя ошибка/лишний 400 (в т.ч. crafted-бросок) — fail;
+    // allowlist «в окне после любого 400» не используется.
+    const vendorShaped = pageErrors.length === 1
+      && pageErrors[0].includes('"message":"Object"') && pageErrors[0].includes('"name":""');
+    check('pageerror только вендорский (ровно один 400 preset_default_13 и один reportError)',
+      vendor400Count === 1 && vendorShaped,
+      `pageerrors: ${pageErrors.slice(0, 2).join(' | ')}; 400: ${vendor400Count}`);
     check('превью и иконки идут только серверным calculate', calculate.length >= 7);
   } catch (error) {
     failure = String(error && error.stack ? error.stack : error);
