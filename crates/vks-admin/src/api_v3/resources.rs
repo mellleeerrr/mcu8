@@ -381,6 +381,29 @@ pub(crate) fn preset_size(preset: &str) -> Option<u32> {
     base.rsplit('_').next().and_then(|tail| tail.parse().ok())
 }
 
+/// Контрактный размер раскладки для attach/валидации: явный `payload.size`
+/// (его поддерживает `recalc_layout_size`), затем id пресета, затем слоты.
+pub(crate) fn layout_size(payload: &Value) -> Option<usize> {
+    payload
+        .get("size")
+        .and_then(Value::as_u64)
+        .filter(|size| *size > 0)
+        .map(|size| size as usize)
+        .or_else(|| payload.get("preset").and_then(Value::as_str).and_then(vks_layout::preset_size))
+        .or_else(|| payload.get("slots").and_then(Value::as_array).map(Vec::len).filter(|count| *count > 0))
+}
+
+/// Размер, выводимый из содержимого: параметрический id конструктора (слоты
+/// могли остаться от прежней раскладки), затем слоты, затем вендорский preset.
+fn derived_layout_size(payload: &Value) -> Option<usize> {
+    let preset = payload.get("preset").and_then(Value::as_str);
+    preset
+        .and_then(vks_layout::grids::slot_count)
+        .or_else(|| payload.get("slots").and_then(Value::as_array).map(Vec::len).filter(|count| *count > 0))
+        .or_else(|| preset.and_then(vks_layout::preset::PresetId::parse).map(|preset| usize::from(preset.size)))
+        .or_else(|| preset.and_then(vks_layout::codian::slot_count))
+}
+
 /// `speakers`/`listeners` в записи — счётчики для таблицы UI; источник истины —
 /// массивы в payload (их правят редакторы канала).
 fn recalc_audio_counts(record: &mut Value) {
@@ -944,7 +967,7 @@ pub async fn attach_layout_abonent(
     }
     let previous = resources.clone();
     let mut draft = source;
-    let limit = draft["payload"]["size"].as_u64().filter(|size| *size > 0).unwrap_or(64);
+    let limit = layout_size(&draft["payload"]).unwrap_or(64) as u64;
     let Some(slots) = draft["payload"]["slots"].as_array_mut() else {
         return error_json(409, "Layout has no video windows");
     };
@@ -1006,8 +1029,8 @@ pub async fn attach_layout_abonent(
     }
     // Живое изменение раскладки должно доехать до MCU без перезапуска сессии.
     drop(resources);
-    super::sessions::push_layout_to_engine(&state, room.id).await;
-    Json(json!({ "status": "ok", "layout_id": target_id })).into_response()
+    let applied = super::sessions::push_layout_to_engine(&state, room.id).await;
+    super::sessions::with_layout_apply(Json(json!({ "status": "ok", "layout_id": target_id })).into_response(), applied)
 }
 
 /// `DELETE …/video_layouts/{resource_id}/abonents/{abonent_id}` — убрать из раскладки.
@@ -1060,14 +1083,12 @@ pub async fn detach_layout_abonent(
     }
     // Живое изменение раскладки должно доехать до MCU без перезапуска сессии.
     drop(resources);
-    super::sessions::push_layout_to_engine(&state, room.id).await;
-    {
-        let mut response = StatusCode::NO_CONTENT.into_response();
-        if let Ok(value) = axum::http::HeaderValue::from_str(&target_id) {
-            response.headers_mut().insert("x-vks-layout-id", value);
-        }
-        response
+    let applied = super::sessions::push_layout_to_engine(&state, room.id).await;
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&target_id) {
+        response.headers_mut().insert("x-vks-layout-id", value);
     }
+    super::sessions::with_layout_apply(response, applied)
 }
 
 /// Миграция сохранённых записей: ранние версии держали в раскладке объект
@@ -1351,17 +1372,9 @@ fn ensure_slot_roles(record: &mut Value) {
 }
 
 fn recalc_layout_size(record: &mut Value) {
-    let Some(payload) = record["payload"].as_object() else { return };
     // Параметрический id конструктора — источник истины о числе окон: слоты
     // могли остаться от прежней раскладки (id изменился, slots — нет).
-    let size = payload
-        .get("preset")
-        .and_then(Value::as_str)
-        .and_then(vks_layout::grids::slot_count)
-        .or_else(|| payload.get("slots").and_then(Value::as_array).map(Vec::len).filter(|count| *count > 0))
-        .or_else(|| payload.get("preset").and_then(Value::as_str).and_then(preset_size).map(|n| n as usize))
-        .or_else(|| payload.get("preset").and_then(Value::as_str).and_then(vks_layout::codian::slot_count));
-    if let Some(size) = size {
+    if let Some(size) = derived_layout_size(&record["payload"]) {
         record["payload"]["size"] = json!(size);
     }
 }
@@ -1399,7 +1412,46 @@ fn merge_layout_slots(previous: &[Value], incoming: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-fn update_resource(record: &mut Value, body: &Value) -> Result<(), String> {
+/// Ошибка PATCH: `Invalid` — 422 (структура payload), `Conflict` — 409
+/// (семантика раскладки: дубль/выход за размер).
+#[derive(Debug)]
+enum UpdateError {
+    Invalid(String),
+    Conflict(String),
+}
+
+/// Уникальность и границы окон: позиции в `1..=size`, без дублей. Битые
+/// legacy-раскладки не ремонтируем молча — PATCH должен вернуть 409 с reason.
+fn validate_layout_assignments(payload: &Value) -> Result<(), UpdateError> {
+    let Some(slots) = payload.get("slots").and_then(Value::as_array) else { return Ok(()) };
+    // Ёмкость сетки: у пресета она больше числа сохранённых слотов (слоты
+    // перечисляют только занятые/созданные окна, `position` — номер окна в сетке).
+    let size = payload
+        .get("preset")
+        .and_then(Value::as_str)
+        .and_then(vks_layout::preset_size)
+        .or_else(|| layout_size(payload));
+    let mut seen = std::collections::HashSet::new();
+    for slot in slots.iter().filter(|slot| slot.is_object()) {
+        let Some(position) = slot.get("position").and_then(Value::as_u64) else { continue };
+        if position == 0 {
+            return Err(UpdateError::Conflict("slot position must be >= 1".to_string()));
+        }
+        if let Some(size) = size {
+            if position > size as u64 {
+                return Err(UpdateError::Conflict(format!(
+                    "slot position {position} is outside layout of {size} windows"
+                )));
+            }
+        }
+        if !seen.insert(position) {
+            return Err(UpdateError::Conflict(format!("duplicate slot position {position}")));
+        }
+    }
+    Ok(())
+}
+
+fn update_resource(record: &mut Value, body: &Value) -> Result<(), UpdateError> {
     // `payload.type` — свойство создания, а не редактирования. Вендорский
     // редактор PNM пишет в черновик `type` при смене режима, и без этого
     // PATCH превращал «Общую» (default) в individual: сессия оставалась без
@@ -1410,9 +1462,9 @@ fn update_resource(record: &mut Value, body: &Value) -> Result<(), String> {
     }
     if let Some(payload) = body.get("payload") {
         if !payload.is_object() {
-            return Err("payload must be an object".to_string());
+            return Err(UpdateError::Invalid("payload must be an object".to_string()));
         }
-        validate_layout_payload(payload)?;
+        validate_layout_payload(payload).map_err(UpdateError::Invalid)?;
         let previous_slots = record["payload"]["slots"].as_array().cloned().unwrap_or_default();
         merge_json(&mut record["payload"], payload);
         if let Some(incoming) = payload["slots"].as_array() {
@@ -1426,6 +1478,7 @@ fn update_resource(record: &mut Value, body: &Value) -> Result<(), String> {
         recalc_layout_size(record);
         recalc_audio_counts(record);
         ensure_slot_roles(record);
+        validate_layout_assignments(&record["payload"])?;
     }
     Ok(())
 }
@@ -1570,8 +1623,11 @@ pub async fn edit_global(
         return error_json(404, "Resource not found");
     };
     let mut draft = source;
-    if let Err(message) = update_resource(&mut draft, &body) {
-        return error_json(422, &message);
+    if let Err(error) = update_resource(&mut draft, &body) {
+        return match error {
+            UpdateError::Invalid(message) => error_json(422, &message),
+            UpdateError::Conflict(message) => error_json(409, &message),
+        };
     }
     if kind == "video_layouts" {
         sanitize_layout_record(&mut draft);
@@ -1598,7 +1654,7 @@ pub async fn edit_global(
     if kind == "video_layouts" {
         for room in rooms {
             if let Ok(room) = room.parse::<vks_core::RoomId>() {
-                super::sessions::push_layout_to_engine(&state, room).await;
+                let _ = super::sessions::push_layout_to_engine(&state, room).await;
             }
         }
     }
@@ -1657,7 +1713,7 @@ pub async fn remove_global(
     if kind == "video_layouts" {
         for room in rooms {
             if let Ok(room) = room.parse::<vks_core::RoomId>() {
-                super::sessions::push_layout_to_engine(&state, room).await;
+                let _ = super::sessions::push_layout_to_engine(&state, room).await;
             }
         }
     }
@@ -1789,8 +1845,11 @@ pub async fn edit_linked(
     };
     // Валидация — на draft-копии, до вставки клона/переключения ссылок.
     let mut draft = source.clone();
-    if let Err(message) = update_resource(&mut draft, &body) {
-        return error_json(422, &message);
+    if let Err(error) = update_resource(&mut draft, &body) {
+        return match error {
+            UpdateError::Invalid(message) => error_json(422, &message),
+            UpdateError::Conflict(message) => error_json(409, &message),
+        };
     }
     if kind == "video_layouts" {
         sanitize_layout_record(&mut draft);
@@ -1814,10 +1873,16 @@ pub async fn edit_linked(
         return response;
     }
     drop(resources);
-    if kind == "video_layouts" {
-        super::sessions::push_layout_to_engine(&state, room.id).await;
+    let applied = if kind == "video_layouts" {
+        Some(super::sessions::push_layout_to_engine(&state, room.id).await)
+    } else {
+        None
+    };
+    let response = Json(json!({singular(kind):result})).into_response();
+    match applied {
+        Some(applied) => super::sessions::with_layout_apply(response, applied),
+        None => response,
     }
-    Json(json!({singular(kind):result})).into_response()
 }
 
 pub async fn layout_contacts(
@@ -1895,14 +1960,12 @@ pub async fn attach_layout_contact(
     }
     // Живое изменение раскладки должно доехать до MCU без перезапуска сессии.
     drop(resources);
-    super::sessions::push_layout_to_engine(&state, room.id).await;
-    {
-        let mut response = StatusCode::NO_CONTENT.into_response();
-        if let Ok(value) = axum::http::HeaderValue::from_str(&target_id) {
-            response.headers_mut().insert("x-vks-layout-id", value);
-        }
-        response
+    let applied = super::sessions::push_layout_to_engine(&state, room.id).await;
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&target_id) {
+        response.headers_mut().insert("x-vks-layout-id", value);
     }
+    super::sessions::with_layout_apply(response, applied)
 }
 
 pub async fn detach_layout_contact(
@@ -1943,14 +2006,12 @@ pub async fn detach_layout_contact(
     }
     // Живое изменение раскладки должно доехать до MCU без перезапуска сессии.
     drop(resources);
-    super::sessions::push_layout_to_engine(&state, room.id).await;
-    {
-        let mut response = StatusCode::NO_CONTENT.into_response();
-        if let Ok(value) = axum::http::HeaderValue::from_str(&target_id) {
-            response.headers_mut().insert("x-vks-layout-id", value);
-        }
-        response
+    let applied = super::sessions::push_layout_to_engine(&state, room.id).await;
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&target_id) {
+        response.headers_mut().insert("x-vks-layout-id", value);
     }
+    super::sessions::with_layout_apply(response, applied)
 }
 
 pub async fn attach(
@@ -1986,7 +2047,8 @@ pub async fn attach(
                 return response;
             }
             drop(resources);
-            super::sessions::push_layout_to_engine(&state, room.id).await;
+            let applied = super::sessions::push_layout_to_engine(&state, room.id).await;
+            return super::sessions::with_layout_apply(StatusCode::NO_CONTENT.into_response(), applied);
         }
         return StatusCode::NO_CONTENT.into_response();
     }
@@ -2020,11 +2082,17 @@ pub async fn attach(
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
     }
-    if kind == "video_layouts" {
+    let applied = if kind == "video_layouts" {
         drop(resources);
-        super::sessions::push_layout_to_engine(&state, room.id).await;
+        Some(super::sessions::push_layout_to_engine(&state, room.id).await)
+    } else {
+        None
+    };
+    let response = StatusCode::NO_CONTENT.into_response();
+    match applied {
+        Some(applied) => super::sessions::with_layout_apply(response, applied),
+        None => response,
     }
-    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn detach(
@@ -2069,11 +2137,17 @@ pub async fn detach(
     if let Err(response) = commit(&state, &mut resources, previous).await {
         return response;
     }
-    if kind == "video_layouts" {
+    let applied = if kind == "video_layouts" {
         drop(resources);
-        super::sessions::push_layout_to_engine(&state, room.id).await;
+        Some(super::sessions::push_layout_to_engine(&state, room.id).await)
+    } else {
+        None
+    };
+    let response = StatusCode::NO_CONTENT.into_response();
+    match applied {
+        Some(applied) => super::sessions::with_layout_apply(response, applied),
+        None => response,
     }
-    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Deserialize)]

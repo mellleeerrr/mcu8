@@ -1822,7 +1822,10 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             && (vks_layout::codian::is_codian_preset(&preset_name) || vks_layout::grids::is_grid_preset(&preset_name));
         if mode != "auto" || explicit_preset {
             let slot_count = assignments.values().copied().max().unwrap_or(0).saturating_add(1);
-            let preset_size = layout["payload"]["size"].as_u64().and_then(|value| u8::try_from(value).ok());
+            // Размер из id пресета — источник истины; payload.size мог устареть.
+            let preset_size = vks_layout::preset_size(stored_preset)
+                .and_then(|size| u8::try_from(size).ok())
+                .or_else(|| layout["payload"]["size"].as_u64().and_then(|value| u8::try_from(value).ok()));
             let preset_name = vks_layout::preset::resolve(stored_preset, preset_size);
             // Пресеты Codian (`codian_01`…`codian_52`, `codian_custom_*`) имеют
             // собственную геометрию по спецификации 4200: их id не разбирается

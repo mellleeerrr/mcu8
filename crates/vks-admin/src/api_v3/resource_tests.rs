@@ -228,6 +228,8 @@ async fn pnm_layout_abonents_attach_detach_and_malformed_payloads() {
         attach(State(state.clone()), Extension(operator()), uri(&base), Path((room.id.to_string(), layout_id.clone())))
             .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    // S8: dialer'а в тесте нет — честный статус «сохранено, движок ещё не принял».
+    assert_eq!(response.headers()["x-vks-layout-applied"], "pending");
 
     // Ручная раскладка без слотов НЕ показывает живой ростер (в отличие от auto).
     let response = layout_abonents(
@@ -242,6 +244,7 @@ async fn pnm_layout_abonents_attach_detach_and_malformed_payloads() {
 
     let response = attach_abonent_call(state.clone(), room.id, layout_id.clone(), "sip-1@sip-gateway").await;
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-vks-layout-applied"], "pending");
     let response = attach_abonent_call(state.clone(), room.id, layout_id.clone(), "sip-2@sip-gateway").await;
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -2393,4 +2396,87 @@ fn ensure_slot_roles_backfills_legacy_payloads() {
     assert_eq!(slots[5]["role"], "AUTO", "пустая строка роли — как отсутствие");
     assert_eq!(slots[6]["role"], "AUTO", "роль вне закрытого словаря (auto) — как отсутствие");
     assert_eq!(slots[7]["role"], "PEER", "неизвестная роль у занятого окна — PEER");
+}
+
+/// S7: дубль позиции и выход за размер — 409 с reason (а не молчаливое
+/// искажение раскладки). Ошибка находится на PATCH, до COW.
+#[tokio::test]
+async fn t00_patch_duplicate_slot_position_is_conflict() {
+    let state = state();
+    let layout_id = create_layout(
+        &state,
+        "Dup",
+        json!({"mode":"manual","preset":"preset_equal_4","type":"individual","slots":[{"position":1,"role":"AUTO"}]}),
+    )
+    .await;
+    let response = edit_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/video_layouts/{layout_id}")),
+        Path(layout_id.clone()),
+        Json(json!({"payload":{"slots":[{"position":1,"role":"AUTO"},{"position":1,"role":"AUTO"}]}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let error = body(response).await;
+    assert!(
+        error["error"]["description"].as_str().unwrap_or_default().contains("duplicate slot position"),
+        "reason: {error}"
+    );
+}
+
+/// S7: позиция вне `size` (size выводится из пресета) — 409.
+#[tokio::test]
+async fn t00_patch_slot_position_outside_layout_is_conflict() {
+    let state = state();
+    let layout_id = create_layout(
+        &state,
+        "Outside",
+        json!({"mode":"manual","preset":"preset_equal_2","type":"individual","slots":[]}),
+    )
+    .await;
+    let response = edit_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&format!("/api/v3/video_layouts/{layout_id}")),
+        Path(layout_id.clone()),
+        Json(json!({"payload":{"slots":[{"position":3,"role":"AUTO"}]}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+/// S7: attach сверх числа окон — 409 «Layout is full» (проверка существовала,
+/// теперь закреплена тестом).
+#[tokio::test]
+async fn t00_attach_beyond_layout_size_is_conflict() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Full layout room").await.unwrap();
+    state.room_hub.register_participant(&room.id, participant("sip-1@sip-gateway", "First"));
+    state.room_hub.register_participant(&room.id, participant("sip-2@sip-gateway", "Second"));
+    let layout_id = create_layout(
+        &state,
+        "Single",
+        json!({"mode":"manual","preset":"preset_equal_1","type":"individual","slots":[]}),
+    )
+    .await;
+    let base = format!("/api/v3/sessions/{}/video_layouts/{}", room.id, layout_id);
+    let response =
+        attach(State(state.clone()), Extension(operator()), uri(&base), Path((room.id.to_string(), layout_id.clone())))
+            .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = attach_abonent_call(state.clone(), room.id, layout_id.clone(), "sip-1@sip-gateway").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = attach_abonent_call(state.clone(), room.id, layout_id.clone(), "sip-2@sip-gateway").await;
+    assert_eq!(response.status(), StatusCode::CONFLICT, "второй абонент не влезает в 1 окно");
+}
+
+/// S7: `layout_size` — единая реализация размера; preset важнее закэшированного size.
+#[test]
+fn pnm_layout_size_prefers_preset_and_falls_back_to_slots() {
+    assert_eq!(super::layout_size(&json!({"preset":"vks_grid_25","size":7})), Some(7));
+    assert_eq!(super::layout_size(&json!({"preset":"preset_default_13"})), Some(13));
+    assert_eq!(super::layout_size(&json!({"size":7})), Some(7));
+    assert_eq!(super::layout_size(&json!({"slots":[{"position":1},{"position":2}]})), Some(2));
+    assert_eq!(super::layout_size(&json!({})), None);
 }

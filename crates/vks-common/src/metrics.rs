@@ -19,6 +19,17 @@ use std::sync::LazyLock;
 /// Однократная регистрация базовых метрик.
 static INIT: std::sync::Once = std::sync::Once::new();
 
+/// Счётчик применений раскладки к медиа-движку.
+///
+/// Labels: `result` — `engine` (движок принял), `pending` (сохранено, но
+/// движка/канала ещё нет либо применение сорвалось), `saved-only` (в комнате
+/// нет раскладки, применять нечего). Основание: `docs/rules/API_V3_CONTRACT.md`
+/// — ответ PATCH/attach не должен выдавать «сохранено» за «применено».
+pub static LAYOUT_APPLY: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!("vks_layout_apply_total", "Layout apply attempts by result", &["result"])
+        .expect("vks_layout_apply_total must register once")
+});
+
 /// Счётчик сигнальных сообщений (label: direction = uplink|downlink).
 pub static SIGNALING_MESSAGES: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!("vks_signaling_messages_total", "Total signaling messages processed", &["direction"])
@@ -247,6 +258,9 @@ pub fn init_default() {
         }
         WEBRTC_FRAMES_DROPPED.with_label_values(&["queue_full"]);
         WEBRTC_FALLBACK.with_label_values(&["disabled"]);
+        for result in ["engine", "pending", "saved-only"] {
+            LAYOUT_APPLY.with_label_values(&[result]);
+        }
         for codec in ["aac", "aac_latm", "g729", "h261", "h263", "h263p", "h265"] {
             for direction in ["decode", "encode"] {
                 CODEC_WORKER_SUPPORTED.with_label_values(&[codec, direction]).set(0);
@@ -297,6 +311,17 @@ mod tests {
         SIGNALING_MESSAGES.with_label_values(&["uplink"]).inc();
         let text = encode();
         assert!(text.contains("vks_signaling_messages_total"));
+    }
+
+    #[test]
+    fn layout_apply_metric_is_registered_with_all_results() {
+        init_default();
+        LAYOUT_APPLY.with_label_values(&["engine"]).inc();
+        let text = encode();
+        assert!(text.contains("vks_layout_apply_total"), "metrics output should include layout apply counter");
+        for result in ["engine", "pending", "saved-only"] {
+            assert!(text.contains(&format!("result=\"{result}\"")), "missing zero sample for {result}");
+        }
     }
 
     #[test]

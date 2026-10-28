@@ -8,7 +8,7 @@
 
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -485,10 +485,42 @@ async fn current_layout_json(state: &SharedState, room_id: &RoomId) -> Option<Va
     None
 }
 
+/// Итог применения раскладки к медиа-движку — честный статус для UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LayoutApply {
+    /// Движок принял раскладку.
+    Engine,
+    /// Раскладка сохранена, но движка/канала ещё нет либо применение сорвалось
+    /// (повторим при старте сессии/следующем изменении).
+    Pending,
+    /// В комнате нет раскладки — применять нечего.
+    SavedOnly,
+}
+
+impl LayoutApply {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            LayoutApply::Engine => "engine",
+            LayoutApply::Pending => "pending",
+            LayoutApply::SavedOnly => "saved-only",
+        }
+    }
+}
+
+/// Добавляет к ответу `x-vks-layout-applied`, чтобы клиент отличал
+/// «сохранено» от «применено» (200/204 не меняем).
+pub(super) fn with_layout_apply(mut response: Response, applied: LayoutApply) -> Response {
+    if let Ok(value) = HeaderValue::from_str(applied.as_str()) {
+        response.headers_mut().insert("x-vks-layout-applied", value);
+    }
+    response
+}
+
 /// Проводит текущую «Общую» раскладку комнаты в медиа-движок. Вызывается
 /// после старта сессии и после каждого изменения раскладки, чтобы живой
-/// PATCH/attach/detach доезжал до MCU без перезапуска.
-pub(super) async fn push_layout_to_engine(state: &SharedState, room_id: RoomId) {
+/// PATCH/attach/detach доезжал до MCU без перезапуска. Возвращает честный
+/// статус: ошибка движка не ломает HTTP-ответ, но и не выдаётся за успех.
+pub(super) async fn push_layout_to_engine(state: &SharedState, room_id: RoomId) -> LayoutApply {
     let room_lock = state
         .api_v3
         .layout_pushes
@@ -498,15 +530,21 @@ pub(super) async fn push_layout_to_engine(state: &SharedState, room_id: RoomId) 
         .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
         .clone();
     let _guard = room_lock.lock().await;
-    let Some(layout) = current_layout_json(state, &room_id).await else {
-        return;
+    let applied = match current_layout_json(state, &room_id).await {
+        None => LayoutApply::SavedOnly,
+        Some(layout) => match state.outbound_dialer() {
+            None => LayoutApply::Pending,
+            Some(dialer) => match dialer.apply_layout(room_id, layout).await {
+                Ok(()) => LayoutApply::Engine,
+                Err(error) => {
+                    tracing::warn!(room = %room_id, %error, "Chosen layout was not applied to the media engine");
+                    LayoutApply::Pending
+                }
+            },
+        },
     };
-    let Some(dialer) = state.outbound_dialer() else {
-        return;
-    };
-    if let Err(error) = dialer.apply_layout(room_id, layout).await {
-        tracing::warn!(room = %room_id, %error, "Chosen layout was not applied to the media engine");
-    }
+    vks_common::metrics::LAYOUT_APPLY.with_label_values(&[applied.as_str()]).inc();
+    applied
 }
 
 pub async fn start_session(
@@ -2326,5 +2364,83 @@ mod layout_selection_tests {
         }
         let layout = current_layout_json(&state, &room).await.expect("first linked layout");
         assert_eq!(layout["id"], "only");
+    }
+
+    /// S8: запись раскладки в state для проверки push без HTTP-слоя.
+    async fn state_with_individual_layout(room: RoomId) -> SharedState {
+        let state: SharedState = Arc::new(AppState::new());
+        let mut resources = state.api_v3.resources.lock().await;
+        resources
+            .layouts
+            .insert("individual".into(), json!({"id":"individual","payload":{"type":"individual","slots":[]}}));
+        resources.links.insert(format!("sessions:{room}:video_layouts"), vec!["individual".into()]);
+        drop(resources);
+        state
+    }
+
+    struct RecordingDialer {
+        result: Result<(), String>,
+        applied: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::state::OutboundDialer for RecordingDialer {
+        async fn dial(&self, _room_id: RoomId, _uri: &str, _display_name: Option<&str>) -> Result<String, String> {
+            Err("dial is not used by layout push tests".into())
+        }
+
+        async fn apply_layout(&self, _room_id: RoomId, _layout: Value) -> Result<(), String> {
+            self.applied.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.result.clone()
+        }
+    }
+
+    /// S8: движок принял раскладку → `engine`, метрика инкрементится.
+    #[tokio::test]
+    async fn push_layout_reports_engine() {
+        let room = RoomId::new();
+        let state = state_with_individual_layout(room).await;
+        let dialer = Arc::new(RecordingDialer { result: Ok(()), applied: 0.into() });
+        state.set_dialer(dialer.clone());
+        let before = vks_common::metrics::LAYOUT_APPLY.with_label_values(&["engine"]).get();
+        assert_eq!(push_layout_to_engine(&state, room).await, LayoutApply::Engine);
+        assert_eq!(dialer.applied.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(vks_common::metrics::LAYOUT_APPLY.with_label_values(&["engine"]).get() > before);
+    }
+
+    /// S8: движок отклонил раскладку → `pending` (сохранено, но не применено).
+    #[tokio::test]
+    async fn push_layout_reports_pending_on_engine_error() {
+        let room = RoomId::new();
+        let state = state_with_individual_layout(room).await;
+        let dialer = Arc::new(RecordingDialer { result: Err("mcu offline".into()), applied: 0.into() });
+        state.set_dialer(dialer);
+        assert_eq!(push_layout_to_engine(&state, room).await, LayoutApply::Pending);
+    }
+
+    /// S8: нет dialer'а (комната без медиа-плоскости) → `pending`.
+    #[tokio::test]
+    async fn push_layout_reports_pending_without_dialer() {
+        let room = RoomId::new();
+        let state = state_with_individual_layout(room).await;
+        assert_eq!(push_layout_to_engine(&state, room).await, LayoutApply::Pending);
+    }
+
+    /// S8: раскладки нет — применять нечего → `saved-only`.
+    #[tokio::test]
+    async fn push_layout_reports_saved_only_without_layout() {
+        let state: SharedState = Arc::new(AppState::new());
+        assert_eq!(push_layout_to_engine(&state, RoomId::new()).await, LayoutApply::SavedOnly);
+    }
+
+    /// S8: заголовок ответа несёт честный статус.
+    #[test]
+    fn layout_apply_header_matches_status() {
+        for (status, expected) in
+            [(LayoutApply::Engine, "engine"), (LayoutApply::Pending, "pending"), (LayoutApply::SavedOnly, "saved-only")]
+        {
+            let response = with_layout_apply(StatusCode::NO_CONTENT.into_response(), status);
+            assert_eq!(response.headers()["x-vks-layout-applied"], expected);
+        }
     }
 }

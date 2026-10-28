@@ -1019,10 +1019,10 @@ pub async fn switch_video_layout_mode(
     }
     // Применённая из редактора раскладка должна сразу доехать до MCU, иначе
     // выбранная схема и позиции участников остаются только в UI.
-    super::sessions::push_layout_to_engine(&state, room.id).await;
+    let applied = super::sessions::push_layout_to_engine(&state, room.id).await;
     super::resources::with_layout_abonents(&state, &mut result, &room.id);
     // `Boe` делает `.then(o => my(o.data))`: ответ — запись раскладки, не конверт.
-    Json(result).into_response()
+    super::sessions::with_layout_apply(Json(result).into_response(), applied)
 }
 
 /// `POST /api/v3/engine/command` — команды движка.

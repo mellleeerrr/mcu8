@@ -45,3 +45,37 @@ pub use preset::{
 };
 pub use rect::{Canvas, NormalizedRect, Rect};
 pub use roles::{assign_by_role, RotationState, SlotRole};
+
+/// Размер, **явно** закодированный в id пресета: параметрический конструктор
+/// (`vks_grid_25`), Codian-схема (`codian_07`) или вендорский `preset_*`
+/// с числовым хвостом (`preset_default_13`, `preset_equal_25`, `preset_equal_25_(2)`).
+///
+/// `None` для id без размера (`preset_equal` — вендорский дефолт): вызывающий
+/// сам решает, брать ли `payload.size`. Это важно для wire-контракта движка:
+/// `preset_equal` + `size:4` обязан остаться 4 окнами, а не дефолтными 13.
+pub fn preset_size(id: &str) -> Option<usize> {
+    if let Some(count) = grids::slot_count(id) {
+        return Some(count);
+    }
+    if let Some(count) = codian::slot_count(id) {
+        return Some(count);
+    }
+    let base = id.rsplit_once("_(").map_or(id, |(base, _)| base);
+    let tail = base.strip_prefix("preset_")?.rsplit('_').next()?;
+    tail.parse::<usize>().ok().filter(|count| *count > 0)
+}
+
+#[cfg(test)]
+mod preset_size_tests {
+    #[test]
+    fn resolves_constructor_codian_and_vendor_ids() {
+        assert_eq!(super::preset_size("vks_grid_25"), Some(25));
+        assert_eq!(super::preset_size("vks_pin_l_g10_m20_8"), Some(8));
+        assert_eq!(super::preset_size("codian_07"), Some(super::codian::slot_count("codian_07").unwrap()));
+        assert_eq!(super::preset_size("preset_default_13"), Some(13));
+        assert_eq!(super::preset_size("preset_equal_25"), Some(25));
+        assert_eq!(super::preset_size("preset_equal_25_(2)"), Some(25));
+        assert_eq!(super::preset_size("preset_equal"), None, "id без размера — не выдумываем дефолт");
+        assert_eq!(super::preset_size("unknown_preset"), None);
+    }
+}
