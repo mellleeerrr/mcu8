@@ -138,7 +138,6 @@
     { key: 'dual', title: 'Два главных докладчика', id: function (count) { return 'vks_dual_' + count; } }
   ];
 
-  var constructorCount = 0;
   var constructorArchetype = 'grid'; // последняя выбранная схема конструктора
   var pendingAdopt = null;
   var pendingAdoptTimer = null;
@@ -645,390 +644,54 @@
     return 0;
   }
 
-  /* Чистый синхронный расчет геометрии слотов по модульной матрице C x R.
-   * Нормализованное 16:9 пространство холста: 1280x720. */
+  /* Геометрия превью — только с сервера (`/ui/video_layouts/calculate`,
+   * vks-layout/src/grids.rs): локального расчёта больше нет, иначе превью и
+   * применяемая раскладка расходятся (R-01: 36/600 vks_grid).
+   * Кэш и in-flight — по preset: 6 карточек делят одни и те же запросы. */
   var CANVAS_W = 1280;
   var CANVAS_H = 720;
+  var geometryCache = {};
+  var geometryPending = {};
 
-  function getProminentConfig(count) {
-    if (count <= 6)  return { cols: 3, rows: 3, mainW: 2, mainH: 2 };
-    if (count <= 8)  return { cols: 4, rows: 4, mainW: 3, mainH: 3 };
-    if (count <= 10) return { cols: 5, rows: 5, mainW: 4, mainH: 4 };
-    if (count <= 12) return { cols: 5, rows: 4, mainW: 3, mainH: 3 };
-    if (count <= 13) return { cols: 4, rows: 4, mainW: 2, mainH: 2 };
-    if (count <= 17) return { cols: 5, rows: 5, mainW: 3, mainH: 3 };
-    if (count <= 22) return { cols: 5, rows: 5, mainW: 2, mainH: 2 };
-    if (count <= 28) return { cols: 6, rows: 6, mainW: 3, mainH: 3 };
-    if (count <= 33) return { cols: 6, rows: 6, mainW: 2, mainH: 2 };
-    if (count <= 38) return { cols: 7, rows: 6, mainW: 2, mainH: 2 };
-    if (count <= 46) return { cols: 7, rows: 7, mainW: 2, mainH: 2 };
-    if (count <= 53) return { cols: 8, rows: 7, mainW: 2, mainH: 2 };
-    if (count <= 61) return { cols: 8, rows: 8, mainW: 2, mainH: 2 };
-    if (count <= 73) return { cols: 9, rows: 9, mainW: 3, mainH: 3 };
-    if (count <= 82) return { cols: 10, rows: 9, mainW: 3, mainH: 3 };
-    if (count <= 92) return { cols: 10, rows: 10, mainW: 3, mainH: 3 };
-    return { cols: 11, rows: 10, mainW: 3, mainH: 3 };
+  function serverGeometry(preset) {
+    if (Object.prototype.hasOwnProperty.call(geometryCache, preset)) {
+      return Promise.resolve(geometryCache[preset]);
+    }
+    if (geometryPending[preset]) return geometryPending[preset];
+    var pending = request('/api/v3/ui/video_layouts/calculate', {
+      method: 'POST',
+      body: JSON.stringify({ preset: preset, width: CANVAS_W, height: CANVAS_H })
+    });
+    if (!pending) return Promise.resolve(null);
+    pending = pending.then(function (doc) {
+      var slots = doc && Array.isArray(doc.slots) && doc.slots.length ? doc.slots : null;
+      if (slots) geometryCache[preset] = slots;
+      delete geometryPending[preset];
+      return slots;
+    }, function () {
+      delete geometryPending[preset];
+      return null;
+    });
+    geometryPending[preset] = pending;
+    return pending;
   }
 
-  function getDualConfig(count) {
-    if (count <= 2)  return { cols: 2, rows: 1, mainW: 1, mainH: 1 };
-    if (count <= 6)  return { cols: 4, rows: 3, mainW: 2, mainH: 2 };
-    if (count <= 10) return { cols: 4, rows: 4, mainW: 2, mainH: 2 };
-    if (count <= 14) return { cols: 4, rows: 5, mainW: 2, mainH: 2 };
-    if (count <= 18) return { cols: 6, rows: 4, mainW: 2, mainH: 2 };
-    if (count <= 24) return { cols: 6, rows: 5, mainW: 2, mainH: 2 };
-    if (count <= 30) return { cols: 6, rows: 6, mainW: 2, mainH: 2 };
-    if (count <= 36) return { cols: 7, rows: 6, mainW: 2, mainH: 2 };
-    if (count <= 50) return { cols: 8, rows: 7, mainW: 2, mainH: 2 };
-    if (count <= 66) return { cols: 9, rows: 8, mainW: 2, mainH: 2 };
-    if (count <= 84) return { cols: 10, rows: 9, mainW: 2, mainH: 2 };
-    return { cols: 11, rows: 10, mainW: 2, mainH: 2 };
+  /* Иконка карточки: тёплый кэш — сразу, иначе заглушка + дорисовка. Гвард
+   * `isConnected` — карточки пересоздаются при смене N. */
+  function paintConstructorIcon(icon, preset, count) {
+    var cached = geometryCache[preset];
+    if (cached) {
+      icon.innerHTML = svgFromSlots(cached);
+      return;
+    }
+    icon.innerHTML = svgFallback(count);
+    serverGeometry(preset).then(function (slots) {
+      if (!icon.isConnected || !slots) return;
+      icon.innerHTML = svgFromSlots(slots);
+    });
   }
 
-  function getGridEdges(start, count, cell_size, gap) {
-    var edges = [];
-    for (var i = 0; i <= count; i += 1) {
-      edges.push(Math.round(start + i * (cell_size + gap)));
-    }
-    return edges;
-  }
-
-  function buildSymmetricLayout(count, mode, canvasW, canvasH, gap) {
-    if (mode === undefined) mode = 'pin_l';
-    if (canvasW === undefined) canvasW = CANVAS_W;
-    if (canvasH === undefined) canvasH = CANVAS_H;
-    if (gap === undefined) gap = 0;
-
-    count = Math.max(1, Math.min(MAX_COUNT, Math.floor(Number(count)) || 1));
-    if (count <= 1) {
-      return [{ position: 1, role: 'AUTO', x: 0, y: 0, width: canvasW, height: canvasH, z_order: 0 }];
-    }
-
-    if (mode === 'grid') {
-      if (count === 2) {
-        var w2 = Math.round((canvasW - gap) / 2);
-        return [
-          { position: 1, role: 'AUTO', x: 0, y: 0, width: w2, height: canvasH, z_order: 0 },
-          { position: 2, role: 'AUTO', x: w2 + gap, y: 0, width: canvasW - w2 - gap, height: canvasH, z_order: 0 }
-        ];
-      }
-      var cols = Math.ceil(Math.sqrt(count * (16 / 9) / (canvasW / canvasH)));
-      var rows = Math.ceil(count / cols);
-      var cellW = (canvasW - gap * (cols - 1)) / cols;
-      var cellH = (canvasH - gap * (rows - 1)) / rows;
-      var rowEdges = getGridEdges(0, rows, cellH, gap);
-      var boxes = [];
-
-      for (var i = 0; i < count; i += 1) {
-        var r = Math.floor(i / cols);
-        var c = i % cols;
-        var itemsInRow = (r === rows - 1) ? (count - r * cols) : cols;
-        var rowWidth = itemsInRow * cellW + (itemsInRow - 1) * gap;
-        var rowOffsetX = (canvasW - rowWidth) / 2;
-        var colEdges = getGridEdges(rowOffsetX, itemsInRow, cellW, gap);
-
-        boxes.push({
-          position: i + 1,
-          role: 'AUTO',
-          x: colEdges[c],
-          y: rowEdges[r],
-          width: Math.max(1, colEdges[c + 1] - colEdges[c] - gap),
-          height: Math.max(1, rowEdges[r + 1] - rowEdges[r] - gap),
-          z_order: 0
-        });
-      }
-      return boxes;
-    }
-
-    if (mode === 'dual') {
-      if (count === 2) {
-        var halfW = Math.round((canvasW - gap) / 2);
-        return [
-          { position: 1, role: 'AUTO', x: 0, y: 0, width: halfW, height: canvasH, z_order: 0 },
-          { position: 2, role: 'AUTO', x: halfW + gap, y: 0, width: canvasW - halfW - gap, height: canvasH, z_order: 0 }
-        ];
-      }
-      var dCfg = getDualConfig(count);
-      var dCols = dCfg.cols;
-      var dRows = dCfg.rows;
-      var dMainW = dCfg.mainW;
-      var dMainH = dCfg.mainH;
-      var dUnitW = (canvasW - gap * (dCols - 1)) / dCols;
-      var dUnitH = (canvasH - gap * (dRows - 1)) / dRows;
-      var colEdges = getGridEdges(0, dCols, dUnitW, gap);
-      var rowEdges = getGridEdges(0, dRows, dUnitH, gap);
-
-      var dBoxes = [];
-      dBoxes.push({
-        position: 1, role: 'AUTO',
-        x: colEdges[0], y: rowEdges[0],
-        width: Math.max(1, colEdges[dMainW] - colEdges[0] - gap),
-        height: Math.max(1, rowEdges[dMainH] - rowEdges[0] - gap),
-        z_order: 0
-      });
-      dBoxes.push({
-        position: 2, role: 'AUTO',
-        x: colEdges[dCols - dMainW], y: rowEdges[0],
-        width: Math.max(1, colEdges[dCols] - colEdges[dCols - dMainW] - gap),
-        height: Math.max(1, rowEdges[dMainH] - rowEdges[0] - gap),
-        z_order: 0
-      });
-
-      var dRemaining = count - 2;
-      var midSlots = [];
-      for (var r = 0; r < dMainH; r += 1) {
-        for (var c = dMainW; c < dCols - dMainW; c += 1) {
-          midSlots.push({ r: r, c: c });
-        }
-      }
-      var useMid = Math.min(dRemaining, midSlots.length);
-      for (var i = 0; i < useMid; i += 1) {
-        var slot = midSlots[i];
-        dBoxes.push({
-          position: dBoxes.length + 1, role: 'AUTO',
-          x: colEdges[slot.c],
-          y: rowEdges[slot.r],
-          width: Math.max(1, colEdges[slot.c + 1] - colEdges[slot.c] - gap),
-          height: Math.max(1, rowEdges[slot.r + 1] - rowEdges[slot.r] - gap),
-          z_order: 0
-        });
-      }
-      dRemaining -= useMid;
-
-      var dBottomRows = dRows - dMainH;
-      for (var rIdx = 0; rIdx < dBottomRows && dRemaining > 0; rIdx += 1) {
-        var rNum = dMainH + rIdx;
-        var take = Math.min(dRemaining, dCols);
-        var rowWidth = take * dUnitW + (take - 1) * gap;
-        var rowOffsetX = (canvasW - rowWidth) / 2;
-        var bColEdges = getGridEdges(rowOffsetX, take, dUnitW, gap);
-        for (var cIdx = 0; cIdx < take; cIdx += 1) {
-          dBoxes.push({
-            position: dBoxes.length + 1, role: 'AUTO',
-            x: bColEdges[cIdx],
-            y: rowEdges[rNum],
-            width: Math.max(1, bColEdges[cIdx + 1] - bColEdges[cIdx] - gap),
-            height: Math.max(1, rowEdges[rNum + 1] - rowEdges[rNum] - gap),
-            z_order: 0
-          });
-        }
-        dRemaining -= take;
-      }
-      return dBoxes;
-    }
-
-    var cfg = getProminentConfig(count);
-    var cols = cfg.cols;
-    var rows = cfg.rows;
-    var mainW = cfg.mainW;
-    var mainH = cfg.mainH;
-    var unitW = (canvasW - gap * (cols - 1)) / cols;
-    var unitH = (canvasH - gap * (rows - 1)) / rows;
-    var colEdges = getGridEdges(0, cols, unitW, gap);
-    var rowEdges = getGridEdges(0, rows, unitH, gap);
-
-    var boxes = [];
-
-    if (mode === 'pin_l') {
-      boxes.push({
-        position: 1, role: 'AUTO',
-        x: colEdges[0], y: rowEdges[0],
-        width: Math.max(1, colEdges[mainW] - colEdges[0] - gap),
-        height: Math.max(1, rowEdges[mainH] - rowEdges[0] - gap),
-        z_order: 0
-      });
-      var rightSlots = [];
-      for (var r = 0; r < mainH; r += 1) {
-        for (var c = mainW; c < cols; c += 1) rightSlots.push({ r: r, c: c });
-      }
-      var remaining = count - 1;
-      var useRight = Math.min(remaining, rightSlots.length);
-      for (var i = 0; i < useRight; i += 1) {
-        var s = rightSlots[i];
-        boxes.push({
-          position: boxes.length + 1, role: 'AUTO',
-          x: colEdges[s.c], y: rowEdges[s.r],
-          width: Math.max(1, colEdges[s.c + 1] - colEdges[s.c] - gap),
-          height: Math.max(1, rowEdges[s.r + 1] - rowEdges[s.r] - gap),
-          z_order: 0
-        });
-      }
-      remaining -= useRight;
-
-      var bottomRowCount = rows - mainH;
-      for (var rIdx = 0; rIdx < bottomRowCount && remaining > 0; rIdx += 1) {
-        var rNum = mainH + rIdx;
-        var takeInRow = Math.min(remaining, cols);
-        var rowWidth = takeInRow * unitW + (takeInRow - 1) * gap;
-        var rowOffsetX = (canvasW - rowWidth) / 2;
-        var bColEdges = getGridEdges(rowOffsetX, takeInRow, unitW, gap);
-        for (var cIdx = 0; cIdx < takeInRow; cIdx += 1) {
-          boxes.push({
-            position: boxes.length + 1, role: 'AUTO',
-            x: bColEdges[cIdx], y: rowEdges[rNum],
-            width: Math.max(1, bColEdges[cIdx + 1] - bColEdges[cIdx] - gap),
-            height: Math.max(1, rowEdges[rNum + 1] - rowEdges[rNum] - gap),
-            z_order: 0
-          });
-        }
-        remaining -= takeInRow;
-      }
-      return boxes;
-    }
-
-    if (mode === 'pin_r') {
-      boxes.push({
-        position: 1, role: 'AUTO',
-        x: colEdges[cols - mainW], y: rowEdges[0],
-        width: Math.max(1, colEdges[cols] - colEdges[cols - mainW] - gap),
-        height: Math.max(1, rowEdges[mainH] - rowEdges[0] - gap),
-        z_order: 0
-      });
-      var leftCols = cols - mainW;
-      var leftSlots = [];
-      for (var r = 0; r < mainH; r += 1) {
-        for (var c = 0; c < leftCols; c += 1) leftSlots.push({ r: r, c: c });
-      }
-      var remaining = count - 1;
-      var useLeft = Math.min(remaining, leftSlots.length);
-      for (var i = 0; i < useLeft; i += 1) {
-        var s = leftSlots[i];
-        boxes.push({
-          position: boxes.length + 1, role: 'AUTO',
-          x: colEdges[s.c], y: rowEdges[s.r],
-          width: Math.max(1, colEdges[s.c + 1] - colEdges[s.c] - gap),
-          height: Math.max(1, rowEdges[s.r + 1] - rowEdges[s.r] - gap),
-          z_order: 0
-        });
-      }
-      remaining -= useLeft;
-
-      var bottomRowCount = rows - mainH;
-      for (var rIdx = 0; rIdx < bottomRowCount && remaining > 0; rIdx += 1) {
-        var rNum = mainH + rIdx;
-        var takeInRow = Math.min(remaining, cols);
-        var rowWidth = takeInRow * unitW + (takeInRow - 1) * gap;
-        var rowOffsetX = (canvasW - rowWidth) / 2;
-        var bColEdges = getGridEdges(rowOffsetX, takeInRow, unitW, gap);
-        for (var cIdx = 0; cIdx < takeInRow; cIdx += 1) {
-          boxes.push({
-            position: boxes.length + 1, role: 'AUTO',
-            x: bColEdges[cIdx], y: rowEdges[rNum],
-            width: Math.max(1, bColEdges[cIdx + 1] - bColEdges[cIdx] - gap),
-            height: Math.max(1, rowEdges[rNum + 1] - rowEdges[rNum] - gap),
-            z_order: 0
-          });
-        }
-        remaining -= takeInRow;
-      }
-      return boxes;
-    }
-
-    if (mode === 'pin_t') {
-      var mainColOffset = Math.floor((cols - mainW) / 2);
-      boxes.push({
-        position: 1, role: 'AUTO',
-        x: colEdges[mainColOffset], y: rowEdges[0],
-        width: Math.max(1, colEdges[mainColOffset + mainW] - colEdges[mainColOffset] - gap),
-        height: Math.max(1, rowEdges[mainH] - rowEdges[0] - gap),
-        z_order: 0
-      });
-      var topSideSlots = [];
-      for (var r = 0; r < mainH; r += 1) {
-        for (var c = 0; c < mainColOffset; c += 1) topSideSlots.push({ r: r, c: c });
-        for (var c = mainColOffset + mainW; c < cols; c += 1) topSideSlots.push({ r: r, c: c });
-      }
-      var remaining = count - 1;
-      var useTopSide = Math.min(remaining, topSideSlots.length);
-      for (var i = 0; i < useTopSide; i += 1) {
-        var s = topSideSlots[i];
-        boxes.push({
-          position: boxes.length + 1, role: 'AUTO',
-          x: colEdges[s.c], y: rowEdges[s.r],
-          width: Math.max(1, colEdges[s.c + 1] - colEdges[s.c] - gap),
-          height: Math.max(1, rowEdges[s.r + 1] - rowEdges[s.r] - gap),
-          z_order: 0
-        });
-      }
-      remaining -= useTopSide;
-
-      var bottomRowCount = rows - mainH;
-      for (var rIdx = 0; rIdx < bottomRowCount && remaining > 0; rIdx += 1) {
-        var rNum = mainH + rIdx;
-        var takeInRow = Math.min(remaining, cols);
-        var rowWidth = takeInRow * unitW + (takeInRow - 1) * gap;
-        var rowOffsetX = (canvasW - rowWidth) / 2;
-        var bColEdges = getGridEdges(rowOffsetX, takeInRow, unitW, gap);
-        for (var cIdx = 0; cIdx < takeInRow; cIdx += 1) {
-          boxes.push({
-            position: boxes.length + 1, role: 'AUTO',
-            x: bColEdges[cIdx], y: rowEdges[rNum],
-            width: Math.max(1, bColEdges[cIdx + 1] - bColEdges[cIdx] - gap),
-            height: Math.max(1, rowEdges[rNum + 1] - rowEdges[rNum] - gap),
-            z_order: 0
-          });
-        }
-        remaining -= takeInRow;
-      }
-      return boxes;
-    }
-
-    if (mode === 'pin_b') {
-      var mainColOffset = Math.floor((cols - mainW) / 2);
-      var mainRowOffset = rows - mainH;
-      boxes.push({
-        position: 1, role: 'AUTO',
-        x: colEdges[mainColOffset], y: rowEdges[mainRowOffset],
-        width: Math.max(1, colEdges[mainColOffset + mainW] - colEdges[mainColOffset] - gap),
-        height: Math.max(1, rowEdges[rows] - rowEdges[mainRowOffset] - gap),
-        z_order: 0
-      });
-
-      var remaining = count - 1;
-      for (var r = 0; r < mainRowOffset && remaining > 0; r += 1) {
-        var takeInRow = Math.min(remaining, cols);
-        var rowWidth = takeInRow * unitW + (takeInRow - 1) * gap;
-        var rowOffsetX = (canvasW - rowWidth) / 2;
-        var bColEdges = getGridEdges(rowOffsetX, takeInRow, unitW, gap);
-        for (var c = 0; c < takeInRow; c += 1) {
-          boxes.push({
-            position: boxes.length + 1, role: 'AUTO',
-            x: bColEdges[c], y: rowEdges[r],
-            width: Math.max(1, bColEdges[c + 1] - bColEdges[c] - gap),
-            height: Math.max(1, rowEdges[r + 1] - rowEdges[r] - gap),
-            z_order: 0
-          });
-        }
-        remaining -= takeInRow;
-      }
-
-      var bottomSideSlots = [];
-      for (var r = mainRowOffset; r < rows; r += 1) {
-        for (var c = 0; c < mainColOffset; c += 1) bottomSideSlots.push({ r: r, c: c });
-        for (var c = mainColOffset + mainW; c < cols; c += 1) bottomSideSlots.push({ r: r, c: c });
-      }
-      var useBottomSide = Math.min(remaining, bottomSideSlots.length);
-      for (var i = 0; i < useBottomSide; i += 1) {
-        var s = bottomSideSlots[i];
-        boxes.push({
-          position: boxes.length + 1, role: 'AUTO',
-          x: colEdges[s.c], y: rowEdges[s.r],
-          width: Math.max(1, colEdges[s.c + 1] - colEdges[s.c] - gap),
-          height: Math.max(1, rowEdges[s.r + 1] - rowEdges[s.r] - gap),
-          z_order: 0
-        });
-      }
-      return boxes;
-    }
-
-    return boxes;
-  }
-
-  function computeSlots(archetype, N) {
-    return buildSymmetricLayout(N, archetype, CANVAS_W, CANVAS_H, 0);
-  }
-
-  function buildConstructorItem(mode, slots, count) {
+  function buildConstructorItem(mode, count) {
     var preset = mode.id(count);
     var item = document.createElement('div');
     item.className = 'layout-scheme-selector-item';
@@ -1044,7 +707,7 @@
     container.className = 'tc-icon-container layout-scheme-selector-item__icon';
     var icon = document.createElement('i');
     icon.className = 'material-icons tc-icon__icon notranslate';
-    icon.innerHTML = slots && slots.length ? svgFromSlots(slots) : svgFallback(count);
+    paintConstructorIcon(icon, preset, count);
     container.appendChild(icon);
     item.appendChild(container);
     setCardCount(item, count);
@@ -1307,9 +970,7 @@
       group.className = 'layout-scheme-selector__group';
       group.style.cssText = 'display:flex;flex-flow:row nowrap;gap:2px;justify-content:flex-start;width:100%;';
       for (var j = i; j < Math.min(i + 5, CONSTRUCTOR_MODES.length); j += 1) {
-        var mode = CONSTRUCTOR_MODES[j];
-        var slots = computeSlots(mode.key, count);
-        group.appendChild(buildConstructorItem(mode, slots, count));
+        group.appendChild(buildConstructorItem(CONSTRUCTOR_MODES[j], count));
       }
       row.appendChild(group);
       selector.appendChild(row);
@@ -1443,29 +1104,25 @@
     }
   }
 
-  /* Запись схемы конструктора: вычисляем слоты и записываем preset и slots в store редактора. */
+  /* Запись схемы конструктора: только `preset`, синхронно. Геометрию в store
+   * не пишем: вендорский store сам даёт fallback ровно по N (позиции/AUTO),
+   * превью рисуется из ответа calculate, а `apply_layout` считает по preset id.
+   * Это убирает гонки «поздний ответ» и лишний HTTP на клик. */
   function selectConstructor(preset) {
     var editor = layoutEditor();
     if (!editor || !preset) return;
-    var m = /^vks_([a-z0-9_]+)_(\d+)$/.exec(preset);
-    var arch = m ? m[1] : 'grid';
-    var count = m ? Number(m[2]) : countForCounter();
-    constructorArchetype = arch;
+    var arch = /^vks_([a-z0-9_]+)_/.exec(preset);
+    var countMatch = /_(\d+)$/.exec(preset);
+    constructorArchetype = arch ? arch[1] : 'grid';
     modeTileEngaged = true;
-    var slots = computeSlots(arch, count);
     try {
       editor.editValueField('preset', preset);
-      if (typeof editor.setSlots === 'function') {
-        editor.setSlots(preset, slots);
-      } else {
-        editor.editValueField('slots', slots);
-      }
     } catch (e) {
       console.warn('codian-layouts: не удалось выбрать схему конструктора ' + preset, e);
       return;
     }
     syncActive();
-    syncCounter(count);
+    syncCounter(countMatch ? Number(countMatch[1]) : countForCounter());
     subscribe(editor);
   }
 
@@ -1687,72 +1344,6 @@
     }
   }
 
-  function formatCalculatedSlots(preset, width, height) {
-    var reqW = Number(width) || CANVAS_W;
-    var reqH = Number(height) || CANVAS_H;
-    var raw = [];
-    if (typeof preset === 'string' && preset.indexOf('vks_') === 0) {
-      var m = /^vks_([a-z0-9_]+)_(\d+)$/.exec(preset);
-      var arch = m ? m[1] : 'grid';
-      var count = m ? Number(m[2]) : 1;
-      raw = computeSlots(arch, count);
-    } else if (typeof preset === 'string' && preset.indexOf('codian_') === 0) {
-      var entry = findEntry(preset);
-      if (entry && entry.slots && entry.slots.length) {
-        raw = entry.slots;
-      } else {
-        var count = entry && entry.windows > 0 ? entry.windows : 1;
-        var cols = Math.ceil(Math.sqrt(count));
-        var rows = Math.ceil(count / cols);
-        var cw = CANVAS_W / cols;
-        var ch = CANVAS_H / rows;
-        for (var i = 0; i < count; i += 1) {
-          raw.push({ position: i + 1, x: (i % cols) * cw, y: Math.floor(i / cols) * ch, width: cw, height: ch, z_order: 0 });
-        }
-      }
-    }
-    var scaleX = reqW / CANVAS_W;
-    var scaleY = reqH / CANVAS_H;
-    var res = [];
-    for (var j = 0; j < raw.length; j += 1) {
-      var s = raw[j];
-      res.push({
-        position: Number(s.position) || (j + 1),
-        role: uiSlotRole(s),
-        x: Math.round((Number(s.x) || 0) * scaleX),
-        y: Math.round((Number(s.y) || 0) * scaleY),
-        width: Math.round((Number(s.width) || 0) * scaleX),
-        height: Math.round((Number(s.height) || 0) * scaleY),
-        z_order: Number(s.z_order) || 0
-      });
-    }
-    return res;
-  }
-
-  function synthXhr(xhr, status, text) {
-    window.setTimeout(function () {
-      if (xhr.__vksAborted) return;
-      try {
-        Object.defineProperty(xhr, 'readyState', { value: 4, configurable: true });
-        Object.defineProperty(xhr, 'status', { value: status, configurable: true });
-        Object.defineProperty(xhr, 'statusText', { value: status === 200 ? 'OK' : 'Error', configurable: true });
-        Object.defineProperty(xhr, 'responseText', { value: text, configurable: true });
-        Object.defineProperty(xhr, 'response', {
-          value: xhr.responseType === 'json' ? JSON.parse(text) : text,
-          configurable: true,
-        });
-        xhr.getAllResponseHeaders = function () { return 'content-type: application/json\n'; };
-        xhr.getResponseHeader = function () { return 'application/json'; };
-        xhr.__vksSynthetic = true;
-        xhr.dispatchEvent(new Event('readystatechange'));
-        xhr.dispatchEvent(new ProgressEvent('load'));
-        xhr.dispatchEvent(new ProgressEvent('loadend'));
-      } catch (e) {
-        try { xhr.dispatchEvent(new Event('readystatechange')); } catch (ignored) {}
-      }
-    }, 0);
-  }
-
   /* После сохранения раскладки серверный payload меняется: сбрасываем кэш
    * числа окон, иначе «Конструктор» после save+auto возьмёт старое N.
    * Вендор сохраняет и через fetch, и через XHR (axios) — перехватываем оба. */
@@ -1762,24 +1353,6 @@
       var wrapped = function (input, init) {
         var url = typeof input === 'string' ? input : (input && input.url) || '';
         var method = String((init && init.method) || 'GET').toUpperCase();
-        if (method === 'POST' && /\/video_layouts\/calculate/.test(url)) {
-          var fBody = null;
-          try {
-            fBody = typeof (init && init.body) === 'string' ? JSON.parse(init.body) : (init && init.body);
-          } catch (e) {}
-          if (fBody && typeof fBody.preset === 'string' &&
-              (fBody.preset.indexOf('vks_') === 0 || fBody.preset.indexOf('codian_') === 0)) {
-            var fSlots = formatCalculatedSlots(fBody.preset, fBody.width, fBody.height);
-            var fPayload = JSON.stringify({ slots: fSlots });
-            if (typeof Response === 'function') {
-              return Promise.resolve(new Response(fPayload, {
-                status: 200,
-                statusText: 'OK',
-                headers: { 'Content-Type': 'application/json' }
-              }));
-            }
-          }
-        }
         var result = nativeFetch.apply(this, arguments);
         if (method !== 'GET' && /\/video_layouts\//.test(url) && !/calculate/.test(url) && result && result.then) {
           result.then(function (response) {
@@ -1807,20 +1380,6 @@
       var xhr = this;
       var method = xhr.__vksCodianMethod;
       var url = xhr.__vksCodianUrl || '';
-
-      if (method === 'POST' && /\/video_layouts\/calculate/.test(url)) {
-        var body = null;
-        try {
-          body = typeof data === 'string' ? JSON.parse(data) : data;
-        } catch (e) {}
-        if (body && typeof body.preset === 'string' &&
-            (body.preset.indexOf('vks_') === 0 || body.preset.indexOf('codian_') === 0)) {
-          var slots = formatCalculatedSlots(body.preset, body.width, body.height);
-          var respText = JSON.stringify({ slots: slots });
-          synthXhr(xhr, 200, respText);
-          return;
-        }
-      }
 
       if (method !== 'GET' && /\/video_layouts\//.test(url) && !/calculate/.test(url)) {
         xhr.addEventListener('load', function () {
