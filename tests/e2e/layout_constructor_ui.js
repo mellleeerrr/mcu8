@@ -94,9 +94,8 @@ async function api(token, method, path, body) {
     // preset в config.data). Любой другой вызов (в т.ч. crafted-объект) —
     // fail; allowlist по форме ошибки/окну времени не используется.
     await context.addInitScript(() => {
-      window.__vendorReported = 0;
-      window.__unexpectedReported = 0;
-      window.reportError = (error) => {
+      window.__vendorReport = { expected: 0, unexpected: 0 };
+      const wrapper = (error) => {
         let expected = false;
         try {
           const config = error && error.config;
@@ -104,9 +103,16 @@ async function api(token, method, path, body) {
             && /\/video_layouts\/calculate/.test(String(config.url || ''))
             && String(config.data || '').includes('preset_default_13');
         } catch (e) { expected = false; }
-        if (expected) window.__vendorReported += 1;
-        else window.__unexpectedReported += 1;
+        window.__vendorReport[expected ? 'expected' : 'unexpected'] += 1;
       };
+      // Обёртка должна быть неизменяемой: иначе код страницы (в т.ч. тестовая
+      // инъекция) может переопределить reportError, спрятать реальный вызов
+      // или подделать провенанс. Счётчики читаются по ВСЕМ фреймам.
+      try {
+        Object.defineProperty(window, 'reportError', { value: wrapper, writable: false, configurable: false });
+      } catch (e) {
+        window.reportError = wrapper;
+      }
     });
     const calculateResponses = [];
     page.on('request', (request) => {
@@ -290,10 +296,16 @@ async function api(token, method, path, body) {
     // Ни один pageerror не допустим: вендорский шум перехвачен на
     // window.reportError и посчитан отдельно; любой неперехваченный бросок
     // (в т.ч. crafted-объект) обязан провалить тест.
-    const reported = await page.evaluate(() => ({
-      expected: Number(window.__vendorReported || 0),
-      unexpected: Number(window.__unexpectedReported || 0),
-    }));
+    // Счётчики суммируем по всем фреймам: reportError в same-origin iframe не
+    // всплывает как pageerror, поэтому иначе его вызов был бы невидим.
+    const reported = { expected: 0, unexpected: 0 };
+    for (const frame of page.frames()) {
+      try {
+        const counters = await frame.evaluate(() => window.__vendorReport || { expected: 0, unexpected: 0 });
+        reported.expected += Number(counters.expected || 0);
+        reported.unexpected += Number(counters.unexpected || 0);
+      } catch (e) { /* фрейм уже закрыт */ }
+    }
     check('нет pageerror; ровно один reportError и он от axios preset_default_13',
       pageErrors.length === 0 && vendor400Count === 1 && reported.expected === 1 && reported.unexpected === 0,
       `pageerrors: ${pageErrors.slice(0, 2).join(' | ')}; 400: ${vendor400Count}; reportError: ${JSON.stringify(reported)}`);
