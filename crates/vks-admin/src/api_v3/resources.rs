@@ -369,18 +369,6 @@ fn singular(kind: &str) -> &'static str {
     }
 }
 
-/// `preset_equal_25` → `Some(25)`, `preset_selected_b_4_(2)` → `Some(4)`.
-/// Как UI-маппер `Iee`: сначала отрезается суффикс `_(N)`, затем берётся хвост.
-///
-/// Только вендорские id с префиксом `preset_`: у `codian_*` число окон задано
-/// самой раскладкой (`vks_layout::codian::slot_count`), а хвост id — это номер
-/// макета, а не размер.
-pub(crate) fn preset_size(preset: &str) -> Option<u32> {
-    let base = preset.rsplit_once("_(").map_or(preset, |(base, _)| base);
-    let base = base.strip_prefix("preset_")?;
-    base.rsplit('_').next().and_then(|tail| tail.parse().ok())
-}
-
 /// Контрактный размер раскладки для attach/валидации: явный `payload.size`
 /// (его поддерживает `recalc_layout_size`), затем id пресета, затем слоты.
 pub(crate) fn layout_size(payload: &Value) -> Option<usize> {
@@ -393,16 +381,19 @@ pub(crate) fn layout_size(payload: &Value) -> Option<usize> {
         .or_else(|| payload.get("slots").and_then(Value::as_array).map(Vec::len).filter(|count| *count > 0))
 }
 
-/// Размер, выводимый из содержимого: параметрический id конструктора (слоты
-/// могли остаться от прежней раскладки), затем слоты, затем вендорский preset.
+/// Ёмкость раскладки: явный id пресета (параметрический конструктор, Codian,
+/// вендорский `preset_*` с числом), затем закэшированный `payload.size`, затем
+/// число сохранённых окон. Слоты перечисляют только занятые окна, поэтому их
+/// длина не должна затирать ёмкость (sparse-модель): `preset_equal_4` с одним
+/// слотом — это 4 окна, а не 1.
 fn derived_layout_size(payload: &Value) -> Option<usize> {
     let preset = payload.get("preset").and_then(Value::as_str);
-    // Только явный размер из id: `PresetId::parse("preset_equal")` вернул бы
-    // дефолтные 13 и затёр бы payload.size (4), сломав wire-контракт.
     preset
         .and_then(vks_layout::grids::slot_count)
-        .or_else(|| payload.get("slots").and_then(Value::as_array).map(Vec::len).filter(|count| *count > 0))
+        .or_else(|| preset.and_then(vks_layout::codian::slot_count))
         .or_else(|| preset.and_then(vks_layout::preset_size))
+        .or_else(|| payload.get("size").and_then(Value::as_u64).filter(|size| *size > 0).map(|size| size as usize))
+        .or_else(|| payload.get("slots").and_then(Value::as_array).map(Vec::len).filter(|count| *count > 0))
 }
 
 /// `speakers`/`listeners` в записи — счётчики для таблицы UI; источник истины —
@@ -984,8 +975,13 @@ pub async fn attach_layout_abonent(
         slot["contact_type"] = contact_type;
         slot["display_name"] = json!(participant.display_name);
     } else {
-        // Сетка хранит и свободные окна (role=AUTO): занимаем первое из них.
-        let free = slots.iter().position(|slot| slot["abonent_id"].as_str().is_none_or(str::is_empty));
+        // Сетка хранит и свободные окна (role=AUTO): занимаем первое из них,
+        // но только если позиция в пределах ёмкости (иначе запись «отравится»
+        // и следующий PATCH упадёт 409); свободные вне ёмкости пропускаем.
+        let free = slots.iter().position(|slot| {
+            slot["abonent_id"].as_str().is_none_or(str::is_empty)
+                && slot["position"].as_u64().is_some_and(|position| (1..=limit).contains(&position))
+        });
         if let Some(index) = free {
             let position = slots[index]["position"].clone();
             slots[index] = json!({
@@ -1440,7 +1436,9 @@ fn validate_layout_assignments(payload: &Value) -> Result<(), UpdateError> {
         .or_else(|| layout_size(payload));
     let mut seen = std::collections::HashSet::new();
     for slot in slots.iter().filter(|slot| slot.is_object()) {
-        let Some(raw_position) = slot.get("position") else { continue };
+        let Some(raw_position) = slot.get("position") else {
+            return Err(UpdateError::Invalid("slot position is required".to_string()));
+        };
         let Some(position) = raw_position.as_u64() else {
             return Err(UpdateError::Invalid("slot position must be an integer".to_string()));
         };
@@ -1526,6 +1524,15 @@ pub async fn create(
         // seed для полей, и без этого создавалась «Общая» с чужим preset
         // (в БД уже есть такие «T7 Dup Layout»).
         record["payload"]["type"] = json!("individual");
+    }
+    if kind == "video_layouts" {
+        // Create — тот же контракт, что PATCH: дубли/выход за ёмкость не должны
+        // попадать в БД (иначе запись «отравлена» для attach и любого PATCH).
+        match validate_layout_assignments(&record["payload"]) {
+            Ok(()) => {}
+            Err(UpdateError::Invalid(message)) => return error_json(422, &message),
+            Err(UpdateError::Conflict(message)) => return error_json(409, &message),
+        }
     }
     let id = record["id"].as_str().unwrap().to_string();
     let mut resources = state.api_v3.resources.lock().await;

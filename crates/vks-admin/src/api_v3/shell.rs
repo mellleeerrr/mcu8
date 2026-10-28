@@ -926,24 +926,13 @@ pub async fn switch_video_layout_mode(
     // (`grids::parse`), а не хвост `preset_size`.
     let preset_field = field("preset").filter(|preset| {
         preset.as_str().is_some_and(|p| {
-            super::resources::preset_size(p).is_some()
+            vks_layout::preset_size(p).is_some()
                 || vks_layout::codian::is_codian_preset(p)
                 || vks_layout::grids::is_grid_preset(p)
         })
     });
-    let inferred_size = size
-        .or_else(|| slots.as_ref().map(|(_, len)| *len))
-        .or_else(|| {
-            preset_field.as_ref().and_then(Value::as_str).and_then(vks_layout::codian::slot_count).map(|n| n as u64)
-        })
-        .or_else(|| {
-            preset_field
-                .as_ref()
-                .and_then(Value::as_str)
-                .and_then(vks_layout::grids::parse)
-                .map(|scheme| scheme.count as u64)
-        })
-        .unwrap_or(13);
+    // Размер не выводим здесь: пустой `slots: []` дал бы 0 (attach-лимит 64),
+    // а ёмкость пресета/закэшированный size важнее. Считаем после чтения draft.
     // `payload.mode` — режим раскладки (auto/dynamic/manual); mcu/sfu — топология комнаты.
     // `Boe` кладёт новый режим в `new_mode`, а в nested `payload.mode` — старое значение.
     // Приоритет: new_mode (auto/dynamic/manual) → nested payload.mode → auto.
@@ -963,13 +952,10 @@ pub async fn switch_video_layout_mode(
     // `type` не переносим: он immutable (resources::update_resource) — иначе
     // «Общая» через mode-эндпоинт снова становилась individual.
     let preset_present = preset_field.is_some();
-    if let Some(preset) = preset_field {
+    if let Some(preset) = preset_field.clone() {
         patch.insert("preset".to_string(), preset);
     }
-    if size.is_some() || slots.is_some() || preset_present {
-        patch.insert("size".to_string(), json!(inferred_size));
-    }
-    if let Some((slots, _)) = slots {
+    if let Some((slots, _)) = slots.clone() {
         patch.insert("slots".to_string(), slots);
     }
     if let Some(autoscroll) = field("autoscroll") {
@@ -994,6 +980,25 @@ pub async fn switch_video_layout_mode(
     }
     let previous = resources.clone();
     let mut draft = source;
+    if size.is_some() || slots.is_some() || preset_present {
+        let inferred_size = size
+            .filter(|size| *size > 0)
+            .or_else(|| slots.as_ref().map(|(_, len)| *len).filter(|len| *len > 0))
+            .or_else(|| {
+                preset_field.as_ref().and_then(Value::as_str).and_then(vks_layout::codian::slot_count).map(|n| n as u64)
+            })
+            .or_else(|| {
+                preset_field
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .and_then(vks_layout::grids::parse)
+                    .map(|scheme| scheme.count as u64)
+            })
+            .or_else(|| draft["payload"]["size"].as_u64().filter(|size| *size > 0))
+            .or_else(|| draft["payload"]["preset"].as_str().and_then(vks_layout::preset_size).map(|size| size as u64))
+            .unwrap_or(13);
+        patch.insert("size".to_string(), json!(inferred_size));
+    }
     if let Some(payload) = draft["payload"].as_object_mut() {
         for (key, value) in &patch {
             payload.insert(key.clone(), value.clone());

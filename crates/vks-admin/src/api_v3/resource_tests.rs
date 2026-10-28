@@ -547,7 +547,7 @@ async fn pnm_individual_auto_layout_shows_only_attached_receivers() {
 fn pnm_layout_patch_preserves_slot_recipient_metadata() {
     let mut record = normalize_resource(
         "video_layouts",
-        &json!({"payload":{"mode":"manual","type":"individual","slots":[
+        &json!({"payload":{"mode":"manual","preset":"vks_grid_2","type":"individual","slots":[
             {"position":1,"role":"PEER","abonent_id":"sip-1@sip-gateway","display_name":"Terminal","contact_id":"cs-1"}
         ]}}),
         "creator",
@@ -559,7 +559,7 @@ fn pnm_layout_patch_preserves_slot_recipient_metadata() {
     .expect("valid patch");
     assert_eq!(record["payload"]["slots"][0]["display_name"], "Terminal");
     assert_eq!(record["payload"]["slots"][0]["contact_id"], "cs-1");
-    assert_eq!(record["payload"]["size"], 2);
+    assert_eq!(record["payload"]["size"], 2, "ёмкость параметрического пресета");
 }
 
 /// P2.6: удаление комнаты не оставляет её раскладки/links в storage и глобальном списке.
@@ -2369,6 +2369,25 @@ fn recalc_layout_size_распознаёт_конструктор() {
     let mut codian = json!({"payload": {"mode": "manual", "preset": "codian_07"}});
     recalc_layout_size(&mut codian);
     assert_eq!(codian["payload"]["size"], 13, "Codian-схема по-прежнему даёт свой размер");
+
+    // Sparse-модель: слоты перечисляют занятые окна и не уменьшают ёмкость.
+    let mut sparse_preset = json!({"payload": {"preset": "preset_equal_4", "slots": [{"position": 1}]}});
+    recalc_layout_size(&mut sparse_preset);
+    assert_eq!(sparse_preset["payload"]["size"], 4, "preset_equal_4 + один слот — всё ещё 4 окна");
+
+    let mut sparse_codian = json!({"payload": {"preset": "codian_07", "slots": [{"position": 1}]}});
+    recalc_layout_size(&mut sparse_codian);
+    assert_eq!(sparse_codian["payload"]["size"], 13, "Codian + один слот — ёмкость схемы");
+
+    let mut sparse_default =
+        json!({"payload": {"preset": "preset_default_13", "size": 13, "slots": [{"position": 1}, {"position": 2}]}});
+    recalc_layout_size(&mut sparse_default);
+    assert_eq!(sparse_default["payload"]["size"], 13, "«Общая» остаётся 13-оконной");
+
+    // Явный size без id-ёмкости (dynamic preset_equal) не затирается слотами.
+    let mut dynamic = json!({"payload": {"preset": "preset_equal", "size": 4, "slots": [{"position": 1}]}});
+    recalc_layout_size(&mut dynamic);
+    assert_eq!(dynamic["payload"]["size"], 4);
 }
 
 /// Вендорский редактор раскрашивает окно только по `slot.role` (UPPERCASE);
@@ -2521,6 +2540,10 @@ async fn t00_attach_into_sparse_layout_uses_free_position() {
         let resources = state.api_v3.resources.lock().await;
         resources.layouts.get(&layout_id).cloned().expect("layout exists")
     };
+    let mut positions: Vec<u64> =
+        record["payload"]["slots"].as_array().unwrap().iter().filter_map(|slot| slot["position"].as_u64()).collect();
+    positions.sort_unstable();
+    assert_eq!(positions, vec![1, 4], "свободное AUTO-окно 4 переиспользовано, второму — минимальное свободное 1");
     assert!(
         record["payload"]["slots"]
             .as_array()
@@ -2559,4 +2582,70 @@ async fn t00_edit_global_exposes_apply_header() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["x-vks-layout-applied"], "pending", "dialer'а нет — pending");
+}
+
+/// S7-регрессия: PATCH динамической раскладки с одним сохранённым слотом не
+/// должен сжимать `size` (sparse-модель: слоты перечисляют занятые окна).
+#[test]
+fn pnm_patch_does_not_shrink_dynamic_layout_with_one_slot() {
+    let mut record = normalize_resource(
+        "video_layouts",
+        &json!({"payload":{"mode":"dynamic","preset":"preset_equal","size":4,"type":"individual","slots":[]}}),
+        "creator",
+    );
+    update_resource(&mut record, &json!({"payload":{"slots":[{"position":1,"role":"AUTO"}]}})).expect("valid patch");
+    assert_eq!(record["payload"]["size"], 4, "один слот не делает раскладку однооконной");
+}
+
+/// S7-регрессия: create не должен принимать дубли/позиции вне ёмкости
+/// (иначе запись отравлена для attach и любого последующего PATCH).
+#[tokio::test]
+async fn t00_create_rejects_invalid_assignments() {
+    let state = state();
+    for (slots, expected) in [
+        (json!([{"position":1},{"position":1}]), StatusCode::CONFLICT),
+        (json!([{"position":5}]), StatusCode::CONFLICT),
+        (json!([{"position":"2"}]), StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        let response = create(
+            State(state.clone()),
+            Extension(operator()),
+            uri("/api/v3/video_layouts"),
+            Json(json!({"display_name":"Invalid","payload":{"type":"individual","preset":"preset_equal_1","slots":slots}})),
+        )
+        .await;
+        assert_eq!(response.status(), expected, "create обязан валидировать назначения");
+    }
+}
+
+/// S7-регрессия: mode-эндпоинт не выводит size из пустого `slots: []`
+/// (раньше запись становилась size=0, attach-лимит 64, gateway 13).
+#[tokio::test]
+async fn t00_mode_switch_keeps_size_for_empty_slots() {
+    let state = state();
+    let room = Rooms::create_async(&state, "Mode size room").await.unwrap();
+    let layout = create_layout(
+        &state,
+        "Dynamic",
+        json!({"mode":"dynamic","preset":"preset_equal","size":4,"type":"individual","slots":[]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &layout).await, StatusCode::NO_CONTENT);
+    let mut extra = serde_json::Map::new();
+    extra.insert("slots".to_string(), json!([]));
+    let response = crate::api_v3::shell::switch_video_layout_mode(
+        State(state.clone()),
+        Extension(operator()),
+        Json(crate::api_v3::shell::SwitchVideoLayoutModeRequest {
+            session_id: Some(room.id.to_string()),
+            conference_id: None,
+            mode: Some("manual".into()),
+            video_layout_id: Some(layout.clone()),
+            extra,
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let resources = state.api_v3.resources.lock().await;
+    assert_eq!(resources.layouts[&layout]["payload"]["size"], 4, "пустой slots не должен обнулять ёмкость");
 }
