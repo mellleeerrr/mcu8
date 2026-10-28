@@ -77,6 +77,6 @@ dep-light: `serde` (workspace), `thiserror` (workspace). Dev: `serde_json`
 cargo test -p vks-layout
 ```
 
-Покрытие: grid (n=1..100, балансировка, полные ряды покрывают ширину / неполный центрируется, без пересечений),
+Покрытие: grid (n=1..100, балансировка, полные ряды покрывают ширину / неполный центрируется, кроме холста уже cols, без пересечений),
 focus (фокус >50%, мелкие остальные, покрытие canvas), renderer
 (4-person grid → 4 DrawCommand, letterbox scale, skip unassigned).
