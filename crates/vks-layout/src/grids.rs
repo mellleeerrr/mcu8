@@ -268,6 +268,15 @@ fn gallery(count: usize, width: f64, height: f64, gap: f64, margin: f64) -> Vec<
     rects
 }
 
+/// Штраф за пустые окна в ряду выбора «галереи».
+///
+/// 0 — приоритет формы ячейки: раскладка выбирает ряды, дающие 16:9, даже
+/// если последний ряд неполный (N=43 → 7×7 с центрированным одним окном).
+/// Ненулевой вес (прежние 20) предпочитал заполнение сетки: меньше пустых
+/// окон ценой растянутой ячейки. Выбор зафиксирован golden-эталоном N=1..100;
+/// 36 значений 43–96 меняют rows×cols (43: 5×9 → 7×7 и т.п.).
+const WASTE_WEIGHT: f64 = 0.0;
+
 fn gallery_cost(count: usize, rows: usize, width: f64, height: f64, gap: f64) -> f64 {
     let rows = rows.max(1);
     let cols = count.div_ceil(rows);
@@ -275,8 +284,10 @@ fn gallery_cost(count: usize, rows: usize, width: f64, height: f64, gap: f64) ->
     let cell_h = (height - (rows - 1) as f64 * gap) / rows as f64;
     let aspect = cell_w / cell_h.max(1.0);
     let deviation = (aspect - 16.0 / 9.0).abs() * 100.0;
-    let waste = (cols * rows - count) as f64 * 20.0;
-    deviation + waste
+    if WASTE_WEIGHT == 0.0 {
+        return deviation;
+    }
+    deviation + (cols * rows - count) as f64 * WASTE_WEIGHT
 }
 
 /// Конфигурация модульной матрицы C x R для 1 крупного окна:
@@ -738,6 +749,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn галерея_предпочитает_16_9_а_не_заполнение_сетки() {
+        // N=43: 7×7 с неполным рядом даёт ячейку 16:9; 5×9 «заполняет» сетку,
+        // но растягивает окна. Приоритет — форма кадра, а не пустые ячейки.
+        assert!(
+            super::gallery_cost(43, 7, 1280.0, 720.0, 0.0) < super::gallery_cost(43, 5, 1280.0, 720.0, 0.0),
+            "16:9-ячейки важнее отсутствия пустых окон"
+        );
     }
 
     #[test]

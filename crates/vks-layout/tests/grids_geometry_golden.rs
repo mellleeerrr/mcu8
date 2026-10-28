@@ -9,9 +9,9 @@
 //! обновления эталона. Независимые инварианты (число окон, границы, 16:9,
 //! отсутствие пересечений) живут в `tests/grids.rs`.
 //!
-//! Покрытие: `vks_grid_1..9,13,16,25,100`; `vks_pin_{l,r,t,b}_{2,5,9,25}`;
+//! Покрытие: `vks_grid_1..100`; `vks_pin_{l,r,t,b}_{2,5,9,25}`;
 //! каждая базовая схема — с опциями по умолчанию, `g8`, `g12`, `m24`, `m64`,
-//! `g12_m24` (174 id). Опции в id заданы в пикселях 720p и масштабируются по
+//! `g12_m24` (696 id). Опции в id заданы в пикселях 720p и масштабируются по
 //! высоте холста.
 //!
 //! Воспроизведение/обновление — только вручную:
@@ -44,10 +44,10 @@ fn golden() -> Golden {
     serde_json::from_str(GOLDEN).expect("эталон — валидный JSON")
 }
 
-/// Базовые схемы без опций: репрезентативные галереи и все стороны PIN.
+/// Базовые схемы без опций: все галереи N=1..100 и все стороны PIN.
 fn base_schemes() -> Vec<GridScheme> {
     let mut schemes = Vec::new();
-    for count in [1usize, 2, 3, 4, 5, 6, 7, 8, 9, 13, 16, 25, 100] {
+    for count in 1usize..=100 {
         schemes.push(GridScheme { count, pin: None, is_dual: false, options: GridOptions { gap: 0, margin: 0 } });
     }
     for count in [2usize, 5, 9, 25] {
@@ -87,7 +87,7 @@ fn эталон_покрывает_ключевые_id_и_непустые_ок�
     let golden = golden();
     let expected: BTreeSet<String> = expected_ids().into_iter().collect();
     let actual: BTreeSet<String> = golden.keys().cloned().collect();
-    assert_eq!(expected.len(), 174, "решётка id: 29 базовых схем × 6 вариантов опций");
+    assert_eq!(expected.len(), 696, "решётка id: (100 галерей + 16 PIN) × 6 вариантов опций");
     assert_eq!(actual, expected, "эталон содержит ровно ожидаемые id (без лишних/без пропусков)");
     for id in &expected {
         let cells = &golden[id];
