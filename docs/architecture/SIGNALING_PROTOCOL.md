@@ -108,6 +108,7 @@ message JoinRoomResult {
   repeated TrackInfo publisher_tracks   = 4; // треки publisher'ов
   Layout layout               = 5;          // текущий layout комнаты
   RoomCaps caps               = 6;
+  vks.media.RoomMode room_mode = 7;         // эффективный режим комнаты (per-room override)
 }
 
 message ParticipantInfo {

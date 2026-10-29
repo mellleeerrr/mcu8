@@ -36,6 +36,41 @@ mod tests {
     use super::*;
     use prost::Message;
 
+    /// T08: `JoinRoomResult.room_mode = 7` is additive. An old server that
+    /// does not send it decodes as `Unspecified` (proto3 default) and an old
+    /// client ignores it; a new server's MCU value must survive the roundtrip.
+    #[test]
+    fn join_room_result_room_mode_is_an_additive_wire_field() {
+        let mut message = signaling::SignalingMessage {
+            msg_id: 7,
+            reply_to: 0,
+            payload: Some(signaling::signaling_message::Payload::JoinRoomResult(signaling::JoinRoomResult {
+                room_mode: media::RoomMode::Mcu as i32,
+                ..Default::default()
+            })),
+        };
+        let bytes = message.encode_to_vec();
+        match signaling::SignalingMessage::decode(&bytes[..]).expect("decode").payload {
+            Some(signaling::signaling_message::Payload::JoinRoomResult(result)) => {
+                assert_eq!(result.room_mode, media::RoomMode::Mcu as i32);
+            }
+            other => panic!("expected JoinRoomResult, got {other:?}"),
+        }
+
+        // Old frame (field absent) → proto3 default 0, clients keep their pipeline.
+        message = signaling::SignalingMessage {
+            msg_id: 8,
+            reply_to: 0,
+            payload: Some(signaling::signaling_message::Payload::JoinRoomResult(signaling::JoinRoomResult::default())),
+        };
+        match signaling::SignalingMessage::decode(&message.encode_to_vec()[..]).expect("decode").payload {
+            Some(signaling::signaling_message::Payload::JoinRoomResult(result)) => {
+                assert_eq!(result.room_mode, media::RoomMode::Unspecified as i32);
+            }
+            other => panic!("expected JoinRoomResult, got {other:?}"),
+        }
+    }
+
     // Roundtrip: SignalingMessage с JoinRoom → bytes → обратно.
     #[test]
     fn signaling_join_room_roundtrip() {

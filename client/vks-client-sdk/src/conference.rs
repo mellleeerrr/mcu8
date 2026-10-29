@@ -93,6 +93,16 @@ impl Conference {
         &self.media
     }
 
+    /// Applies a wire room mode to the pipeline. `Unspecified` (proto3 default,
+    /// and resume without a JoinRoomResult) means "keep the current pipeline".
+    fn apply_room_mode(&mut self, mode: vks_proto::media::RoomMode) {
+        match mode {
+            vks_proto::media::RoomMode::Sfu => self.media.switch_mode(crate::media_engine::RoomMode::Sfu),
+            vks_proto::media::RoomMode::Mcu => self.media.switch_mode(crate::media_engine::RoomMode::Mcu),
+            _ => {}
+        }
+    }
+
     /// Забирает события, накопленные push-сообщениями сервера, и применяет
     /// их к media engine (режим, раскладка).
     ///
@@ -236,12 +246,7 @@ impl Conference {
         // Auto-select the media pipeline from the join snapshot: waiting for the
         // first RoomModeChanged push would render one mode with the other
         // pipeline's semantics (a composite frame decoded as N tracks).
-        match join_result.room_mode {
-            vks_proto::media::RoomMode::Sfu => self.media.switch_mode(crate::media_engine::RoomMode::Sfu),
-            vks_proto::media::RoomMode::Mcu => self.media.switch_mode(crate::media_engine::RoomMode::Mcu),
-            // Unspecified/unknown: keep the default (SFU) until a mode push.
-            _ => {}
-        }
+        self.apply_room_mode(join_result.room_mode);
 
         // 3. Раскладка комнаты приходит снимком в JoinRoomResult — без гонки
         // с push-сообщением (поздний участник иначе рисовал бы авто-сетку до
@@ -364,6 +369,10 @@ impl Conference {
                 if let Ok(jr) = client.join_room_async(&self.cfg.room_id, &self.cfg.display_name).await {
                     self.join_nonce = Some(jr.join_nonce);
                     self.nonce_acquired_at = Some(std::time::Instant::now());
+                    // A rejoin can land in a room whose mode changed while the
+                    // client was disconnected: refresh the pipeline from the
+                    // fresh join snapshot (resume carries none).
+                    self.apply_room_mode(jr.room_mode);
                     self.apply_layout_snapshot(jr.layout.as_ref());
                     self.state = ConferenceState::Active;
                     client.reset_reconnect();

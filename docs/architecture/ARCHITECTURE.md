@@ -56,18 +56,32 @@ pub trait MediaEngine: Send + Sync + 'static {
 }
 ```
 
-2. **Единый сигнальный протокол.** Сообщение `ServerHello` (после аутентификации) содержит `room_mode` — единственный источник истины о режиме:
+2. **Единый сигнальный протокол.** `ServerHello` (после аутентификации) и
+`JoinRoomResult` несут `room_mode`:
 
 ```protobuf
 message ServerHello {
-    string server_name = 1;
-    string server_id   = 2;
-    RoomMode room_mode = 3;   // ← SFU | MCU
-    RoomCaps caps       = 4;  // кодеки, simulcast, svc, layout вкл/выкл
-    repeated IceServer ice  = 5;
-    uint32 proto_version    = 6;
+    uint32 proto_version = 1;
+    uint32 min_supported = 2;
+    uint32 max_supported = 3;
+    string server_id     = 4;
+    string server_name   = 5;
+    RoomMode room_mode   = 6;  // глобальный режим инстанса
+    RoomCaps caps        = 7;  // кодеки, simulcast, svc, layout вкл/выкл
+    IceConfig ice        = 8;
+}
+
+message JoinRoomResult {
+    // ... participant_id=1, join_nonce=2, participants=3,
+    //     publisher_tracks=4, layout=5, caps=6
+    RoomMode room_mode   = 7;  // эффективный режим КОМНАТЫ (per-room override)
 }
 ```
+
+`ServerHello.room_mode` — режим инстанса; `JoinRoomResult.room_mode` —
+эффективный режим конкретной комнаты (глобальный default + per-room
+override). SDK выбирает конвейер по `JoinRoomResult` при входе и rejoin;
+resume без `JoinRoomResult` сохраняет текущий конвейер.
 
 3. **Клиентский SDK выбирает рендерер сам.** Приложение не пишет `if sfu {} else {}` — эта ветка только внутри SDK:
 

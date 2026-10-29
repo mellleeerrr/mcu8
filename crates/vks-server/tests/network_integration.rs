@@ -1483,6 +1483,9 @@ async fn test_package_d_mcu_pipeline_handover_and_pnm_control_events() {
             assert_eq!(layout.slots[0].id, 0, "slot id — 0-based");
             let rect = layout.slots[0].rect.as_ref().expect("нормализованный rect");
             assert!(rect.w > 0.0 && rect.h > 0.0, "у слота есть размер");
+            // T08: per-room MCU override must be visible on the wire, not only
+            // the process-wide HandlerConfig value.
+            assert_eq!(res.room_mode, vks_proto::media::RoomMode::Mcu as i32, "per-room mode wins");
         }
         other => panic!("expected JoinRoomResult, got {other:?}"),
     }
