@@ -387,22 +387,30 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                             dtmf_active = dtmf.pop_front().map(|event| (event, 0, dtmf_timestamp));
                         }
                         if let Some((event, step, started)) = dtmf_active {
-                            let duration = [160u16, 320, 480, 640, 800][step];
-                            let mut event_packet = [0u8; 16];
-                            vks_gateway_sip::write_rtp_header(
-                                &mut event_packet[..12],
+                            // Same RFC 4733 series as the sample-oriented bridge:
+                            // marker first, E=1 last, 200 ms of 20 ms packets.
+                            let event_packet = super::audio::dtmf_event_packet(
+                                &super::audio::DTMF_DURATIONS,
                                 payload_type,
                                 sequence,
                                 started,
                                 ssrc,
-                                step == 0,
+                                event,
+                                step,
                             );
                             sequence = sequence.wrapping_add(1);
-                            event_packet[12] = event;
-                            event_packet[13] = if step == 4 { 0x8a } else { 0x0a };
-                            event_packet[14..].copy_from_slice(&duration.to_be_bytes());
-                            let _ = session.rtp_socket.send_to(&event_packet, egress).await;
-                            if step == 4 {
+                            match session.rtp_socket.send_to(&event_packet, egress).await {
+                                Ok(_) => {
+                                    session.media_stats.dtmf_tx_packets.fetch_add(1, Relaxed);
+                                }
+                                Err(error) => {
+                                    let errors = session.media_stats.dtmf_tx_errors.fetch_add(1, Relaxed) + 1;
+                                    if errors <= 3 {
+                                        tracing::warn!(participant = %session.participant_id_str, %error, %egress, "failed to send AAC DTMF telephone-event packet");
+                                    }
+                                }
+                            }
+                            if step + 1 == super::audio::DTMF_DURATIONS.len() {
                                 dtmf_active = None;
                                 dtmf_gap = 2;
                             } else {

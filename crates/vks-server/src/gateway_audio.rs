@@ -452,12 +452,24 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                     else {
                         if dtmf_active.is_none() { dtmf_active = dtmf.pop_front().map(|event| (event, 0, dtmf_timestamp)); }
                         if let Some((event, step, started)) = dtmf_active {
-                            let duration = DTMF_DURATIONS[step.min(DTMF_DURATIONS.len() - 1)];
-                            let mut event_packet = [0; 16];
-                            vks_gateway_sip::write_rtp_header(&mut event_packet[..12], payload_type, sequence, started, ssrc, step == 0);
-                            sequence = sequence.wrapping_add(1); event_packet[12] = event; event_packet[13] = if step >= 2 { 0x8a } else { 0x0a };
-                            event_packet[14..].copy_from_slice(&duration.to_be_bytes());
-                            let _ = session.rtp_socket.send_to(&event_packet, egress).await;
+                            let event_packet =
+                                dtmf_event_packet(&DTMF_DURATIONS, payload_type, sequence, started, ssrc, event, step);
+                            sequence = sequence.wrapping_add(1);
+                            match session.rtp_socket.send_to(&event_packet, egress).await {
+                                Ok(_) => {
+                                    session.media_stats.dtmf_tx_packets.fetch_add(1, Relaxed);
+                                }
+                                Err(error) => {
+                                    // DTMF нельзя терять молча: раньше `let _ =`
+                                    // скрывал закрытый сокет и тон «исчезал».
+                                    let errors = session.media_stats.dtmf_tx_errors.fetch_add(1, Relaxed) + 1;
+                                    if errors <= 3 {
+                                        tracing::warn!(participant = %session.participant_id_str, %error, %egress, "failed to send DTMF telephone-event packet");
+                                    } else {
+                                        tracing::debug!(participant = %session.participant_id_str, %error, "failed to send DTMF telephone-event packet");
+                                    }
+                                }
+                            }
                             if step + 1 == DTMF_DURATIONS.len() { dtmf_active = None; dtmf_gap = 2; } else { dtmf_active = Some((event, step + 1, started)); }
                         }
                     }
@@ -680,7 +692,33 @@ impl RtpSource {
 /// Длительности (в 8-кГц сэмплах) последовательных RFC 4733-пакетов одного
 /// нажатия: 10 × 160 = 1600 сэмплов = 200 мс тона. Шаг 20 мс совпадает с
 /// тиком моста; для Opus/48k телефонный клок остаётся 8 кГц (RFC 4733 §2.1).
-const DTMF_DURATIONS: [u16; 10] = [160, 320, 480, 640, 800, 960, 1120, 1280, 1440, 1600];
+pub(super) const DTMF_DURATIONS: [u16; 10] = [160, 320, 480, 640, 800, 960, 1120, 1280, 1440, 1600];
+
+/// Собирает `step`-й 20-мс пакет RFC 4733 для одного нажатия.
+///
+/// RFC 4733 §2.5.1.2: первый пакет события несёт маркер `M=1`, последний —
+/// `E=1`; промежуточные не несут ни того, ни другого. Получатель завершает
+/// тон на первом пакете с `E=1` и берёт его `duration` как длительность
+/// (RFC 4733 §2.5.2). Раньше `E=1` стоял начиная с третьего пакета, поэтому
+/// 200-мс тон обрывался через 60 мс (аудит 07, P1-1).
+pub(super) fn dtmf_event_packet(
+    durations: &[u16],
+    payload_type: u8,
+    sequence: u16,
+    timestamp: u32,
+    ssrc: u32,
+    event: u8,
+    step: usize,
+) -> [u8; 16] {
+    debug_assert!(!durations.is_empty() && step < durations.len(), "DTMF step outside the tone series");
+    let last = step + 1 == durations.len();
+    let mut packet = [0u8; 16];
+    vks_gateway_sip::write_rtp_header(&mut packet[..12], payload_type, sequence, timestamp, ssrc, step == 0);
+    packet[12] = event;
+    packet[13] = if last { 0x8a } else { 0x0a };
+    packet[14..].copy_from_slice(&durations[step].to_be_bytes());
+    packet
+}
 
 /// Причина отказа RTP-валидатора. Раньше все отказы логировались как
 /// «codec/PT mismatch», хотя это мог быть чужой source или смена SSRC —
@@ -939,14 +977,48 @@ mod tests {
         assert_eq!(reject_reason(0, None, source, source, Some(7), header(0, 9)), "ssrc_changed");
     }
 
+    /// RFC 4733-получатель: тон длится от первого пакета до первого `E=1`;
+    /// длительность берётся из поля duration этого пакета (в 8-кГц сэмплах).
+    fn receiver_tone_ms(packets: &[[u8; 16]]) -> u32 {
+        for packet in packets {
+            let duration = u16::from_be_bytes([packet[14], packet[15]]);
+            if packet[13] & 0x80 != 0 {
+                return u32::from(duration) / 8;
+            }
+        }
+        0
+    }
+
     #[test]
-    fn telephone_event_tone_lasts_about_200_ms_at_8k_clock() {
-        assert_eq!(DTMF_DURATIONS.len(), 10, "10 пакетов по 20 мс");
-        assert_eq!(DTMF_DURATIONS[0], 160, "первый пакет — 20 мс × 8 кГц");
-        assert_eq!(DTMF_DURATIONS[DTMF_DURATIONS.len() - 1], 1600, "200 мс × 8 кГц");
-        assert!(
-            DTMF_DURATIONS.windows(2).all(|pair| pair[1] - pair[0] == 160),
-            "каждый следующий пакет — +20 мс телефонного клока"
-        );
+    fn telephone_event_tone_is_200_ms_marker_first_end_last() {
+        let packets: Vec<[u8; 16]> = (0..DTMF_DURATIONS.len())
+            .map(|step| dtmf_event_packet(&DTMF_DURATIONS, 101, 7 + step as u16, 0, 42, 5, step))
+            .collect();
+        assert_eq!(packets.len(), 10, "10 пакетов по 20 мс");
+        for (step, packet) in packets.iter().enumerate() {
+            assert_eq!(packet[0] >> 6, 2, "RTP v2");
+            assert_eq!(packet[12], 5, "event=5");
+            let marker = packet[1] & 0x80 != 0;
+            assert_eq!(marker, step == 0, "маркер только на первом пакете (step {step})");
+            let end = packet[13] & 0x80 != 0;
+            assert_eq!(end, step + 1 == packets.len(), "E=1 только на последнем пакете (step {step})");
+            let duration = u16::from_be_bytes([packet[14], packet[15]]);
+            assert_eq!(duration, 160 * (step as u16 + 1), "+20 мс на пакет");
+            assert_eq!(u32::from_be_bytes(packet[4..8].try_into().unwrap()), 0, "ts0 фиксирован");
+        }
+        assert_eq!(receiver_tone_ms(&packets), 200, "получатель видит 200 мс, а не 60");
+    }
+
+    #[test]
+    fn telephone_event_end_bit_on_third_packet_would_truncate_tone() {
+        let packets: Vec<[u8; 16]> = (0..10)
+            .map(|step| {
+                let mut packet = dtmf_event_packet(&DTMF_DURATIONS, 101, step as u16, 0, 42, 5, step);
+                // Регресс-контроль: старое поведение (E=1 с третьего пакета).
+                packet[13] = if step >= 2 { 0x8a } else { 0x0a };
+                packet
+            })
+            .collect();
+        assert_eq!(receiver_tone_ms(&packets), 60, "старый баг давал 60 мс");
     }
 }

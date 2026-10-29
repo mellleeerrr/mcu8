@@ -207,6 +207,10 @@ pub struct GatewayMediaStats {
     pub rtcp_rr_sent: std::sync::atomic::AtomicU64,
     /// RFC 4733 digits received from the peer and relayed into the room.
     pub dtmf_events_received: std::sync::atomic::AtomicU64,
+    /// RFC 4733 telephone-event packets successfully sent to the peer.
+    pub dtmf_tx_packets: std::sync::atomic::AtomicU64,
+    /// RFC 4733 telephone-event packets the socket refused (closed egress).
+    pub dtmf_tx_errors: std::sync::atomic::AtomicU64,
 }
 
 impl GatewayMediaStats {
@@ -233,6 +237,8 @@ impl GatewayMediaStats {
             "rtcp_fir": self.rtcp_fir.load(Relaxed),
             "rtcp_rr_sent": self.rtcp_rr_sent.load(Relaxed),
             "dtmf_events_received": self.dtmf_events_received.load(Relaxed),
+            "dtmf_tx_packets": self.dtmf_tx_packets.load(Relaxed),
+            "dtmf_tx_errors": self.dtmf_tx_errors.load(Relaxed),
         })
     }
 }
