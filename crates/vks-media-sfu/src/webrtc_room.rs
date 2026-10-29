@@ -58,6 +58,21 @@ pub struct RoomLimits {
     pub max_peers: usize,
 }
 
+/// T15/L0: per-peer UDP buffers (`VKS_WEBRTC_UDP_*`, defaults 1 MiB rcv /
+/// 512 KiB snd). A tuning failure must not refuse the peer: log it and keep the
+/// kernel default; `scripts/host-doctor.sh` reports the drift.
+fn tune_webrtc_socket(socket: &std::net::UdpSocket) {
+    let config = vks_common::net_tuning::UdpBufferConfig::for_webrtc_peer();
+    match vks_common::net_tuning::apply_udp_buffers(socket, &config) {
+        Ok(effective) => {
+            tracing::debug!(buffers = %effective.summary(), "WebRTC peer UDP buffers applied")
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to apply WebRTC peer UDP buffers; using kernel defaults")
+        }
+    }
+}
+
 impl Default for RoomLimits {
     fn default() -> Self {
         Self { max_peers_per_room: DEFAULT_MAX_PEERS_PER_ROOM, max_peers: DEFAULT_MAX_PEERS }
@@ -291,7 +306,10 @@ impl WebRtcRoomRegistry {
         if let Some((min, max)) = self.port_range {
             for port in min..=max {
                 match std::net::UdpSocket::bind((bind_ip, port)) {
-                    Ok(socket) => return Ok(socket),
+                    Ok(socket) => {
+                        tune_webrtc_socket(&socket);
+                        return Ok(socket);
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
                     Err(error) => return Err(error.into()),
                 }
@@ -300,7 +318,9 @@ impl WebRtcRoomRegistry {
             tracing::warn!(min, max, "WebRTC port range exhausted; refusing peer");
             return Err(WebRtcError::Net(format!("WebRTC port range {min}-{max} exhausted")));
         }
-        Ok(std::net::UdpSocket::bind((bind_ip, 0))?)
+        let socket = std::net::UdpSocket::bind((bind_ip, 0))?;
+        tune_webrtc_socket(&socket);
+        Ok(socket)
     }
 
     /// Accepts one browser offer, binds the peer's UDP socket and starts its loop.

@@ -108,6 +108,12 @@ impl UdpMediaLoop {
     /// Привязывает сокет к указанному адресу (например, `127.0.0.1:0` для dynamic port или `0.0.0.0:50000`).
     pub async fn bind(addr: &str) -> std::io::Result<Self> {
         let socket = UdpSocket::bind(addr).await?;
+        if let Err(error) = vks_common::net_tuning::apply_udp_buffers(
+            &socket,
+            &vks_common::net_tuning::UdpBufferConfig::for_media_loop(),
+        ) {
+            warn!(%error, "failed to apply media loop UDP buffers; using kernel defaults");
+        }
         let local_addr = socket.local_addr()?;
         let (shutdown_tx, _) = broadcast::channel(1);
 

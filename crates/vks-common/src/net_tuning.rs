@@ -7,6 +7,7 @@
 //! размеры буферов:
 //!
 //! - общий медиа-луп SFU (`vks-media-sfu::udp_loop`, порт `40000`);
+//! - per-peer WebRTC UDP-сокеты (`vks-media-sfu::webrtc_room`, порты 43000–43100);
 //! - per-call RTP/RTCP-сокеты SIP-моста (`vks-gateway-sip::rtp_bridge`).
 //!
 //! Linux удваивает запрошенный размер (`setsockopt(SO_RCVBUF, N)` → фактически
@@ -20,6 +21,8 @@
 //! |---|---|---|
 //! | `VKS_UDP_RCVBUF_BYTES` | `media_loop` | 4 MiB |
 //! | `VKS_UDP_SNDBUF_BYTES` | `media_loop` | 1 MiB |
+//! | `VKS_WEBRTC_UDP_RCVBUF_BYTES` | `webrtc_peer` | 1 MiB |
+//! | `VKS_WEBRTC_UDP_SNDBUF_BYTES` | `webrtc_peer` | 512 KiB |
 //! | `VKS_GATEWAY_UDP_RCVBUF_BYTES` | `gateway_rtp` | 512 KiB |
 //! | `VKS_GATEWAY_UDP_SNDBUF_BYTES` | `gateway_rtp` | 512 KiB |
 //!
@@ -40,6 +43,10 @@ use tracing::warn;
 pub const ENV_MEDIA_RCVBUF: &str = "VKS_UDP_RCVBUF_BYTES";
 /// Env: размер отправляющего буфера общих медиа-сокетов.
 pub const ENV_MEDIA_SNDBUF: &str = "VKS_UDP_SNDBUF_BYTES";
+/// Env: размер приёмного буфера per-peer WebRTC UDP-сокетов.
+pub const ENV_WEBRTC_RCVBUF: &str = "VKS_WEBRTC_UDP_RCVBUF_BYTES";
+/// Env: размер отправляющего буфера per-peer WebRTC UDP-сокетов.
+pub const ENV_WEBRTC_SNDBUF: &str = "VKS_WEBRTC_UDP_SNDBUF_BYTES";
 /// Env: размер приёмного буфера per-call RTP/RTCP-сокетов SIP/H.323-мостов.
 pub const ENV_GATEWAY_RCVBUF: &str = "VKS_GATEWAY_UDP_RCVBUF_BYTES";
 /// Env: размер отправляющего буфера per-call RTP/RTCP-сокетов.
@@ -50,6 +57,11 @@ pub const ENV_GATEWAY_SNDBUF: &str = "VKS_GATEWAY_UDP_SNDBUF_BYTES";
 pub const DEFAULT_MEDIA_RCVBUF_BYTES: usize = 4 * 1024 * 1024;
 /// 1 MiB на отправку: исходящий поток ограничен pacer'ом, больше не нужно.
 pub const DEFAULT_MEDIA_SNDBUF_BYTES: usize = 1024 * 1024;
+/// 1 MiB на per-peer WebRTC-сокет: при 256 пирах это ~256 MiB лимита,
+/// а не 1 GiB как с медиа-дефолтом 4 MiB. Буфер выделяется по мере надобности.
+pub const DEFAULT_WEBRTC_RCVBUF_BYTES: usize = 1024 * 1024;
+/// 512 KiB на отправку per-peer: исходящий поток ограничен pacer'ом.
+pub const DEFAULT_WEBRTC_SNDBUF_BYTES: usize = 512 * 1024;
 /// 512 KiB на per-call RTP-сокет: при 20 звонках это ~20 MiB лимита, а не 160.
 pub const DEFAULT_GATEWAY_RCVBUF_BYTES: usize = 512 * 1024;
 /// 512 KiB на отправку per-call RTP/RTCP.
@@ -59,10 +71,11 @@ pub const DEFAULT_GATEWAY_SNDBUF_BYTES: usize = 512 * 1024;
 // быть меньше. Compile-time проверка, чтобы правка констант не проскочила.
 const _: () = assert!(DEFAULT_GATEWAY_RCVBUF_BYTES < DEFAULT_MEDIA_RCVBUF_BYTES);
 const _: () = assert!(DEFAULT_GATEWAY_SNDBUF_BYTES < DEFAULT_MEDIA_SNDBUF_BYTES);
+const _: () = assert!(DEFAULT_WEBRTC_RCVBUF_BYTES < DEFAULT_MEDIA_RCVBUF_BYTES);
 
 /// Gauge: эффективный `SO_RCVBUF` тюнингованных UDP-сокетов (T15/L0).
 ///
-/// Label `role` = `media_loop` | `gateway_rtp`. Значение читается обратно
+/// Label `role` = `media_loop` | `webrtc_peer` | `gateway_rtp`. Значение читается обратно
 /// `getsockopt`, т.е. уже включает удвоение ядра и потолок `rmem_max` — ровно
 /// то, что показывает `ss -u -m`.
 pub static UDP_RCVBUF_BYTES: LazyLock<IntGaugeVec> = LazyLock::new(|| {
@@ -81,6 +94,8 @@ pub static UDP_SNDBUF_BYTES: LazyLock<IntGaugeVec> = LazyLock::new(|| {
 pub enum UdpSocketRole {
     /// Общий медиа-луп SFU (один сокет на процесс, порт `40000`).
     MediaLoop,
+    /// Per-peer WebRTC UDP-сокет (порты 43000–43100).
+    WebRtcPeer,
     /// Per-call RTP/RTCP-сокеты шлюза (SIP/H.323 media bridge).
     GatewayRtp,
 }
@@ -90,6 +105,7 @@ impl UdpSocketRole {
     pub fn as_label(self) -> &'static str {
         match self {
             Self::MediaLoop => "media_loop",
+            Self::WebRtcPeer => "webrtc_peer",
             Self::GatewayRtp => "gateway_rtp",
         }
     }
@@ -112,6 +128,11 @@ impl UdpBufferConfig {
         Self::from_env(UdpSocketRole::MediaLoop)
     }
 
+    /// Конфиг для per-peer WebRTC UDP-сокетов (`VKS_WEBRTC_UDP_*`).
+    pub fn for_webrtc_peer() -> Self {
+        Self::from_env(UdpSocketRole::WebRtcPeer)
+    }
+
     /// Конфиг для per-call RTP/RTCP-сокетов (`VKS_GATEWAY_UDP_*`).
     pub fn for_gateway_rtp() -> Self {
         Self::from_env(UdpSocketRole::GatewayRtp)
@@ -122,6 +143,9 @@ impl UdpBufferConfig {
         let (rcv_var, rcv_default, snd_var, snd_default) = match role {
             UdpSocketRole::MediaLoop => {
                 (ENV_MEDIA_RCVBUF, DEFAULT_MEDIA_RCVBUF_BYTES, ENV_MEDIA_SNDBUF, DEFAULT_MEDIA_SNDBUF_BYTES)
+            }
+            UdpSocketRole::WebRtcPeer => {
+                (ENV_WEBRTC_RCVBUF, DEFAULT_WEBRTC_RCVBUF_BYTES, ENV_WEBRTC_SNDBUF, DEFAULT_WEBRTC_SNDBUF_BYTES)
             }
             UdpSocketRole::GatewayRtp => {
                 (ENV_GATEWAY_RCVBUF, DEFAULT_GATEWAY_RCVBUF_BYTES, ENV_GATEWAY_SNDBUF, DEFAULT_GATEWAY_SNDBUF_BYTES)
@@ -251,10 +275,13 @@ mod tests {
     #[test]
     fn roles_have_sane_distinct_defaults_and_labels() {
         assert_eq!(UdpSocketRole::MediaLoop.as_label(), "media_loop");
+        assert_eq!(UdpSocketRole::WebRtcPeer.as_label(), "webrtc_peer");
         assert_eq!(UdpSocketRole::GatewayRtp.as_label(), "gateway_rtp");
-        // 20 per-call RTP-пар не должны резервировать 4 MiB каждая — это
-        // проверяет compile-time assert рядом с константами.
+        // Per-call/per-peer сокеты не должны резервировать 4 MiB каждый — это
+        // проверяют compile-time assert рядом с константами.
         assert_ne!(DEFAULT_GATEWAY_RCVBUF_BYTES, DEFAULT_MEDIA_RCVBUF_BYTES);
+        assert_eq!(DEFAULT_WEBRTC_RCVBUF_BYTES, 1024 * 1024);
+        assert!(DEFAULT_WEBRTC_RCVBUF_BYTES > DEFAULT_GATEWAY_RCVBUF_BYTES);
     }
 
     #[test]
