@@ -62,6 +62,9 @@ pub struct AcceptedPeer {
     pub answer_sdp: String,
     pub rtp_maps: Vec<(u8, String, u32, u32)>,
     pub handle: PeerHandle,
+    /// True when an already-registered peer answered this offer: callers must
+    /// not re-announce tracks they announced on the first negotiation.
+    pub reoffered: bool,
 }
 
 /// Answer produced by re-negotiating on an existing str0m session.
@@ -218,7 +221,17 @@ impl WebRtcRoomRegistry {
                             }
                         }
                     }
-                    return Ok(AcceptedPeer { answer_sdp: reoffer.answer_sdp, rtp_maps: reoffer.rtp_maps, handle });
+                    // A re-offer that starts publishing video needs a fresh IDR: re-arm
+                    // the gate so the new SSRC's first frames are not deltas.
+                    if reoffer.publishes_video {
+                        handle.waiting_keyframe.store(true, Ordering::Relaxed);
+                    }
+                    return Ok(AcceptedPeer {
+                        answer_sdp: reoffer.answer_sdp,
+                        rtp_maps: reoffer.rtp_maps,
+                        handle,
+                        reoffered: true,
+                    });
                 }
                 Ok(Ok(Err(error))) => {
                     WEBRTC_OFFERS.with_label_values(&["reoffer_rejected"]).inc();
@@ -357,7 +370,7 @@ impl WebRtcRoomRegistry {
             max_bitrate_bps,
             waiting_keyframe,
         ));
-        Ok(AcceptedPeer { answer_sdp, rtp_maps, handle })
+        Ok(AcceptedPeer { answer_sdp, rtp_maps, handle, reoffered: false })
     }
 
     /// Removes a peer and closes its command channel; the task exits after
@@ -685,7 +698,6 @@ async fn run_peer(
                                 // session is untouched: reject this re-offer only.
                                 let _ = reply.send(Err(message.clone()));
                                 tracing::warn!(%message, ?participant, "WebRTC re-offer rejected; keeping live session");
-                                WEBRTC_FRAMES_DROPPED.with_label_values(&["reoffer_rejected"]).inc();
                                 continue;
                             }
                             Err(error) => {
@@ -1014,6 +1026,23 @@ mod tests {
         assert_eq!(accepted.rtp_maps.len(), 1);
         assert_eq!(registry.peer_count(room), 1);
         peer_task.await.expect("peer task");
+    }
+
+    #[tokio::test]
+    async fn reoffer_on_a_full_command_queue_errors_instead_of_forking_a_new_session() {
+        let registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+        let room = RoomId::new();
+        let participant = ParticipantId::new();
+        let (peer, _rx) = handle(participant);
+        for _ in 0..8 {
+            peer.tx.try_send(PeerCommand::SetSubscription { audio: true, video: true }).expect("fill queue");
+        }
+        registry.rooms.lock().unwrap().entry(room).or_default().insert(participant, peer);
+        // Re-offer must not silently create a second DTLS/ICE session.
+        let error = registry.accept_offer(room, participant, "v=0\r\n").await.expect_err("queue is full");
+        assert!(error.to_string().contains("queue is full"), "{error}");
+        assert_eq!(registry.peer_count(room), 1, "old session must survive a queue-full re-offer");
+        assert!(registry.has_peer(room, participant), "registration must stay");
     }
 
     #[test]

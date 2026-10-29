@@ -124,6 +124,9 @@ impl Session {
             (SessionState::InRoom, SessionEvent::SdpOffer) => Some(SessionState::Negotiating),
             // Negotiating → MediaActive (IceComplete success).
             (SessionState::Negotiating, SessionEvent::IceComplete) => Some(SessionState::MediaActive),
+            // Negotiating → Negotiating: clients that never send IceComplete
+            // still renegotiate (screen share, re-offer).
+            (SessionState::Negotiating, SessionEvent::SdpOffer) => Some(SessionState::Negotiating),
             // MediaActive → Negotiating (re-negotiation, e.g. new SdpOffer).
             (SessionState::MediaActive, SessionEvent::SdpOffer) => Some(SessionState::Negotiating),
             // MediaActive → InRoom (ICE resumption settled without full renegotiation).
@@ -205,6 +208,8 @@ mod tests {
     #[test]
     fn negotiation_and_media_active() {
         let mut s = into_in_room();
+        assert_eq!(s.apply(SessionEvent::SdpOffer).unwrap(), SessionState::Negotiating);
+        // Clients that never send IceComplete (repo e2e/SDK) still renegotiate.
         assert_eq!(s.apply(SessionEvent::SdpOffer).unwrap(), SessionState::Negotiating);
         assert_eq!(s.apply(SessionEvent::IceComplete).unwrap(), SessionState::MediaActive);
         // MediaActive → Negotiating (re-negotiation).

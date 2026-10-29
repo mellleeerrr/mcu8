@@ -91,6 +91,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_exit(e);
     }
 
+    // Fail before touching storage: an operator that enabled the transport but
+    // left candidate_addr empty must get the real reason (the later preflight
+    // validates the *derived* address, so an empty value would look like a
+    // loopback deployment instead).
+    if vks_server::webrtc_runtime::enabled()
+        && config.candidate_addr.as_deref().map(str::trim).is_none_or(str::is_empty)
+    {
+        config_exit(
+            "VKS_WEBRTC_TRANSPORT is enabled but candidate_addr is empty; set VKS_CANDIDATE_ADDR/network.candidate_addr (or VKS_WEBRTC_TRANSPORT=0)".to_string(),
+        );
+    }
+
     // Один владелец SQLite-файла: CLI dedup берёт тот же lock, поэтому не может
     // сделать backup/--apply, пока сервер держит состояние в памяти.
     let _db_lock = match vks_storage::db_lock::sqlite_path_from_url(&config.database_url) {

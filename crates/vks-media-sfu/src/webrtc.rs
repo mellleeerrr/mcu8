@@ -200,7 +200,11 @@ impl WebRtcPeer {
                 ));
             }
         }
-        let offer = SdpOffer::from_sdp_string(offer_sdp).map_err(|e| WebRtcError::Sdp(e.to_string()))?;
+        // Parse errors happen before the session is mutated, so the live call
+        // is safe to keep: classify them as a rejected re-offer, not a fatal
+        // transport failure.
+        let offer = SdpOffer::from_sdp_string(offer_sdp)
+            .map_err(|e| WebRtcError::InvalidOffer(format!("re-offer SDP is not valid: {e}")))?;
         let answer = self.rtc.sdp_api().accept_offer(offer)?;
         // Do not advertise trickle: this transport never applies trickled
         // remote candidates.
@@ -456,6 +460,12 @@ pub(crate) fn validate_offer(offer: &str) -> Result<(), WebRtcError> {
     if audio == 0 && video == 0 {
         return Err(WebRtcError::InvalidOffer("no audio or video m-line".into()));
     }
+    // The answer only enables Opus + VP8; an offer carrying neither would be
+    // answered with rejected m-lines while we still announce tracks.
+    let lower = offer.to_ascii_lowercase();
+    if !lower.contains("vp8/90000") && !lower.contains("opus/48000") {
+        return Err(WebRtcError::InvalidOffer("offer has no supported codec (Opus/VP8)".into()));
+    }
     Ok(())
 }
 
@@ -529,6 +539,49 @@ mod tests {
         );
         assert!(answer.contains("VP8/90000"), "re-offer answer keeps VP8-only caps");
         assert_eq!(peer.mids().len(), 2, "same two m-lines renegotiated");
+    }
+
+    fn browser_offer() -> String {
+        let mut client = RtcConfig::new().set_ice_lite(false).build(Instant::now());
+        client.add_local_candidate(Candidate::host(A, "udp").expect("candidate A"));
+        let mut change = client.sdp_api();
+        change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+        change.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
+        let (offer, _pending): (str0m::change::SdpOffer, SdpPendingOffer) = change.apply().expect("offer");
+        offer.to_sdp_string()
+    }
+
+    /// Regression: a re-offer that passes our own validation but is rejected by
+    /// str0m's SDP parser must NOT close the live session (the parse happens
+    /// before mutation, so the call is safe to keep).
+    #[test]
+    fn malformed_reoffer_is_rejected_without_touching_the_live_session() {
+        let offer_sdp = browser_offer();
+        let mut peer = WebRtcPeer::accept_offer(&offer_sdp, B, &WebRtcConfig::default()).expect("accept");
+        let answer_before = peer.answer_sdp().to_string();
+        let malformed = offer_sdp.replacen("t=0 0", "t=0 1", 1);
+        assert_ne!(malformed, offer_sdp, "fixture must change the timing line");
+        match peer.accept_reoffer(&malformed) {
+            Err(WebRtcError::InvalidOffer(message)) => assert!(message.contains("re-offer SDP"), "{message}"),
+            other => panic!("expected a rejected re-offer, got {other:?}"),
+        }
+        assert_eq!(peer.answer_sdp(), answer_before, "rejected re-offer must not rewrite the answer");
+        assert_eq!(peer.mids().len(), 2, "session keeps both m-lines");
+        // The very same session still negotiates a valid re-offer.
+        peer.accept_reoffer(&offer_sdp).expect("valid re-offer after a rejected one");
+    }
+
+    /// A re-created browser PeerConnection has a new DTLS fingerprint that str0m
+    /// silently ignores; accepting it would leave dead media for 30s.
+    #[test]
+    fn reoffer_with_a_new_dtls_fingerprint_is_rejected() {
+        let mut peer =
+            WebRtcPeer::accept_offer(&browser_offer(), B, &WebRtcConfig::default()).expect("accept first client");
+        let other_client_offer = browser_offer();
+        match peer.accept_reoffer(&other_client_offer) {
+            Err(WebRtcError::InvalidOffer(message)) => assert!(message.contains("fingerprint"), "{message}"),
+            other => panic!("expected a fingerprint rejection, got {other:?}"),
+        }
     }
 
     #[test]

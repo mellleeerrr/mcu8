@@ -810,7 +810,10 @@ async fn test_m5_recorder_lifecycle_integration() {
 
     // 1. Старт записи
     let rec_id = rec.start_recording(&state, &room_id, RecordingMode::Mcu).expect("start recording");
-    assert_eq!(rec_id, *room_id.as_uuid());
+    // The stable identifier is the RECORD id (one room can be recorded twice
+    // across restarts), not the room id.
+    assert_ne!(rec_id, *room_id.as_uuid(), "must return the record id");
+    assert!(!rec_id.is_nil());
     assert!(rec.is_recording(&room_id));
 
     // 2. Рекордер отображается в RoomHub как участник с флагом is_recorder
@@ -1570,7 +1573,8 @@ async fn test_m5_recorder_idempotent_stop_persistent_storage_and_playable_contai
 
     let rec = RecorderManager::new();
     let rec_id = rec.start_recording(&state, &room_id, RecordingMode::Mcu).expect("start recording");
-    assert_eq!(rec_id, *room_id.as_uuid());
+    assert_ne!(rec_id, *room_id.as_uuid(), "start returns the record id");
+    assert!(!rec_id.is_nil());
     assert!(rec.is_recording(&room_id));
 
     // First stop

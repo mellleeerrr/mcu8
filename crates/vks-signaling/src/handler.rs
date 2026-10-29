@@ -342,11 +342,11 @@ impl SignalingHandler {
 
     fn on_sdp_offer(&mut self, offer: &sig::SdpOffer, reply_to: u64) -> Vec<Envelope> {
         let state = self.session.state();
-        if !matches!(state, SessionState::InRoom | SessionState::MediaActive) {
+        if !matches!(state, SessionState::InRoom | SessionState::MediaActive | SessionState::Negotiating) {
             return vec![Envelope::error_reply(
                 reply_to,
                 "bad_state",
-                &format!("SdpOffer requires InRoom or MediaActive (current: {state:?})"),
+                &format!("SdpOffer requires InRoom, MediaActive or Negotiating (current: {state:?})"),
                 false,
             )];
         }

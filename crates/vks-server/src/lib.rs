@@ -618,6 +618,8 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
     // Set when the current SDP offer was answered by the real str0m peer; the
     // legacy plaintext PT/SSRC/endpoint side effects are skipped for it.
     let mut real_webrtc_peer;
+    // Set when the current AcceptedPeer answered an existing session.
+    let mut is_reoffer = false;
     let mut real_webrtc_attempted = false;
     let mut room_rx: Option<tokio::sync::broadcast::Receiver<vks_admin::hub::RoomBroadcastEvent>> = None;
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
@@ -930,6 +932,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                                 .to_string(),
                                                         ));
                                                     } else {
+                                                    is_reoffer = accepted.reoffered;
                                                     let rtp_maps = accepted.rtp_maps;
                                                     if let Some(answer) = replies.iter_mut().find_map(|reply| {
                                                         match reply.payload_mut() {
@@ -997,7 +1000,8 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                     // rejected as bad_state.
                                     handler.rollback_offer();
                                     replies.retain(|reply| !matches!(reply.payload(), Some(Payload::SdpAnswer(_))));
-                                    let retryable = matches!(code, "room_full" | "webrtc_capacity");
+                                    let retryable =
+                                        matches!(code, "room_full" | "webrtc_capacity" | "webrtc_room_changed");
                                     replies.push(Envelope::error_reply(request_msg_id, code, &message, retryable));
                                     vks_common::metrics::WEBRTC_FALLBACK
                                         .with_label_values(&["offer_rejected"])
@@ -1013,10 +1017,21 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                         if let Ok(sdp) = vks_signaling::sdp::Sdp::parse(&o.sdp) {
                                             if let Some(ref m) = current_membership {
                                                 let pid = parse_participant_id(&m.participant_id);
+                                                // The SDP answer can leave a video m-line
+                                                // rejected (e.g. H264-only publisher while we
+                                                // answer VP8). Do not announce tracks we did
+                                                // not actually negotiate.
+                                                let mut accepted_audio = true;
+                                                let mut accepted_video = true;
                                                 if let Some(answer) = replies.iter().find_map(|reply| match reply.payload() {
                                                     Some(Payload::SdpAnswer(answer)) => Some(answer),
                                                     _ => None,
                                                 }) {
+                                                    accepted_audio =
+                                                        answer.rtp_map.iter().any(|m| m.codec.eq_ignore_ascii_case("opus"));
+                                                    accepted_video = answer.rtp_map.iter().any(|m| {
+                                                        m.clock == 90000 && m.codec.to_ascii_uppercase().contains("VP8")
+                                                    });
                                                     if !real_webrtc_peer {
                                                         for (kind, payload_type) in answer_payload_types(&answer.rtp_map) {
                                                             ctx.sfu_engine.set_subscriber_payload_type(
@@ -1031,6 +1046,12 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                         vks_signaling::sdp::MediaKind::Audio => vks_core::track::TrackKind::Audio,
                                                         _ => vks_core::track::TrackKind::Video,
                                                     };
+                                                    if real_webrtc_peer
+                                                        && ((track_kind == vks_core::track::TrackKind::Audio && !accepted_audio)
+                                                            || (track_kind == vks_core::track::TrackKind::Video && !accepted_video))
+                                                    {
+                                                        continue;
+                                                    }
                                                     let track = vks_core::ports::media_engine::MediaTrack::new(pid, track_kind);
                                                     if !real_webrtc_peer {
                                                         for ssrc_str in &media.ssrcs {
@@ -1059,7 +1080,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                         // выбросит его кадры.
                                                         ctx.mcu_engine.seat_publisher(m.room_id, pid, tracks.clone());
                                                     }
-                                                    for track in &tracks {
+                                                    // A re-offer re-sends TrackAdded for
+                                                    // tracks the room already knows about.
+                                                    for track in tracks.iter().filter(|_| !is_reoffer) {
                                                         let proto_kind = match track.media_kind {
                                                             vks_core::MediaKind::Audio => vks_proto::media::TrackKind::Audio,
                                                             vks_core::MediaKind::Video => vks_proto::media::TrackKind::Video,
@@ -1080,8 +1103,20 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                                     kind: proto_kind as i32,
                                                                     codec: proto_codec as i32,
                                                                     ssrc: 0,
-                                                                    clock_rate: 90000,
-                                                                    channels: 2,
+                                                                    clock_rate: if proto_kind
+                                                                        == vks_proto::media::TrackKind::Audio
+                                                                    {
+                                                                        48_000
+                                                                    } else {
+                                                                        90_000
+                                                                    },
+                                                                    channels: if proto_kind
+                                                                        == vks_proto::media::TrackKind::Audio
+                                                                    {
+                                                                        2
+                                                                    } else {
+                                                                        0
+                                                                    },
                                                                 }),
                                                             })),
                                                         };
