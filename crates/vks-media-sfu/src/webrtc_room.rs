@@ -191,34 +191,45 @@ impl WebRtcRoomRegistry {
         if let Some(handle) = existing {
             let (reply, answer) = tokio::sync::oneshot::channel();
             let command = PeerCommand::Reoffer { offer_sdp: offer_sdp.to_string(), reply };
-            if handle.tx.try_send(command).is_ok() {
-                match tokio::time::timeout(Duration::from_secs(2), answer).await {
-                    Ok(Ok(Ok(reoffer))) => {
-                        WEBRTC_OFFERS.with_label_values(&["reoffered"]).inc();
-                        // The participant may have started publishing video in
-                        // this negotiation; keep the handle's view current.
-                        if reoffer.publishes_video && !handle.publishes_video {
-                            if let Some(peers) =
-                                self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&room)
-                            {
-                                if let Some(current) = peers.get_mut(&participant) {
-                                    current.publishes_video = true;
-                                }
+            match handle.tx.try_send(command) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    // Peer task is gone: fall through to a fresh registration.
+                    return self.accept_fresh_offer(room, participant, offer_sdp);
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    // Do not silently create a second DTLS session: the old
+                    // call is still alive, the client may retry the re-offer.
+                    WEBRTC_OFFERS.with_label_values(&["reoffer_queue_full"]).inc();
+                    return Err(WebRtcError::Sdp("re-offer queue is full; retry".to_string()));
+                }
+            }
+            match tokio::time::timeout(Duration::from_secs(2), answer).await {
+                Ok(Ok(Ok(reoffer))) => {
+                    WEBRTC_OFFERS.with_label_values(&["reoffered"]).inc();
+                    // The participant may have started publishing video in
+                    // this negotiation; keep the handle's view current.
+                    if reoffer.publishes_video && !handle.publishes_video {
+                        if let Some(peers) =
+                            self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&room)
+                        {
+                            if let Some(current) = peers.get_mut(&participant) {
+                                current.publishes_video = true;
                             }
                         }
-                        return Ok(AcceptedPeer { answer_sdp: reoffer.answer_sdp, rtp_maps: reoffer.rtp_maps, handle });
                     }
-                    Ok(Ok(Err(error))) => {
-                        WEBRTC_OFFERS.with_label_values(&["reoffer_rejected"]).inc();
-                        tracing::warn!(?room, ?participant, %error, "WebRTC re-offer rejected; keeping old session");
-                        return Err(WebRtcError::Sdp(error));
-                    }
-                    Ok(Err(_)) => {
-                        tracing::warn!(?room, ?participant, "WebRTC re-offer task dropped; replacing peer");
-                    }
-                    Err(_) => {
-                        tracing::warn!(?room, ?participant, "WebRTC re-offer timed out; replacing peer");
-                    }
+                    return Ok(AcceptedPeer { answer_sdp: reoffer.answer_sdp, rtp_maps: reoffer.rtp_maps, handle });
+                }
+                Ok(Ok(Err(error))) => {
+                    WEBRTC_OFFERS.with_label_values(&["reoffer_rejected"]).inc();
+                    tracing::warn!(?room, ?participant, %error, "WebRTC re-offer rejected; keeping old session");
+                    return Err(WebRtcError::Sdp(error));
+                }
+                Ok(Err(_)) => {
+                    tracing::warn!(?room, ?participant, "WebRTC re-offer task dropped; replacing peer");
+                }
+                Err(_) => {
+                    tracing::warn!(?room, ?participant, "WebRTC re-offer timed out; replacing peer");
                 }
             }
         }
@@ -408,6 +419,11 @@ impl WebRtcRoomRegistry {
         let Some(handle) = handle else { return };
         handle.audio.store(audio, Ordering::Relaxed);
         handle.video.store(video, Ordering::Relaxed);
+        if video {
+            // Arm the gate synchronously, before any queued Write can slip in
+            // ahead of the SetSubscription command.
+            handle.waiting_keyframe.store(true, Ordering::Relaxed);
+        }
         let _ = handle.tx.try_send(PeerCommand::SetSubscription { audio, video });
     }
 
@@ -661,6 +677,16 @@ async fn run_peer(
                                 };
                                 actions.append(&mut tail);
                                 Ok(actions)
+                            }
+                            Err(WebRtcError::InvalidOffer(message)) => {
+                                // The offered SDP is not something this peer can
+                                // renegotiate (e.g. getDisplayMedia adds a second
+                                // video m-line, or a data channel). The live
+                                // session is untouched: reject this re-offer only.
+                                let _ = reply.send(Err(message.clone()));
+                                tracing::warn!(%message, ?participant, "WebRTC re-offer rejected; keeping live session");
+                                WEBRTC_FRAMES_DROPPED.with_label_values(&["reoffer_rejected"]).inc();
+                                continue;
                             }
                             Err(error) => {
                                 let _ = reply.send(Err(error.to_string()));

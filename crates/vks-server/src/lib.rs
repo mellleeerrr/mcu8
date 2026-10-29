@@ -189,7 +189,10 @@ pub fn build_app_with_services(
         // P1-7: служебные endpoint'ы отдают топологию/статус → Moderator+.
         // Анонимный запрос из LAN получает 401, а не 200 (было в аудите).
         .route_layer(axum::middleware::from_fn(require_moderator))
-        .route_layer(axum::middleware::from_fn_with_state(state.clone(), vks_admin::api_v3::auth::token_middleware));
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), vks_admin::api_v3::auth::token_middleware))
+        // Same process-wide bucket as the main /api/v3 router: these m5
+        // endpoints are mounted separately but must not be limiter-exempt.
+        .layer(axum::middleware::from_fn_with_state(state.clone(), vks_admin::api_v3::auth::global_bucket_middleware));
 
     // `/metrics`: Prometheus на этом же узле скрейпит с loopback без токена;
     // удалённый скрейп — через `VKS_METRICS_TOKEN` (Bearer или X-Metrics-Token).
@@ -893,6 +896,40 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             .await
                                             {
                                                 Some(Ok(accepted)) => {
+                                                    // The peer registered asynchronously without
+                                                    // the admission lock; re-validate the room
+                                                    // shape under it so a gateway landing or MCU
+                                                    // switch cannot leave a half-bridged room.
+                                                    let still_ok = {
+                                                        let _guard = crate::webrtc_runtime::admission();
+                                                        let gateway_now =
+                                                            state.room_hub.list_participants(&membership.room_id).iter().any(
+                                                                |participant| {
+                                                                    participant.participant_id.contains("@sip-gateway")
+                                                                        || participant.participant_id.contains("@h323-gateway")
+                                                                },
+                                                            );
+                                                        let mode_now = state
+                                                            .mode
+                                                            .lock()
+                                                            .ok()
+                                                            .map(|mode| mode.effective_mode(&membership.room_id))
+                                                            .unwrap_or(vks_core::RoomMode::Sfu);
+                                                        !gateway_now && mode_now != vks_core::RoomMode::Mcu
+                                                    };
+                                                    if !still_ok {
+                                                        if let Some(registry) =
+                                                            crate::webrtc_runtime::registry(&handler_config)
+                                                        {
+                                                            registry.remove(membership.room_id, pid);
+                                                        }
+                                                        real_webrtc_peer = false;
+                                                        webrtc_failure = Some((
+                                                            "webrtc_room_changed",
+                                                            "Room shape changed during negotiation (gateway/MCU); retry"
+                                                                .to_string(),
+                                                        ));
+                                                    } else {
                                                     let rtp_maps = accepted.rtp_maps;
                                                     if let Some(answer) = replies.iter_mut().find_map(|reply| {
                                                         match reply.payload_mut() {
@@ -918,6 +955,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                         participant = %pid,
                                                         "WebRTC: real str0m transport accepted"
                                                     );
+                                                    }
                                                 }
                                                 Some(Err(error)) => {
                                                     warn!(

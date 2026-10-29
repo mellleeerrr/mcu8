@@ -34,12 +34,13 @@ cargo build --release -p vks-server
    export VKS_DATABASE_URL='postgres://vks:<пароль>@db.internal:5432/vks'
    VKS_CONFIG_PATH=/etc/vks/server.toml ./target/release/vks-server
    ```
-3. При `VKS_WEBRTC_TRANSPORT=1` `candidate_addr` должен быть публичным
-   **IPv4** (SDP за NAT; DNS-имя не принимается): preflight отвергает пусто,
-   TEST-NET (RFC 5737), loopback/unspecified и невалидный IP с exit 78. При
-   выключенном транспорте (по умолчанию) поле не используется — остаётся
-   legacy SDP. БД — PostgreSQL; TLS/reverse-proxy и ограничение доступа к
-   `/pnm/` — на уровне инфраструктуры.
+3. Реальный WebRTC-транспорт **включён по умолчанию**; `candidate_addr`
+   должен быть публичным **IPv4** (SDP за NAT; DNS-имя не принимается):
+   preflight отвергает пусто, TEST-NET (RFC 5737), loopback/unspecified,
+   неassignable IP и занятый UDP-порт с exit 78. Явный opt-out на legacy SDP —
+   `VKS_WEBRTC_TRANSPORT=0` (только для биссекта/откката). БД — PostgreSQL;
+   TLS/reverse-proxy и ограничение доступа к `/pnm/` — на уровне
+   инфраструктуры.
 4. Production fail-closed: `configs/prod.example.toml` содержит
    `allow_insecure_defaults = false`. Без сильного `VKS_JWT_SECRET` (≥32 байта)
    сервер завершается с кодом 78; для новой БД и для разовой ротации слабого

@@ -107,6 +107,10 @@ pub struct WebRtcPeer {
     mids: Vec<Mid>,
     /// Parallel to `mids`; true for `m=audio`.
     mid_audio: Vec<bool>,
+    /// Remote DTLS fingerprint from the accepted offer. A re-offer from a
+    /// recreated PeerConnection has a new fingerprint that str0m silently
+    /// ignores, so it must be rejected instead of leaving 30s dead media.
+    remote_fingerprint: Option<String>,
     next_timeout: Option<Instant>,
 }
 
@@ -167,7 +171,16 @@ impl WebRtcPeer {
             }
         }
 
-        let mut peer = Self { rtc, answer_sdp, local_addr, connected: false, mids, mid_audio, next_timeout: None };
+        let mut peer = Self {
+            rtc,
+            answer_sdp,
+            local_addr,
+            connected: false,
+            mids,
+            mid_audio,
+            remote_fingerprint: fingerprint_of(offer_sdp),
+            next_timeout: None,
+        };
         // accept_offer mutates the session; drain the invariant before the
         // first datagram arrives. No remote input exists yet, so any output
         // here is a local ICE/DTLS action we must not silently keep queued.
@@ -180,6 +193,13 @@ impl WebRtcPeer {
     /// by the renegotiation, which the caller must transmit.
     pub fn accept_reoffer(&mut self, offer_sdp: &str) -> Result<(String, Vec<WebRtcAction>), WebRtcError> {
         validate_offer(offer_sdp)?;
+        if let (Some(current), Some(next)) = (&self.remote_fingerprint, fingerprint_of(offer_sdp)) {
+            if *current != next {
+                return Err(WebRtcError::InvalidOffer(
+                    "DTLS fingerprint changed: the browser created a new PeerConnection; open a new transport".into(),
+                ));
+            }
+        }
         let offer = SdpOffer::from_sdp_string(offer_sdp).map_err(|e| WebRtcError::Sdp(e.to_string()))?;
         let answer = self.rtc.sdp_api().accept_offer(offer)?;
         // Do not advertise trickle: this transport never applies trickled
@@ -402,7 +422,12 @@ fn shared_dtls_cert() -> Option<str0m::crypto::dtls::DtlsCert> {
 /// The real path supports exactly one audio + one video m-line per peer and
 /// requires browser ICE/DTLS credentials. Application/data or extra m-lines
 /// are rejected explicitly instead of being silently mis-mapped.
-fn validate_offer(offer: &str) -> Result<(), WebRtcError> {
+/// Extracts the first `a=fingerprint:<algo> <value>` line.
+fn fingerprint_of(offer: &str) -> Option<String> {
+    offer.lines().find_map(|line| line.strip_prefix("a=fingerprint:")).map(|value| value.trim().to_ascii_lowercase())
+}
+
+pub(crate) fn validate_offer(offer: &str) -> Result<(), WebRtcError> {
     if offer.len() > 64 * 1024 {
         return Err(WebRtcError::InvalidOffer("SDP larger than 64 KiB".into()));
     }

@@ -1106,6 +1106,7 @@ async fn spawn_live_server_with_mcu_sfu(
     mcu_engine: Arc<vks_media_mcu::McuEngine>,
     sfu_engine: Arc<vks_media_sfu::SfuEngine>,
 ) -> (SocketAddr, SocketAddr, Arc<AppState>, String) {
+    force_legacy_webrtc_transport();
     let mut state = AppState::new();
     let issuer = Arc::new(JwtIssuer::new(vks_auth::jwt::JwtConfig {
         secret: "mcu_pkg_d_secret_456".to_string(),
