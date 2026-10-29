@@ -13,6 +13,7 @@ pub mod gateways;
 pub mod layout_signal;
 pub mod operator_policy;
 pub mod recorder;
+mod recorder_tap;
 pub mod room_events;
 
 pub use cluster::ClusterManager;

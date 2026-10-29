@@ -1568,7 +1568,7 @@ async fn test_m5_recorder_idempotent_stop_persistent_storage_and_playable_contai
     use vks_admin::rooms::Rooms;
     use vks_admin::state::AppState;
     use vks_core::ports::Storage;
-    use vks_recorder::container::{ContainerConfig, PlayableContainerWriter};
+    use vks_recorder::container::{ContainerConfig, PlayableContainerWriter, VideoCodec};
     use vks_recorder::RecordingMode;
     use vks_server::RecorderManager;
 
@@ -1602,20 +1602,33 @@ async fn test_m5_recorder_idempotent_stop_persistent_storage_and_playable_contai
     assert_eq!(entry.id, meta_1.id.to_string());
     assert_eq!(entry.room_id, room_id);
 
-    // Verify PlayableContainerWriter generates valid ISOBMFF container with complete sample tables
+    // Verify PlayableContainerWriter generates valid ISOBMFF container with
+    // complete sample tables. T09b: real SPS/PPS + avcC + length-prefixed
+    // NALUs; the ffprobe decode gate lives in `vks-recorder` tests.
     let config = ContainerConfig {
         width: 1280,
         height: 720,
         fps: 30,
-        sample_rate: 48000,
-        channels: 2,
+        video_codec: VideoCodec::H264,
+        audio: None,
         max_size_bytes: 5 * 1024 * 1024,
     };
+    let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0x00, 0x00, 0x03, 0x00, 0x04];
+    let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+    let annexb = |nal: &[u8]| {
+        let mut out = vec![0x00, 0x00, 0x00, 0x01];
+        out.extend_from_slice(nal);
+        out
+    };
+    let mut idr = annexb(sps);
+    idr.extend_from_slice(&annexb(pps));
+    idr.extend_from_slice(&annexb(&[0x65, 0x88, 0x84]));
+    let mut delta = annexb(sps);
+    delta.extend_from_slice(&annexb(pps));
+    delta.extend_from_slice(&annexb(&[0x41, 0x9a]));
     let mut writer = PlayableContainerWriter::new(config);
-    writer.write_video_sample(&[0x00, 0x00, 0x00, 0x01, 0x65, 0x88], 0, true).unwrap();
-    writer.write_audio_sample(&[0xf8, 0xff, 0xfe], 20).unwrap();
-    writer.write_video_sample(&[0x00, 0x00, 0x00, 0x01, 0x41, 0x99], 33, false).unwrap();
-    writer.write_audio_sample(&[0xf8, 0xff, 0xfd], 40).unwrap();
+    writer.write_video_sample(&idr, 0, true).unwrap();
+    writer.write_video_sample(&delta, 33_333, false).unwrap();
     let mp4_bytes = writer.finalize().unwrap();
 
     assert!(mp4_bytes.len() > 64);
@@ -1627,6 +1640,8 @@ async fn test_m5_recorder_idempotent_stop_persistent_storage_and_playable_contai
     assert!(mp4_bytes.windows(4).any(|w| w == b"stsc"));
     assert!(mp4_bytes.windows(4).any(|w| w == b"stsz"));
     assert!(mp4_bytes.windows(4).any(|w| w == b"stco"));
+    assert!(mp4_bytes.windows(4).any(|w| w == b"avcC"), "avcC must be present");
+    assert!(!mp4_bytes.windows(4).any(|w| w == b"mp4a"), "no fake audio track in a video-only recording");
 
     // Save and retrieve container artifact in RecorderManager
     rec.save_container(&meta_1.id.to_string(), mp4_bytes.clone());
@@ -2228,41 +2243,64 @@ async fn test_farm_metrics_and_api_v3_snapshot_reflect_encoder_group_lifecycle()
     }
 }
 
-/// T09a: the recording control port persists synchronously, finalizes a row
-/// left unfinalized by a restart, and never accumulates duplicate ACTIVE rows.
+/// T09a/T09b: the recording control port persists synchronously, finalizes a
+/// row left unfinalized by a restart, and never accumulates duplicate ACTIVE
+/// rows. T09b makes `start` tap an **existing** encoder group (no hidden
+/// viewer/spawn), so the test keeps one real group alive across "restarts".
 #[tokio::test]
 async fn recording_control_persists_immediately_and_reuses_the_room_slot_after_restart() {
     use vks_admin::state::RecordingControl as _;
     use vks_core::ports::Storage as _;
+    use vks_core::track::{Track, TrackKind};
+    use vks_media_mcu::{EncoderSpec, FarmCodec, McuEngine};
     use vks_server::RecorderControl;
     use vks_server::RecorderManager;
 
+    let ffmpeg = std::env::var("VKS_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_string());
+    if std::process::Command::new(&ffmpeg).arg("-version").output().is_err() {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    }
+
     let storage = Arc::new(vks_storage::MemoryStorage::new());
     let room_id = vks_core::RoomId::new();
+    // One real H.264 group with a viewer lives across all "restarts": T09b
+    // refuses to start a recording without an existing group (409 semantics).
+    let engine = Arc::new(McuEngine::new());
+    let participant = vks_core::ParticipantId::new();
+    engine.bridge_participant(room_id, participant, vec![Track::new(participant, TrackKind::Video)]);
+    assert!(engine.ensure_composite_size(room_id, 640, 360));
+    let spec = EncoderSpec {
+        codec: FarmCodec::H264,
+        width: 640,
+        height: 360,
+        fps: 30,
+        bitrate_kbps: 1024,
+        maxrate_kbps: 1024,
+        bufsize_kbps: 2048,
+        profile: "baseline".into(),
+        level: "3.1".into(),
+        keyint: 30,
+        encoder_params: "repeat-headers=1:aud=1:scenecut=0".into(),
+    };
+    let viewer = engine.acquire_video_viewer(room_id, &spec).await.expect("farm encoder must start");
 
     let state_a = Arc::new(AppState::with_storage(storage.clone()));
-    let control_a = RecorderControl::new(
-        RecorderManager::new(),
-        Arc::downgrade(&state_a),
-        Arc::new(vks_media_mcu::McuEngine::new()),
-    );
+    let control_a = RecorderControl::new(RecorderManager::new(), Arc::downgrade(&state_a), Arc::clone(&engine));
     let record_id = control_a.start(room_id).await.expect("start");
     assert!(!record_id.is_empty());
     // Persistence is awaited: the row is visible without polling.
     let row = storage.get_record(&record_id).await.expect("get").expect("persisted immediately");
     assert_eq!(row.room_id, room_id);
     assert_eq!(row.duration_sec, 0);
-    assert!(row.bitrate_kbps > 0 && row.width > 0 && row.height > 0, "profile is stored: {row:?}");
+    assert_eq!((row.width, row.height, row.bitrate_kbps), (640, 360, 1024), "actual group spec: {row:?}");
+    assert_eq!(engine.video_farm_stats().len(), 1, "tap did not create a hidden group");
 
     // Path A: "restart" then start again without stopping. The unfinalized row
     // from the dead process must be replaced, not duplicated.
     drop(state_a);
     let state_b = Arc::new(AppState::with_storage(storage.clone()));
-    let control_b = RecorderControl::new(
-        RecorderManager::new(),
-        Arc::downgrade(&state_b),
-        Arc::new(vks_media_mcu::McuEngine::new()),
-    );
+    let control_b = RecorderControl::new(RecorderManager::new(), Arc::downgrade(&state_b), Arc::clone(&engine));
     let second_id = control_b.start(room_id).await.expect("start after restart");
     assert_ne!(second_id, record_id, "a new recording gets a new record id");
     let rows = storage.list_records(Some(room_id)).await.expect("list");
@@ -2273,15 +2311,12 @@ async fn recording_control_persists_immediately_and_reuses_the_room_slot_after_r
     // the stop path (the in-memory session no longer exists after restart).
     drop(state_b);
     let state_c = Arc::new(AppState::with_storage(storage.clone()));
-    let control_c = RecorderControl::new(
-        RecorderManager::new(),
-        Arc::downgrade(&state_c),
-        Arc::new(vks_media_mcu::McuEngine::new()),
-    );
+    let control_c = RecorderControl::new(RecorderManager::new(), Arc::downgrade(&state_c), Arc::clone(&engine));
     control_c.stop(room_id).await.expect("stop after restart finalizes the row");
     let finalized = storage.get_record(&second_id).await.expect("get").expect("row");
     assert!(finalized.duration_sec >= 1, "restarted stop must finalize duration: {finalized:?}");
     let active =
         storage.list_records(Some(room_id)).await.expect("list").into_iter().filter(|e| e.duration_sec == 0).count();
     assert_eq!(active, 0, "no row may stay active after DELETE");
+    drop(viewer);
 }

@@ -37,7 +37,10 @@ mod recording;
 mod retention;
 mod storage;
 
-pub use container::{ContainerConfig, ContainerError, PlayableContainerWriter};
+pub use container::{
+    AudioConfig, ContainerConfig, ContainerError, PlayableContainerWriter, VideoCodec, AAC_FRAME_SAMPLES,
+    MOVIE_TIMESCALE, VIDEO_TIMESCALE,
+};
 pub use profile::RecorderProfile;
 pub use recording::{
     Clock, ClockMs, RecordingError, RecordingMeta, RecordingMode, RecordingSession, RecordingState, Segment,

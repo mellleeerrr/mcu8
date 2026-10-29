@@ -355,6 +355,26 @@ impl Group {
     }
 }
 
+/// Non-owning подписка рекордера на **уже существующую** группу фермы.
+///
+/// Не увеличивает `refcount`, не создаёт группу и не спавнит FFmpeg: если
+/// группа ретируется, `rx.recv()` вернёт `Closed`. Это семантика «нет
+/// зрителя — нет записи» (мастер-план: tap = subscribe, а не hidden viewer).
+pub struct FarmTap {
+    /// Ключ группы, на которую подписались (room + canvas_version + spec).
+    pub key: EncoderKey,
+    /// Поток access units группы.
+    pub rx: broadcast::Receiver<Arc<AccessUnit>>,
+    /// SPS/PPS snapshot на момент подписки (может быть пустым до первого IDR).
+    pub parameter_sets: Vec<Arc<[u8]>>,
+}
+
+/// Жива ли группа: не отменена и её актор ещё не завершился.
+fn group_is_live(group: &Group) -> bool {
+    !group.cancel.load(Ordering::Relaxed)
+        && !group.join.lock().unwrap().as_ref().is_some_and(|actor| actor.is_finished())
+}
+
 /// Ферма энкодеров (одна на [`crate::engine::McuEngine`]).
 pub struct EncoderFarm {
     inner: Arc<FarmInner>,
@@ -397,6 +417,60 @@ impl EncoderFarm {
     /// Текущая версия холста комнаты (инкрементится [`Self::invalidate_room`]).
     pub fn canvas_version(&self, room: RoomId) -> u64 {
         self.inner.versions.lock().unwrap().get(&room).copied().unwrap_or(0)
+    }
+
+    /// Подписка рекордера на существующую группу: room + codec + текущая
+    /// версия холста, группа жива, `viewers > 0`.
+    ///
+    /// Никакого `spawner`/`insert`/`refcount`: это не зритель. При нескольких
+    /// подходящих группах выбирается группа с максимумом зрителей; при
+    /// равенстве — первая в порядке `BTreeMap` (детерминированно).
+    /// `None` — запись невозможна без скрытой группы (admin отдаёт 409).
+    pub fn subscribe(&self, room: RoomId, codec: FarmCodec) -> Option<FarmTap> {
+        let canvas_version = self.canvas_version(room);
+        let groups = self.inner.groups.lock().unwrap();
+        let mut selected: Option<&Arc<Group>> = None;
+        for group in groups.values() {
+            if group.key.room != room
+                || group.key.spec.codec != codec
+                || group.key.canvas_version != canvas_version
+                || !group_is_live(group)
+                || group.refcount() <= 1
+            {
+                continue;
+            }
+            if selected.is_none_or(|current| group.refcount() > current.refcount()) {
+                selected = Some(group);
+            }
+        }
+        let group = selected?;
+        let key = group.key.clone();
+        let rx = group.tx.subscribe();
+        let parameter_sets = group.parameter_sets.lock().unwrap().clone();
+        drop(groups);
+        Some(FarmTap { key, rx, parameter_sets })
+    }
+
+    /// Число групп комнаты, к которым можно подписаться (room + codec +
+    /// текущий canvas + live + `viewers > 0`). Для 409-гейта записи.
+    pub fn active_group_count(&self, room: RoomId, codec: FarmCodec) -> usize {
+        let canvas_version = self.canvas_version(room);
+        let groups = self.inner.groups.lock().unwrap();
+        groups
+            .values()
+            .filter(|group| {
+                group.key.room == room
+                    && group.key.spec.codec == codec
+                    && group.key.canvas_version == canvas_version
+                    && group_is_live(group)
+                    && group.refcount() > 1
+            })
+            .count()
+    }
+
+    /// Есть ли активная H.264-группа со зрителями (recording 409-гейт).
+    pub fn has_active_h264_group(&self, room: RoomId) -> bool {
+        self.active_group_count(room, FarmCodec::H264) > 0
     }
 
     /// Идемпотентно берёт группу под ключ; `input` — размер кадра, который
@@ -1483,6 +1557,75 @@ mod tests {
         // The old plan's "579 MB absolute RSS" gate was allocator-dependent:
         // budgets must scale with groups, not with a fixed total.
         assert!(farm_soak_budget(1).0 < farm_soak_budget(2).0);
+    }
+
+    fn counting_spawner(counter: Arc<AtomicUsize>) -> Spawner {
+        Arc::new(move |_spec: &EncoderSpec, _input: (u32, u32)| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut command = Command::new("cat");
+            command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+            command.process_group(0);
+            command.spawn()
+        })
+    }
+
+    #[tokio::test]
+    async fn subscribe_without_group_returns_none_and_does_not_spawn() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let farm = EncoderFarm::with_spawner(counting_spawner(Arc::clone(&spawns)), 4);
+        let room = room();
+        assert!(farm.subscribe(room, FarmCodec::H264).is_none(), "no group -> no tap");
+        assert_eq!(farm.group_count(), 0, "subscribe must not insert a hidden group");
+        assert_eq!(spawns.load(Ordering::SeqCst), 0, "subscribe must never spawn FFmpeg");
+        assert!(!farm.has_active_h264_group(room));
+        assert_eq!(farm.active_group_count(room, FarmCodec::H264), 0);
+    }
+
+    #[tokio::test]
+    async fn subscribe_reuses_existing_group_without_refcount_or_spawn() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let farm = EncoderFarm::with_spawner(counting_spawner(Arc::clone(&spawns)), 4);
+        let room = room();
+        let key = spec(30).key(room, 0);
+        let viewer = farm.acquire(key.clone(), (640, 360)).await.expect("acquire");
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        let before = farm.snapshot();
+        assert!(farm.has_active_h264_group(room));
+        assert_eq!(farm.active_group_count(room, FarmCodec::H264), 1);
+
+        let tap = farm.subscribe(room, FarmCodec::H264).expect("existing group is subscribable");
+        assert_eq!(tap.key, key);
+        assert_eq!(spawns.load(Ordering::SeqCst), 1, "subscribe reuses the running encoder");
+        assert_eq!(farm.group_count(), 1);
+        let after = farm.snapshot();
+        assert_eq!(after[0].refcount, before[0].refcount, "tap is non-owning (no refcount bump)");
+        assert_eq!(after[0].viewers, before[0].viewers, "tap is not a viewer");
+
+        drop(tap);
+        drop(viewer);
+    }
+
+    #[tokio::test]
+    async fn subscribe_filters_codec_and_stale_canvas_versions() {
+        let farm = farm_with_test_spawner(8);
+        let room = room();
+
+        let h265 = EncoderSpec { codec: FarmCodec::H265, ..spec(30) };
+        let h265_key = h265.key(room, 0);
+        let viewer = farm.acquire(h265_key.clone(), (640, 360)).await.expect("acquire h265");
+        assert!(farm.subscribe(room, FarmCodec::H264).is_none(), "H.265 group is not an H.264 tap");
+        assert!(!farm.has_active_h264_group(room));
+        let h265_tap = farm.subscribe(room, FarmCodec::H265).expect("H.265 tap");
+        assert_eq!(h265_tap.key, h265_key);
+        drop(h265_tap);
+        drop(viewer);
+
+        let h264_key = spec(30).key(room, 0);
+        let viewer = farm.acquire(h264_key, (640, 360)).await.expect("acquire h264");
+        farm.invalidate_room(room);
+        assert!(farm.subscribe(room, FarmCodec::H264).is_none(), "stale canvas group is not tapped");
+        assert!(!farm.has_active_h264_group(room));
+        drop(viewer);
     }
 
     #[tokio::test]

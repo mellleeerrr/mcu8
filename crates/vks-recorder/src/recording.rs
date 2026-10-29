@@ -46,7 +46,7 @@ impl SegmentKind {
 }
 
 /// Ошибка операций записи.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum RecordingError {
     /// Вызов [`RecordingSession::append_segment`] в состоянии
     /// [`RecordingState::Stopped`] (сегмент прилетел после `stop()`).
@@ -59,6 +59,9 @@ pub enum RecordingError {
     /// Не удалось сохранить метаданные записи в Storage.
     #[error("recording metadata persistence failed: {0}")]
     Storage(String),
+    /// Контейнер не финализировался (например пустая запись или нет IDR).
+    #[error("recording container finalize failed: {0}")]
+    Container(String),
 }
 
 /// Состояние записи.
@@ -180,6 +183,11 @@ pub struct RecordingSession {
     cached_meta: Option<RecordingMeta>,
     container_writer: Option<crate::container::PlayableContainerWriter>,
     finalized_container: Option<Vec<u8>>,
+    /// Ошибка `finalize`, сохранённая чтобы `stop` не «глотал» её и
+    /// повторный `stop` возвращал ту же ошибку.
+    finalize_error: Option<crate::container::ContainerError>,
+    /// PTS последнего записанного сэмпла (для длительности сегментов).
+    last_pts_us: Option<u64>,
     now_ms: Box<Clock>,
 }
 
@@ -198,6 +206,8 @@ impl RecordingSession {
             cached_meta: None,
             container_writer: None,
             finalized_container: None,
+            finalize_error: None,
+            last_pts_us: None,
             now_ms,
         }
     }
@@ -240,45 +250,64 @@ impl RecordingSession {
         self.container_writer = Some(crate::container::PlayableContainerWriter::new(config));
     }
 
-    /// Записывает видео-сэмпл в прикреплённый контейнер и сегмент в сессию.
+    /// Задаёт SPS/PPS до первого кадра (snapshot группы фермы).
+    ///
+    /// После первого IDR writer сам соберёт параметры из Annex-B; здесь нужен
+    /// случай, когда энкодер не повторяет заголовки в каждом IDR.
+    pub fn set_video_parameter_sets(
+        &mut self,
+        sets: &[std::sync::Arc<[u8]>],
+    ) -> Result<(), crate::container::ContainerError> {
+        if let Some(writer) = self.container_writer.as_mut() {
+            let refs: Vec<&[u8]> = sets.iter().map(std::convert::AsRef::as_ref).collect();
+            writer.set_parameter_sets(&refs)?;
+        }
+        Ok(())
+    }
+
+    /// Записывает видео-сэмпл (Annex-B access unit) в прикреплённый контейнер
+    /// и сегмент в сессию.
+    ///
+    /// `pts_us` — PTS в микросекундах от старта группы (writer переводит его
+    /// в 90 kHz-тики напрямую, без округления через миллисекунды).
     pub fn write_video_sample(
         &mut self,
         data: &[u8],
-        timestamp_ms: u64,
+        pts_us: u64,
         is_keyframe: bool,
     ) -> Result<(), crate::container::ContainerError> {
         if self.state != RecordingState::Running {
             return Err(crate::container::ContainerError::AlreadyFinalized);
         }
         if let Some(ref mut writer) = self.container_writer {
-            writer.write_video_sample(data, timestamp_ms, is_keyframe)?;
+            writer.write_video_sample(data, pts_us, is_keyframe)?;
         }
+        let duration_ms = self.last_pts_us.map_or(0, |previous| pts_us.saturating_sub(previous) / 1_000);
+        self.last_pts_us = Some(pts_us);
         let _ = self.append_segment(Segment::new(
             self.segments.len() as u64,
             SegmentKind::CompositeVideo,
             data.len() as u64,
-            timestamp_ms,
+            duration_ms,
         ));
         Ok(())
     }
 
-    /// Записывает аудио-сэмпл в прикреплённый контейнер и сегмент в сессию.
-    pub fn write_audio_sample(
-        &mut self,
-        data: &[u8],
-        timestamp_ms: u64,
-    ) -> Result<(), crate::container::ContainerError> {
+    /// Записывает AAC-аудио-сэмпл (сырой access unit без ADTS) в контейнер.
+    pub fn write_audio_sample(&mut self, data: &[u8], pts_us: u64) -> Result<(), crate::container::ContainerError> {
         if self.state != RecordingState::Running {
             return Err(crate::container::ContainerError::AlreadyFinalized);
         }
         if let Some(ref mut writer) = self.container_writer {
-            writer.write_audio_sample(data, timestamp_ms)?;
+            writer.write_audio_sample(data, pts_us)?;
         }
+        let duration_ms = self.last_pts_us.map_or(0, |previous| pts_us.saturating_sub(previous) / 1_000);
+        self.last_pts_us = Some(pts_us);
         let _ = self.append_segment(Segment::new(
             self.segments.len() as u64,
             SegmentKind::Audio,
             data.len() as u64,
-            timestamp_ms,
+            duration_ms,
         ));
         Ok(())
     }
@@ -288,29 +317,49 @@ impl RecordingSession {
         self.finalized_container.as_deref()
     }
 
+    /// Метаданные после `stop`, даже если `finalize` контейнера завершился
+    /// ошибкой (нужны, чтобы остановка всё равно сняла recorder-участника и
+    /// закрыла активную строку записи).
+    pub fn finalized_meta(&self) -> Option<&RecordingMeta> {
+        self.cached_meta.as_ref()
+    }
+
+    /// Ошибка финализации контейнера (если была).
+    pub fn finalize_error(&self) -> Option<&crate::container::ContainerError> {
+        self.finalize_error.as_ref()
+    }
+
     /// Останавливает запись и возвращает финальные метаданные.
     /// Повторный вызов в состоянии [`RecordingState::Stopped`] идемпотентно
     /// возвращает зафиксированные метаданные без искажения времени.
     pub fn stop(&mut self) -> Result<RecordingMeta, RecordingError> {
         if self.state == RecordingState::Stopped {
             if let Some(ref meta) = self.cached_meta {
-                return Ok(meta.clone());
+                return match self.finalize_error.as_ref() {
+                    Some(error) => Err(RecordingError::Container(error.to_string())),
+                    None => Ok(meta.clone()),
+                };
             }
         }
         let started = self.started_at_ms.ok_or(RecordingError::NotStarted)?;
         let now = (self.now_ms)();
         let ended = now.max(started);
         let segments = self.segments.len();
-        let size_bytes = self.segments.iter().map(|s| s.data_size).sum();
+        let raw_size_bytes: u64 = self.segments.iter().map(|segment| segment.data_size).sum();
         let id = self.id.expect("id set on start");
         self.ended_at_ms = Some(ended);
         self.state = RecordingState::Stopped;
 
         if let Some(mut writer) = self.container_writer.take() {
-            if let Ok(bytes) = writer.finalize() {
-                self.finalized_container = Some(bytes);
+            match writer.finalize() {
+                Ok(bytes) => self.finalized_container = Some(bytes),
+                Err(error) => self.finalize_error = Some(error),
             }
         }
+        // `size_bytes` записи — реальный размер MP4-файла, если контейнер
+        // финализировался (сырые AU-сегменты его не описывают после
+        // length-prefix). Ошибка finalize видна вызывающему, а не маскируется.
+        let size_bytes = self.finalized_container.as_ref().map_or(raw_size_bytes, |bytes| bytes.len() as u64);
 
         let meta = RecordingMeta {
             id,
@@ -323,7 +372,10 @@ impl RecordingSession {
             size_bytes,
         };
         self.cached_meta = Some(meta.clone());
-        Ok(meta)
+        match self.finalize_error.as_ref() {
+            Some(error) => Err(RecordingError::Container(error.to_string())),
+            None => Ok(meta),
+        }
     }
 
     /// Добавляет сегмент. В состоянии [`RecordingState::Stopped`] —
@@ -509,6 +561,65 @@ mod tests {
         assert_eq!(meta2.ended_at_ms, 3_000);
         assert_eq!(meta2.duration_ms, 2_000);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    fn video_au() -> Vec<u8> {
+        let mut out = Vec::new();
+        for nal in [&[0x67u8, 0x42, 0xc0, 0x1f, 0, 0, 3, 0, 4][..], &[0x68, 0xce, 0x3c, 0x80], &[0x65, 0x88]] {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(nal);
+        }
+        out
+    }
+
+    #[test]
+    fn container_finalize_error_is_surfaced_not_swallowed() {
+        let mut session = RecordingSession::new_at_zero(room());
+        session.start(RecordingMode::Mcu).unwrap();
+        session.enable_container(crate::container::ContainerConfig::default());
+        let error = session.stop().unwrap_err();
+        assert!(matches!(error, RecordingError::Container(_)), "empty container must not look successful: {error:?}");
+        let meta = session.finalized_meta().cloned().expect("meta is cached even if finalize fails");
+        assert_eq!(meta.segments, 0);
+        assert_eq!(meta.size_bytes, 0);
+        assert!(session.container_bytes().is_none());
+        assert!(matches!(session.stop().unwrap_err(), RecordingError::Container(_)), "repeat stop keeps the error");
+    }
+
+    #[test]
+    fn container_metadata_size_is_the_finalized_mp4_size() {
+        let mut session = RecordingSession::new_at_zero(room());
+        session.start(RecordingMode::Mcu).unwrap();
+        session.enable_container(crate::container::ContainerConfig {
+            width: 640,
+            height: 360,
+            fps: 30,
+            ..Default::default()
+        });
+        let raw = video_au();
+        session.write_video_sample(&raw, 0, true).unwrap();
+        let meta = session.stop().expect("finalize");
+        let bytes = session.container_bytes().expect("container bytes");
+        assert_eq!(meta.segments, 1);
+        assert_eq!(meta.size_bytes, bytes.len() as u64);
+        assert_ne!(meta.size_bytes, raw.len() as u64, "stsz uses length-prefixed sizes, meta uses file size");
+        assert_eq!(&bytes[4..8], b"ftyp");
+    }
+
+    #[test]
+    fn audio_sample_without_config_is_rejected() {
+        let mut session = RecordingSession::new_at_zero(room());
+        session.start(RecordingMode::Mcu).unwrap();
+        session.enable_container(crate::container::ContainerConfig {
+            width: 640,
+            height: 360,
+            fps: 30,
+            ..Default::default()
+        });
+        assert_eq!(
+            session.write_audio_sample(&[0x21, 0x10], 0).unwrap_err(),
+            crate::container::ContainerError::UnsupportedAudio
+        );
     }
 
     #[test]
