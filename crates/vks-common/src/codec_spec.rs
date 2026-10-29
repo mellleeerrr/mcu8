@@ -1567,11 +1567,9 @@ mod tests {
         "vks-server/src/gateway_aac.rs",
         "vks-server/src/gateway_audio.rs",
         "vks-server/src/gateways.rs",
-        "vks-server/src/lib.rs",
         "vks-server/src/main.rs",
         "vks-server/src/transcoder_runtime.rs",
         "vks-signaling/src/handler.rs",
-        "vks-signaling/src/sdp.rs",
     ];
 
     /// Explicit, reviewed allowlist of files that may spell canonical codec
