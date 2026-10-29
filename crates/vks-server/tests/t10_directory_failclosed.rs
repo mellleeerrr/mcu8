@@ -63,7 +63,11 @@ async fn corrupt_document_with_fallback_exits_78_and_keeps_directory_rows() {
         .env("VKS_STORAGE_ALLOW_FALLBACK", "true")
         .env("VKS_ALLOW_INSECURE_DEFAULTS", "true")
         .env("VKS_LISTEN_ADDR", "127.0.0.1:0")
-        .env("VKS_MEDIA_LISTEN_ADDR", "127.0.0.1:0")
+        // T11c: the real media plane is mandatory and has no off switch, so the
+        // binary must reach the directory-hydration gate instead of exiting at
+        // the transport/candidate preflight.
+        .env("VKS_WEBRTC_TRANSPORT", "1")
+        .env("VKS_CANDIDATE_ADDR", "127.0.0.1")
         .output()
         .expect("spawn vks-server");
     let logs = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
