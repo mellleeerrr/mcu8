@@ -225,8 +225,14 @@ restore_previous_runtime() {
         ( cd "$DEST" && find . -type f ! -name '*.gz' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum ) > "$MANIFEST"
         echo "ИМПОРТ ОТМЕНЁН: прежний рантайм и манифест восстановлены" >&2
     fi
+    cleanup_tmp
     trap - EXIT
     exit "$rc"
+}
+cleanup_tmp() {
+    # T07 review A/C P3: раньше успешный импорт оставлял ~72 MB в $TMP
+    # (trap на EXIT перекрывался restore-трапом или снимался на успехе).
+    [ -n "${TMP:-}" ] && [ -d "$TMP" ] && rm -rf "$TMP"
 }
 trap restore_previous_runtime EXIT
 # P3 review A: сигнал во время импорта даёт rc=0 в EXIT-trap и восстановление
@@ -386,4 +392,5 @@ if [ "$WITH_GZIP" -eq 1 ]; then
     log "ВНИМАНИЕ: --gzip больше не нужен (runtime CompressionLayer), флаг игнорируется"
 fi
 
+cleanup_tmp
 log "готово."

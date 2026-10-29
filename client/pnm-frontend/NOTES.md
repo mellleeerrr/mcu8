@@ -82,9 +82,11 @@ VKS_PNM_ARCHIVE=/path/to/new.zip ./scripts/import-pnm-frontend.sh --force [--wit
 1. **Вендорный рантайм 1:1** — распаковка архива, копирование `deployed/pnm`,
    вычистка симлинков и `*.bak*`.
 2. **Проектный слой** — сохраняются и восстанавливаются `perf-overrides.js`,
-   `api-errors.js` и блок `<style id="prostor-pnm-overrides">` из `index.html`
-   (в вендорском архиве их нет, а копирование 1:1 их бы уничтожило). Правки
-   T1.1/T12b/T13/T14/T15, живущие в этих файлах, переживают переимпорт.
+   `api-errors.js`, `codian-layouts.js`, `theme-toggle.js`, `deeplink.js`,
+   блок `<!-- prostor:project-layer -->` и блок
+   `<style id="prostor-pnm-overrides">` из `index.html` (в вендорском архиве их
+   нет, а копирование 1:1 их бы уничтожило). Правки T1.1/T07/T12b/T13/T14/T15,
+   живущие в этих файлах, переживают переимпорт.
 3. **Вендорские патчи** — `scripts/patch-pnm-chartjs.py` (T11b) и
    `scripts/patch-pnm-audio-in-layouts.py` (T15) применяются к свежему рантайму
    **до** пересборки манифеста, поэтому манифест считается по итоговым байтам.
