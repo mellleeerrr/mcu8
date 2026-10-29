@@ -70,3 +70,4 @@
 | 08:20 | T02 реализован (`eb514e2`): Argon2id m=19456/t=2/p=1, PBKDF2 legacy + ленивый rehash без generation, 4 хеша + очередь 128 → 429, API bucket 200/50, sync-ldap 501, ADR-0033 |
 | 08:26 | T03b закрыт (`9a394ec`): doc-links gate блокирующий, oxideav/phantom-deps к факту |
 | 16:16 | T16 done: RX IP+SSRC, H.235 fail-closed, UII, честный active_calls, golden+ADR-0034; сайдкар оставлен до паритета |
+| 17:20 | T06 rr9 P2-1 fixed: explicit `size > MAX_WINDOWS` → 422 в mode и PATCH до clamp/prune (запись не меняется); §4.6 обновлён (preset-first, size>MAX=422, slots-only=409), регрессионные тесты |
