@@ -460,7 +460,7 @@ fn issue_token(state: &AppState, user_id: &str) -> Response {
     }
 }
 
-/// 401 `Too many attempts…` + `Retry-After` (сек, минимум 1).
+/// 429 `Too many requests…` + `Retry-After` (sec, minimum 1).
 /// Process-wide API request budget: 200-token burst, 50 tokens/s refill
 /// (BACKEND_RULES §1.4). One bucket per process state keeps memory bounded and
 /// makes the limit testable; per-IP WS limits stay in [`super::ws`].
