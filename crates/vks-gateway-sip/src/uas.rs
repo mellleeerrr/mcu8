@@ -506,6 +506,27 @@ fn aac_fmtp_parameters_bridgeable(parameters: &[(String, String)]) -> bool {
     object_ok && cpresent_seen && cpresent_ok && sbr_ok
 }
 
+/// Inbound SIP UAS payload map. PTs 0/4/8/9/15 are RFC 3551 static
+/// assignments; 107-110 are the dynamic numbers this gateway offers and must
+/// still be declared with `a=rtpmap` (checked below). The table is a transport
+/// artifact, not capability truth: every mapped id is checked against
+/// `Disposition::Native` by `uas_static_pt_map_matches_ssot`.
+const UAS_STATIC_AUDIO_PTS: &[(u8, CodecId)] = &[
+    (0, CodecId::Pcmu),
+    (4, CodecId::G723),
+    (8, CodecId::Pcma),
+    (9, CodecId::G722),
+    (15, CodecId::G728),
+    (107, CodecId::G726_16),
+    (108, CodecId::G726_24),
+    (109, CodecId::G726_32),
+    (110, CodecId::G726_40),
+];
+
+fn uas_static_audio_pt(payload: u8) -> Option<CodecId> {
+    UAS_STATIC_AUDIO_PTS.iter().find(|(pt, _)| *pt == payload).map(|(_, id)| *id)
+}
+
 /// Map one offered payload to a codec the bridge can handle without a
 /// transcoder. Static PTs 0/8/9 may omit rtpmap; dynamic PTs (including our
 /// 107-110) must declare a matching name+clock, otherwise a hostile offer
@@ -518,18 +539,7 @@ fn bridgeable_audio(section: &str, payload: u8, aac_available: bool) -> Option<B
             .is_some_and(|(name, clock, _)| name.eq_ignore_ascii_case("G726-32") && clock == 8000)
             .then_some(BridgeableAudio::narrow("G726-32"));
     }
-    let static_codec = match payload {
-        0 => Some(CodecId::Pcmu),
-        8 => Some(CodecId::Pcma),
-        9 => Some(CodecId::G722),
-        15 => Some(CodecId::G728),
-        4 => Some(CodecId::G723),
-        107 => Some(CodecId::G726_16),
-        108 => Some(CodecId::G726_24),
-        109 => Some(CodecId::G726_32),
-        110 => Some(CodecId::G726_40),
-        _ => None,
-    };
+    let static_codec = uas_static_audio_pt(payload);
     if let Some(id) = static_codec {
         let codec = codec_spec::spec(id).name;
         // Dynamic G.726 must be explicitly mapped; static G.711/G.722 may rely
@@ -1121,6 +1131,47 @@ a=rtpmap:96 G726-32/8000\r\na=rtpmap:0 PCMU/8000\r\n";
 a=rtpmap:18 G729/8000\r\na=rtpmap:0 PCMU/8000\r\n";
         let media = negotiate(mixed).expect("PCMU is still selectable");
         assert_eq!(media.audio_payload_type, 0);
+    }
+
+    #[test]
+    fn uas_static_pt_map_matches_ssot_disposition() {
+        use std::collections::BTreeSet;
+        let mut pts = BTreeSet::new();
+        let mut ids = BTreeSet::new();
+        for (pt, id) in UAS_STATIC_AUDIO_PTS {
+            assert!(pts.insert(*pt), "duplicate UAS PT{pt}");
+            assert!(ids.insert(*id), "duplicate UAS mapping for {:?}", id);
+            let spec = codec_spec::spec(*id);
+            assert_eq!(spec.kind, codec_spec::CodecKind::Audio, "PT{pt} maps to a non-audio spec");
+            // A codec the SSOT calls Unsupported must never be answerable.
+            assert_eq!(spec.sip, codec_spec::Disposition::Native, "PT{pt} {} is not SIP-native", spec.name);
+            // The row's name must resolve back to the declared id (no second table).
+            assert_eq!(codec_spec::lookup(spec.name).map(|spec| spec.id), Some(*id), "PT{pt}");
+            let resolved = codec_spec::resolve_clock(spec.name, spec.rtp_clock).expect("canonical identity");
+            assert_eq!(resolved.spec.id, *id, "PT{pt} name/clock identity drift");
+            assert_eq!(resolved.variant, None, "PT{pt} {} must be a fixed-clock spec", spec.name);
+        }
+        // Reverse completeness: every native audio codec has exactly one static
+        // entry, except Opus. RFC 7587 has no static PT for Opus; it is accepted
+        // on the dynamic 96-127 path by name+clock only.
+        for spec in codec_spec::CODECS
+            .iter()
+            .filter(|spec| spec.kind == codec_spec::CodecKind::Audio && spec.sip == codec_spec::Disposition::Native)
+        {
+            let present: Vec<u8> =
+                UAS_STATIC_AUDIO_PTS.iter().filter(|(_, id)| *id == spec.id).map(|(pt, _)| *pt).collect();
+            if spec.id == CodecId::Opus {
+                assert!(present.is_empty(), "Opus has no static PT (RFC 7587)");
+            } else {
+                assert_eq!(present.len(), 1, "{} must have exactly one UAS static PT", spec.name);
+            }
+        }
+        // Unsupported/worker codecs are not answerable through the static map.
+        for spec in codec_spec::CODECS.iter().filter(|spec| spec.kind == codec_spec::CodecKind::Audio) {
+            if !matches!(spec.sip, codec_spec::Disposition::Native) {
+                assert!(!ids.contains(&spec.id), "{} must not be answerable from the static map", spec.name);
+            }
+        }
     }
 
     #[test]

@@ -1009,40 +1009,42 @@ fn bridgeable_audio_pts(is_h323: bool) -> Vec<u8> {
     pts
 }
 
-/// Transport-local static PT map for the SIP plane (not SSOT truth).
-const fn sip_static_pt(id: vks_common::codec_spec::CodecId) -> Option<u8> {
-    use vks_common::codec_spec::CodecId;
-    match id {
-        CodecId::Pcmu => Some(0),
-        CodecId::Pcma => Some(8),
-        CodecId::G722 => Some(9),
-        CodecId::G723 => Some(4),
-        CodecId::G726_16 => Some(107),
-        CodecId::G726_24 => Some(108),
-        CodecId::G726_32 => Some(109),
-        CodecId::G726_40 => Some(110),
-        CodecId::G728 => Some(15),
-        CodecId::Opus => Some(111),
-        _ => None,
-    }
+/// One transport-local SIP payload assignment. PT numbers never enter the
+/// codec SSOT; this table only maps wire numbers to closed ids.
+struct SipAudioPt {
+    payload: u8,
+    id: vks_common::codec_spec::CodecId,
+    /// Part of the outbound/native bridge set. PT2 (deprecated G.721/G.726-32)
+    /// and PT113 (license/probe-gated AAC) are receive-only special cases.
+    forwarded: bool,
 }
 
-const fn audio_codec_id(payload_type: u8) -> Option<vks_common::codec_spec::CodecId> {
-    use vks_common::codec_spec::CodecId;
-    match payload_type {
-        0 => Some(CodecId::Pcmu),
-        2 | 109 => Some(CodecId::G726_32),
-        8 => Some(CodecId::Pcma),
-        9 => Some(CodecId::G722),
-        15 => Some(CodecId::G728),
-        4 => Some(CodecId::G723),
-        107 => Some(CodecId::G726_16),
-        108 => Some(CodecId::G726_24),
-        110 => Some(CodecId::G726_40),
-        111 => Some(CodecId::Opus),
-        113 => Some(CodecId::AacLatm),
-        _ => None,
-    }
+/// The single SIP PT table used by both directions. `sip_pt_maps_match_ssot_disposition`
+/// checks it against SSOT dispositions.
+const SIP_AUDIO_PTS: &[SipAudioPt] = &[
+    SipAudioPt { payload: 0, id: vks_common::codec_spec::CodecId::Pcmu, forwarded: true },
+    // RFC 3551 PT2: deprecated G.721/G.726-32 alias, only bridged with rtpmap.
+    SipAudioPt { payload: 2, id: vks_common::codec_spec::CodecId::G726_32, forwarded: false },
+    SipAudioPt { payload: 4, id: vks_common::codec_spec::CodecId::G723, forwarded: true },
+    SipAudioPt { payload: 8, id: vks_common::codec_spec::CodecId::Pcma, forwarded: true },
+    SipAudioPt { payload: 9, id: vks_common::codec_spec::CodecId::G722, forwarded: true },
+    SipAudioPt { payload: 15, id: vks_common::codec_spec::CodecId::G728, forwarded: true },
+    SipAudioPt { payload: 107, id: vks_common::codec_spec::CodecId::G726_16, forwarded: true },
+    SipAudioPt { payload: 108, id: vks_common::codec_spec::CodecId::G726_24, forwarded: true },
+    SipAudioPt { payload: 109, id: vks_common::codec_spec::CodecId::G726_32, forwarded: true },
+    SipAudioPt { payload: 110, id: vks_common::codec_spec::CodecId::G726_40, forwarded: true },
+    SipAudioPt { payload: 111, id: vks_common::codec_spec::CodecId::Opus, forwarded: true },
+    // AAC-LATM is forwarded only when probe+license+pool are green
+    // (bridgeable_audio_pts adds it explicitly).
+    SipAudioPt { payload: 113, id: vks_common::codec_spec::CodecId::AacLatm, forwarded: false },
+];
+
+fn sip_static_pt(id: vks_common::codec_spec::CodecId) -> Option<u8> {
+    SIP_AUDIO_PTS.iter().find(|row| row.forwarded && row.id == id).map(|row| row.payload)
+}
+
+fn audio_codec_id(payload_type: u8) -> Option<vks_common::codec_spec::CodecId> {
+    SIP_AUDIO_PTS.iter().find(|row| row.payload == payload_type).map(|row| row.id)
 }
 
 /// H.323 single-codec bridge: only symmetric static G.711U/PCMA/G.722/G.723.1
@@ -3988,6 +3990,78 @@ mod media_runtime_tests {
         }
         for pt in [15, 107, 108, 109, 110, 111] {
             assert!(!h323.contains(&pt), "H.323 must not bridge PT{pt}");
+        }
+    }
+
+    #[test]
+    fn sip_pt_maps_match_ssot_disposition() {
+        use std::collections::BTreeSet;
+        let mut payloads = BTreeSet::new();
+        let mut forwarded = BTreeSet::new();
+        for row in SIP_AUDIO_PTS {
+            assert!(payloads.insert(row.payload), "duplicate server PT{}", row.payload);
+            let spec = vks_common::codec_spec::spec(row.id);
+            assert_eq!(spec.kind, vks_common::codec_spec::CodecKind::Audio, "PT{}", row.payload);
+            // No PT may map to a codec the SSOT calls Unsupported: it would be
+            // answerable/native on the wire while the matrix says "—".
+            assert!(
+                matches!(
+                    spec.sip,
+                    vks_common::codec_spec::Disposition::Native | vks_common::codec_spec::Disposition::Worker
+                ),
+                "PT{} maps to {} whose SIP disposition is {:?}",
+                row.payload,
+                spec.name,
+                spec.sip
+            );
+            assert_eq!(
+                vks_common::codec_spec::lookup(spec.name).map(|spec| spec.id),
+                Some(row.id),
+                "PT{} wire name must resolve to the declared id",
+                row.payload
+            );
+            assert_eq!(audio_codec_id(row.payload), Some(row.id));
+            if row.forwarded {
+                assert_eq!(spec.sip, vks_common::codec_spec::Disposition::Native, "{} forwarded but gated", spec.name);
+                assert!(forwarded.insert(row.id), "duplicate forwarded mapping for {}", spec.name);
+                assert_eq!(sip_static_pt(row.id), Some(row.payload));
+            }
+        }
+        // Every native audio codec is in the forwarded map exactly once, and
+        // every non-native one is absent (AAC is only reachable through the
+        // explicit PT113 gate).
+        for spec in
+            vks_common::codec_spec::CODECS.iter().filter(|spec| spec.kind == vks_common::codec_spec::CodecKind::Audio)
+        {
+            let forward = sip_static_pt(spec.id);
+            if spec.sip == vks_common::codec_spec::Disposition::Native {
+                assert!(forward.is_some(), "{} native audio has no server PT", spec.name);
+            } else {
+                assert!(forward.is_none(), "{} is not SIP-native but has a forwarded PT", spec.name);
+            }
+        }
+        // PT113 is a receive-only special assignment for the worker codec.
+        assert_eq!(audio_codec_id(113), Some(vks_common::codec_spec::CodecId::AacLatm));
+        assert_eq!(sip_static_pt(vks_common::codec_spec::CodecId::AacLatm), None);
+        // The bridge set is derived from the same table: all forwarded PTs are
+        // present, PT2 (receive-only) is added explicitly, PT113 only with the
+        // worker gate.
+        let pts = bridgeable_audio_pts(false);
+        for row in SIP_AUDIO_PTS.iter().filter(|row| row.forwarded) {
+            assert!(pts.contains(&row.payload), "forwarded PT{} missing from bridge set", row.payload);
+        }
+        assert!(pts.contains(&2), "PT2 receive-only assignment must stay bridgeable");
+        assert!(!pts.contains(&113), "AAC must not be bridgeable without the worker gate");
+        // Unsupported audio specs are never answerable from any PT.
+        for spec in vks_common::codec_spec::CODECS.iter().filter(|spec| {
+            spec.kind == vks_common::codec_spec::CodecKind::Audio
+                && matches!(spec.sip, vks_common::codec_spec::Disposition::Unsupported(_))
+        }) {
+            assert!(
+                !SIP_AUDIO_PTS.iter().any(|row| row.id == spec.id),
+                "{} is Unsupported but has an answerable PT",
+                spec.name
+            );
         }
     }
 

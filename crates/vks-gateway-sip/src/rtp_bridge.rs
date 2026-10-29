@@ -825,6 +825,7 @@ m=audio 3230 RTP/AVP 18 0\r\na=rtpmap:18 G729/8000\r\na=rtpmap:0 PCMU/8000\r\n";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use vks_common::codec_spec::CodecKind;
 
     #[test]
@@ -936,8 +937,119 @@ m=video 5006 RTP/AVP 96\r\n";
         assert_eq!(CodecProfile::from_config(Some("native"), Some("1"), Some("1")), CodecProfile::Native);
     }
 
+    /// Bitrate declared by a row: `a=fmtp ...;bitrate=24000` or the SSOT
+    /// variant bitrate (G.726 rows encode it in the name/spec).
+    fn row_bitrate(codec: &OfferCodec) -> Option<u32> {
+        codec
+            .fmtp
+            .and_then(|fmtp| {
+                fmtp.split(';').find_map(|parameter| parameter.trim().strip_prefix("bitrate=")?.parse::<u32>().ok())
+            })
+            .or_else(|| codec_spec::spec(codec.spec).bitrate)
+    }
+
+    /// Enforces "exactly one offer row per codec variant":
+    /// * payload types are unique;
+    /// * the row's wire name resolves to the row's declared [`CodecId`]
+    ///   (documented exception: the G711 alias family, which is never offered);
+    /// * the `(name, clock)` pair resolves through [`codec_spec::resolve_clock`],
+    ///   so G.722.1 variants are checked at 16 kHz *and* 32 kHz;
+    /// * `(id, clock, bitrate)` appears exactly once.
+    ///
+    /// Returns an error instead of asserting so tests can feed injected rows.
+    fn validate_offer_rows(rows: &[OfferCodec]) -> Result<(), String> {
+        let mut payloads = BTreeSet::new();
+        let mut identities: BTreeMap<(CodecId, u32, Option<u32>), u8> = BTreeMap::new();
+        for codec in rows {
+            if !payloads.insert(codec.payload) {
+                return Err(format!("duplicate payload type PT{}", codec.payload));
+            }
+            if codec.dtmf {
+                if codec_spec::spec(codec.spec).kind != CodecKind::Dtmf {
+                    return Err(format!("DTMF row {} maps to a media spec", codec.name));
+                }
+                continue;
+            }
+            let spec = codec_spec::spec(codec.spec);
+            if spec.kind != CodecKind::Audio {
+                return Err(format!("audio offer row {} maps to {:?}", codec.name, spec.kind));
+            }
+            match codec_spec::family(codec.name) {
+                Some(family) => {
+                    if !family.members.contains(&codec.spec) {
+                        return Err(format!("name {} is an alias family that excludes {:?}", codec.name, codec.spec));
+                    }
+                }
+                None => {
+                    let resolved = codec_spec::lookup(codec.name).map(|spec| spec.id);
+                    if resolved != Some(codec.spec) {
+                        return Err(format!(
+                            "name {} resolves to {resolved:?}, row declares {:?}",
+                            codec.name, codec.spec
+                        ));
+                    }
+                }
+            }
+            let resolved = codec_spec::resolve_clock(codec.name, codec.clock)
+                .ok_or_else(|| format!("{} has no SSOT variant at clock {}", codec.name, codec.clock))?;
+            if resolved.spec.id != codec.spec {
+                return Err(format!("{} clock {} resolves to {:?}", codec.name, codec.clock, resolved.spec.id));
+            }
+            let bitrate = row_bitrate(codec);
+            if let Some(variant) = resolved.variant {
+                let bitrate = bitrate.ok_or_else(|| format!("{} row has no bitrate", codec.name))?;
+                if !variant.bitrates.contains(&bitrate) {
+                    return Err(format!("{} has no variant at {bitrate} bit/s", codec.name));
+                }
+            }
+            let key = (codec.spec, codec.clock, bitrate);
+            if let Some(previous) = identities.insert(key, codec.payload) {
+                return Err(format!(
+                    "duplicate identity {:?} at {} Hz/{bitrate:?} bit/s: PT{previous} and PT{}",
+                    codec.spec, codec.clock, codec.payload
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_video_rows(rows: &[OfferCodec]) -> Result<(), String> {
+        let mut payloads = BTreeSet::new();
+        let mut identities = BTreeMap::new();
+        for codec in rows {
+            if !payloads.insert(codec.payload) {
+                return Err(format!("duplicate video payload type PT{}", codec.payload));
+            }
+            let spec = codec_spec::spec(codec.spec);
+            if spec.kind != CodecKind::Video {
+                return Err(format!("video row {} maps to {:?}", codec.name, spec.kind));
+            }
+            if codec_spec::lookup(codec.name).map(|spec| spec.id) != Some(codec.spec) {
+                return Err(format!("video name {} does not resolve to {:?}", codec.name, codec.spec));
+            }
+            let resolved = codec_spec::resolve_clock(codec.name, codec.clock)
+                .ok_or_else(|| format!("{} has no variant at clock {}", codec.name, codec.clock))?;
+            if resolved.spec.id != codec.spec || resolved.variant.is_some() {
+                return Err(format!("{} clock {} is not the canonical video variant", codec.name, codec.clock));
+            }
+            if !spec.sip.is_bidirectional() {
+                return Err(format!("RX-only {} must not be in VIDEO_OFFER", codec.name));
+            }
+            if identities.insert(key_of(codec), codec.payload).is_some() {
+                return Err(format!("duplicate video identity {}", codec.name));
+            }
+        }
+        Ok(())
+    }
+
+    fn key_of(codec: &OfferCodec) -> (CodecId, u32, Option<u32>) {
+        (codec.spec, codec.clock, row_bitrate(codec))
+    }
+
     #[test]
     fn offer_rows_match_spec() {
+        validate_offer_rows(AUDIO_OFFER).expect("AUDIO_OFFER must be one row per SSOT variant");
+        validate_video_rows(VIDEO_OFFER).expect("VIDEO_OFFER must be one row per SSOT video codec");
         for codec in AUDIO_OFFER {
             let spec = codec_spec::spec(codec.spec);
             if codec.dtmf {
@@ -945,10 +1057,13 @@ m=video 5006 RTP/AVP 96\r\n";
                 continue;
             }
             assert_eq!(spec.kind, CodecKind::Audio, "kind mismatch: {codec:?}");
-            // G7221 identity rows cover both G.722.1 (16 kHz clock) and
-            // G.722.1C (32 kHz clock); the spec documents the 16 kHz variant.
-            if codec.spec != CodecId::G7221 {
-                assert_eq!(spec.rtp_clock, codec.clock, "clock mismatch: {codec:?}");
+            // G7221 rows cover G.722.1 (16 kHz) and G.722.1C (32 kHz); the
+            // variant table — not a blanket skip — validates the clock.
+            let resolved = codec_spec::resolve_clock(codec.name, codec.clock).expect("known variant");
+            if codec.spec == CodecId::G7221 {
+                assert_eq!(resolved.spec.rtp_clock, 16_000, "G7221 spec documents the G.722.1 baseline");
+            } else {
+                assert_eq!(resolved.spec.id, codec.spec);
             }
             assert_eq!(
                 audio_offer(false).iter().any(|row| row.payload == codec.payload),
@@ -970,6 +1085,54 @@ m=video 5006 RTP/AVP 96\r\n";
             assert!(spec.sip.is_bidirectional(), "RX-only {} must not be in VIDEO_OFFER", codec.name);
             assert!(offer_video_enabled(codec.spec, true, true), "{} gated out with probes green", codec.name);
         }
+        // Reverse completeness: every bidirectional SSOT video spec has exactly
+        // one offered row.
+        for spec in
+            codec_spec::CODECS.iter().filter(|spec| spec.kind == CodecKind::Video && spec.sip.is_bidirectional())
+        {
+            let rows: Vec<&OfferCodec> = VIDEO_OFFER.iter().filter(|codec| codec.spec == spec.id).collect();
+            assert_eq!(rows.len(), 1, "{} must have exactly one VIDEO_OFFER row", spec.name);
+        }
+    }
+
+    #[test]
+    fn offer_validation_rejects_injected_foreign_name_and_duplicate_identity() {
+        // Reviewer A injection: an extra identity row with wire name G729 but
+        // spec G719 used to pass every meta-test because checks used `any`.
+        let foreign = OfferCodec {
+            payload: 114,
+            name: "G729",
+            clock: 48_000,
+            channels: 1,
+            fmtp: None,
+            spec: CodecId::G719,
+            dtmf: false,
+        };
+        let mut rows = AUDIO_OFFER.to_vec();
+        rows.push(foreign);
+        let error = validate_offer_rows(&rows).expect_err("foreign name/spec row must fail");
+        assert!(error.contains("resolves"), "unexpected error: {error}");
+
+        // A second row for an existing identity must also fail (exactly one).
+        let duplicate = OfferCodec {
+            payload: 115,
+            name: "G729",
+            clock: 8_000,
+            channels: 1,
+            fmtp: Some("annexb=no"),
+            spec: CodecId::G729,
+            dtmf: false,
+        };
+        let mut rows = AUDIO_OFFER.to_vec();
+        rows.push(duplicate);
+        let error = validate_offer_rows(&rows).expect_err("duplicate identity must fail");
+        assert!(error.contains("duplicate identity"), "unexpected error: {error}");
+
+        // Duplicate payload type is detected too.
+        let mut rows = AUDIO_OFFER.to_vec();
+        rows.push(OfferCodec { payload: 18, ..rows[0] });
+        let error = validate_offer_rows(&rows).expect_err("duplicate PT must fail");
+        assert!(error.contains("duplicate payload"), "unexpected error: {error}");
     }
 
     #[test]
