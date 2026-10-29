@@ -191,10 +191,13 @@ mod tests {
         assert_eq!((rects[1].x, rects[2].x), (426, 852));
         assert_eq!(rects[2].w, 428, "last tile in a full row takes the remainder");
         assert_eq!((rects[3].x, rects[3].y, rects[3].w), (214, 360, 426), "last row is centred");
+        assert_eq!((rects[4].x, rects[4].y, rects[4].w), (640, 360, 426), "second tile of the last row");
+        assert_no_overlap(&rects);
+        assert_inside(&canvas, &rects);
         let covered: u64 = rects.iter().map(|rect| u64::from(rect.w) * u64::from(rect.h)).sum();
-        assert_eq!(covered, 767_520);
+        assert_eq!(covered, 767_520, "exact integer area");
         let ratio = covered as f64 / (1280.0 * 720.0);
-        assert!((ratio - 0.8328).abs() < 0.0001, "fill {ratio}");
+        assert!((ratio - 0.8328125).abs() < 1e-9, "fill 767520/921600 = 83.28125%, got {ratio}");
     }
 
     #[test]

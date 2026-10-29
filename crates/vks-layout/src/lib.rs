@@ -65,7 +65,9 @@ pub fn preset_size(id: &str) -> Option<usize> {
     }
     let base = id.rsplit_once("_(").map_or(id, |(base, _)| base);
     let tail = base.strip_prefix("preset_")?.rsplit('_').next()?;
-    tail.parse::<usize>().ok().filter(|count| *count > 0)
+    // Untrusted ids come from PNM payloads: keep the parsed capacity inside the
+    // supported window range instead of trusting arbitrary integers.
+    tail.parse::<usize>().ok().filter(|count| (1..=grids::MAX_WINDOWS).contains(count))
 }
 
 #[cfg(test)]

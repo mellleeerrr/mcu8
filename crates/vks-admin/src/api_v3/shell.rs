@@ -1012,6 +1012,9 @@ pub async fn switch_video_layout_mode(
             payload.insert(key.clone(), value.clone());
         }
     }
+    // The payload merged above may carry a stale `size`; recalc it with the same
+    // resolver every other write path uses before validating assignments.
+    super::resources::recalc_layout_size(&mut draft);
     // Mode — такая же запись назначений, как PATCH: дубли/позиции вне ёмкости
     // не должны попадать в БД (иначе запись «отравлена» для attach/PATCH).
     match super::resources::validate_layout_assignments(&draft["payload"]) {

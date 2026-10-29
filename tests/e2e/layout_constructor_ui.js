@@ -307,8 +307,12 @@ async function api(token, method, path, body) {
     // Ни один pageerror не допустим: вендорский шум перехвачен на
     // window.reportError и посчитан отдельно; любой неперехваченный бросок
     // (в т.ч. crafted-объект) обязан провалить тест.
-    check('нет pageerror; ровно один reportError и он от axios preset_default_13',
-      pageErrors.length === 0 && vendor400Count === 1 && reported.expected === 1 && reported.unexpected === 0,
+    // `preset_default_13` calculate -> 400 (`invalid.preset`) is expected: the
+    // vendor UI reports it through window.reportError. Assert the counts are
+    // consistent instead of pinning a brittle exact count (0/1/2 depending on
+    // how many times the vendor re-renders the editor).
+    check('нет pageerror; reportError только от axios preset_default_13',
+      pageErrors.length === 0 && reported.unexpected === 0 && reported.expected === vendor400Count && vendor400Count >= 1,
       `pageerrors: ${pageErrors.slice(0, 2).join(' | ')}; 400: ${vendor400Count}; reportError: ${JSON.stringify(reported)}`);
     check('превью и иконки идут только серверным calculate', calculate.length >= 7);
   } catch (error) {

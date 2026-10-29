@@ -955,7 +955,9 @@ pub async fn attach_layout_abonent(
     }
     let previous = resources.clone();
     let mut draft = source;
-    let limit = layout_size(&draft["payload"]).unwrap_or(64) as u64;
+    // Unknown/empty layouts keep the vendor default capacity (13), not an
+    // arbitrary 64 that would let attach create slots with no geometry.
+    let limit = layout_size(&draft["payload"]).unwrap_or(13) as u64;
     let Some(slots) = draft["payload"]["slots"].as_array_mut() else {
         return error_json(409, "Layout has no video windows");
     };
@@ -1373,7 +1375,7 @@ fn ensure_slot_roles(record: &mut Value) {
     }
 }
 
-fn recalc_layout_size(record: &mut Value) {
+pub(crate) fn recalc_layout_size(record: &mut Value) {
     // Параметрический id конструктора — источник истины о числе окон: слоты
     // могли остаться от прежней раскладки (id изменился, slots — нет).
     if let Some(size) = derived_layout_size(&record["payload"]) {
