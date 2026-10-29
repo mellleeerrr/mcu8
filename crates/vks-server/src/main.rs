@@ -387,7 +387,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // AAC-LATM patent/licensing sign-off is an explicit deployment decision:
     // the FFmpeg probe alone must never enable it. Operators opt in after legal
     // approval; otherwise AAC stays 488/fallback like before T06b-8.
-    let aac_latm_legal = std::env::var("VKS_AAC_LATM_LEGAL_ACCEPTED").is_ok_and(|value| value.trim() == "1");
+    let accepted_codecs = vks_server::codec_policy::accepted_codecs_from_env();
+    let aac_latm_legal = accepted_codecs.contains(&vks_server::codec_policy::AAC_LATM);
+    if !accepted_codecs.is_empty() {
+        info!(accepted_codecs = ?accepted_codecs, "operator accepted patent-encumbered codec bridges");
+    }
     let aac_latm = aac_latm_legal
         && vks_server::transcoder_runtime::pool().is_some_and(|pool| pool.max_workers() >= 2)
         && vks_server::transcoder_runtime::capabilities()

@@ -348,6 +348,36 @@ async fn pnm_card_resources_roundtrip_regression() {
 }
 
 #[tokio::test]
+async fn audio_codec_matrix_marks_unsupported_variants_instead_of_promising_them() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response = send(&server, request("GET", "/api/v3/settings/audio_codecs", Some(&token), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let codecs = body["audio_codecs"].as_array().expect("audio_codecs array");
+    let supported = |name: &str, bitrate: Option<i64>| {
+        codecs
+            .iter()
+            .find(|codec| codec["name"] == name && codec["bitrate"].as_i64() == bitrate)
+            .unwrap_or_else(|| panic!("missing {name}:{bitrate:?} in {codecs:?}"))["supported"]
+            .as_bool()
+            .expect("supported bool")
+    };
+    // Bridgeable today.
+    assert!(supported("G711", None), "G.711 is natively bridged");
+    assert!(supported("G722", None));
+    assert!(supported("OPUS", None));
+    // Listed by the vendor matrix but not bridgeable without T06b/transcoder:
+    // the API must say so instead of letting an operator enable dead codecs.
+    for (name, bitrate) in
+        [("G719", None), ("G729", None), ("ILBC", None), ("AAC", None), ("G7221", Some(24)), ("G7221C", Some(48))]
+    {
+        assert!(!supported(name, bitrate), "{name}:{bitrate:?} must report supported=false");
+    }
+}
+
+#[tokio::test]
 async fn codec_settings_etag_304_and_concurrent_patch() {
     let (state, _) = test_state();
     let server = app(state);

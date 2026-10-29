@@ -993,7 +993,7 @@ fn bridgeable_audio_pts(is_h323: bool) -> Vec<u8> {
     if is_h323 {
         return vks_gateway_h323::H323_NATIVE_AUDIO_PTS.to_vec();
     }
-    let mut pts = vec![0, 4, 8, 9, 15, 107, 108, 109, 110, 111];
+    let mut pts = vec![0, 2, 4, 8, 9, 15, 107, 108, 109, 110, 111];
     if vks_common::codec_capabilities::audio_codec_available("MP4A-LATM") {
         pts.push(113);
     }
@@ -1017,6 +1017,7 @@ fn h323_inbound_audio_pt(event: &serde_json::Value) -> Option<u8> {
 pub(super) fn audio_codec_name(payload_type: u8) -> &'static str {
     match payload_type {
         0 => "PCMU",
+        2 => "G726-32",
         8 => "PCMA",
         9 => "G722",
         15 => "G728",
@@ -3936,7 +3937,7 @@ mod media_runtime_tests {
     #[test]
     fn sip_keeps_g728_and_opus_while_h323_does_not() {
         let sip = bridgeable_audio_pts(false);
-        for pt in [0, 4, 8, 9, 15, 107, 108, 109, 110, 111] {
+        for pt in [0, 2, 4, 8, 9, 15, 107, 108, 109, 110, 111] {
             assert!(sip.contains(&pt), "SIP PT{pt} must stay bridgeable");
         }
         let h323 = bridgeable_audio_pts(true);

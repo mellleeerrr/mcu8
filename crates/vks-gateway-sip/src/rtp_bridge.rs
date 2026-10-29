@@ -435,8 +435,13 @@ impl VideoSdpProfile {
 
 /// Video codecs advertised in the outbound offer, in `m=video` order.
 ///
-/// Only bridgeable video is advertised: H.264 baseline/high and H.265.
-/// H.261/H.263 entries return once their RFC 4587/4629 payloaders are wired.
+/// Only video that can be carried in **both** directions is advertised:
+/// H.264 Baseline and H.265. H.264 High (PT 98) is intentionally absent: the
+/// gateway encoder is baseline-only (`-profile:v baseline`), so a terminal that
+/// answered High could not be sent a decodable stream; offering it produced a
+/// 200 OK followed by one-way video (audit 03, P0). High-profile terminals are
+/// handled on the inbound (UAS) path, which accepts 4d/64 for receive while
+/// still transmitting baseline.
 pub const VIDEO_OFFER: &[OfferCodec] = &[
     OfferCodec {
         payload: 97,
@@ -445,15 +450,6 @@ pub const VIDEO_OFFER: &[OfferCodec] = &[
         channels: 0,
         fmtp: Some("packetization-mode=1;profile-level-id=42801e;max-mbps=13800;max-fs=920;max-br=256"),
         native: true,
-        dtmf: false,
-    },
-    OfferCodec {
-        payload: 98,
-        name: "H264",
-        clock: 90000,
-        channels: 0,
-        fmtp: Some("packetization-mode=1;profile-level-id=64001f;max-mbps=13800;max-fs=920;max-br=256"),
-        native: false,
         dtmf: false,
     },
     OfferCodec {
@@ -883,17 +879,56 @@ m=video 5006 RTP/AVP 96\r\n";
     fn offer_carries_bridgeable_video_matrix() {
         let sdp = build_offer(CodecProfile::Full, "192.168.1.93", 41000, Some(41002));
         for line in [
-            "m=video 41002 RTP/AVP 97 98 99",
+            "m=video 41002 RTP/AVP 97 99",
             "a=rtpmap:97 H264/90000",
             "b=AS:2048",
             "a=fmtp:97 packetization-mode=1;profile-level-id=42c01f;max-mbps=108000;max-fs=3600;max-br=2048",
-            "a=rtpmap:98 H264/90000",
-            "a=fmtp:98 packetization-mode=1;profile-level-id=64001f;max-mbps=108000;max-fs=3600;max-br=2048",
             "a=rtpmap:99 H265/90000",
             "a=fmtp:99 profile-id=1",
             "a=rtcp:41003",
         ] {
             assert!(sdp.contains(line), "offer misses `{line}`:\n{sdp}");
+        }
+    }
+
+    #[test]
+    fn offers_never_advertise_unbridgeable_audio() {
+        for profile in [CodecProfile::Native, CodecProfile::Full] {
+            let sdp = build_offer(profile, "192.168.1.93", 41000, Some(41002));
+            for name in ["G729", "G7221", "G7221C", "G719", "ILBC"] {
+                assert!(
+                    !sdp.contains(&format!(" {name}/")),
+                    "{profile:?} offer advertises unbridgeable {name}:\n{sdp}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_offer_never_advertises_h264_high_we_cannot_encode() {
+        let sdp = build_offer(CodecProfile::Full, "192.168.1.93", 41000, Some(41002));
+        assert!(!sdp.contains("a=rtpmap:98 H264"), "PT98 High must not be offered:\n{sdp}");
+        assert!(!sdp.contains("profile-level-id=6400"), "High profile-level-id must not be offered:\n{sdp}");
+        assert!(sdp.contains("a=rtpmap:97 H264/90000"), "{sdp}");
+    }
+
+    #[test]
+    fn every_offered_video_codec_is_answerable_by_the_bridge() {
+        // Инвариант: оффер ⊆ то, что этот же мост принимает в ответе. Иначе
+        // терминал отвечает кодеком, для которого нет пары → one-way media.
+        for codec in VIDEO_OFFER {
+            let sdp = format!(
+                "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\nm=video 5006 RTP/AVP {}\r\na=rtpmap:{} {}/90000\r\n{}",
+                codec.payload,
+                codec.payload,
+                codec.name,
+                codec.fmtp.map(|fmtp| format!("a=fmtp:{} {fmtp}\r\n", codec.payload)).unwrap_or_default()
+            );
+            let answer = sdp.replacen("m=video 5006", "m=video 5008", 1);
+            let offer = build_offer(CodecProfile::Native, "192.168.1.93", 41000, Some(41002));
+            let media = negotiate_media(&offer, &answer)
+                .unwrap_or_else(|| panic!("offered video codec {codec:?} is not answerable"));
+            assert_eq!(media.video_codec, Some(codec.name), "codec mismatch for {codec:?}");
         }
     }
 
@@ -1245,8 +1280,13 @@ fn h265_video(media: &SdpMedia, payload: u8) -> bool {
 }
 
 /// Resolves one remote video payload to a codec this bridge can carry.
+///
+/// Receive side: main/high profile streams are decoded by FFmpeg just like
+/// baseline (the depacketizer is profile-agnostic), so a terminal that
+/// transmits High is not a reason to drop the call. The transmit side is
+/// stricter — see [`h264_tx_level`].
 fn video_identity(media: &SdpMedia, payload: u8) -> Option<NegotiatedVideoCodec> {
-    if h264_baseline_level(media, payload).is_some() {
+    if h264_rx_level(media, payload).is_some() {
         return Some(NegotiatedVideoCodec::H264);
     }
     if h265_video(media, payload) {
@@ -1256,15 +1296,20 @@ fn video_identity(media: &SdpMedia, payload: u8) -> Option<NegotiatedVideoCodec>
 }
 
 /// Finds a local payload for the same codec (H.264 prefers compatible levels).
+///
+/// The local payload is what we *transmit*; the encoder is baseline-only
+/// (`-profile:v baseline`), so only a baseline entry may be selected even when
+/// the peer's receive side accepted main/high.
 fn local_video_payload(media: &SdpMedia, codec: NegotiatedVideoCodec, remote_level: Option<u8>) -> Option<u8> {
     media.payloads.iter().copied().find(|payload| match codec {
-        NegotiatedVideoCodec::H264 => h264_baseline_level(media, *payload)
+        NegotiatedVideoCodec::H264 => h264_tx_level(media, *payload)
             .is_some_and(|local_level| local_level.min(remote_level.unwrap_or(local_level)) >= 30),
         NegotiatedVideoCodec::H265 => h265_video(media, *payload),
     })
 }
 
-fn h264_baseline_level(media: &SdpMedia, payload: u8) -> Option<u8> {
+/// Parses `packetization-mode=1` H.264 fmtp and returns `(profile_idc, level)`.
+fn h264_profile(media: &SdpMedia, payload: u8) -> Option<(u8, u8)> {
     let map = media.maps.get(&payload)?;
     if !(96..=127).contains(&payload) || !map.name.eq_ignore_ascii_case("H264") || map.clock != 90000 {
         return None;
@@ -1281,7 +1326,16 @@ fn h264_baseline_level(media: &SdpMedia, payload: u8) -> Option<u8> {
     let profile_idc = ((bits >> 16) & 255) as u8;
     let constraints = ((bits >> 8) & 255) as u8;
     let level = (bits & 255) as u8;
-    if profile_idc != 66 || constraints & 3 != 0 || ![30, 31, 32, 40, 41, 42, 50, 51, 52].contains(&level) {
+    // Baseline (66) must be constraint-compliant; Main (77) and High (100) are
+    // decodable by the FFmpeg bridge for receive. Level 3.0 is the floor: the
+    // gateway never sends below 1280×720 (3600 MB ⇒ level 3.1), but 3.0 is
+    // kept for audio-only/low-res gateway profiles.
+    let profile_ok = match profile_idc {
+        66 => constraints & 3 == 0,
+        77 | 100 => true,
+        _ => false,
+    };
+    if !profile_ok || ![30, 31, 32, 40, 41, 42, 50, 51, 52].contains(&level) {
         return None;
     }
     for (key, needed) in [("max-fs", 920u32), ("max-mbps", 13800), ("max-br", 256)] {
@@ -1291,7 +1345,17 @@ fn h264_baseline_level(media: &SdpMedia, payload: u8) -> Option<u8> {
             }
         }
     }
-    Some(level)
+    Some((profile_idc, level))
+}
+
+/// Receive-side H.264 level: baseline, main or high profile.
+fn h264_rx_level(media: &SdpMedia, payload: u8) -> Option<u8> {
+    h264_profile(media, payload).map(|(_, level)| level)
+}
+
+/// Transmit-side H.264 level: the encoder is baseline-only.
+fn h264_tx_level(media: &SdpMedia, payload: u8) -> Option<u8> {
+    h264_profile(media, payload).filter(|(profile_idc, _)| *profile_idc == 66).map(|(_, level)| level)
 }
 
 /// Intersect local offer with the peer's answer and report *why* it failed.
@@ -1353,10 +1417,14 @@ fn negotiate_media_detailed_with(
         // Symmetric with the UAS: the answer must describe AAC-LC with in-band
         // SMC. bitrate/config hints are legal; cpresent=0, SBR and other object
         // types mean this bridge would answer but never decode audio.
-        let fmtp = remote_audio.fmtp.get(&codec.payload);
-        let rendered =
-            fmtp.map(|params| params.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join(";"));
-        if rendered.as_deref().is_some_and(|value| !crate::uas::aac_fmtp_is_bridgeable(value)) {
+        // An answer without `a=fmtp` for AAC cannot be assumed to use in-band
+        // SMC: the LOAS bridge needs cpresent=1 explicitly (RFC 3016). Treat a
+        // missing fmtp exactly like cpresent=0 instead of answering silence.
+        let Some(fmtp) = remote_audio.fmtp.get(&codec.payload) else {
+            return Err(NegotiationFailure::UnsupportedAudio { codec: codec.name.to_string(), payload: codec.payload });
+        };
+        let rendered = fmtp.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join(";");
+        if !crate::uas::aac_fmtp_is_bridgeable(&rendered) {
             return Err(NegotiationFailure::UnsupportedAudio { codec: codec.name.to_string(), payload: codec.payload });
         }
     }
@@ -1365,18 +1433,31 @@ fn negotiate_media_detailed_with(
     let dtmf_payload_type = telephone_event(local_audio).and_then(|_| telephone_event(remote_audio));
     let mut video = None;
     if let (Some(local_video), Some(remote_video)) = (usable_media(&local, "video"), usable_media(&remote, "video")) {
+        // Prefer an answer payload that we actually offered (RFC 3264 §6.1);
+        // keep one decodable unoffered candidate as a fallback for terminals
+        // that renumber dynamic PTs. The fallback must never override a
+        // conformant choice: Polycom answers list High before Baseline.
+        let mut fallback = None;
         for transmit_payload in &remote_video.payloads {
             let Some(codec) = video_identity(remote_video, *transmit_payload) else {
                 continue;
             };
-            let remote_level = h264_baseline_level(remote_video, *transmit_payload);
+            let remote_level = h264_rx_level(remote_video, *transmit_payload);
             let Some(receive_payload) = local_video_payload(local_video, codec, remote_level) else {
                 continue;
             };
-            if let Some(video_ip) = remote_video.ip.clone().or(remote.ip.clone()) {
-                video = Some((video_ip, remote_video.port, *transmit_payload, receive_payload, codec));
+            let Some(video_ip) = remote_video.ip.clone().or(remote.ip.clone()) else {
+                continue;
+            };
+            let candidate = (video_ip, remote_video.port, *transmit_payload, receive_payload, codec);
+            if local_video.payloads.contains(transmit_payload) {
+                video = Some(candidate);
                 break;
             }
+            fallback.get_or_insert(candidate);
+        }
+        if video.is_none() {
+            video = fallback;
         }
     }
     Ok(NegotiatedMedia {
@@ -1549,20 +1630,43 @@ mod negotiation_regressions {
     const POLYCOM_ANSWER: &str = include_str!("../tests/fixtures/polycom_rpd_3_5_answer.sdp");
 
     #[test]
-    fn captured_polycom_answer_selects_baseline_mode1_tx110_and_offered_rx96() {
+    fn captured_polycom_answer_selects_high_rx111_but_baseline_tx96() {
         let media = negotiate_media(POLYCOM_OFFER, POLYCOM_ANSWER).unwrap();
         assert_eq!(media.audio_payload_type, 0);
         assert_eq!(media.video_port, Some(3232), "compatible H264 was silently discarded");
-        assert_eq!(media.video_payload_type, Some(110), "High111 and mode0 PT109 must not be selected");
+        // The peer's first usable video entry is PT111 High: we decode High
+        // (FFmpeg is profile-agnostic) while our own TX stays baseline PT96.
+        assert_eq!(media.video_payload_type, Some(111), "High111 must be accepted for receive");
         assert_eq!(media.local_video_payload_type, Some(96));
         assert_eq!(media.video_ip.as_deref(), Some("192.168.1.132"));
         assert_eq!(media.dtmf_payload_type, Some(119), "answer PT101 is G7221, not telephone-event");
     }
 
     #[test]
-    fn h264_high_interleaved_and_default_mode0_are_not_offered_as_usable_video() {
+    fn h264_high_and_main_are_received_but_only_baseline_is_transmitted() {
+        for profile in ["profile-level-id=64001e", "profile-level-id=4d401e"] {
+            let answer = format!("v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 3230 RTP/AVP 0\r\nm=video 3232 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 {profile};packetization-mode=1\r\n");
+            let media =
+                negotiate_media(POLYCOM_OFFER, &answer).unwrap_or_else(|| panic!("{profile} receive must be accepted"));
+            assert_eq!(media.video_codec, Some("H264"), "{profile}");
+            let parsed = parse_sdp(&answer).unwrap();
+            let remote = usable_media(&parsed, "video").unwrap();
+            assert!(h264_rx_level(remote, 96).is_some(), "RX helper must accept {profile}");
+            assert!(h264_tx_level(remote, 96).is_none(), "TX helper must stay baseline-only for {profile}");
+            // TX payload comes from the local offer and is baseline.
+            let local = parse_sdp(POLYCOM_OFFER).unwrap();
+            let local_video = usable_media(&local, "video").unwrap();
+            assert_eq!(
+                local_video_payload(local_video, NegotiatedVideoCodec::H264, h264_rx_level(remote, 96)),
+                Some(96)
+            );
+            assert!(h264_tx_level(local_video, 96).is_some(), "local TX payload must be baseline");
+        }
+    }
+
+    #[test]
+    fn h264_default_mode0_and_non_frame_packetization_are_not_usable_video() {
         for parameters in [
-            "profile-level-id=64001e;packetization-mode=1",
             "profile-level-id=42801e;packetization-mode=0",
             "profile-level-id=42801e",
             "profile-level-id=42801e;packetization-mode=2",
@@ -1592,8 +1696,8 @@ mod negotiation_regressions {
     fn offered_h264_rx_payload_is_independent_from_answer_tx_payload() {
         let offer = POLYCOM_OFFER.replace("96", "112");
         let media = negotiate_media(&offer, POLYCOM_ANSWER).unwrap();
-        assert_eq!(media.video_payload_type, Some(110));
-        assert_eq!(media.local_video_payload_type, Some(112));
+        assert_eq!(media.video_payload_type, Some(111), "answer's first usable video payload");
+        assert_eq!(media.local_video_payload_type, Some(112), "our baseline TX payload");
     }
     #[test]
     fn pcma_and_h264_are_negotiated_without_inventing_dtmf() {
@@ -1769,6 +1873,16 @@ a=rtpmap:113 MP4A-LATM/90000\r\na=fmtp:113 {bad}\r\n"
         assert!(
             negotiate_media_detailed_with(offer, &config_hint, true).is_ok(),
             "config hint with in-band SMC is legal"
+        );
+        // No a=fmtp at all: RFC 3016 defaults cpresent=0 (out-of-band config),
+        // which this bridge cannot turn into a decodable stream.
+        let no_fmtp = answer.replace("a=fmtp:113 profile-level-id=1;object=2;cpresent=1\r\n", "");
+        assert!(
+            matches!(
+                negotiate_media_detailed_with(offer, &no_fmtp, true),
+                Err(NegotiationFailure::UnsupportedAudio { payload: 113, .. })
+            ),
+            "AAC answer without fmtp must be refused: {no_fmtp}"
         );
     }
 }

@@ -6,6 +6,7 @@
 //! Используется и `main.rs` (композиционный корень), и интеграционными тестами.
 
 pub mod cluster;
+pub mod codec_policy;
 pub mod farm_metrics;
 pub mod frontend;
 pub mod gateways;

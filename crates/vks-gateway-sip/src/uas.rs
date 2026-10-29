@@ -475,6 +475,10 @@ pub(crate) fn aac_fmtp_is_bridgeable(fmtp: &str) -> bool {
 /// it is explicitly disabled.
 fn aac_fmtp_parameters_bridgeable(parameters: &[(String, String)]) -> bool {
     let mut object_ok = true;
+    // cpresent is mandatory for this bridge: its absence means "config in
+    // out-of-band `config=`, SMC not in-band", which the LOAS path cannot
+    // synthesise. Defaulting to true silently accepted such answers.
+    let mut cpresent_seen = false;
     let mut cpresent_ok = true;
     let mut sbr_ok = true;
     for (key, value) in parameters {
@@ -486,7 +490,10 @@ fn aac_fmtp_parameters_bridgeable(parameters: &[(String, String)]) -> bool {
             "object" => object_ok &= value == "2",
             // RFC 3016 defines cpresent as 0 or 1; only 1 is bridgeable
             // in-band, and anything non-canonical must fail closed.
-            "cpresent" => cpresent_ok &= value == "1",
+            "cpresent" => {
+                cpresent_seen = true;
+                cpresent_ok &= value == "1";
+            }
             "sbr" => {
                 let disabled = value.eq_ignore_ascii_case("0") || value.eq_ignore_ascii_case("false");
                 sbr_ok &= disabled;
@@ -494,7 +501,7 @@ fn aac_fmtp_parameters_bridgeable(parameters: &[(String, String)]) -> bool {
             _ => {}
         }
     }
-    object_ok && cpresent_ok && sbr_ok
+    object_ok && cpresent_seen && cpresent_ok && sbr_ok
 }
 
 /// Map one offered payload to a codec the bridge can handle without a
@@ -502,6 +509,13 @@ fn aac_fmtp_parameters_bridgeable(parameters: &[(String, String)]) -> bool {
 /// 107-110) must declare a matching name+clock, otherwise a hostile offer
 /// could claim PCMU while sending G.726.
 fn bridgeable_audio(section: &str, payload: u8, aac_available: bool) -> Option<BridgeableAudio> {
+    // RFC 3551 reserves PT2 for G.721/G.726-32 but calls it deprecated and
+    // ambiguous, so it is only bridged when the offer spells the codec out.
+    if payload == 2 {
+        return declared_codec(section, payload)
+            .is_some_and(|(name, clock, _)| name.eq_ignore_ascii_case("G726-32") && clock == 8000)
+            .then_some(BridgeableAudio::narrow("G726-32"));
+    }
     let static_codec = match payload {
         0 => Some("PCMU"),
         8 => Some("PCMA"),
@@ -1059,6 +1073,22 @@ a=rtpmap:101 telephone-event/8000\r\n";
     }
 
     #[test]
+    fn static_pt2_g726_32_requires_an_explicit_rtpmap() {
+        let mapped = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP 2\r\na=rtpmap:2 G726-32/8000\r\n";
+        let media = negotiate(mapped).expect("declared PT2 G.726-32 must be bridged");
+        assert_eq!(media.audio_payload_type, 2);
+        assert_eq!(media.audio_codec, "G726-32");
+        // Without a declaration PT2 is G.721 in theory: refuse rather than
+        // decode the peer's G.726-32 stream as something else.
+        let bare = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP 2\r\n";
+        assert!(negotiate(bare).is_none(), "bare PT2 is ambiguous");
+        for spoof in ["PCMU/8000", "G726-32/16000", "G722/8000"] {
+            let offer = format!("v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP 2\r\na=rtpmap:2 {spoof}\r\n");
+            assert!(negotiate(&offer).is_none(), "PT2 spoofed as {spoof} must be refused");
+        }
+    }
+
+    #[test]
     fn dynamic_pt_g726_keeps_peer_payload_number_and_codec_name() {
         let offer = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 5004 RTP/AVP 96 0\r\n\
 a=rtpmap:96 G726-32/8000\r\na=rtpmap:0 PCMU/8000\r\n";
@@ -1276,8 +1306,11 @@ a=rtpmap:113 MP4A-LATM/90000\r\n";
             let offer = format!("{base}{bad_prefix}");
             assert!(negotiate_with(&offer, true).is_none(), "must refuse prefix: {bad_prefix:?}");
         }
-        let other_pt = format!("{base}a=fmtp:1130 object=8;cpresent=1\r\n");
-        assert!(negotiate_with(&other_pt, true).is_some(), "PT1130 is a different payload, fmtp must not gate 113");
+        let stray_pt = format!("{base}a=fmtp:113 object=2;cpresent=1\r\na=fmtp:1130 object=8\r\n");
+        assert!(negotiate_with(&stray_pt, true).is_some(), "fmtp for PT1130 must not gate PT113");
+        // cpresent is mandatory: without a=fmtp the answer means out-of-band
+        // `config=`, which the in-band LOAS bridge cannot synthesise.
+        assert!(negotiate_with(base, true).is_none(), "AAC without fmtp/cpresent must be refused");
         for weird in ["00", "false", "01", "true"] {
             let fmtp = format!("{base}a=fmtp:113 object=2;cpresent={weird}\r\n");
             assert!(negotiate_with(&fmtp, true).is_none(), "non-canonical cpresent={weird} must be refused");

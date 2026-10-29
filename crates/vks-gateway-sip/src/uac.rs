@@ -419,7 +419,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(session.remote_audio_payload_type, 0);
-        assert_eq!(session.remote_video_payload_type, Some(110));
+        assert_eq!(session.remote_video_payload_type, Some(111), "High RX accepted, baseline TX kept");
         assert_eq!(session.local_video_payload_type, Some(96));
         assert_eq!(session.remote_video_ip.as_deref(), Some("192.168.1.132"));
         assert_eq!(session.remote_dtmf_payload_type, Some(119));
