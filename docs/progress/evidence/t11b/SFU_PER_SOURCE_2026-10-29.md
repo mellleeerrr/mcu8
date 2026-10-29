@@ -88,11 +88,12 @@ queue_full|awaiting_keyframe|no_egress_mid}`.
 | `cargo test -p vks-media-sfu --features str0m --offline` | **112 passed** (было 98; +14) |
 | `cargo test -p vks-media-sfu --offline` (без feature) | 80 passed (str0m-тесты gated) |
 | `cargo test -p vks-signaling --offline` | 49 passed |
-| `cargo test -p vks-server --offline` | lib **151**, main 2, config_failclosed 1, h265 1, network_integration 23, operator_policy 7, recorder_tap 5 — 0 failed |
+| `cargo test -p vks-server --offline` | lib **152**, main 3, config_failclosed 1, h265 1, network_integration 23, operator_policy 7, recorder_tap 5 — 0 failed |
 | `python3 scripts/check-pnm-webrtc-drift.py --check` | exit 0, «70 text files, no SDP API» |
 | `python3 -m unittest test_check_pnm_webrtc_drift` | 6 tests ok |
-| `node --check tests/e2e/webrtc.js` | ok |
+| `node --check tests/e2e/webrtc.js` + все 70 vendor JS | ok (0 fail) |
 | `sha256sum -c MANIFEST.sha256` | 215/215 (vendor не менялся) |
+| workspace clippy `--all-features --all-targets -D warnings` | **не мой блокер**: падает на 2× `redundant closure` в `crates/vks-admin/src/api_v3/shell.rs` (незакоммиченный WIP другого агента); в файлах T11b находок нет, `-p vks-server --no-deps` — чисто |
 
 Новые тесты media-sfu: 1+8/8+8 negotiation + 16 m-lines в answer, 8+8 reoffer
 round-trip и отклонение перестановки mid'ов с сохранением сессии, уникальные
@@ -124,6 +125,9 @@ broadcast, детерминированный порядок fanout.
   снова `room_full` (FSM rollback);
 - `audio_only`: аудио идёт, видео-секция согласована, но payload = 0;
 - 0 pageerrors.
+
+`h265_rtp` один раз упал по таймингу x265 и дважды прошёл подряд — это
+известная нестабильность теста, не T11b (файл не менялся).
 
 Первый прогон на `candidate_addr=127.0.0.1` показал ICE fail (браузер
 собирает host-кандидаты 192.168.1.93/10.200.0.1, loopback не достижим) —
