@@ -519,24 +519,63 @@ async fn audio_codec_matrix_marks_unsupported_variants_instead_of_promising_them
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
     let codecs = body["audio_codecs"].as_array().expect("audio_codecs array");
-    let supported = |name: &str, bitrate: Option<i64>| {
+    let entry = |name: &str, bitrate: Option<i64>| {
         codecs
             .iter()
             .find(|codec| codec["name"] == name && codec["bitrate"].as_i64() == bitrate)
-            .unwrap_or_else(|| panic!("missing {name}:{bitrate:?} in {codecs:?}"))["supported"]
-            .as_bool()
-            .expect("supported bool")
+            .unwrap_or_else(|| panic!("missing {name}:{bitrate:?} in {codecs:?}"))
     };
+    let supported = |name: &str, bitrate: Option<i64>| entry(name, bitrate)["supported"].as_bool().expect("bool");
+    let reason = |name: &str, bitrate: Option<i64>| entry(name, bitrate)["reason"].as_str().map(str::to_string);
     // Bridgeable today.
     assert!(supported("G711", None), "G.711 is natively bridged");
     assert!(supported("G722", None));
     assert!(supported("OPUS", None));
+    assert!(reason("G711", None).is_none(), "supported codecs carry no reason");
     // Listed by the vendor matrix but not bridgeable without T06b/transcoder:
     // the API must say so instead of letting an operator enable dead codecs.
     for (name, bitrate) in
         [("G719", None), ("G729", None), ("ILBC", None), ("AAC", None), ("G7221", Some(24)), ("G7221C", Some(48))]
     {
         assert!(!supported(name, bitrate), "{name}:{bitrate:?} must report supported=false");
+        assert!(reason(name, bitrate).is_some(), "{name}:{bitrate:?} must report a reason");
+    }
+    assert_eq!(reason("AAC", None).as_deref(), Some("license_not_accepted"));
+    assert_eq!(reason("G729", None).as_deref(), Some("encoder_not_bit_exact"));
+    assert_eq!(reason("G7221C", Some(48)).as_deref(), Some("no_implementation"));
+    // T22: every false row has a non-empty machine-readable reason id.
+    for codec in codecs {
+        if codec["supported"].as_bool() == Some(false) {
+            let reason = codec["reason"].as_str().unwrap_or_else(|| panic!("no reason for {codec:?}"));
+            assert!(!reason.is_empty() && reason.is_ascii(), "reason must be an id: {reason}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn video_codec_matrix_reports_reasons_for_unsupported_entries() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response = send(&server, request("GET", "/api/v3/settings/video_codecs", Some(&token), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let details = body["video_codec_details"].as_array().expect("details array");
+    let detail = |name: &str| {
+        details
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .unwrap_or_else(|| panic!("missing video {name} in {details:?}"))
+    };
+    assert_eq!(detail("H264")["supported"], true);
+    assert_eq!(detail("H264-HIGH")["supported"], false);
+    assert_eq!(detail("H264-HIGH")["reason"], "tx_profile_unsupported");
+    assert_eq!(detail("H261")["reason"], "no_implementation");
+    assert_eq!(detail("VP8")["reason"], "webrtc_only");
+    for entry in details {
+        if entry["supported"].as_bool() == Some(false) {
+            assert!(entry["reason"].as_str().is_some(), "unsupported video without reason: {entry:?}");
+        }
     }
 }
 

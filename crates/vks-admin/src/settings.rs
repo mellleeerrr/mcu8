@@ -487,4 +487,22 @@ mod tests {
         let back: AuthProvider = serde_json::from_str("\"ldap\"").unwrap();
         assert_eq!(back, AuthProvider::Ldap);
     }
+    #[test]
+    fn default_codec_matrix_entries_map_to_specs() {
+        // Every name the admin ships as operator intent must resolve in the
+        // codec SSOT; otherwise "unsupported" rows would be invisible to the
+        // matrix and the API could not explain them.
+        use vks_common::codec_spec;
+        let config = CodecConfig::default();
+        for name in &config.video {
+            assert!(codec_spec::lookup(name).is_some(), "video codec {name} has no CodecSpec");
+        }
+        for entry in &config.audio {
+            let (name, bitrate) = CodecConfig::audio_parts(entry);
+            assert!(
+                codec_spec::lookup_variant(&name, bitrate).is_some() || codec_spec::family(&name).is_some(),
+                "audio codec {entry} has no CodecSpec"
+            );
+        }
+    }
 }

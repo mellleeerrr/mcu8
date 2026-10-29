@@ -78,8 +78,7 @@ fn write_aac_rtp_packet(
 pub(super) fn is_aac_audio(payload_type: u8, codec: Option<&str>) -> bool {
     match codec {
         Some(name) => {
-            let normalized = name.trim().to_ascii_uppercase().replace(['.', '-', '_'], "");
-            matches!(normalized.as_str(), "AAC" | "AACLATM" | "MP4ALATM")
+            vks_common::codec_spec::lookup(name).is_some_and(|spec| spec.id == vks_common::codec_spec::CodecId::AacLatm)
         }
         None => payload_type == AAC_PAYLOAD_TYPE,
     }

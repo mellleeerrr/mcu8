@@ -134,17 +134,22 @@ impl WebRtcPeer {
         validate_offer(offer_sdp)?;
         let mut builder = RtcConfig::new()
             .set_ice_lite(config.ice_lite)
-            // Honest SFU capabilities: Opus + VP8 only. The signalling caps,
-            // TrackInfo and metrics all say VP8 today; advertising VP9/AV1/
-            // H264/H265 here would make the answer disagree with all three
-            // (and browsers do not negotiate H.265 over WebRTC at all).
+            // Honest SFU capabilities: the codec SSOT decides which encodings
+            // enter the answer (Opus + VP8 today). The feature-gated registry
+            // (vp9/av1) must not leak here: str0m would advertise codecs the
+            // forwarding path cannot carry.
             .clear_codecs()
-            .enable_opus(true, false)
-            .enable_vp8(true)
             .set_reordering_timeout_video(Some(std::time::Duration::from_millis(config.video_jitter_ms)))
             .set_reordering_size_video(config.video_reorder_size)
             .set_send_buffer_audio(config.send_buffer_audio)
             .set_send_buffer_video(config.send_buffer_video);
+        for spec in vks_common::codec_spec::webrtc_answer_specs() {
+            builder = match spec.id {
+                vks_common::codec_spec::CodecId::Opus => builder.enable_opus(true, false),
+                vks_common::codec_spec::CodecId::Vp8 => builder.enable_vp8(true),
+                other => unreachable!("webrtc_answer_specs returned {other:?}"),
+            };
+        }
         if config.bwe {
             builder = builder.enable_bwe(Some(str0m::bwe::Bitrate::bps(config.bwe_initial_bps)));
         }
@@ -844,5 +849,19 @@ mod tests {
         assert!(sent_total > 0, "SFU did not emit SRTP to browser");
         assert!(back > 0, "no media arrived back at the browser peer");
         let _ = video_mid;
+    }
+    #[test]
+    fn webrtc_answer_slice_matches_peer_builder() {
+        let offer_sdp = browser_offer();
+        let peer = WebRtcPeer::accept_offer(&offer_sdp, B, &WebRtcConfig::default()).expect("accept");
+        let answer = peer.answer_sdp().to_ascii_lowercase();
+        let names = vks_common::codec_spec::webrtc_answer_names();
+        assert_eq!(names, ["OPUS", "VP8"], "SSOT answer slice changed");
+        for name in names {
+            assert!(answer.contains(&format!("{}/", name.to_ascii_lowercase())), "missing {name}: {answer}");
+        }
+        for forbidden in ["vp9/90000", "av1/90000", "h264/90000", "h265/90000"] {
+            assert!(!answer.contains(forbidden), "unexpected {forbidden} in answer");
+        }
     }
 }

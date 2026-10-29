@@ -41,26 +41,28 @@ impl AudioBridgeCodec {
     fn new(payload_type: u8, codec: Option<&str>) -> Option<Self> {
         // Codec identity is authoritative: a peer may choose any dynamic PT
         // 96-127 for G.726, so the payload number alone is not enough.
-        let normalized = codec.map(|name| name.trim().to_ascii_uppercase().replace(['.', '-', '_'], ""));
-        match normalized.as_deref() {
-            Some("G72616") => {
+        // Identity comes from the SSOT; the dispatch below only selects the
+        // actual codec implementation.
+        use vks_common::codec_spec::{self, CodecId};
+        match codec.and_then(codec_spec::lookup).map(|spec| spec.id) {
+            Some(CodecId::G726_16) => {
                 Some(Self::G726(Box::new(vks_gateway_sip::g726::G726Codec::new(vks_gateway_sip::g726::G726Rate::R16))))
             }
-            Some("G72624") => {
+            Some(CodecId::G726_24) => {
                 Some(Self::G726(Box::new(vks_gateway_sip::g726::G726Codec::new(vks_gateway_sip::g726::G726Rate::R24))))
             }
-            Some("G72632") => {
+            Some(CodecId::G726_32) => {
                 Some(Self::G726(Box::new(vks_gateway_sip::g726::G726Codec::new(vks_gateway_sip::g726::G726Rate::R32))))
             }
-            Some("G72640") => {
+            Some(CodecId::G726_40) => {
                 Some(Self::G726(Box::new(vks_gateway_sip::g726::G726Codec::new(vks_gateway_sip::g726::G726Rate::R40))))
             }
-            Some("G722") => Some(Self::G722(Box::new(vks_gateway_sip::g722::G722Codec::new()))),
-            Some("OPUS") => Some(Self::Opus(Box::new(vks_gateway_sip::opus::OpusCodec::new()?))),
-            Some("G728") => Some(Self::G728(Box::new(vks_gateway_sip::g728::G728Codec::new()))),
-            Some("G723") | Some("G7231") => Some(Self::G7231(Box::new(vks_gateway_sip::g7231::G7231Codec::new()))),
-            Some("PCMU") => Some(Self::G711 { law: 0, encode_payload_type: 0 }),
-            Some("PCMA") => Some(Self::G711 { law: 8, encode_payload_type: 8 }),
+            Some(CodecId::G722) => Some(Self::G722(Box::new(vks_gateway_sip::g722::G722Codec::new()))),
+            Some(CodecId::Opus) => Some(Self::Opus(Box::new(vks_gateway_sip::opus::OpusCodec::new()?))),
+            Some(CodecId::G728) => Some(Self::G728(Box::new(vks_gateway_sip::g728::G728Codec::new()))),
+            Some(CodecId::G723) => Some(Self::G7231(Box::new(vks_gateway_sip::g7231::G7231Codec::new()))),
+            Some(CodecId::Pcmu) => Some(Self::G711 { law: 0, encode_payload_type: 0 }),
+            Some(CodecId::Pcma) => Some(Self::G711 { law: 8, encode_payload_type: 8 }),
             _ => match payload_type {
                 0 | 8 => Some(Self::G711 { law: payload_type, encode_payload_type: payload_type }),
                 9 => Some(Self::G722(Box::new(vks_gateway_sip::g722::G722Codec::new()))),

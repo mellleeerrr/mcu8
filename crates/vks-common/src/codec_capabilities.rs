@@ -1,19 +1,22 @@
-//! Единый источник правды о кодеках, которые шлюз реально мостит без
-//! транскодера (T06a). Списки настроек/UI остаются «намерением» и могут
-//! содержать полную матрицу T06b; SDP и выбор кодека фильтруются здесь.
+//! Public compatibility facade over [`crate::codec_spec`] (T04b).
 //!
-//! Для видео одного статического списка мало: H.264/H.265 мосты запускают
-//! внешний FFmpeg, поэтому SDP обязан спрашивать [`video_codec_available`],
-//! а `main` выставляет её по результату probe. Значения по умолчанию `true`
-//! нужны unit-тестам и библиотечным вызовам; production всегда переопределяет
-//! их на старте.
+//! The SSOT lives in [`crate::codec_spec::CODECS`]; this module keeps the
+//! historical API (`NATIVE_AUDIO`, `NATIVE_VIDEO`, `is_*`, `matrix_mode`) so
+//! existing callers keep working while deriving every answer from the table.
+//!
+//! Probe state is process-global: `main` publishes it once at startup, tests
+//! use the pure `*_with` helpers so they never race on the atomics.
+
+use crate::codec_spec::{self, CodecId, CodecKind, Disposition, Reason};
 
 /// Аудио, которое native-профиль шлюза принимает/отдаёт без транскодера.
-pub const NATIVE_AUDIO: &[&str] =
-    &["PCMU", "PCMA", "G711", "G711U", "G711A", "G722", "G72616", "G72624", "G72632", "G72640", "G728", "G723", "OPUS"];
+/// Производный срез [`codec_spec::CODECS`] (канонические имена + алиасы).
+pub const NATIVE_AUDIO: &[&str] = &codec_spec::native_audio_names();
 /// Видео, которое native-профиль шлюза кодирует/декодирует: H.264 baseline
-/// (high — отдельная конфигурация) и H.265 через FFmpeg-мост.
-pub const NATIVE_VIDEO: &[&str] = &["H264", "H265", "HEVC"];
+/// (high — RX-only) и H.265 через FFmpeg-мост.
+pub const NATIVE_VIDEO: &[&str] = &codec_spec::native_video_names();
+/// Worker/transcode-срез (AAC-LATM и алиасы).
+pub const WORKER_CODECS: &[&str] = &codec_spec::worker_codec_names();
 
 static H264_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static H265_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -25,10 +28,12 @@ pub struct VideoCodecAvailability {
     pub h265: bool,
 }
 
-/// Доступность аудио-мостов, зависящих от внешнего FFmpeg.
+/// Доступность аудио-мостов, зависящих от внешнего FFmpeg и лицензионного
+/// решения оператора.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioCodecAvailability {
-    /// MP4A-LATM bridge: AAC encoder + `latm` muxer + `aac_latm` decoder + `loas` demuxer.
+    /// MP4A-LATM bridge: проба FFmpeg + license opt-in + pool≥2. `false` means
+    /// the codec must not appear in SDP or the admin matrix as supported.
     pub aac_latm: bool,
 }
 
@@ -39,6 +44,16 @@ pub fn set_audio_codec_availability(availability: AudioCodecAvailability) {
     AAC_LATM_AVAILABLE.store(availability.aac_latm, std::sync::atomic::Ordering::Release);
 }
 
+/// Записывает доступность видео-мостов (один раз на старте сервера).
+pub fn set_video_codec_availability(availability: VideoCodecAvailability) {
+    H264_AVAILABLE.store(availability.h264, std::sync::atomic::Ordering::Release);
+    H265_AVAILABLE.store(availability.h265, std::sync::atomic::Ordering::Release);
+}
+
+fn is_aac_latm(name: &str) -> bool {
+    codec_spec::lookup(name).is_some_and(|spec| spec.id == CodecId::AacLatm)
+}
+
 /// Доступен ли AAC-LATM мост на этом хосте. До публикации результата probe
 /// возвращает `false`, чтобы SDP никогда не обещал AAC без воркера.
 #[must_use]
@@ -47,36 +62,28 @@ pub fn audio_codec_available(name: &str) -> bool {
 }
 
 fn audio_codec_available_with(name: &str, aac_latm: bool) -> bool {
-    match normalize(name).as_str() {
-        "AAC" | "AACLATM" | "MP4ALATM" => aac_latm,
-        _ => false,
-    }
-}
-
-/// Записывает доступность видео-мостов (один раз на старте сервера).
-pub fn set_video_codec_availability(availability: VideoCodecAvailability) {
-    H264_AVAILABLE.store(availability.h264, std::sync::atomic::Ordering::Release);
-    H265_AVAILABLE.store(availability.h265, std::sync::atomic::Ordering::Release);
+    is_aac_latm(name) && aac_latm
 }
 
 /// Доступен ли мост конкретного видео-кодека на этом хосте.
 #[must_use]
 pub fn video_codec_available(name: &str) -> bool {
-    match normalize(name).as_str() {
-        "H264" => H264_AVAILABLE.load(std::sync::atomic::Ordering::Acquire),
-        "H265" | "HEVC" => H265_AVAILABLE.load(std::sync::atomic::Ordering::Acquire),
+    match codec_spec::lookup(name).map(|spec| spec.id) {
+        Some(CodecId::H264) => H264_AVAILABLE.load(std::sync::atomic::Ordering::Acquire),
+        Some(CodecId::H265) => H265_AVAILABLE.load(std::sync::atomic::Ordering::Acquire),
         _ => false,
     }
 }
 
-fn normalize(name: &str) -> String {
-    name.trim().to_ascii_uppercase().replace(['.', '-', '_', ' '], "")
-}
-
-/// Мостится ли аудиокодек native-профилем (`G711` — общий алиас PCMU/PCMA).
+/// Мостится ли аудиокодек native-профилем (`G711` — семейство PCMU/PCMA).
 #[must_use]
 pub fn is_native_audio(name: &str) -> bool {
-    NATIVE_AUDIO.contains(&normalize(name).as_str())
+    if let Some(family) = codec_spec::family(name) {
+        return family.members.iter().any(|id| {
+            codec_spec::spec(*id).kind == CodecKind::Audio && codec_spec::spec(*id).sip == Disposition::Native
+        });
+    }
+    codec_spec::lookup(name).is_some_and(|spec| spec.kind == CodecKind::Audio && spec.sip == Disposition::Native)
 }
 
 /// Variant-aware audio check: `G726` is only supported at 16/24/32/40 kbit/s,
@@ -84,26 +91,35 @@ pub fn is_native_audio(name: &str) -> bool {
 /// their bitrate instead of a generic name match.
 #[must_use]
 pub fn is_native_audio_variant(name: &str, bitrate: Option<u32>) -> bool {
-    if let Some(suffix) = normalize(name).strip_prefix("G726") {
-        if let Ok(bits) = suffix.parse::<u32>() {
-            return matches!(bits, 16 | 24 | 32 | 40) && bitrate.is_none_or(|value| value == bits);
-        }
-        return matches!(bitrate, Some(16 | 24 | 32 | 40));
+    if let Some(spec) = codec_spec::lookup_variant(name, bitrate) {
+        return spec.kind == CodecKind::Audio && spec.sip == Disposition::Native;
     }
-    is_native_audio(name)
+    // Alias families (G711) have no single spec.
+    bitrate.is_none() && is_native_audio(name)
 }
 
-/// Audio codec the SIP gateway can actually bridge: the native sample codecs
-/// plus AAC-LATM once its FFmpeg workers were probed. H.323 callers must not
-/// use this (its single-codec matrix stays G.711/G.722/G.723.1).
+/// Audio codec the SIP gateway can actually bridge: native sample codecs plus
+/// AAC-LATM once its FFmpeg workers were probed **and** the operator accepted
+/// the license. H.323 callers must not use this (its matrix is static).
 #[must_use]
 pub fn is_supported_audio_variant(name: &str, bitrate: Option<u32>) -> bool {
-    is_native_audio_variant(name, bitrate)
-        || (matches!(normalize(name).as_str(), "AAC" | "AACLATM" | "MP4ALATM") && audio_codec_available("MP4A-LATM"))
+    supported_audio_variant_with(name, bitrate, AAC_LATM_AVAILABLE.load(std::sync::atomic::Ordering::Acquire))
+}
+
+fn supported_audio_variant_with(name: &str, bitrate: Option<u32>, aac_latm: bool) -> bool {
+    if is_native_audio_variant(name, bitrate) {
+        return true;
+    }
+    match codec_spec::lookup_variant(name, bitrate) {
+        Some(spec) if spec.kind == CodecKind::Audio && spec.sip == Disposition::Worker => {
+            is_aac_latm(spec.name) && aac_latm
+        }
+        _ => false,
+    }
 }
 
 /// Мостится ли видеокодек native-профилем *и* доступен ли его мост на хосте.
-/// `H264-HIGH` не входит в native-список (это отдельная конфигурация).
+/// `H264-HIGH` не входит в native-список (RX-only).
 #[must_use]
 pub fn is_native_video(name: &str) -> bool {
     native_video_with(name, video_codec_available("H264"), video_codec_available("H265"))
@@ -113,20 +129,53 @@ pub fn is_native_video(name: &str) -> bool {
 ///
 /// Односторонние пути сюда не входят: FFmpeg умеет декодировать G.729, но не
 /// кодировать, а G.722.1/G.719 не умеет вообще. Объявлять их в SDP нельзя —
-/// терминал ответит кодеком, который шлюз не сможет отдать обратно, и звонок
-/// умрёт после 200 OK. Проба хоста проверяется отдельно
-/// ([`audio_codec_available`]).
+/// терминал ответит кодеком, который шлюз не сможет отдать обратно.
 #[must_use]
 pub fn is_transcodeable_audio(name: &str) -> bool {
-    matches!(normalize(name).as_str(), "AAC" | "AACLATM" | "MP4ALATM")
+    codec_spec::lookup(name).is_some_and(|spec| spec.kind == CodecKind::Audio && spec.sip == Disposition::Worker)
 }
 
 fn native_video_with(name: &str, h264: bool, h265: bool) -> bool {
-    match normalize(name).as_str() {
-        "H264" => h264,
-        "H265" | "HEVC" => h265,
+    match codec_spec::lookup(name).map(|spec| spec.id) {
+        Some(CodecId::H264) => h264,
+        Some(CodecId::H265) => h265,
         _ => false,
     }
+}
+
+/// Public machine-readable reason why an audio settings variant is not
+/// supported right now (`None` when it is).
+#[must_use]
+pub fn audio_unavailable_reason(name: &str, bitrate: Option<u32>) -> Option<&'static str> {
+    if is_supported_audio_variant(name, bitrate) {
+        return None;
+    }
+    match codec_spec::lookup_variant(name, bitrate) {
+        // Worker codec is gated by the operator license (and probe); the
+        // process exposes only the combined availability flag.
+        Some(spec) if spec.sip == Disposition::Worker => Some(Reason::LicenseNotAccepted.as_id()),
+        Some(spec) => Some(spec.reason.unwrap_or(Reason::NoImplementation).as_id()),
+        None => Some(Reason::UnknownCodec.as_id()),
+    }
+}
+
+/// Public machine-readable reason why a video settings entry is not supported.
+#[must_use]
+pub fn video_unavailable_reason(name: &str) -> Option<&'static str> {
+    if is_native_video(name) {
+        return None;
+    }
+    let Some(spec) = codec_spec::lookup(name) else {
+        return Some(Reason::UnknownCodec.as_id());
+    };
+    let reason = match spec.sip {
+        Disposition::Native if !video_codec_available(name) => Reason::ProbeUnavailable,
+        Disposition::Native | Disposition::Worker | Disposition::WebRtc => {
+            spec.reason.unwrap_or(Reason::NoImplementation)
+        }
+        Disposition::RxOnly | Disposition::Unsupported(_) => spec.reason.unwrap_or(Reason::NoImplementation),
+    };
+    Some(reason.as_id())
 }
 
 /// True, если значение — «истина» в смысле env-переменных.
@@ -163,7 +212,7 @@ mod tests {
 
     #[test]
     fn native_names_match_gateway_offer() {
-        for name in ["PCMU", "PCMA", "G711", "g711u", "G.711-A", "G722", "g722", "OPUS", "opus"] {
+        for name in ["PCMU", "PCMA", "G711", "g711u", "G.711-A", "G722", "g722", "OPUS", "opus", "G7231"] {
             assert!(is_native_audio(name), "{name} должен моститься");
         }
         for (name, bitrate) in [("G726", Some(16)), ("G726", Some(24)), ("G726", Some(32)), ("G726", Some(40))] {
@@ -178,8 +227,6 @@ mod tests {
         for name in ["G729", "AAC", "G7221C", "G719"] {
             assert!(!is_native_audio(name), "{name} требует T06b-транскодера");
         }
-        assert!(is_native_video("H264"));
-        assert!(is_native_video("h.264"));
         for name in ["H264", "h.264", "H265", "h.265", "HEVC"] {
             assert!(is_native_video(name), "{name} мостится worker-мостом");
         }
@@ -206,23 +253,51 @@ mod tests {
         assert!(native_video_with("H265", false, true));
         assert!(!native_video_with("H264", false, true));
         assert!(!native_video_with("H261", true, true));
+        assert!(!native_video_with("H264-HIGH", true, true));
     }
 
     #[test]
-    fn supported_audio_variant_tracks_the_aac_probe() {
+    fn supported_audio_variant_tracks_the_aac_probe_and_license() {
         assert!(is_supported_audio_variant("G722", None));
         assert!(is_supported_audio_variant("G726", Some(32)));
         assert!(!is_supported_audio_variant("G726", Some(20)));
         assert!(!is_supported_audio_variant("AAC", None));
         assert!(audio_codec_available_with("AAC", true));
         assert!(!is_supported_audio_variant("AAC", None), "global probe is off in tests");
+        // License/probe state is injected: without it AAC is not advertised,
+        // with it the worker codec becomes supported.
+        assert!(!supported_audio_variant_with("MP4A-LATM", None, false));
+        assert!(supported_audio_variant_with("MP4A-LATM", None, true));
+        assert!(supported_audio_variant_with("aac", None, true));
+        assert!(supported_audio_variant_with("AAC-LATM", None, true));
+        assert!(!supported_audio_variant_with("G729", None, true));
+    }
+
+    #[test]
+    fn unsupported_reasons_are_complete() {
+        assert_eq!(audio_unavailable_reason("AAC", None), Some("license_not_accepted"));
+        assert_eq!(audio_unavailable_reason("AAC", None), Some(Reason::LicenseNotAccepted.as_id()));
+        for (name, reason) in [
+            ("G729", "encoder_not_bit_exact"),
+            ("G7221", "no_implementation"),
+            ("G7221C", "no_implementation"),
+            ("G719", "no_implementation"),
+            ("ILBC", "no_implementation"),
+            ("not-a-codec", "unknown_codec"),
+        ] {
+            assert_eq!(audio_unavailable_reason(name, None), Some(reason), "{name}");
+        }
+        for (name, reason) in
+            [("H264-HIGH", "tx_profile_unsupported"), ("H261", "no_implementation"), ("VP8", "webrtc_only")]
+        {
+            assert_eq!(video_unavailable_reason(name), Some(reason), "{name}");
+        }
+        assert!(video_unavailable_reason("H264").is_none());
+        assert!(audio_unavailable_reason("PCMU", None).is_none());
     }
 
     #[test]
     fn only_two_way_audio_codecs_are_transcodeable() {
-        // В SDP можно объявлять только кодеки, которые шлюз и декодирует, и
-        // кодирует: FFmpeg декодирует G.729, но не кодирует, а G.722.1/G.719
-        // не умеет вообще.
         assert!(is_transcodeable_audio("MP4A-LATM"));
         assert!(is_transcodeable_audio("aac"));
         for name in ["G729", "G7221", "G719", "PCMU", "OPUS"] {
@@ -237,5 +312,15 @@ mod tests {
         assert!(!audio_codec_available("G711"));
         assert!(audio_codec_available_with("aac", true));
         assert!(!audio_codec_available_with("AAC", false));
+    }
+
+    #[test]
+    fn native_consts_equal_generated_slices() {
+        assert_eq!(NATIVE_AUDIO, &codec_spec::native_audio_names());
+        assert_eq!(NATIVE_VIDEO, &codec_spec::native_video_names());
+        assert_eq!(WORKER_CODECS, &codec_spec::worker_codec_names());
+        assert!(NATIVE_AUDIO.contains(&"G7231"));
+        assert!(NATIVE_VIDEO.contains(&"HEVC"));
+        assert!(!NATIVE_VIDEO.contains(&"H264-HIGH"));
     }
 }

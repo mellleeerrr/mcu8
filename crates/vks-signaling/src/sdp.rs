@@ -462,9 +462,14 @@ impl Sdp {
             // m-line with no common codec is rejected with port 0).
             let mut selected: Vec<RtpMap> = Vec::new();
             for map in &profile.rtp_maps {
-                let kind = match map.codec.to_ascii_lowercase().as_str() {
-                    "opus" | "pcmu" | "pcma" | "g722" => MediaKind::Audio,
-                    _ => MediaKind::Video,
+                // Codec kind comes from the SSOT: an unknown name is not a
+                // video codec (a typo used to create a bogus m=video answer).
+                let kind = match vks_common::codec_spec::lookup(&map.codec).map(|spec| spec.kind) {
+                    Some(vks_common::codec_spec::CodecKind::Audio | vks_common::codec_spec::CodecKind::Dtmf) => {
+                        MediaKind::Audio
+                    }
+                    Some(vks_common::codec_spec::CodecKind::Video) => MediaKind::Video,
+                    None => continue,
                 };
                 if kind != media.kind {
                     continue;
@@ -720,6 +725,20 @@ mod tests {
         assert!(parsed.media.iter().all(|media| media.port == 0));
         assert!(text.contains("m=audio 0"));
         assert!(text.contains("m=video 0"));
+    }
+
+    #[test]
+    fn unknown_codec_does_not_land_on_video_mline() {
+        // `_ => Video` used to turn any typo/unknown name into a video answer.
+        let mut offer = two_line_offer();
+        offer.media[1].payload_types = vec![101];
+        offer.media[1].rtp_maps = vec![RtpMap { payload: 101, codec: "h246".into(), clock: 90000, channels: 0 }];
+        let mut profile = sfu_profile();
+        profile.rtp_maps.push(RtpMap { payload: 101, codec: "h246".into(), clock: 90000, channels: 0 });
+        let (answer, maps) = offer.sfu_answer(&profile);
+        assert_eq!(answer.media[1].port, 0, "unknown codec must reject the video m-line");
+        assert!(answer.media[1].rtp_maps.is_empty());
+        assert!(!maps.iter().any(|map| map.codec == "h246"), "unknown codec selected: {maps:?}");
     }
 
     #[test]

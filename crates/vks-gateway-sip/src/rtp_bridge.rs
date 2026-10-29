@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 use tokio::net::UdpSocket;
+use vks_common::codec_spec::{self, CodecId, Disposition};
 
 /// Выделенная пара UDP-сокетов (RTP четный, RTCP нечетный).
 pub struct PortPair {
@@ -272,30 +273,32 @@ pub struct OfferCodec {
     pub channels: u8,
     /// Optional `a=fmtp` parameters.
     pub fmtp: Option<&'static str>,
-    /// `true` only when this gateway really decodes/encodes the codec.
-    pub native: bool,
+    /// Closed SSOT identity; disposition/clock/reason come from
+    /// [`vks_common::codec_spec::CODECS`].
+    pub spec: vks_common::codec_spec::CodecId,
     /// RFC 4733 `telephone-event` pseudo-codec (never selected as media).
     pub dtmf: bool,
 }
 
 /// Audio codecs advertised in the outbound offer, in `m=audio` order.
 ///
-/// G.729/G.722.1(C)/G.719/MP4A-LATM are listed only in [`CodecProfile::Full`]
-/// (lab/transcoder matrix) and are answered with an explicit 488 until their
-/// worker bridge lands — never silently downgraded. The native profile omits
-/// every `native: false` entry.
+/// G.729/G.722.1(C)/G.719 are identity rows only: they are never sent, but
+/// they let an inbound answer name the codec and return an explicit
+/// `UnsupportedAudio{codec,payload}` 488 instead of "no common codec" (T8).
+/// MP4A-LATM is a worker row, sent only when the probe and the operator
+/// license are both green. Every row carries its SSOT [`CodecId`].
 pub const AUDIO_OFFER: &[OfferCodec] = &[
-    OfferCodec { payload: 0, name: "PCMU", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
-    OfferCodec { payload: 8, name: "PCMA", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
-    OfferCodec { payload: 9, name: "G722", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
-    OfferCodec { payload: 15, name: "G728", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
+    OfferCodec { payload: 0, name: "PCMU", clock: 8000, channels: 1, fmtp: None, spec: CodecId::Pcmu, dtmf: false },
+    OfferCodec { payload: 8, name: "PCMA", clock: 8000, channels: 1, fmtp: None, spec: CodecId::Pcma, dtmf: false },
+    OfferCodec { payload: 9, name: "G722", clock: 8000, channels: 1, fmtp: None, spec: CodecId::G722, dtmf: false },
+    OfferCodec { payload: 15, name: "G728", clock: 8000, channels: 1, fmtp: None, spec: CodecId::G728, dtmf: false },
     OfferCodec {
         payload: 4,
         name: "G723",
         clock: 8000,
         channels: 1,
         fmtp: Some("annexa=no"),
-        native: true,
+        spec: CodecId::G723,
         dtmf: false,
     },
     OfferCodec {
@@ -304,7 +307,7 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
         clock: 8000,
         channels: 1,
         fmtp: Some("annexb=no"),
-        native: false,
+        spec: CodecId::G729,
         dtmf: false,
     },
     OfferCodec {
@@ -313,7 +316,7 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
         clock: 16000,
         channels: 1,
         fmtp: Some("bitrate=24000"),
-        native: false,
+        spec: CodecId::G7221,
         dtmf: false,
     },
     OfferCodec {
@@ -322,7 +325,7 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
         clock: 16000,
         channels: 1,
         fmtp: Some("bitrate=32000"),
-        native: false,
+        spec: CodecId::G7221,
         dtmf: false,
     },
     OfferCodec {
@@ -331,7 +334,7 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
         clock: 32000,
         channels: 1,
         fmtp: Some("bitrate=24000"),
-        native: false,
+        spec: CodecId::G7221,
         dtmf: false,
     },
     OfferCodec {
@@ -340,7 +343,7 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
         clock: 32000,
         channels: 1,
         fmtp: Some("bitrate=32000"),
-        native: false,
+        spec: CodecId::G7221,
         dtmf: false,
     },
     OfferCodec {
@@ -349,13 +352,45 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
         clock: 32000,
         channels: 1,
         fmtp: Some("bitrate=48000"),
-        native: false,
+        spec: CodecId::G7221,
         dtmf: false,
     },
-    OfferCodec { payload: 107, name: "G726-16", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
-    OfferCodec { payload: 108, name: "G726-24", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
-    OfferCodec { payload: 109, name: "G726-32", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
-    OfferCodec { payload: 110, name: "G726-40", clock: 8000, channels: 1, fmtp: None, native: true, dtmf: false },
+    OfferCodec {
+        payload: 107,
+        name: "G726-16",
+        clock: 8000,
+        channels: 1,
+        fmtp: None,
+        spec: CodecId::G726_16,
+        dtmf: false,
+    },
+    OfferCodec {
+        payload: 108,
+        name: "G726-24",
+        clock: 8000,
+        channels: 1,
+        fmtp: None,
+        spec: CodecId::G726_24,
+        dtmf: false,
+    },
+    OfferCodec {
+        payload: 109,
+        name: "G726-32",
+        clock: 8000,
+        channels: 1,
+        fmtp: None,
+        spec: CodecId::G726_32,
+        dtmf: false,
+    },
+    OfferCodec {
+        payload: 110,
+        name: "G726-40",
+        clock: 8000,
+        channels: 1,
+        fmtp: None,
+        spec: CodecId::G726_40,
+        dtmf: false,
+    },
     OfferCodec {
         payload: 111,
         name: "opus",
@@ -364,10 +399,10 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
         // `stereo=0`/`sprop-stereo=0`: the bridge mixes mono even though the
         // rtpmap channel count is the codec's maximum (RFC 7587 §7.1).
         fmtp: Some("useinbandfec=1;stereo=0;sprop-stereo=0"),
-        native: true,
+        spec: CodecId::Opus,
         dtmf: false,
     },
-    OfferCodec { payload: 112, name: "G719", clock: 48000, channels: 1, fmtp: None, native: false, dtmf: false },
+    OfferCodec { payload: 112, name: "G719", clock: 48000, channels: 1, fmtp: None, spec: CodecId::G719, dtmf: false },
     OfferCodec {
         payload: 113,
         name: "MP4A-LATM",
@@ -378,7 +413,7 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
         // FFmpeg's latm muxer emits the StreamMuxConfig in-band on the first
         // audioMuxElement, so cpresent=1 (and no config=) is the honest fmtp.
         fmtp: Some("profile-level-id=1;object=2;cpresent=1"),
-        native: false,
+        spec: CodecId::AacLatm,
         dtmf: false,
     },
     OfferCodec {
@@ -387,7 +422,7 @@ pub const AUDIO_OFFER: &[OfferCodec] = &[
         clock: 8000,
         channels: 1,
         fmtp: Some("0-16"),
-        native: false,
+        spec: CodecId::TelephoneEvent,
         dtmf: true,
     },
 ];
@@ -449,7 +484,7 @@ pub const VIDEO_OFFER: &[OfferCodec] = &[
         clock: 90000,
         channels: 0,
         fmtp: Some("packetization-mode=1;profile-level-id=42801e;max-mbps=13800;max-fs=920;max-br=256"),
-        native: true,
+        spec: CodecId::H264,
         dtmf: false,
     },
     OfferCodec {
@@ -461,7 +496,7 @@ pub const VIDEO_OFFER: &[OfferCodec] = &[
         // libx265 emits at the gateway's slot profiles. sprop-* are optional
         // and would be stale after a resolution change, so they are omitted.
         fmtp: Some("profile-id=1"),
-        native: true,
+        spec: CodecId::H265,
         dtmf: false,
     },
 ];
@@ -472,12 +507,22 @@ pub const VIDEO_OFFER: &[OfferCodec] = &[
 /// в одном профиле: терминал ответил бы ими, мост не смог бы отдать звук
 /// обратно — звонок умер бы после 200 OK.
 fn audio_offer(aac: bool) -> Vec<&'static OfferCodec> {
-    AUDIO_OFFER
-        .iter()
-        .filter(|codec| {
-            codec.native || codec.dtmf || (aac && vks_common::codec_capabilities::is_transcodeable_audio(codec.name))
-        })
-        .collect()
+    AUDIO_OFFER.iter().filter(|codec| audio_row_visible(codec, aac)).collect()
+}
+
+/// One offer row is sent when the SSOT says the codec is bidirectional on the
+/// SIP plane. Worker codecs additionally need the host/license gate (`aac`).
+fn audio_row_visible(codec: &OfferCodec, aac: bool) -> bool {
+    if codec.dtmf {
+        return true;
+    }
+    match codec_spec::spec(codec.spec).sip {
+        Disposition::Native => true,
+        // Only AAC-LATM has a worker bridge today; a future worker codec
+        // must be wired here (and in the offer meta-test) explicitly.
+        Disposition::Worker => aac && codec.spec == CodecId::AacLatm,
+        Disposition::WebRtc | Disposition::RxOnly | Disposition::Unsupported(_) => false,
+    }
 }
 
 fn push_codec_attrs(sdp: &mut String, codecs: &[&OfferCodec]) {
@@ -507,13 +552,38 @@ fn push_video_attrs(sdp: &mut String, codecs: &[&OfferCodec], video: &VideoSdpPr
 
 /// H.264 High определяется по fmtp (`profile-level-id=6400…`), а не по
 /// магическому PT 98: нумерация payload type может измениться.
-/// Availability gate for offered video entries. H.264/H.265 need a working
-/// FFmpeg bridge; H.261/H.263 stay lab-only until their payloaders exist.
-fn offer_video_enabled(name: &str, h264: bool, h265: bool) -> bool {
-    match name.to_ascii_uppercase().as_str() {
-        "H264" => h264,
-        "H265" | "HEVC" => h265,
-        _ => true,
+/// Availability gate for offered video entries, keyed by the closed SSOT id.
+///
+/// Exhaustive on purpose: a new [`CodecId`] cannot be advertised without an
+/// explicit decision here. There is no fail-open `_ => true` anymore (T7).
+fn offer_video_enabled(id: CodecId, h264: bool, h265: bool) -> bool {
+    match id {
+        CodecId::H264 => h264,
+        CodecId::H265 => h265,
+        CodecId::Pcmu
+        | CodecId::Pcma
+        | CodecId::G722
+        | CodecId::G723
+        | CodecId::G726_16
+        | CodecId::G726_24
+        | CodecId::G726_32
+        | CodecId::G726_40
+        | CodecId::G728
+        | CodecId::Opus
+        | CodecId::AacLatm
+        | CodecId::G729
+        | CodecId::G7221
+        | CodecId::G719
+        | CodecId::Ilbc
+        | CodecId::H264High
+        | CodecId::Vp8
+        | CodecId::Vp9
+        | CodecId::Av1
+        | CodecId::H261
+        | CodecId::H263
+        | CodecId::H263Plus
+        | CodecId::H264Svc
+        | CodecId::TelephoneEvent => false,
     }
 }
 
@@ -594,8 +664,13 @@ impl CodecProfile {
     fn video_with(self, h264: bool, h265: bool) -> Vec<&'static OfferCodec> {
         VIDEO_OFFER
             .iter()
-            .filter(|codec| self == Self::Full || codec.native)
-            .filter(|codec| offer_video_enabled(codec.name, h264, h265))
+            .filter(|codec| {
+                let disposition = codec_spec::spec(codec.spec).sip;
+                // RX-only (H.264 High) is never offered; Native profile also
+                // excludes worker-only video until the transcoder profile.
+                disposition.is_bidirectional() && (self == Self::Full || disposition == Disposition::Native)
+            })
+            .filter(|codec| offer_video_enabled(codec.spec, h264, h265))
             .collect()
     }
 }
@@ -750,6 +825,7 @@ m=audio 3230 RTP/AVP 18 0\r\na=rtpmap:18 G729/8000\r\na=rtpmap:0 PCMU/8000\r\n";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vks_common::codec_spec::CodecKind;
 
     #[test]
     fn g711_ulaw_roundtrip() {
@@ -861,18 +937,121 @@ m=video 5006 RTP/AVP 96\r\n";
     }
 
     #[test]
-    fn offer_native_flags_match_shared_capabilities() {
-        use vks_common::codec_capabilities::{is_native_audio, is_native_video};
+    fn offer_rows_match_spec() {
         for codec in AUDIO_OFFER {
+            let spec = codec_spec::spec(codec.spec);
             if codec.dtmf {
+                assert_eq!(spec.kind, CodecKind::Dtmf);
                 continue;
             }
-            assert_eq!(codec.native, is_native_audio(codec.name), "audio native mismatch: {codec:?}");
+            assert_eq!(spec.kind, CodecKind::Audio, "kind mismatch: {codec:?}");
+            // G7221 identity rows cover both G.722.1 (16 kHz clock) and
+            // G.722.1C (32 kHz clock); the spec documents the 16 kHz variant.
+            if codec.spec != CodecId::G7221 {
+                assert_eq!(spec.rtp_clock, codec.clock, "clock mismatch: {codec:?}");
+            }
+            assert_eq!(
+                audio_offer(false).iter().any(|row| row.payload == codec.payload),
+                spec.sip == Disposition::Native,
+                "{} native offer visibility",
+                codec.name
+            );
+            assert_eq!(
+                audio_offer(true).iter().any(|row| row.payload == codec.payload),
+                spec.sip.is_bidirectional(),
+                "{} worker offer visibility",
+                codec.name
+            );
         }
         for codec in VIDEO_OFFER {
-            let expected = is_native_video(codec.name) && !is_h264_high(codec);
-            assert_eq!(codec.native, expected, "video native mismatch: {codec:?}");
+            let spec = codec_spec::spec(codec.spec);
+            assert_eq!(spec.kind, CodecKind::Video);
+            assert_eq!(spec.rtp_clock, codec.clock);
+            assert!(spec.sip.is_bidirectional(), "RX-only {} must not be in VIDEO_OFFER", codec.name);
+            assert!(offer_video_enabled(codec.spec, true, true), "{} gated out with probes green", codec.name);
         }
+    }
+
+    #[test]
+    fn advertised_supported_implies_negotiable() {
+        // Level 3 of "no lie in the public matrix": every codec the admin
+        // reports as supported must be in the real offer, and every codec the
+        // SSOT calls unsupported must not be.
+        use vks_common::codec_capabilities::{is_native_audio, is_supported_audio_variant};
+        let native_offer = audio_offer(false);
+        for spec in codec_spec::CODECS.iter().filter(|spec| spec.kind == CodecKind::Audio) {
+            let advertised = native_offer.iter().any(|row| row.spec == spec.id);
+            match spec.sip {
+                Disposition::Native => {
+                    assert!(advertised, "{} is supported but not offered", spec.name);
+                    assert!(is_native_audio(spec.name));
+                    assert!(is_supported_audio_variant(spec.name, spec.bitrate));
+                }
+                Disposition::Worker => {
+                    assert!(!advertised, "{} must not be offered without the worker gate", spec.name);
+                    assert!(!is_supported_audio_variant(spec.name, spec.bitrate), "{}", spec.name);
+                }
+                Disposition::WebRtc | Disposition::RxOnly | Disposition::Unsupported(_) => {
+                    assert!(!advertised, "{} is unsupported but offered", spec.name);
+                    assert!(!is_supported_audio_variant(spec.name, spec.bitrate), "{}", spec.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sip_offer_has_no_duplicate_payload_types() {
+        let mut audio = BTreeSet::new();
+        for codec in AUDIO_OFFER {
+            assert!(audio.insert(codec.payload), "duplicate audio PT{}", codec.payload);
+        }
+        let mut video = BTreeSet::new();
+        for codec in VIDEO_OFFER {
+            assert!(video.insert(codec.payload), "duplicate video PT{}", codec.payload);
+        }
+    }
+
+    #[test]
+    fn unsupported_audio_rows_keep_identity_and_reason() {
+        // The seven never-sent rows are not dead code: they carry the codec
+        // identity used to answer 488 with `UnsupportedAudio{codec,payload}`
+        // instead of a silent "no common codec" (T8).
+        for (payload, name) in [
+            (18, "G729"),
+            (102, "G7221"),
+            (103, "G7221"),
+            (104, "G7221"),
+            (105, "G7221"),
+            (106, "G7221"),
+            (112, "G719"),
+        ] {
+            let row = AUDIO_OFFER
+                .iter()
+                .find(|codec| codec.payload == payload)
+                .unwrap_or_else(|| panic!("identity row PT{payload} removed"));
+            assert_eq!(row.name, name);
+            let spec = codec_spec::spec(row.spec);
+            assert!(matches!(spec.sip, Disposition::Unsupported(_)), "{} must be Unsupported", name);
+            assert!(spec.reason.is_some(), "{} needs a public reason", name);
+            assert!(!audio_offer(true).iter().any(|sent| sent.payload == payload), "PT{payload} must not be sent");
+        }
+    }
+
+    #[test]
+    fn aac_offer_follows_worker_license_and_probe() {
+        let without = audio_offer(false);
+        assert!(!without.iter().any(|codec| codec.payload == 113), "AAC advertised without probe/license");
+        let with = audio_offer(true);
+        assert!(with.iter().any(|codec| codec.payload == 113), "AAC missing with probe+license");
+    }
+
+    #[test]
+    fn h264_high_is_rx_only_and_has_public_reason() {
+        let spec = codec_spec::spec(CodecId::H264High);
+        assert_eq!(spec.sip, Disposition::RxOnly);
+        assert!(!spec.sip.is_bidirectional());
+        assert_eq!(spec.reason, Some(vks_common::codec_spec::Reason::TxProfileUnsupported));
+        assert!(!VIDEO_OFFER.iter().any(|codec| codec.spec == CodecId::H264High));
     }
 
     #[test]
@@ -1437,10 +1616,16 @@ fn negotiate_media_detailed_with(
         }
     }
     let (wire_payload, codec) = first_common.or(identity_fallback).ok_or(NegotiationFailure::NoCommonAudio)?;
-    let aac_latm = codec.name.eq_ignore_ascii_case("MP4A-LATM") && aac_available;
-    if !codec.native && !aac_latm {
+    let spec = codec_spec::spec(codec.spec);
+    let bridgeable = match spec.sip {
+        Disposition::Native => true,
+        Disposition::Worker => aac_available,
+        Disposition::WebRtc | Disposition::RxOnly | Disposition::Unsupported(_) => false,
+    };
+    if !bridgeable {
         return Err(NegotiationFailure::UnsupportedAudio { codec: codec.name.to_string(), payload: codec.payload });
     }
+    let aac_latm = spec.id == CodecId::AacLatm && aac_available;
     if aac_latm {
         // Symmetric with the UAS: the answer must describe AAC-LC with in-band
         // SMC. bitrate/config hints are legal; cpresent=0, SBR and other object
@@ -1518,12 +1703,16 @@ mod h265_offer_tests {
     use super::*;
 
     #[test]
-    fn unavailable_h265_is_not_offered() {
-        assert!(!offer_video_enabled("H265", true, false));
-        assert!(!offer_video_enabled("HEVC", true, false));
-        assert!(offer_video_enabled("H264", true, false));
-        assert!(offer_video_enabled("H265", true, true));
-        assert!(offer_video_enabled("H261", false, false));
+    fn unknown_and_unsupported_video_is_never_offered() {
+        // T7: the old `_ => true` fail-open is gone; only H.264/H.265 can be
+        // enabled, and only when their host probe is green.
+        assert!(!offer_video_enabled(CodecId::H265, true, false));
+        assert!(offer_video_enabled(CodecId::H265, false, true));
+        assert!(offer_video_enabled(CodecId::H264, true, false));
+        assert!(offer_video_enabled(CodecId::H265, false, true));
+        assert!(!offer_video_enabled(CodecId::H261, false, false));
+        assert!(!offer_video_enabled(CodecId::Vp8, true, true));
+        assert!(!offer_video_enabled(CodecId::H264High, true, true));
     }
 
     #[test]

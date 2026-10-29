@@ -6,6 +6,8 @@
 //! (PCMU/PCMA/G722/G726/G728/Opus + H.264/H.265, если мост доступен).
 //! SRTP/TLS/100rel/digest осознанно отклоняются, а не имитируются.
 
+use vks_common::codec_spec::{self, CodecId};
+
 /// Разобранный входящий SIP-запрос.
 #[derive(Debug, Clone)]
 pub struct UasRequest {
@@ -517,18 +519,19 @@ fn bridgeable_audio(section: &str, payload: u8, aac_available: bool) -> Option<B
             .then_some(BridgeableAudio::narrow("G726-32"));
     }
     let static_codec = match payload {
-        0 => Some("PCMU"),
-        8 => Some("PCMA"),
-        9 => Some("G722"),
-        15 => Some("G728"),
-        4 => Some("G723"),
-        107 => Some("G726-16"),
-        108 => Some("G726-24"),
-        109 => Some("G726-32"),
-        110 => Some("G726-40"),
+        0 => Some(CodecId::Pcmu),
+        8 => Some(CodecId::Pcma),
+        9 => Some(CodecId::G722),
+        15 => Some(CodecId::G728),
+        4 => Some(CodecId::G723),
+        107 => Some(CodecId::G726_16),
+        108 => Some(CodecId::G726_24),
+        109 => Some(CodecId::G726_32),
+        110 => Some(CodecId::G726_40),
         _ => None,
     };
-    if let Some(codec) = static_codec {
+    if let Some(id) = static_codec {
+        let codec = codec_spec::spec(id).name;
         // Dynamic G.726 must be explicitly mapped; static G.711/G.722 may rely
         // on the RFC 3551 default map, but a present rtpmap must still agree.
         if payload >= 96 {
@@ -548,8 +551,11 @@ fn bridgeable_audio(section: &str, payload: u8, aac_available: bool) -> Option<B
         }
     } else if (96..=127).contains(&payload) {
         let (name, clock, channels) = declared_codec(section, payload)?;
-        let name = name.trim().to_ascii_uppercase().replace(['.', '-', '_'], "");
-        if name == "MP4ALATM" {
+        let spec = codec_spec::lookup(name)?;
+        if spec.kind != codec_spec::CodecKind::Audio {
+            return None;
+        }
+        if spec.id == CodecId::AacLatm {
             if !aac_available {
                 return None;
             }
@@ -564,21 +570,21 @@ fn bridgeable_audio(section: &str, payload: u8, aac_available: bool) -> Option<B
                 return None;
             }
             return Some(BridgeableAudio {
-                codec: "MP4A-LATM",
+                codec: spec.name,
                 clock: 90_000,
                 channels: 1,
                 fmtp: Some("profile-level-id=1;object=2;cpresent=1"),
                 ptime_ms: 0,
             });
         }
-        if name == "OPUS" {
+        if spec.id == CodecId::Opus {
             // RFC 7587: 48 kHz clock, rtpmap channel count 2 (codec maximum);
             // the bridge itself is mono, advertised via stereo=0.
             if clock != 48_000 || channels.unwrap_or(2) != 2 {
                 return None;
             }
             return Some(BridgeableAudio {
-                codec: "OPUS",
+                codec: spec.name,
                 clock: 48_000,
                 channels: 2,
                 fmtp: Some("useinbandfec=1;stereo=0;sprop-stereo=0"),
@@ -588,27 +594,20 @@ fn bridgeable_audio(section: &str, payload: u8, aac_available: bool) -> Option<B
         if clock != 8000 {
             return None;
         }
-        let codec = match name.as_str() {
-            "PCMU" => "PCMU",
-            "PCMA" => "PCMA",
-            "G722" => "G722",
-            "G723" | "G7231" => "G723",
-            "G72616" => "G726-16",
-            "G72624" => "G726-24",
-            "G72632" => "G726-32",
-            "G72640" => "G726-40",
-            _ => return None,
-        };
-        if codec == "G723" {
-            return Some(BridgeableAudio {
-                codec: "G723",
+        match spec.id {
+            CodecId::Pcmu | CodecId::Pcma | CodecId::G722 | CodecId::G728 => Some(BridgeableAudio::narrow(spec.name)),
+            CodecId::G723 => Some(BridgeableAudio {
+                codec: spec.name,
                 clock: 8000,
                 channels: 1,
                 fmtp: Some("annexa=no"),
                 ptime_ms: 30,
-            });
+            }),
+            CodecId::G726_16 | CodecId::G726_24 | CodecId::G726_32 | CodecId::G726_40 => {
+                Some(BridgeableAudio::narrow(spec.name))
+            }
+            _ => None,
         }
-        Some(BridgeableAudio::narrow(codec))
     } else {
         None
     }

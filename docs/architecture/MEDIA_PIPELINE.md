@@ -173,16 +173,44 @@ enum MediaEngineState {
 
 ## 5. Codecs
 
-| Codec | SFU | MCU (decode) | MCU (encode) | Gateway (SIP) | Gateway (H.323) |
+<!-- codec-matrix:begin -->
+| Codec | Kind | SIP | H.323 | WebRTC | Reason |
 |---|---|---|---|---|---|
-| VP8 | ✅ | ✅ | — | — | — |
-| VP9 | ✅ | ✅ | — | — | — |
-| H.264 | ✅ | ✅ | ✅ (composite) | ✅ | ✅ |
-| H.265 | ✅ (feature) | ✅ | — | — | — |
-| AV1 | ✅ (feature) | ✅ | — | — | — |
-| Opus | ✅ | ✅ (mix) | ✅ | ✅ (transcode) | ✅ (transcode) |
-| G.722 | ✅ | ✅ | — | ✅ | — |
-| G.711 | — | — | — | ✅ | ✅ (transcode) |
+| PCMU | audio | native | native | — | — |
+| PCMA | audio | native | native | — | — |
+| G722 | audio | native | native | — | — |
+| G723 | audio | native | native | — | — |
+| G726-16 | audio | native | — | — | — |
+| G726-24 | audio | native | — | — | — |
+| G726-32 | audio | native | — | — | — |
+| G726-40 | audio | native | — | — | — |
+| G728 | audio | native | — | — | — |
+| OPUS | audio | native | — | webrtc | — |
+| MP4A-LATM | audio | worker | — | — | — |
+| G729 | audio | — | — | — | encoder_not_bit_exact |
+| G7221 | audio | — | — | — | no_implementation |
+| G719 | audio | — | — | — | no_implementation |
+| ILBC | audio | — | — | — | no_implementation |
+| H264 | video | native | native | — | — |
+| H264-HIGH | video | rx-only | — | — | tx_profile_unsupported |
+| H265 | video | native | — | — | — |
+| VP8 | video | — | — | webrtc | webrtc_only |
+| VP9 | video | — | — | — | webrtc_only |
+| AV1 | video | — | — | — | webrtc_only |
+| H261 | video | — | — | — | no_implementation |
+| H263 | video | — | — | — | no_implementation |
+| H263+ | video | — | — | — | no_implementation |
+| H264-SVC | video | — | — | — | svc_not_forwarded |
+| telephone-event | dtmf | native | — | — | — |
+<!-- codec-matrix:end -->
+
+The matrix is **generated from** `crates/vks-common/src/codec_spec.rs` and checked
+by `docs_public_matrix_matches_ssot` in `cargo test --workspace`; edit the SSOT,
+not this table. `native` = bit-exact bridge, `worker` = isolated FFmpeg bridge
+(license-gated for AAC-LATM), `webrtc` = present in the str0m answer,
+`rx-only` = accepted but never offered, `—` = not available on that plane.
+`H.264 High` is receive-only: the gateway always transmits baseline.
+`G711` is an alias family (PCMU + PCMA), not a separate codec row.
 
 Feature flags: `vp8`, `vp9`, `h264`, `h265`, `av1`, `opus`, `g722`, `g711` (ADR-0017).
 

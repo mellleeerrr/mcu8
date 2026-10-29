@@ -21,15 +21,28 @@ pub const AAC_LATM: &str = "aac-latm";
 #[must_use]
 pub fn accepted_codecs(list: Option<&str>, legacy_aac_flag: Option<&str>) -> Vec<&'static str> {
     let mut accepted = Vec::new();
+    let known: Vec<&'static str> =
+        vks_common::codec_spec::CODECS.iter().filter_map(|spec| spec.license.token()).collect();
     for token in list.unwrap_or_default().split(',') {
         let token = token.trim();
-        if token.eq_ignore_ascii_case(AAC_LATM) && !accepted.contains(&AAC_LATM) {
-            accepted.push(AAC_LATM);
+        // Only tokens that belong to a license-gated spec are accepted; the
+        // list of known tokens comes from the SSOT, not a literal here.
+        if let Some(known) = known.iter().copied().find(|known| token.eq_ignore_ascii_case(known)) {
+            if !accepted.contains(&known) {
+                accepted.push(known);
+            }
         }
     }
+    // Legacy flag maps to the one legacy-gated codec; keep it in sync with the
+    // spec token rather than duplicating the literal.
+    let legacy_token = vks_common::codec_spec::spec(vks_common::codec_spec::CodecId::AacLatm).license.token();
     let legacy_on = legacy_aac_flag.is_some_and(|value| value.trim() == "1");
-    if legacy_on && !accepted.contains(&AAC_LATM) {
-        accepted.push(AAC_LATM);
+    if legacy_on {
+        if let Some(token) = legacy_token {
+            if !accepted.contains(&token) {
+                accepted.push(token);
+            }
+        }
     }
     accepted
 }
@@ -76,5 +89,14 @@ mod tests {
         }
         // No duplicates when both forms are present.
         assert_eq!(accepted_codecs(Some("aac-latm"), Some("1")), vec![AAC_LATM]);
+    }
+    #[test]
+    fn license_tokens_come_from_specs() {
+        let tokens: Vec<&str> = vks_common::codec_spec::CODECS.iter().filter_map(|spec| spec.license.token()).collect();
+        assert_eq!(tokens, vec![AAC_LATM]);
+        assert_eq!(accepted_codecs(Some("aac-latm"), None), tokens);
+        assert_eq!(accepted_codecs(None, Some("1")), tokens);
+        // A token that is not a license token stays rejected.
+        assert!(accepted_codecs(Some("g729"), None).is_empty());
     }
 }

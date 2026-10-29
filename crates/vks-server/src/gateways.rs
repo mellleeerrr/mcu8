@@ -100,7 +100,7 @@ fn codec_name(item: &serde_json::Value) -> Option<String> {
     let raw = item.as_str().or_else(|| item.get("name").and_then(serde_json::Value::as_str))?;
     let (raw, inline_bitrate) =
         raw.split_once(':').map_or((raw, None), |(name, bitrate)| (name, bitrate.trim().parse::<u32>().ok()));
-    let name = raw.trim().to_uppercase().replace(['.', '-', '_'], "");
+    let name = vks_common::codec_spec::normalize(raw);
     if name.is_empty() {
         return None;
     }
@@ -118,22 +118,16 @@ fn codec_name(item: &serde_json::Value) -> Option<String> {
     Some(name)
 }
 
-/// Audio codecs the H.323 sidecar actually opens an OLC for: symmetric
-/// G.722 (PT9), G.723.1 (PT4), G.711U (PT0) or G.711A (PT8). G.728 stays
-/// SIP-only until H.245 g728 frame-count/packetization is verified against real
-/// terminals; the bridge accepts the RFC 3551 40-byte/20-ms packet only.
-const H323_AUDIO: &[&str] = &["PCMU", "G711U", "PCMA", "G711A", "G711", "G722", "G723", "G7231"];
-/// H.323 sidecar negotiates H.241/H.264 only; the SIP H.265 bridge does not
-/// apply to `h323:` addresses until H.245/OLC H.265 exists.
-const H323_VIDEO: &[&str] = &["H264"];
-
+/// H.323 audio names are generated from the SSOT (`h323: Native`); the
+/// single-codec sidecar opens OLCs for symmetric G.711/G.722/G.723.1 only.
 fn h323_audio_native(name: &str) -> bool {
-    H323_AUDIO.iter().any(|codec| codec.eq_ignore_ascii_case(name))
+    vks_common::codec_spec::is_h323_native_audio(name)
 }
 
+/// H.323 sidecar negotiates H.241/H.264 only; the SIP H.265 bridge does not
+/// apply to `h323:` addresses until H.245/OLC H.265 exists.
 fn h323_video_native(name: &str) -> bool {
-    H323_VIDEO.iter().any(|codec| codec.eq_ignore_ascii_case(name))
-        && vks_common::codec_capabilities::video_codec_available("H264")
+    vks_common::codec_spec::is_h323_native_video(name) && vks_common::codec_capabilities::video_codec_available("H264")
 }
 
 #[cfg(test)]
@@ -150,10 +144,10 @@ fn ensure_bridgeable_codec_selection_for(
     video: Option<&serde_json::Value>,
 ) -> Result<(), String> {
     use vks_common::codec_capabilities::{is_native_video, is_supported_audio_variant, NATIVE_AUDIO, NATIVE_VIDEO};
-    let audio_supported: &[&str] = if h323 { H323_AUDIO } else { NATIVE_AUDIO };
+    let audio_supported: &[&str] = if h323 { vks_common::codec_spec::H323_AUDIO_NAMES } else { NATIVE_AUDIO };
     let audio_native: fn(&str) -> bool =
         if h323 { h323_audio_native } else { |name| is_supported_audio_variant(name, None) };
-    let video_supported: &[&str] = if h323 { H323_VIDEO } else { NATIVE_VIDEO };
+    let video_supported: &[&str] = if h323 { vks_common::codec_spec::H323_VIDEO_NAMES } else { NATIVE_VIDEO };
     let video_native: fn(&str) -> bool = if h323 { h323_video_native } else { is_native_video as fn(&str) -> bool };
     for (kind, value, supported, native) in
         [("audio", audio, audio_supported, audio_native), ("video", video, video_supported, video_native)]
@@ -973,12 +967,7 @@ fn layout_meta(mode: &str, preset: &str) -> (String, String) {
 ///
 /// The value is advertised in media details; it is not an RTP clock.
 pub(super) fn audio_sample_rate(payload_type: u8) -> u32 {
-    match payload_type {
-        9 => 16_000,
-        111 => 48_000,
-        113 => 48_000,
-        _ => 8_000,
-    }
+    audio_codec_id(payload_type).map_or(8_000, |id| vks_common::codec_spec::spec(id).sample_rate)
 }
 
 /// Sample rate the MCU mix must run at, by negotiated codec identity.
@@ -986,11 +975,7 @@ pub(super) fn audio_sample_rate(payload_type: u8) -> u32 {
 /// PT numbers are not authoritative: a terminal may renumber G.722 to a
 /// dynamic PT, so the server asks the codec name instead of guessing from PT.
 fn audio_sample_rate_for_codec(codec: &str) -> u32 {
-    match codec {
-        "G722" => 16_000,
-        "OPUS" | "MP4A-LATM" => 48_000,
-        _ => 8_000,
-    }
+    vks_common::codec_spec::lookup(codec).map_or(8_000, |spec| spec.sample_rate)
 }
 
 /// AAC-LATM needs two FFmpeg workers (encode + decode) before a call may be
@@ -1001,15 +986,63 @@ fn aac_bridge_preflight() -> bool {
         && crate::transcoder_runtime::pool().is_some_and(|pool| pool.available() >= 2)
 }
 
+/// Static SIP payload types of every SSOT-native audio codec, plus the two
+/// transport-local legacy assignments: PT2 (deprecated G.721/G.726-32 alias,
+/// bridged only with an explicit rtpmap) and PT113 (AAC-LATM, probe+license
+/// gated). Payload numbers never enter [`vks_common::codec_spec`].
 fn bridgeable_audio_pts(is_h323: bool) -> Vec<u8> {
     if is_h323 {
         return vks_gateway_h323::H323_NATIVE_AUDIO_PTS.to_vec();
     }
-    let mut pts = vec![0, 2, 4, 8, 9, 15, 107, 108, 109, 110, 111];
+    let mut pts: Vec<u8> = vks_common::codec_spec::CODECS
+        .iter()
+        .filter(|spec| {
+            spec.kind == vks_common::codec_spec::CodecKind::Audio
+                && spec.sip == vks_common::codec_spec::Disposition::Native
+        })
+        .filter_map(|spec| sip_static_pt(spec.id))
+        .collect();
+    pts.push(2);
     if vks_common::codec_capabilities::audio_codec_available("MP4A-LATM") {
         pts.push(113);
     }
     pts
+}
+
+/// Transport-local static PT map for the SIP plane (not SSOT truth).
+const fn sip_static_pt(id: vks_common::codec_spec::CodecId) -> Option<u8> {
+    use vks_common::codec_spec::CodecId;
+    match id {
+        CodecId::Pcmu => Some(0),
+        CodecId::Pcma => Some(8),
+        CodecId::G722 => Some(9),
+        CodecId::G723 => Some(4),
+        CodecId::G726_16 => Some(107),
+        CodecId::G726_24 => Some(108),
+        CodecId::G726_32 => Some(109),
+        CodecId::G726_40 => Some(110),
+        CodecId::G728 => Some(15),
+        CodecId::Opus => Some(111),
+        _ => None,
+    }
+}
+
+const fn audio_codec_id(payload_type: u8) -> Option<vks_common::codec_spec::CodecId> {
+    use vks_common::codec_spec::CodecId;
+    match payload_type {
+        0 => Some(CodecId::Pcmu),
+        2 | 109 => Some(CodecId::G726_32),
+        8 => Some(CodecId::Pcma),
+        9 => Some(CodecId::G722),
+        15 => Some(CodecId::G728),
+        4 => Some(CodecId::G723),
+        107 => Some(CodecId::G726_16),
+        108 => Some(CodecId::G726_24),
+        110 => Some(CodecId::G726_40),
+        111 => Some(CodecId::Opus),
+        113 => Some(CodecId::AacLatm),
+        _ => None,
+    }
 }
 
 /// H.323 single-codec bridge: only symmetric static G.711U/PCMA/G.722/G.723.1
@@ -1027,21 +1060,7 @@ fn h323_inbound_audio_pt(event: &serde_json::Value) -> Option<u8> {
 
 /// Canonical audio codec name for stats/UI (RTP payload type → name).
 pub(super) fn audio_codec_name(payload_type: u8) -> &'static str {
-    match payload_type {
-        0 => "PCMU",
-        2 => "G726-32",
-        8 => "PCMA",
-        9 => "G722",
-        15 => "G728",
-        4 => "G723",
-        107 => "G726-16",
-        108 => "G726-24",
-        109 => "G726-32",
-        110 => "G726-40",
-        111 => "OPUS",
-        113 => "MP4A-LATM",
-        _ => "unknown",
-    }
+    audio_codec_id(payload_type).map_or("unknown", |id| vks_common::codec_spec::spec(id).name)
 }
 
 pub struct RtpBridgeSession {
@@ -1505,8 +1524,7 @@ impl GatewayManager {
         let audio_bridgeable = if is_h323 {
             bridgeable_audio_pts(true).contains(&audio_payload_type)
         } else {
-            vks_common::codec_capabilities::is_native_audio_variant(audio_codec, None)
-                || (audio_codec == "MP4A-LATM" && vks_common::codec_capabilities::audio_codec_available("MP4A-LATM"))
+            vks_common::codec_capabilities::is_supported_audio_variant(audio_codec, None)
         };
         if !audio_bridgeable {
             return Err(format!(

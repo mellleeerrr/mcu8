@@ -210,4 +210,23 @@ mod tests {
         let back = admin::RoomDto::decode(&bytes[..]).expect("decode");
         assert_eq!(back.id, "x");
     }
+    // T04b: proto wire tags are a stable public contract. The codec SSOT must
+    // never drive these numbers; this pin fails on any renumbering.
+    #[test]
+    fn codec_id_wire_tags_are_stable() {
+        use media::CodecId;
+        for (id, tag) in [
+            (CodecId::Unspecified, 0),
+            (CodecId::Vp8, 1),
+            (CodecId::Vp9, 2),
+            (CodecId::H264, 3),
+            (CodecId::H265, 4),
+            (CodecId::Av1, 5),
+            (CodecId::Opus, 6),
+            (CodecId::G722, 7),
+            (CodecId::G711, 8),
+        ] {
+            assert_eq!(id as i32, tag, "proto CodecId wire tag changed");
+        }
+    }
 }

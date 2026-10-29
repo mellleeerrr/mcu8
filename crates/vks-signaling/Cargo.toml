@@ -15,4 +15,5 @@ thiserror.workspace = true
 tracing.workspace = true
 prost.workspace = true
 uuid.workspace = true
+vks-common = { path = "../vks-common" }
 vks-proto = { path = "../vks-proto" }

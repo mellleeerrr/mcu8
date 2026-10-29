@@ -44,6 +44,34 @@ fn video_bitrate_from(raw: Option<&str>) -> u32 {
     raw.and_then(|value| value.trim().parse::<u32>().ok()).unwrap_or(2048).clamp(64, 20_000)
 }
 
+/// Proto [`media::RoomCaps`] for the WebRTC plane, derived from the codec SSOT
+/// (`webrtc_negotiable` slice = Opus + VP8). No raw enum numbers: adding a
+/// proto tag cannot silently change the caps.
+fn webrtc_room_caps() -> media::RoomCaps {
+    let mut video_codecs = Vec::new();
+    let mut audio_codecs = Vec::new();
+    for spec in vks_common::codec_spec::webrtc_answer_specs() {
+        let id = match spec.id {
+            vks_common::codec_spec::CodecId::Opus => media::CodecId::Opus,
+            vks_common::codec_spec::CodecId::Vp8 => media::CodecId::Vp8,
+            _ => continue,
+        };
+        match spec.kind {
+            vks_common::codec_spec::CodecKind::Audio => audio_codecs.push(id as i32),
+            vks_common::codec_spec::CodecKind::Video => video_codecs.push(id as i32),
+            vks_common::codec_spec::CodecKind::Dtmf => {}
+        }
+    }
+    media::RoomCaps {
+        room_mode: 1, // ROOM_MODE_SFU
+        video_codecs,
+        audio_codecs,
+        simulcast: false,
+        svc: false,
+        dtls_srtp: true,
+    }
+}
+
 impl HandlerConfig {
     /// Создаёт конфигурацию обработчика с явными параметрами.
     #[allow(clippy::too_many_arguments)]
@@ -68,14 +96,7 @@ impl HandlerConfig {
             rtp_maps,
             ice_servers: Vec::new(),
             room_mode: 1, // ROOM_MODE_SFU
-            caps: Some(vks_proto::media::RoomCaps {
-                room_mode: 1,
-                video_codecs: vec![1], // VP8; H.264 browser-leg не мостится в SFU до T06b
-                audio_codecs: vec![6], // OPUS
-                simulcast: false,
-                svc: false,
-                dtls_srtp: true,
-            }),
+            caps: Some(webrtc_room_caps()),
             video_bitrate_kbps: video_bitrate_from(std::env::var("VKS_SFU_VIDEO_BITRATE_KBPS").ok().as_deref()),
         }
     }
@@ -123,14 +144,7 @@ impl HandlerConfig {
             ],
             ice_servers: Vec::new(),
             room_mode: 1,
-            caps: Some(vks_proto::media::RoomCaps {
-                room_mode: 1,
-                video_codecs: vec![1],
-                audio_codecs: vec![6],
-                simulcast: false,
-                svc: false,
-                dtls_srtp: true,
-            }),
+            caps: Some(webrtc_room_caps()),
             video_bitrate_kbps: 2048,
         }
     }
@@ -737,5 +751,34 @@ mod tests {
         assert_eq!(high.answer_profile().b_as, Some(20_000));
         let configured = HandlerConfig::default_test().with_video_bitrate(4096);
         assert_eq!(configured.answer_profile().b_as, Some(4096));
+    }
+}
+
+#[cfg(test)]
+mod codec_caps_tests {
+    use super::*;
+
+    #[test]
+    fn proto_caps_match_ssot_webrtc_slice() {
+        let caps = webrtc_room_caps();
+        assert_eq!(caps.video_codecs, vec![media::CodecId::Vp8 as i32]);
+        assert_eq!(caps.audio_codecs, vec![media::CodecId::Opus as i32]);
+        let expected: Vec<i32> = vks_common::codec_spec::webrtc_answer_specs()
+            .filter(|spec| spec.kind == vks_common::codec_spec::CodecKind::Video)
+            .map(|spec| match spec.id {
+                vks_common::codec_spec::CodecId::Vp8 => media::CodecId::Vp8 as i32,
+                other => panic!("unexpected video codec {other:?}"),
+            })
+            .collect();
+        assert_eq!(caps.video_codecs, expected);
+    }
+
+    #[test]
+    fn unspecified_is_never_advertised() {
+        let caps = webrtc_room_caps();
+        assert!(!caps.video_codecs.contains(&(media::CodecId::Unspecified as i32)));
+        assert!(!caps.audio_codecs.contains(&(media::CodecId::Unspecified as i32)));
+        assert!(caps.video_codecs.iter().all(|id| *id > 0));
+        assert!(caps.audio_codecs.iter().all(|id| *id > 0));
     }
 }

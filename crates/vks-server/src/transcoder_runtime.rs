@@ -75,6 +75,9 @@ pub async fn init() -> Result<(), String> {
 
 fn publish_support(capabilities: &FfmpegCapabilities) {
     use vks_common::metrics::CODEC_WORKER_SUPPORTED;
+    // H.264 is intentionally absent: it is probed by `gateways::video_bridge_availability`
+    // (the SIP gateway bridge uses `ffmpeg -encoders/-decoders`), not by the
+    // worker `VideoCodec` enum. The label set must stay a subset of `codec_spec`.
     for (codec, decode, encode) in [
         ("aac", capabilities.has_audio_decoder(AudioCodec::Aac), capabilities.has_audio_encoder(AudioCodec::Aac)),
         (
@@ -127,5 +130,14 @@ mod tests {
     #[test]
     fn pool_is_absent_before_init() {
         assert!(pool().is_none());
+    }
+
+    #[test]
+    fn worker_metric_labels_are_subset_of_specs() {
+        // Every `/metrics CODEC_WORKER_SUPPORTED{codec=...}` label must resolve
+        // through the SSOT (T15): a label the matrix does not know is a lie.
+        for label in ["aac", "aac_latm", "g729", "h261", "h263", "h263p", "h265"] {
+            assert!(vks_common::codec_spec::lookup(label).is_some(), "metric label {label} is not in CODECS");
+        }
     }
 }
