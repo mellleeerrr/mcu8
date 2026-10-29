@@ -239,11 +239,15 @@ fn get_grid_edges(start: f64, count: usize, cell_size: f64, gap: f64) -> Vec<f64
 /// Равномерная сетка (галерея) с центрированием последнего неполного ряда.
 fn gallery(count: usize, width: f64, height: f64, gap: f64, margin: f64) -> Vec<SlotRect> {
     let count = count.max(1);
-    // Tiny canvases (`calculate(width=9,height=10)`) previously produced an
-    // inner area of 1px with a normal margin: cells escaped the canvas and
-    // `count - row*cols` underflowed in debug. Clamp the margin to a third of
-    // the canvas so inner area stays positive and no rect leaves the canvas.
-    let margin = margin.min(width.max(0.0) / 3.0).min(height.max(0.0) / 3.0).max(0.0);
+    // A canvas too small to hold one window is a broken `calculate` request:
+    // fall back to the server default geometry instead of emitting 1px cells
+    // that leave the canvas (`count - row*cols` also underflowed in debug).
+    let (width, height) = if !width.is_finite() || !height.is_finite() || width < 16.0 || height < 16.0 {
+        (1280.0, 720.0)
+    } else {
+        (width, height)
+    };
+    let margin = margin.min(width / 3.0).min(height / 3.0).max(0.0);
     let inner_w = (width - 2.0 * margin).max(1.0);
     let inner_h = (height - 2.0 * margin).max(1.0);
     let gap = clamp_gap(gap, count, inner_w, inner_h);
@@ -772,14 +776,19 @@ mod tests {
         // `count - row*cols` in debug and emit extra windows without overflow
         // checks. Every rect must stay finite and inside the canvas.
         for (width, height) in [(9.0, 10.0), (1.0, 1.0), (0.0, 0.0), (16.0, 9.0)] {
+            // Degenerate canvases fall back to the default 1280x720 geometry.
+            let (canvas_w, canvas_h) = if width < 16.0 || height < 16.0 { (1280.0, 720.0) } else { (width, height) };
             for count in 1..=100 {
                 let rects = gallery(count, width, height, 2.0, 8.0);
                 assert_eq!(rects.len(), count, "{count} windows at {width}x{height}");
                 for rect in &rects {
                     assert!(rect.width >= 1.0 && rect.height >= 1.0 && rect.x.is_finite() && rect.y.is_finite());
                     assert!(
-                        rect.x >= 0.0 && rect.y >= 0.0 && rect.x + rect.width <= width.max(1.0) + 1e-9,
-                        "{}x{}: {:?} outside canvas",
+                        rect.x >= -1e-9
+                            && rect.y >= -1e-9
+                            && rect.x + rect.width <= canvas_w + 1e-9
+                            && rect.y + rect.height <= canvas_h + 1e-9,
+                        "{}x{}: {:?} outside {canvas_w}x{canvas_h}",
                         width,
                         height,
                         rect

@@ -374,7 +374,33 @@ fn singular(kind: &str) -> &'static str {
 /// приоритетнее кэшированного `payload.size`, иначе раскладку можно
 /// «сжать» устаревшим числом.
 pub(crate) fn layout_size(payload: &Value) -> Option<usize> {
-    derived_layout_size(payload)
+    // Capacity is the resolver value, but never below the highest occupied
+    // window: a legacy record (preset 5, slots 1..9) must keep accepting
+    // PATCH/attach for the slots it already has.
+    let derived = derived_layout_size(payload);
+    let occupied = max_slot_position(payload);
+    let capacity = match (derived, occupied) {
+        (Some(derived), Some(occupied)) => derived.max(occupied),
+        (Some(derived), None) => derived,
+        (None, Some(occupied)) => occupied,
+        (None, None) => return None,
+    };
+    Some(capacity.min(vks_layout::grids::MAX_WINDOWS))
+}
+
+/// 1-based `position` максимума по ЗАНЯТЫМ слотам payload. Legacy-запись с 9
+/// занятыми окнами должна сохранять ёмкость 9 даже при пресете на 5; пустые
+/// AUTO-окна вне ёмкости (мусор прежних версий) ёмкость не раздувают.
+fn max_slot_position(payload: &Value) -> Option<usize> {
+    payload
+        .get("slots")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|slot| slot.get("abonent_id").and_then(Value::as_str).is_some())
+        .filter_map(|slot| slot.get("position").and_then(Value::as_u64))
+        .max()
+        .map(|position| position as usize)
 }
 
 /// Ёмкость раскладки: явный id пресета (параметрический конструктор, Codian,
@@ -1381,21 +1407,7 @@ pub(crate) fn recalc_layout_size(record: &mut Value) {
     // Legacy-записи могут содержать БОЛЬШЕ занятых слотов, чем новый пресет:
     // уменьшать size ниже max(position) нельзя — PATCH/attach начали бы
     // отклонять уже существующие слоты.
-    let derived = derived_layout_size(&record["payload"]);
-    let occupied = record["payload"]["slots"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|slot| slot.get("position").and_then(Value::as_u64))
-        .max()
-        .map(|position| position as usize);
-    let size = match (derived, occupied) {
-        (Some(derived), Some(occupied)) => Some(derived.max(occupied).min(vks_layout::grids::MAX_WINDOWS)),
-        (Some(derived), None) => Some(derived.min(vks_layout::grids::MAX_WINDOWS)),
-        (None, Some(occupied)) => Some(occupied.min(vks_layout::grids::MAX_WINDOWS)),
-        (None, None) => None,
-    };
-    if let Some(size) = size {
+    if let Some(size) = layout_size(&record["payload"]) {
         record["payload"]["size"] = json!(size);
     }
 }
@@ -1444,14 +1456,20 @@ pub(super) enum UpdateError {
 /// Уникальность и границы окон: позиции в `1..=size`, без дублей. Битые
 /// legacy-раскладки не ремонтируем молча — PATCH должен вернуть 409 с reason.
 pub(super) fn validate_layout_assignments(payload: &Value) -> Result<(), UpdateError> {
+    validate_layout_assignments_with_capacity(payload, None)
+}
+
+/// Как [`validate_layout_assignments`], но с ёмкостью, зафиксированной ДО merge
+/// запроса: legacy-запись с size=9 и пресетом на 5 окон должна принимать PATCH
+/// существующих окон, а новые окна за её ёмкость выходить не должны.
+pub(super) fn validate_layout_assignments_with_capacity(
+    payload: &Value,
+    stored_capacity: Option<usize>,
+) -> Result<(), UpdateError> {
     let Some(slots) = payload.get("slots").and_then(Value::as_array) else { return Ok(()) };
     // Ёмкость сетки: у пресета она больше числа сохранённых слотов (слоты
     // перечисляют только занятые/созданные окна, `position` — номер окна в сетке).
-    let size = payload
-        .get("preset")
-        .and_then(Value::as_str)
-        .and_then(vks_layout::preset_size)
-        .or_else(|| layout_size(payload));
+    let size = stored_capacity.or_else(|| derived_layout_size(payload));
     let mut seen = std::collections::HashSet::new();
     for slot in slots.iter().filter(|slot| slot.is_object()) {
         let Some(raw_position) = slot.get("position") else {
@@ -1486,6 +1504,7 @@ fn update_resource(record: &mut Value, body: &Value) -> Result<(), UpdateError> 
     if let Some(name) = body.get("display_name") {
         record["display_name"] = name.clone();
     }
+    let stored_capacity = layout_size(&record["payload"]);
     if let Some(payload) = body.get("payload") {
         if !payload.is_object() {
             return Err(UpdateError::Invalid("payload must be an object".to_string()));
@@ -1504,7 +1523,7 @@ fn update_resource(record: &mut Value, body: &Value) -> Result<(), UpdateError> 
         recalc_layout_size(record);
         recalc_audio_counts(record);
         ensure_slot_roles(record);
-        validate_layout_assignments(&record["payload"])?;
+        validate_layout_assignments_with_capacity(&record["payload"], stored_capacity)?;
     }
     Ok(())
 }

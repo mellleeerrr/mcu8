@@ -72,7 +72,11 @@ impl RecordingControl for RecorderControl {
             // After a restart the in-memory session is gone but the DB may hold
             // an unfinalized row; finalize it so DELETE actually stops it.
             if let Some(storage) = state.storage.clone() {
-                if let Ok(records) = storage.list_records(Some(room_id)).await {
+                let records = storage
+                    .list_records(Some(room_id))
+                    .await
+                    .map_err(|error| format!("recording metadata read failed: {error}"))?;
+                {
                     for mut entry in records.into_iter().filter(|entry| entry.duration_sec == 0) {
                         let now_ms = vks_admin::state::now_unix_ms();
                         entry.duration_sec = (((now_ms.saturating_sub(entry.created_ms)) / 1000).max(1)) as u32;

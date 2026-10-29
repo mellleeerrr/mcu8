@@ -2360,8 +2360,11 @@ fn recalc_layout_size_распознаёт_конструктор() {
         "payload": {
             "mode": "auto",
             "preset": "vks_grid_g8_m16_5",
-            "slots": [{"position": 1}, {"position": 2}, {"position": 3}, {"position": 4},
-                      {"position": 5}, {"position": 6}, {"position": 7}, {"position": 8}, {"position": 9}],
+            "slots": [{"position": 1, "abonent_id": "p1"}, {"position": 2, "abonent_id": "p2"},
+                      {"position": 3, "abonent_id": "p3"}, {"position": 4, "abonent_id": "p4"},
+                      {"position": 5, "abonent_id": "p5"}, {"position": 6, "abonent_id": "p6"},
+                      {"position": 7, "abonent_id": "p7"}, {"position": 8, "abonent_id": "p8"},
+                      {"position": 9, "abonent_id": "p9"}],
         }
     });
     recalc_layout_size(&mut stale);
@@ -2502,6 +2505,27 @@ fn pnm_layout_size_prefers_preset_capacity_over_stale_explicit_size() {
     assert_eq!(super::layout_size(&json!({"size":7})), Some(7));
     assert_eq!(super::layout_size(&json!({"slots":[{"position":1},{"position":2}]})), Some(2));
     assert_eq!(super::layout_size(&json!({})), None);
+}
+
+/// T06 review P1-регрессия: legacy-раскладка с числом занятых окон больше
+/// ёмкости пресета не теряет эти окна — ни validate, ни attach (оба идут через
+/// `layout_size`) не должны видеть ёмкость 5 при слотах 1..9.
+#[test]
+fn legacy_layout_capacity_never_drops_below_occupied_slots() {
+    let positions: Vec<_> = (1..=9)
+        .map(|position| json!({"position": position, "role": "PEER", "abonent_id": format!("peer-{position}")}))
+        .collect();
+    for preset in ["preset_equal_5", "vks_grid_5"] {
+        let payload = json!({"preset": preset, "size": 5, "slots": positions});
+        assert_eq!(super::layout_size(&payload), Some(9), "{preset}: capacity keeps occupied windows");
+        let stored = super::layout_size(&payload);
+        assert!(
+            super::validate_layout_assignments_with_capacity(&payload, stored).is_ok(),
+            "{preset}: existing slots stay valid"
+        );
+        // A sparse preset still keeps its own capacity.
+        assert_eq!(super::layout_size(&json!({"preset":"preset_equal_5"})), Some(5), "{preset}: no slots -> preset");
+    }
 }
 
 /// S7-регрессия: `preset_equal` без числа не должен раздувать явный `size` до

@@ -523,6 +523,7 @@ mod tests {
     struct PushTransport {
         handler: std::sync::Mutex<Option<Arc<dyn crate::signaling_client::PushHandler>>>,
         join_layout: std::sync::Mutex<Option<vks_proto::signaling::Layout>>,
+        join_room_mode: std::sync::Mutex<vks_proto::media::RoomMode>,
         resume_ok: std::sync::Mutex<bool>,
     }
 
@@ -531,8 +532,13 @@ mod tests {
             Self {
                 handler: std::sync::Mutex::new(None),
                 join_layout: std::sync::Mutex::new(None),
+                join_room_mode: std::sync::Mutex::new(vks_proto::media::RoomMode::Unspecified),
                 resume_ok: std::sync::Mutex::new(false),
             }
+        }
+
+        fn set_join_room_mode(&self, mode: vks_proto::media::RoomMode) {
+            *self.join_room_mode.lock().expect("join mode lock") = mode;
         }
 
         fn with_join_layout(layout: vks_proto::signaling::Layout) -> Self {
@@ -593,7 +599,7 @@ mod tests {
                 join_nonce: "nonce-1".into(),
                 participants: vec!["p1".into()],
                 layout: self.join_layout.lock().expect("join layout lock").clone(),
-                room_mode: vks_proto::media::RoomMode::Unspecified,
+                room_mode: *self.join_room_mode.lock().expect("join mode lock"),
             })
         }
 
@@ -754,6 +760,35 @@ mod tests {
         c.reconnect_async(&mut client).await.unwrap();
         assert_eq!(c.state(), ConferenceState::Active);
         assert_eq!(c.join_nonce(), Some(nonce.as_str()));
+    }
+
+    /// T08 P1 regression: a clean rejoin must refresh the pipeline from the
+    /// fresh `JoinRoomResult.room_mode` (a room can switch SFU<->MCU while the
+    /// client is disconnected), and `Unspecified` must keep the current one.
+    #[tokio::test]
+    async fn rejoin_refreshes_the_pipeline_from_room_mode() {
+        let transport = Arc::new(PushTransport::new());
+        let mut client = SignalingClient::with_transport(transport.clone());
+        let mut c = Conference::new(test_cfg());
+        c.start_async(&client).await.expect("join ok");
+        assert_eq!(c.media().mode(), crate::media_engine::RoomMode::Sfu, "default pipeline");
+
+        // Force the clean-rejoin path (resume is disabled on this transport)
+        // and report an MCU room on the next join.
+        transport.set_join_room_mode(vks_proto::media::RoomMode::Mcu);
+        c.join_nonce = None;
+        c.nonce_acquired_at = None;
+        c.on_connection_lost();
+        c.reconnect_async(&mut client).await.expect("rejoin");
+        assert_eq!(c.media().mode(), crate::media_engine::RoomMode::Mcu, "rejoin must adopt the new mode");
+
+        // Unspecified (old server) keeps the pipeline instead of resetting it.
+        transport.set_join_room_mode(vks_proto::media::RoomMode::Unspecified);
+        c.join_nonce = None;
+        c.nonce_acquired_at = None;
+        c.on_connection_lost();
+        c.reconnect_async(&mut client).await.expect("rejoin");
+        assert_eq!(c.media().mode(), crate::media_engine::RoomMode::Mcu, "unspecified keeps current");
     }
 
     /// T10c: join-снимок применяет и геометрию, и метаданные (поздний

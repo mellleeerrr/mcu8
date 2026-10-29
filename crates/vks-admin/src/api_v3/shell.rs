@@ -1007,6 +1007,7 @@ pub async fn switch_video_layout_mode(
             .unwrap_or(13);
         patch.insert("size".to_string(), json!(inferred_size));
     }
+    let stored_capacity = super::resources::layout_size(&draft["payload"]);
     if let Some(payload) = draft["payload"].as_object_mut() {
         for (key, value) in &patch {
             payload.insert(key.clone(), value.clone());
@@ -1017,7 +1018,7 @@ pub async fn switch_video_layout_mode(
     super::resources::recalc_layout_size(&mut draft);
     // Mode — такая же запись назначений, как PATCH: дубли/позиции вне ёмкости
     // не должны попадать в БД (иначе запись «отравлена» для attach/PATCH).
-    match super::resources::validate_layout_assignments(&draft["payload"]) {
+    match super::resources::validate_layout_assignments_with_capacity(&draft["payload"], stored_capacity) {
         Ok(()) => {}
         Err(super::resources::UpdateError::Invalid(message)) => return super::error_json(422, &message),
         Err(super::resources::UpdateError::Conflict(message)) => return super::error_json(409, &message),
