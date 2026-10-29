@@ -5,8 +5,9 @@
 //! фиксирует метаданные в хранилище и уведомляет админ-панель.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::task::AbortHandle;
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -14,7 +15,7 @@ use vks_admin::hub::ParticipantSnapshot;
 use vks_admin::state::RecordingControl;
 use vks_admin::state::{now_unix_ms, AppState, RecordEntry};
 use vks_core::RoomId;
-use vks_media_mcu::farm::{FarmCodec, FarmTap};
+use vks_media_mcu::farm::{EncoderFarm, EncoderKey, FarmCodec, FarmTap};
 use vks_media_mcu::EncoderSpec;
 use vks_proto::signaling::signaling_message::Payload;
 use vks_proto::signaling::{ParticipantJoined, ParticipantLeft, SignalingMessage};
@@ -53,7 +54,18 @@ impl RecordingControl for RecorderControl {
             // закрыта, но сессия ещё жива 10–20 мс. Честный ответ — ошибка
             // «запись завершается», а не 200 со старым id на запись, которая
             // уже ничего не пишет (T09b review D P2-1).
-            if self.active_h264_groups(room_id) == 0 {
+            //
+            // Проверяем живость СОБСТВЕННОГО tap'а сессии, а не любой группы
+            // комнаты (T09b review E P2-1): при re-key/перекрытии в комнате
+            // может остаться живая группа B, пока группа A, на которую
+            // подписан tap, уже закрыта. `active_h264_groups(room) > 0` тогда
+            // маскирует мёртвый tap и даёт ложный 200 со старым id.
+            let own_tap_live = self.recorder.has_live_tap(&room_id, self.mcu_engine.video_farm());
+            let room_has_group = || self.active_h264_groups(room_id) > 0;
+            // `None` — сессия без tap (legacy `start_recording`): для неё
+            // сохраняем прежний coarse-гейт.
+            let tap_alive = own_tap_live.unwrap_or_else(room_has_group);
+            if !tap_alive {
                 return Err("запись завершается: живой H.264-группы больше нет; повторите старт".to_string());
             }
             return self
@@ -62,6 +74,10 @@ impl RecordingControl for RecorderControl {
                 .map(|record_id| record_id.to_string())
                 .map_err(|error| error.to_string());
         }
+        // Detached-финализация предыдущей сессии может ещё дописывать
+        // storage.upsert; новый старт обязан дождаться её, иначе две сессии
+        // гоняются за одной строкой/артефактом (T09b review E P3-4).
+        self.recorder.wait_for_pending_finalizers(&room_id).await;
         // A recording that was active when the process died leaves an
         // unfinalized row (duration_sec == 0). Starting again must reuse the
         // room's recording slot, not accumulate duplicate active rows.
@@ -88,7 +104,13 @@ impl RecordingControl for RecorderControl {
         if let Some(storage) = state.storage.clone() {
             let entry = { state.records.lock().unwrap().get(&record_id.to_string()).cloned() };
             if let Some(entry) = entry {
-                storage.upsert_record(&entry).await.map_err(|error| format!("record persistence failed: {error}"))?;
+                if let Err(error) = storage.upsert_record(&entry).await {
+                    // Неудачный persist не должен оставлять живую сессию:
+                    // иначе повторный `start` идёт по idempotent-ветке и
+                    // возвращает Ok, так и не записав строку (review E P3-3).
+                    self.recorder.abort_start(&state, &room_id, record_id);
+                    return Err(format!("record persistence failed: {error}"));
+                }
             }
         }
         Ok(record_id.to_string())
@@ -152,11 +174,12 @@ pub struct RecorderManager {
     /// для честного повторного DELETE (T09b review A P2-1).
     stopped_cache: Arc<Mutex<HashMap<RoomId, StoppedRecord>>>,
     containers: Arc<Mutex<HashMap<String, Vec<u8>>>>,
-    /// Abort-хэндлы tap-тасков по комнатам (non-owning подписки на группы).
-    taps: Arc<Mutex<HashMap<RoomId, AbortHandle>>>,
-    /// Причина, по которой tap перестал писать (writer отверг сэмпл): должна
-    /// вернуться из stop, а не превратиться в 200 с усечённым MP4.
-    tap_errors: Arc<Mutex<HashMap<RoomId, String>>>,
+    /// Tap-таски по комнатам (non-owning подписки на группы). Запись 1:1 с
+    /// сессией: ключ группы + liveness-флаг + ошибка writer'а (P2-1/P3-2).
+    taps: Arc<Mutex<HashMap<RoomId, TapTask>>>,
+    /// Detached-задачи финализации по комнатам (P3-4): следующая сессия
+    /// дожидается их, чтобы не гоняться со storage.upsert.
+    finalizers: Arc<Mutex<HashMap<RoomId, Vec<JoinHandle<()>>>>>,
 }
 
 impl Default for RecorderManager {
@@ -174,7 +197,7 @@ impl RecorderManager {
             stopped_cache: Arc::new(Mutex::new(HashMap::new())),
             containers: Arc::new(Mutex::new(HashMap::new())),
             taps: Arc::new(Mutex::new(HashMap::new())),
-            tap_errors: Arc::new(Mutex::new(HashMap::new())),
+            finalizers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -182,6 +205,59 @@ impl RecorderManager {
     pub fn is_recording(&self, room_id: &RoomId) -> bool {
         let guard = self.sessions.lock().unwrap();
         guard.contains_key(room_id)
+    }
+
+    /// Жив ли tap **собственной** сессии комнаты.
+    ///
+    /// `None` — у сессии нет tap'а (legacy `start_recording`, не через
+    /// `RecorderControl`), вызывающий решает по старому гейту.
+    /// `Some(false)` — tap-таск завершился сам (Closed/ошибка writer'а) или
+    /// его группа уже не зарегистрирована в ферме, даже если в комнате есть
+    /// другая живая группа (re-key/перекрытие, review E P2-1).
+    fn has_live_tap(&self, room_id: &RoomId, farm: &EncoderFarm) -> Option<bool> {
+        let (key, task_alive) = {
+            let taps = self.taps.lock().unwrap();
+            let tap = taps.get(room_id)?;
+            (tap.key.clone(), tap.live.load(Ordering::Acquire))
+        };
+        if !task_alive {
+            return Some(false);
+        }
+        // Группа ретируется синхронно (drop последнего viewer'а), поэтому
+        // точное совпадение ключа в снимке фермы — честный признак «эта
+        // группа ещё жива»; любая другая группа комнаты не маскирует смерть.
+        let group_live = farm.canvas_version(key.room) == key.canvas_version
+            && farm.snapshot().iter().any(|stat| stat.key == key && stat.refcount > 1);
+        Some(group_live)
+    }
+
+    /// Откатывает только что созданную запись, чей `storage.upsert` упал
+    /// (review E P3-3): без этого `is_recording=true` навсегда, а повторный
+    /// `start` возвращает Ok, так и не записав строку.
+    fn abort_start(&self, state: &Arc<AppState>, room_id: &RoomId, record_id: Uuid) {
+        {
+            let mut sessions = self.sessions.lock().unwrap();
+            let ours = sessions.get(room_id).and_then(RecordingSession::record_id) == Some(record_id);
+            if !ours {
+                return;
+            }
+            sessions.remove(room_id);
+        }
+        if let Some(tap) = self.taps.lock().unwrap().remove(room_id) {
+            tap.handle.abort();
+        }
+        self.detach_room_participant(state, room_id);
+        state.records.lock().unwrap().remove(&record_id.to_string());
+        self.stopped_cache.lock().unwrap().remove(room_id);
+    }
+
+    /// Дожидается detached-финализаций комнаты (review E P3-4): следующий
+    /// старт не должен обгонять `storage.upsert` предыдущей сессии.
+    async fn wait_for_pending_finalizers(&self, room_id: &RoomId) {
+        let handles = self.finalizers.lock().unwrap().remove(room_id).unwrap_or_default();
+        for handle in handles {
+            let _ = handle.await;
+        }
     }
 
     /// Сохраняет готовый медиаконтейнер записи в хранилище артефактов.
@@ -301,15 +377,24 @@ impl RecorderManager {
         self.stopped_cache.lock().unwrap().remove(room_id);
 
         if let Some(tap) = tap {
+            let tap_key = tap.key.clone();
+            let tap_live = Arc::new(AtomicBool::new(true));
+            let tap_error = Arc::new(Mutex::new(None));
             let sessions = Arc::clone(&self.sessions);
             let tap_room = *room_id;
             let manager = self.clone();
             let tap_state = Arc::clone(state);
-            let tap_errors = Arc::clone(&self.tap_errors);
+            let live_flag = Arc::clone(&tap_live);
+            let error_cell = Arc::clone(&tap_error);
             let handle = tokio::spawn(async move {
-                let tap_error = recorder_tap::run(tap_room, tap, sessions).await;
-                if let Some(error) = tap_error {
-                    tap_errors.lock().unwrap().insert(tap_room, error);
+                let error = recorder_tap::run(tap_room, tap, sessions).await;
+                // Завершение tap'а и запись ошибки — синхронно в том же poll'е,
+                // в котором `run().await` вернулся: stop, абортящий handle,
+                // либо увидит ошибку, либо таск был отменён до её появления
+                // (review E P3-2: никакой общей map, которую можно затереть).
+                live_flag.store(false, Ordering::Release);
+                if let Some(error) = error {
+                    *error_cell.lock().unwrap() = Some(error);
                 }
                 // T09b review A P1-1: группа ретировалась вместе с последним
                 // зрителем — запись не должна остаться ACTIVE без источника.
@@ -318,7 +403,10 @@ impl RecorderManager {
                 // посреди storage.upsert (review C P1).
                 manager.finalize_after_tap_stop(&tap_state, &tap_room, record_id).await;
             });
-            self.taps.lock().unwrap().insert(*room_id, handle.abort_handle());
+            self.taps
+                .lock()
+                .unwrap()
+                .insert(*room_id, TapTask { key: tap_key, live: tap_live, error: tap_error, handle });
         }
 
         // 4. Оповещение административного WebSocket
@@ -349,15 +437,27 @@ impl RecorderManager {
         state: &Arc<AppState>,
         room_id: &RoomId,
         spawn_bg_persistence: bool,
-    ) -> Result<StopOutcome, RecordingError> {
+        expected: Option<Uuid>,
+    ) -> Result<(StopOutcome, Option<TapTask>), RecordingError> {
         let mut session = {
             let mut guard = self.sessions.lock().unwrap();
-            match guard.remove(room_id) {
-                Some(session) => session,
+            match guard.get(room_id) {
+                Some(session) => {
+                    // Сверка поколения под ТЕМ ЖЕ lock, что и удаление:
+                    // detached-финализатор не должен убить новую сессию,
+                    // созданную после stop+start (review E P3-1).
+                    if expected.is_some_and(|record_id| session.record_id() != Some(record_id)) {
+                        return Err(RecordingError::NotStarted);
+                    }
+                    guard.remove(room_id).expect("session was checked above")
+                }
                 None => {
+                    if expected.is_some() {
+                        return Err(RecordingError::NotStarted);
+                    }
                     // Проверяем кэш недавно остановленных сессий (идемпотентность)
                     if let Some((meta, finalize_error)) = self.stopped_cache.lock().unwrap().get(room_id).cloned() {
-                        return Ok(StopOutcome { meta, entry: None, finalize_error });
+                        return Ok((StopOutcome { meta, entry: None, finalize_error }, None));
                     }
                     return Err(RecordingError::NotStarted);
                 }
@@ -365,9 +465,13 @@ impl RecorderManager {
         };
 
         // Останавливаем tap до финализации: он не должен дописывать сэмплы,
-        // пока writer собирает moov.
-        if let Some(handle) = self.taps.lock().unwrap().remove(room_id) {
-            handle.abort();
+        // пока writer собирает moov. Ошибку writer'а забирает вызывающий
+        // ПОСЛЕ await tap-таска: запись в ячейку и завершение таска
+        // синхронны, поэтому stop не может прочитать её «до» (review E P3-2).
+        // Ячейка per-session — поздняя запись не припишется новой сессии.
+        let tap_task = self.taps.lock().unwrap().remove(room_id);
+        if let Some(tap) = tap_task.as_ref() {
+            tap.handle.abort();
         }
 
         let record_id = session.record_id();
@@ -375,9 +479,6 @@ impl RecorderManager {
         // метаданные уже закэшированы внутри сессии — запись/участник будут
         // закрыты ниже в любом случае (P1: не терять RoomHub-участника).
         let stop_result = session.stop();
-        // Ошибка tap'а (writer отверг сэмпл) не должна теряться даже если
-        // контейнер формально финализировался: файл усечён (review B P2-2).
-        let tap_error = self.tap_errors.lock().unwrap().remove(room_id);
         if let Some(bytes) = session.container_bytes() {
             if let Some(record_id) = record_id {
                 self.save_container(&record_id.to_string(), bytes.to_vec());
@@ -407,14 +508,10 @@ impl RecorderManager {
 
         // 3. Фиксация в хранилище записей
         self.storage.lock().unwrap().save(meta.clone());
-        let finalize_error = stop_result
-            .as_ref()
-            .err()
-            .map(|error| match error {
-                RecordingError::Container(message) => message.clone(),
-                other => other.to_string(),
-            })
-            .or(tap_error);
+        let finalize_error = stop_result.as_ref().err().map(|error| match error {
+            RecordingError::Container(message) => message.clone(),
+            other => other.to_string(),
+        });
         self.stopped_cache.lock().unwrap().insert(*room_id, (meta.clone(), finalize_error.clone()));
 
         // 4. Строка AppState.records: сохраняем фактические width/height/
@@ -451,13 +548,29 @@ impl RecorderManager {
         }
 
         info!(room_id = %room_id, duration_ms = meta.duration_ms, size_bytes = meta.size_bytes, "Recording stopped for room");
-        Ok(StopOutcome {
-            meta,
-            entry: Some(entry),
-            // Причиной может быть и ошибка tap'а (writer отверг сэмпл), а не
-            // только finalize контейнера (review D P3-2).
-            finalize_error,
-        })
+        Ok((
+            StopOutcome {
+                meta,
+                entry: Some(entry),
+                // Ошибку tap'а (writer отверг сэмпл) вызывающий добавит после
+                // await tap-таска (review D P3-2 / review E P3-2).
+                finalize_error,
+            },
+            tap_task,
+        ))
+    }
+
+    /// Добавляет ошибку tap'а к итогу stop'а и к кэшу повторного DELETE.
+    /// Приоритет — ошибка финализации контейнера (как и раньше).
+    fn apply_tap_error(&self, room_id: &RoomId, outcome: &mut StopOutcome, tap_error: Option<String>) {
+        if outcome.finalize_error.is_none() {
+            if let Some(tap_error) = tap_error {
+                outcome.finalize_error = Some(tap_error);
+                if let Some(cached) = self.stopped_cache.lock().unwrap().get_mut(room_id) {
+                    cached.1 = outcome.finalize_error.clone();
+                }
+            }
+        }
     }
 
     /// Снимает recorder-участника с RoomHub и рассылает ParticipantLeft.
@@ -497,29 +610,32 @@ impl RecorderManager {
     /// writer отверг сэмпл): без этого сессия оставалась Running/ACTIVE без
     /// источника, а повторный start не переподписывался (T09b review A P1-1).
     async fn finalize_after_tap_stop(&self, state: &Arc<AppState>, room_id: &RoomId, expected: Uuid) {
-        if !self.is_recording(room_id) {
-            return;
-        }
         let manager = self.clone();
         let state = Arc::clone(state);
         let room_id = *room_id;
         // Отдельный таск: stop абортит AbortHandle tap-таска, и выполнение
         // финализации внутри него отменялось посреди storage.upsert (review C P1).
-        tokio::spawn(async move {
-            let still_same =
-                manager.sessions.lock().unwrap().get(&room_id).and_then(vks_recorder::RecordingSession::record_id)
-                    == Some(expected);
-            if !still_same {
-                debug!(room = %room_id, "recording already replaced/stopped; detached finalize skipped");
-                return;
-            }
-            match manager.stop_recording_async(&state, &room_id).await {
+        // Handle трекается (review E P3-4): следующий старт дожидается его,
+        // а ошибки/скипы логируются здесь, а не теряются.
+        // Держим lock до push: `wait_for_pending_finalizers` не может
+        // проскочить между spawn и регистрацией handle'а.
+        let mut finalizers = self.finalizers.lock().unwrap();
+        let handle = tokio::spawn(async move {
+            match manager.stop_recording_async_inner(&state, &room_id, Some(expected)).await {
                 Ok(meta) => {
                     info!(room = %room_id, size_bytes = meta.size_bytes, "recording finalized after encoder group closed")
+                }
+                // Сессию уже остановили или заменили: этот финализатор не её
+                // (сверка record_id была под тем же lock, что и удаление).
+                Err(RecordingError::NotStarted) => {
+                    debug!(room = %room_id, "recording already replaced/stopped; detached finalize skipped")
                 }
                 Err(error) => warn!(room = %room_id, %error, "recording finalized with container error after tap stop"),
             }
         });
+        let pending = finalizers.entry(room_id).or_default();
+        pending.retain(|handle| !handle.is_finished());
+        pending.push(handle);
     }
 
     /// Останавливает запись комнаты и сохраняет метаданные.
@@ -529,7 +645,12 @@ impl RecorderManager {
     /// превращается в «успех с пустым файлом»); строка записи и RoomHub уже
     /// приведены в согласованное состояние.
     pub fn stop_recording(&self, state: &Arc<AppState>, room_id: &RoomId) -> Result<RecordingMeta, RecordingError> {
-        let outcome = self.stop_recording_internal(state, room_id, true)?;
+        let (mut outcome, tap_task) = self.stop_recording_internal(state, room_id, true, None)?;
+        // Sync-путь не может await'ить tap-таск: он уже абортнут, ошибку
+        // читаем best-effort. Control-plane DELETE идёт через
+        // `stop_recording_async`, где ожидание гарантировано.
+        let tap_error = tap_task.and_then(|tap| tap.error.lock().unwrap().take());
+        self.apply_tap_error(room_id, &mut outcome, tap_error);
         match outcome.finalize_error {
             Some(message) => Err(RecordingError::Container(message)),
             None => Ok(outcome.meta),
@@ -542,7 +663,29 @@ impl RecorderManager {
         state: &Arc<AppState>,
         room_id: &RoomId,
     ) -> Result<RecordingMeta, RecordingError> {
-        let outcome = self.stop_recording_internal(state, room_id, false)?;
+        self.stop_recording_async_inner(state, room_id, None).await
+    }
+
+    /// Останавливает запись, только если её `record_id` всё ещё совпадает с
+    /// ожидаемым (detached-финализатор tap'а, review E P3-1).
+    async fn stop_recording_async_inner(
+        &self,
+        state: &Arc<AppState>,
+        room_id: &RoomId,
+        expected: Option<Uuid>,
+    ) -> Result<RecordingMeta, RecordingError> {
+        let (mut outcome, tap_task) = self.stop_recording_internal(state, room_id, false, expected)?;
+        // Ожидаем aborted-таск: после await ячейка ошибки финальна, поэтому
+        // stop не может разминуться с writer-error (review E P3-2).
+        let tap_error = match tap_task {
+            Some(tap) => {
+                tap.handle.abort();
+                let _ = tap.handle.await;
+                tap.error.lock().unwrap().take()
+            }
+            None => None,
+        };
+        self.apply_tap_error(room_id, &mut outcome, tap_error);
         if let (Some(ref storage), Some(entry)) = (&state.storage, outcome.entry.clone()) {
             // DELETE must not return 200 while the DB row still looks ACTIVE.
             storage.upsert_record(&entry).await.map_err(|error| RecordingError::Storage(error.to_string()))?;
@@ -559,6 +702,22 @@ impl RecorderManager {
 
 /// Недавно остановленная запись: метаданные + ошибка финализации (если была).
 type StoppedRecord = (RecordingMeta, Option<String>);
+
+/// Per-session состояние tap-таска: на какую группу подписан, жив ли таск и
+/// какая ошибка writer'а возникла. Живёт 1:1 с сессией в `sessions` (review E
+/// P2-1: живость tap'а нельзя выводить из `active_h264_groups(room)`).
+struct TapTask {
+    /// Ключ группы (room + canvas_version + spec), на которую подписались.
+    key: EncoderKey,
+    /// `false` после завершения `recorder_tap::run` (Closed/ошибка writer'а).
+    /// Abort при `stop` флаг не трогает: сессия к тому моменту уже удалена.
+    live: Arc<AtomicBool>,
+    /// Ошибка writer'а из `recorder_tap::run`; пишется в том же poll'е, что и
+    /// возврат из `run`, поэтому stop видит её детерминированно (P3-2).
+    error: Arc<Mutex<Option<String>>>,
+    /// Tap-таск; `stop` абортит его до финализации контейнера.
+    handle: JoinHandle<()>,
+}
 
 /// Итог остановки: метаданные + строка (для persistence) + ошибка finalize,
 /// которую нельзя терять, но и нельзя мешать cleanup (P1-5).

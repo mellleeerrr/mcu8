@@ -36,13 +36,18 @@ fn ffprobe_available() -> bool {
 }
 
 fn encoder_spec() -> EncoderSpec {
+    encoder_spec_with_bitrate(1024)
+}
+
+/// Второй `EncoderSpec` на том же холсте — другой ключ группы (re-key).
+fn encoder_spec_with_bitrate(bitrate_kbps: u32) -> EncoderSpec {
     EncoderSpec {
         codec: FarmCodec::H264,
         width: 640,
         height: 360,
         fps: 30,
-        bitrate_kbps: 1024,
-        maxrate_kbps: 1024,
+        bitrate_kbps,
+        maxrate_kbps: bitrate_kbps,
         bufsize_kbps: 2048,
         profile: "baseline".into(),
         level: "3.1".into(),
@@ -141,7 +146,7 @@ async fn recording_tap_reuses_existing_group_without_becoming_a_viewer() {
                 "-select_streams",
                 "v:0",
                 "-show_entries",
-                "stream=codec_name,codec_tag_string,is_avc,nal_length_size,time_base,nb_read_frames",
+                "stream=codec_name,codec_tag_string,is_avc,nal_length_size,time_base,has_b_frames,nb_read_frames",
                 "-of",
                 "default=noprint_wrappers=1",
             ])
@@ -151,9 +156,16 @@ async fn recording_tap_reuses_existing_group_without_becoming_a_viewer() {
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let text = String::from_utf8_lossy(&output.stdout).to_string();
         eprintln!("tap ffprobe:\n{text}");
-        for expected in
-            ["codec_name=h264", "codec_tag_string=avc1", "is_avc=true", "nal_length_size=4", "time_base=1/90000"]
-        {
+        for expected in [
+            "codec_name=h264",
+            "codec_tag_string=avc1",
+            "is_avc=true",
+            "nal_length_size=4",
+            "time_base=1/90000",
+            // T09b review E P3-7: B-кадров нет, `ctts` не пишется — MP4 не
+            // должен нести B-frames (перепроверка независимым декодером).
+            "has_b_frames=0",
+        ] {
             assert!(text.lines().any(|line| line == expected), "missing {expected} in {text}");
         }
         let frames = text
@@ -252,6 +264,118 @@ async fn recording_finalizes_when_encoder_group_closes() {
     assert_ne!(second, record_id, "a new session must be created, not a stale one");
     control.stop(room).await.ok();
     drop(viewer2);
+}
+
+/// T09b review E P2-1: в комнате остаётся вторая живая H.264-группа B, а
+/// группа A, на которую подписан tap, закрывается. Немедленный `start` не
+/// имеет права вернуть Ok(stale id): живость проверяется по собственному
+/// ключу tap'а, а не по `active_h264_groups(room)`. После автофинализации B
+/// должна остаться доступной для tap'а.
+#[tokio::test]
+async fn recording_immediate_restart_rejects_dead_tap_with_second_live_group() {
+    if !ffmpeg_available() {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    }
+    let state = Arc::new(AppState::new());
+    let room = RoomId::new();
+    let engine = Arc::new(McuEngine::new());
+    let participant = ParticipantId::new();
+    engine.bridge_participant(room, participant, vec![Track::new(participant, TrackKind::Video)]);
+    assert!(engine.ensure_composite_size(room, 640, 360));
+
+    let viewer_a = engine.acquire_video_viewer(room, &encoder_spec()).await.expect("group A");
+    let manager = RecorderManager::new();
+    let control = RecorderControl::new(manager.clone(), Arc::downgrade(&state), engine.clone());
+    let old_id = control.start(room).await.expect("start taps group A");
+    assert!(manager.is_recording(&room));
+
+    // Вторая живая группа того же холста, но другого EncoderSpec (re-key):
+    // её наличие маскировало мёртвый tap при проверке active_h264_groups.
+    let viewer_b = engine.acquire_video_viewer(room, &encoder_spec_with_bitrate(512)).await.expect("group B");
+    assert_eq!(engine.video_farm().active_group_count(room, FarmCodec::H264), 2);
+    assert_eq!(engine.video_farm_stats().len(), 2, "two live groups in one room");
+
+    // Последний зритель A уходит: A ретируется синхронно, B остаётся живой.
+    drop(viewer_a);
+    assert_eq!(engine.video_farm().active_group_count(room, FarmCodec::H264), 1, "only B remains live");
+
+    // Окно автофинализации: сессия ещё жива, но её tap мёртв. Ложный 200 со
+    // старым id запрещён, даже несмотря на живую B.
+    let error = control.start(room).await.expect_err("dead tap must not return a stale id while B lives");
+    assert!(error.contains("запись завершается"), "same honest error text, got: {error}");
+    assert!(manager.is_recording(&room), "stale session is still in its finalize window");
+
+    // Detached finalize старой сессии: пустой MP4 не пишется, B не трогается.
+    let mut finalized = false;
+    for _ in 0..100 {
+        if !manager.is_recording(&room) {
+            finalized = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(finalized, "dead tap must finalize the stale session");
+    assert!(manager.get_container(&old_id).is_none(), "no empty MP4 for the dead tap");
+    assert_eq!(engine.video_farm().active_group_count(room, FarmCodec::H264), 1, "B survived the stale finalize");
+    let old_row = state.records.lock().unwrap().get(&old_id).cloned().expect("old record row");
+    assert!(old_row.duration_sec >= 1, "old row must not look active: {old_row:?}");
+    assert_eq!(old_row.size_bytes, 0, "dead tap wrote nothing: {old_row:?}");
+
+    // B остаётся tap-able: новый start подписывается уже на неё.
+    let new_id = control.start(room).await.expect("B is live and must be tappable");
+    assert_ne!(new_id, old_id, "a new session for B, not the stale id");
+    for _ in 0..45 {
+        let _ = engine.publish_video_frame(room, &gray_frame());
+        tokio::time::sleep(Duration::from_millis(34)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    control.stop(room).await.expect("new tap writes a non-empty MP4 from B");
+    let bytes = manager.get_container(&new_id).expect("B tap saved an MP4");
+    assert!(bytes.len() > 64, "B tap produced real samples: {} bytes", bytes.len());
+    let row = state.records.lock().unwrap().get(&new_id).cloned().expect("new record row");
+    assert_eq!((row.width, row.height, row.bitrate_kbps), (640, 360, 512), "row uses B's spec");
+    drop(viewer_b);
+}
+
+/// T09b review D/E: одиночная группа закрыта — немедленный второй `start`
+/// 8/8 обязан вернуть ту же ошибку, а не Ok(stale id). Committed-версия
+/// внешнего probe review E (без второй группы).
+#[tokio::test]
+async fn recording_immediate_restart_without_group_is_rejected_eight_of_eight() {
+    if !ffmpeg_available() {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    }
+    let state = Arc::new(AppState::new());
+    let engine = Arc::new(McuEngine::new());
+    let manager = RecorderManager::new();
+    let control = RecorderControl::new(manager.clone(), Arc::downgrade(&state), engine.clone());
+    for iteration in 0..8 {
+        let room = RoomId::new();
+        let participant = ParticipantId::new();
+        engine.bridge_participant(room, participant, vec![Track::new(participant, TrackKind::Video)]);
+        assert!(engine.ensure_composite_size(room, 640, 360));
+        let viewer = engine.acquire_video_viewer(room, &encoder_spec()).await.expect("encoder group");
+        let record_id = control.start(room).await.expect("start");
+        assert!(manager.is_recording(&room));
+        drop(viewer);
+        assert_eq!(engine.video_farm().active_group_count(room, FarmCodec::H264), 0, "iteration {iteration}");
+        let error = control.start(room).await.expect_err("immediate restart in the finalize window");
+        assert!(error.contains("запись завершается"), "iteration {iteration}: {error}");
+        assert!(manager.is_recording(&room), "iteration {iteration}: session still finalizing");
+        let mut finalized = false;
+        for _ in 0..100 {
+            if !manager.is_recording(&room) {
+                finalized = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(finalized, "iteration {iteration}: dead tap did not finalize");
+        assert!(manager.get_container(&record_id).is_none(), "iteration {iteration}: no empty MP4");
+    }
+    assert_eq!(engine.video_farm().group_count(), 0, "no hidden/leaked encoder groups");
 }
 
 /// T09b review A/B P2-1: повторный stop после ошибки финализации обязан
