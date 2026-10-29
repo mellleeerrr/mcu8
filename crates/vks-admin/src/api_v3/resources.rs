@@ -427,6 +427,40 @@ fn max_slot_position(payload: &Value) -> Option<usize> {
         .map(|position| position as usize)
 }
 
+/// Ёмкость, ЯВНО объявленная входящим payload: id пресета или `size > 0`.
+///
+/// Нужна для валидации PATCH: пользователь вправе увеличить сетку
+/// (`vks_grid_5` → `vks_grid_9`, `size` → 43, mode → `preset_equal_25`), но
+/// не вправе расширить её одними номерами слотов (иначе stale `size`
+/// обходится позициями). Поэтому сюда НЕ входит fallback `slots.len`.
+fn explicit_layout_capacity(payload: &Value) -> Option<usize> {
+    payload
+        .get("preset")
+        .and_then(Value::as_str)
+        .and_then(|preset| {
+            vks_layout::grids::slot_count(preset)
+                .or_else(|| vks_layout::codian::slot_count(preset))
+                .or_else(|| vks_layout::preset_size(preset))
+        })
+        .or_else(|| payload.get("size").and_then(Value::as_u64).filter(|size| *size > 0).map(|size| size as usize))
+        .map(|capacity| capacity.min(vks_layout::grids::MAX_WINDOWS))
+}
+
+/// Удаляет пустые окна за пределами ёмкости: это следы прежних пресетов и
+/// отвязки абонентов. Они не рисуются движком, но раньше ломали ЛЮБОЙ PATCH
+/// (`slot position N is outside layout of M windows`) — «успешная запись
+/// отравляла запись» (T06 rr3/rr4 P1-2).
+pub(super) fn prune_empty_slots_beyond_capacity(record: &mut Value) {
+    let Some(capacity) = layout_size(&record["payload"]) else { return };
+    let capacity = capacity as u64;
+    if let Some(slots) = record["payload"]["slots"].as_array_mut() {
+        slots.retain(|slot| {
+            slot_holds_participant(slot)
+                || slot.get("position").and_then(Value::as_u64).is_none_or(|position| position <= capacity)
+        });
+    }
+}
+
 /// Ёмкость раскладки: явный id пресета (параметрический конструктор, Codian,
 /// вендорский `preset_*` с числом), затем закэшированный `payload.size`, затем
 /// число сохранённых окон. Слоты перечисляют только занятые окна, поэтому их
@@ -1121,6 +1155,10 @@ pub async fn detach_layout_abonent(
         let position = slot["position"].clone();
         *slot = json!({"position": position, "role": "AUTO"});
     }
+    // Отвязка всех окон уменьшает эффективную ёмкость до пресета; пустые окна
+    // за ней должны исчезнуть, иначе следующий PATCH получит 409.
+    recalc_layout_size(&mut draft);
+    prune_empty_slots_beyond_capacity(&mut draft);
     let owners = resources.links.values().filter(|ids| ids.iter().any(|value| value == &resource_id)).count();
     let direct = resources.links.get(&scope_key).is_some_and(|ids| ids.iter().any(|value| value == &resource_id));
     let target_id = if direct && owners <= 1 {
@@ -1476,16 +1514,35 @@ pub(super) enum UpdateError {
 
 /// Уникальность и границы окон: позиции в `1..=size`, без дублей. Битые
 /// legacy-раскладки не ремонтируем молча — PATCH должен вернуть 409 с reason.
-pub(super) fn validate_layout_assignments(payload: &Value) -> Result<(), UpdateError> {
-    validate_layout_assignments_with_capacity(payload, None)
-}
-
 /// Как [`validate_layout_assignments`], но с ёмкостью, зафиксированной ДО merge
 /// запроса: legacy-запись с size=9 и пресетом на 5 окон должна принимать PATCH
 /// существующих окон, а новые окна за её ёмкость выходить не должны.
+#[cfg(test)]
 pub(super) fn validate_layout_assignments_with_capacity(
     payload: &Value,
     stored_capacity: Option<usize>,
+) -> Result<(), UpdateError> {
+    validate_layout_assignments_impl(payload, stored_capacity, None)
+}
+
+/// Как [`validate_layout_assignments_with_capacity`], но позиции, пришедшие
+/// самим запросом, проверяются строго: клиент не вправе прислать пустое окно
+/// за ёмкостью (это баг формы), тогда как пустые окна, УЖЕ лежащие в записи,
+/// безвредны и не должны блокировать PATCH (T06 rr4 P1-3).
+pub(super) fn validate_layout_assignments_with_incoming(
+    payload: &Value,
+    stored_capacity: Option<usize>,
+    incoming: &[Value],
+) -> Result<(), UpdateError> {
+    let incoming: std::collections::HashSet<u64> =
+        incoming.iter().filter_map(|slot| slot.get("position").and_then(Value::as_u64)).collect();
+    validate_layout_assignments_impl(payload, stored_capacity, Some(&incoming))
+}
+
+fn validate_layout_assignments_impl(
+    payload: &Value,
+    stored_capacity: Option<usize>,
+    incoming: Option<&std::collections::HashSet<u64>>,
 ) -> Result<(), UpdateError> {
     let Some(slots) = payload.get("slots").and_then(Value::as_array) else { return Ok(()) };
     // Ёмкость сетки: у пресета она больше числа сохранённых слотов (слоты
@@ -1504,6 +1561,13 @@ pub(super) fn validate_layout_assignments_with_capacity(
         }
         if let Some(size) = size {
             if position > size as u64 {
+                // Пустое окно за ёмкостью, пришедшее не в этом запросе, — след
+                // прежних пресетов; движок его не рисует, блокировать PATCH
+                // нельзя. Окно из запроса или с участником — ошибка клиента.
+                let from_request = incoming.is_some_and(|positions| positions.contains(&position));
+                if !from_request && !slot_holds_participant(slot) {
+                    continue;
+                }
                 return Err(UpdateError::Conflict(format!(
                     "slot position {position} is outside layout of {size} windows"
                 )));
@@ -1526,11 +1590,13 @@ fn update_resource(record: &mut Value, body: &Value) -> Result<(), UpdateError> 
         record["display_name"] = name.clone();
     }
     let stored_capacity = layout_size(&record["payload"]);
+    let mut declared_capacity = None;
     if let Some(payload) = body.get("payload") {
         if !payload.is_object() {
             return Err(UpdateError::Invalid("payload must be an object".to_string()));
         }
         validate_layout_payload(payload).map_err(UpdateError::Invalid)?;
+        declared_capacity = explicit_layout_capacity(payload);
         let previous_slots = record["payload"]["slots"].as_array().cloned().unwrap_or_default();
         merge_json(&mut record["payload"], payload);
         if let Some(incoming) = payload["slots"].as_array() {
@@ -1544,7 +1610,17 @@ fn update_resource(record: &mut Value, body: &Value) -> Result<(), UpdateError> 
         recalc_layout_size(record);
         recalc_audio_counts(record);
         ensure_slot_roles(record);
-        validate_layout_assignments_with_capacity(&record["payload"], stored_capacity)?;
+        // Рост ёмкости разрешён, если он объявлен самим запросом (пресет/size);
+        // расширение одними номерами слотов — нет (stale size не обходится).
+        let validation_capacity = match (stored_capacity, declared_capacity) {
+            (Some(stored), Some(declared)) => Some(stored.max(declared)),
+            (stored, None) => stored,
+            (None, declared) => declared,
+        };
+        let incoming_slots = body["payload"]["slots"].as_array().map(Vec::as_slice).unwrap_or_default();
+        validate_layout_assignments_with_incoming(&record["payload"], validation_capacity, incoming_slots)?;
+        prune_empty_slots_beyond_capacity(record);
+        recalc_layout_size(record);
     }
     Ok(())
 }
@@ -1586,7 +1662,9 @@ pub async fn create(
     if kind == "video_layouts" {
         // Create — тот же контракт, что PATCH: дубли/выход за ёмкость не должны
         // попадать в БД (иначе запись «отравлена» для attach и любого PATCH).
-        match validate_layout_assignments(&record["payload"]) {
+        // Все окна здесь — из запроса, поэтому позиции проверяются строго.
+        let incoming_slots = record["payload"]["slots"].as_array().map(Vec::as_slice).unwrap_or_default();
+        match validate_layout_assignments_with_incoming(&record["payload"], None, incoming_slots) {
             Ok(()) => {}
             Err(UpdateError::Invalid(message)) => return error_json(422, &message),
             Err(UpdateError::Conflict(message)) => return error_json(409, &message),

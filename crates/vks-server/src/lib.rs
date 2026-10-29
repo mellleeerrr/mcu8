@@ -31,6 +31,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
+use http_body::{Body as HttpBody, Frame, SizeHint};
 use tracing::{info, warn};
 
 use vks_admin::state::AppState;
@@ -337,8 +338,13 @@ pub fn classify_path(path: &str) -> &'static str {
 const METRIC_METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
 
 /// Слой HTTP-метрик: счётчик по `(method, class, status)`, длительность и байты
-/// тела ответа по классу. Байты учитываются по `Content-Length` (потоковые
-/// ответы без него — не учитываются; для статики/API этого достаточно).
+/// тела ответа по классу.
+///
+/// `Content-Length` есть не у всех ответов: `CompressionLayer` (runtime gzip)
+/// удаляет его и отдаёт поток без длины, поэтому для таких ответов тело
+/// оборачивается в [`CountingBody`] и байты считаются по фактически отданным
+/// кадрам. Иначе сжатая статика давала бы 0 в `vks_http_response_bytes_total`
+/// (T07 review A, P2-1).
 ///
 /// `method` whitelist-ится (как и `class` по путям): произвольные методы
 /// (расширения, мусор) не раздувают кардинальность — попадают в `other`.
@@ -362,8 +368,64 @@ async fn http_metrics_middleware(request: Request, next: Next) -> Response {
         .unwrap_or(0);
     if bytes > 0 {
         HTTP_RESPONSE_BYTES.with_label_values(&[class]).inc_by(bytes);
+        return response;
     }
-    response
+    // Потоковый ответ без Content-Length (в т.ч. gzip от CompressionLayer):
+    // считаем реальные байты тела на этапе отдачи, не блокируя стрим.
+    let (parts, body) = response.into_parts();
+    Response::from_parts(parts, axum::body::Body::new(CountingBody::new(body, class)))
+}
+
+/// Тело ответа, считающее отданные байты и публикующее их в
+/// `vks_http_response_bytes_total` при завершении (drop/poll end).
+struct CountingBody<B> {
+    inner: B,
+    class: &'static str,
+    bytes: u64,
+}
+
+impl<B> CountingBody<B> {
+    fn new(inner: B, class: &'static str) -> Self {
+        Self { inner, class, bytes: 0 }
+    }
+}
+
+impl<B> HttpBody for CountingBody<B>
+where
+    B: HttpBody<Data = bytes::Bytes> + Unpin,
+{
+    type Data = bytes::Bytes;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        let polled = std::pin::Pin::new(&mut this.inner).poll_frame(cx);
+        if let std::task::Poll::Ready(Some(Ok(frame))) = &polled {
+            if let Some(data) = frame.data_ref() {
+                this.bytes += data.len() as u64;
+            }
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+impl<B> Drop for CountingBody<B> {
+    fn drop(&mut self) {
+        if self.bytes > 0 {
+            HTTP_RESPONSE_BYTES.with_label_values(&[self.class]).inc_by(self.bytes);
+        }
+    }
 }
 
 /// Эндпоинт сбора Prometheus-метрик.
@@ -1595,6 +1657,20 @@ mod tests {
         // Basic-схема не принимается как Bearer-токен.
         headers.insert(header::AUTHORIZATION, "Basic dXNlcjpwYXNz".parse().expect("header value"));
         assert_eq!(metrics_tokens(&headers), vec!["second".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn streaming_response_bytes_are_counted_without_content_length() {
+        // T07 review A P2-1: CompressionLayer снимает Content-Length; счётчик
+        // обязан видеть фактически отданные байты, иначе gzip-статика даёт 0.
+        let class = "spa";
+        let before = HTTP_RESPONSE_BYTES.with_label_values(&[class]).get();
+        let body = axum::body::Body::from(vec![7u8; 4096]);
+        let counted = axum::body::Body::new(CountingBody::new(body, class));
+        let bytes = axum::body::to_bytes(counted, 1 << 20).await.expect("read body");
+        assert_eq!(bytes.len(), 4096);
+        let after = HTTP_RESPONSE_BYTES.with_label_values(&[class]).get();
+        assert!(after >= before + 4096, "streamed bytes must reach the metric: {before} -> {after}");
     }
 
     #[test]

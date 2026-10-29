@@ -198,6 +198,7 @@ mkdir -p "$DEST_PARENT"
 # tar поверх) оставлял НАПОЛОВИНУ импортированное дерево, если tar падал на
 # середине: рантайм без части чанков и без манифеста.
 STAGE="$DEST_PARENT/.pnm-stage"
+PREV="$DEST_PARENT/.pnm-prev"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 tar -C "$TMP/deployed" -cf - --exclude='*.bak' --exclude='*.bak.*' pnm | tar -C "$STAGE" -xf -
@@ -205,9 +206,28 @@ if [ ! -f "$STAGE/pnm/index.html" ]; then
     echo "распаковка неполная: нет $STAGE/pnm/index.html; рантайм не тронут" >&2
     exit 1
 fi
-rm -rf "$DEST"
+# T07 review A P2-2: тема/ссылки проверяются ПОСЛЕ подмены дерева. Если
+# проверка упадёт, рантайм остался бы новым, а манифест/гейты — старыми.
+# Поэтому прежний рантайм сохраняется и восстанавливается любым провалом до
+# фиксации манифеста (swap_committed=1).
+rm -rf "$PREV"
+[ -d "$DEST" ] && mv "$DEST" "$PREV"
 mv "$STAGE/pnm" "$DEST"
 rmdir "$STAGE" 2>/dev/null || true
+swap_committed=0
+restore_previous_runtime() {
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ "$swap_committed" -eq 0 ] && [ -d "$PREV" ]; then
+        trap - EXIT
+        rm -rf "$DEST"
+        mv "$PREV" "$DEST"
+        ( cd "$DEST" && find . -type f ! -name '*.gz' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum ) > "$MANIFEST"
+        echo "ИМПОРТ ОТМЕНЁН: прежний рантайм и манифест восстановлены" >&2
+    fi
+    trap - EXIT
+    exit "$rc"
+}
+trap restore_previous_runtime EXIT
 
 BAK_COUNT="$(find "$TMP/deployed/pnm" -name '*.bak*' | wc -l)"
 FILE_COUNT="$(find "$DEST" -type f | wc -l)"
@@ -318,7 +338,7 @@ import re, sys, pathlib
 index, dest = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 text = index.read_text(encoding="utf-8")
 missing = []
-for src in re.findall(r'<script[^>]*src="(/mcu/[^"]+)"[^>]*></script>', text):
+for src in re.findall(r"""<script[^>]*src=["'](/mcu/[^"'?#]+)["'?#]""", text):
     path = dest / src[len("/mcu/"):]
     if not path.is_file():
         missing.append(src)
@@ -338,6 +358,13 @@ log "  локали ru_RU/en_US) и примените ребренд вручн
 # *.gz не должны попадать в манифест: это gitignored артефакты, их наличие
 # в рантайме сделало бы CI-checkout невалидным (T07).
 ( cd "$DEST" && find . -type f ! -name '*.gz' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum ) > "$MANIFEST"
+if ! ( cd "$DEST" && sha256sum -c "$MANIFEST" >/dev/null ); then
+    echo "манифест не сходится с рантаймом" >&2
+    exit 1
+fi
+swap_committed=1
+rm -rf "$PREV"
+trap - EXIT
 log "манифест: $MANIFEST ($(wc -l < "$MANIFEST") строк)"
 
 # 5. Опционально: source/.

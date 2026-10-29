@@ -139,9 +139,16 @@ fn should_compress_static(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    ["text/", "application/javascript", "application/json", "application/xml", "image/svg+xml"]
-        .iter()
-        .any(|allowed| content_type.starts_with(allowed))
+    [
+        "text/",
+        "application/javascript",
+        "application/json",
+        "application/manifest+json",
+        "application/xml",
+        "image/svg+xml",
+    ]
+    .iter()
+    .any(|allowed| content_type.starts_with(allowed))
 }
 
 /// Deep-link удалённого раздела калибровки (T1.1) → «Статистика».
@@ -632,8 +639,11 @@ mod tests {
         assert!(response.headers().get(header::CONTENT_ENCODING).is_none(), "tiny file must not be gzipped");
     }
 
+    /// HEAD обязан отражать заголовки GET (gzip допустим) и сохранять Vary,
+    /// по которому кэш различает представления. Тело для HEAD отбрасывает
+    /// hyper, поэтому здесь проверяются статус и Vary (T07 review A P3).
     #[tokio::test]
-    async fn head_request_is_not_compressed() {
+    async fn head_static_response_keeps_vary_and_is_safe() {
         let f = fixture("gzip-head");
         let app = app_for(&f);
         let request = HttpRequest::builder()

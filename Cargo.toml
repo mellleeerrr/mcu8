@@ -35,6 +35,7 @@ members = [
 # runtime / async
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
+http-body = "1"
 subtle = "2.6"
 libc = "0.2"
 # ошибки

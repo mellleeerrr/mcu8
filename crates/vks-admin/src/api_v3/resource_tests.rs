@@ -2594,6 +2594,157 @@ async fn contact_only_legacy_slots_keep_capacity_across_preset_shrink() {
     assert_eq!(response.status(), StatusCode::OK, "record stays editable (no 409)");
 }
 
+/// T06 rr3 P1-1: рост ёмкости, объявленный самим запросом (пресет/`size`),
+/// легитимен — vendor-бандл сохраняет все окна store при смене пресета.
+#[tokio::test]
+async fn declared_preset_growth_is_accepted_and_validated() {
+    let state = state();
+    let layout_id =
+        create_layout(&state, "Growth", json!({"mode":"manual","preset":"vks_grid_5","type":"individual","slots":[]}))
+            .await;
+    let path = format!("/api/v3/video_layouts/{layout_id}");
+    let grown: Vec<_> = (1..=9)
+        .map(|position| json!({"position": position, "role": "PEER", "abonent_id": format!("ab-{position}")}))
+        .collect();
+    let response = edit_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&path),
+        Path(layout_id.clone()),
+        Json(json!({"payload": {"preset": "vks_grid_9", "slots": grown}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "vks_grid_5 -> vks_grid_9 must be a valid save");
+    let payload = {
+        let resources = state.api_v3.resources.lock().await;
+        resources.layouts.get(&layout_id).expect("layout exists")["payload"].clone()
+    };
+    assert_eq!(payload["size"], 9);
+    assert_eq!(payload["slots"].as_array().map(Vec::len), Some(9));
+}
+
+/// T06 rr4 P1-3: пустое AUTO-окно за ёмкостью (след прежнего пресета) не
+/// должно блокировать обычный PATCH/rename.
+#[tokio::test]
+async fn legacy_empty_auto_slots_beyond_capacity_do_not_block_rename() {
+    let state = state();
+    let layout_id = create_layout(
+        &state,
+        "Legacy AUTO",
+        json!({"mode":"manual","preset":"vks_grid_4","type":"individual","slots":[]}),
+    )
+    .await;
+    {
+        // Сид легаси-БД: capacity=4, но в слотах остались пустые окна 1..5.
+        let mut resources = state.api_v3.resources.lock().await;
+        let record = resources.layouts.get_mut(&layout_id).expect("layout exists");
+        record["payload"]["slots"] =
+            json!((1..=5).map(|position| json!({"position": position, "role": "AUTO"})).collect::<Vec<_>>());
+    }
+    let path = format!("/api/v3/video_layouts/{layout_id}");
+    let response = edit_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&path),
+        Path(layout_id.clone()),
+        Json(json!({"display_name": "Renamed legacy"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "empty AUTO beyond capacity must not 409");
+    let slots = {
+        let resources = state.api_v3.resources.lock().await;
+        resources.layouts.get(&layout_id).expect("layout exists")["payload"]["slots"].clone()
+    };
+    assert_eq!(slots.as_array().map(Vec::len), Some(4), "pruned to capacity");
+}
+
+/// T06 rr3 P1-2: отвязка всех окон + сжатие пресета не должны оставлять запись
+/// нередактируемой (пустые окна за новой ёмкостью).
+#[tokio::test]
+async fn detached_empty_windows_do_not_poison_record() {
+    let state = state();
+    let room = Rooms::create_async(&state, "T06 detach").await.unwrap();
+    let layout_id = create_layout(
+        &state,
+        "Detach",
+        json!({"mode":"manual","preset":"preset_equal_9","type":"individual","slots":[]}),
+    )
+    .await;
+    assert_eq!(attach_to(&state, &room, &layout_id).await, StatusCode::NO_CONTENT);
+    let path = format!("/api/v3/video_layouts/{layout_id}");
+    let occupied: Vec<_> = (1..=9)
+        .map(|position| json!({"position": position, "role": "PEER", "abonent_id": format!("ab-{position}")}))
+        .collect();
+    let response = edit_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&path),
+        Path(layout_id.clone()),
+        Json(json!({"payload": {"preset": "preset_equal_9", "slots": occupied}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    for position in 1..=9 {
+        let response = super::detach_layout_abonent(
+            State(state.clone()),
+            Extension(operator()),
+            uri(&format!("/api/v3/sessions/{}/video_layouts/{layout_id}/abonents/ab-{position}", room.id)),
+            Path((room.id.to_string(), layout_id.clone(), format!("ab-{position}"))),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT, "detach {position}");
+    }
+    let response = edit_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&path),
+        Path(layout_id.clone()),
+        Json(json!({"payload": {"preset": "preset_equal_5"}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "preset shrink after detach");
+    let response = edit_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&path),
+        Path(layout_id),
+        Json(json!({"display_name": "Detached renamed"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "record stays editable after detach");
+}
+
+/// T06 rr3 NC-C: mode-переключение обязано пересчитывать `size` (иначе на
+/// 13-оконной записи остаётся 13 при пресете на 5/25).
+#[tokio::test]
+async fn mode_preset_switch_recalculates_capacity() {
+    let state = state();
+    let room = Rooms::create_async(&state, "T06 mode").await.unwrap();
+    let layout_id = create_layout(&state, "Mode", json!({"type":"default"})).await;
+    assert_eq!(attach_session_to(&state, &room, &layout_id).await, StatusCode::NO_CONTENT);
+    let response = crate::api_v3::shell::switch_video_layout_mode(
+        State(state.clone()),
+        Extension(operator()),
+        Json(
+            serde_json::from_value(json!({
+                "session_id": room.id.to_string(),
+                "video_layout_id": layout_id,
+                "mode": "manual",
+                "payload": {"mode": "manual", "preset": "preset_equal_5"}
+            }))
+            .expect("mode request"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "mode save must be accepted");
+    let size = {
+        let resources = state.api_v3.resources.lock().await;
+        resources.layouts.get(&layout_id).expect("layout exists")["payload"]["size"].as_u64()
+    };
+    assert_eq!(size, Some(5), "mode preset switch recalculates size");
+}
+
 /// S7-регрессия: `preset_equal` без числа не должен раздувать явный `size` до
 /// дефолтных 13 (`PresetId::parse` даёт 13, explicit-only helper — None).
 #[test]

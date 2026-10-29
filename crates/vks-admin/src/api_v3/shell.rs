@@ -980,6 +980,7 @@ pub async fn switch_video_layout_mode(
     }
     let previous = resources.clone();
     let mut draft = source;
+    let mut declared_capacity: Option<u64> = None;
     if size.is_some() || slots.is_some() || preset_present {
         let inferred_size = size
             .filter(|size| *size > 0)
@@ -1006,6 +1007,7 @@ pub async fn switch_video_layout_mode(
             .or_else(|| draft["payload"]["preset"].as_str().and_then(vks_layout::preset_size).map(|size| size as u64))
             .unwrap_or(13);
         patch.insert("size".to_string(), json!(inferred_size));
+        declared_capacity = Some(inferred_size);
     }
     let stored_capacity = super::resources::layout_size(&draft["payload"]);
     if let Some(payload) = draft["payload"].as_object_mut() {
@@ -1018,11 +1020,25 @@ pub async fn switch_video_layout_mode(
     super::resources::recalc_layout_size(&mut draft);
     // Mode — такая же запись назначений, как PATCH: дубли/позиции вне ёмкости
     // не должны попадать в БД (иначе запись «отравлена» для attach/PATCH).
-    match super::resources::validate_layout_assignments_with_capacity(&draft["payload"], stored_capacity) {
+    // Переключение на больший пресет — легитимный рост ёмкости: валидируем по
+    // max(сохранённая, объявленная в запросе), как и PATCH. Пустые окна из
+    // запроса за ёмкостью — ошибка клиента; лежащие в записи — безвредны.
+    let validation_capacity = match (stored_capacity, declared_capacity) {
+        (Some(stored), Some(declared)) => Some(stored.max(declared as usize)),
+        (stored, None) => stored,
+        (None, declared) => declared.map(|declared| declared as usize),
+    };
+    let incoming_slots = slots.as_ref().map(|(slots, _)| slots.as_array().map(Vec::as_slice).unwrap_or_default());
+    match super::resources::validate_layout_assignments_with_incoming(
+        &draft["payload"],
+        validation_capacity,
+        incoming_slots.unwrap_or_default(),
+    ) {
         Ok(()) => {}
         Err(super::resources::UpdateError::Invalid(message)) => return super::error_json(422, &message),
         Err(super::resources::UpdateError::Conflict(message)) => return super::error_json(409, &message),
     }
+    super::resources::prune_empty_slots_beyond_capacity(&mut draft);
     let owners = resources.links.values().filter(|ids| ids.iter().any(|value| value == &layout_id)).count();
     let direct = resources.links.get(&scope_key).is_some_and(|ids| ids.iter().any(|value| value == &layout_id));
     let target_id = if direct && owners <= 1 {

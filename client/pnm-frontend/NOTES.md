@@ -24,12 +24,13 @@
 
 ## Что импортировано
 
-- `deployed/pnm/` — рантайм 1:1, **212 файлов** (26 MB). Формула состава: **замыкание ссылок
+- `deployed/pnm/` — рантайм 1:1, **215 файлов** (26 MB). Формула состава: **замыкание ссылок
   `index.html` (+ `LICENSE.txt`)** — при переимпорте сверять. Из 216 записей исключены 6 служебных
   бэкапов ручных правок: `chunks/index.bundle-2.2.1.66.js.bak.dbg2`, `.bak.step3`,
   `chunks/InfoMainDescription*.js.bak.{hotfix,2026-…}` и т.п. (полный список — см. вывод импорта).
-  Счёт 212, а не 210: в рантайм добавлены проектные файлы `perf-overrides.js` и `api-errors.js`
-  (их нет в вендорском архиве; при импорте они сохраняются — см. §«Как обновлять»).
+  Счёт 215: к вендорским файлам добавлены проектные `perf-overrides.js`, `api-errors.js`,
+  `theme-toggle.js`, `deeplink.js` и `codian-layouts.js` (их нет в вендорском архиве;
+  при импорте они сохраняются — см. §«Как обновлять»).
 - Legacy-сборка (`chunks/*-legacy.bundle-*`): **32 файла / 6 289 441 B** (~41 % `chunks`, ~22 %
   рантайма) — входит в замыкание `index.html` (три `nomodule`-ссылки), сохранена ради 1:1;
   стоимость принята осознанно (ADR-0027).
@@ -62,7 +63,7 @@
    и `index-legacy8`; старый URL не занят. При будущих правках словника — снова менять имя.
 
 После интеграции: `MANIFEST.sha256` пересобран командой импорт-скрипта
-(`find … | sort -z | xargs -0 sha256sum`, 210 строк, `sha256sum -c` — OK);
+(`cd deployed/pnm && find . -type f ! -name '*.gz' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum`, 215 строк, `sha256sum -c` — OK);
 `node --check` на изменённых бандлах — OK.
 
 Инварианты whitelist соблюдены (`LICENSE.txt`, `TRUECONF`-тексты EULA, `trueconf.*`-контракты,
@@ -73,7 +74,7 @@
 ## Как обновлять
 
 ```bash
-VKS_PNM_ARCHIVE=/path/to/new.zip ./scripts/import-pnm-frontend.sh --force [--with-source] [--gzip]
+VKS_PNM_ARCHIVE=/path/to/new.zip ./scripts/import-pnm-frontend.sh --force [--with-source]
 ```
 
 Скрипт делает четыре слоя работы (раньше делал только первый — остальные терялись):
@@ -114,9 +115,10 @@ cd client/pnm-frontend/deployed/pnm && sha256sum -c ../../MANIFEST.sha256
   (клиент ревалидирует по `Last-Modified`), поэтому для них cache-bust не нужен —
   это подтверждено и живой проверкой заголовков, и правками T11b/T15. Cache-bust
   обязателен для `assets/**` (там `immutable`).
-- `--gzip` генерирует предсжатые `.gz` (их читает `tower-http::ServeDir::precompressed_gzip`);
-  в оригинальном архиве `.gz` нет. Ответы статики несут `Vary: Accept-Encoding` (обязательно
-  при gzip-представлениях).
+- `--gzip` больше не нужен (T07): сжатие статики делает tower-http `CompressionLayer`
+  в рантайме; флаг принимается, но игнорируется с предупреждением. `.gz`-файлы не
+  должны появляться в рантайме и в манифесте (их отсутствие проверяет
+  `scripts/check-pnm-runtime.py`). Ответы статики несут `Vary: Accept-Encoding`.
 - CSP вычисляется сервером **при старте** из `index.html` (sha256 всех inline-скриптов) — правки
   inline-скриптов политику не ломают; если в `index.html` появятся внешние домены
   (`https://cdn…`), их нужно добавить в `frontend.rs::build_csp`.

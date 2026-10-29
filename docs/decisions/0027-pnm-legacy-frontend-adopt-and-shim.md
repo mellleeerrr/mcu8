@@ -45,7 +45,7 @@
 1. **Размещение** (структура — наша, внутренности — архива 1:1):
    - `client/pnm-frontend/archive/PNM-Frontend-20261016.zip` — оригинал (юридический якорь, не распаковывается);
    - `client/pnm-frontend/deployed/pnm/` — рантайм (извлечён 1:1, исключены только `*.bak*`; `MANIFEST.sha256` — 215 файлов); формула: **замыкание ссылок `index.html` (+ LICENSE.txt)**;
-   - `scripts/import-pnm-frontend.sh` — идемпотентный импорт/переимпорт (sha256-якорь, recovery, `--with-source`, `--gzip`).
+   - `scripts/import-pnm-frontend.sh` — идемпотентный импорт/переимпорт (sha256-якорь, recovery, `--with-source`; `--gzip` не нужен — сжатие в рантайме).
 2. **Раздача статики**: крейт `vks-server`, модуль `frontend.rs` на `tower_http::ServeDir`/`ServeFile` 0.6.11 (ADR + запись в `deny.toml`). Роуты: `/` 307→`/pnm/`; `/pnm` 308→`/pnm/` (+query); `/pnm/…` — файл, иначе SPA-fallback `index.html`; `/mcu/…` — файл, иначе 404; `/admin(/` 307→`/pnm/administration` (до Dioxus-админки, фаза 8).
 3. **Кэш**: `immutable` — только реально хэшированные (`assets/fonts/**`, `assets/images/**`, `assets/*<hash>.webm`); всё остальное (в т.ч. `chunks/**`, `index.html`) — `no-cache`; `Vary: Accept-Encoding` (runtime gzip через `CompressionLayer`); процедура cache-bust при ручных правках — `NOTES.md`.
 4. **CSP и заголовки**: `script-src 'self'` + sha256 **всех** inline-скриптов `index.html` (в сборке их 5; вычисляются при старте — правки index.html не ломают политику), `style-src 'self' 'unsafe-inline'`, `media-src 'self' blob:`, `img-src 'self' data: blob:`, `connect-src 'self'`; app-wide `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: same-origin`; HSTS — только prod-TLS.

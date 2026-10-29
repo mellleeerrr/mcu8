@@ -27,7 +27,7 @@ for line in MANIFEST.read_text(encoding="utf-8").splitlines():
     if not line.strip():
         continue
     digest, _, name = line.partition("  ")
-    listed.append(name.lstrip("./"))
+    listed.append(name[2:] if name.startswith("./") else name)
     if len(digest) != 64:
         failures.append(f"MANIFEST: bad digest line: {line!r}")
 if listed != actual:

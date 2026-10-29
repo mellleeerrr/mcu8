@@ -3875,6 +3875,7 @@ dependencies = [
  "base64",
  "bytes",
  "futures-util",
+ "http-body",
  "prometheus",
  "serde",
  "serde_json",
