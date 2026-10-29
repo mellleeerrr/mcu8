@@ -33,6 +33,10 @@ use vks_server::{build_app_with_services, ClusterManager, GatewayManager, Record
 use vks_signaling::handler::HandlerConfig;
 use vks_storage::{MemoryStorage, PostgresStorage, SqliteStorage};
 
+// T14: bin-only wiring (`vks-server/src/lib.rs` принадлежит параллельной T13) —
+// честная env-диагностика NATS/OTLP и таймаутный дренаж шины на SIGTERM.
+mod observability;
+
 /// Ошибка конфигурации: отдельный exit-код 78 (EX_CONFIG), чтобы systemd с
 /// `RestartPreventExitStatus=78` не повторял заведомо неудачный запуск.
 fn config_exit(err: impl std::fmt::Display) -> ! {
@@ -121,6 +125,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         frontend_dir = %config.frontend_dir,
         "configuration applied"
     );
+
+    // T14: NATS/OTLP env заданы, но соответствующие адаптеры не собраны
+    // (blocked: крейтов нет в офлайн-реестре). Fail-open: не exit, а warn.
+    observability::warn_if_nats_requested();
+    observability::warn_if_otlp_requested();
 
     // 4. Инициализация хранилища (SQLite / Postgres / Memory)
     // M1.6: отказ сконфигурированной БД прерывает startup (fail-fast),
@@ -468,12 +477,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(addr = %config.listen_addr, "vks-server ready and listening for HTTP/WebSocket");
 
     let uas_shutdown = gateway_manager.clone();
+    let cluster_bus_shutdown = cluster_manager.bus().clone();
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
             uas_shutdown.begin_shutdown();
             uas_shutdown.shutdown_sip_uas().await;
             uas_shutdown.shutdown_h323_uas().await;
+            // T14: шаг StorageFlush — дренаж кластерной шины с wall-clock
+            // таймаутом; зависший flush не держит SIGTERM.
+            let drained = observability::drain_cluster_bus(cluster_bus_shutdown).await;
+            if drained != vks_cluster::StepResult::Ok {
+                warn!("cluster bus drain did not complete within the shutdown timeout");
+            }
         })
         .await?;
 

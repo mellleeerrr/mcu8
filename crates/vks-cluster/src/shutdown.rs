@@ -5,6 +5,14 @@
 //!
 //! Что реально: ordered execution, timeout detection, per-step reporting.
 //! Что мокнуто: реальный RTP/DTLS flush, NATS queue drain, SIGKILL.
+//!
+//! [`run_with_timeout`] — реальный (не tick) guard для SIGTERM-пути: дренаж
+//! кластерной шины и flush OTLP-экспортёра не должны вешать процесс, поэтому
+//! шаг ограничен wall-clock таймаутом, а по его истечении возвращается
+//! `StepResult::Failed` (main продолжает shutdown и выходит).
+
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// Шаг graceful shutdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +132,33 @@ impl Default for ShutdownSequence {
     }
 }
 
+/// Выполняет блокирующий shutdown-шаг (дренаж шины / flush экспортёра) с
+/// wall-clock таймаутом.
+///
+/// Шаг запускается в отдельном потоке: зависший NATS/OTLP не должен держать
+/// SIGTERM-путь. По истечении `timeout` возвращается
+/// [`StepResult::Failed`], поток остаётся detached (процесс всё равно
+/// завершается). `Ok` — шаг завершился без ошибки; `Err`/паника — `Failed`.
+pub fn run_with_timeout<F>(step: F, timeout: Duration) -> StepResult
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        // `send` fails only if the receiver timed out and dropped; that is not
+        // an error in the shutdown path.
+        let _ = tx.send(step());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(())) => StepResult::Ok,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "shutdown step failed");
+            StepResult::Failed
+        }
+        Err(_) => StepResult::Failed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +216,48 @@ mod tests {
                 ShutdownStep::StorageFlush,
                 ShutdownStep::Exit0,
             ]
+        );
+    }
+
+    #[test]
+    fn run_with_timeout_reports_success() {
+        assert_eq!(run_with_timeout(|| Ok(()), Duration::from_secs(1)), StepResult::Ok);
+    }
+
+    #[test]
+    fn run_with_timeout_reports_error() {
+        assert_eq!(
+            run_with_timeout(|| Err("nats flush failed".to_string()), Duration::from_secs(1)),
+            StepResult::Failed
+        );
+    }
+
+    #[test]
+    fn run_with_timeout_does_not_block_on_hung_step() {
+        let started = std::time::Instant::now();
+        let result = run_with_timeout(
+            || {
+                std::thread::sleep(Duration::from_millis(500));
+                Ok(())
+            },
+            Duration::from_millis(20),
+        );
+        assert_eq!(result, StepResult::Failed);
+        // The guard returns on the deadline rather than waiting for the step:
+        // a hung NATS/OTLP flush must not hold SIGTERM for 500 ms.
+        assert!(started.elapsed() < Duration::from_millis(300), "timeout guard blocked: {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn run_with_timeout_treats_panic_as_failure() {
+        assert_eq!(
+            run_with_timeout(
+                || {
+                    panic!("exporter panicked");
+                },
+                Duration::from_secs(1)
+            ),
+            StepResult::Failed
         );
     }
 }

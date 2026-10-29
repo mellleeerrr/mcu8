@@ -27,7 +27,7 @@
 | T11c | Удаление легаси-плоскости (2176/79) + 6 тестов | P1 | T11a,T11b | ⏳ |
 | T12 | P5: room_mode (on_client_hello), guards→bridge_available, audio+composite egress | P0 | T11a | ⏳ |
 | T13 | WebTransport native (wtransport, cert-hash, Alt-Svc) | P2 | T11a | ⏳ |
-| T14 | NATS/OTLP (UUIDv7, CI-сервисы, shutdown) | P2 | T03a | ⏳ |
+| T14 | NATS/OTLP (UUIDv7, CI-сервисы, shutdown) | P2 | T03a | 🔁 partial: UUIDv7 + wire v1 + LocalTransport/fail-open + shutdown guard + lease-move twin готовы; **NATS/OTLP blocked** (нет `async-nats`/`opentelemetry*` в офлайн-реестре) |
 | T15 | L0: SO_RCVBUF, RT-потоки, sysctl, systemd slice | P2 | T01 | ⏳ |
 | T16 | H.323: убрать ffi, RX-латч, fail-closed H.235, UII, active_calls, golden+ADR | P2 | T03c | ✅ 9.0 (ffi уже удалён T03c; RX IP+SSRC, H.235 fail-closed, UII, честный active_calls, golden+ADR-0034; сайдкар сохранён по аудиту — нативный ASN.1 остаётся P2) |
 | T17 | Финал: артефакты, доки, полный прогон, рестарт, отчёт | P0 | все | ⏳ |
@@ -52,7 +52,7 @@
 - **T11c:** легаси-плоскость удалена; 6 новых тестов; `VKS_WEBRTC_TRANSPORT` обязателен.
 - **T12:** mixed room: браузер+шлюз; audio-мост; composite H.264; guards заменены `bridge_available`.
 - **T13:** нативный WT-клиент ClientHello→ServerHello; `/wt/cert-hash`; Alt-Svc только при on; 404 при off; WS жив.
-- **T14:** UUIDv7; lease переезжает между двумя узлами через NATS; fallback LocalTransport; OTLP-спан в collector; shutdown.
+- **T14:** ✅ UUIDv7 (`Msg::id`), стабильный wire v1, `Transport`+`LocalTransport`, fail-open по `VKS_NATS_URL`, lease-move двух узлов (in-process twin), shutdown-guard с timeout. ⛔ NATS (`async-nats`) и OTLP (`opentelemetry-otlp`) — blocked: крейтов нет в офлайн-реестре; CI-сервисы не добавлены. Детали/evidence: `docs/operations/cluster-bus.md`.
 - **T15:** `ss -u -m` показывает rcvbuf; `chrt -p` RT; systemd slice/memory лимиты; sysctl применён.
 - **T16 ✅:** ffi удалён (T03c); RX-латч по IP+SSRC; H.235 fail-closed; UII — один IA5-символ; active_calls честный; golden-харнесс; ADR-0034. Python-сайдкар сохранён до паритета нативного ASN.1 (P2), fastStart/reverse OLC/H.239 не заявляются.
 - **T17:** все гейты; live на новом бинаре; stale-данные очищены миграцией; финальный отчёт.
@@ -70,4 +70,5 @@
 | 08:20 | T02 реализован (`eb514e2`): Argon2id m=19456/t=2/p=1, PBKDF2 legacy + ленивый rehash без generation, 4 хеша + очередь 128 → 429, API bucket 200/50, sync-ldap 501, ADR-0033 |
 | 08:26 | T03b закрыт (`9a394ec`): doc-links gate блокирующий, oxideav/phantom-deps к факту |
 | 16:16 | T16 done: RX IP+SSRC, H.235 fail-closed, UII, честный active_calls, golden+ADR-0034; сайдкар оставлен до паритета |
+| 17:20 | T14 partial: UUIDv7/wire v1/LocalTransport fallback/shutdown guard/lease-move twin; NATS+OTLP blocked (нет `async-nats`/`opentelemetry*` в офлайн-реестре) |
 | 17:20 | T06 rr9 P2-1 fixed: explicit `size > MAX_WINDOWS` → 422 в mode и PATCH до clamp/prune (запись не меняется); §4.6 обновлён (preset-first, size>MAX=422, slots-only=409), регрессионные тесты |

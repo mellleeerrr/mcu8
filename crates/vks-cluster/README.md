@@ -1,9 +1,10 @@
 # vks-cluster
 
 Кластеризация и отказоустойчивость VKS (Фаза 7, `DEVELOPMENT_PLAN.md`,
-`docs/architecture/CLUSTERING.md`). Самодостаточное ядро без реального NATS
-и сети: NATS моделируется как in-memory pub/sub, время — в ticks
-(parameterized), детерминированно.
+`docs/architecture/CLUSTERING.md`). Самодостаточное ядро: реальный NATS-адаптер
+пока не собран (blocked: `async-nats` нет в офлайн-реестре), поэтому дефолт —
+`LocalTransport` (in-memory pub/sub). Время — в ticks (parameterized),
+детерминированно.
 
 ## Что делает
 
@@ -15,11 +16,19 @@
 | `shutdown` | `ShutdownSequence` — ordered: StopAccepting → Maintaining → MediaDrain → StorageFlush → Exit0; timeout 30 ticks → Killed | §3 |
 | `backpressure` | `Backpressure` — очередь max 10000: drop non-critical (→ DLQ), retry critical | §5 |
 | `circuit` | `CircuitBreaker` — 50% fail / окно 10 ticks → OPEN 30 ticks → HALF-OPEN (1 probe) → Closed on success | §6 |
+| `transport` | `Transport` trait + `LocalTransport` (Bus); выбор по `VKS_NATS_URL` с fail-open в local; `NatsConfig`; `connect_nats` честно возвращает `NotCompiled`, пока адаптер не собран | §1, §5 |
+| `wire` | `encode`/`decode` — версионированный (`VKSM` v1) бинарный формат `Msg` с golden-тестом; лимиты topic/payload; отвергает не-UUIDv7 id | §5, ADR-0019 |
 
 ## Что реально, что мокнуто
 
 **Реальное (детерминированное ядро):**
 - Модель `Msg` + dedup по `message_id` (ADR-0019): дубликаты игнорируются.
+- `Msg::id` — UUIDv7 (RFC 9562): time-ordered и уникален между узлами
+  (старый `msg-<counter>` ломал dedup на двух узлах).
+- Стабильный wire-формат v1 (`wire`) + `Transport`/`LocalTransport` с
+  fail-open выбором по `VKS_NATS_URL`; lease переезжает между двумя узлами
+  в in-process twin-тесте (`tests/lease_move.rs`).
+- `shutdown::run_with_timeout` — wall-clock guard для SIGTERM-пути.
 - Delivery + per-subject лог (JetStream-like persistence в памяти), DLQ.
 - Consistent hashing room→instance, lease lifecycle (acquire/renew/release),
   split-brain resolution (lowest instance_id wins).
@@ -29,9 +38,11 @@
 - Circuit breaker state machine (Closed→Open→HalfOpen→Closed).
 
 **Мокнуто / за фичами позже (production):**
+- Реальный NATS (`async-nats`): **blocked** — крейта нет в офлайн-реестре.
+  `VKS_NATS_URL` при несобранном адаптере даёт `LocalTransport` + `warn!`
+  (fail-open), `connect_nats()` возвращает `TransportError::NotCompiled`.
+- OTLP-экспортёр — **blocked** по той же причине; `VKS_OTLP_ENDPOINT` не читается.
 - Реальный NATS JetStream: persistent storage, 3-node cluster, HA-queue.
-  Здесь NATS = in-memory bus; тематика и семантика (dedup, DLQ, per-subject
-  ordering) сохранены.
 - PostgreSQL advisory lock (вторая линия split-brain).
 - Реальный RTP/DTLS flush в media drain, NATS queue drain в storage flush.
 - Exponential retry/backoff (1s→30s) для зависимостей.
@@ -63,7 +74,7 @@ bus.publish(Msg::new("vks.cluster.lease.update", vec![1], true));
 let mut ro = RoomOwner::new();
 ro.register("i-1", 0);
 ro.register("i-2", 0);
-assert_eq!(ro.acquire_lease("room-1", "i-1", 30), LeaseResult::Acquired);
+assert_eq!(ro.acquire_lease("room-1", "i-1", 0, 30), LeaseResult::Acquired);
 
 let mut reg = InstanceRegistry::new();
 reg.heartbeat("i-1", 0);
@@ -89,4 +100,9 @@ assert_eq!(bp.push(Msg::new("t", vec![1], false)), PushResult::DroppedNonCritica
 
 `cargo test -p vks-cluster` — unit-тесты каждого модуля: dedup, DLQ,
 consistent hash, split-brain, heartbeat deadline, ordered shutdown,
-backpressure policy, circuit breaker state transitions.
+backpressure policy, circuit breaker state transitions, UUIDv7 ordering,
+wire-формат (golden/roundtrip/лимиты), LocalTransport + fail-open.
+`tests/lease_move.rs` — переезд lease между двумя независимыми `RoomOwner`
+через `Transport` (voluntary leave и death-by-expiry).
+
+Архитектура, env и ограничения: [`docs/operations/cluster-bus.md`](../../docs/operations/cluster-bus.md).

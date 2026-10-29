@@ -3,13 +3,18 @@
 //! Темы `vks.cluster.*`, DLQ `vks.cluster.dlq.*`.
 //! Идемпотентность: дубликаты по `Msg::id` игнорируются (ADR-0019).
 //!
+//! `Msg::id` — UUIDv7 (RFC 9562): time-ordered, поэтому id сортируются по
+//! времени создания и не сталкиваются между процессами (старый счётчик
+//! `msg-<n>` давал одинаковые id в разных узлах и ломал dedup в NATS).
+//!
 //! Что реально: модель сообщений, dedup, delivery, DLQ, backpressure-политика.
 //! Что мокнуто: персистентность JetStream, реальный кластер NATS, per-subject
 //! ordering (в памяти ordering последовательный, cross-subject — eventual).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+use uuid::Uuid;
 
 use crate::backpressure::PushResult;
 
@@ -19,10 +24,10 @@ pub const TOPIC_PREFIX: &str = "vks.cluster.";
 /// Префикс DLQ-тем.
 pub const DLQ_PREFIX: &str = "vks.cluster.dlq.";
 
-/// Сообщение шины. `id` — `message_id` (UUID) для идемпотентности (ADR-0019).
+/// Сообщение шины. `id` — `message_id` (UUIDv7) для идемпотентности (ADR-0019).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Msg {
-    /// Идентификатор для dedup (UUID в production).
+    /// Идентификатор для dedup: UUIDv7 (time-ordered, уникален между узлами).
     pub id: String,
     /// Тема, например `vks.cluster.lease.update`.
     pub topic: String,
@@ -33,11 +38,13 @@ pub struct Msg {
 }
 
 impl Msg {
-    /// Создаёт сообщение; `id` генерируется детерминированно от счётчика.
+    /// Создаёт сообщение; `id` — UUIDv7 от текущего времени.
+    ///
+    /// `Uuid::now_v7` использует общий на процесс контекст с монотонным
+    /// счётчиком, поэтому последовательные id строго упорядочены по времени
+    /// даже в пределах одной миллисекунды.
     pub fn new(topic: impl Into<String>, payload: Vec<u8>, critical: bool) -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        Self { id: format!("msg-{seq}"), topic: topic.into(), payload, critical }
+        Self { id: Uuid::now_v7().to_string(), topic: topic.into(), payload, critical }
     }
 }
 
@@ -202,6 +209,17 @@ impl Bus {
     pub fn drain(&self, topic: &str) -> Vec<Msg> {
         let mut st = self.state.lock().unwrap();
         st.topics.remove(topic).unwrap_or_default()
+    }
+
+    /// Все темы, у которых есть очередь (включая пустые), отсортированно.
+    ///
+    /// Нужен graceful shutdown'у: [`crate::shutdown`] обходит темы и дренирует
+    /// их, не зная заранее, какие `vks.cluster.*` использовались.
+    pub fn topics(&self) -> Vec<String> {
+        let st = self.state.lock().unwrap();
+        let mut topics: Vec<String> = st.topics.keys().cloned().collect();
+        topics.sort();
+        topics
     }
 
     /// Backpressure (CLUSTERING.md §5): очередь темы > max → non-critical
@@ -407,5 +425,80 @@ mod tests {
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].payload, vec![2]);
         assert_eq!(bus.queue_len("t"), 0);
+    }
+
+    // --- T14: UUIDv7 message ids (P0-2) ---
+
+    #[test]
+    fn msg_id_is_rfc9562_uuid_v7() {
+        let msg = Msg::new("vks.cluster.lease.update", vec![1], true);
+        let uuid = Uuid::parse_str(&msg.id).expect("Msg::id must be a canonical UUID");
+        assert_eq!(uuid.get_version_num(), 7, "Msg::id must be UUIDv7, got {uuid}");
+        assert_eq!(uuid.get_variant(), uuid::Variant::RFC4122);
+        // No legacy `msg-<counter>` scheme: identical ids in two processes
+        // silently collapsed distinct cluster events under NATS dedup.
+        assert!(!msg.id.starts_with("msg-"));
+    }
+
+    #[test]
+    fn msg_ids_are_strictly_time_ordered_within_process() {
+        let mut previous: Option<(String, Uuid)> = None;
+        for _ in 0..256 {
+            let msg = Msg::new("vks.cluster.heartbeat", vec![], false);
+            let uuid = Uuid::parse_str(&msg.id).expect("uuid");
+            if let Some((prev_raw, prev_uuid)) = &previous {
+                assert!(msg.id > *prev_raw, "UUIDv7 string order regressed: {prev_raw} !< {}", msg.id);
+                assert!(
+                    uuid.get_timestamp().expect("v7 timestamp").to_unix()
+                        >= prev_uuid.get_timestamp().expect("v7 timestamp").to_unix(),
+                    "timestamp component must be non-decreasing (same-ms collisions use the counter)"
+                );
+            }
+            previous = Some((msg.id, uuid));
+        }
+    }
+
+    #[test]
+    fn msg_ids_are_unique_across_threads() {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..500).map(|_| Msg::new("vks.cluster.lease.update", vec![], true).id).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut all = std::collections::HashSet::new();
+        for handle in handles {
+            for id in handle.join().expect("thread") {
+                assert!(all.insert(id.clone()), "duplicate UUIDv7 message id: {id}");
+            }
+        }
+        assert_eq!(all.len(), 8 * 500);
+    }
+
+    #[test]
+    fn dedup_still_works_with_uuid_v7_ids() {
+        // Regression guard: switching the id generator must not break ADR-0019.
+        let bus = Bus::new();
+        bus.subscribe("t");
+        let m = Msg::new("t", vec![7], true);
+        let id = m.id.clone();
+        assert_eq!(bus.publish(m), PublishResult::Delivered);
+        assert_eq!(
+            bus.publish(Msg { id, topic: "t".into(), payload: vec![7], critical: true }),
+            PublishResult::Duplicate
+        );
+        assert_eq!(bus.read("t").len(), 1);
+    }
+
+    #[test]
+    fn topics_lists_queues_sorted_for_shutdown_drain() {
+        let bus = Bus::new();
+        bus.publish(Msg::new("vks.cluster.lease.update", vec![1], true));
+        bus.publish(Msg::new("vks.cluster.heartbeat", vec![1], false));
+        assert_eq!(bus.topics(), vec!["vks.cluster.heartbeat", "vks.cluster.lease.update"]);
+        let drained: usize = bus.topics().iter().map(|topic| bus.drain(topic).len()).sum();
+        assert_eq!(drained, 2);
+        assert!(bus.topics().is_empty());
     }
 }

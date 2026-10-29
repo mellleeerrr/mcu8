@@ -1,0 +1,39 @@
+# T14 (P2): NATS + OpenTelemetry Collector для кластерной шины/трейсов.
+#
+# ВАЖНО: текущий бинарник vks-server это ещё НЕ использует. NATS-адаптер и
+# OTLP-экспортёр не собраны (нет async-nats/opentelemetry-otlp в офлайн-реестре,
+# см. docs/operations/cluster-bus.md). Стек поднимается для будущих гейтов и
+# ручной проверки; VKS_NATS_URL сейчас даёт fail-open LocalTransport, а
+# VKS_OTLP_ENDPOINT игнорируется.
+#
+# Запуск:  docker compose -f deploy/cluster/docker-compose.yml up -d
+# NATS monitoring: http://127.0.0.1:8222   OTLP: 4317 (gRPC) / 4318 (HTTP)
+name: vks-cluster-infra
+
+services:
+  nats:
+    image: nats:2.10-alpine
+    # Core NATS: lease/heartbeat — fire-and-forget pub/sub, JetStream не нужен.
+    command: ["-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      # NATS monitoring /healthz отвечает 200, когда сервер готов.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.0
+    command: ["--config=/etc/otel-collector.yaml"]
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "13133:13133"
+    volumes:
+      - ./otel-collector.yaml:/etc/otel-collector.yaml:ro
+    # Образ коллектора distroless: нет shell/wget, healthcheck не вешаем.
+    restart: unless-stopped

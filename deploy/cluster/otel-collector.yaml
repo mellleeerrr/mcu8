@@ -1,0 +1,31 @@
+# OTel Collector для T14 (P2). Принимает OTLP gRPC/HTTP, печатает спаны.
+# Прод-экспортёр (Tempo/Jaeger/OTLP upstream) добавляется отдельно и осознанно:
+# в этом репозитории нет постоянного трейс-бэкенда.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+
+exporters:
+  # Видно в `docker compose logs -f otel-collector`; только для dev/CI.
+  debug:
+    verbosity: detailed
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

@@ -46,3 +46,12 @@ default_room_mode = "sfu"
 ice_servers = [
     "stun:stun.l.google.com:19302"
 ]
+
+# --- Cluster bus / tracing (T14, P2; env-only, NOT wired in this build) -----
+# Эти параметры НЕ читаются из TOML (Config их не знает) — только env:
+#   VKS_NATS_URL=nats://127.0.0.1:4222   (пусто -> LocalTransport)
+#   VKS_NATS_CONNECT_TIMEOUT_MS=5000
+#   VKS_OTLP_ENDPOINT=http://127.0.0.1:4318  (пока игнорируется)
+# NATS-адаптер и OTLP не собраны (blocked, см. docs/operations/cluster-bus.md);
+# установленный VKS_NATS_URL даёт fail-open LocalTransport, сервер не падает.
+

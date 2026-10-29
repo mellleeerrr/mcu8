@@ -122,6 +122,17 @@ strings at the proxy, and preserve `Host` for the Origin check (override with
 `tests/e2e/webrtc.js`; the PNM UI is not yet wired to this transport. To stop
 serving media, stop the service; there is no legacy rollback path.
 
+## Cluster bus and OTLP (T14, P2 — not wired yet)
+
+`deploy/cluster/docker-compose.yml` поднимает NATS (`:4222`, monitoring `:8222`)
+и OTel Collector (`:4317` gRPC, `:4318` HTTP) для будущих гейтов. **Текущий
+бинарник их не использует:** NATS-адаптер и OTLP-экспортёр не собраны
+(blocked: нет `async-nats`/`opentelemetry-otlp` в офлайн-реестре).
+`VKS_NATS_URL` сейчас даёт fail-open `LocalTransport` + `warn!`, а
+`VKS_OTLP_ENDPOINT` не читается. Полная архитектура, env и wire-формат:
+[`../docs/operations/cluster-bus.md`](../docs/operations/cluster-bus.md).
+Не включайте этот стек в прод-профиль до разблокировки зависимостей.
+
 ## First start
 
 ```bash
