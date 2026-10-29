@@ -193,8 +193,13 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/videorecords/{id}", delete(observability::videorecords_delete))
         .route("/api/v3/conferences/{id}/videorecords/estimated_time", get(observability::videorecords_estimated_time))
         .route("/api/v3/sessions/{id}/videorecords/estimated_time", get(observability::videorecords_estimated_time))
-        .route("/api/v3/sessions/{id}/videorecords", get(observability::session_videorecords_list))
+        .route(
+            "/api/v3/sessions/{id}/videorecords",
+            get(observability::session_videorecords_list).post(observability::videorecords_start),
+        )
+        .route("/api/v3/conferences/{id}/videorecords", post(observability::videorecords_start))
         .route("/api/v3/conferences/{id}/videorecords", get(observability::session_videorecords_list))
+        .route("/api/v3/sessions/{id}/videorecords/{connection_id}", delete(observability::videorecords_stop))
         .route("/api/v3/system/status/network", get(shell::status_network))
         .route("/api/v3/license", get(shell::license))
         .route("/api/v3/features", get(shell::features))

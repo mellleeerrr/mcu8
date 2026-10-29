@@ -84,6 +84,9 @@ impl SqliteStorage {
 
     /// Создаёт пул по `SqliteConnectOptions` и применяет migrations.
     pub async fn init_options(options: SqliteConnectOptions) -> Result<Self> {
+        // A concurrent writer (recording stop vs settings PATCH) must wait for
+        // the lock instead of failing with SQLITE_BUSY.
+        let options = options.busy_timeout(std::time::Duration::from_secs(5));
         let pool = SqlitePoolOptions::new().max_connections(POOL_SIZE).connect_with(options).await?;
         let storage = Self { pool, core_participants: std::sync::RwLock::new(std::collections::HashMap::new()) };
         storage.migrate().await?;

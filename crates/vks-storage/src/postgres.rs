@@ -394,6 +394,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(storage.get_room(room.id).await.unwrap(), room);
+
+        // T09a: recording metadata roundtrip + room filter.
+        use vks_core::ports::Storage as _;
+        let room_id = vks_core::RoomId::new();
+        let record = vks_core::ports::storage::RecordEntry {
+            id: format!("pg-rec-{}", Uuid::new_v4().simple()),
+            room_id,
+            created_ms: 1_700_000_000_000,
+            duration_sec: 77,
+            size_bytes: 9_216,
+            bitrate_kbps: 2350,
+            width: 1920,
+            height: 1080,
+        };
+        storage.upsert_record(&record).await.unwrap();
+        let loaded = storage.get_record(&record.id).await.unwrap().expect("record");
+        assert_eq!(loaded.room_id, room_id);
+        assert_eq!((loaded.width, loaded.height), (1920, 1080));
+        assert_eq!(loaded.duration_sec, 77);
+        assert!(storage.list_records(Some(room_id)).await.unwrap().iter().any(|r| r.id == record.id));
+        storage.delete_record(&record.id).await.unwrap();
+        assert!(storage.get_record(&record.id).await.unwrap().is_none());
     }
 
     #[test]

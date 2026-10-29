@@ -131,6 +131,11 @@ pub fn build_app_with_services(
 ) -> Router {
     gateways.bind_state(Arc::downgrade(&state));
     state.set_dialer(gateways.clone());
+    state.set_recording(Arc::new(recorder::RecorderControl::new(
+        recorder.as_ref().clone(),
+        Arc::downgrade(&state),
+        mcu_engine.clone(),
+    )));
     // S12: события движка (речь, пересадка главного окна) доходят до клиентов.
     room_events::install(&state, &mcu_engine);
     // `P4a`: метрики фермы энкодеров (`encoder_group_*`/`viewer_rtp_*`) и

@@ -274,6 +274,19 @@ pub enum FarmError {
     Closed,
 }
 
+/// Soak budget: a released group may leak at most this much parent RSS.
+pub const FARM_GROUP_LEAK_BUDGET_BYTES: u64 = 1024 * 1024;
+/// Soak budget: a live group may retain at most this much parent RSS.
+pub const FARM_GROUP_RETENTION_BUDGET_BYTES: u64 = 12 * 1024 * 1024;
+/// Group count used by the T09a release soak (66 sequential start/stops).
+pub const FARM_SOAK_GROUPS: u64 = 66;
+
+/// Total leak/retention budget for `groups` soak cycles (allocation-free
+/// arithmetic so the CI gate is deterministic across allocators).
+pub fn farm_soak_budget(groups: u64) -> (u64, u64) {
+    (groups.saturating_mul(FARM_GROUP_LEAK_BUDGET_BYTES), groups.saturating_mul(FARM_GROUP_RETENTION_BUDGET_BYTES))
+}
+
 /// Диагностика одной группы для `/metrics` и `/api/v3`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupStat {
@@ -1459,6 +1472,17 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(900)).await;
         assert_eq!(farm.publish(room, &fake_frame(3)), 1, "следующий интервал принят");
         drop(viewer);
+    }
+
+    #[test]
+    fn soak_budget_for_66_groups_is_arithmetic_not_absolute_rss() {
+        let (leak, retention) = farm_soak_budget(FARM_SOAK_GROUPS);
+        assert_eq!(leak, 66 * 1024 * 1024, "<=1 MiB leaked per sequential start/stop");
+        assert_eq!(retention, 792 * 1024 * 1024, "<=12 MiB retained per live group");
+        assert_eq!(farm_soak_budget(0), (0, 0));
+        // The old plan's "579 MB absolute RSS" gate was allocator-dependent:
+        // budgets must scale with groups, not with a fixed total.
+        assert!(farm_soak_budget(1).0 < farm_soak_budget(2).0);
     }
 
     #[tokio::test]

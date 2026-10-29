@@ -16,6 +16,32 @@ use crate::memory::MemoryStorage;
 use crate::postgres::PostgresStorage;
 use crate::sqlite::SqliteStorage;
 
+fn record_from_row(
+    (id, room_id, created_ms, duration_sec, size_bytes, bitrate_kbps, width, height): (
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ),
+) -> Result<RecordEntry, StorageError> {
+    let room_uuid = uuid::Uuid::parse_str(&room_id)
+        .map_err(|error| StorageError::Other(format!("invalid video_records.room_id {room_id}: {error}")))?;
+    Ok(RecordEntry {
+        id,
+        room_id: RoomId::from_uuid(room_uuid),
+        created_ms: created_ms.max(0) as u64,
+        duration_sec: duration_sec.clamp(0, i64::from(u32::MAX)) as u32,
+        size_bytes: size_bytes.max(0) as u64,
+        bitrate_kbps: bitrate_kbps.clamp(0, i64::from(u32::MAX)) as u32,
+        width: width.clamp(0, i64::from(u32::MAX)) as u32,
+        height: height.clamp(0, i64::from(u32::MAX)) as u32,
+    })
+}
+
 fn to_storage_err(err: impl std::fmt::Display) -> StorageError {
     StorageError::Other(err.to_string())
 }
@@ -680,12 +706,82 @@ impl Storage for SqliteStorage {
         Ok(row.map(|(data,)| data))
     }
 
+    // --- Records (T09a) ---
+
+    async fn upsert_record(&self, record: &RecordEntry) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO video_records(id, room_id, created_ms, duration_sec, size_bytes, bitrate_kbps, width, height)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT(id) DO UPDATE SET room_id=excluded.room_id, created_ms=excluded.created_ms,
+                 duration_sec=excluded.duration_sec, size_bytes=excluded.size_bytes,
+                 bitrate_kbps=excluded.bitrate_kbps, width=excluded.width, height=excluded.height",
+        )
+        .bind(&record.id)
+        .bind(record.room_id.to_string())
+        .bind(record.created_ms as i64)
+        .bind(i64::from(record.duration_sec))
+        .bind(record.size_bytes as i64)
+        .bind(i64::from(record.bitrate_kbps))
+        .bind(i64::from(record.width))
+        .bind(i64::from(record.height))
+        .execute(self.pool())
+        .await
+        .map_err(to_storage_err)?;
+        Ok(())
+    }
+
+    async fn get_record(&self, id: &str) -> Result<Option<RecordEntry>, StorageError> {
+        let row: Option<(String, String, i64, i64, i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT id, room_id, created_ms, duration_sec, size_bytes, bitrate_kbps, width, height
+             FROM video_records WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(to_storage_err)?;
+        Ok(row.map(record_from_row).transpose()?)
+    }
+
+    async fn list_records(&self, room_id: Option<RoomId>) -> Result<Vec<RecordEntry>, StorageError> {
+        let rows: Vec<(String, String, i64, i64, i64, i64, i64, i64)> = match room_id {
+            Some(room) => {
+                sqlx::query_as(
+                    "SELECT id, room_id, created_ms, duration_sec, size_bytes, bitrate_kbps, width, height
+                     FROM video_records WHERE room_id=$1 ORDER BY created_ms",
+                )
+                .bind(room.to_string())
+                .fetch_all(self.pool())
+                .await
+            }
+            None => {
+                sqlx::query_as(
+                    "SELECT id, room_id, created_ms, duration_sec, size_bytes, bitrate_kbps, width, height
+                     FROM video_records ORDER BY created_ms",
+                )
+                .fetch_all(self.pool())
+                .await
+            }
+        }
+        .map_err(to_storage_err)?;
+        rows.into_iter().map(record_from_row).collect()
+    }
+
+    async fn delete_record(&self, id: &str) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM video_records WHERE id=$1")
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(to_storage_err)?;
+        Ok(())
+    }
+
     async fn reset(&self) -> Result<(), StorageError> {
         sqlx::query("DELETE FROM room_mode_override").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_layouts").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_api_keys").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_users").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM user_credentials").execute(self.pool()).await.map_err(to_storage_err)?;
+        sqlx::query("DELETE FROM video_records").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_audit_log").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM server_settings").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM layouts").execute(self.pool()).await.map_err(to_storage_err)?;
@@ -1140,12 +1236,82 @@ impl Storage for PostgresStorage {
         Ok(row.map(|(data,)| data))
     }
 
+    // --- Records (T09a) ---
+
+    async fn upsert_record(&self, record: &RecordEntry) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO video_records(id, room_id, created_ms, duration_sec, size_bytes, bitrate_kbps, width, height)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT(id) DO UPDATE SET room_id=excluded.room_id, created_ms=excluded.created_ms,
+                 duration_sec=excluded.duration_sec, size_bytes=excluded.size_bytes,
+                 bitrate_kbps=excluded.bitrate_kbps, width=excluded.width, height=excluded.height",
+        )
+        .bind(&record.id)
+        .bind(record.room_id.to_string())
+        .bind(record.created_ms as i64)
+        .bind(i64::from(record.duration_sec))
+        .bind(record.size_bytes as i64)
+        .bind(i64::from(record.bitrate_kbps))
+        .bind(i64::from(record.width))
+        .bind(i64::from(record.height))
+        .execute(self.pool())
+        .await
+        .map_err(to_storage_err)?;
+        Ok(())
+    }
+
+    async fn get_record(&self, id: &str) -> Result<Option<RecordEntry>, StorageError> {
+        let row: Option<(String, String, i64, i64, i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT id, room_id, created_ms, duration_sec, size_bytes, bitrate_kbps, width, height
+             FROM video_records WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(to_storage_err)?;
+        Ok(row.map(record_from_row).transpose()?)
+    }
+
+    async fn list_records(&self, room_id: Option<RoomId>) -> Result<Vec<RecordEntry>, StorageError> {
+        let rows: Vec<(String, String, i64, i64, i64, i64, i64, i64)> = match room_id {
+            Some(room) => {
+                sqlx::query_as(
+                    "SELECT id, room_id, created_ms, duration_sec, size_bytes, bitrate_kbps, width, height
+                     FROM video_records WHERE room_id=$1 ORDER BY created_ms",
+                )
+                .bind(room.to_string())
+                .fetch_all(self.pool())
+                .await
+            }
+            None => {
+                sqlx::query_as(
+                    "SELECT id, room_id, created_ms, duration_sec, size_bytes, bitrate_kbps, width, height
+                     FROM video_records ORDER BY created_ms",
+                )
+                .fetch_all(self.pool())
+                .await
+            }
+        }
+        .map_err(to_storage_err)?;
+        rows.into_iter().map(record_from_row).collect()
+    }
+
+    async fn delete_record(&self, id: &str) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM video_records WHERE id=$1")
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(to_storage_err)?;
+        Ok(())
+    }
+
     async fn reset(&self) -> Result<(), StorageError> {
         sqlx::query("DELETE FROM room_mode_override").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_layouts").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_api_keys").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_users").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM user_credentials").execute(self.pool()).await.map_err(to_storage_err)?;
+        sqlx::query("DELETE FROM video_records").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM core_audit_log").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM server_settings").execute(self.pool()).await.map_err(to_storage_err)?;
         sqlx::query("DELETE FROM layouts").execute(self.pool()).await.map_err(to_storage_err)?;
@@ -1273,6 +1439,37 @@ mod tests {
         assert_eq!(loaded_creds.generation, 3);
         let all_creds = storage.list_user_credentials().await.expect("list_user_credentials");
         assert!(all_creds.iter().any(|c| c.user_id == user_id));
+
+        // Records (T09a): durable metadata with profile fields.
+        let record = RecordEntry {
+            id: "rec-contract-1".to_string(),
+            room_id,
+            created_ms: 1_700_000_000_000,
+            duration_sec: 42,
+            size_bytes: 8_192,
+            bitrate_kbps: 2350,
+            width: 1920,
+            height: 1080,
+        };
+        storage.upsert_record(&record).await.expect("upsert_record");
+        let loaded_record = storage.get_record("rec-contract-1").await.expect("get_record").expect("exists");
+        assert_eq!(loaded_record.room_id, room_id);
+        assert_eq!(loaded_record.duration_sec, 42);
+        assert_eq!(loaded_record.size_bytes, 8_192);
+        assert_eq!(loaded_record.bitrate_kbps, 2350);
+        assert_eq!((loaded_record.width, loaded_record.height), (1920, 1080));
+        let listed = storage.list_records(Some(room_id)).await.expect("list_records by room");
+        assert!(listed.iter().any(|entry| entry.id == "rec-contract-1"));
+        // Upsert must update, not duplicate.
+        let mut updated = record.clone();
+        updated.size_bytes = 16_384;
+        storage.upsert_record(&updated).await.expect("upsert_record update");
+        assert_eq!(
+            storage.list_records(None).await.expect("list_records").iter().filter(|e| e.id == "rec-contract-1").count(),
+            1
+        );
+        storage.delete_record("rec-contract-1").await.expect("delete_record");
+        assert!(storage.get_record("rec-contract-1").await.expect("get_record").is_none());
 
         // Settings (M1.5)
         let test_settings = "{\"name\":\"test_vks\",\"default_mode\":\"sfu\"}";

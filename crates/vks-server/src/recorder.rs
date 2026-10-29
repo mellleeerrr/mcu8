@@ -10,12 +10,63 @@ use tracing::info;
 use uuid::Uuid;
 
 use vks_admin::hub::ParticipantSnapshot;
+use vks_admin::state::RecordingControl;
 use vks_admin::state::{now_unix_ms, AppState, RecordEntry};
 use vks_core::RoomId;
 use vks_proto::signaling::signaling_message::Payload;
 use vks_proto::signaling::{ParticipantJoined, ParticipantLeft, SignalingMessage};
-use vks_recorder::{MemoryStore, RecordingError, RecordingMeta, RecordingMode, RecordingSession, RecordingStore};
+use vks_recorder::{
+    MemoryStore, RecorderProfile, RecordingError, RecordingMeta, RecordingMode, RecordingSession, RecordingStore,
+};
 use vks_signaling::Envelope;
+
+/// Server-side implementation of the admin recording port.
+pub struct RecorderControl {
+    recorder: RecorderManager,
+    state: std::sync::Weak<AppState>,
+    mcu_engine: Arc<vks_media_mcu::McuEngine>,
+}
+
+impl RecorderControl {
+    pub fn new(
+        recorder: RecorderManager,
+        state: std::sync::Weak<AppState>,
+        mcu_engine: Arc<vks_media_mcu::McuEngine>,
+    ) -> Self {
+        Self { recorder, state, mcu_engine }
+    }
+}
+
+#[async_trait::async_trait]
+impl RecordingControl for RecorderControl {
+    async fn start(&self, room_id: RoomId) -> Result<String, String> {
+        let state = self.state.upgrade().ok_or_else(|| "server state is gone".to_string())?;
+        self.recorder
+            .start_recording(&state, &room_id, RecordingMode::Mcu)
+            .map(|id| id.to_string())
+            .map_err(|error| error.to_string())
+    }
+
+    async fn stop(&self, room_id: RoomId) -> Result<(), String> {
+        let state = self.state.upgrade().ok_or_else(|| "server state is gone".to_string())?;
+        if !self.recorder.is_recording(&room_id) {
+            return Ok(());
+        }
+        self.recorder.stop_recording_async(&state, &room_id).await.map(|_| ()).map_err(|error| error.to_string())
+    }
+
+    fn active_h264_groups(&self, room_id: RoomId) -> usize {
+        self.mcu_engine
+            .video_farm_stats()
+            .into_iter()
+            .filter(|stat| {
+                stat.key.room == room_id
+                    && stat.key.spec.codec == vks_media_mcu::farm::FarmCodec::H264
+                    && stat.viewers > 0
+            })
+            .count()
+    }
+}
 
 /// Менеджер сессий записи комнат.
 #[derive(Clone)]
@@ -67,9 +118,9 @@ impl RecorderManager {
         mode: RecordingMode,
     ) -> Result<Uuid, RecordingError> {
         let mut guard = self.sessions.lock().unwrap();
-        if guard.contains_key(room_id) {
-            // Уже пишется — возвращаем стабильный идентификатор комнаты
-            return Ok(*room_id.as_uuid());
+        if let Some(existing) = guard.get(room_id) {
+            // Idempotent retry: return the id of the recording already running.
+            return Ok(existing.record_id().unwrap_or(*room_id.as_uuid()));
         }
 
         let room_uuid = *room_id.as_uuid();
@@ -106,7 +157,28 @@ impl RecorderManager {
         let payload_bytes = Envelope::new(joined_msg).encode();
         state.room_hub.broadcast(room_id, None, payload_bytes.into());
 
-        // 3. Сохраняем сессию
+        // 3. Persist the new record immediately so a restart shows an active
+        // recording; the stop path updates duration/size on the same row.
+        let record_id = session.record_id().ok_or(RecordingError::NotStarted)?;
+        let profile = RecorderProfile::default();
+        let entry = RecordEntry {
+            id: record_id.to_string(),
+            room_id: *room_id,
+            created_ms: now_unix_ms(),
+            duration_sec: 0,
+            size_bytes: 0,
+            bitrate_kbps: profile.bitrate_kbps(),
+            width: profile.width,
+            height: profile.height,
+        };
+        state.records.lock().unwrap().insert(entry.id.clone(), entry.clone());
+        if let Some(storage) = state.storage.clone() {
+            tokio::spawn(async move {
+                let _ = storage.upsert_record(&entry).await;
+            });
+        }
+
+        // 4. Сохраняем сессию
         guard.insert(*room_id, session);
         self.stopped_cache.lock().unwrap().remove(room_id);
 
@@ -130,7 +202,7 @@ impl RecorderManager {
         );
 
         info!(room_id = %room_id, mode = %mode.as_str(), "Recording started for room");
-        Ok(room_uuid)
+        Ok(record_id)
     }
 
     fn stop_recording_internal(
@@ -180,12 +252,16 @@ impl RecorderManager {
         self.stopped_cache.lock().unwrap().insert(*room_id, meta.clone());
 
         // 4. Добавляем запись в состояние AppState.records и персистируем в Storage
+        let profile = RecorderProfile::default();
         let entry = RecordEntry {
             id: meta.id.to_string(),
             room_id: *room_id,
             created_ms: meta.started_at_ms,
             duration_sec: (meta.duration_ms / 1000) as u32,
             size_bytes: meta.size_bytes,
+            bitrate_kbps: profile.bitrate_kbps(),
+            width: profile.width,
+            height: profile.height,
         };
         state.records.lock().unwrap().insert(entry.id.clone(), entry.clone());
 

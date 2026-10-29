@@ -3617,6 +3617,7 @@ dependencies = [
  "vks-core",
  "vks-layout",
  "vks-proto",
+ "vks-recorder",
  "vks-storage",
 ]
 

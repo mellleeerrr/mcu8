@@ -653,12 +653,16 @@ fn record_json(record: &RecordEntry) -> Value {
         "session": {"id": record.room_id.to_string(), "display_name": record.room_id.to_string()},
         "video_layout": {"id": Value::Null, "display_name": Value::Null},
         "payload": {
-            "bitrate": 0,
+            "bitrate": record.bitrate_kbps,
             "title": Value::Null,
-            "profile": Value::Null,
+            "profile": if record.width > 0 && record.height > 0 {
+                format!("{}x{}", record.width, record.height)
+            } else {
+                Value::Null.to_string()
+            },
             "src": record.id,
             "preview": Value::Null,
-            "resolution": [1280, 720],
+            "resolution": [record.width, record.height],
             "meta": {"size": record.size_bytes},
         },
     })
@@ -736,24 +740,112 @@ pub async fn videorecords_delete(Extension(auth): Extension<AuthContext>, Path(_
     unsupported("Deleting a video record")
 }
 
+/// `POST /api/v3/sessions/{id}/videorecords` (vendor start) — starts an MCU
+/// recording. SFU mode → 501; no active H.264 encoder group → 409 with a
+/// machine-readable `reason`.
+pub async fn videorecords_start(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(session_id): Path<String>,
+    body: Option<Json<Value>>,
+) -> Response {
+    super::track("sessions/{id}/videorecords");
+    if let Some(response) = forbid(&auth) {
+        return response;
+    }
+    let settings = body.map(|Json(value)| value).unwrap_or(Value::Null);
+    let Some(room_id) = parse_room_id(&session_id) else {
+        return error_json(404, "Session not found");
+    };
+    if state.rooms.lock().map(|rooms| !rooms.contains_key(&room_id)).unwrap_or(true) {
+        return error_json(404, "Session not found");
+    }
+    let mode =
+        state.mode.lock().map(|mode_state| mode_state.effective_mode(&room_id)).unwrap_or(vks_core::RoomMode::Mcu);
+    if mode == vks_core::RoomMode::Sfu {
+        return unsupported("Recording in SFU mode");
+    }
+    let Some(control) = state.recording_control() else {
+        return error_json(503, "Recording is not configured");
+    };
+    if control.active_h264_groups(room_id) == 0 {
+        // Vendor UI switches on this reason; do not create a bogus record.
+        return (
+            axum::http::StatusCode::CONFLICT,
+            Json(json!({"error": {
+                "code": 409,
+                "description": "No active H.264 encoder group for this session",
+                "reason": "no_active_h264_encoder_group",
+            }})),
+        )
+            .into_response();
+    }
+    match control.start(room_id).await {
+        Ok(record_id) => Json(json!({
+            "id": record_id,
+            "session": {"id": room_id.to_string()},
+            "settings": settings,
+        }))
+        .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, room = %room_id, "recording start failed");
+            error_json(500, "Recording could not be started")
+        }
+    }
+}
+
+/// `DELETE /api/v3/sessions/{id}/videorecords/{connectionId}` (vendor stop).
+pub async fn videorecords_stop(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((session_id, connection_id)): Path<(String, String)>,
+) -> Response {
+    super::track("sessions/{id}/videorecords/{id}");
+    if let Some(response) = forbid(&auth) {
+        return response;
+    }
+    let Some(room_id) = parse_room_id(&session_id) else {
+        return error_json(404, "Session not found");
+    };
+    let Some(control) = state.recording_control() else {
+        return error_json(503, "Recording is not configured");
+    };
+    match control.stop(room_id).await {
+        Ok(()) => Json(json!({"id": connection_id, "session": {"id": room_id.to_string()}})).into_response(),
+        Err(error) => {
+            tracing::warn!(%error, room = %room_id, "recording stop failed");
+            error_json(500, "Recording could not be stopped")
+        }
+    }
+}
+
+fn parse_room_id(raw: &str) -> Option<vks_core::RoomId> {
+    uuid::Uuid::parse_str(raw).ok().map(vks_core::RoomId::from_uuid)
+}
+
 /// `GET /api/v3/conferences/{id}/videorecords/estimated_time` — оценка записи.
 pub async fn videorecords_estimated_time(Extension(auth): Extension<AuthContext>) -> Response {
     super::track("videorecords/estimated_time");
     if let Some(response) = forbid(&auth) {
         return response;
     }
-    let recording_time = if state_disk_free_gb() < 1 { 0 } else { 3600 };
+    let free_bytes = state_disk_free_bytes();
+    let recording_time = if free_bytes < 1024 * 1024 * 1024 {
+        0
+    } else {
+        vks_recorder::RecorderProfile::default().estimate_seconds(free_bytes)
+    };
     Json(json!({"recording_time": recording_time})).into_response()
 }
 
-fn state_disk_free_gb() -> u64 {
+fn state_disk_free_bytes() -> u64 {
     let Ok(output) = std::process::Command::new("df").args(["-Pk", "/"]).output() else { return 0 };
     let text = String::from_utf8_lossy(&output.stdout);
     text.lines()
         .nth(1)
         .and_then(|line| line.split_whitespace().nth(3))
         .and_then(|value| value.parse::<u64>().ok())
-        .map(|kib| kib / 1_048_576)
+        .map(|kib| kib.saturating_mul(1024))
         .unwrap_or(0)
 }
 

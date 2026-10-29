@@ -227,6 +227,11 @@ impl RecordingSession {
         Ok(())
     }
 
+    /// Identifier of the current (or last) recording, if any.
+    pub fn record_id(&self) -> Option<Uuid> {
+        self.id
+    }
+
     /// Прикрепляет к сессии генератор воспроизводимого MP4 контейнера.
     pub fn enable_container(&mut self, config: crate::container::ContainerConfig) {
         self.container_writer = Some(crate::container::PlayableContainerWriter::new(config));

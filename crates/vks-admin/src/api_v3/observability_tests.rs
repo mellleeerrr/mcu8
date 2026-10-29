@@ -6,7 +6,7 @@ use axum::http::{header, Request, StatusCode};
 use serde_json::json;
 use tower::ServiceExt;
 
-use crate::api_v3::tests::{app, json_body, login_token, send, test_state};
+use crate::api_v3::tests::{app, json_body, login_token, request, send, test_state};
 use crate::users::Users;
 use vks_core::Role;
 
@@ -538,4 +538,187 @@ async fn stats_disk_prefers_real_filesystems_and_root_first() {
     }
     assert!(spaces[0]["total"].as_u64().unwrap_or(0) > 100, "root must be a real disk: {disk}");
     assert!(spaces[0]["used"].as_u64().unwrap_or(0) <= spaces[0]["total"].as_u64().unwrap_or(0), "{disk}");
+}
+
+// ---------- T09a: recording start/stop contract ----------
+
+struct FakeRecording {
+    h264_groups: usize,
+    started: std::sync::Mutex<Vec<vks_core::RoomId>>,
+    stopped: std::sync::Mutex<Vec<vks_core::RoomId>>,
+}
+
+impl FakeRecording {
+    fn new(h264_groups: usize) -> Self {
+        Self { h264_groups, started: std::sync::Mutex::new(Vec::new()), stopped: std::sync::Mutex::new(Vec::new()) }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::state::RecordingControl for FakeRecording {
+    async fn start(&self, room_id: vks_core::RoomId) -> Result<String, String> {
+        self.started.lock().unwrap().push(room_id);
+        Ok(uuid::Uuid::new_v4().to_string())
+    }
+
+    async fn stop(&self, room_id: vks_core::RoomId) -> Result<(), String> {
+        self.stopped.lock().unwrap().push(room_id);
+        Ok(())
+    }
+
+    fn active_h264_groups(&self, _room_id: vks_core::RoomId) -> usize {
+        self.h264_groups
+    }
+}
+
+#[tokio::test]
+async fn start_recording_without_h264_group_returns_409_and_creates_nothing() {
+    let (state, _issuer) = test_state();
+    state.mode.lock().unwrap().global_mode = vks_core::RoomMode::Mcu;
+    let room = crate::rooms::Rooms::create_async(&state, "rec-409".to_string()).await.expect("room");
+    let control = std::sync::Arc::new(FakeRecording::new(0));
+    state.set_recording(control.clone());
+    let server = app(state.clone());
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response =
+        send(&server, request("POST", &format!("/api/v3/sessions/{}/videorecords", room.id), Some(&token), json!({})))
+            .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["reason"], "no_active_h264_encoder_group", "{body}");
+    assert!(control.started.lock().unwrap().is_empty(), "no recording may start without an encoder group");
+    assert!(state.records.lock().unwrap().is_empty(), "409 must not create a record");
+}
+
+#[tokio::test]
+async fn start_and_stop_recording_hit_the_control_port_once() {
+    let (state, _issuer) = test_state();
+    state.mode.lock().unwrap().global_mode = vks_core::RoomMode::Mcu;
+    let room = crate::rooms::Rooms::create_async(&state, "rec-ok".to_string()).await.expect("room");
+    let control = std::sync::Arc::new(FakeRecording::new(1));
+    state.set_recording(control.clone());
+    let server = app(state.clone());
+    let token = login_token(&server, "admin", "s3cret").await;
+    let started =
+        send(&server, request("POST", &format!("/api/v3/sessions/{}/videorecords", room.id), Some(&token), json!({})))
+            .await;
+    assert_eq!(started.status(), StatusCode::OK);
+    let body = json_body(started).await;
+    let record_id = body["id"].as_str().expect("record id").to_string();
+    assert!(uuid::Uuid::parse_str(&record_id).is_ok());
+    assert_eq!(control.started.lock().unwrap().len(), 1);
+
+    let stopped = send(
+        &server,
+        request("DELETE", &format!("/api/v3/sessions/{}/videorecords/{record_id}", room.id), Some(&token), json!({})),
+    )
+    .await;
+    assert_eq!(stopped.status(), StatusCode::OK);
+    assert_eq!(control.stopped.lock().unwrap().as_slice(), &[*room.id.as_uuid()].map(vks_core::RoomId::from_uuid));
+}
+
+#[tokio::test]
+async fn start_recording_in_sfu_room_returns_501_before_any_encoder_probe() {
+    let (state, _issuer) = test_state();
+    let room = crate::rooms::Rooms::create_async(&state, "rec-sfu".to_string()).await.expect("room");
+    state.mode.lock().unwrap().global_mode = vks_core::RoomMode::Sfu;
+    let control = std::sync::Arc::new(FakeRecording::new(1));
+    state.set_recording(control.clone());
+    let server = app(state.clone());
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response =
+        send(&server, request("POST", &format!("/api/v3/sessions/{}/videorecords", room.id), Some(&token), json!({})))
+            .await;
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    assert!(control.started.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn videorecords_report_the_stored_profile_instead_of_hardcoded_720p() {
+    let (state, _issuer) = test_state();
+    state.records.lock().unwrap().insert(
+        "rec-1".into(),
+        crate::state::RecordEntry {
+            id: "rec-1".into(),
+            room_id: vks_core::RoomId::new(),
+            created_ms: 1_700_000_000_000,
+            duration_sec: 61,
+            size_bytes: 12_345_678,
+            bitrate_kbps: 2350,
+            width: 1920,
+            height: 1080,
+        },
+    );
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let body = json_body(send(&server, auth_request("GET", "/api/v3/videorecords", &token)).await).await;
+    let record = &body["videorecords"][0];
+    assert_eq!(record["payload"]["bitrate"], 2350, "{body}");
+    assert_eq!(record["payload"]["resolution"], json!([1920, 1080]), "{body}");
+    assert_eq!(record["payload"]["profile"], "1920x1080", "{body}");
+    assert_eq!(record["stopped_at"].as_i64().unwrap() - record["started_at"].as_i64().unwrap(), 61);
+}
+
+#[tokio::test]
+async fn videorecords_survive_sqlite_restart_and_hydrate_state_records() {
+    use vks_core::ports::Storage;
+    let path = std::env::temp_dir().join(format!("vks-t09a-{}.db", uuid::Uuid::new_v4()));
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let record = crate::state::RecordEntry {
+        id: "restart-rec-1".into(),
+        room_id: vks_core::RoomId::new(),
+        created_ms: 1_700_000_000_000,
+        duration_sec: 90,
+        size_bytes: 4_096,
+        bitrate_kbps: 2350,
+        width: 1280,
+        height: 720,
+    };
+    {
+        let storage = std::sync::Arc::new(vks_storage::SqliteStorage::init(&url).await.expect("init sqlite"));
+        storage.upsert_record(&record).await.expect("persist record");
+        let state = std::sync::Arc::new(crate::state::AppState::with_storage(storage));
+        state.sync_from_storage().await.expect("cold-start hydration");
+        let hydrated = state.records.lock().unwrap().get("restart-rec-1").cloned().expect("hydrated record");
+        assert_eq!(hydrated.room_id, record.room_id);
+        assert_eq!(hydrated.duration_sec, 90);
+    }
+    // "Restart": a brand-new storage instance on the same file + new AppState.
+    let storage = std::sync::Arc::new(vks_storage::SqliteStorage::init(&url).await.expect("reopen sqlite"));
+    let state = std::sync::Arc::new(crate::state::AppState::with_storage(storage));
+    state.sync_from_storage().await.expect("restart hydration");
+    let record_after = state.records.lock().unwrap().get("restart-rec-1").cloned().expect("record survives restart");
+    assert_eq!(record_after.size_bytes, 4_096);
+    assert_eq!((record_after.width, record_after.height), (1280, 720));
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn hot_reload_does_not_resurrect_deleted_records() {
+    use vks_core::ports::Storage;
+    let path = std::env::temp_dir().join(format!("vks-t09a-hot-{}.db", uuid::Uuid::new_v4()));
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let storage = std::sync::Arc::new(vks_storage::SqliteStorage::init(&url).await.expect("init sqlite"));
+    storage
+        .upsert_record(&crate::state::RecordEntry {
+            id: "hot-rec-1".into(),
+            room_id: vks_core::RoomId::new(),
+            created_ms: 1,
+            duration_sec: 1,
+            size_bytes: 1,
+            bitrate_kbps: 2350,
+            width: 1280,
+            height: 720,
+        })
+        .await
+        .expect("persist");
+    let state = std::sync::Arc::new(crate::state::AppState::with_storage(storage));
+    state.sync_from_storage().await.expect("cold start");
+    state.records.lock().unwrap().remove("hot-rec-1");
+    state.hot_reload_from_storage().await.expect("hot reload");
+    assert!(
+        state.records.lock().unwrap().get("hot-rec-1").is_none(),
+        "hot reload must not resurrect a record deleted in this process"
+    );
+    let _ = std::fs::remove_file(path);
 }

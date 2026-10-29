@@ -130,6 +130,18 @@ impl ModeState {
     }
 }
 
+/// Start/stop recording and encoder-farm probe (implemented in the server,
+/// which owns the RecorderManager and McuEngine; admin only sees this port).
+#[async_trait::async_trait]
+pub trait RecordingControl: Send + Sync {
+    /// Starts an MCU recording; returns the record id.
+    async fn start(&self, room_id: RoomId) -> Result<String, String>;
+    /// Stops the room recording (idempotent).
+    async fn stop(&self, room_id: RoomId) -> Result<(), String>;
+    /// Active H.264 encoder groups with viewers for this room (0 = cannot record).
+    fn active_h264_groups(&self, room_id: RoomId) -> usize;
+}
+
 #[async_trait::async_trait]
 pub trait OutboundDialer: Send + Sync {
     /// Инициирует исходящий вызов абонента в указанную комнату по URI/строке вызова.
@@ -222,6 +234,8 @@ pub struct AppState {
     pub api_v3: crate::api_v3::ApiV3State,
     /// Исходящий дозвонщик (SIP/H.323 шлюзы) (V1-V4).
     pub outbound_dialer: std::sync::RwLock<Option<Arc<dyn OutboundDialer>>>,
+    /// Recording control port (recorder manager + encoder farm probe).
+    pub recording: std::sync::RwLock<Option<Arc<dyn RecordingControl>>>,
     /// Комнаты (id → запись).
     pub rooms: Mutex<BTreeMap<RoomId, RoomRecord>>,
     /// Пользователи (id → запись).
@@ -324,6 +338,7 @@ impl AppState {
             local_db: None,
             api_v3: crate::api_v3::ApiV3State::default(),
             outbound_dialer: std::sync::RwLock::new(None),
+            recording: std::sync::RwLock::new(None),
             rooms: Mutex::new(BTreeMap::new()),
             users: Mutex::new(BTreeMap::new()),
             layouts: Mutex::new(BTreeMap::new()),
@@ -364,6 +379,18 @@ impl AppState {
     /// Возвращает текущий активный исходящий дозвонщик (если сконфигурирован).
     pub fn outbound_dialer(&self) -> Option<Arc<dyn OutboundDialer>> {
         self.outbound_dialer.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Устанавливает порт управления записью (вызывает сервер при сборке app).
+    pub fn set_recording(&self, control: Arc<dyn RecordingControl>) {
+        if let Ok(mut lock) = self.recording.write() {
+            *lock = Some(control);
+        }
+    }
+
+    /// Текущий порт управления записью (если сервер его установил).
+    pub fn recording_control(&self) -> Option<Arc<dyn RecordingControl>> {
+        self.recording.read().ok().and_then(|guard| guard.clone())
     }
 
     /// Внедряет сбой в подсистему для проверки деградации (M0.6 / M6.3).
