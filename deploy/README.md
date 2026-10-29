@@ -86,13 +86,21 @@ VKS_WEBRTC_MAX_PEERS=256
 
 The effective concurrency is
 `min(VKS_WEBRTC_MAX_PEERS_PER_ROOM per room, VKS_WEBRTC_MAX_PEERS process,
-size of the UDP range)` because every peer owns one UDP socket; size the range
-for the peer count you need (43000–43100 holds 101 peers). Both limits are
-parsed fail-closed: an empty/non-numeric/zero value aborts startup (exit 78)
-instead of silently using a default. A client that pre-offers the full
-`1+(N-1)` shape can only be shown 8 sources per kind (`MAX_VIDEO_MIDS`); a cap
-above 8 is allowed but logs a warning and counts the invisible sources as
-`webrtc_sources{dropped_no_mid}`.
+size of the UDP range)` because every peer owns one UDP socket. For a host
+running R rooms, the per-room cap bounds each room while the process cap and
+the UDP range bound `R × per-room`: keep both
+`R × VKS_WEBRTC_MAX_PEERS_PER_ROOM` and `VKS_WEBRTC_MAX_PEERS` inside the
+range you size (43000–43100 holds 101 sockets). Both caps are parsed
+fail-closed: an empty/non-numeric/zero value aborts startup (exit 78) instead
+of silently using a default. Startup additionally *warns* (it does not fail)
+when the process cap exceeds the UDP range, when the per-room cap exceeds the
+process cap, or when a cap is implausibly large — these values parse but can
+never be honoured, so the effective cap is lower. A client that pre-offers the
+full `1+(N-1)` shape can only be shown 8 sources per kind
+(`MAX_AUDIO_MIDS`/`MAX_VIDEO_MIDS`); a per-room cap above 8 is allowed but
+counts the invisible sources as `webrtc_sources{dropped_no_mid}`. A legacy 1+1
+client keeps one deterministic publisher per kind with the same explicit
+`dropped_no_mid` degradation — two publishers are never glued into one mid.
 
 Auxiliary/secondary processes on the same host are also real WebRTC servers
 after this default flip; pass `VKS_WEBRTC_TRANSPORT=0` (or distinct UDP

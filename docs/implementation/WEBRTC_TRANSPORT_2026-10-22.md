@@ -65,7 +65,7 @@
    без склейки часов и без тишины.
    Keyframe-gate — per publisher: дельты паблишера не уходят подписчику до его
    IDR, PLI-запросы коалесцируются (500 мс на `(room, publisher, kind)`).
-8. Отказ закрытый:8. Отказ закрытый: если транспорт включён и str0m отверг оффер, сервер
+8. Отказ закрытый: если транспорт включён и str0m отверг оффер, сервер
    возвращает `Payload::Error` (`webrtc_offer_rejected`), а не поддельный
    legacy-SDP с `FF:00:11`; оффер без ICE/DTLS-материала при включённом
    транспорте также отклоняется (`webrtc_offer_unsupported`). Legacy-SDP
@@ -116,14 +116,17 @@
 
 ## Доказательство (live, Chromium)
 
-`tests/e2e/webrtc.js`: два Chromium-пира (fake camera/mic) с реальным
-signalling по `/ws` (Node `ws` с Bearer; media — в Chromium), реальный
-offer → реальный str0m answer → ICE/DTLS/SRTP → взаимные аудио/видео.
-Итог: **29/29 проверок**, оба пира `connected`,
+`tests/e2e/webrtc.js`: **три** Chromium-пира (fake camera/mic) с реальным
+signalling по `/ws` (Node `ws` с Bearer; media — в Chromium). Каждая страница
+делает T11b pre-offer `1+7 audio + 1+7 video` (16 m-lines), поэтому answer
+зеркалит все 16 m-line, а каждый пир получает два чужих аудио-потока и два
+чужих видео на отдельных mid'ах. Итог: все три пира `connected`,
 `dtlsState=connected`, `srtpCipher=SRTP_AEAD_AES_256_GCM`, входящие
-audio/video `bytesReceived > 0`, `framesDecoded` 189/191,
-`frameWidth=320`, `frameHeight=240`; третий пир получает `room_full`;
-браузерный WebSocket с `?token=<JWT>` проходит ClientHello; page errors 0.
+audio/video `bytesReceived > 0`, page errors 0; браузерный WebSocket с
+`?token=<JWT>` проходит ClientHello. `room_full` проверяется только когда
+оракул запущен с `VKS_E2E_PEER_CAP`, совпадающим с
+`VKS_WEBRTC_MAX_PEERS_PER_ROOM` (`cap+1`-пир получает `room_full`,
+`retryable=true`, повторный оффер тоже `room_full` после FSM-rollback).
 В `result.json` пишутся commit, sha256 бинаря, env,
 `metrics.txt` и хвост server-лога. Прежний UI/API live-E2E
 (`tests/e2e/live.js`) — **233/233**, но он не проверяет `/ws`/WebRTC и
@@ -131,15 +134,24 @@ audio/video `bytesReceived > 0`, `framesDecoded` 189/191,
 
 ## Границы (честно)
 
-- Это 1:1/комнатный SFU-фан-аут браузер↔браузер. N-way с несколькими
-  источниками требует per-source transceiver/MSID-маршрутизации; сейчас
-  жёстко ограничено 2 пирами на комнату, третий получает `room_full`.
+- Это комнатный SFU-фан-аут браузер↔браузер с per-source egress: каждый
+  подписчик получает N−1 отдельных аудио-mid'ов и N−1 видео-mid'ов (без
+  микширования и без склейки RTP-часовых доменов). Ёмкость —
+  `VKS_WEBRTC_MAX_PEERS_PER_ROOM` (по умолчанию 8) и 8 egress-mid'ов на вид
+  (`MAX_AUDIO_MIDS`/`MAX_VIDEO_MIDS`); сверх лимита — явный `room_full`, а не
+  тихая деградация. Клиент обязан сам pre-offer'ить `1+(N-1)` m-lines: сервер
+  не может добавить их в answer (RFC 3264 §6).
 - Мост SIP/H.323 (plaintext RTP) ↔ SRTP-браузер не реализован в этом
   коммите; для комнат со шлюзами нужен отдельный frame↔RTP мост.
 - Симулкаст: если браузер пришлёт несколько rid, фан-аут пока не выбирает
   слой; это следующий шаг вместе с `SimulcastSelector`.
-- Поддерживается ровно один audio- и один video-m-line (без screen share);
-  лишние m-lines отвергаются валидацией оффера.
+- Поддерживается до 8 audio- и 8 video-m-line в одном оффере (1 sendrecv +
+  recvonly-слоты); 9-я m-line любого вида отвергается валидацией оффера
+  (`InvalidOffer`). Дубли `a=mid:` **между** audio и video отвергаются явной
+  `Sdp`-ошибкой (один mid не может быть двумя пулами); дубли внутри одного
+  вида по-прежнему схлопывает str0m (унаследованное поведение 1+1, не T11b).
+  Секция, отклонённая браузером через `m=… 0`, получает в answer порт 0 и
+  `a=inactive` (RFC 3264 §6.1) и никогда не становится egress-слотом.
 - Реальный WebRTC несовместим с MCU-режимом, recorder/mixing и комнатой с
   SIP/H.323-участником: при попытке такой комбинации обе стороны получают
   явный отказ, а не half-bridged «тишину». Live-переключение комнаты/глобального
