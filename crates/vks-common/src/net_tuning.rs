@@ -59,6 +59,8 @@ pub const DEFAULT_MEDIA_RCVBUF_BYTES: usize = 4 * 1024 * 1024;
 pub const DEFAULT_MEDIA_SNDBUF_BYTES: usize = 1024 * 1024;
 /// 1 MiB на per-peer WebRTC-сокет: при 256 пирах это ~256 MiB лимита,
 /// а не 1 GiB как с медиа-дефолтом 4 MiB. Буфер выделяется по мере надобности.
+const _: () = assert!(DEFAULT_WEBRTC_RCVBUF_BYTES > DEFAULT_GATEWAY_RCVBUF_BYTES);
+
 pub const DEFAULT_WEBRTC_RCVBUF_BYTES: usize = 1024 * 1024;
 /// 512 KiB на отправку per-peer: исходящий поток ограничен pacer'ом.
 pub const DEFAULT_WEBRTC_SNDBUF_BYTES: usize = 512 * 1024;
@@ -281,7 +283,7 @@ mod tests {
         // проверяют compile-time assert рядом с константами.
         assert_ne!(DEFAULT_GATEWAY_RCVBUF_BYTES, DEFAULT_MEDIA_RCVBUF_BYTES);
         assert_eq!(DEFAULT_WEBRTC_RCVBUF_BYTES, 1024 * 1024);
-        assert!(DEFAULT_WEBRTC_RCVBUF_BYTES > DEFAULT_GATEWAY_RCVBUF_BYTES);
+
     }
 
     #[test]
