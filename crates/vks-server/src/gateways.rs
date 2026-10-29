@@ -981,6 +981,18 @@ pub(super) fn audio_sample_rate(payload_type: u8) -> u32 {
     }
 }
 
+/// Sample rate the MCU mix must run at, by negotiated codec identity.
+///
+/// PT numbers are not authoritative: a terminal may renumber G.722 to a
+/// dynamic PT, so the server asks the codec name instead of guessing from PT.
+fn audio_sample_rate_for_codec(codec: &str) -> u32 {
+    match codec {
+        "G722" => 16_000,
+        "OPUS" | "MP4A-LATM" => 48_000,
+        _ => 8_000,
+    }
+}
+
 /// AAC-LATM needs two FFmpeg workers (encode + decode) before a call may be
 /// answered. The pool is bounded; a busy host must refuse with 488/503 rather
 /// than answer 200 OK and leave the participant with dead audio.
@@ -1385,111 +1397,123 @@ impl GatewayManager {
             bitrate_kbps = video_profile.bitrate_kbps,
             "outbound gateway video profile"
         );
-        let (remote_ip, remote_audio_port, audio_payload_type, dtmf_payload_type, video_remote, call_id) = if is_h323 {
-            let h323_video = vks_gateway_h323::H323VideoProfile {
-                max_bitrate_kbps: video_profile.bitrate_kbps.max(64),
-                level_idc: video_profile.h323_level_idc(),
-                profile_bits: 64,
-            };
-            let session = self
-                .h323_uac_client
-                .dial_with_media_profile(
-                    trimmed,
-                    rtp_port,
-                    video_pair.as_ref().map(|pair| pair.rtp_port),
-                    std::time::Duration::from_secs(60),
-                    h323_video,
-                )
-                .await
-                .map_err(|error| format!("H.323 outbound dial failed: {error}"))?;
-            setup.h323 = Some(session.clone());
-            // H.241 peer limits are authoritative for the encoder: never send
-            // above the peer's maxBitRate/level even if the room asks for more.
-            if let Some(max_bitrate_100bps) = session.remote_video_max_bitrate_100bps {
-                // Peer may advertise less than 64 kbit/s; never round UP past
-                // its declared maxBitRate (16 kbit/s is the encoder floor).
-                video_profile.bitrate_kbps = video_profile.bitrate_kbps.min((max_bitrate_100bps / 10).max(16));
-            }
-            // Профиль пира — только информация: наш encoder отдаёт baseline,
-            // который декодируется любым H.264-профилем. Не отвергаем high/main.
-            if let Some(level_idc) = session.remote_video_h264_level {
-                // Неизвестный/кастомный level у пира не повод рвать вызов:
-                // encoder остаётся на уровне комнаты (не выше 4.0).
-                if let Some(level) = video::h264_level_name(level_idc) {
-                    video_profile.level = level.to_string();
+        let (remote_ip, remote_audio_port, audio_payload_type, dtmf_payload_type, video_remote, call_id, audio_codec) =
+            if is_h323 {
+                let h323_video = vks_gateway_h323::H323VideoProfile {
+                    max_bitrate_kbps: video_profile.bitrate_kbps.max(64),
+                    level_idc: video_profile.h323_level_idc(),
+                    profile_bits: 64,
+                };
+                let session = self
+                    .h323_uac_client
+                    .dial_with_media_profile(
+                        trimmed,
+                        rtp_port,
+                        video_pair.as_ref().map(|pair| pair.rtp_port),
+                        std::time::Duration::from_secs(60),
+                        h323_video,
+                    )
+                    .await
+                    .map_err(|error| format!("H.323 outbound dial failed: {error}"))?;
+                setup.h323 = Some(session.clone());
+                // H.241 peer limits are authoritative for the encoder: never send
+                // above the peer's maxBitRate/level even if the room asks for more.
+                if let Some(max_bitrate_100bps) = session.remote_video_max_bitrate_100bps {
+                    // Peer may advertise less than 64 kbit/s; never round UP past
+                    // its declared maxBitRate (16 kbit/s is the encoder floor).
+                    video_profile.bitrate_kbps = video_profile.bitrate_kbps.min((max_bitrate_100bps / 10).max(16));
                 }
-            }
-            let audio_port = session
-                .remote_audio_port
-                .filter(|port| *port > 0)
-                .ok_or_else(|| "H.323 did not negotiate an audio RTP channel".to_string())?;
-            if session.local_audio_payload_type != session.remote_audio_payload_type {
-                return Err(
+                // Профиль пира — только информация: наш encoder отдаёт baseline,
+                // который декодируется любым H.264-профилем. Не отвергаем high/main.
+                if let Some(level_idc) = session.remote_video_h264_level {
+                    // Неизвестный/кастомный level у пира не повод рвать вызов:
+                    // encoder остаётся на уровне комнаты (не выше 4.0).
+                    if let Some(level) = video::h264_level_name(level_idc) {
+                        video_profile.level = level.to_string();
+                    }
+                }
+                let audio_port = session
+                    .remote_audio_port
+                    .filter(|port| *port > 0)
+                    .ok_or_else(|| "H.323 did not negotiate an audio RTP channel".to_string())?;
+                if session.local_audio_payload_type != session.remote_audio_payload_type {
+                    return Err(
                     "Asymmetric H.323 audio payload types are not supported by the single-codec G.711/G.722/G.723.1 bridge"
                         .into(),
                 );
-            }
-            let video = session
-                .remote_video_port
-                .filter(|port| *port > 0)
-                .zip(session.remote_video_ip.clone())
-                .zip(session.remote_video_payload_type)
-                .zip(session.local_video_payload_type)
-                .map(|(((port, ip), transmit_pt), receive_pt)| (ip, port, transmit_pt, receive_pt));
-            (
-                session.remote_ip.clone(),
-                audio_port,
-                session.remote_audio_payload_type,
-                None,
-                video,
-                session.call_id.clone(),
-            )
-        } else {
-            let offer = vks_gateway_sip::build_plain_sdp_with_video(
-                &Self::sdp_video_profile(&video_profile),
-                &self.candidate_ip,
-                rtp_port,
-                video_pair.as_ref().map(|pair| pair.rtp_port),
-            );
-            let session = match self.uac_client.dial(trimmed, &offer, std::time::Duration::from_secs(60)).await {
-                Ok(session) => session,
-                Err(error) if sip_dial_error_is_terminal(&error) => {
-                    return Err(vks_common::terminal_failure(format!("SIP outbound dial failed: {error}")));
                 }
-                Err(error) => return Err(format!("SIP outbound dial failed: {error}")),
+                let video = session
+                    .remote_video_port
+                    .filter(|port| *port > 0)
+                    .zip(session.remote_video_ip.clone())
+                    .zip(session.remote_video_payload_type)
+                    .zip(session.local_video_payload_type)
+                    .map(|(((port, ip), transmit_pt), receive_pt)| (ip, port, transmit_pt, receive_pt));
+                (
+                    session.remote_ip.clone(),
+                    audio_port,
+                    session.remote_audio_payload_type,
+                    None,
+                    video,
+                    session.call_id.clone(),
+                    Some(audio_codec_name(session.remote_audio_payload_type)),
+                )
+            } else {
+                let offer = vks_gateway_sip::build_plain_sdp_with_video(
+                    &Self::sdp_video_profile(&video_profile),
+                    &self.candidate_ip,
+                    rtp_port,
+                    video_pair.as_ref().map(|pair| pair.rtp_port),
+                );
+                let session = match self.uac_client.dial(trimmed, &offer, std::time::Duration::from_secs(60)).await {
+                    Ok(session) => session,
+                    Err(error) if sip_dial_error_is_terminal(&error) => {
+                        return Err(vks_common::terminal_failure(format!("SIP outbound dial failed: {error}")));
+                    }
+                    Err(error) => return Err(format!("SIP outbound dial failed: {error}")),
+                };
+                setup.sip = Some(session.clone());
+                answer_limits =
+                    vks_gateway_sip::video_answer_limits(&session.answer_sdp, session.remote_video_payload_type);
+                let answer_bitrate = answer_limits.max_br.iter().chain(answer_limits.b_as.iter()).copied().min();
+                video_profile.clamp_to_answer(answer_limits.max_fs, answer_bitrate, answer_limits.max_mbps);
+                if session.remote_video_codec == Some("H265") {
+                    video_profile.codec = video::GatewayVideoCodec::H265;
+                }
+                let audio_port = session
+                    .remote_audio_port
+                    .filter(|port| *port > 0)
+                    .ok_or_else(|| "SIP did not negotiate an audio RTP channel".to_string())?;
+                let video = session
+                    .remote_video_port
+                    .filter(|port| *port > 0)
+                    .zip(session.remote_video_payload_type)
+                    .zip(session.local_video_payload_type)
+                    .zip(session.remote_video_ip.clone())
+                    .map(|(((port, transmit_pt), receive_pt), ip)| (ip, port, transmit_pt, receive_pt));
+                (
+                    session.remote_media_ip.clone(),
+                    audio_port,
+                    session.remote_audio_payload_type,
+                    session.remote_dtmf_payload_type,
+                    video,
+                    session.call_id.clone(),
+                    session.remote_audio_codec,
+                )
             };
-            setup.sip = Some(session.clone());
-            answer_limits =
-                vks_gateway_sip::video_answer_limits(&session.answer_sdp, session.remote_video_payload_type);
-            let answer_bitrate = answer_limits.max_br.iter().chain(answer_limits.b_as.iter()).copied().min();
-            video_profile.clamp_to_answer(answer_limits.max_fs, answer_bitrate, answer_limits.max_mbps);
-            if session.remote_video_codec == Some("H265") {
-                video_profile.codec = video::GatewayVideoCodec::H265;
-            }
-            let audio_port = session
-                .remote_audio_port
-                .filter(|port| *port > 0)
-                .ok_or_else(|| "SIP did not negotiate an audio RTP channel".to_string())?;
-            let video = session
-                .remote_video_port
-                .filter(|port| *port > 0)
-                .zip(session.remote_video_payload_type)
-                .zip(session.local_video_payload_type)
-                .zip(session.remote_video_ip.clone())
-                .map(|(((port, transmit_pt), receive_pt), ip)| (ip, port, transmit_pt, receive_pt));
-            (
-                session.remote_media_ip.clone(),
-                audio_port,
-                session.remote_audio_payload_type,
-                session.remote_dtmf_payload_type,
-                video,
-                session.call_id.clone(),
-            )
+        let audio_codec = audio_codec.unwrap_or_else(|| audio_codec_name(audio_payload_type));
+        let audio_bridgeable = if is_h323 {
+            bridgeable_audio_pts(true).contains(&audio_payload_type)
+        } else {
+            vks_common::codec_capabilities::is_native_audio_variant(audio_codec, None)
+                || (audio_codec == "MP4A-LATM" && vks_common::codec_capabilities::audio_codec_available("MP4A-LATM"))
         };
-        if !bridgeable_audio_pts(is_h323).contains(&audio_payload_type) {
-            return Err("Negotiated audio payload type is not supported by the RTP bridge".into());
+        if !audio_bridgeable {
+            return Err(format!(
+                "Negotiated audio codec {audio_codec} (PT{audio_payload_type}) is not supported by the RTP bridge"
+            ));
         }
-        if audio_payload_type == 113 && !aac_bridge_preflight() {
+        if audio_codec == "MP4A-LATM" && !aac_bridge_preflight() {
             return Err("AAC-LATM bridge unavailable: worker pool has no free encode/decode slots".into());
         }
         let remote_audio_ip =
@@ -1503,10 +1527,10 @@ impl GatewayManager {
         }
         let mut has_video = video_configuration.is_some();
         let media_details = serde_json::json!({
-            "audio_codec": audio_codec_name(audio_payload_type),
+            "audio_codec": audio_codec,
             "audio_payload_type": audio_payload_type,
-            "audio_clock_rate": match audio_payload_type { 111 => 48000, 113 => 90000, _ => 8000 },
-            "audio_sample_rate": audio_sample_rate(audio_payload_type),
+            "audio_clock_rate": match audio_codec { "OPUS" => 48000, "MP4A-LATM" => 90000, _ => 8000 },
+            "audio_sample_rate": audio_sample_rate_for_codec(audio_codec),
             "audio_tx_payload_type": audio_payload_type, "audio_rx_payload_type": audio_payload_type,
             "remote_audio_address": std::net::SocketAddr::new(remote_audio_ip, remote_audio_port).to_string(),
             "video_codec": if has_video { Some(video_profile.codec.name()) } else { None },
@@ -1578,7 +1602,7 @@ impl GatewayManager {
             remote_media_ip: remote_ip,
             remote_audio_port,
             audio_payload_type,
-            audio_codec: Some(audio_codec_name(audio_payload_type)),
+            audio_codec: Some(audio_codec),
             source_latch: false,
             dtmf_payload_type,
             dtmf_events: None,

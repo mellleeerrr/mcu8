@@ -1010,6 +1010,18 @@ mod tests {
     }
 
     #[test]
+    fn renumbered_dynamic_payload_resolves_by_codec_identity() {
+        // G.722 offered as PT9 but answered on PT96: identity wins, the wire PT
+        // is remembered for the payload header.
+        let codec = AudioBridgeCodec::new(96, Some("G722")).expect("G722 identity must resolve");
+        assert_eq!(codec.frame_samples(), 320);
+        assert!(AudioBridgeCodec::new(96, None).is_none(), "bare dynamic PT is ambiguous");
+        assert!(AudioBridgeCodec::new(96, Some("G729")).is_none(), "unbridgeable identity must fail");
+        // Static and dynamic G.726-32 agree on the same codec.
+        assert_eq!(AudioBridgeCodec::new(2, Some("G726-32")).map(|c| c.frame_samples()), Some(160));
+    }
+
+    #[test]
     fn telephone_event_end_bit_on_third_packet_would_truncate_tone() {
         let packets: Vec<[u8; 16]> = (0..10)
             .map(|step| {

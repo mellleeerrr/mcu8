@@ -1218,6 +1218,19 @@ fn audio_identity(media: &SdpMedia, payload: u8) -> Option<&'static OfferCodec> 
     }
 }
 
+/// Resolves a remote payload by its declared `a=rtpmap` name+clock. Needed
+/// when a terminal renumbers a dynamic payload; the table entry found this way
+/// describes the codec, while the wire PT stays the peer's number.
+fn remote_audio_identity(media: &SdpMedia, payload: u8) -> Option<&'static OfferCodec> {
+    if let Some(codec) = audio_identity(media, payload) {
+        return Some(codec);
+    }
+    let map = media.maps.get(&payload)?;
+    AUDIO_OFFER
+        .iter()
+        .find(|codec| !codec.dtmf && codec.name.eq_ignore_ascii_case(&map.name) && codec.clock == map.clock)
+}
+
 fn telephone_event(media: &SdpMedia) -> Option<u8> {
     media.payloads.iter().copied().find(|payload| {
         (96..=127).contains(payload)
@@ -1391,25 +1404,40 @@ fn negotiate_media_detailed_with(
     // Falling through to a later native codec while the peer's first choice is
     // unbridged produces "connected" with dead audio (Polycom lists G722.1C
     // before PCMU). Either bridge the first one or refuse before 200 OK.
-    let mut first_common = None;
+    //
+    // Identity is name+clock: a terminal may renumber a dynamic payload
+    // (G.722 as 96 instead of our 9). A conformant answer echoes our PT and is
+    // preferred; the identity match is the fallback, and its wire PT is the
+    // peer's number because the bridge uses one PT for both directions.
+    let mut first_common: Option<(u8, &OfferCodec)> = None;
+    let mut identity_fallback: Option<(u8, &OfferCodec)> = None;
     for payload in &remote_audio.payloads {
-        let Some(remote_codec) = audio_identity(remote_audio, *payload) else {
+        let Some(remote_codec) = remote_audio_identity(remote_audio, *payload) else {
             continue;
         };
         if remote_codec.dtmf {
             continue;
         }
-        let Some(local_codec) = audio_identity(local_audio, *payload) else {
-            continue;
-        };
-        if !local_codec.name.eq_ignore_ascii_case(remote_codec.name) || local_codec.clock != remote_codec.clock {
+        if let Some(local_codec) = audio_identity(local_audio, *payload) {
+            if local_codec.name.eq_ignore_ascii_case(remote_codec.name) && local_codec.clock == remote_codec.clock {
+                first_common = Some((*payload, local_codec));
+                break;
+            }
+        }
+        if identity_fallback.is_some() {
             continue;
         }
-        first_common = Some(local_codec);
-        break;
+        let same_codec = local_audio.payloads.iter().copied().find_map(|local_payload| {
+            let local_codec = audio_identity(local_audio, local_payload)?;
+            (local_codec.name.eq_ignore_ascii_case(remote_codec.name) && local_codec.clock == remote_codec.clock)
+                .then_some(local_codec)
+        });
+        if let Some(local_codec) = same_codec {
+            identity_fallback = Some((*payload, local_codec));
+        }
     }
-    let codec = first_common.ok_or(NegotiationFailure::NoCommonAudio)?;
-    let aac_latm = codec.payload == 113 && aac_available;
+    let (wire_payload, codec) = first_common.or(identity_fallback).ok_or(NegotiationFailure::NoCommonAudio)?;
+    let aac_latm = codec.name.eq_ignore_ascii_case("MP4A-LATM") && aac_available;
     if !codec.native && !aac_latm {
         return Err(NegotiationFailure::UnsupportedAudio { codec: codec.name.to_string(), payload: codec.payload });
     }
@@ -1420,7 +1448,7 @@ fn negotiate_media_detailed_with(
         // An answer without `a=fmtp` for AAC cannot be assumed to use in-band
         // SMC: the LOAS bridge needs cpresent=1 explicitly (RFC 3016). Treat a
         // missing fmtp exactly like cpresent=0 instead of answering silence.
-        let Some(fmtp) = remote_audio.fmtp.get(&codec.payload) else {
+        let Some(fmtp) = remote_audio.fmtp.get(&wire_payload) else {
             return Err(NegotiationFailure::UnsupportedAudio { codec: codec.name.to_string(), payload: codec.payload });
         };
         let rendered = fmtp.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join(";");
@@ -1463,7 +1491,7 @@ fn negotiate_media_detailed_with(
     Ok(NegotiatedMedia {
         ip,
         audio_port: remote_audio.port,
-        audio_payload_type: codec.payload,
+        audio_payload_type: wire_payload,
         audio_codec: codec.name,
         dtmf_payload_type,
         video_ip: video.as_ref().map(|value| value.0.clone()),
@@ -1792,6 +1820,19 @@ a=rtpmap:97 H264/90000\r\na=fmtp:97 packetization-mode=1;profile-level-id=42801e
         assert_eq!(media.video_payload_type, Some(97));
         assert_eq!(media.local_video_payload_type, Some(97));
         assert_eq!(media.video_codec, Some("H264"));
+    }
+
+    #[test]
+    fn renumbered_dynamic_payload_is_matched_by_name_and_clock() {
+        // Our offer maps G.722 to PT9; the terminal answers with dynamic PT96.
+        let offer = build_plain_sdp("127.0.0.1", 41000, Some(41002));
+        let answer = "v=0\r\nc=IN IP4 192.0.2.10\r\nm=audio 32000 RTP/AVP 96\r\na=rtpmap:96 G722/8000\r\n";
+        let media = negotiate_media(&offer, answer).expect("G.722 by identity");
+        assert_eq!(media.audio_payload_type, 96, "wire PT must be the peer's number");
+        assert_eq!(media.audio_codec, "G722");
+        // A renumbered codec we do not bridge must not be guessed.
+        let g729 = answer.replace("G722", "G729");
+        assert!(negotiate_media(&offer, &g729).is_none(), "unbridgeable identity must be refused");
     }
 
     #[test]

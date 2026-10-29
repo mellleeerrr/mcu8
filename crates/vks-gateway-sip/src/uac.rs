@@ -43,6 +43,8 @@ pub struct ActiveSipSession {
     pub remote_audio_port: Option<u16>,
     pub remote_video_port: Option<u16>,
     pub remote_audio_payload_type: u8,
+    /// Negotiated audio codec name, independent of the wire payload number.
+    pub remote_audio_codec: Option<&'static str>,
     pub remote_video_payload_type: Option<u8>,
     pub local_video_payload_type: Option<u8>,
     pub remote_video_ip: Option<String>,
@@ -296,6 +298,7 @@ impl SipUacClient {
                         remote_audio_port: Some(media.audio_port),
                         remote_video_port: media.video_port,
                         remote_audio_payload_type: media.audio_payload_type,
+                        remote_audio_codec: Some(media.audio_codec),
                         remote_video_payload_type: media.video_payload_type,
                         local_video_payload_type: media.local_video_payload_type,
                         remote_video_ip: media.video_ip,
