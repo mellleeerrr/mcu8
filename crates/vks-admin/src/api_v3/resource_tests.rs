@@ -2334,7 +2334,11 @@ fn normalize_loaded_collapses_duplicate_canonical_addresses_and_rewrites_refs() 
         .or_default()
         .insert("addr-new".into(), resources.addresses[&"addr-old".to_string()].clone());
 
-    normalize_loaded(&mut resources);
+    crate::api_v3::directory_migrate::dedup_address_book(
+        &mut resources.addresses,
+        &mut resources.directory.user_addresses,
+        &mut resources.directory.users,
+    );
 
     assert_eq!(resources.addresses.len(), 1, "canonical-дубль должен схлопнуться");
     let kept = resources.addresses.values().next().expect("address");

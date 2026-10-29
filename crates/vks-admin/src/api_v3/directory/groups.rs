@@ -112,6 +112,7 @@ pub async fn create_group(
         display_name: display_name.to_string(),
         created_at: now_secs(),
         creator_id: Some(auth.subject.clone()),
+        ..DirectoryGroup::default()
     };
     let value = match commit_directory(&state, |resources| {
         if resources.directory.groups.values().any(|g| g.display_name.to_lowercase() == display_name.to_lowercase()) {

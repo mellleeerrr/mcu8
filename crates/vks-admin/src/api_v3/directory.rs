@@ -173,6 +173,10 @@ pub struct DirectoryUser {
     pub login: Option<String>,
     /// Основной личный адрес (vendor «звёздочка»/primary address).
     pub primary_address: Option<String>,
+    /// Unknown/future fields preserved verbatim through the T10 migration and
+    /// subsequent SQL snapshots (forward-compatibility, P2-5).
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 /// Группа пользователей (`GET /groups`).
@@ -183,6 +187,9 @@ pub struct DirectoryGroup {
     pub display_name: String,
     pub created_at: u64,
     pub creator_id: Option<String>,
+    /// Unknown/future fields preserved verbatim (T10 P2-5).
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 /// Роль справочника (`GET /roles`): built-in Administrator/Operator и
@@ -196,6 +203,9 @@ pub struct DirectoryRole {
     pub permissions: Vec<String>,
     pub created_at: u64,
     pub creator_id: Option<String>,
+    /// Unknown/future fields preserved verbatim (T10 P2-5).
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 /// Справочник в `ResourceState`.
@@ -992,9 +1002,10 @@ mod tests {
     #[test]
     fn group_json_counts_members() {
         let mut directory = DirectoryState::default();
-        directory
-            .groups
-            .insert("g1".into(), DirectoryGroup { display_name: "G".into(), created_at: 1, creator_id: None });
+        directory.groups.insert(
+            "g1".into(),
+            DirectoryGroup { display_name: "G".into(), created_at: 1, ..DirectoryGroup::default() },
+        );
         directory.users.insert("u1".into(), DirectoryUser { groups: vec!["g1".into()], ..DirectoryUser::default() });
         directory.users.insert("u2".into(), DirectoryUser::default());
         let json = group_json("g1", directory.groups.get("g1").unwrap(), &directory);

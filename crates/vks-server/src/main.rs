@@ -174,6 +174,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut admin_state = AppState::with_storage(storage.clone());
     admin_state.local_db = Some(local_db.clone());
 
+    // T10: one-shot idempotent migration of `resources.directory` /
+    // `resources.addresses` from the legacy configuration document into SQL.
+    // Runs AFTER storage init (which applies migration 0007) and BEFORE
+    // `sync_from_storage`. Any failure aborts startup even when
+    // `storage_allow_fallback` is set: serving an empty directory and
+    // accepting writes into RAM would silently lose data (T10 P1-5).
+    if let Err(error) = vks_admin::api_v3::directory_migrate::run(&admin_state).await {
+        config_exit(error);
+    }
+
     if let Err(e) = admin_state.sync_from_storage().await {
         if !config.storage_allow_fallback && !config.database_url.is_empty() {
             error!(error = %e, "failed to synchronize admin state from storage; aborting startup (fail-fast)");

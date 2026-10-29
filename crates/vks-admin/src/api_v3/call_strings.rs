@@ -1194,6 +1194,17 @@ pub async fn update_call_string(
                 Err((reason, position)) => return validation_error(reason, position),
             };
             let display_name = if explicit_name { fallback_name } else { current.display_name.clone() };
+            // T10: the global canonical URI is unique in SQL. Creating a second
+            // record for it is idempotent (POST), but moving another record onto
+            // an existing URI would violate the index — reject it explicitly
+            // instead of surfacing a storage error as 500.
+            let collides = resources
+                .addresses
+                .iter()
+                .any(|(other_id, address)| other_id != &id && vks_common::uri::canonical_uri(&address.uri) == uri);
+            if collides {
+                return error_json(409, "Call string with the same URI already exists");
+            }
             let previous = resources.clone();
             let record = AddressRecord {
                 id,
@@ -1392,6 +1403,28 @@ mod t10_canonical_create_tests {
         assert_eq!(third["id"], id);
         assert_eq!(third["display_name"], "Second");
         assert_eq!(state.api_v3.resources.lock().await.addresses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn updating_uri_onto_an_existing_canonical_is_rejected_before_sql() {
+        let state = state();
+        let first = create(&state, json!({"uri": "sip:first@example.com", "display_name": "First"})).await;
+        let first_id = first["id"].as_str().unwrap().to_string();
+        let second = create(&state, json!({"uri": "sip:second@example.com", "display_name": "Second"})).await;
+        let second_id = second["id"].as_str().unwrap().to_string();
+
+        let response = update_call_string(
+            State(state.clone()),
+            Extension(auth()),
+            Path(second_id.clone()),
+            Json(json!({"uri": "SIP:first@Example.COM:5060"})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let resources = state.api_v3.resources.lock().await;
+        assert_eq!(resources.addresses.len(), 2, "rejected update must not mutate the book");
+        assert_eq!(resources.addresses[&second_id].uri, "sip:second@example.com");
+        assert_eq!(resources.addresses[&first_id].uri, "sip:first@example.com");
     }
 
     #[tokio::test]

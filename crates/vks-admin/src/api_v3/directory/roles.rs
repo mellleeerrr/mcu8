@@ -141,6 +141,7 @@ pub async fn create_role(
                 permissions,
                 created_at: now_secs(),
                 creator_id: Some(auth.subject.clone()),
+                ..DirectoryRole::default()
             },
         );
         Ok(())
@@ -240,6 +241,7 @@ pub async fn update_role(
                 permissions: default_role_permissions(&id),
                 created_at: now_secs(),
                 creator_id: Some(auth.subject.clone()),
+                ..DirectoryRole::default()
             });
             entry.display_name = name.to_string();
             if body.get("description").is_some() {

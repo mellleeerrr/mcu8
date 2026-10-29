@@ -135,6 +135,135 @@ pub struct RecordEntry {
     pub height: u32,
 }
 
+// --- Directory / address book snapshot (T10) -------------------------------
+//
+// `resources.directory`/`resources.addresses` moved out of the PNM
+// configuration-document into normalized SQL tables. These neutral types keep
+// `vks-core` independent from the admin-level `DirectoryState`/`AddressRecord`:
+// the admin converts to/from its own types, storage only moves rows.
+//
+// Unknown/future fields are preserved as `*_json` catch-all strings (P2-5 of
+// the T10 pitfalls report) so a forward-migrated document is not destroyed by
+// a round-trip through the current structs.
+
+/// One stored directory profile (`directory_profiles.profile_json` is the full
+/// `DirectoryUser` incl. future fields).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredDirectoryProfile {
+    /// User id (string UUID / bootstrap id).
+    pub user_id: String,
+    /// Full profile document (JSON object).
+    pub profile_json: String,
+    /// Last write, unix seconds.
+    pub updated_at: u64,
+}
+
+/// One stored custom/override directory group.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredDirectoryGroup {
+    /// Group id.
+    pub id: String,
+    /// Full group document (JSON object).
+    pub group_json: String,
+    /// Last write, unix seconds.
+    pub updated_at: u64,
+}
+
+/// One stored custom/override directory role.
+///
+/// Built-in Administrator/Operator ids are NOT rows: they are code constants
+/// (`directory::ADMIN_ROLE_ID` / `OPERATOR_ROLE_ID`), so v1 has no FK on
+/// `role_id` (P0-6).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredDirectoryRole {
+    /// Role id.
+    pub id: String,
+    /// Full role document (JSON object).
+    pub role_json: String,
+    /// Last write, unix seconds.
+    pub updated_at: u64,
+}
+
+/// One stored address record.
+///
+/// The primary key is `(owner_id, id)`, where `owner_id == ""` is the global
+/// book and any other value is that user's personal copy. Personal copies may
+/// share an id with the global row: they are independent rows (P0-3).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredDirectoryAddress {
+    /// `""` = global book, otherwise the owning user id.
+    pub owner_id: String,
+    /// Address id (global `cs-*` or arbitrary personal id).
+    pub id: String,
+    /// Raw URI as stored (API/UI contract).
+    pub uri: String,
+    /// Canonical URI key used by the global partial unique index.
+    pub uri_canonical: String,
+    /// Display name.
+    pub display_name: String,
+    /// Protocol payload (JSON object; flat map `sip/h323/...`).
+    pub payload_json: String,
+    /// Full record document incl. unknown/future fields.
+    pub address_json: String,
+    /// Creation time, unix seconds (NOT milliseconds; P1-8).
+    pub created_at: u64,
+}
+
+/// Whole directory + address-book snapshot, the atomic unit of SQL persistence.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectorySnapshot {
+    /// Profiles.
+    pub profiles: Vec<StoredDirectoryProfile>,
+    /// Groups.
+    pub groups: Vec<StoredDirectoryGroup>,
+    /// Custom/override roles.
+    pub roles: Vec<StoredDirectoryRole>,
+    /// `(group_id, user_id)` memberships.
+    pub group_members: Vec<(String, String)>,
+    /// `(user_id, role_id)` assignments (built-in ids allowed).
+    pub user_roles: Vec<(String, String)>,
+    /// Global (`owner_id == ""`) and personal address records.
+    pub addresses: Vec<StoredDirectoryAddress>,
+}
+
+impl DirectorySnapshot {
+    /// True when no rows at all are present (used by the migration to decide
+    /// "adopt existing SQL rows" vs "import the legacy JSON document").
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.profiles.is_empty()
+            && self.groups.is_empty()
+            && self.roles.is_empty()
+            && self.group_members.is_empty()
+            && self.user_roles.is_empty()
+            && self.addresses.is_empty()
+    }
+
+    /// Total row count (reporting/logging only).
+    #[must_use]
+    pub fn row_count(&self) -> usize {
+        self.profiles.len()
+            + self.groups.len()
+            + self.roles.len()
+            + self.group_members.len()
+            + self.user_roles.len()
+            + self.addresses.len()
+    }
+}
+
+/// Outcome of the atomic legacy-document migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectoryMigrationOutcome {
+    /// Marker was absent and this call imported/adopted the rows + stripped
+    /// the legacy JSON keys in one transaction.
+    Applied,
+    /// Marker `version >= 1` already present: nothing was changed.
+    AlreadyMigrated,
+    /// The configuration document changed between read and CAS write; the
+    /// caller must re-read and retry. Nothing was written.
+    DocumentChanged,
+}
+
 /// Порт Storage — CRUD для Room/Participant/Layout/ApiKey/User/Audit.
 ///
 /// Ядро использует этот порт для persistence; конкретные реализации —
@@ -281,6 +410,58 @@ pub trait Storage: Send + Sync + 'static {
 
     /// Read a configuration document. Runtime calls must never be restored from it.
     async fn get_configuration_document(&self, _key: &str) -> Result<Option<String>, StorageError> {
+        Ok(None)
+    }
+
+    // --- Directory / address book (T10) -----------------------------------
+
+    /// Loads the whole directory snapshot. Callers must invoke this even when
+    /// [`Self::get_configuration_document`] returned `None` (P1-13): directory
+    /// rows are still authoritative and must not disappear.
+    async fn load_directory_snapshot(&self) -> Result<DirectorySnapshot, StorageError> {
+        Ok(DirectorySnapshot::default())
+    }
+
+    /// Replaces the whole directory snapshot atomically (single transaction in
+    /// SQL backends).
+    async fn replace_directory_snapshot(&self, _snapshot: &DirectorySnapshot) -> Result<(), StorageError> {
+        Err(StorageError::Other("Directory snapshot persistence is unavailable".into()))
+    }
+
+    /// Atomically upserts `document` AND replaces the directory snapshot.
+    ///
+    /// Used by every directory/address mutation so rows and the (directory-free)
+    /// configuration document can never diverge.
+    async fn put_configuration_document_with_directory(
+        &self,
+        _key: &str,
+        _document: &str,
+        _snapshot: &DirectorySnapshot,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Other("Directory snapshot persistence is unavailable".into()))
+    }
+
+    /// One-shot idempotent migration of the legacy `resources.directory` /
+    /// `resources.addresses` JSON keys into SQL (T10).
+    ///
+    /// One transaction covers marker + rows + document CAS. Existing non-empty
+    /// rows win over the legacy JSON ("adopt"): a lost marker must never
+    /// resurrect deleted records (P0-2). When no rows exist the `snapshot` is
+    /// imported. `expected_document` is the exact JSON read by the caller;
+    /// `new_document` is the same document with the legacy keys stripped (or
+    /// `None` when the document has no legacy keys / does not exist).
+    async fn migrate_directory_document(
+        &self,
+        _key: &str,
+        _expected_document: Option<&str>,
+        _new_document: Option<&str>,
+        _snapshot: &DirectorySnapshot,
+    ) -> Result<DirectoryMigrationOutcome, StorageError> {
+        Err(StorageError::Other("Directory migration is unavailable".into()))
+    }
+
+    /// Marker version for the directory schema (`schema_state('directory')`).
+    async fn directory_schema_version(&self) -> Result<Option<u64>, StorageError> {
         Ok(None)
     }
 

@@ -349,8 +349,10 @@ async fn roles_list_filters_by_user() {
     assert_eq!(body["roles"][0]["id"], OPERATOR_ROLE_ID);
 }
 
-#[test]
-fn directory_persists_in_resource_configuration_document() {
+/// T10: directory/addresses are NOT serialized into the configuration document
+/// any more; the SQL snapshot is the only durable home.
+#[tokio::test]
+async fn directory_is_not_serialized_into_configuration_document_and_snapshot_roundtrips() {
     let mut state = ResourceState::default();
     state.directory.users.insert(
         "u-1".to_string(),
@@ -362,7 +364,12 @@ fn directory_persists_in_resource_configuration_document() {
     );
     state.directory.groups.insert(
         "g-1".to_string(),
-        super::DirectoryGroup { display_name: "Группа".to_string(), created_at: 1, creator_id: None },
+        super::DirectoryGroup {
+            display_name: "Группа".to_string(),
+            created_at: 1,
+            creator_id: None,
+            ..Default::default()
+        },
     );
     state.directory.user_addresses.entry("u-1".to_string()).or_default().insert(
         "a-1".to_string(),
@@ -374,12 +381,36 @@ fn directory_persists_in_resource_configuration_document() {
             payload: serde_json::json!({}),
         },
     );
+    state.addresses.insert(
+        "global-1".to_string(),
+        crate::api_v3::resources::AddressRecord {
+            id: "global-1".to_string(),
+            uri: "h323:192.168.1.10".to_string(),
+            display_name: "Зал".to_string(),
+            created_at: 2,
+            payload: serde_json::json!({}),
+        },
+    );
     let json = serde_json::to_string(&state).expect("serialize");
-    assert!(json.contains("\"directory\""));
+    assert!(!json.contains("\"directory\""), "T10: directory must not reach the JSON document");
+    assert!(!json.contains("\"addresses\""), "T10: addresses must not reach the JSON document");
+    // Old keys are ignored on load (no resurrection from a stale document).
     let restored: ResourceState = serde_json::from_str(&json).expect("deserialize");
+    assert!(restored.directory.users.is_empty());
+    assert!(restored.addresses.is_empty());
+
+    // The SQL snapshot round-trips every record.
+    let storage = std::sync::Arc::new(vks_storage::MemoryStorage::new());
+    let snapshot = crate::api_v3::directory_migrate::snapshot_from_resources(&state);
+    storage.replace_directory_snapshot(&snapshot).await.unwrap();
+    let loaded = storage.load_directory_snapshot().await.unwrap();
+    assert_eq!(loaded, snapshot);
+    let mut restored = ResourceState::default();
+    crate::api_v3::directory_migrate::apply_snapshot(&mut restored, &loaded);
     assert_eq!(restored.directory.users["u-1"].display_name, "Иван");
     assert_eq!(restored.directory.groups["g-1"].display_name, "Группа");
     assert_eq!(restored.directory.user_addresses["u-1"]["a-1"].uri, "sip:user@example.com");
+    assert_eq!(restored.addresses["global-1"].uri, "h323:192.168.1.10");
 }
 
 #[tokio::test]
@@ -695,26 +726,30 @@ async fn validation_lengths_unicode_duplicates_and_json_envelope() {
     assert!(body["error"]["code"].as_i64().is_some(), "error envelope: {body}");
 }
 
+/// T10: a legacy document is migrated into SQL once, then hydrated from the SQL
+/// snapshot on restart (the old JSON keys are stripped in the same transaction).
 #[tokio::test]
-async fn directory_hydrates_from_configuration_document_on_restart() {
+async fn legacy_directory_migrates_on_startup() {
     let storage = std::sync::Arc::new(vks_storage::MemoryStorage::new());
     storage
         .put_configuration_document(
             crate::api_v3::resources::CONFIGURATION_KEY,
             &serde_json::json!({
+                "future_top": {"keep": true},
                 "resources": {
                     "layouts": {},
                     "audiochannels": {},
                     "links": {},
                     "schedules": {},
                     "contacts": {},
-                    "addresses": {},
+                    "addresses": {"global-1": {"id": "global-1", "uri": "h323:192.168.1.10", "display_name": "Зал", "created_at": 3}},
                     "directory": {
                         "users": {"u-1": {"display_name": "Гидратация", "roles": [ADMIN_ROLE_ID]}},
                         "groups": {"g-1": {"display_name": "Группа рестарта"}},
                         "roles": {"r-1": {"display_name": "Кастом", "permissions": ["users:read"]}},
                         "user_addresses": {"u-1": {"a-1": {"id": "a-1", "uri": "sip:a@b", "display_name": "Адрес", "created_at": 1}}}
-                    }
+                    },
+                    "future_res": "keep"
                 }
             })
             .to_string(),
@@ -722,13 +757,45 @@ async fn directory_hydrates_from_configuration_document_on_restart() {
         .await
         .unwrap();
     let mut state = crate::state::AppState::new();
-    state.storage = Some(storage);
+    state.storage = Some(storage.clone());
+    let report = crate::api_v3::directory_migrate::run(&state).await.expect("migrate");
+    assert_eq!(report.outcome, "applied");
+    assert!(report.imported);
+    assert_eq!(report.profiles, 1);
+    assert_eq!(report.global_addresses, 1);
+    assert_eq!(report.personal_addresses, 1);
+
     state.sync_from_storage().await.expect("hydrate");
     let resources = state.api_v3.resources.lock().await;
     assert_eq!(resources.directory.users["u-1"].display_name, "Гидратация");
     assert_eq!(resources.directory.groups["g-1"].display_name, "Группа рестарта");
     assert_eq!(resources.directory.roles["r-1"].display_name, "Кастом");
     assert_eq!(resources.directory.user_addresses["u-1"]["a-1"].uri, "sip:a@b");
+    assert_eq!(resources.addresses["global-1"].uri, "h323:192.168.1.10");
+    drop(resources);
+
+    // Legacy keys stripped from the document, unknown fields preserved verbatim.
+    let raw = storage
+        .get_configuration_document(crate::api_v3::resources::CONFIGURATION_KEY)
+        .await
+        .unwrap()
+        .expect("document");
+    let document: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(document["future_top"]["keep"], true);
+    assert_eq!(document["resources"]["future_res"], "keep");
+    assert!(document["resources"].get("directory").is_none());
+    assert!(document["resources"].get("addresses").is_none());
+    assert_eq!(storage.directory_schema_version().await.unwrap(), Some(1));
+
+    // Second run is a strict no-op: rows and document stay byte-identical.
+    let before = storage.load_directory_snapshot().await.unwrap();
+    let second = crate::api_v3::directory_migrate::run(&state).await.expect("second migrate");
+    assert_eq!(second.outcome, "already_migrated");
+    assert_eq!(storage.load_directory_snapshot().await.unwrap(), before);
+    assert_eq!(
+        storage.get_configuration_document(crate::api_v3::resources::CONFIGURATION_KEY).await.unwrap().as_deref(),
+        Some(raw.as_str())
+    );
 }
 
 #[tokio::test]

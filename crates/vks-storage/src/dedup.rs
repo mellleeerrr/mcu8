@@ -41,6 +41,12 @@ pub struct DedupReport {
     pub dangling_links_removed: usize,
     pub promoted_addresses: Vec<String>,
     pub address_aliases: Vec<Alias>,
+    /// T10: personal address books (`resources.directory.user_addresses`) were
+    /// deduplicated by canonical URI inside each user's book.
+    #[serde(default)]
+    pub personal_addresses_before: usize,
+    #[serde(default)]
+    pub personal_addresses_after: usize,
     pub layout_aliases: Vec<Alias>,
     pub orphan_default_layouts: usize,
     pub skipped_layouts: Vec<String>,
@@ -114,6 +120,83 @@ fn collect_string_refs(value: &Value, refs: &mut BTreeMap<String, usize>) {
         Value::Array(items) => items.iter().for_each(|item| collect_string_refs(item, refs)),
         Value::Object(map) => map.values().for_each(|item| collect_string_refs(item, refs)),
         _ => {}
+    }
+}
+
+/// Merges missing top-level keys from `duplicate` into `keep` (payload union).
+/// Existing values win, so a second run over an already-cleaned document is a
+/// no-op (idempotence requirement from the T10 report).
+fn merge_missing(keep: &mut Value, duplicate: &Value) {
+    if let (Some(keep_map), Some(duplicate_map)) = (keep.as_object_mut(), duplicate.as_object()) {
+        for (key, value) in duplicate_map {
+            match keep_map.get_mut(key) {
+                None => {
+                    keep_map.insert(key.clone(), value.clone());
+                }
+                Some(existing) if existing.is_null() => *existing = value.clone(),
+                Some(Value::Object(existing_map)) if value.is_object() => {
+                    for (inner_key, inner_value) in value.as_object().into_iter().flatten() {
+                        existing_map.entry(inner_key.clone()).or_insert_with(|| inner_value.clone());
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+    }
+}
+
+/// Deduplicates `resources.directory.user_addresses` in place (per user, by
+/// canonical URI) and rewrites `directory.users[].primary_address` aliases.
+/// Returns counts via `report`.
+fn dedup_personal_addresses(document: &mut Value, report: &mut DedupReport) {
+    let Some(resources) = document.get_mut("resources").and_then(Value::as_object_mut) else { return };
+    let Some(directory) = resources.get_mut("directory").and_then(Value::as_object_mut) else { return };
+    let Some(books) = directory.get_mut("user_addresses").and_then(Value::as_object_mut) else { return };
+    // (user_id, removed_id) -> kept_id, for primary_address repair below.
+    let mut primary_aliases: BTreeMap<(String, String), String> = BTreeMap::new();
+    for (user_id, book_value) in books.iter_mut() {
+        let Some(book) = book_value.as_object_mut() else { continue };
+        report.personal_addresses_before += book.len();
+        // Early created_at wins (stable primary reference), then id.
+        let mut ids: Vec<String> = book.keys().cloned().collect();
+        ids.sort_by_key(|id| {
+            (book.get(id).and_then(|record| record.get("created_at")).and_then(Value::as_u64).unwrap_or(0), id.clone())
+        });
+        let mut keep_by_uri: BTreeMap<String, String> = BTreeMap::new();
+        let mut aliases: Vec<(String, String)> = Vec::new();
+        for id in &ids {
+            let Some(uri) = book.get(id).and_then(|record| record.get("uri")).and_then(Value::as_str) else {
+                continue;
+            };
+            let canonical = normalize_uri(uri);
+            match keep_by_uri.get(&canonical).cloned() {
+                Some(keep) => aliases.push((id.clone(), keep)),
+                None => {
+                    keep_by_uri.insert(canonical, id.clone());
+                }
+            }
+        }
+        for (duplicate_id, keep_id) in aliases {
+            let Some(duplicate) = book.remove(&duplicate_id) else { continue };
+            if let Some(keep) = book.get_mut(&keep_id) {
+                merge_missing(keep, &duplicate);
+            }
+            primary_aliases.insert((user_id.clone(), duplicate_id), keep_id);
+        }
+        report.personal_addresses_after += book.len();
+    }
+    if primary_aliases.is_empty() {
+        return;
+    }
+    if let Some(users) = directory.get_mut("users").and_then(Value::as_object_mut) {
+        for (user_id, profile) in users.iter_mut() {
+            let Some(primary) = profile.get("primary_address").and_then(Value::as_str).map(str::to_string) else {
+                continue;
+            };
+            if let Some(keep) = primary_aliases.get(&(user_id.clone(), primary)) {
+                profile["primary_address"] = json!(keep);
+            }
+        }
     }
 }
 
@@ -244,6 +327,13 @@ pub fn dedup_document(document: &mut Value) -> DedupReport {
             .and_then(Value::as_object)
             .map_or(0, |contacts| contacts.values().filter_map(Value::as_array).map(Vec::len).sum());
     }
+
+    // --- 2b. Дедуп личных адресных книг (`directory.user_addresses`) --------
+    // T10: legacy personal books may hold two records with the same canonical
+    // URI (personal create never checked duplicates). Deduplicate inside each
+    // user's book only: a personal copy may legitimately share its id/URI with
+    // the global book, so cross-owner collapsing is forbidden.
+    dedup_personal_addresses(document, &mut report);
 
     // --- 3. Переписываем ссылки на canonical id по всему документу ----------
     let mut rewritten = 0usize;
@@ -611,6 +701,39 @@ mod tests {
         let call = &doc["resources"]["history"]["sessions"][0]["calls"][0];
         assert_eq!(call["contact_id"], "cs-sip", "история переписана на canonical");
         assert_eq!(call["connection_url"], "sip:192.168.1.132");
+    }
+
+    #[test]
+    fn dedups_personal_address_books_and_repairs_primary_address() {
+        let mut doc = json!({"version": 1, "resources": {
+            "addresses": {},
+            "directory": {
+                "users": {
+                    "u1": {"primary_address": "b", "groups": []}
+                },
+                "user_addresses": {
+                    "u1": {
+                        "a": {"id":"a","uri":"SIP:user@Host:5060","display_name":"Имя","created_at":10,"payload":{"sip":{"x":1}}},
+                        "b": {"id":"b","uri":"sip:user@host","display_name":"","created_at":20,"payload":{"h323":{"y":2}}}
+                    },
+                    "u2": {
+                        "x": {"id":"x","uri":"sip:user@host","display_name":"Друг","created_at":1,"payload":{}}
+                    }
+                }
+            }
+        }});
+        let report = dedup_document(&mut doc);
+        assert_eq!(report.personal_addresses_before, 3);
+        assert_eq!(report.personal_addresses_after, 2, "u1 collapsed, u2 kept separate");
+        let book = &doc["resources"]["directory"]["user_addresses"]["u1"];
+        assert!(book.get("a").is_some() && book.get("b").is_none(), "canonical copy keeps earliest id");
+        assert_eq!(book["a"]["payload"]["h323"]["y"], 2, "payload of the removed copy is merged");
+        assert_eq!(doc["resources"]["directory"]["users"]["u1"]["primary_address"], "a");
+        let once = doc.to_string();
+        let second = dedup_document(&mut doc);
+        assert_eq!(second.personal_addresses_before, 2);
+        assert_eq!(second.personal_addresses_after, 2);
+        assert_eq!(doc.to_string(), once, "personal dedup is idempotent");
     }
 
     #[test]

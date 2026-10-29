@@ -28,11 +28,24 @@ pub struct MemoryStorage {
     core_records: RwLock<HashMap<String, vks_core::ports::storage::RecordEntry>>,
     server_settings: RwLock<Option<String>>,
     configuration_documents: RwLock<HashMap<String, String>>,
+    /// T10: authoritative directory/address snapshot (RAM analogue of the SQL
+    /// tables) plus the `schema_state('directory')` migration marker.
+    directory_state: RwLock<StoredDirectoryState>,
+}
+
+/// In-memory mirror of the normalized directory tables + migration marker.
+#[derive(Debug, Default)]
+pub(crate) struct StoredDirectoryState {
+    pub version: Option<u64>,
+    pub snapshot: vks_core::ports::storage::DirectorySnapshot,
 }
 
 impl MemoryStorage {
     pub(crate) fn configuration_documents(&self) -> &RwLock<HashMap<String, String>> {
         &self.configuration_documents
+    }
+    pub(crate) fn directory_state(&self) -> &RwLock<StoredDirectoryState> {
+        &self.directory_state
     }
     pub(crate) fn records_map(&self) -> &RwLock<HashMap<String, vks_core::ports::storage::RecordEntry>> {
         &self.core_records

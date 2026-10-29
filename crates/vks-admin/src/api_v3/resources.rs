@@ -36,13 +36,19 @@ pub struct ResourceState {
     /// присылать старый id после клонирования, попадал в клон текущей комнаты.
     #[serde(default)]
     pub layout_aliases: BTreeMap<String, String>,
-    /// Глобальная адресная книга (`/api/v3/call_strings`): сохранённые адреса
-    /// переживают рестарт и участвуют в автодополнении «Добавить по адресу».
-    #[serde(default, deserialize_with = "deserialize_addresses")]
+    /// Глобальная адресная книга (`/api/v3/call_strings`): RAM-кэш (T10).
+    ///
+    /// Источник истины — нормализованные SQL-таблицы (`directory_addresses`),
+    /// а не configuration-document. `skip` означает, что поле не читается и не
+    /// пишется в JSON: старый документ не воскрешает удалённые адреса, а
+    /// мутации сохраняют snapshot отдельной транзакцией (`persist_directory`).
+    /// Literal removal поля из `ResourceState` — отдельный follow-up (вариант A
+    /// отчёта T10 §3.1).
+    #[serde(skip)]
     pub addresses: BTreeMap<String, AddressRecord>,
-    /// Справочник (T2.1): профили пользователей, группы, роли и личные
-    /// адресные книги. Хранится в том же configuration-document, что и ресурсы.
-    #[serde(default)]
+    /// Справочник (T2.1): профили, группы, роли и личные книги — RAM-кэш (T10).
+    /// Источник истины — SQL (`directory_*`), см. комментарий у `addresses`.
+    #[serde(skip)]
     pub directory: super::directory::DirectoryState,
     /// История конференций (T2.2): переживает рестарт в том же документе.
     #[serde(default)]
@@ -57,7 +63,11 @@ pub struct ResourceState {
 /// Толерантная загрузка адресной книги: битые/старые записи не роняют весь
 /// `ResourceState` (а с ним и layout'ы) — чинятся недостающие поля, отбрасываются
 /// записи без `uri` и не-объектные значения протоколов.
-fn deserialize_addresses<'de, D>(deserializer: D) -> Result<BTreeMap<String, AddressRecord>, D::Error>
+///
+/// T10: остаётся legacy-парсером миграции (`directory_migrate`); после
+/// `#[serde(skip)]` на `addresses` больше не участвует в serde-загрузке
+/// `ResourceState`.
+pub(crate) fn deserialize_addresses<'de, D>(deserializer: D) -> Result<BTreeMap<String, AddressRecord>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -66,6 +76,15 @@ where
         .into_iter()
         .filter_map(|(id, value)| address_record_from_value(&id, &value).map(|record| (record.id.clone(), record)))
         .collect())
+}
+
+/// Разбирает сырое JSON-значение адресной книги (`{id: record}`) тем же
+/// толерантным парсером, что использовался до T10. Возвращает пустую карту
+/// для не-объектных/битых значений — миграция не должна падать из-за них.
+pub(crate) fn deserialize_address_book(value: &Value) -> BTreeMap<String, AddressRecord> {
+    #[derive(Deserialize)]
+    struct AddressBook(#[serde(deserialize_with = "deserialize_addresses")] BTreeMap<String, AddressRecord>);
+    serde_json::from_value::<AddressBook>(value.clone()).map(|book| book.0).unwrap_or_default()
 }
 
 fn address_record_from_value(stored_id: &str, value: &Value) -> Option<AddressRecord> {
@@ -253,19 +272,42 @@ pub async fn persist_with_video_settings(
     video_settings: Value,
 ) -> Result<(), String> {
     if let Some(storage) = &state.storage {
-        let configurations = state.api_v3.conference_settings.lock().map_err(|e| e.to_string())?.clone();
-        let document = json!({
-            "version":1,
-            "resources":resources,
-            "conference_settings":configurations,
-            "video_settings":video_settings,
-        });
+        let document = configuration_document(state, resources, video_settings)?;
+        storage.put_configuration_document(CONFIGURATION_KEY, &document).await.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// T10: persists the (directory-free) configuration document AND the directory
+/// snapshot in ONE storage transaction. Every directory/address mutation goes
+/// through [`commit`], so rows and the document cannot diverge, and the JSON
+/// never contains `resources.directory`/`resources.addresses` again.
+pub(crate) async fn persist_with_directory(state: &SharedState, resources: &ResourceState) -> Result<(), String> {
+    if let Some(storage) = &state.storage {
+        let video_settings = state.api_v3.video_settings.lock().map(|guard| guard.clone()).unwrap_or(Value::Null);
+        let document = configuration_document(state, resources, video_settings)?;
+        let snapshot = super::directory_migrate::snapshot_from_resources(resources);
         storage
-            .put_configuration_document(CONFIGURATION_KEY, &document.to_string())
+            .put_configuration_document_with_directory(CONFIGURATION_KEY, &document, &snapshot)
             .await
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+fn configuration_document(
+    state: &SharedState,
+    resources: &ResourceState,
+    video_settings: Value,
+) -> Result<String, String> {
+    let configurations = state.api_v3.conference_settings.lock().map_err(|e| e.to_string())?.clone();
+    Ok(json!({
+        "version":1,
+        "resources":resources,
+        "conference_settings":configurations,
+        "video_settings":video_settings,
+    })
+    .to_string())
 }
 
 pub(crate) async fn commit(
@@ -273,7 +315,7 @@ pub(crate) async fn commit(
     resources: &mut ResourceState,
     previous: ResourceState,
 ) -> Result<(), Response> {
-    if let Err(error) = persist(state, resources).await {
+    if let Err(error) = persist_with_directory(state, resources).await {
         *resources = previous;
         return Err(error_json(500, &format!("Storage error: {error}")));
     }
@@ -433,7 +475,7 @@ fn max_slot_position(payload: &Value) -> Option<usize> {
 /// (`vks_grid_5` → `vks_grid_9`, `size` → 43, mode → `preset_equal_25`), но
 /// не вправе расширить её одними номерами слотов (иначе stale `size`
 /// обходится позициями). Поэтому сюда НЕ входит fallback `slots.len`.
-fn explicit_layout_capacity(payload: &Value) -> Option<usize> {
+pub(super) fn explicit_layout_capacity(payload: &Value) -> Option<usize> {
     payload
         .get("preset")
         .and_then(Value::as_str)
@@ -1264,56 +1306,10 @@ pub fn normalize_loaded(resources: &mut ResourceState) {
             resources.active_layouts.insert(key, fallback);
         }
     }
-    dedup_addresses(resources);
-}
-
-/// Схлопывает глобальные адреса с одинаковым canonical URI, сохраняя самый
-/// ранний id: документ мог накопить дубли до появления canonical-idempotent
-/// create. Личные ссылки переписываются на оставшийся id, payload'ы
-/// объединяются, пустое имя заменяется непустым. Это дешёвая durable-защита
-/// на старте; API-путь дополнительно сериализован мьютексом и canonical-create.
-fn dedup_addresses(resources: &mut ResourceState) {
-    let mut keep_by_uri: HashMap<String, String> = HashMap::new();
-    let mut aliases: Vec<(String, String)> = Vec::new();
-    let mut ids: Vec<String> = resources.addresses.keys().cloned().collect();
-    // Ранний created_at важнее порядка id: именно его id остаётся стабильным
-    // для ссылок из личных книг.
-    ids.sort_by_key(|id| {
-        resources
-            .addresses
-            .get(id)
-            .map(|record| (record.created_at, record.id.clone()))
-            .unwrap_or((u64::MAX, id.clone()))
-    });
-    for id in ids {
-        let Some(key) = resources.addresses.get(&id).map(|record| vks_common::uri::canonical_uri(&record.uri)) else {
-            continue;
-        };
-        match keep_by_uri.get(&key).cloned() {
-            Some(keep) => aliases.push((id, keep)),
-            None => {
-                keep_by_uri.insert(key, id);
-            }
-        }
-    }
-    for (duplicate_id, keep_id) in aliases {
-        let Some(duplicate) = resources.addresses.remove(&duplicate_id) else {
-            continue;
-        };
-        let Some(keep) = resources.addresses.get_mut(&keep_id) else {
-            continue;
-        };
-        keep.created_at = keep.created_at.min(duplicate.created_at);
-        if keep.display_name.trim().is_empty() {
-            keep.display_name = duplicate.display_name;
-        }
-        merge_json(&mut keep.payload, &duplicate.payload);
-        for addresses in resources.directory.user_addresses.values_mut() {
-            if addresses.remove(&duplicate_id).is_some() {
-                addresses.insert(keep_id.clone(), keep.clone());
-            }
-        }
-    }
+    // T10: `resources.addresses`/`resources.directory` are not part of this
+    // document any more (SQL snapshot). Legacy address normalization now lives
+    // in `directory_migrate::dedup_address_book` and runs exactly once, during
+    // the SQL migration — not on every load.
 }
 
 /// Удаление комнаты: убираются только её scoped-ссылки и ставшие недостижимыми

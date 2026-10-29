@@ -698,18 +698,23 @@ impl AppState {
                 }
             }
 
-            // M0.4: Hydrate custom layouts from storage
-            if let Some(document) = storage
+            // M0.4 + T10: the configuration document now holds only
+            // layouts/links/history/settings; `resources.directory` and
+            // `resources.addresses` live in normalized SQL tables and are
+            // hydrated separately (P0-4/P1-13). The SQL snapshot is loaded even
+            // when the document is absent.
+            let document = storage
                 .get_configuration_document(crate::api_v3::resources::CONFIGURATION_KEY)
                 .await
-                .map_err(|e| e.to_string())?
-            {
+                .map_err(|e| e.to_string())?;
+            let mut loaded_document: Option<crate::api_v3::resources::ResourceState> = None;
+            if let Some(document) = document {
                 let value: serde_json::Value = serde_json::from_str(&document).map_err(|e| e.to_string())?;
                 if let Some(resources) = value.get("resources") {
                     let mut loaded: crate::api_v3::resources::ResourceState =
                         serde_json::from_value(resources.clone()).map_err(|e| e.to_string())?;
                     crate::api_v3::resources::normalize_loaded(&mut loaded);
-                    *self.api_v3.resources.lock().await = loaded;
+                    loaded_document = Some(loaded);
                 }
                 if let Some(settings) = value.get("conference_settings") {
                     *self.api_v3.conference_settings.lock().map_err(|e| e.to_string())? =
@@ -718,6 +723,23 @@ impl AppState {
                 if let Some(video) = value.get("video_settings") {
                     *self.api_v3.video_settings.lock().map_err(|e| e.to_string())? = video.clone();
                 }
+            }
+            let snapshot = storage.load_directory_snapshot().await.map_err(|e| format!("directory snapshot: {e}"))?;
+            {
+                let mut current = self.api_v3.resources.lock().await;
+                let mut loaded = match loaded_document {
+                    Some(loaded) => loaded,
+                    None => {
+                        // No document: keep layouts/history but replace the
+                        // directory cache with the authoritative SQL rows.
+                        let mut kept = current.clone();
+                        kept.addresses.clear();
+                        kept.directory = Default::default();
+                        kept
+                    }
+                };
+                crate::api_v3::directory_migrate::apply_snapshot(&mut loaded, &snapshot);
+                *current = loaded;
             }
             // Stored definitions survive a restart; live calls and sessions do not.
             // При hot-reload живые сессии сохраняются — маркер не ставим.

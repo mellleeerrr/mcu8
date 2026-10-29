@@ -324,6 +324,17 @@ async fn address_book_crud_filters_and_persists() {
         StatusCode::NOT_FOUND
     );
     assert_eq!(state.api_v3.resources.lock().await.addresses.len(), 1);
+    // T10: the address book is persisted in SQL, not in the JSON document.
+    let stored_id = second["id"].as_str().unwrap();
+    let snapshot = state.storage.as_ref().unwrap().load_directory_snapshot().await.unwrap();
+    let stored = snapshot
+        .addresses
+        .iter()
+        .find(|address| address.owner_id.is_empty() && address.id == stored_id)
+        .expect("global address row");
+    assert_eq!(stored.uri, "h323:192.168.1.60");
+    let payload: Value = serde_json::from_str(&stored.payload_json).unwrap();
+    assert_eq!(payload["sip"]["bitrate"], 2048);
     let raw = state
         .storage
         .as_ref()
@@ -332,10 +343,11 @@ async fn address_book_crud_filters_and_persists() {
         .await
         .unwrap()
         .unwrap();
-    let stored: Value = serde_json::from_str(&raw).unwrap();
-    let stored_id = second["id"].as_str().unwrap();
-    assert_eq!(stored["resources"]["addresses"][stored_id]["uri"], "h323:192.168.1.60");
-    assert_eq!(stored["resources"]["addresses"][stored_id]["payload"]["sip"]["bitrate"], 2048);
+    let stored_document: Value = serde_json::from_str(&raw).unwrap();
+    assert!(
+        stored_document["resources"].get("addresses").is_none(),
+        "T10: addresses must not be in the JSON document: {stored_document}"
+    );
 }
 
 /// T1.5: чтение книги — Moderator+, запись — Operator без room_scope; пустой
@@ -431,8 +443,10 @@ async fn address_patch_and_delete_resolve_room_contacts() {
     assert!(state.api_v3.resources.lock().await.contacts[&room.to_string()].is_empty());
 }
 
-/// T1.5: битые persisted-записи адресной книги не роняют `ResourceState`
-/// (а с ним layout'ы): чинятся поля, отбрасываются записи без uri.
+/// T1.5/T10: битые persisted-записи адресной книги не роняют legacy-парсер
+/// (а с ним и миграцию): чинятся поля, отбрасываются записи без uri.
+/// `ResourceState` больше не десериализует `addresses` (T10 `serde(skip)`),
+/// поэтому тест проверяет непосредственно `deserialize_address_book`.
 #[test]
 fn address_records_tolerate_broken_persisted_document() {
     let raw = json!({"addresses": {
@@ -440,13 +454,18 @@ fn address_records_tolerate_broken_persisted_document() {
         "broken": {"uri": 42},
         "empty": {}
     }});
-    let loaded: crate::api_v3::resources::ResourceState = serde_json::from_value(raw).expect("tolerant load");
-    assert_eq!(loaded.addresses.len(), 1);
-    let good = &loaded.addresses["good"];
+    let loaded = crate::api_v3::resources::deserialize_address_book(&raw["addresses"]);
+    assert_eq!(loaded.len(), 1);
+    let good = &loaded["good"];
     assert_eq!(good.uri, "h323:192.168.1.132");
     assert_eq!(good.display_name, "h323:192.168.1.132");
     assert_eq!(good.payload["h323"]["bitrate"], 4096);
     assert!(good.payload.get("sip").is_none(), "не-объектные протоколы отбрасываются");
+
+    // T10: старый JSON-ключ `addresses` игнорируется при загрузке ResourceState.
+    let state: crate::api_v3::resources::ResourceState =
+        serde_json::from_value(json!({"addresses": {"good": {"uri": "sip:a@b"}}})).expect("skip legacy key");
+    assert!(state.addresses.is_empty(), "legacy addresses must not be read into the RAM cache");
 }
 
 /// T1.5: битый persisted payload протокола не должен ронять PATCH (release abort).

@@ -15,6 +15,7 @@ pub mod auth;
 pub mod boot;
 pub mod call_strings;
 pub mod directory;
+pub mod directory_migrate;
 pub mod export_store;
 pub mod history;
 pub mod observability;
