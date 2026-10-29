@@ -14,23 +14,23 @@
 | T03b | Доки к факту + doc-links gate | P1 | T03a | ✅ `9a394ec`: все doc-ссылки, rustdoc-гейт блокирующий, oxideav/ldap3/Taffy/progenitor — к факту |
 | T03c | Мёртвый код (−1080) + неиспользуемые deps | P1 | T03a | ✅ done 07:46 (`aef9257`) |
 | T04a | SDP/кодеки P0–P1 (H.264 PT98, cpresent, PT identity, G.726, лицензия) | P0 | T03a | ✅ `7cb7ba7`+`14834a8`: PT98/RX High/AAC/лицензия/PT2/матрица/audio-identity |
-| T04b | CodecSpec SSOT + матрица диспозиций | P2 | T04a | ⏳ |
+| T04b | CodecSpec SSOT + матрица диспозиций | P2 | T04a | ✅ 9.0 (`6ac14c2`; P2 review C закрыта исполнением; t10 dependency fixed in `71f7aeb`; full workspace 1587/0/8) |
 | T05 | DTMF E-бит (60→200 мс) + send_to метрика | P1 | T03a | ✅ done 07:49 (`2a77be5`) |
-| T06 | Layout: normalize/резолвер/P2/тест S6/оракул e2e | P1 | T03a | ⏳ |
+| T06 | Layout: normalize/резолвер/P2/тест S6/оракул e2e | P1 | T03a | ✅ 9.5 (`215baa5`+`5549b22`, rr9, gate 1587/0/8) |
 | T07 | Frontend: deep link, импорт, gzip, тема, CI-гейты | P1 | T03a | 🔁 `25c9d99` (gzip metrics + atomic import + docs P2 fixed) → финальные `T07_rereviewA/B` |
 | T08 | SDK: room_mode в JoinRoomResult + auto-select + wasm | P1 | T03a | ✅ 9.6 (`T08_rereview2.md`) |
 | T09a | Запись: Storage-контракт+гидратация+API+409+soak | P0 | T03a | ✅ 9.0 (`T09a_rereview3.md`, P1 был чужой — T11a clippy, исправлен `ce4f45f`) |
-| T09b | MP4: avcC/length-prefix/timescale/esds + tap | P1 | T09a | ⏳ |
-| T10 | T10b: directory в SQL + schema_state + удаление из JSON | P1 | T09a | ⏳ |
+| T09b | MP4: avcC/length-prefix/timescale/esds + tap | P1 | T09a | ✅ 9.0 (`9db7ae1`, review E P2-1 fixed; recorder_tap 7, full gate 1587/0/8) |
+| T10 | T10b: directory в SQL + schema_state + удаление из JSON | P1 | T09a | ✅ 9.0 (`d748170`+`71f7aeb`; t10 fail-closed test green; hydration fail-closed) |
 | T11a | SFU: default transport+fail-closed, keyframe-gate, re-offer, кодеки | P0 | T04a | ✅ 9.0 (`T11a_rereview6.md`, P0/P1=0, acceptance met; 9.5 не выставлен из-за P2 coverage gap — committed gate-re-arm test, inherent str0m ICE) |
-| T11b | Per-source: mid-маппинг + >2 пиров (патч вендора снят: в бандле нет SDP → drift-guard) | P0 | T11a | 🔁 `14e7027` (multi-mid, cap 8 fail-closed, gate per publisher, drift-guard; 112/151 тестов) |
-| T11c | Удаление легаси-плоскости (2176/79) + 6 тестов | P1 | T11a,T11b | ⏳ |
-| T12 | P5: room_mode (on_client_hello), guards→bridge_available, audio+composite egress | P0 | T11a | ⏳ |
-| T13 | WebTransport native (wtransport, cert-hash, Alt-Svc) | P2 | T11a | 🔁 native UDP/QUIC listener (`wtransport 0.7.2`, feature `vks-server/webtransport`), `/wt` ClientHello→ServerHello, `/wt/cert-hash`, Alt-Svc only when on, 404 off, WS regression; review pending |
+| T11b | Per-source: mid-маппинг + >2 пиров (патч вендора снят: в бандле нет SDP → drift-guard) | P0 | T11a | ✅ 9.5 (`0825f16`, 49 media-sfu, 160 server lib, P3 generation/cleanup/metric fixed) |
+| T11c | Удаление легаси-плоскости (2176/79) + 6 тестов | P1 | T11a,T11b | ✅ 9.0 (`71f7aeb`, real str0m/SUDP only, transport mandatory) |
+| T12 | P5: hybrid room bridge (audio delivered; H.264 mixed-room egress honestly blocked) | P0 | T11a | 🔁 `a4eb59e`+`153cb0c` (audio bridge + docs; H.264 stays Unsupported, no VP8 fallback) |
+| T13 | WebTransport native (wtransport, cert-hash, Alt-Svc) | P2 | T11a | 🔁 `9ad8ca1` (real native QUIC + cert pin integration; review pending) |
 | T14 | NATS/OTLP (UUIDv7, CI-сервисы, shutdown) | P2 | T03a | 🔁 partial: UUIDv7 + wire v1 + LocalTransport/fail-open + shutdown guard + lease-move twin готовы; **NATS/OTLP blocked** (нет `async-nats`/`opentelemetry*` в офлайн-реестре) |
-| T15 | L0: SO_RCVBUF, RT-потоки, sysctl, systemd slice | P2 | T01 | ⏳ |
+| T15 | L0: SO_RCVBUF, RT-потоки, sysctl, systemd slice | P2 | T01 | ✅ (`baf0e2e`.. committed; doctor + runtime settings) |
 | T16 | H.323: убрать ffi, RX-латч, fail-closed H.235, UII, active_calls, golden+ADR | P2 | T03c | ✅ 9.0 (ffi уже удалён T03c; RX IP+SSRC, H.235 fail-closed, UII, честный active_calls, golden+ADR-0034; сайдкар сохранён по аудиту — нативный ASN.1 остаётся P2) |
-| T17 | Финал: артефакты, доки, полный прогон, рестарт, отчёт | P0 | все | ⏳ |
+| T17 | Финал: артефакты, доки, полный прогон, рестарт, отчёт | P0 | все | 🔁 in progress: full workspace 1587/0/8; rustdoc 0; final independent reviews/T14/T12 e2e pending |
 
 ## Критерии приёмки по задачам (кратко)
 
@@ -73,3 +73,4 @@
 | 17:20 | T14 partial: UUIDv7/wire v1/LocalTransport fallback/shutdown guard/lease-move twin; NATS+OTLP blocked (нет `async-nats`/`opentelemetry*` в офлайн-реестре) |
 | 17:20 | T06 rr9 P2-1 fixed: explicit `size > MAX_WINDOWS` → 422 в mode и PATCH до clamp/prune (запись не меняется); §4.6 обновлён (preset-first, size>MAX=422, slots-only=409), регрессионные тесты |
 | 17:35 | T13 implemented (native WT: wtransport 0.7.2, `/wt`, `/wt/cert-hash`, Alt-Svc gated, 404 off, WS regression, QUIC handshake + cert-pin tests; review pending) |
+
