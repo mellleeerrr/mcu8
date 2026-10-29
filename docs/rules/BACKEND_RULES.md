@@ -171,6 +171,16 @@
 - Per room: max 50 participants, max 100 tracks.
 - Per participant: max 4 tracks (2 video + 1 audio + 1 screen).
 
+### 4.6. Раскладки: ёмкость и слоты
+- Ёмкость раскладки (`payload.size`) вычисляет один резолвер:
+  `grids::slot_count` → `codian::slot_count` → `preset_size` →
+  `payload.size` → `slots.len`; после merge запроса size пересчитывается.
+- `size` никогда не опускается ниже `max(slot.position)`: legacy-запись с
+  большим числом занятых окон не должна ломать PATCH/attach.
+- `preset_size` от PNM парсится из untrusted id и зажимается в `1..=100`.
+- `preset_default_13` в `POST /ui/video_layouts/calculate` → 400
+  `invalid.preset` — политика реестра, а не дефект (см. LAYOUT_ENGINE §13).
+
 ### 4.5. Circuit breaker
 - LDAP, PostgreSQL, NATS, TURN: 50% fail / 10s → OPEN 30s → HALF-OPEN.
 - Retry: exponential 1s→30s, max 3, jitter.

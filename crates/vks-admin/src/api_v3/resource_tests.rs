@@ -2354,7 +2354,8 @@ fn recalc_layout_size_распознаёт_конструктор() {
     recalc_layout_size(&mut record);
     assert_eq!(record["payload"]["size"], 5, "size выводится из параметрического id");
 
-    // Слоты могли остаться от прежней раскладки: id-число окон важнее их длины.
+    // Legacy-запись: id конструктора говорит 5, но занято 9 слотов. Уменьшать
+    // ёмкость до 5 нельзя — PATCH/attach начали бы отклонять существующие окна.
     let mut stale = json!({
         "payload": {
             "mode": "auto",
@@ -2364,7 +2365,10 @@ fn recalc_layout_size_распознаёт_конструктор() {
         }
     });
     recalc_layout_size(&mut stale);
-    assert_eq!(stale["payload"]["size"], 5, "id конструктора важнее устаревших slots");
+    assert_eq!(stale["payload"]["size"], 9, "ёмкость не опускается ниже max(position)");
+    let mut no_slots = json!({"payload": {"mode": "auto", "preset": "vks_grid_g8_m16_5"}});
+    recalc_layout_size(&mut no_slots);
+    assert_eq!(no_slots["payload"]["size"], 5, "без слотов ёмкость из id");
 
     let mut codian = json!({"payload": {"mode": "manual", "preset": "codian_07"}});
     recalc_layout_size(&mut codian);

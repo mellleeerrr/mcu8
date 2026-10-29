@@ -1378,7 +1378,24 @@ fn ensure_slot_roles(record: &mut Value) {
 pub(crate) fn recalc_layout_size(record: &mut Value) {
     // Параметрический id конструктора — источник истины о числе окон: слоты
     // могли остаться от прежней раскладки (id изменился, slots — нет).
-    if let Some(size) = derived_layout_size(&record["payload"]) {
+    // Legacy-записи могут содержать БОЛЬШЕ занятых слотов, чем новый пресет:
+    // уменьшать size ниже max(position) нельзя — PATCH/attach начали бы
+    // отклонять уже существующие слоты.
+    let derived = derived_layout_size(&record["payload"]);
+    let occupied = record["payload"]["slots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|slot| slot.get("position").and_then(Value::as_u64))
+        .max()
+        .map(|position| position as usize);
+    let size = match (derived, occupied) {
+        (Some(derived), Some(occupied)) => Some(derived.max(occupied).min(vks_layout::grids::MAX_WINDOWS)),
+        (Some(derived), None) => Some(derived.min(vks_layout::grids::MAX_WINDOWS)),
+        (None, Some(occupied)) => Some(occupied.min(vks_layout::grids::MAX_WINDOWS)),
+        (None, None) => None,
+    };
+    if let Some(size) = size {
         record["payload"]["size"] = json!(size);
     }
 }
