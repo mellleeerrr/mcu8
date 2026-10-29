@@ -468,6 +468,27 @@ mod tests {
             ) -> Result<Vec<vks_core::ports::storage::ApiKey>, vks_core::ports::StorageError> {
                 Ok(vec![])
             }
+            async fn upsert_record(
+                &self,
+                _: &vks_core::ports::storage::RecordEntry,
+            ) -> Result<(), vks_core::ports::StorageError> {
+                Ok(())
+            }
+            async fn get_record(
+                &self,
+                _: &str,
+            ) -> Result<Option<vks_core::ports::storage::RecordEntry>, vks_core::ports::StorageError> {
+                Ok(None)
+            }
+            async fn list_records(
+                &self,
+                _: Option<RoomId>,
+            ) -> Result<Vec<vks_core::ports::storage::RecordEntry>, vks_core::ports::StorageError> {
+                Ok(vec![])
+            }
+            async fn delete_record(&self, _: &str) -> Result<(), vks_core::ports::StorageError> {
+                Ok(())
+            }
             async fn reset(&self) -> Result<(), vks_core::ports::StorageError> {
                 Ok(())
             }

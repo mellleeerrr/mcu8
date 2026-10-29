@@ -81,6 +81,23 @@ impl Drop for QueueSlot {
     }
 }
 
+/// Test-only high-water mark of concurrently executing hash jobs and the
+/// number currently running. Regression guard for the re-review N1: a
+/// cancelled request must not admit another hash while its blocking job runs.
+#[cfg(test)]
+pub(crate) static MAX_CONCURRENT_HASHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) static ACTIVE_HASHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+struct ActiveHashGuard;
+#[cfg(test)]
+impl Drop for ActiveHashGuard {
+    fn drop(&mut self) {
+        ACTIVE_HASHES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 async fn hash_permit() -> Result<(QueueSlot, tokio::sync::OwnedSemaphorePermit), LocalDbError> {
     let slot = QueueSlot::acquire()?;
     let permit = std::sync::Arc::clone(hash_gate()).acquire_owned().await.map_err(|_| LocalDbError::Busy)?;
@@ -99,6 +116,12 @@ where
     let gate = hash_permit().await?;
     tokio::task::spawn_blocking(move || {
         let _gate = gate;
+        #[cfg(test)]
+        let _active = {
+            let now = ACTIVE_HASHES.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            MAX_CONCURRENT_HASHES.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+            ActiveHashGuard
+        };
         job()
     })
     .await
@@ -413,6 +436,13 @@ impl LocalDb {
         if map.contains_key(id) {
             return Err(LocalDbError::AlreadyExists(id.to_string()));
         }
+        // Same case-insensitive login uniqueness as the sync `register`: the
+        // check and the insert happen under one lock, so two concurrent
+        // `register_async` calls cannot create duplicate logins.
+        let username_key = username.trim().to_lowercase();
+        if map.values().any(|user| user.username.to_lowercase() == username_key) {
+            return Err(LocalDbError::AlreadyExists(username.to_string()));
+        }
         let clone = user.clone();
         map.insert(id.to_string(), user);
         drop(map);
@@ -517,6 +547,7 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn remove_user_revokes_login_and_bumps_generation() {
@@ -722,6 +753,51 @@ mod tests {
             .expect_err("stale CAS must be rejected");
         assert!(matches!(error, LocalDbError::AuthFailed));
         assert!(db.authenticate_async("legacy3", "brand-new-password").await.is_ok());
+    }
+
+    /// Regression for the re-review N1: the semaphore permit is owned by the
+    /// blocking job, so aborting request futures must NOT let a cancelled hash
+    /// overlap a new one (old bug: up to ~7 concurrent hashes after cancels).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_hashes_never_exceed_the_permit_limit() {
+        let db: Arc<LocalDb> = Arc::new(LocalDb::new());
+        for index in 0..6 {
+            db.register_async(&format!("u-cancel-{index}"), &format!("cancel{index}"), "correct horse battery")
+                .await
+                .unwrap();
+        }
+        // Abort half of the requests while their hashes are in flight.
+        let mut aborted: Vec<tokio::task::JoinHandle<Result<User, LocalDbError>>> = Vec::new();
+        for index in 0..6 {
+            let db = db.clone();
+            aborted.push(tokio::spawn(async move {
+                db.authenticate_async(&format!("cancel{index}"), "correct horse battery").await
+            }));
+        }
+        for task in aborted.drain(..3) {
+            task.abort();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Storm the gate while the detached hashes may still be finishing.
+        let mut storm: Vec<tokio::task::JoinHandle<Result<User, LocalDbError>>> = Vec::new();
+        for index in 0..6 {
+            let db = db.clone();
+            storm.push(tokio::spawn(async move {
+                db.authenticate_async(&format!("cancel{index}"), "correct horse battery").await
+            }));
+        }
+        for task in storm {
+            assert!(task.await.expect("join").is_ok(), "a valid login must not become 429/Busy");
+        }
+        for task in aborted {
+            let _ = task.await;
+        }
+        assert!(
+            MAX_CONCURRENT_HASHES.load(std::sync::atomic::Ordering::SeqCst) <= AUTH_HASH_PERMITS,
+            "at most {} concurrent hashes allowed, observed {}",
+            AUTH_HASH_PERMITS,
+            MAX_CONCURRENT_HASHES.load(std::sync::atomic::Ordering::SeqCst)
+        );
     }
 
     #[test]

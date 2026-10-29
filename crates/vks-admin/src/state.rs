@@ -598,6 +598,18 @@ impl AppState {
                 }
             }
 
+            // T09a: hydrate recording metadata on cold start only. A hot
+            // reload must not resurrect records the admin just deleted, and a
+            // newer in-memory entry must win (entry().or_insert).
+            if mark_stopped {
+                let records = storage.list_records(None).await.unwrap_or_default();
+                if let Ok(mut map) = self.records.lock() {
+                    for record in records {
+                        map.entry(record.id.clone()).or_insert(record);
+                    }
+                }
+            }
+
             // M1.7: Hydrate audit log from durable storage to eliminate audit amnesia after restart
             let audit_entries = storage.list_audit().await.unwrap_or_default();
             if let Ok(mut audit) = self.audit.lock() {

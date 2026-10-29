@@ -162,6 +162,9 @@ async fn videorecords_map_real_records_and_refuse_delete() {
         records.insert(
             "rec-1".into(),
             crate::state::RecordEntry {
+                bitrate_kbps: 2350,
+                width: 1280,
+                height: 720,
                 id: "rec-1".into(),
                 room_id,
                 created_ms: 1_800_000_000_000,

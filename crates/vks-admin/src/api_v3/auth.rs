@@ -363,7 +363,7 @@ pub async fn change_password(
         return error_json(503, "Authentication is not configured");
     };
     if body.old_password.len() > vks_auth::local_db::MAX_PASSWORD_BYTES {
-        return unauthorized("Login rejected");
+        return error_json(422, "Old password is too long");
     }
     let user = match db.authenticate_async(&body.username, &body.old_password).await {
         Ok(u) => u,
