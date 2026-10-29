@@ -1096,9 +1096,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                     // did not publish before (a re-offer must
                                                     // not duplicate TrackAdded, but a newly
                                                     // added audio/video track must be announced).
-                                                    for track in tracks
-                                                        .iter()
-                                                        .filter(|track| !previous_kinds.contains(&track.media_kind))
+                                                    let new_kinds = new_track_kinds(&previous_kinds, &tracks);
+                                                    for track in
+                                                        tracks.iter().filter(|track| new_kinds.contains(&track.media_kind))
                                                     {
                                                         let proto_kind = match track.media_kind {
                                                             vks_core::MediaKind::Audio => vks_proto::media::TrackKind::Audio,
@@ -1441,7 +1441,7 @@ mod tests {
         assert!(new_track_kinds(&[], &[]).is_empty());
         // A re-offer of the same kind announces nothing; a genuinely new kind
         // appears exactly once even if the re-offer lists it twice.
-        assert!(new_track_kinds(&[MediaKind::Audio], &[audio.clone()]).is_empty());
+        assert!(new_track_kinds(&[MediaKind::Audio], std::slice::from_ref(&audio)).is_empty());
         assert_eq!(new_track_kinds(&[MediaKind::Audio], &[audio.clone(), video.clone()]), vec![MediaKind::Video]);
         assert_eq!(new_track_kinds(&[], &[audio, video]), vec![MediaKind::Audio, MediaKind::Video]);
     }
