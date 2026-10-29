@@ -11,7 +11,7 @@
 | 0004 | MCU-композитор — oxideav-scene (чистый Rust, 0.1.4) | accepted | 2026-10-13 | 0002, Q1 |
 | 0005 | Протокол — protobuf (prost), сигнальный JSON запрещён в hot path | accepted | 2026-10-13 | 0002 |
 | 0006 | Шлюз SIP — rvoip | accepted | 2026-10-13 | — |
-| 0007 | Шлюз H.323 — FFI-обёртка над H323Plus | accepted | 2026-10-13 | Q2 |
+| 0007 | Шлюз H.323 — FFI-обёртка над H323Plus | superseded by 0034 | 2026-10-13 | Q2, 0034 |
 | 0008 | БД — sqlx + PostgreSQL (production), SQLite (single-node), memory (тесты) | accepted | 2026-10-13 | — |
 | 0009 | Аутентификация — JWT (jsonwebtoken) + API-ключи + LDAP (ldap3) | accepted | 2026-10-13 | — |
 | 0010 | Фронтенд-фреймворк — Dioxus | accepted | 2026-10-13 | — |
@@ -38,6 +38,7 @@
 | 0031 | Герметичный protoc для vks-proto (без системной зависимости) — BREAKING: снята фича `vendored-protoc` | accepted | 2026-10-23 | 0005, S15 |
 | 0032 | Метаданные раскладки на проводе: `preset/mode` в `Layout`, без `layout_id` и без `LayoutModeChanged` | accepted | 2026-10-24 | 0030, 0012, T10a |
 | 0033 | Пароли local_db — Argon2id; PBKDF2 только для проверки и ленивой миграции | accepted | 2026-10-29 | 0009, T02 |
+| 0034 | Нативный H.323: поэтапный стек, pycrate-сайдкар на T16, H.235 fail-closed | accepted | 2026-10-29 | 0007, T16 |
 
 ## Правила ведения
 

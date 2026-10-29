@@ -1,4 +1,4 @@
-//! `vks-gateway-h323` — H.323-шлюз: H.323 → WebRTC (ADR-0007, H323Plus FFI).
+//! `vks-gateway-h323` — H.323-шлюз: H.323 → WebRTC (ADR-0034).
 //!
 //! Фаза 6 (DEVELOPMENT_PLAN.md):
 //!
@@ -8,19 +8,23 @@
 //! - Codec negotiation (H.323 capability → WebRTC SDP):
 //!   H.263/H.264 → VP8/VP9, G.711/G.729 → Opus (транскодирование при
 //!   mismatch);
-//! - **FFI-граница** (H323Plus, BACKEND_RULES §6.2): одна точка,
-//!   panic hook (не роняет процесс), watchdog (FFI call > 5s → restart).
+//! - нативный TPKT/Q.931-каркас ([`q931`]) и JSON IPC с Python/pycrate
+//!   сайдкаром для H.225/H.245 ([`uac`], [`uas`]).
 //!
-//! Текущая волна: self-contained testable core — [`codec`] (таблица
-//! соответствий) и [`call`] (H.323-вызов FSM + in-memory шлюз). Транспорт —
-//! Python-сайдкар на pycrate; нативный Q.931/H.225/H.245 — отдельный эпик (см.
-//! docs/audit/2026-10-29/02_h323_p6.md); дефолтная сборка dep-light, без `unsafe`.
+//! H323Plus/OPAL FFI и `src/ffi.rs` удалены (T03c); pyo3/libloading и C++
+//! линковки больше нет. Нативный ASN.1-стек — отдельный эпик
+//! (docs/audit/2026-10-29/02_h323_p6.md §7/§12), а не текущая волна.
+//! H.235/H.245-шифрование fail-closed: вызов с токенами или encryptionSync
+//! отклоняется с `securityDenied`, plaintext-fallback не допускается.
 //!
 //! ## Module
 //! - [`codec`] — H.323 ↔ WebRTC codec negotiation (deterministic map).
 //! - [`call`] — H.323 call FSM (H.225/Q.931) and in-memory gateway.
+//! - [`q931`] — strict native TPKT/Q.931 framing.
+//! - [`uac`] — outbound sidecar supervisor and session lifecycle.
+//! - [`uas`] — inbound listener handle and event stream.
 //!
-//! Dependency tree: vks-core, vks-common (ARCHITECTURE §3).
+//! Dependency tree: vks-common (ARCHITECTURE §3).
 
 use vks_common::codec_spec::{CodecId, CodecKind, Disposition, CODECS};
 

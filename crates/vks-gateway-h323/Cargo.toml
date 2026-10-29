@@ -1,12 +1,14 @@
-# vks-gateway-h323 — H.323-шлюз (H323Plus/OPAL, ADR-0007, FFI).
-# Фаза 6 (DEVELOPMENT_PLAN.md): H.323 → WebRTC bridge (participant = gateway),
-# H.263/H.264 → VP8/VP9, G.711/G.729 → Opus, FFI-граница (panic hook, watchdog).
+# vks-gateway-h323 — H.323-шлюз: нативный TPKT/Q.931-каркас и Python/pycrate
+# ASN.1-сайдкар для H.225/H.245 (ADR-0007 заменён ADR-0034).
+# Фаза 6 (DEVELOPMENT_PLAN.md): H.323 → WebRTC (participant = gateway),
+# H.263/H.264 → VP8/VP9, G.711/G.729 → Opus.
 #
 # Дерево зависимостей: vks-common (ARCHITECTURE §3); vks-core напрямую не нужен.
 #
-# H323Plus — тяжёлая C++/FFI-зависимость. В этой волне — MOCK FFI-граница
-# (детерминированная, без реальных потоков: tick-счётчик); реальная FFI-обёртка
-# появится вместе с H323Plus, отдельного feature-флага нет (он ничего не включал).
+# H323Plus/OPAL FFI и `src/ffi.rs` удалены (T03c, aef9257). Здесь нет pyo3,
+# libloading, unsafe-обёрток и C++-линковки: сигнализация идёт через
+# документированный JSON IPC с отдельным Python-процессом. Нативный ASN.1 —
+# отдельный эпик (docs/audit/2026-10-29/02_h323_p6.md §7/§12), не эта волна.
 [package]
 name = "vks-gateway-h323"
 version.workspace = true
@@ -14,7 +16,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "VKS H.323 gateway: H323Plus FFI bridged into WebRTC rooms"
+description = "VKS H.323 gateway: native Q.931 framing with a pinned pycrate ASN.1 sidecar"
 
 [dependencies]
 anyhow = { workspace = true }

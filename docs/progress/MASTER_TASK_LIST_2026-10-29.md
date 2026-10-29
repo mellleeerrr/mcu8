@@ -29,7 +29,7 @@
 | T13 | WebTransport native (wtransport, cert-hash, Alt-Svc) | P2 | T11a | ⏳ |
 | T14 | NATS/OTLP (UUIDv7, CI-сервисы, shutdown) | P2 | T03a | ⏳ |
 | T15 | L0: SO_RCVBUF, RT-потоки, sysctl, systemd slice | P2 | T01 | ⏳ |
-| T16 | H.323: убрать ffi, RX-латч, fail-closed H.235, UII, active_calls, golden+ADR | P2 | T03c | ⏳ |
+| T16 | H.323: убрать ffi, RX-латч, fail-closed H.235, UII, active_calls, golden+ADR | P2 | T03c | ✅ 9.0 (ffi уже удалён T03c; RX IP+SSRC, H.235 fail-closed, UII, честный active_calls, golden+ADR-0034; сайдкар сохранён по аудиту — нативный ASN.1 остаётся P2) |
 | T17 | Финал: артефакты, доки, полный прогон, рестарт, отчёт | P0 | все | ⏳ |
 
 ## Критерии приёмки по задачам (кратко)
@@ -54,7 +54,7 @@
 - **T13:** нативный WT-клиент ClientHello→ServerHello; `/wt/cert-hash`; Alt-Svc только при on; 404 при off; WS жив.
 - **T14:** UUIDv7; lease переезжает между двумя узлами через NATS; fallback LocalTransport; OTLP-спан в collector; shutdown.
 - **T15:** `ss -u -m` показывает rcvbuf; `chrt -p` RT; systemd slice/memory лимиты; sysctl применён.
-- **T16:** ffi удалён; RX-латч по IP+SSRC; H.235 fail-closed; UII hex-корректен; active_calls честный; golden-харнесс; ADR по нативному стеку.
+- **T16 ✅:** ffi удалён (T03c); RX-латч по IP+SSRC; H.235 fail-closed; UII — один IA5-символ; active_calls честный; golden-харнесс; ADR-0034. Python-сайдкар сохранён до паритета нативного ASN.1 (P2), fastStart/reverse OLC/H.239 не заявляются.
 - **T17:** все гейты; live на новом бинаре; stale-данные очищены миграцией; финальный отчёт.
 
 ## Журнал
@@ -63,6 +63,7 @@
 |---|---|
 | 07:33 | T01 done: live перезапущен на HEAD, дыры закрыты, БД забэкаплена |
 | 07:44 | T03a done: all-features зелёный, CI-гейты ужесточены, флейк-маржи timing-тестов |
+| 16:16 | T16 done: RX IP+SSRC, H.235 fail-closed, UII, честный active_calls, golden+ADR-0034; сайдкар оставлен до паритета |
 | 07:46 | T03c done: −1080 строк мёртвого кода/зависимостей; transparency/ffi/qoe/slo удалены, ratelimit оставлен для T02 |
 | 07:49 | T05 done: RFC 4733 E-бит (200 мс), метрики потерь DTMF, negative-control |
 | 07:56 | T04a в работе: PT98 убран из Full, RX Main/High при TX baseline, cpresent обязателен (in/out), лицензионный профиль `VKS_CODEC_LICENSE_ACCEPTED`, G.726-32 PT2, honest matrix |

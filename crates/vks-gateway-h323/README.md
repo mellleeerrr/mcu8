@@ -58,8 +58,13 @@ Supported outbound negotiation:
 
 The initial implementation rejects non-IPv4, H.245 tunneling-only peers,
 unsupported/reverse logical channel forms, and media/control addresses different
-from the dialed endpoint. It does not advertise encryption, G.729, FECC, H.239
-presentation, gatekeeper registration or transcoding that is not running.
+from the dialed endpoint. FastStart, reverse OLC and H.239 presentation are not
+implemented and are not advertised. H.235/H.245 encryption is **fail-closed**:
+a Setup/Connect that offers only TLS/IPsec security, carries H.235 tokens, or
+opens a logical channel with `encryptionSync` is released with
+`securityDenied`; there is no silent plaintext fallback. DTMF from the room is
+sent as H.245 `UserInputIndication.signal` with the single IA5 symbol
+(`0-9*#ABCD`), not as an RTP telephone-event.
 
 ## Lifecycle integration
 
@@ -76,15 +81,17 @@ IPC; stderr is independently drained with bounded retained diagnostics.
 ```sh
 cargo test -p vks-gateway-h323
 "$HOME/.local/share/vks-mcu/h323-venv/bin/python3" -m unittest discover \
-  -s crates/vks-gateway-h323/python -p test_h323_sidecar.py -v
+  -s crates/vks-gateway-h323/python -p 'test_*.py' -v
 ```
 
 Python tests include independent Polycom CONNECT/OLC/ACK wire captures,
-fragmentation, malformed/private-format rejection and negotiation state gates.
-Rust tests cover IPC size limits, ringing/EOF failures, remote disconnect,
-graceful hangup and cancellation cleanup. These tests place no real calls.
+golden vectors (`tests/golden/h323/`), fragmentation, malformed/private-format
+rejection, H.235 fail-closed rejection and negotiation state gates. Rust tests
+cover native TPKT/Q.931 framing and mutation robustness, IPC size limits,
+ringing/EOF failures, remote disconnect, DTMF forwarding, graceful hangup and
+cancellation cleanup. These tests place no real calls.
 
-`call`, `codec` and `ffi` still contain the earlier deterministic core/FFI mocks;
-they are not a running H323Plus/OPAL implementation. The `h323plus` feature alone
-does not provide a native telephony stack. Production outbound UAC uses the
-explicit sidecar path above.
+`call` and `codec` still contain the earlier deterministic in-memory core;
+they are not a running H323Plus/OPAL implementation and no FFI module remains
+(`src/ffi.rs` was deleted in T03c). Production outbound UAC and inbound UAS use
+the explicit pycrate sidecar path above.

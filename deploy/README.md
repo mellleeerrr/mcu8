@@ -241,6 +241,19 @@ sudo /opt/vks/h323-venv/bin/pip install -r /opt/vks/share/vks-mcu/requirements.l
 Keep the existing home venv for local development only. `PYTHONDONTWRITEBYTECODE=1`
 is set in the unit because `/opt/vks` is read-only.
 
+The sidecar has no H.235/H.245 encryption implementation. Calls that offer only
+TLS/IPsec security, carry H.235 tokens, or open a channel with
+`encryptionSync` are released with `securityDenied`; the gateway never falls
+back to plaintext for them. FastStart, reverse OLC and H.239 presentation are
+also not implemented (the native staged rewrite is ADR-0034). The inbound UAS is
+disabled by default and, when enabled, still requires the explicit
+`VKS_H323_UAS_ALLOW` allowlist and the call/IP/child limits above.
+
+Golden H.323 vectors live in
+`crates/vks-gateway-h323/tests/golden/h323/` and are checked by
+`cargo test -p vks-gateway-h323 --test golden_h323` plus
+`python/test_golden_vectors.py`; they place no real calls.
+
 ## Verification
 
 - `curl -fsS http://127.0.0.1:8080/healthz` and `/readyz`.
