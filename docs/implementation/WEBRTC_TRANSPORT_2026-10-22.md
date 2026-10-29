@@ -44,21 +44,28 @@
 6. BWE реальный: `Event::EgressBitrateEstimate` применяется через
    `set_desired_bitrate`, пейсер str0m ограничивает отправку; NACK/RTX,
    jitter buffer и pacing — внутри str0m.
-7. Ёмкость: не более **2** реальных WebRTC-пиров на комнату
-   (`MAX_PEERS_PER_ROOM`) и `VKS_WEBRTC_MAX_PEERS` (по умолчанию 256) на
-   процесс; глобальный лимит проверяется и для пустой комнаты. Третий оффер получает явную ошибку
-   `room_full`, а не молчаливое смешивание двух RTP-часовых доменов в один
-   mid. Re-offer переиспользует ту же str0m-сессию (ICE/DTLS ключи и сокет
-   сохраняются); структурно несовместимый re-offer (missing BUNDLE, echoed
-   ice-lite, переименованный mid) отклоняется, не разрывая живой звонок
-   (смена BUNDLE-тегов, `a=setup` или payload type str0m принимает молча)
-   (пир, сокет, DTLS и медиа продолжают работать). Важная деталь: str0m
-   применяет ICE-креды оффера (`add_ice_details`) до валидации SDP, поэтому
-   отклонённый re-offer с новым ufrag/pwd может ротировать серверный ufrag —
-   следующий валидный re-offer увидит новое значение. Это не разрыв звонка и
-   не новый сокет/DTLS; решение о форме комнаты перепроверяется под
-   admission-lock после await.
-8. Отказ закрытый: если транспорт включён и str0m отверг оффер, сервер
+7. Ёмкость и per-source egress (T11b): клиент делает pre-offer
+   `1 audio + (N-1) audio` и `1 video + (N-1) video` m-lines (1 sendrecv,
+   остальные recvonly); answer зеркалит **каждую** m-line (RFC 3264 §6), а не
+   сжимается до 1+1. Направление каждого m-line учитывается (`sendonly` для
+   recvonly-слота, `inactive` для port 0). Сервер держит маппинг
+   `(publisher, kind) -> mid`: у каждого паблишера свой egress mid, поэтому
+   N−1 аудио-потоков идут отдельными mid'ами (без микширования и без склейки
+   двух RTP-часовых доменов), а `mid` никогда не переиспользуется между
+   паблишерами — при уходе пира mid «retire»-ится.
+   Ёмкость комнаты: `VKS_WEBRTC_MAX_PEERS_PER_ROOM` (по умолчанию **8**;
+   предел — 8 egress mid'ов на вид, `MAX_AUDIO_MIDS`/`MAX_VIDEO_MIDS`), плюс
+   глобальный `VKS_WEBRTC_MAX_PEERS` (256) на процесс и размер UDP-диапазона.
+   Лимиты парсятся fail-closed: пустое/нечисловое/нулевое значение — ошибка
+   старта (exit 78), а не тихий default. Сверх лимита — явная `room_full`
+   (`retryable=true`), исчерпание портов — транспортная ошибка, не `room_full`.
+   Легаси-клиент с одним audio+video mid в комнате 3+ паблишеров получает
+   ровно одного детерминированного паблишера (по generation), остальные
+   источники явно деградируют с метрикой `webrtc_sources{dropped_no_mid}` —
+   без склейки часов и без тишины.
+   Keyframe-gate — per publisher: дельты паблишера не уходят подписчику до его
+   IDR, PLI-запросы коалесцируются (500 мс на `(room, publisher, kind)`).
+8. Отказ закрытый:8. Отказ закрытый: если транспорт включён и str0m отверг оффер, сервер
    возвращает `Payload::Error` (`webrtc_offer_rejected`), а не поддельный
    legacy-SDP с `FF:00:11`; оффер без ICE/DTLS-материала при включённом
    транспорте также отклоняется (`webrtc_offer_unsupported`). Legacy-SDP
@@ -68,6 +75,7 @@
    реальным пиром; моста plaintext↔SRTP нет.
 9. Наблюдаемость: `vks_webrtc_peers`, `vks_webrtc_offers_total`,
    `vks_webrtc_ice_failures_total`, `vks_webrtc_frames_dropped_total`,
+   `vks_webrtc_sources_total{result=allocated|retired|dropped_no_mid}`,
    `vks_webrtc_fallback_total`; состояния ICE/Connected и ошибки таймеров
    логируются на `info`/`warn`. Пир удаляется при ошибке `Rtc`, по
    дедлайну подключения (15 с) и по idle-таймауту (30 с).
@@ -81,8 +89,13 @@
   фиктивный SDP. Loopback допустим только при `allow_insecure_defaults=true`
   или `VKS_ALLOW_LOOPBACK_MEDIA=1` (с предупреждением в лог).
 - `VKS_WEBRTC_BWE_INITIAL_BPS` — стартовая оценка BWE (64 kbit/s..50 Mbit/s).
+- `VKS_WEBRTC_MAX_PEERS_PER_ROOM` — лимит реальных пиров **на комнату**
+  (по умолчанию 8, T11b); значение парсится fail-closed (нечисловое/0 —
+  exit 78). Выше 8 клиент с максимальным pre-offer'ом увидит не всех
+  паблишеров (`webrtc_sources{dropped_no_mid}`), т.к. egress mid'ов 8.
 - `VKS_WEBRTC_MAX_PEERS` — глобальный лимит реальных пиров процесса
-  (по умолчанию 256); исчерпание даёт `webrtc_capacity` с `retryable=true`.
+  (по умолчанию 256, тоже fail-closed); исчерпание даёт `webrtc_capacity`
+  с `retryable=true`.
 - `VKS_WEBRTC_PORT_MIN`/`VKS_WEBRTC_PORT_MAX` — UDP-диапазон для пиров;
   пусто = эфемерные порты. На стенде `43000..43100`.
 - `VKS_ALLOW_LOOPBACK_MEDIA=1` разрешает loopback `candidate_addr` для

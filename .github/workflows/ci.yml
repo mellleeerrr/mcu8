@@ -270,9 +270,14 @@ jobs:
           python3 scripts/patch-pnm-layout-crash.py --check
           python3 scripts/patch-pnm-audio-in-layouts.py --check
           python3 scripts/patch-pnm-chartjs.py --check
-      - name: Unit tests (PNM patch lib)
+      # T11b D1: no-op today (the vendor bundle has no SDP API). It fails the
+      # moment the bundle starts speaking SDP: then the per-source mid policy
+      # must be re-validated against the real client, not assumed.
+      - name: PNM vendor has no WebRTC SDP API (T11b drift guard)
+        run: python3 scripts/check-pnm-webrtc-drift.py --check
+      - name: Unit tests (PNM patch lib + WebRTC drift guard)
         working-directory: scripts
-        run: python -m unittest -v test_pnm_patch_lib
+        run: python -m unittest -v test_pnm_patch_lib test_check_pnm_webrtc_drift
 
   deny:
     name: cargo-deny

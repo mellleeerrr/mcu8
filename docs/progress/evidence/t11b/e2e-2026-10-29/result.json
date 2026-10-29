@@ -1,0 +1,254 @@
+{
+  "generated_at": "2026-10-29T12:37:21.470Z",
+  "commit": "14e7027df38252616b309f8f1902025faefbde6c",
+  "binary_sha256": "cbad4986b607f5caf37329114f7b4d521145dd63ce1c370d9cf1f3287c3fa93f",
+  "env": {
+    "process": {
+      "VKS_WEBRTC_TRANSPORT": null,
+      "VKS_WEBRTC_PORT_MIN": null,
+      "VKS_WEBRTC_PORT_MAX": null
+    },
+    "server": {
+      "VKS_WEBRTC_TRANSPORT": "1",
+      "VKS_WEBRTC_PORT_MIN": "43000",
+      "VKS_WEBRTC_PORT_MAX": "43100"
+    }
+  },
+  "base": "http://127.0.0.1:18099",
+  "room_id": "9e521730-8623-4b53-9fee-5d8d87c2f6b5",
+  "checks": [
+    {
+      "name": "auth: JWT issued",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "room: created",
+      "ok": true,
+      "detail": "9e521730-8623-4b53-9fee-5d8d87c2f6b5"
+    },
+    {
+      "name": "browser /ws: query-token WebSocket handshake",
+      "ok": true,
+      "detail": "86"
+    },
+    {
+      "name": "alice: answer is real str0m SDP",
+      "ok": true,
+      "detail": "v=0 | o=str0m-0.24.1 4267385054933220448 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 | a=extmap-allow-mixed | a=msid-semanti"
+    },
+    {
+      "name": "alice: answer offers Opus+VP8 only",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "alice: offer has 16 mids",
+      "ok": true,
+      "detail": "16"
+    },
+    {
+      "name": "alice: answer mirrors every offered mid",
+      "ok": true,
+      "detail": "16/16"
+    },
+    {
+      "name": "bob: answer is real str0m SDP",
+      "ok": true,
+      "detail": "v=0 | o=str0m-0.24.1 3604495944998532845 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 | a=extmap-allow-mixed | a=msid-semanti"
+    },
+    {
+      "name": "bob: answer offers Opus+VP8 only",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "bob: offer has 16 mids",
+      "ok": true,
+      "detail": "16"
+    },
+    {
+      "name": "bob: answer mirrors every offered mid",
+      "ok": true,
+      "detail": "16/16"
+    },
+    {
+      "name": "carol: answer is real str0m SDP",
+      "ok": true,
+      "detail": "v=0 | o=str0m-0.24.1 752087885506545509 2 IN IP4 0.0.0.0 | s=- | t=0 0 | a=group:BUNDLE 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 | a=extmap-allow-mixed | a=msid-semantic"
+    },
+    {
+      "name": "carol: answer offers Opus+VP8 only",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "carol: offer has 16 mids",
+      "ok": true,
+      "detail": "16"
+    },
+    {
+      "name": "carol: answer mirrors every offered mid",
+      "ok": true,
+      "detail": "16/16"
+    },
+    {
+      "name": "all pages: ICE connected",
+      "ok": true,
+      "detail": "alice:true,bob:true,carol:true"
+    },
+    {
+      "name": "alice: browser has 16 transceivers",
+      "ok": true,
+      "detail": "16"
+    },
+    {
+      "name": "bob: browser has 16 transceivers",
+      "ok": true,
+      "detail": "16"
+    },
+    {
+      "name": "carol: browser has 16 transceivers",
+      "ok": true,
+      "detail": "16"
+    },
+    {
+      "name": "room admits 3 peers",
+      "ok": true,
+      "detail": "cap=4"
+    },
+    {
+      "name": "third peer: existing peers stay connected",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "legacy 1+1: two mids, not a fake multi-source answer",
+      "ok": true,
+      "detail": "2"
+    },
+    {
+      "name": "legacy 1+1: sees exactly one deterministic publisher video",
+      "ok": true,
+      "detail": "[\"1\"]"
+    },
+    {
+      "name": "legacy 1+1: dropped source is counted, not silent",
+      "ok": true,
+      "detail": "vks_webrtc_sources_total WebRTC per-source egress mids | vks_webrtc_sources_total counter | vks_webrtc_sources_total{result=\"allocated\"} 20 | vks_webrtc_sources_total{result=\"dropped_no_mid\"} 4 | vks_webrtc_sources_total{result=\"retired\"} 0"
+    },
+    {
+      "name": "cap+1 peer: rejected with room_full (cap=4)",
+      "ok": true,
+      "detail": "{\"code\":\"room_full\",\"message\":\"Real WebRTC transport rejected the offer: room already has the maximum number of real WebRTC peers\",\"retryable\":true}"
+    },
+    {
+      "name": "audio_only: subscriber receives audio",
+      "ok": true,
+      "detail": "{\"kind\":\"audio\",\"mid\":\"0\",\"trackIdentifier\":\"a1c34903-352f-490e-bbd0-648f46ad2100\",\"bytesReceived\":4565,\"packetsReceived\":139}"
+    },
+    {
+      "name": "audio_only: subscriber receives no video payload",
+      "ok": true,
+      "detail": "{\"kind\":\"video\",\"mid\":\"1\",\"trackIdentifier\":\"beed591b-da6b-4bbc-abdc-43d363f740f0\",\"bytesReceived\":0,\"packetsReceived\":146,\"framesDecoded\":0}"
+    },
+    {
+      "name": "alice: connectionState connected",
+      "ok": true,
+      "detail": "connected"
+    },
+    {
+      "name": "alice: DTLS connected",
+      "ok": true,
+      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":1115220,\"bytesSent\":593595}"
+    },
+    {
+      "name": "alice: SRTP cipher negotiated",
+      "ok": true,
+      "detail": "SRTP_AEAD_AES_256_GCM"
+    },
+    {
+      "name": "alice: N-1 inbound audio RTP streams",
+      "ok": true,
+      "detail": "[[\"2\",22154],[\"3\",20828],[\"4\",6898]]"
+    },
+    {
+      "name": "alice: inbound video RTP on distinct per-source mids",
+      "ok": true,
+      "detail": "[[\"10\",294],[\"9\",326],[\"11\",67]]"
+    },
+    {
+      "name": "alice: outbound audio+video",
+      "ok": true,
+      "detail": "audio,video"
+    },
+    {
+      "name": "bob: connectionState connected",
+      "ok": true,
+      "detail": "connected"
+    },
+    {
+      "name": "bob: DTLS connected",
+      "ok": true,
+      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":1095835,\"bytesSent\":549803}"
+    },
+    {
+      "name": "bob: SRTP cipher negotiated",
+      "ok": true,
+      "detail": "SRTP_AEAD_AES_256_GCM"
+    },
+    {
+      "name": "bob: N-1 inbound audio RTP streams",
+      "ok": true,
+      "detail": "[[\"2\",20985],[\"4\",6898],[\"3\",20831]]"
+    },
+    {
+      "name": "bob: inbound video RTP on distinct per-source mids",
+      "ok": true,
+      "detail": "[[\"9\",323],[\"10\",294],[\"11\",67]]"
+    },
+    {
+      "name": "bob: outbound audio+video",
+      "ok": true,
+      "detail": "audio,video"
+    },
+    {
+      "name": "carol: connectionState connected",
+      "ok": true,
+      "detail": "connected"
+    },
+    {
+      "name": "carol: DTLS connected",
+      "ok": true,
+      "detail": "{\"dtlsState\":\"connected\",\"srtpCipher\":\"SRTP_AEAD_AES_256_GCM\",\"bytesReceived\":1039276,\"bytesSent\":492662}"
+    },
+    {
+      "name": "carol: SRTP cipher negotiated",
+      "ok": true,
+      "detail": "SRTP_AEAD_AES_256_GCM"
+    },
+    {
+      "name": "carol: N-1 inbound audio RTP streams",
+      "ok": true,
+      "detail": "[[\"3\",18685],[\"4\",6898],[\"2\",18647]]"
+    },
+    {
+      "name": "carol: inbound video RTP on distinct per-source mids",
+      "ok": true,
+      "detail": "[[\"10\",295],[\"11\",67],[\"9\",290]]"
+    },
+    {
+      "name": "carol: outbound audio+video",
+      "ok": true,
+      "detail": "audio,video"
+    },
+    {
+      "name": "server: no page errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "passed": 46,
+  "failed": 0,
+  "total": 46
+}

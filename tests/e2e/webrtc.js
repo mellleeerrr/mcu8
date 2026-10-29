@@ -2,11 +2,16 @@
 /*
  * Live browser proof for the real str0m WebRTC transport.
  *
- * Two Chromium pages (fake camera/mic) each get a real str0m answer over an
- * authenticated /ws bridge. The assertions are deliberately transport-level:
+ * Three Chromium pages (fake camera/mic) each get a real str0m answer over an
+ * authenticated /ws bridge. Every page pre-offers the T11b shape — 1 sendrecv
+ * audio + 7 recvonly audio, 1 sendrecv video + 7 recvonly video (16 m-lines) —
+ * and the SFU must fan out one stream per publisher into its own mid: two
+ * inbound audio streams (N-1, no mixing) and two remote video streams on
+ * distinct mids per page. The assertions are deliberately transport-level:
  * ICE connected, DTLS/SRTP cipher present, inbound RTP bytes and decoded video
- * frames on BOTH pages, and a real 32-byte SHA-256 fingerprint in the answer
- * (not the legacy "sha-256 FF:00:11" placeholder).
+ * frames on EVERY page, a real 32-byte SHA-256 fingerprint in the answer (not
+ * the legacy "sha-256 FF:00:11" placeholder), and the documented explicit
+ * degradation (metric + one video, never a glued mid) for a legacy 1+1 client.
  *
  * Run:
  *   NODE_PATH=<playwright node_modules> node tests/e2e/webrtc.js
@@ -29,6 +34,9 @@ const ART = artifactsDir('e2e-webrtc');
 const CHROMIUM = process.env.VKS_CHROMIUM
   || '/home/pro/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome';
 const RUN_SECONDS = Number(process.env.VKS_WEBRTC_RUN_SECONDS || 6);
+// Per-room cap of the server under test (VKS_WEBRTC_MAX_PEERS_PER_ROOM).
+// 0 = unknown: admission is asserted, room_full is not exercised.
+const PEER_CAP = Number(process.env.VKS_E2E_PEER_CAP || 0);
 
 const checks = [];
 function check(name, ok, detail) {
@@ -208,8 +216,8 @@ class SignalPeer {
   }
 }
 
-async function createBrowserPeer(page) {
-  return page.evaluate(async () => {
+async function createBrowserPeer(page, extraAudio = 0, extraVideo = 0) {
+  return page.evaluate(async ({ extraAudio, extraVideo }) => {
     const pc = new RTCPeerConnection({ iceServers: [] });
     window.__vksPc = pc;
     window.__vksStats = { connectedAt: 0, states: [], iceErrors: [], candidates: [] };
@@ -231,6 +239,15 @@ async function createBrowserPeer(page) {
     });
     window.__vksStream = stream;
     for (const track of stream.getTracks()) pc.addTrack(track, stream);
+    // T11b pre-offer: 1 sendrecv m-line per kind (the tracks above) plus
+    // (N-1) recvonly egress slots. Adding them BEFORE createOffer is what
+    // makes the server see 1+7 mids; adding them after would be a re-offer.
+    for (let index = 0; index < extraAudio; index += 1) {
+      pc.addTransceiver('audio', { direction: 'recvonly' });
+    }
+    for (let index = 0; index < extraVideo; index += 1) {
+      pc.addTransceiver('video', { direction: 'recvonly' });
+    }
     await pc.setLocalDescription(await pc.createOffer());
     if (pc.iceGatheringState !== 'complete') {
       await new Promise(resolve => {
@@ -240,8 +257,13 @@ async function createBrowserPeer(page) {
       });
     }
     return { sdp: pc.localDescription.sdp, sdpType: pc.localDescription.type };
-  });
+  }, { extraAudio, extraVideo });
 }
+
+// The documented T11b pre-offer: one publish m-line plus seven egress slots.
+const EXTRA_AUDIO_MIDS = 7;
+const EXTRA_VIDEO_MIDS = 7;
+const MID_TOTAL = 2 + EXTRA_AUDIO_MIDS + EXTRA_VIDEO_MIDS;
 
 async function applyAnswer(page, sdp) {
   await page.evaluate(async answer => {
@@ -268,7 +290,8 @@ async function collectStats(page) {
       }
       if (stat.type === 'inbound-rtp') {
         out.inbound.push({
-          kind: stat.kind, bytesReceived: stat.bytesReceived, packetsReceived: stat.packetsReceived,
+          kind: stat.kind, mid: stat.mid, trackIdentifier: stat.trackIdentifier,
+          bytesReceived: stat.bytesReceived, packetsReceived: stat.packetsReceived,
           framesDecoded: stat.framesDecoded, frameWidth: stat.frameWidth, frameHeight: stat.frameHeight,
         });
       }
@@ -363,7 +386,7 @@ async function collectStats(page) {
       await wsPage.close();
     }
 
-    for (const name of ['alice', 'bob']) {
+    for (const name of ['alice', 'bob', 'carol']) {
       const page = await context.newPage();
       page.on('pageerror', error => check(`pageerror ${name}`, false, String(error)));
       await page.goto(BASE + '/pnm/authorization', { waitUntil: 'domcontentloaded' });
@@ -371,7 +394,7 @@ async function collectStats(page) {
       await signal.hello();
       await signal.join();
       await signal.subscribe();
-      const offer = await createBrowserPeer(page);
+      const offer = await createBrowserPeer(page, EXTRA_AUDIO_MIDS, EXTRA_VIDEO_MIDS);
       const answer = await signal.offer(offer.sdp);
       fs.writeFileSync(path.join(ART, `${name}-offer.sdp`), offer.sdp);
       fs.writeFileSync(path.join(ART, `${name}-answer.sdp`), answer);
@@ -379,6 +402,12 @@ async function collectStats(page) {
         && !answer.includes('FF:00:11') && answer.includes('a=candidate'), answer.slice(0, 160).replace(/\r?\n/g, ' | '));
       check(`${name}: answer offers Opus+VP8 only`, answer.includes('opus/48000/2') && answer.includes('VP8/90000')
         && !answer.includes('H264') && !answer.includes('H265') && !answer.includes('VP9'), '');
+      const offeredMids = (offer.sdp.match(/^a=mid:/gm) || []).length;
+      const answeredMids = (answer.match(/^a=mid:/gm) || []).length;
+      check(`${name}: offer has ${MID_TOTAL} mids`, offeredMids === MID_TOTAL, String(offeredMids));
+      // RFC 3264: one answer m-line per offered m-line (no collapsing to 1+1).
+      check(`${name}: answer mirrors every offered mid`, answeredMids === offeredMids,
+        `${answeredMids}/${offeredMids}`);
       await applyAnswer(page, answer);
       let connected = false;
       try {
@@ -394,33 +423,90 @@ async function collectStats(page) {
       peers.push({ name, page, signal, connected });
     }
 
-    check('both pages: ICE connected', peers.length === 2 && peers.every(p => p.connected),
+    check('all pages: ICE connected', peers.length === 3 && peers.every(p => p.connected),
       peers.map(p => `${p.name}:${p.connected}`).join(','));
 
-    // The SFU currently maps one source per kind per subscriber; a third real
-    // peer must be refused explicitly instead of silently mixing RTP clocks.
+    // T11b: three real peers in one room. Every page pre-offered 1+7+1+7 mids,
+    // so each must receive BOTH other publishers on their own mids.
     if (peers.every(p => p.connected)) {
-      const thirdPage = await context.newPage();
-      await thirdPage.goto(BASE + '/pnm/authorization', { waitUntil: 'domcontentloaded' });
-      const thirdOffer = await createBrowserPeer(thirdPage);
-      const thirdSignal = await new SignalPeer(token, roomId, 'WebRTC-third').connect();
-      await thirdSignal.hello();
-      await thirdSignal.join();
-      await thirdSignal.subscribe();
-      const roomFull = await thirdSignal.offerExpectError(thirdOffer.sdp);
-      check('third peer: rejected with room_full', Boolean(roomFull) && roomFull.code === 'room_full',
-        JSON.stringify(roomFull));
-      check('third peer: room_full is retryable', Boolean(roomFull) && roomFull.retryable === true,
-        JSON.stringify(roomFull));
-      // Same socket, same offer: the server must roll the FSM back after a
-      // rejected offer, otherwise this returns bad_state instead of room_full.
-      const retry = await thirdSignal.offerExpectError(thirdOffer.sdp);
-      check('third peer: retry after rejection reaches room_full (FSM rollback)',
-        Boolean(retry) && retry.code === 'room_full', JSON.stringify(retry));
-      thirdSignal.close();
-      await thirdPage.close();
+      for (const peer of peers) {
+        const transceivers = await peer.page.evaluate(() => window.__vksPc.getTransceivers().length);
+        check(`${peer.name}: browser has ${MID_TOTAL} transceivers`, transceivers === MID_TOTAL, String(transceivers));
+      }
+      // The room cap is an explicit room_full, never a crash. The oracle runs
+      // only when the server under test was started with a known
+      // VKS_E2E_PEER_CAP matching VKS_WEBRTC_MAX_PEERS_PER_ROOM, so the
+      // default run stays cheap.
+      if (PEER_CAP > 0 && PEER_CAP <= 3) {
+        const fourthPage = await context.newPage();
+        await fourthPage.goto(BASE + '/pnm/authorization', { waitUntil: 'domcontentloaded' });
+        const fourthOffer = await createBrowserPeer(fourthPage, 0, 0);
+        const fourth = await new SignalPeer(token, roomId, 'WebRTC-cap+1').connect();
+        await fourth.hello();
+        await fourth.join();
+        await fourth.subscribe();
+        const roomFull = await fourth.offerExpectError(fourthOffer.sdp);
+        check(`cap+1 peer: rejected with room_full (cap=${PEER_CAP})`,
+          Boolean(roomFull) && roomFull.code === 'room_full', JSON.stringify(roomFull));
+        check('cap+1 peer: room_full is retryable', Boolean(roomFull) && roomFull.retryable === true,
+          JSON.stringify(roomFull));
+        // Same socket, same offer: the server must roll the FSM back after a
+        // rejected offer, otherwise this returns bad_state instead of room_full.
+        const retry = await fourth.offerExpectError(fourthOffer.sdp);
+        check('cap+1 peer: retry after rejection reaches room_full (FSM rollback)',
+          Boolean(retry) && retry.code === 'room_full', JSON.stringify(retry));
+        fourth.close();
+        await fourthPage.close();
+      } else {
+        check('room admits 3 peers', true, PEER_CAP ? `cap=${PEER_CAP}` : 'cap unknown');
+      }
       check('third peer: existing peers stay connected',
         (await Promise.all(peers.map(p => p.page.evaluate(() => window.__vksPc.connectionState)))).every(s => s === 'connected'), '');
+
+      // T11b D4: a legacy 1+1 client in a 3-publisher room is explicitly
+      // degraded — it keeps one deterministic publisher, gets a metric, and is
+      // never handed a second publisher's stream on the same mid. Needs a free
+      // slot, so it runs only when the cap leaves room for a fourth peer.
+      if (PEER_CAP >= 4) {
+        const legacyPage = await context.newPage();
+        await legacyPage.goto(BASE + '/pnm/authorization', { waitUntil: 'domcontentloaded' });
+        const legacySignal = await new SignalPeer(token, roomId, 'WebRTC-legacy').connect();
+        await legacySignal.hello();
+        await legacySignal.join();
+        await legacySignal.subscribe();
+        const legacyOffer = await createBrowserPeer(legacyPage, 0, 0);
+        const legacyAnswer = await legacySignal.offer(legacyOffer.sdp);
+        const legacyMids = (legacyAnswer.match(/^a=mid:/gm) || []).length;
+        check('legacy 1+1: two mids, not a fake multi-source answer', legacyMids === 2, String(legacyMids));
+        await applyAnswer(legacyPage, legacyAnswer);
+        await waitConnected(legacyPage).catch(() => {});
+        await new Promise(resolve => setTimeout(resolve, 2500));
+        const legacyStats = await collectStats(legacyPage);
+        const legacyVideo = legacyStats.inbound.filter(stat => stat.kind === 'video' && stat.framesDecoded > 0);
+        check('legacy 1+1: sees exactly one deterministic publisher video', legacyVideo.length === 1,
+          JSON.stringify(legacyVideo.map(stat => stat.mid)));
+        const metricsText = await fetch(BASE + '/metrics').then(r => r.text()).catch(() => '');
+        check('legacy 1+1: dropped source is counted, not silent',
+          /vks_webrtc_sources_total\{result="dropped_no_mid"\}\s+[1-9]/.test(metricsText),
+          (metricsText.match(/vks_webrtc_sources_total[^\n]*/g) || []).join(' | '));
+        // With the cap exactly reached, the next offer is room_full.
+        if (PEER_CAP === 4) {
+          const fifthPage = await context.newPage();
+          await fifthPage.goto(BASE + '/pnm/authorization', { waitUntil: 'domcontentloaded' });
+          const fifthOffer = await createBrowserPeer(fifthPage, 0, 0);
+          const fifth = await new SignalPeer(token, roomId, 'WebRTC-cap+1').connect();
+          await fifth.hello();
+          await fifth.join();
+          await fifth.subscribe();
+          const roomFull = await fifth.offerExpectError(fifthOffer.sdp);
+          check('cap+1 peer: rejected with room_full (cap=4)', Boolean(roomFull) && roomFull.code === 'room_full',
+            JSON.stringify(roomFull));
+          fifth.close();
+          await fifthPage.close();
+        }
+        legacySignal.close();
+        await legacyPage.close();
+      }
     }
 
     // audio_only contract: a subscriber that sets SubscribeRequest.audio_only
@@ -467,11 +553,13 @@ async function collectStats(page) {
       const transport = stats.transport[0] || {};
       check(`${peer.name}: DTLS connected`, transport.dtlsState === 'connected', JSON.stringify(transport));
       check(`${peer.name}: SRTP cipher negotiated`, typeof transport.srtpCipher === 'string' && transport.srtpCipher.length > 0, String(transport.srtpCipher));
-      const audioIn = stats.inbound.find(s => s.kind === 'audio');
-      const videoIn = stats.inbound.find(s => s.kind === 'video');
-      check(`${peer.name}: inbound audio RTP`, Boolean(audioIn && audioIn.bytesReceived > 0), JSON.stringify(stats.inbound));
-      check(`${peer.name}: inbound video RTP`, Boolean(videoIn && videoIn.bytesReceived > 0), JSON.stringify(videoIn || null));
-      check(`${peer.name}: decoded video frames`, Boolean(videoIn && videoIn.framesDecoded > 0), JSON.stringify(videoIn || null));
+      const audioIns = stats.inbound.filter(s => s.kind === 'audio' && s.bytesReceived > 0);
+      const videoIns = stats.inbound.filter(s => s.kind === 'video' && s.framesDecoded > 0);
+      check(`${peer.name}: N-1 inbound audio RTP streams`, audioIns.length >= 2,
+        JSON.stringify(stats.inbound.filter(s => s.kind === 'audio').map(s => [s.mid, s.bytesReceived])));
+      check(`${peer.name}: inbound video RTP on distinct per-source mids`,
+        videoIns.length >= 2 && new Set(videoIns.map(s => s.mid)).size >= 2,
+        JSON.stringify(videoIns.map(s => [s.mid, s.framesDecoded])));
       const outbound = stats.outbound.filter(s => s.bytesSent > 0).map(s => s.kind);
       check(`${peer.name}: outbound audio+video`, outbound.includes('audio') && outbound.includes('video'), outbound.join(','));
     }

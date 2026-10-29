@@ -80,12 +80,19 @@ VKS_WEBRTC_TRANSPORT=0
 # production sizing (every peer owns one UDP socket)
 VKS_WEBRTC_PORT_MIN=43000
 VKS_WEBRTC_PORT_MAX=43100
+VKS_WEBRTC_MAX_PEERS_PER_ROOM=8
 VKS_WEBRTC_MAX_PEERS=256
 ```
 
-The effective concurrency is `min(VKS_WEBRTC_MAX_PEERS, size of the UDP
-range)` because every peer owns one UDP socket; size the range for the peer
-count you need (43000–43100 holds 101 peers).
+The effective concurrency is
+`min(VKS_WEBRTC_MAX_PEERS_PER_ROOM per room, VKS_WEBRTC_MAX_PEERS process,
+size of the UDP range)` because every peer owns one UDP socket; size the range
+for the peer count you need (43000–43100 holds 101 peers). Both limits are
+parsed fail-closed: an empty/non-numeric/zero value aborts startup (exit 78)
+instead of silently using a default. A client that pre-offers the full
+`1+(N-1)` shape can only be shown 8 sources per kind (`MAX_VIDEO_MIDS`); a cap
+above 8 is allowed but logs a warning and counts the invisible sources as
+`webrtc_sources{dropped_no_mid}`.
 
 Auxiliary/secondary processes on the same host are also real WebRTC servers
 after this default flip; pass `VKS_WEBRTC_TRANSPORT=0` (or distinct UDP

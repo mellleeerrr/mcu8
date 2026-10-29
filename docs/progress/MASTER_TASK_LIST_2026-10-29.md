@@ -23,7 +23,7 @@
 | T09b | MP4: avcC/length-prefix/timescale/esds + tap | P1 | T09a | ⏳ |
 | T10 | T10b: directory в SQL + schema_state + удаление из JSON | P1 | T09a | ⏳ |
 | T11a | SFU: default transport+fail-closed, keyframe-gate, re-offer, кодеки | P0 | T04a | ✅ 9.0 (`T11a_rereview6.md`, P0/P1=0, acceptance met; 9.5 не выставлен из-за P2 coverage gap — committed gate-re-arm test, inherent str0m ICE) |
-| T11b | Per-source: 8 mids (patch вендора) + маппинг + >2 пиров | P0 | T11a | ⏳ |
+| T11b | Per-source: mid-маппинг + >2 пиров (патч вендора снят: в бандле нет SDP → drift-guard) | P0 | T11a | 🔁 `14e7027` (multi-mid, cap 8 fail-closed, gate per publisher, drift-guard; 112/151 тестов) |
 | T11c | Удаление легаси-плоскости (2176/79) + 6 тестов | P1 | T11a,T11b | ⏳ |
 | T12 | P5: room_mode (on_client_hello), guards→bridge_available, audio+composite egress | P0 | T11a | ⏳ |
 | T13 | WebTransport native (wtransport, cert-hash, Alt-Svc) | P2 | T11a | ⏳ |
@@ -48,7 +48,7 @@
 - **T09b:** MP4 играется ffprobe/ffmpeg; avcC/esds/timescale/stco корректны; tap не спавнит скрытую группу.
 - **T10:** directory/addresses в SQL; идемпотентная миграция с маркером; rerun не воскрешает; sqlite==pg; поле убрано из JSON.
 - **T11a:** default transport=1 + preflight; keyframe-gate; re-offer без нового DTLS; VP9/AV1/H264/H265 в caps честно.
-- **T11b:** 3+ пира в комнате; patch вендора `--check`; нет обрезки до 2.
+- **T11b:** 3+ пира в комнате (тест через mpsc + e2e 3 страницы); pre-offer `1+(N-1)` обоих видов, answer зеркалит все m-lines; per-source `(publisher,kind)→mid`, mid не переиспользуется (retire), N−1 аудио без микширования; `VKS_WEBRTC_MAX_PEERS_PER_ROOM=8` fail-closed + `room_full` сверх лимита; keyframe-gate per publisher; легаси 1+1 — явная деградация с метрикой; вендор без SDP → `check-pnm-webrtc-drift.py --check` (no-op сегодня).
 - **T11c:** легаси-плоскость удалена; 6 новых тестов; `VKS_WEBRTC_TRANSPORT` обязателен.
 - **T12:** mixed room: браузер+шлюз; audio-мост; composite H.264; guards заменены `bridge_available`.
 - **T13:** нативный WT-клиент ClientHello→ServerHello; `/wt/cert-hash`; Alt-Svc только при on; 404 при off; WS жив.

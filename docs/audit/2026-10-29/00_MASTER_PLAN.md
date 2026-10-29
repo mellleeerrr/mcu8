@@ -60,7 +60,7 @@
 | FEC 10:1 | ⛔ | XOR-FEC в WebRTC не реализуем (нет в str0m, браузеры не договариваются). Замена: NACK/RTX + RED; Opus in-band FEC — отдельный fmtp. |
 | Pacing P3 | ✅ | У str0m; не дублировать. |
 | CSS/Taffy layouts | ⛔ | Серверный layout — **прямоугольники** (`vks-layout`), клиент рисует CSS. Taffy не нужен: тянет зависимость без выигрыша, Codian-эталоны — абсолютные координаты. Зафиксировать в доках. |
-| Per-source egress > 2 пиров | ❌ | T11b: клиентский pre-offer 1 audio + 8 video mids (1 sendrecv + 7 recvonly), сервер `(publisher,kind)→mid`, снять `MAX_PEERS_PER_ROOM`. «8 mids в answer» — нельзя (RFC 3264). |
+| Per-source egress > 2 пиров | ✅ | T11b: клиентский pre-offer `1 audio +(N-1) audio`, `1 video +(N-1) video` (1 sendrecv + recvonly), сервер `(publisher,kind)→mid` с direction-aware answer; `MAX_PEERS_PER_ROOM` заменён на `VKS_WEBRTC_MAX_PEERS_PER_ROOM=8` (fail-closed). Вендорский бандл SDP не содержит — вместо патча fail-closed drift-guard `scripts/check-pnm-webrtc-drift.py`. «8 mids в answer» — нельзя (RFC 3264), answer зеркалит все m-lines. |
 | Keyframe-gate + адресный PLI | ❌ | T11a: `MediaData::is_keyframe`, PLI уже есть; не форвардить дельты до IDR. |
 | Re-offer | ❌ | T11a: `PeerCommand::Reoffer` на том же peer (str0m не перезапускает DTLS), 150–250 строк. |
 | P5 SFU↔MCU hybrid bridge | ⛔→❌ | T12: audio-мост + composite-egress; снятие guard'ов **после** моста (`bridge_available()`), иначе «connected но тишина». Композит — H.264-only политика (VP8-декодера в MCU нет). |
@@ -195,7 +195,7 @@
 ### Фаза 3 — SFU/P5 и транспорт
 
 - **T11a. SFU P3:** default `VKS_WEBRTC_TRANSPORT=1` + fail-closed preflight; keyframe-gate+PLI; re-offer (`PeerCommand::Reoffer`); включить VP9/AV1/H264/H265 в caps; RED/reorder тюнинг; 6 браузерных тестов.
-- **T11b. Per-source:** серверный маппинг `(publisher,kind)→mid` + снятие `MAX_PEERS_PER_ROOM`; клиент — вендорский бандл, поэтому деливерабл `scripts/patch-pnm-webrtc-mids.py` (pre-offer 1 audio + 8 video) + `--check` в CI; гейт «вендор предлагает 8 mids» + тест 3+ пира.
+- **T11b. Per-source:** серверный маппинг `(publisher,kind)→mid` (N−1 аудио-потоков отдельными mid'ами, без микширования; mid не переиспользуется между паблишерами) + `VKS_WEBRTC_MAX_PEERS_PER_ROOM` (default 8, fail-closed) вместо `MAX_PEERS_PER_ROOM`; keyframe-gate per publisher. Вендорский бандл PNM **не содержит SDP** (проверено: только feature detection `"RTCPeerConnection" in window`), поэтому деливерабл `scripts/patch-pnm-webrtc-mids.py` снят — вместо него no-op сегодня fail-closed `scripts/check-pnm-webrtc-drift.py` (exit 1, если бандл начнёт говорить SDP) + unit-тесты в CI. Гейты: 3+ пира в комнате, pre-offer 1+7/1+7 до `createOffer`, легаси 1+1 деградирует явно (`webrtc_sources{dropped_no_mid}`), а не склейкой часов.
 - **T11c. Удаление легаси:** после T11a/T11b — 2176/79 строк, `VKS_WEBRTC_TRANSPORT` обязателен.
 - **T12. P5 hybrid:** room_mode в `on_client_hello`; guards → `bridge_available()`; audio-мост; composite-egress (H.264-only) с VP8-политикой; e2e mixed room; удаление `evict`.
 - **T13. WebTransport native:** wtransport UDP-листенер, порт, cert/key + `/wt/cert-hash`, Alt-Svc при on, 404 при off; auth до accept; лимиты; MemoryTransport в cfg(test); тесты нативных клиентов.
