@@ -647,7 +647,12 @@ impl WebRtcPeer {
     /// retired-source mark, so a publisher that reconnects with the same
     /// `ParticipantId` gets a fresh mid (the old one stays retired).
     pub fn ensure_source(&mut self, from: ParticipantId, audio: bool) -> bool {
-        self.mids.ensure_source(from, audio).is_some()
+        // A repeated `EnsureSource` for the same publisher must not inflate the
+        // `allocated` counter (P3-5): the mid is only newly allocated on the
+        // first mapping, while re-announcements keep the existing slot.
+        let already_mapped =
+            if audio { self.mids.src_audio.contains_key(&from) } else { self.mids.src_video.contains_key(&from) };
+        self.mids.ensure_source(from, audio).is_some() && !already_mapped
     }
 
     /// Retires a publisher's egress mids (publisher left the room). They are

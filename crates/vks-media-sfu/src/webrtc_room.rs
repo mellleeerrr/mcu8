@@ -685,7 +685,7 @@ impl WebRtcRoomRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|(key_room, publisher, _), _| !(*key_room == room && *publisher == participant));
-        let (removed, survivors) = {
+        let (removed, _survivors) = {
             let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut survivors = Vec::new();
             let mut removed = false;
@@ -699,21 +699,27 @@ impl WebRtcRoomRegistry {
                     rooms.remove(&room);
                 }
                 WEBRTC_PEERS.set(rooms.values().map(HashMap::len).sum::<usize>() as i64);
+                // Lock-held broadcast: a replacement generation cannot even
+                // begin registration until this DropSource is queued, so it
+                // can never overtake the older task-exit below (P3-3).
+                if removed {
+                    for survivor in &survivors {
+                        survivor.forget_video(participant);
+                        let _ = survivor.tx.try_send(PeerCommand::DropSource { from: participant });
+                    }
+                }
             }
             (removed, survivors)
         };
         if !removed {
             return;
         }
-        // Retire the departed publisher's egress mids in every surviving peer:
-        // the mid must never be reused for a different publisher (a new RTP
-        // clock domain under a live decoder). Close the per-publisher keyframe
-        // gate synchronously, before the command is queued, so a frame cannot
-        // slip through into the reopened gate in the meantime.
-        for survivor in survivors {
-            survivor.forget_video(participant);
-            let _ = survivor.tx.try_send(PeerCommand::DropSource { from: participant });
-        }
+        // Coalescing cleanup only; broadcasting already occurred under lock.
+        // with registration; the DropSource was already queued under the lock.
+        self.last_keyframe_request
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(key_room, publisher, _), _| !(*key_room == room && *publisher == participant));
     }
 
     /// Exits a peer task without deleting a newer generation of the same
@@ -725,7 +731,11 @@ impl WebRtcRoomRegistry {
     /// must be cleared, and the per-publisher keyframe gate must be closed so a
     /// reconnect with the same `ParticipantId` waits for a fresh IDR (P2-1).
     fn remove_generation(&self, room: RoomId, participant: ParticipantId, generation: u64) {
-        let (removed, survivors) = {
+        // Symmetry with `remove`: task-exit must not leave subscription or
+        // bitrate bookkeeping for a dead participant (P3-4).
+        self.subscriptions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(room, participant));
+        self.bitrate_caps.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(room, participant));
+        let (removed, _survivors) = {
             let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut removed = false;
             let mut survivors = Vec::new();
@@ -739,25 +749,22 @@ impl WebRtcRoomRegistry {
                 if peers.is_empty() {
                     rooms.remove(&room);
                 }
-            }
-            if removed {
-                WEBRTC_PEERS.set(rooms.values().map(HashMap::len).sum::<usize>() as i64);
+                // Broadcast under the room lock as in `remove` (P3-3).
+                if removed {
+                    WEBRTC_PEERS.set(rooms.values().map(HashMap::len).sum::<usize>() as i64);
+                    self.last_keyframe_request
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .retain(|(key_room, publisher, _), _| !(*key_room == room && *publisher == participant));
+                    for survivor in &survivors {
+                        survivor.forget_video(participant);
+                        let _ = survivor.tx.try_send(PeerCommand::DropSource { from: participant });
+                    }
+                }
             }
             (removed, survivors)
         };
-        // A stale generation (already replaced by a re-offer) must not touch
-        // the new generation's coalescing state.
-        if !removed {
-            return;
-        }
-        self.last_keyframe_request
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|(key_room, publisher, _), _| !(*key_room == room && *publisher == participant));
-        for survivor in survivors {
-            survivor.forget_video(participant);
-            let _ = survivor.tx.try_send(PeerCommand::DropSource { from: participant });
-        }
+        if !removed {}
     }
 
     /// Number of registered browser peers in a room (tests/observability).
