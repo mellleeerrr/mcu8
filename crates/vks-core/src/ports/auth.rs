@@ -66,4 +66,12 @@ pub trait AuthProvider: Send + Sync + 'static {
 
     /// Возвращает пользователя по username.
     async fn get_user_by_name(&self, username: &str) -> Result<Option<User>, AuthError>;
+
+    /// True only when `verify` checked credentials against this process's
+    /// LocalDb (Argon2id/PBKDF2 rows). Remote providers (LDAP/OIDC) must keep
+    /// the default `false`: their successful login must never trigger a local
+    /// password migration.
+    fn authenticates_locally(&self) -> bool {
+        false
+    }
 }

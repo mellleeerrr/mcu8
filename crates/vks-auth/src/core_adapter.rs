@@ -59,6 +59,10 @@ impl CoreAuthProvider for LocalAuth {
             Err(e) => Err(CoreAuthError::Other(e.to_string())),
         }
     }
+
+    fn authenticates_locally(&self) -> bool {
+        true
+    }
 }
 
 #[async_trait]
@@ -100,6 +104,10 @@ impl CoreAuthProvider for AuthProviderEnum {
             Self::Ldap(_) => Ok(None),
             Self::Oidc(_) => Ok(None),
         }
+    }
+
+    fn authenticates_locally(&self) -> bool {
+        matches!(self, Self::Local(_))
     }
 }
 

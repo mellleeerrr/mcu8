@@ -276,7 +276,12 @@ pub async fn login(
     }
 
     enum LoginOk {
-        Provider(String),
+        /// `local` is true only for LocalDb-backed providers: remote (LDAP/
+        /// OIDC) logins must never touch local password rows.
+        Provider {
+            user_id: String,
+            local: bool,
+        },
         Local(vks_auth::local_db::User),
     }
 
@@ -284,7 +289,7 @@ pub async fn login(
         let creds =
             vks_core::ports::auth::Credentials { username: body.login.clone(), password: body.password.clone() };
         match provider.verify(&creds).await {
-            Ok(user) => Ok(LoginOk::Provider(user.id.to_string())),
+            Ok(user) => Ok(LoginOk::Provider { user_id: user.id.to_string(), local: provider.authenticates_locally() }),
             // Typed backpressure: a saturated hash queue is not a bad password.
             Err(vks_core::ports::auth::AuthError::Busy) => Err(LoginError::Busy),
             Err(_) => Err(LoginError::Invalid),
@@ -305,24 +310,21 @@ pub async fn login(
             LOGIN_ATTEMPTS.with_label_values(&["ok"]).inc();
             audit(&state, &body.login, &ip, "login_ok");
             match ok {
-                LoginOk::Provider(user_id) => issue_token(&state, &user_id),
-                LoginOk::Local(user) => {
-                    // Lazy migration only for credentials verified by LocalDb:
-                    // an LDAP/OIDC login must never overwrite a local row with
-                    // the typed (remote) password. CAS on the stored hash also
-                    // keeps a concurrent password change from being reverted.
-                    if vks_auth::local_db::LocalDb::needs_rehash(&user) {
-                        if let Some(db) = &state.local_db {
-                            match db
-                                .rehash_async_if_unchanged(&user.id, Some(&user.password_hash_hex), &body.password)
-                                .await
-                            {
-                                Ok(upgraded) => persist_lazy_rehash(&state, db, &upgraded).await,
-                                Err(error) => {
-                                    tracing::warn!(%error, "lazy Argon2id rehash skipped; keeping current hash")
-                                }
-                            }
+                LoginOk::Provider { user_id, local } => {
+                    // The shipped binary always installs a provider (even for
+                    // `local`), so the provider path must trigger the lazy
+                    // PBKDF2->Argon2id migration too — but ONLY when the
+                    // provider really verified against LocalDb.
+                    if local {
+                        if let (Some(db), Ok(user)) = (&state.local_db, db_user_by_name(&state, &body.login)) {
+                            lazy_upgrade_if_needed(&state, db, &user, &body.password).await;
                         }
+                    }
+                    issue_token(&state, &user_id)
+                }
+                LoginOk::Local(user) => {
+                    if let Some(db) = &state.local_db {
+                        lazy_upgrade_if_needed(&state, db, &user, &body.password).await;
                     }
                     issue_token(&state, &user.id)
                 }
@@ -401,7 +403,10 @@ pub async fn change_password(
         }
     }
     if let Some(storage) = &state.storage {
-        let user_id = vks_core::UserId::parse(&updated.id).unwrap_or_else(|_| vks_core::UserId::bootstrap_operator());
+        let Ok(user_id) = vks_core::UserId::parse(&updated.id) else {
+            tracing::error!(user_id = %updated.id, "password changed in memory but cannot be persisted (non-UUID id)");
+            return error_json(500, "Password changed in memory only; storage id is not a UUID");
+        };
         let creds = vks_core::ports::storage::UserCredentials {
             user_id,
             password_hash_hex: updated.password_hash_hex.clone(),
@@ -455,7 +460,7 @@ fn issue_token(state: &AppState, user_id: &str) -> Response {
     }
 }
 
-/// 401 + `Retry-After` (сек, минимум 1).
+/// 401 `Too many attempts…` + `Retry-After` (сек, минимум 1).
 /// Process-wide API request budget: 200-token burst, 50 tokens/s refill
 /// (BACKEND_RULES §1.4). One bucket per process state keeps memory bounded and
 /// makes the limit testable; per-IP WS limits stay in [`super::ws`].
@@ -492,12 +497,57 @@ pub(crate) fn too_busy_response() -> Response {
     response
 }
 
+fn db_user_by_name(
+    state: &AppState,
+    login: &str,
+) -> Result<vks_auth::local_db::User, vks_auth::local_db::LocalDbError> {
+    state
+        .local_db
+        .as_ref()
+        .ok_or_else(|| vks_auth::local_db::LocalDbError::NotFound(login.to_string()))?
+        .user_by_name(login)
+}
+
+/// CAS-guarded PBKDF2->Argon2id upgrade; never fails the login.
+async fn lazy_upgrade_if_needed(
+    state: &AppState,
+    db: &vks_auth::local_db::LocalDb,
+    user: &vks_auth::local_db::User,
+    password: &str,
+) {
+    if !vks_auth::local_db::LocalDb::needs_rehash(user) {
+        return;
+    }
+    match db.rehash_async_if_unchanged(&user.id, Some(&user.password_hash_hex), password).await {
+        Ok(upgraded) => persist_lazy_rehash(state, db, &upgraded).await,
+        Err(error) => tracing::warn!(%error, "lazy Argon2id rehash skipped; keeping current hash"),
+    }
+}
+
 /// Persists a lazy Argon2id upgrade, keeping token generation/mark unchanged.
 /// Failure is logged but never fails the login: the in-memory Argon2id hash is
 /// already authoritative for this process.
 async fn persist_lazy_rehash(state: &AppState, db: &vks_auth::local_db::LocalDb, user: &vks_auth::local_db::User) {
     let Some(storage) = &state.storage else { return };
-    let user_id = vks_core::UserId::parse(&user.id).unwrap_or_else(|_| vks_core::UserId::bootstrap_operator());
+    let Ok(user_id) = vks_core::UserId::parse(&user.id) else {
+        // No bootstrap-id fallback: writing a credential row under another
+        // user's id would corrupt that account.
+        tracing::warn!(user_id = %user.id, "lazy rehash not persisted: non-UUID local user id");
+        return;
+    };
+    // Re-check the row right before persisting: a concurrent password change
+    // between the in-memory CAS and this upsert must win.
+    match db.user_by_name(&user.username) {
+        Ok(current) if current.password_hash_hex == user.password_hash_hex => {}
+        Ok(_) => {
+            tracing::warn!(user_id = %user.id, "lazy rehash not persisted: password changed concurrently");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "lazy rehash not persisted: local row disappeared");
+            return;
+        }
+    }
     let creds = vks_core::ports::storage::UserCredentials {
         user_id,
         password_hash_hex: user.password_hash_hex.clone(),

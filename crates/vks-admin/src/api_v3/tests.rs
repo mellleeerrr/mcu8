@@ -468,6 +468,38 @@ async fn provider_login_never_rewrites_local_password() {
     assert!(db.authenticate("ldapuser", "from-ldap").is_err(), "LDAP password must not become the local password");
 }
 
+/// The shipped binary always installs a provider, so the LocalAuth provider
+/// path must still lazily migrate a legacy PBKDF2 row (the previous fix only
+/// ran in the unreachable provider=None branch).
+#[tokio::test]
+async fn local_provider_login_lazily_migrates_legacy_pbkdf2_row() {
+    let (state, _, db) = test_state_custom(|db| {
+        Some(Arc::new(vks_auth::provider::LocalAuth::with_db(db)) as Arc<dyn vks_core::ports::auth::AuthProvider>)
+    });
+    db.restore_user(
+        "u-legacy-prov",
+        "provuser",
+        "49d49c25f597846209f0d92e7770ab64e1c75e94b4ce6c509265ee67175d2a1e",
+        "000102030405060708090a0b0c0d0e0f",
+        Some(7),
+        Some(3),
+    );
+    let generation_before = db.generation("u-legacy-prov");
+    let mark_before = db.password_changed_at("u-legacy-prov");
+    let server = app(state);
+    let response = send(
+        &server,
+        request("POST", "/api/v3/login", None, json!({"login":"provuser","password":"correct horse battery staple"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "legacy local row must log in through LocalAuth");
+    let upgraded = db.user_by_name("provuser").expect("row");
+    assert!(!LocalDb::needs_rehash(&upgraded), "LocalAuth login must migrate PBKDF2 -> Argon2id");
+    assert_eq!(db.generation("u-legacy-prov"), generation_before, "migration is not a password change");
+    assert_eq!(db.password_changed_at("u-legacy-prov"), mark_before);
+    assert!(db.authenticate("provuser", "correct horse battery staple").is_ok());
+}
+
 #[tokio::test]
 async fn login_rejects_oversized_passwords() {
     let (state, _) = test_state();
@@ -634,12 +666,22 @@ async fn calls_patch_and_codec_patch_do_not_lose_each_other() {
 
 /// Состояние с issuer + LocalDb(`admin`/`s3cret`), как бутстрап `main.rs`.
 pub(crate) fn test_state() -> (SharedState, Arc<JwtIssuer>) {
-    test_state_with_provider(None)
+    let (state, issuer, _db) = test_state_custom(|_| None);
+    (state, issuer)
 }
 
 pub(crate) fn test_state_with_provider(
     auth_provider: Option<Arc<dyn vks_core::ports::auth::AuthProvider>>,
 ) -> (SharedState, Arc<JwtIssuer>) {
+    let (state, issuer, _db) = test_state_custom(|_| auth_provider);
+    (state, issuer)
+}
+
+/// Builds a fresh state, letting the caller construct the provider from the
+/// same LocalDb instance; returns the db for white-box assertions.
+pub(crate) fn test_state_custom(
+    make_provider: impl FnOnce(Arc<LocalDb>) -> Option<Arc<dyn vks_core::ports::auth::AuthProvider>>,
+) -> (SharedState, Arc<JwtIssuer>, Arc<LocalDb>) {
     let issuer = Arc::new(JwtIssuer::new(JwtConfig {
         secret: "test_secret_api_v3_phase2".to_string(),
         ttl_secs: 86_400,
@@ -649,14 +691,14 @@ pub(crate) fn test_state_with_provider(
     db.register("u-admin", "admin", "s3cret").expect("register admin");
     let mut state = AppState::new();
     state.jwt_issuer = Some(issuer.clone());
-    state.auth_provider = auth_provider;
-    state.local_db = Some(db);
+    state.auth_provider = make_provider(db.clone());
+    state.local_db = Some(db.clone());
     // Как main.rs после bind UDP-лупа: conference-адреса строятся из candidate IP.
     state.server_addr.set("192.168.1.92".to_string()).expect("server_addr set once");
     // UI-поиск пользователей (`ui:users:search`) читает admin-хранилище (§4.4);
     // bootstrap `main.rs` наполняет его тем же администратором.
     crate::users::Users::create(&state, "admin", vks_core::Role::Operator);
-    (Arc::new(state), issuer)
+    (Arc::new(state), issuer, db)
 }
 
 pub(crate) fn app(state: SharedState) -> Router {

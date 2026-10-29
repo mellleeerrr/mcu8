@@ -260,9 +260,14 @@ pub async fn update_user_credentials(
         }
     }
     if !password.is_empty() {
-        if let Err(error) = db.set_password_async(&login, password).await {
-            tracing::warn!(error = %error, "directory: password update failed");
-            return error_json(500, "Internal error");
+        match db.set_password_async(&login, password).await {
+            Ok(_) => {}
+            Err(vks_auth::local_db::LocalDbError::Busy) => return crate::api_v3::auth::too_busy_response(),
+            Err(vks_auth::local_db::LocalDbError::PasswordTooLong) => return error_json(422, "Password is too long"),
+            Err(error) => {
+                tracing::warn!(error = %error, "directory: password update failed");
+                return error_json(500, "Internal error");
+            }
         }
     }
     if let Err(response) = commit_directory(&state, |resources| {
@@ -403,6 +408,7 @@ pub async fn update_profile_credentials(
     }
     match db.authenticate_async(&current_login, old_password).await {
         Ok(_) => {}
+        Err(vks_auth::local_db::LocalDbError::Busy) => return crate::api_v3::auth::too_busy_response(),
         Err(_) => return error_json(404, "Incorrect old password"),
     }
     let mut login = current_login.clone();
@@ -421,9 +427,14 @@ pub async fn update_profile_credentials(
         }
     }
     if !new_password.is_empty() {
-        if let Err(error) = db.set_password_async(&login, new_password).await {
-            tracing::error!(error = %error, "directory: profile password update failed");
-            return error_json(500, "Internal error");
+        match db.set_password_async(&login, new_password).await {
+            Ok(_) => {}
+            Err(vks_auth::local_db::LocalDbError::Busy) => return crate::api_v3::auth::too_busy_response(),
+            Err(vks_auth::local_db::LocalDbError::PasswordTooLong) => return error_json(422, "Password is too long"),
+            Err(error) => {
+                tracing::error!(error = %error, "directory: profile password update failed");
+                return error_json(500, "Internal error");
+            }
         }
     }
     if let Err(response) = commit_directory(&state, |resources| {

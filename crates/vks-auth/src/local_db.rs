@@ -4,8 +4,9 @@
 //! (`m=19456 KiB, t=2, p=1` — OWASP baseline) and are stored as a PHC string in
 //! `password_hash_hex` (the `salt_hex` column stays empty: the PHC string
 //! carries its own salt). Pre-existing PBKDF2-SHA256 rows still authenticate
-//! and are lazily rehashed to Argon2id on the next successful login without
-//! bumping the token generation (see [`LocalDb::needs_rehash`]).
+//! and are lazily rehashed to Argon2id on the next successful login (including
+//! through the shipped `LocalAuth` provider) without bumping the token
+//! generation (see [`LocalDb::needs_rehash`]).
 //!
 //! Passwords are never stored in plaintext; only the derived hash. A real
 //! deployment would back this with PostgreSQL, but the store is isolated
@@ -51,9 +52,9 @@ fn argon2() -> Argon2<'static> {
 /// each other and the counter would only ever grow.
 static HASH_WAITERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-fn hash_gate() -> &'static tokio::sync::Semaphore {
-    static GATE: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    GATE.get_or_init(|| tokio::sync::Semaphore::new(AUTH_HASH_PERMITS))
+fn hash_gate() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
+    static GATE: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(AUTH_HASH_PERMITS)))
 }
 
 /// RAII slot in the bounded hashing queue.
@@ -80,10 +81,28 @@ impl Drop for QueueSlot {
     }
 }
 
-async fn hash_permit() -> Result<(QueueSlot, tokio::sync::SemaphorePermit<'static>), LocalDbError> {
+async fn hash_permit() -> Result<(QueueSlot, tokio::sync::OwnedSemaphorePermit), LocalDbError> {
     let slot = QueueSlot::acquire()?;
-    let permit = hash_gate().acquire().await.map_err(|_| LocalDbError::Busy)?;
+    let permit = std::sync::Arc::clone(hash_gate()).acquire_owned().await.map_err(|_| LocalDbError::Busy)?;
     Ok((slot, permit))
+}
+
+/// Runs a blocking password-hash/verify job with the gate held *inside* the
+/// blocking task. `spawn_blocking` tasks cannot be cancelled, so moving the
+/// permit into the closure keeps the "≤ 4 concurrent Argon2/MiB" invariant
+/// even when the requesting future is dropped mid-hash.
+async fn run_gated<T, F>(job: F) -> Result<T, LocalDbError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let gate = hash_permit().await?;
+    tokio::task::spawn_blocking(move || {
+        let _gate = gate;
+        job()
+    })
+    .await
+    .map_err(|_| LocalDbError::AuthFailed)
 }
 
 /// A stored user.
@@ -92,7 +111,7 @@ pub struct User {
     pub id: String,
     /// Username / login name.
     pub username: String,
-    /// PBKDF2-SHA256 derived key, hex-encoded.
+    /// Hash column: Argon2id PHC string for new rows, PBKDF2 hex for legacy rows.
     pub password_hash_hex: String,
     /// Random 16-byte salt, hex-encoded (32 chars).
     pub salt_hex: String,
@@ -180,7 +199,7 @@ impl LocalDb {
                 }
             }
             None => {
-                // Same Argon2id work as a real verify: a PBKDF2 dummy is
+                // Same Argon2id work as a real verify: a cheaper dummy would
                 // ~2.5x faster and leaks account existence through timing.
                 let _ = hash_password(password);
                 Err(LocalDbError::NotFound(username.to_string()))
@@ -260,7 +279,7 @@ impl LocalDb {
         removed
     }
 
-    /// Replace `username`'s password (fresh salt + PBKDF2 hash) and bump the
+    /// Replace `username`'s password (fresh Argon2id PHC string) and bump the
     /// change mark and monotonic generation, invalidating previously issued tokens.
     pub fn set_password(&self, username: &str, new_password: &str) -> Result<User, LocalDbError> {
         if new_password.len() > MAX_PASSWORD_BYTES {
@@ -281,15 +300,13 @@ impl LocalDb {
         Ok(updated)
     }
 
-    /// Asynchronously replace `username`'s password, offloading PBKDF2 to a worker thread (M1.3).
+    /// Asynchronously replace `username`'s password, hashing Argon2id on a blocking worker.
     pub async fn set_password_async(&self, username: &str, new_password: &str) -> Result<User, LocalDbError> {
         if new_password.len() > MAX_PASSWORD_BYTES {
             return Err(LocalDbError::PasswordTooLong);
         }
         let pwd = new_password.to_string();
-        let (_slot, _permit) = hash_permit().await?;
-        let (hash_hex, salt_hex) =
-            tokio::task::spawn_blocking(move || hash_password(&pwd)).await.map_err(|_| LocalDbError::AuthFailed)?;
+        let (hash_hex, salt_hex) = run_gated(move || hash_password(&pwd)).await?;
         let (id, updated) = {
             let mut map = self.users.lock().unwrap();
             let Some((id, user)) = map.iter_mut().find(|(_, u)| u.username == username) else {
@@ -304,7 +321,7 @@ impl LocalDb {
         Ok(updated)
     }
 
-    /// Asynchronously authenticate by username + password, offloading PBKDF2 to a worker thread (M1.3).
+    /// Asynchronously authenticate by username + password (Argon2id/PBKDF2 verify on a blocking worker).
     pub async fn authenticate_async(&self, username: &str, password: &str) -> Result<User, LocalDbError> {
         if password.len() > MAX_PASSWORD_BYTES {
             return Err(LocalDbError::AuthFailed);
@@ -315,8 +332,7 @@ impl LocalDb {
         };
         let uname = username.to_string();
         let pwd = password.to_string();
-        let (_slot, _permit) = hash_permit().await?;
-        tokio::task::spawn_blocking(move || match user_opt {
+        run_gated(move || match user_opt {
             Some(user) => {
                 if verify_password(&user, &pwd) {
                     Ok(user)
@@ -329,15 +345,31 @@ impl LocalDb {
                 Err(LocalDbError::NotFound(uname))
             }
         })
-        .await
-        .map_err(|_| LocalDbError::AuthFailed)?
+        .await?
     }
 
     /// True when `user` still has a legacy PBKDF2 credential that should be
     /// upgraded to Argon2id after a successful login.
     #[must_use]
     pub fn needs_rehash(user: &User) -> bool {
-        !user.password_hash_hex.starts_with("$argon2")
+        let hash = user.password_hash_hex.as_str();
+        let mut parts = hash.split('$');
+        if parts.next() != Some("") || parts.next() != Some("argon2id") {
+            return true;
+        }
+        let _version = parts.next();
+        let mut memory = 0u32;
+        let mut time = 0u32;
+        let mut parallelism = 0u32;
+        for field in parts.next().unwrap_or_default().split(',') {
+            match field.split_once('=') {
+                Some(("m", value)) => memory = value.parse().unwrap_or(0),
+                Some(("t", value)) => time = value.parse().unwrap_or(0),
+                Some(("p", value)) => parallelism = value.parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+        memory != ARGON2_MEMORY_KIB || time != ARGON2_TIME_COST || parallelism != ARGON2_PARALLELISM
     }
 
     /// Lazily upgrades a legacy PBKDF2 credential to Argon2id after a verified
@@ -358,10 +390,7 @@ impl LocalDb {
         password: &str,
     ) -> Result<User, LocalDbError> {
         let pwd = password.to_string();
-        let permit = hash_permit().await?;
-        let (hash_hex, salt_hex) =
-            tokio::task::spawn_blocking(move || hash_password(&pwd)).await.map_err(|_| LocalDbError::AuthFailed)?;
-        drop(permit);
+        let (hash_hex, salt_hex) = run_gated(move || hash_password(&pwd)).await?;
         let mut map = self.users.lock().unwrap();
         let user = map.get_mut(user_id).ok_or_else(|| LocalDbError::NotFound(user_id.to_string()))?;
         if expected.is_some_and(|hash| user.password_hash_hex != hash) {
@@ -378,9 +407,7 @@ impl LocalDb {
             return Err(LocalDbError::PasswordTooLong);
         }
         let pwd = password.to_string();
-        let (_slot, _permit) = hash_permit().await?;
-        let (hash_hex, salt_hex) =
-            tokio::task::spawn_blocking(move || hash_password(&pwd)).await.map_err(|_| LocalDbError::AuthFailed)?;
+        let (hash_hex, salt_hex) = run_gated(move || hash_password(&pwd)).await?;
         let user = User { id: id.to_string(), username: username.to_string(), password_hash_hex: hash_hex, salt_hex };
         let mut map = self.users.lock().unwrap();
         if map.contains_key(id) {
