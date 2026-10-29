@@ -1,0 +1,25 @@
+# VKS MCU cgroup v2 slice (T15/L0), managed by scripts/host-tune.sh.
+#
+# Install (root):  sudo scripts/host-tune.sh apply --systemd
+# Verify:          scripts/host-doctor.sh --prod
+#
+# One slice for the prod unit (and any future co-located vks unit) so memory
+# and CPU/IO weights are enforced *together* and not only per unit. Values are
+# deliberately generous for a dedicated host: MemoryMax is a hard OOM ceiling,
+# MemoryHigh is the reclaim/throttle threshold. A vks-server that legitimately
+# needs more than 3 GiB must raise these in one place (this file), not disable
+# them in the unit.
+[Unit]
+Description=VKS MCU cgroup v2 resource slice (T15/L0)
+
+[Slice]
+# Hard ceiling for all services in this slice (prod unit also sets MemoryMax).
+MemoryMax=3G
+# Start reclaiming/throttling at 2G before hitting the hard ceiling.
+MemoryHigh=2G
+# Default weight is 100; 200 keeps the MCU ahead of background maintenance
+# under CPU contention without pinning a single core.
+CPUWeight=200
+# Default weight is 100; media + ffmpeg workers are latency-sensitive on disk.
+IOWeight=200
+TasksMax=8192

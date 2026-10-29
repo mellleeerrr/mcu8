@@ -31,6 +31,19 @@ TimeoutStopSec=30
 LimitNOFILE=65536
 UMask=0077
 
+# T15/L0 (cgroup v2): one slice for all vks services, hard memory ceiling and
+# scheduling weights. The same values are provided as a drop-in for existing
+# installs (deploy/host/systemd/vks-mcu-prod.service.d/10-l0-resources.conf);
+# keep both in sync. RT scheduling is intentionally not enabled — media runs on
+# the shared tokio runtime (docs/operations/host-l0-tuning.md §4).
+Slice=vks.slice
+MemoryHigh=2G
+MemoryMax=3G
+CPUWeight=200
+IOWeight=100
+Nice=-5
+CPUSchedulingPolicy=other
+
 # Hardening: запись только в State/LogsDirectory; /opt/vks и /etc/vks — read-only.
 NoNewPrivileges=true
 PrivateTmp=true
