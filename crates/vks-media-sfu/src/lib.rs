@@ -1,58 +1,30 @@
-//! `vks-media-sfu` — SFU-движок (str0m).
+//! `vks-media-sfu` — настоящая WebRTC-медиаплоскость SFU (str0m).
 //!
-//! **Фаза 2** (DEVELOPMENT_PLAN.md): наполнен по `docs/architecture/
-//! MEDIA_PIPELINE.md` §2. Модули:
+//! Плоскость — только DTLS/SRTP-сессия на каждого браузера: ICE (host
+//! candidates, ICE-lite на сервере), DTLS, SRTP/SRTCP, NACK/RTX, jitter
+//! buffer, TWCC/REMB — всё внутри `str0m`. Серверного plaintext-форвардера,
+//! UDP-медиалупа, BWE/simulcast-легаси больше нет (T11c).
 //!
-//! - [`engine`] — [`SfuEngine`], impl `vks_core::MediaEngine` (SFU);
-//!   in-memory SFU с loopback-раном.
-//! - [`forwarder`] — полный loop, forward-тер N+1 (N; 1-to-1 = 1
-//!   подписатель; full-mesh по умолчанию).
-//! - [`simulcast`] — 3 пространственных layer (sim/Med/High)
-//!   hsim hysteresis.
-//! - [`bwe`] — TWCC bandwidth estimator (sliding window).
-//! - [`dtls`] — DTLS-SRTP session state (str0m, optional feature).
-//! - [`congestion`] — congestion ladder (degrade/recovery).
-//! - [`ice`] — ICE-lite (host candidates only, RFC 8445 §2).
-//! - [`codec`] — codec feature flags (ADR-0017).
+//! - [`webrtc`] — sans-I/O обёртка над `str0m` ([`WebRtcPeer`]): приём
+//!   датаграмм, реальный SDP-answer, per-source egress mids (T11b).
+//! - [`webrtc_room`] — реестр реальных пиров ([`WebRtcRoomRegistry`]),
+//!   UDP-сокет и таймер на каждого пира, per-publisher keyframe gate.
+//! - [`registry`] — [`MediaRegistry`], roster комнат/паблишеров/подписчиков
+//!   для сигналинга (`TrackAdded`, раскладка, подписки); медиа через него не
+//!   идёт.
 //!
-//! **T11b:** [`webrtc`] is direction-aware and multi-mid (`1 + (N-1)` m-lines
-//! per kind), [`webrtc_room`] fans every publisher into its own egress mid
-//! (N-1 audio mids, no mixing), gates video per publisher, and enforces an
-//! honest per-room cap ([`RoomLimits`]).
+//! **MediaEngine-порт:** [`MediaRegistry`] реализует `vks_core::MediaEngine`
+//! — сервер работает с трейтом, а не с транспортом.
 //!
-//! **MediaEngine-порт:** `SfuEngine` реализует `vks_core::MediaEngine`
-//! (SFU). Клиентский SDK работает с трейтом — MCU/SFU-прозрачность
-//! (ARCHITECTURE.md §2).
-//!
-//! Дерево: vks-core, vks-proto, vks-common (ARCHITECTURE.md §3).
+//! Дерево: vks-core, vks-common.
 
-pub mod bwe;
-pub mod codec;
-pub mod congestion;
-pub mod dtls;
-pub mod engine;
-pub mod forwarder;
-pub mod ice;
-pub mod simulcast;
-pub mod udp_loop;
+pub mod registry;
 #[cfg(feature = "str0m")]
 pub mod webrtc;
 #[cfg(feature = "str0m")]
 pub mod webrtc_room;
 
-// Re-exports (flat API).
-pub use bwe::{BweConfig, BweEstimator, BweResult, TwccReportedPacket};
-pub use codec::{
-    parse_h264_rtp, parse_opus_rtp, parse_vp8_rtp, CodecEntry, CodecKind, CodecRegistry, H264RtpInfo, OpusRtpInfo,
-    Vp8RtpInfo,
-};
-pub use congestion::{CongestionConfig, CongestionLadder, CongestionLevel, LadderStep};
-pub use dtls::{CipherSuite, DtlsConfig, DtlsRole, DtlsSession, DtlsState, SrtpKeyingMaterial};
-pub use engine::SfuEngine;
-pub use forwarder::{ForwardTarget, Forwarder, ForwarderConfig, RecordingSink, RtpPacket, Sink};
-pub use ice::{HostCandidate, IceLite, LocalAddrProvider, LoopbackProvider, StaticAddrs, Transport};
-pub use simulcast::{Selection, SimulcastConfig, SimulcastLayer, SimulcastSelector};
-pub use udp_loop::{UdpMediaLoop, UdpMediaStats};
+pub use registry::MediaRegistry;
 #[cfg(feature = "str0m")]
 pub use webrtc::{
     MidDirection, MidSection, PeerMids, WebRtcAction, WebRtcConfig, WebRtcError, WebRtcPeer, MAX_AUDIO_MIDS,
@@ -63,7 +35,7 @@ pub use webrtc_room::{
     AcceptedPeer, PeerHandle, RoomLimits, WebRtcRoomRegistry, DEFAULT_MAX_PEERS, DEFAULT_MAX_PEERS_PER_ROOM,
 };
 
-/// str0m (optional, feature `str0m`) — re-export для фаз3 (реальный
-/// DTLS handshake + SRTP). Без feature крейт компилируется.
+/// str0m (feature `str0m`, on by default) — re-export so tests and the server
+/// can build a browser offer without taking a second direct dependency.
 #[cfg(feature = "str0m")]
 pub use str0m;

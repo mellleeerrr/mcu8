@@ -1,6 +1,6 @@
-# vks-media-sfu — SFU-движок.
-# Фаза 2 (DEVELOPMENT_PLAN.md): engine/forwarder/simulcast/bwe/congestion,
-# DTLS-SRTP (str0m, optional feature), ICE-lite, codec feature flags (ADR-0017).
+# vks-media-sfu — real WebRTC SFU (str0m) + room roster registry.
+# The legacy plaintext MCU (forwarder/BWE/simulcast/UDP loop) was removed in
+# T11c; media always flows through a per-peer DTLS/SRTP session.
 # Дерево: vks-core (MediaEngine-порт), vks-common.
 [package]
 name = "vks-media-sfu"
@@ -9,18 +9,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "VKS SFU engine: forwarder, simulcast, BWE, congestion (str0m)"
+description = "VKS SFU: str0m WebRTC transport and room roster registry"
 
 [features]
-# Codec registry features (ADR-0017): default = opus + vp8.
-default = ["opus", "vp8"]
-# DTLS-SRTP backend (optional; core compiles without it).
+# str0m is the only media plane; it is on by default so `cargo test -p
+# vks-media-sfu` can never silently run zero transport tests.
+default = ["str0m"]
 str0m = ["dep:str0m", "str0m/rust-crypto"]
-# Codec feature flags (ADR-0017).
-opus = []
-vp8 = []
-vp9 = []
-av1 = []
 
 [dependencies]
 vks-core = { path = "../vks-core" }

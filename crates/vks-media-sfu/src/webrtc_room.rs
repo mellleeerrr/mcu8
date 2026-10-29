@@ -8,12 +8,13 @@
 //! await. A re-offer the peer cannot negotiate is rejected and the live call
 //! keeps flowing (peer, socket, DTLS and media survive), but str0m may have
 //! already applied the offer's ICE credentials before rejecting the SDP body,
-//! so the next accepted re-offer can observe a rotated server ufrag. Media then flows through SRTP, is depayloaded to frames, and
-//! is re-encrypted separately for every receiving browser.
+//! so the next accepted re-offer can observe a rotated server ufrag. Media then
+//! flows through SRTP, is depayloaded to frames, and is re-encrypted separately
+//! for every receiving browser.
 //!
-//! This is intentionally a small SFU fanout, not the legacy plaintext
-//! [`crate::SfuEngine`] path: SRTP keys, RTP sequence numbers, NACK/RTX/FEC and
-//! BWE are per-peer state and cannot be shared through the plaintext forwarder.
+//! This is intentionally a small SFU fanout. The legacy plaintext `SfuEngine`
+//! and its forwarder were deleted in T11c: SRTP keys, RTP sequence numbers,
+//! NACK/RTX/FEC and BWE are per-peer state and cannot be shared.
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};

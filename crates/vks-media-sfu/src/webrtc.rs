@@ -7,8 +7,8 @@
 //!
 //! The wrapper is deliberately sans-I/O: the caller owns the UDP socket,
 //! feeds datagrams in, and sends every [`WebRtcAction::Send`] out. That keeps
-//! the transport testable without a browser and lets the existing
-//! `UdpMediaLoop` own socket lifecycle.
+//! the transport testable without a browser and lets the per-peer room task
+//! own the socket lifecycle.
 //!
 //! Mutations follow str0m's single-mutation invariant: every public method
 //! that mutates the inner [`Rtc`] drains `poll_output()` before returning.
