@@ -90,6 +90,11 @@ impl RecordingControl for RecorderControl {
     async fn stop(&self, room_id: RoomId) -> Result<(), String> {
         let state = self.state.upgrade().ok_or_else(|| "server state is gone".to_string())?;
         if !self.recorder.is_recording(&room_id) {
+            // Повторный DELETE после ошибки финализации обязан её повторить,
+            // а не вернуть 200 (T09b review A/B P2-1).
+            if let Some(error) = self.recorder.stopped_finalize_error(&room_id) {
+                return Err(error);
+            }
             // After a restart the in-memory session is gone but the DB may hold
             // an unfinalized row; finalize it so DELETE actually stops it.
             if let Some(storage) = state.storage.clone() {
@@ -126,10 +131,15 @@ impl RecordingControl for RecorderControl {
 pub struct RecorderManager {
     sessions: Arc<Mutex<HashMap<RoomId, RecordingSession>>>,
     storage: Arc<Mutex<MemoryStore>>,
-    stopped_cache: Arc<Mutex<HashMap<RoomId, RecordingMeta>>>,
+    /// Недавно остановленные записи: метаданные + ошибка finalize (если была)
+    /// для честного повторного DELETE (T09b review A P2-1).
+    stopped_cache: Arc<Mutex<HashMap<RoomId, (RecordingMeta, Option<String>)>>>,
     containers: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     /// Abort-хэндлы tap-тасков по комнатам (non-owning подписки на группы).
     taps: Arc<Mutex<HashMap<RoomId, AbortHandle>>>,
+    /// Причина, по которой tap перестал писать (writer отверг сэмпл): должна
+    /// вернуться из stop, а не превратиться в 200 с усечённым MP4.
+    tap_errors: Arc<Mutex<HashMap<RoomId, String>>>,
 }
 
 impl Default for RecorderManager {
@@ -147,6 +157,7 @@ impl RecorderManager {
             stopped_cache: Arc::new(Mutex::new(HashMap::new())),
             containers: Arc::new(Mutex::new(HashMap::new())),
             taps: Arc::new(Mutex::new(HashMap::new())),
+            tap_errors: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -275,7 +286,21 @@ impl RecorderManager {
         if let Some(tap) = tap {
             let sessions = Arc::clone(&self.sessions);
             let tap_room = *room_id;
-            let handle = tokio::spawn(recorder_tap::run(tap_room, tap, sessions));
+            let manager = self.clone();
+            let tap_state = Arc::clone(state);
+            let tap_errors = Arc::clone(&self.tap_errors);
+            let manager_for_tap = manager.clone();
+            let handle = tokio::spawn(async move {
+                let tap_error = recorder_tap::run(tap_room, tap, sessions).await;
+                if let Some(error) = tap_error {
+                    tap_errors.lock().unwrap().insert(tap_room, error);
+                }
+                // T09b review A P1-1: группа ретировалась вместе с последним
+                // зрителем — запись не должна остаться ACTIVE без источника.
+                // Штатный stop абортит этот таск, поэтому финализация здесь
+                // выполняется только при естественном выходе tap'а.
+                manager_for_tap.finalize_after_tap_stop(&tap_state, &tap_room).await;
+            });
             self.taps.lock().unwrap().insert(*room_id, handle.abort_handle());
         }
 
@@ -314,8 +339,12 @@ impl RecorderManager {
                 Some(session) => session,
                 None => {
                     // Проверяем кэш недавно остановленных сессий (идемпотентность)
-                    if let Some(meta) = self.stopped_cache.lock().unwrap().get(room_id).cloned() {
-                        return Ok(StopOutcome { meta, entry: None, finalize_error: None });
+                    if let Some((meta, finalize_error)) = self.stopped_cache.lock().unwrap().get(room_id).cloned() {
+                        return Ok(StopOutcome {
+                            meta,
+                            entry: None,
+                            finalize_error: finalize_error.map(RecordingError::Container),
+                        });
                     }
                     return Err(RecordingError::NotStarted);
                 }
@@ -333,6 +362,9 @@ impl RecorderManager {
         // метаданные уже закэшированы внутри сессии — запись/участник будут
         // закрыты ниже в любом случае (P1: не терять RoomHub-участника).
         let stop_result = session.stop();
+        // Ошибка tap'а (writer отверг сэмпл) не должна теряться даже если
+        // контейнер формально финализировался: файл усечён (review B P2-2).
+        let tap_error = self.tap_errors.lock().unwrap().remove(room_id);
         if let Some(bytes) = session.container_bytes() {
             if let Some(record_id) = record_id {
                 self.save_container(&record_id.to_string(), bytes.to_vec());
@@ -346,15 +378,24 @@ impl RecorderManager {
             Ok(meta) => Some(meta.clone()),
             Err(_) => session.finalized_meta().cloned(),
         };
-        let Some(meta) = meta else {
+        let Some(mut meta) = meta else {
             // Теоретически недостижимо (сессия стартовала), но не оставляем
             // «активную» строку/участника даже в этом случае.
             return Err(stop_result.err().unwrap_or(RecordingError::NotStarted));
         };
 
+        // P2 (review A/B): ошибка finalize при уже записанных сэмплах оставляла
+        // size_bytes = размер сырого Annex-B без MP4-артефакта — строка
+        // выглядела завершённой без файла. Размера нет — значит 0.
+        let container_saved = record_id.and_then(|id| self.get_container(&id.to_string())).is_some();
+        if stop_result.is_err() && !container_saved {
+            meta.size_bytes = 0;
+        }
+
         // 3. Фиксация в хранилище записей
         self.storage.lock().unwrap().save(meta.clone());
-        self.stopped_cache.lock().unwrap().insert(*room_id, meta.clone());
+        let finalize_error = stop_result.as_ref().err().map(ToString::to_string).or(tap_error);
+        self.stopped_cache.lock().unwrap().insert(*room_id, (meta.clone(), finalize_error.clone()));
 
         // 4. Строка AppState.records: сохраняем фактические width/height/
         // bitrate из старта (группа), обновляем длительность/размер.
@@ -418,6 +459,27 @@ impl RecorderManager {
             }),
         );
         state.notify_admin("sessions:updated", serde_json::json!({ "id": room_str, "recording": false }));
+    }
+
+    /// Ошибка finalize последней остановленной записи комнаты (для
+    /// идемпотентного повторного DELETE).
+    pub fn stopped_finalize_error(&self, room_id: &RoomId) -> Option<String> {
+        self.stopped_cache.lock().unwrap().get(room_id).and_then(|(_, error)| error.clone())
+    }
+
+    /// Финализирует запись, чей tap завершился сам (группа закрылась или
+    /// writer отверг сэмпл): без этого сессия оставалась Running/ACTIVE без
+    /// источника, а повторный start не переподписывался (T09b review A P1-1).
+    async fn finalize_after_tap_stop(&self, state: &Arc<AppState>, room_id: &RoomId) {
+        if !self.is_recording(room_id) {
+            return;
+        }
+        match self.stop_recording_async(state, room_id).await {
+            Ok(meta) => {
+                info!(room = %room_id, size_bytes = meta.size_bytes, "recording finalized after encoder group closed")
+            }
+            Err(error) => warn!(room = %room_id, %error, "recording finalized with container error after tap stop"),
+        }
     }
 
     /// Останавливает запись комнаты и сохраняет метаданные.

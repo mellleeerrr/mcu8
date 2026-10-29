@@ -26,7 +26,14 @@ use vks_media_mcu::farm::FarmTap;
 use vks_recorder::RecordingSession;
 
 /// Крутит tap до `Closed`, исчезновения сессии или ошибки writer'а.
-pub(crate) async fn run(room: RoomId, mut tap: FarmTap, sessions: Arc<Mutex<HashMap<RoomId, RecordingSession>>>) {
+///
+/// Возвращает причину, по которой writer отверг сэмпл (если была): stop обязан
+/// её вернуть, иначе неполный MP4 выглядел бы успешным (T09b review B P2-2).
+pub(crate) async fn run(
+    room: RoomId,
+    mut tap: FarmTap,
+    sessions: Arc<Mutex<HashMap<RoomId, RecordingSession>>>,
+) -> Option<String> {
     // Snapshot группы плюс SPS/PPS из встреченных AU; дедуп по байтам.
     let mut parameter_sets = tap.parameter_sets.clone();
     let mut started = false;
@@ -58,7 +65,7 @@ pub(crate) async fn run(room: RoomId, mut tap: FarmTap, sessions: Arc<Mutex<Hash
                 });
                 if let Err(error) = result {
                     warn!(room = %room, %error, "recorder tap stopped: writer rejected a video sample");
-                    break;
+                    return Some(error.to_string());
                 }
             }
             Err(RecvError::Lagged(dropped)) => {
@@ -71,4 +78,5 @@ pub(crate) async fn run(room: RoomId, mut tap: FarmTap, sessions: Arc<Mutex<Hash
             }
         }
     }
+    None
 }

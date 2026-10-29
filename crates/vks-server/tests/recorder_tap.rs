@@ -203,3 +203,77 @@ async fn recording_stop_surfaces_container_error_but_still_detaches_room_hub() {
     assert_eq!(row.size_bytes, 0);
     drop(viewer);
 }
+
+/// T09b review A P1-1: группа ретировалась (ушёл последний зритель) — tap
+/// завершается сам, запись не должна оставаться ACTIVE/Running без источника,
+/// а повторный start должен начать новую запись, а не «успех без кадров».
+#[tokio::test]
+async fn recording_finalizes_when_encoder_group_closes() {
+    if !ffmpeg_available() {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    }
+    let state = Arc::new(AppState::new());
+    let room = RoomId::new();
+    let engine = Arc::new(McuEngine::new());
+    let participant = ParticipantId::new();
+    engine.bridge_participant(room, participant, vec![Track::new(participant, TrackKind::Video)]);
+    assert!(engine.ensure_composite_size(room, 640, 360));
+    let viewer = engine.acquire_video_viewer(room, &encoder_spec()).await.expect("encoder group");
+
+    let manager = RecorderManager::new();
+    let control = RecorderControl::new(manager.clone(), Arc::downgrade(&state), engine.clone());
+    let record_id = control.start(room).await.expect("start");
+    for _ in 0..30 {
+        let _ = engine.publish_video_frame(room, &gray_frame());
+        tokio::time::sleep(Duration::from_millis(34)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Последний зритель уходит: broadcast закрывается, tap естественно выходит.
+    drop(viewer);
+    let mut finalized = false;
+    for _ in 0..100 {
+        if !manager.is_recording(&room) {
+            finalized = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(finalized, "recording must finalize when the encoder group closes");
+    assert!(state.room_hub.list_participants(&room).is_empty(), "recorder participant detached");
+    let row = state.records.lock().unwrap().get(&record_id).cloned().expect("record row");
+    assert!(row.duration_sec >= 1, "row must not look active after group loss: {row:?}");
+    assert!(manager.get_container(&record_id).is_some(), "recorded prefix saved as MP4");
+
+    // Новая группа и повторный start — новая запись, без «already running».
+    let viewer2 = engine.acquire_video_viewer(room, &encoder_spec()).await.expect("new encoder group");
+    let _ = engine.publish_video_frame(room, &gray_frame());
+    let second = control.start(room).await.expect("start after group loss");
+    assert_ne!(second, record_id, "a new session must be created, not a stale one");
+    control.stop(room).await.ok();
+    drop(viewer2);
+}
+
+/// T09b review A/B P2-1: повторный stop после ошибки финализации обязан
+/// повторять ту же ошибку, а не отдавать 200/Ok.
+#[tokio::test]
+async fn repeated_stop_replays_finalize_error() {
+    if !ffmpeg_available() {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    }
+    let state = Arc::new(AppState::new());
+    let room = RoomId::new();
+    let engine = Arc::new(McuEngine::new());
+    let participant = ParticipantId::new();
+    engine.bridge_participant(room, participant, vec![Track::new(participant, TrackKind::Video)]);
+    assert!(engine.ensure_composite_size(room, 640, 360));
+    let viewer = engine.acquire_video_viewer(room, &encoder_spec()).await.expect("encoder group");
+    let manager = RecorderManager::new();
+    let control = RecorderControl::new(manager.clone(), Arc::downgrade(&state), engine.clone());
+    control.start(room).await.expect("start");
+    let first = control.stop(room).await.expect_err("empty recording errors");
+    let second = control.stop(room).await.expect_err("repeat stop must replay the error");
+    assert_eq!(first, second, "same finalize error on idempotent retry");
+    drop(viewer);
+}
