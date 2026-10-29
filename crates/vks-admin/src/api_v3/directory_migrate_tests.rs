@@ -45,7 +45,8 @@ fn legacy_document() -> Value {
                 },
                 "groups": {"g-1": {"display_name": "Группа рестарта", "created_at": 2}},
                 "roles": {"r-1": {"display_name": "Кастом", "permissions": ["users:read"], "created_at": 3}},
-                "user_addresses": {"u-1": {"a-1": {"id": "a-1", "uri": "sip:a@b", "display_name": "Адрес", "created_at": 1}}}
+                "user_addresses": {"u-1": {"a-1": {"id": "a-1", "uri": "sip:a@b", "display_name": "Адрес", "created_at": 1,
+                                               "future_personal": "keep"}}}
             }
         }
     })
@@ -387,4 +388,215 @@ async fn reset_allows_migration_again() {
     let report = super::run_on_storage(&*storage, Some(&raw)).await.expect("migrate after reset");
     assert_eq!(report.outcome, "applied");
     assert_eq!(report.profiles, 1);
+}
+
+/// T10 P2-1: unknown/future address fields must round-trip
+/// legacy JSON → migration → RAM → mutation → SQL → restart → API.
+#[tokio::test]
+async fn future_address_fields_survive_mutation_restart_and_api() {
+    let (url, path) = temp_sqlite_url();
+    let storage = sqlite_storage(&url).await;
+    let raw = legacy_document().to_string();
+    storage.put_configuration_document(CONFIGURATION_KEY, &raw).await.unwrap();
+
+    let (mut base, _) = test_state();
+    Arc::get_mut(&mut base).unwrap().storage = Some(storage.clone());
+    let state = base;
+    let report = super::run(&state).await.expect("migrate");
+    assert_eq!(report.outcome, "applied");
+    state.sync_from_storage().await.expect("hydrate after migration");
+
+    // Any directory mutation rewrites the whole snapshot: the unknown fields
+    // must survive that rewrite in SQL.
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response =
+        send(&server, request("POST", "/api/v3/groups", Some(&token), json!({"display_name": "После миграции"}))).await;
+    assert_eq!(response.status(), StatusCode::CREATED, "unrelated group mutation");
+    drop(server);
+
+    let snapshot = storage.load_directory_snapshot().await.unwrap();
+    let global = snapshot.addresses.iter().find(|address| address.owner_id.is_empty()).expect("global row");
+    let global_json: Value = serde_json::from_str(&global.address_json).unwrap();
+    assert_eq!(global_json["future_address"], true, "global unknown field lost on mutation: {global_json}");
+    let personal = snapshot.addresses.iter().find(|address| address.owner_id == "u-1").expect("personal row");
+    let personal_json: Value = serde_json::from_str(&personal.address_json).unwrap();
+    assert_eq!(personal_json["future_personal"], "keep", "personal unknown field lost: {personal_json}");
+
+    // Restart: new state hydrates from SQL, API returns the same fields.
+    let (mut restarted, _) = test_state();
+    Arc::get_mut(&mut restarted).unwrap().storage = Some(storage.clone());
+    restarted.sync_from_storage().await.expect("restart hydrate");
+    {
+        let resources = restarted.api_v3.resources.lock().await;
+        assert!(
+            resources.addresses.contains_key("global-1"),
+            "restart hydrate lost the address: {:?}",
+            resources.addresses.keys().collect::<Vec<_>>()
+        );
+    }
+    let server = app(restarted);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response = send(&server, request("GET", "/api/v3/call_strings/global-1", Some(&token), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["call_string"]["future_address"], true, "API must expose the forwarded field: {body}");
+    drop(server);
+
+    storage.pool().close().await;
+    let _ = std::fs::remove_file(path);
+}
+
+/// T10 P2-3: a document that is valid JSON but cannot hydrate `ResourceState`
+/// makes `sync_from_storage` fail. Even with `storage_allow_fallback=true` the
+/// process must fail closed and directory mutations must not replace SQL rows
+/// with the empty RAM snapshot.
+#[tokio::test]
+async fn failed_directory_hydration_refuses_mutations_and_keeps_sql() {
+    let (url, path) = temp_sqlite_url();
+    let storage = sqlite_storage(&url).await;
+    let raw = legacy_document().to_string();
+    storage.put_configuration_document(CONFIGURATION_KEY, &raw).await.unwrap();
+    {
+        let (mut seeded, _) = test_state();
+        Arc::get_mut(&mut seeded).unwrap().storage = Some(storage.clone());
+        let seeded = Arc::new(seeded);
+        super::run(&seeded).await.expect("migrate");
+        seeded.sync_from_storage().await.expect("initial hydrate");
+    }
+
+    // Valid JSON, stripped of legacy keys, but `resources.layouts` has the
+    // wrong type: `directory_migrate::run` is happy, hydration is not.
+    let corrupt = r#"{"version":1,"resources":{"layouts":"not-an-object"}}"#;
+    storage.put_configuration_document(CONFIGURATION_KEY, corrupt).await.unwrap();
+
+    let (mut restarted, _) = test_state();
+    Arc::get_mut(&mut restarted).unwrap().storage = Some(storage.clone());
+    let error = restarted.sync_from_storage().await.expect_err("hydration must fail");
+    assert!(!error.is_empty(), "explicit hydration error expected");
+    assert!(restarted.directory_hydration_failed(), "state must be marked read-only for directory writes");
+
+    let before = storage.load_directory_snapshot().await.unwrap();
+    assert!(!before.is_empty(), "fixture rows present");
+    let server = app(restarted);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response =
+        send(&server, request("POST", "/api/v3/groups", Some(&token), json!({"display_name": "Не должно записаться"})))
+            .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = json_body(response).await;
+    assert!(
+        body.to_string().contains("refusing to overwrite the SQL directory snapshot"),
+        "explicit fail-closed error expected: {body}"
+    );
+    let after = storage.load_directory_snapshot().await.unwrap();
+    assert_eq!(before, after, "directory SQL must not be wiped after a failed hydration");
+    // The mutation was not persisted either.
+    assert_eq!(
+        storage.get_configuration_document(CONFIGURATION_KEY).await.unwrap().as_deref(),
+        Some(corrupt),
+        "the corrupt document must not be replaced by an empty-state persist"
+    );
+
+    storage.pool().close().await;
+    let _ = std::fs::remove_file(path);
+}
+
+/// T10 P3-2: `MigrationReport.imported` must distinguish import from adopt and
+/// `already_migrated`; the latter also reports zero imported counts.
+#[tokio::test]
+async fn migration_report_distinguishes_import_adopt_and_already_migrated() {
+    let raw = legacy_document().to_string();
+    let storage = vks_storage::MemoryStorage::new();
+    storage.put_configuration_document(CONFIGURATION_KEY, &raw).await.unwrap();
+    let first = super::run_on_storage(&storage, Some(&raw)).await.expect("import");
+    assert_eq!(first.outcome, "applied");
+    assert!(first.imported, "fresh SQL rows are imported");
+    assert_eq!(first.profiles, 1);
+
+    let second = super::run_on_storage(&storage, Some(&raw)).await.expect("already migrated");
+    assert_eq!(second.outcome, "already_migrated");
+    assert!(!second.imported, "marker present means nothing was imported");
+    assert_eq!(second.profiles, 0);
+    assert_eq!(second.global_addresses, 0);
+
+    // Marker lost but non-empty SQL rows: adopt, not import.
+    let adopt = vks_storage::MemoryStorage::new();
+    adopt.put_configuration_document(CONFIGURATION_KEY, &raw).await.unwrap();
+    let fixture = super::parse_legacy_document(Some(&raw)).expect("parse").snapshot;
+    adopt.replace_directory_snapshot(&fixture).await.unwrap();
+    let report = super::run_on_storage(&adopt, Some(&raw)).await.expect("adopt");
+    assert_eq!(report.outcome, "applied");
+    assert!(!report.imported, "non-empty SQL rows win, the document is not imported");
+}
+
+/// T10 P3-1: personal canonical dedup must rewrite `users[].primary_address`
+/// to the surviving id (otherwise the profile points at a removed row).
+#[test]
+fn personal_dedup_rewrites_primary_address() {
+    let raw = json!({
+        "resources": {
+            "directory": {
+                "users": {"u-1": {"display_name": "U", "primary_address": "p-b", "created_at": 1}},
+                "user_addresses": {"u-1": {
+                    "p-a": {"id": "p-a", "uri": "sip:user@example.com", "created_at": 10},
+                    "p-b": {"id": "p-b", "uri": "sip:user@example.com:5060", "created_at": 20}
+                }}
+            }
+        }
+    })
+    .to_string();
+    let parsed = super::parse_legacy_document(Some(&raw)).expect("parse");
+    let profile = parsed.snapshot.profiles.iter().find(|profile| profile.user_id == "u-1").unwrap();
+    let profile_json: Value = serde_json::from_str(&profile.profile_json).unwrap();
+    assert_eq!(profile_json["primary_address"], "p-a", "primary must follow the dedup keep-id");
+}
+
+/// T10 P2-4 (documented limitation, not a supported deployment): every commit
+/// replaces the WHOLE directory snapshot from that process's RAM cache. Two
+/// writers on one database are last-writer-wins — PG clustering / a second
+/// instance is unsupported and must not be advertised. This test pins the
+/// current single-node contract; a CAS/per-row redesign must update it.
+#[tokio::test]
+async fn two_writers_on_one_sqlite_are_last_writer_wins_single_node_only() {
+    let (url, path) = temp_sqlite_url();
+    let storage = sqlite_storage(&url).await;
+    storage.put_configuration_document(CONFIGURATION_KEY, r#"{"version":1,"resources":{}}"#).await.unwrap();
+
+    let (mut first, _) = test_state();
+    Arc::get_mut(&mut first).unwrap().storage = Some(storage.clone());
+    first.sync_from_storage().await.expect("first writer hydrate");
+    let (mut second, _) = test_state();
+    Arc::get_mut(&mut second).unwrap().storage = Some(storage.clone());
+    second.sync_from_storage().await.expect("second writer hydrate");
+
+    async fn write_address(state: &crate::state::SharedState, id: &str, uri: &str) {
+        let mut resources = state.api_v3.resources.lock().await;
+        resources.addresses.insert(
+            id.to_string(),
+            crate::api_v3::resources::AddressRecord {
+                id: id.to_string(),
+                uri: uri.to_string(),
+                display_name: id.to_string(),
+                created_at: 1,
+                payload: json!({}),
+                extra: Default::default(),
+            },
+        );
+        crate::api_v3::resources::persist_with_directory(state, &resources).await.expect("persist");
+    }
+
+    write_address(&first, "addr-a", "sip:a@example.com").await;
+    // The second node's cache is stale: its whole-snapshot write removes A's
+    // row. This is exactly why T10 is single-writer only.
+    write_address(&second, "addr-b", "sip:b@example.com").await;
+    let snapshot = storage.load_directory_snapshot().await.unwrap();
+    assert!(snapshot.addresses.iter().any(|address| address.id == "addr-b"), "last writer keeps its row");
+    assert!(
+        !snapshot.addresses.iter().any(|address| address.id == "addr-a"),
+        "documented limitation: a second writer on one DB erases the first writer's rows"
+    );
+
+    storage.pool().close().await;
+    let _ = std::fs::remove_file(path);
 }

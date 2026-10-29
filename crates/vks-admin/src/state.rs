@@ -268,6 +268,11 @@ pub struct AppState {
     pub revocation_tx: tokio::sync::broadcast::Sender<RevocationNotice>,
     /// Флаг здоровья медиа-подсистемы (UDP media loop / pipelines) (M0.6 / M6.3).
     pub media_healthy: std::sync::atomic::AtomicBool,
+    /// T10 P2-3: set when the last `sync_from_storage`/hot reload failed before
+    /// the SQL directory snapshot was applied. The RAM directory cache is then
+    /// empty or stale, so directory mutations must fail closed instead of
+    /// replacing the authoritative SQL rows with an empty snapshot.
+    pub directory_hydration_failed: std::sync::atomic::AtomicBool,
     /// Набор активных инъекций сбоев (M0.6 / M6.3).
     pub faults: Mutex<std::collections::HashSet<String>>,
     /// Адрес MCU для conference-адресов (`addresses.sip/h323`). `OnceLock` — потому
@@ -355,6 +360,7 @@ impl AppState {
             admin_events: admin_tx,
             revocation_tx,
             media_healthy: std::sync::atomic::AtomicBool::new(true),
+            directory_hydration_failed: std::sync::atomic::AtomicBool::new(false),
             faults: Mutex::new(std::collections::HashSet::new()),
             server_addr: std::sync::OnceLock::new(),
             database_file: std::sync::OnceLock::new(),
@@ -585,7 +591,27 @@ impl AppState {
         self.sync_from_storage_inner(false).await
     }
 
+    /// T10 P2-3: true when the last storage sync/hot reload failed before the
+    /// directory snapshot was applied. Directory mutations must then fail
+    /// closed (`persist_with_directory`), so the empty/stale RAM cache can
+    /// never replace the authoritative SQL rows.
+    #[must_use]
+    pub fn directory_hydration_failed(&self) -> bool {
+        self.directory_hydration_failed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     async fn sync_from_storage_inner(&self, mark_stopped: bool) -> Result<(), String> {
+        // Fail closed by default: until the directory snapshot has been applied
+        // the RAM cache must not be persisted. Cleared only on full success.
+        self.directory_hydration_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = self.hydrate_from_storage_inner(mark_stopped).await;
+        if result.is_ok() {
+            self.directory_hydration_failed.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        result
+    }
+
+    async fn hydrate_from_storage_inner(&self, mark_stopped: bool) -> Result<(), String> {
         if let Some(storage) = &self.storage {
             let rooms = storage.list_rooms().await.map_err(|e| e.to_string())?;
             let overrides = storage.list_room_mode_overrides().await.unwrap_or_default();

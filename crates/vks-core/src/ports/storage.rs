@@ -424,6 +424,12 @@ pub trait Storage: Send + Sync + 'static {
 
     /// Replaces the whole directory snapshot atomically (single transaction in
     /// SQL backends).
+    ///
+    /// Single-writer contract (T10 P2-4): implementations replace **all** rows
+    /// with the given snapshot; there is no per-row merge, revision or CAS.
+    /// Concurrent writers on one database are last-writer-wins and unsupported
+    /// (SQLite is protected by the server `DbLock`; a PostgreSQL cluster with
+    /// two instances is not a supported T10 deployment).
     async fn replace_directory_snapshot(&self, _snapshot: &DirectorySnapshot) -> Result<(), StorageError> {
         Err(StorageError::Other("Directory snapshot persistence is unavailable".into()))
     }
@@ -431,7 +437,8 @@ pub trait Storage: Send + Sync + 'static {
     /// Atomically upserts `document` AND replaces the directory snapshot.
     ///
     /// Used by every directory/address mutation so rows and the (directory-free)
-    /// configuration document can never diverge.
+    /// configuration document can never diverge. Same single-writer contract as
+    /// [`Self::replace_directory_snapshot`]: the whole snapshot is replaced.
     async fn put_configuration_document_with_directory(
         &self,
         _key: &str,

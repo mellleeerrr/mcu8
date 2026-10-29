@@ -113,7 +113,26 @@ fn address_record_from_value(stored_id: &str, value: &Value) -> Option<AddressRe
         display_name,
         created_at: value["created_at"].as_u64().unwrap_or(0),
         payload: Value::Object(payload),
+        extra: address_extra_fields(value),
     })
+}
+
+/// Unknown/future keys of a raw address object (`future_address`, …).
+///
+/// Typed fields win; everything else is kept verbatim so the
+/// API→RAM→SQL→API round-trip does not drop fields written by a newer version
+/// (T10 P2-1).
+fn address_extra_fields(value: &Value) -> BTreeMap<String, Value> {
+    const KNOWN: [&str; 5] = ["id", "uri", "display_name", "created_at", "payload"];
+    let mut extra = BTreeMap::new();
+    if let Some(object) = value.as_object() {
+        for (key, value) in object {
+            if !KNOWN.contains(&key.as_str()) {
+                extra.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    extra
 }
 
 /// Сохранённый адрес: `payload` — плоская карта протоколов (sip/h323/…),
@@ -126,6 +145,11 @@ pub struct AddressRecord {
     pub display_name: String,
     pub created_at: u64,
     pub payload: Value,
+    /// Catch-all for unknown/future fields (T10 P2-1). With
+    /// `#[serde(flatten)]` the RAM record is lossless: a legacy `address_json`
+    /// containing `future_address` survives hydrate → mutation → SQL → API.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 /// Протокол контакта комнаты: по `contact_type` и схеме URI.
@@ -282,7 +306,23 @@ pub async fn persist_with_video_settings(
 /// snapshot in ONE storage transaction. Every directory/address mutation goes
 /// through [`commit`], so rows and the document cannot diverge, and the JSON
 /// never contains `resources.directory`/`resources.addresses` again.
+///
+/// Single-writer contract (T10 P2-4): the snapshot is built from THIS process's
+/// RAM cache and storage replaces the whole directory snapshot (`DELETE`+`INSERT`
+/// per table), so a second live writer on the same database would overwrite the
+/// first one's rows (last writer wins). SQLite is protected by the startup
+/// `DbLock`; a PostgreSQL cluster / two instances are deliberately NOT supported
+/// by T10. Do not add a second writer until a per-row/CAS design lands.
+///
+/// Fail-closed (T10 P2-3): after a failed startup/hot-reload hydration the RAM
+/// directory cache is empty or stale; writing it would erase the authoritative
+/// SQL rows, so the mutation is refused instead.
 pub(crate) async fn persist_with_directory(state: &SharedState, resources: &ResourceState) -> Result<(), String> {
+    if state.directory_hydration_failed() {
+        return Err("directory storage was not hydrated (configuration document could not be parsed); \
+             refusing to overwrite the SQL directory snapshot"
+            .to_string());
+    }
     if let Some(storage) = &state.storage {
         let video_settings = state.api_v3.video_settings.lock().map(|guard| guard.clone()).unwrap_or(Value::Null);
         let document = configuration_document(state, resources, video_settings)?;

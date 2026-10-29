@@ -4452,6 +4452,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
                     "sip": {"bitrate": 256, "resolution": {"width": 320, "height": 180, "fps_limit": 10}},
                     "h323": {"bitrate": 512}
                 }),
+                extra: Default::default(),
             },
         );
         let sip = find_call_string_override(&resources, None, "sip:Probe@192.168.1.132:5060").expect("sip override");
@@ -4465,6 +4466,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
                 display_name: "Probe H323".into(),
                 created_at: 2,
                 payload: serde_json::json!({"call_string": {"sip": {"bitrate": 111}, "h323": {"bitrate": 512}}}),
+                extra: Default::default(),
             },
         );
         let h323 = find_call_string_override(&resources, None, "h323:probe@192.168.1.132").expect("h323 override");
@@ -4484,6 +4486,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
                 display_name: "Probe".into(),
                 created_at: 1,
                 payload: serde_json::json!({"sip": {"audioCodecs": [{"name": "G711"}], "videoCodecs": ["H264"]}}),
+                extra: Default::default(),
             },
         );
         resources.contacts.insert(

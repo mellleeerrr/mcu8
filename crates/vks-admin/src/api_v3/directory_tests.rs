@@ -378,6 +378,7 @@ async fn directory_is_not_serialized_into_configuration_document_and_snapshot_ro
             uri: "sip:user@example.com".to_string(),
             display_name: "Адрес".to_string(),
             created_at: 1,
+            extra: Default::default(),
             payload: serde_json::json!({}),
         },
     );
@@ -388,6 +389,7 @@ async fn directory_is_not_serialized_into_configuration_document_and_snapshot_ro
             uri: "h323:192.168.1.10".to_string(),
             display_name: "Зал".to_string(),
             created_at: 2,
+            extra: Default::default(),
             payload: serde_json::json!({}),
         },
     );

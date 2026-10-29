@@ -200,6 +200,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Err(e) = admin_state.sync_from_storage().await {
+        // T10 P2-3: a failed hydration leaves the RAM directory cache empty or
+        // stale. Continuing would let the next mutation replace the SQL rows
+        // with that empty snapshot (`storage_allow_fallback` is dev-only but
+        // must never authorize directory data loss). Fail closed even when the
+        // fallback policy is enabled; `persist_with_directory` would refuse the
+        // write anyway, so the server must not pretend to be healthy.
+        if admin_state.directory_hydration_failed() {
+            config_exit(format!(
+                "failed to hydrate directory data from storage; aborting startup to avoid overwriting SQL \
+                 (storage_allow_fallback does not apply): {e}"
+            ));
+        }
         if !config.storage_allow_fallback && !config.database_url.is_empty() {
             error!(error = %e, "failed to synchronize admin state from storage; aborting startup (fail-fast)");
             return Err(e.into());

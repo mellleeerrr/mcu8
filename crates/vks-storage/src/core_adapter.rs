@@ -462,11 +462,10 @@ impl Storage for MemoryStorage {
         if directory.version.is_some_and(|version| version >= 1) {
             return Ok(DirectoryMigrationOutcome::AlreadyMigrated);
         }
-        // Existing rows win over a legacy JSON document (lost marker must not
-        // resurrect deleted records).
-        if directory.snapshot.is_empty() {
-            directory.snapshot = snapshot.clone();
-        }
+        // CAS the document (when the migration strips legacy keys) BEFORE any
+        // in-memory mutation. `DocumentChanged` promises "Nothing was written"
+        // (T10 P3-1); the old order assigned the snapshot first and left rows
+        // behind on a conflict.
         if let Some(new_document) = new_document {
             let unchanged =
                 expected_document.is_some_and(|expected| documents.get(key).map(String::as_str) == Some(expected));
@@ -474,6 +473,11 @@ impl Storage for MemoryStorage {
                 return Ok(DirectoryMigrationOutcome::DocumentChanged);
             }
             documents.insert(key.to_string(), new_document.to_string());
+        }
+        // Existing rows win over a legacy JSON document (lost marker must not
+        // resurrect deleted records).
+        if directory.snapshot.is_empty() {
+            directory.snapshot = snapshot.clone();
         }
         directory.version = Some(1);
         Ok(DirectoryMigrationOutcome::Applied)

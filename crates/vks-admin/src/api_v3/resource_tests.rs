@@ -2316,6 +2316,7 @@ fn normalize_loaded_collapses_duplicate_canonical_addresses_and_rewrites_refs() 
         uri: "SIP:192.168.1.132:5060".into(),
         display_name: String::new(),
         created_at: 10,
+        extra: Default::default(),
         payload: json!({"sip":{"bitrate":1024}}),
     };
     let newer = AddressRecord {
@@ -2323,6 +2324,7 @@ fn normalize_loaded_collapses_duplicate_canonical_addresses_and_rewrites_refs() 
         uri: "sip:192.168.1.132".into(),
         display_name: "Зал 132".into(),
         created_at: 20,
+        extra: Default::default(),
         payload: json!({"sip":{"bitrate":4096},"media":{"loop":true}}),
     };
     resources.addresses.insert(older.id.clone(), older);

@@ -277,6 +277,82 @@ async fn sqlite_and_pg_load_same_directory_snapshot() {
     assert_eq!(sqlite.directory_schema_version().await.unwrap(), Some(1));
     assert_eq!(pg.directory_schema_version().await.unwrap(), Some(1));
 
+    // ---- Import branch parity (review B P2-2): empty tables + legacy document.
+    // The existing part above only exercised adopt; clear both backends so
+    // `existing == 0` and the imported snapshot is the one under test.
+    for table in [
+        "directory_profiles",
+        "directory_groups",
+        "directory_roles",
+        "directory_group_members",
+        "directory_user_roles",
+        "directory_addresses",
+        "schema_state",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table}")).execute(sqlite.pool()).await.expect("clear sqlite table");
+        sqlx::query(&format!("DELETE FROM {table}")).execute(pg.pool()).await.expect("clear pg table");
+    }
+    let import_key = format!("t10-parity-import-{}", uuid::Uuid::new_v4().simple());
+    let import_document = r#"{"future_top":{"keep":true},"resources":{"layouts":{},"future_res":"keep","addresses":{"global-1":{"id":"global-1","uri":"sip:one@example.com","created_at":10,"future_address":true}},"directory":{"users":{"u-1":{"display_name":"Иван","created_at":7,"future_profile":true}}}}}"#;
+    let import_stripped = r#"{"future_top":{"keep":true},"resources":{"layouts":{},"future_res":"keep"}}"#;
+    let import_snapshot = DirectorySnapshot {
+        profiles: vec![StoredDirectoryProfile {
+            user_id: "u-1".to_string(),
+            profile_json: r#"{"display_name":"Иван","created_at":7,"future_profile":true}"#.to_string(),
+            updated_at: 7,
+        }],
+        addresses: vec![address("", "global-1", "sip:one@example.com", 10)],
+        ..DirectorySnapshot::default()
+    };
+    for storage in [&sqlite as &dyn Storage, &pg as &dyn Storage] {
+        storage.put_configuration_document(&import_key, import_document).await.expect("put import doc");
+    }
+    let import_sqlite = sqlite
+        .migrate_directory_document(&import_key, Some(import_document), Some(import_stripped), &import_snapshot)
+        .await
+        .expect("sqlite import");
+    let import_pg = pg
+        .migrate_directory_document(&import_key, Some(import_document), Some(import_stripped), &import_snapshot)
+        .await
+        .expect("pg import");
+    assert_eq!(import_sqlite, DirectoryMigrationOutcome::Applied);
+    assert_eq!(import_pg, DirectoryMigrationOutcome::Applied);
+    assert_eq!(
+        sqlite.load_directory_snapshot().await.unwrap(),
+        import_snapshot,
+        "SQLite import branch stores the legacy snapshot"
+    );
+    assert_eq!(
+        pg.load_directory_snapshot().await.unwrap(),
+        import_snapshot,
+        "PostgreSQL import branch stores the legacy snapshot"
+    );
+    assert_eq!(
+        sqlite.load_directory_snapshot().await.unwrap(),
+        pg.load_directory_snapshot().await.unwrap(),
+        "import branch: SQLite and PostgreSQL snapshots match"
+    );
+    assert_eq!(sqlite.get_configuration_document(&import_key).await.unwrap().as_deref(), Some(import_stripped));
+    assert_eq!(pg.get_configuration_document(&import_key).await.unwrap().as_deref(), Some(import_stripped));
+    assert_eq!(sqlite.directory_schema_version().await.unwrap(), Some(1));
+    assert_eq!(pg.directory_schema_version().await.unwrap(), Some(1));
+
     sqlite.pool().close().await;
     let _ = std::fs::remove_file(path);
+}
+
+/// MemoryStorage `DocumentChanged` must be a no-op: "Nothing was written"
+/// (T10 P3-1). The old order assigned the snapshot before the CAS check.
+#[tokio::test]
+async fn memory_document_changed_writes_nothing() {
+    let storage = MemoryStorage::new();
+    storage.put_configuration_document(KEY, r#"{"old":true}"#).await.unwrap();
+    let outcome = storage
+        .migrate_directory_document(KEY, Some(r#"{"stale":true}"#), Some(r#"{"new":true}"#), &fixture())
+        .await
+        .expect("cas");
+    assert_eq!(outcome, DirectoryMigrationOutcome::DocumentChanged);
+    assert_eq!(storage.load_directory_snapshot().await.unwrap(), DirectorySnapshot::default());
+    assert_eq!(storage.directory_schema_version().await.unwrap(), None);
+    assert_eq!(storage.get_configuration_document(KEY).await.unwrap().as_deref(), Some(r#"{"old":true}"#));
 }

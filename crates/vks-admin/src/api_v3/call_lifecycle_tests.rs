@@ -594,6 +594,7 @@ async fn patch_without_explicit_name_keeps_raw_display_name_and_explicit_emoji_i
                 display_name: "Зал 🎤".into(),
                 created_at: 1,
                 payload: json!({}),
+                extra: Default::default(),
             },
         );
     }

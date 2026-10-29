@@ -40,8 +40,10 @@ pub struct MigrationReport {
     pub outcome: &'static str,
     /// Retries caused by a concurrent document writer.
     pub attempts: usize,
-    /// Whether the SQL rows were imported from this legacy document (false when
-    /// non-empty SQL rows were adopted or the marker was already present).
+    /// Whether this run actually imported rows from the legacy document. False
+    /// when non-empty SQL rows were adopted, the marker was already present, or
+    /// the document had no legacy keys; `already_migrated` also zeroes the
+    /// parsed counts because nothing was written.
     pub imported: bool,
     /// Profiles in the parsed legacy document.
     pub profiles: usize,
@@ -146,6 +148,17 @@ fn overlay_raw_address_json(
             raw_personal.get(&address.owner_id).and_then(Value::as_object).and_then(|book| book.get(&address.id))
         };
         let Some(mut object) = raw.and_then(Value::as_object).cloned() else { continue };
+        // Unknown fields merged into the kept record by dedup must survive the
+        // raw overlay as well (the raw object only knows this record's fields).
+        if let Ok(stored) = serde_json::from_str::<Value>(&address.address_json) {
+            if let Some(stored) = stored.as_object() {
+                for (key, value) in stored {
+                    if !matches!(key.as_str(), "id" | "uri" | "display_name" | "created_at" | "payload") {
+                        object.entry(key.clone()).or_insert_with(|| value.clone());
+                    }
+                }
+            }
+        }
         object.insert("id".to_string(), json!(address.id));
         object.insert("uri".to_string(), json!(address.uri));
         object.insert("display_name".to_string(), json!(address.display_name));
@@ -239,6 +252,9 @@ pub(crate) fn dedup_address_book(
             keep.display_name = duplicate.display_name;
         }
         resources::merge_json(&mut keep.payload, &duplicate.payload);
+        for (key, value) in duplicate.extra {
+            keep.extra.entry(key).or_insert(value);
+        }
         for book in user_addresses.values_mut() {
             if book.remove(&duplicate_id).is_some() {
                 book.insert(keep_id.clone(), keep.clone());
@@ -251,14 +267,24 @@ pub(crate) fn dedup_address_book(
         }
     }
     // Per-user canonical dedup (idempotent; personal copies may share a URI
-    // with the global book, which is legitimate).
-    for book in user_addresses.values_mut() {
-        dedup_personal_book(book);
+    // with the global book, which is legitimate). Duplicate ids are rewritten
+    // in `primary_address` exactly like the global aliases above, so a dedup
+    // cannot leave the profile pointing at a removed row (T10 P3-1).
+    for (user_id, book) in user_addresses.iter_mut() {
+        let aliases = dedup_personal_book(book);
+        let Some(profile) = users.get_mut(user_id) else { continue };
+        for (duplicate_id, keep_id) in aliases {
+            if profile.primary_address.as_deref() == Some(duplicate_id.as_str()) {
+                profile.primary_address = Some(keep_id);
+            }
+        }
     }
 }
 
 /// Deduplicates one personal book by canonical URI; earliest `created_at` wins.
-fn dedup_personal_book(book: &mut BTreeMap<String, AddressRecord>) {
+/// Returns `(duplicate_id, keep_id)` aliases so the caller can rewrite
+/// `users[].primary_address`.
+fn dedup_personal_book(book: &mut BTreeMap<String, AddressRecord>) -> Vec<(String, String)> {
     let mut ids: Vec<String> = book.keys().cloned().collect();
     ids.sort_by_key(|id| {
         book.get(id).map(|record| (record.created_at, record.id.clone())).unwrap_or((u64::MAX, id.clone()))
@@ -274,9 +300,9 @@ fn dedup_personal_book(book: &mut BTreeMap<String, AddressRecord>) {
             }
         }
     }
-    for (duplicate_id, keep_id) in aliases {
-        let Some(duplicate) = book.remove(&duplicate_id) else { continue };
-        if let Some(keep) = book.get_mut(&keep_id) {
+    for (duplicate_id, keep_id) in &aliases {
+        let Some(duplicate) = book.remove(duplicate_id) else { continue };
+        if let Some(keep) = book.get_mut(keep_id) {
             keep.created_at = keep.created_at.min(duplicate.created_at);
             if (keep.display_name.trim().is_empty() || keep.display_name == keep.uri)
                 && !duplicate.display_name.trim().is_empty()
@@ -285,8 +311,12 @@ fn dedup_personal_book(book: &mut BTreeMap<String, AddressRecord>) {
                 keep.display_name = duplicate.display_name;
             }
             resources::merge_json(&mut keep.payload, &duplicate.payload);
+            for (key, value) in duplicate.extra {
+                keep.extra.entry(key).or_insert(value);
+            }
         }
     }
+    aliases
 }
 
 /// Admin-level state → neutral SQL snapshot.
@@ -406,6 +436,7 @@ pub(crate) fn apply_snapshot(resources: &mut ResourceState, snapshot: &Directory
             display_name: address.display_name.clone(),
             created_at: address.created_at,
             payload: serde_json::from_str(&address.payload_json).unwrap_or_else(|_| json!({})),
+            extra: BTreeMap::new(),
         });
         if address.owner_id.is_empty() {
             resources.addresses.insert(address.id.clone(), record);
@@ -441,6 +472,13 @@ pub async fn run(state: &AppState) -> Result<MigrationReport, String> {
             .map_err(|error| format!("T10 directory migration: cannot read configuration document: {error}"))?;
         let parsed =
             parse_legacy_document(old.as_deref()).map_err(|error| format!("T10 directory migration: {error}"))?;
+        // Only the storage decides whether the legacy document is imported or
+        // existing SQL rows are adopted; reading the rows before the migration
+        // lets the report say which branch actually ran (T10 P3-2).
+        let existing_rows = storage
+            .load_directory_snapshot()
+            .await
+            .map_err(|error| format!("T10 directory migration: cannot read directory snapshot: {error}"))?;
         let outcome = storage
             .migrate_directory_document(
                 CONFIGURATION_KEY,
@@ -452,12 +490,12 @@ pub async fn run(state: &AppState) -> Result<MigrationReport, String> {
             .map_err(|error| format!("T10 directory migration: cannot persist directory snapshot: {error}"))?;
         match outcome {
             DirectoryMigrationOutcome::Applied => {
-                let report = MigrationReport { outcome: "applied", attempts, ..parsed.report };
+                let report = applied_report(attempts, parsed.report, existing_rows.is_empty());
                 log_report(&report);
                 return Ok(report);
             }
             DirectoryMigrationOutcome::AlreadyMigrated => {
-                let report = MigrationReport { outcome: "already_migrated", attempts, ..parsed.report };
+                let report = already_migrated_report(attempts);
                 log_report(&report);
                 return Ok(report);
             }
@@ -472,6 +510,18 @@ pub async fn run(state: &AppState) -> Result<MigrationReport, String> {
             }
         }
     }
+}
+
+/// Honest report for an `Applied` outcome: `imported` is false when non-empty
+/// SQL rows won (adopt) or the document had no legacy keys.
+fn applied_report(attempts: usize, parsed: MigrationReport, sql_was_empty: bool) -> MigrationReport {
+    MigrationReport { outcome: "applied", attempts, imported: parsed.imported && sql_was_empty, ..parsed }
+}
+
+/// `already_migrated` writes nothing, so it must not report legacy counts as if
+/// they had been imported (T10 P3-2).
+fn already_migrated_report(attempts: usize) -> MigrationReport {
+    MigrationReport { outcome: "already_migrated", attempts, ..MigrationReport::default() }
 }
 
 fn log_report(report: &MigrationReport) {
@@ -493,18 +543,17 @@ fn log_report(report: &MigrationReport) {
 #[cfg(test)]
 pub(crate) async fn run_on_storage(storage: &dyn Storage, document: Option<&str>) -> Result<MigrationReport, String> {
     let parsed = parse_legacy_document(document)?;
+    let existing_rows = storage.load_directory_snapshot().await.map_err(|error| error.to_string())?;
     let outcome = storage
         .migrate_directory_document(CONFIGURATION_KEY, document, parsed.new_document.as_deref(), &parsed.snapshot)
         .await
         .map_err(|error| error.to_string())?;
-    Ok(MigrationReport {
-        outcome: match outcome {
-            DirectoryMigrationOutcome::Applied => "applied",
-            DirectoryMigrationOutcome::AlreadyMigrated => "already_migrated",
-            DirectoryMigrationOutcome::DocumentChanged => "document_changed",
-        },
-        attempts: 1,
-        ..parsed.report
+    Ok(match outcome {
+        DirectoryMigrationOutcome::Applied => applied_report(1, parsed.report, existing_rows.is_empty()),
+        DirectoryMigrationOutcome::AlreadyMigrated => already_migrated_report(1),
+        DirectoryMigrationOutcome::DocumentChanged => {
+            MigrationReport { outcome: "document_changed", attempts: 1, ..MigrationReport::default() }
+        }
     })
 }
 

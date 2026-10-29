@@ -70,13 +70,16 @@ VKS_SIP_UAS_MAX_CALLS=64
 
 ## WebRTC media
 
-Real browser WebRTC (str0m, ICE-lite, DTLS-SRTP) is **on by default**; a
-non-ICE offer is rejected instead of receiving fake DTLS credentials. The
-legacy hand-built SDP answer is only a bisect/rollback escape hatch:
+Real browser WebRTC (str0m, ICE-lite, DTLS-SRTP) is the **only** media plane.
+`VKS_WEBRTC_TRANSPORT` is mandatory: only `1/true/on/yes` starts the server;
+unset, empty, `0` or garbage exits 78 (EX_CONFIG). A non-ICE offer is rejected
+with an explicit `webrtc_offer_unsupported` error instead of receiving fake
+DTLS credentials, and a real offer rejected by str0m is never answered with a
+hand-built SDP.
 
 ```bash
-# explicit opt-out back to the legacy answer path
-VKS_WEBRTC_TRANSPORT=0
+# mandatory, no off switch
+VKS_WEBRTC_TRANSPORT=1
 # production sizing (every peer owns one UDP socket)
 VKS_WEBRTC_PORT_MIN=43000
 VKS_WEBRTC_PORT_MAX=43100
@@ -102,9 +105,9 @@ counts the invisible sources as `webrtc_sources{dropped_no_mid}`. A legacy 1+1
 client keeps one deterministic publisher per kind with the same explicit
 `dropped_no_mid` degradation — two publishers are never glued into one mid.
 
-Auxiliary/secondary processes on the same host are also real WebRTC servers
-after this default flip; pass `VKS_WEBRTC_TRANSPORT=0` (or distinct UDP
-ports) to any process that must not serve media. `candidate_addr` must be the
+Auxiliary/secondary processes on the same host are also real WebRTC servers;
+give every process a distinct UDP port range (and candidate address) — there
+is no `VKS_WEBRTC_TRANSPORT=0` opt-out any more. `candidate_addr` must be the
 address browsers can reach; startup preflight
 fails with exit 78 if it is empty/loopback (unless
 `VKS_ALLOW_LOOPBACK_MEDIA=1`) or if the port pair is invalid/unbindable. Open
@@ -116,8 +119,8 @@ connect to `/ws` with a Bearer token, or from a browser with
 history or a Referer, so terminate TLS, keep the JWT TTL short, do not log query
 strings at the proxy, and preserve `Host` for the Origin check (override with
 `VKS_WS_ORIGIN_ALLOW=https://ui.example`). Today the only end-to-end client is
-`tests/e2e/webrtc.js`; the PNM UI is not yet wired to this transport. Rollback: set
-`VKS_WEBRTC_TRANSPORT=0` and restart (live calls are dropped).
+`tests/e2e/webrtc.js`; the PNM UI is not yet wired to this transport. To stop
+serving media, stop the service; there is no legacy rollback path.
 
 ## First start
 
@@ -300,3 +303,41 @@ this order, never overlap the two versions on one DB:
 3. Install the new binary/config and `sudo systemctl start vks-mcu-prod`.
 4. Verify `/readyz`, then `vks-db-dedup <db>` again — it must report zero
    removals/rewrites (idempotent).
+
+### T10 directory migration: backup, first start, no downgrade
+
+T10 moves the PNM directory and address book out of the configuration document
+(`resources.directory` / `resources.addresses`) into six normalized tables
+(`directory_profiles`, `directory_groups`, `directory_roles`,
+`directory_group_members`, `directory_user_roles`, `directory_addresses`) and
+writes the one-shot marker `schema_state('directory') = 1`.
+
+Operating rules:
+
+1. **Back up before the first start of a T10 binary.** The migration runs once,
+   in one transaction (rows + marker + JSON key strip), but there is no
+   down-migration.
+2. **No downgrade after migration.** An older binary only reads the JSON
+   document; after T10 the directory keys are gone, so rolling back shows an
+   empty directory and the next mutation would persist that emptiness. To go
+   back, stop the service and restore the backup made in step 1 — never run an
+   old and a new binary over the same database.
+3. `vks-db-dedup` on a post-T10 database only touches layouts/links: the legacy
+   directory keys no longer exist, so its personal-address dedup is a no-op.
+   It is not a rollback tool.
+4. **One writer per database.** SQLite is protected by the server's advisory
+   lock; a PostgreSQL cluster or a second `vks-server` instance is **not**
+   supported by T10. Every directory commit replaces the whole snapshot from
+   that process's RAM cache (last writer wins, no CAS). Do not point two
+   instances at one database.
+5. **Fail closed.** If the configuration document exists but cannot be parsed or
+   migrated, startup exits with code 78 even when
+   `storage_allow_fallback = true`; if a running server cannot hydrate the
+   directory, directory mutations return 500 instead of overwriting SQL. Fix
+   the document or restore the backup; do not "repair" it by deleting the
+   directory rows.
+6. **Known limit (D5):** if the marker is lost *and* all six tables are empty, a
+   restored legacy JSON document can be imported again (deleted contacts may
+   resurrect). The backup from step 1 and the marker are the only protection;
+   never drop `schema_state` separately from the tables.
+

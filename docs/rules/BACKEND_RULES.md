@@ -223,6 +223,32 @@
 - Retention: audit 2y, recordings 90d.
 - Storage: on territory (default: RU).
 
+### 5.4. Directory / addresses (T10): single-writer и forward-compat
+- Источник истины — шесть таблиц `directory_*` + маркер
+  `schema_state('directory')`; JSON-документ хранит только
+  layouts/links/history/settings. Legacy-ключи вычищаются в той же транзакции,
+  что и строки/маркер.
+- **Один writer на БД.** Каждый commit заменяет весь snapshot (DELETE+INSERT),
+  собранный из RAM-кэша процесса; CAS/версии нет → два writer'а дают
+  last-writer-wins и молча теряют строки друг друга. SQLite защищён
+  advisory-lock'ом на файле (второй процесс → exit 78). **PG-кластер / второй
+  инстанс с T10 не поддерживаются** — не заявлять clustering-поддержку, пока не
+  появится per-row upsert или snapshot-CAS. Mixed-version deploy (старый + новый
+  бинарь) запрещён: старый читает только JSON.
+- **Fail-closed.** Нечитаемый/непригодный документ при наличии directory-rows:
+  startup → exit 78 (даже при `storage_allow_fallback=true`), мутации в
+  работающем процессе → 500; пустой snapshot никогда не перезаписывает непустой
+  SQL. Fallback допустим только для не-directory состояния.
+- **Forward-compat.** Неизвестные поля профилей/групп/ролей и адресов
+  (`#[serde(flatten)] extra`) переживают миграцию, гидратацию, мутацию, SQL и
+  API-ответ. Верхнеуровневые unknown-поля документа сохраняются только до первой
+  мутации через `persist` (pre-existing ограничение).
+- **Backup / no downgrade:** см. `deploy/README.md` §«T10 directory migration».
+  Предел D5: потеря маркера при всех пустых таблицах неотличима от свежей БД —
+  старый JSON может воскресить удалённое; защита — бэкап и сохранность
+  `schema_state`.
+
+
 ## 6. Приложение
 
 ### 6.1. Input validation

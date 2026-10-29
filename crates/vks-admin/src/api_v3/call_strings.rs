@@ -7,7 +7,7 @@
 //! - Повторный вызов (Recall / Invite) абонентов из списков StandBy / disconnected.
 //! - Строгие форматы ошибок 400 (validation details) и 409 (conflict descriptions).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use axum::{
     extract::{Extension, Path, Query, State},
@@ -823,10 +823,24 @@ fn lookup_session_record(state: &SharedState, room_id: &RoomId, id: Option<&str>
 }
 
 /// Сериализация адреса в форме vendor (`id/uri/display_name/created_at/payload/contact`).
+///
+/// Unknown/future address fields kept in [`AddressRecord::extra`] are added back
+/// on top of the vendor shape (T10 P2-1) without overriding known keys.
 pub(crate) fn address_value(id: &str, address: &AddressRecord) -> Value {
     let mut record = stored_address_record(address);
     record.id = id.to_string();
-    address_book_record(&record)
+    with_extra_fields(address_book_record(&record), &address.extra)
+}
+
+/// Merges unknown/future fields into an address JSON object; known vendor keys
+/// always win.
+fn with_extra_fields(mut value: Value, extra: &BTreeMap<String, Value>) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        for (key, field) in extra {
+            object.entry(key.clone()).or_insert_with(|| field.clone());
+        }
+    }
+    value
 }
 
 fn address_book_record(record: &CallStringRecord) -> Value {
@@ -846,7 +860,8 @@ async fn address_book_records(state: &SharedState, auth: &AuthContext) -> Vec<Va
     {
         let resources = state.api_v3.resources.lock().await;
         for (id, address) in &resources.addresses {
-            records.insert(id.clone(), address_book_record(&stored_address_record(address)));
+            let record = stored_address_record(address);
+            records.insert(id.clone(), with_extra_fields(address_book_record(&record), &address.extra));
         }
         for (room_id, contacts) in &resources.contacts {
             if check_permission(auth, Some(room_id)).is_err() {
@@ -1105,6 +1120,8 @@ pub async fn create_call_string(
             display_name: explicit_display_name.unwrap_or(current.display_name),
             created_at: current.created_at,
             payload: address_payload(Some(&normalize_address_payload(&current.payload)), patch.as_ref()),
+            // T10 P2-1: a mutation must not drop forward-compat fields.
+            extra: current.extra,
         }
     } else {
         AddressRecord {
@@ -1113,14 +1130,14 @@ pub async fn create_call_string(
             display_name: explicit_display_name.unwrap_or(fallback_display_name),
             created_at: now_unix_sec(),
             payload: address_payload(None, patch.as_ref()),
+            extra: BTreeMap::new(),
         }
     };
     resources.addresses.insert(record.id.clone(), record.clone());
     if let Err(response) = super::resources::commit(&state, &mut resources, previous).await {
         return response;
     }
-    (StatusCode::CREATED, Json(json!({"call_string": address_book_record(&stored_address_record(&record))})))
-        .into_response()
+    (StatusCode::CREATED, Json(json!({"call_string": address_value(&record.id, &record)}))).into_response()
 }
 
 /// Куда указывает id из адресной книги: глобальное хранилище или контакт комнаты.
@@ -1212,12 +1229,14 @@ pub async fn update_call_string(
                 display_name,
                 created_at: current.created_at,
                 payload: address_payload(Some(&current.payload), patch.as_ref()),
+                // T10 P2-1: a PATCH must not drop unknown/future fields.
+                extra: current.extra,
             };
             resources.addresses.insert(record.id.clone(), record.clone());
             if let Err(response) = super::resources::commit(&state, &mut resources, previous).await {
                 return response;
             }
-            Json(json!({"call_string": address_book_record(&stored_address_record(&record))})).into_response()
+            Json(json!({"call_string": address_value(&record.id, &record)})).into_response()
         }
         AddressTarget::Contact { room_id, index } => {
             if let Some(response) = contact_write_allowed(&auth, &room_id) {

@@ -305,7 +305,14 @@ pub async fn create_user_call_string(
         body["display_name"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(uri).to_string();
     let id = uuid::Uuid::new_v4().to_string();
     let payload = default_contact_payload(body.get("payload"));
-    let address = AddressRecord { id: id.clone(), uri: uri.to_string(), display_name, created_at: now_secs(), payload };
+    let address = AddressRecord {
+        id: id.clone(),
+        uri: uri.to_string(),
+        display_name,
+        created_at: now_secs(),
+        payload,
+        extra: Default::default(),
+    };
     let user_id = user.id.to_string();
     let address_clone = address.clone();
     if let Err(response) = commit_directory(&state, |resources| {
