@@ -168,11 +168,22 @@ pub struct PeerMids {
     src_audio: HashMap<ParticipantId, Mid>,
     src_video: HashMap<ParticipantId, Mid>,
     retired: HashSet<Mid>,
+    /// `(publisher, kind)` pairs whose source was retired by a `DropSource`. A
+    /// late `Write` from the dead task must not allocate a fresh mid (P2-1);
+    /// an explicit `EnsureSource` for that kind clears the mark, so a publisher
+    /// that reconnects with the same id gets a *fresh* mid while the old one
+    /// stays retired. Per kind, because a returning peer may publish audio
+    /// without a camera.
+    retired_sources: HashSet<(ParticipantId, bool)>,
+    /// Mids whose offered section had port 0 (RFC 3264 §6.1 rejection). They
+    /// stay `Inactive` even when str0m emits `MediaAdded`/`MediaChanged` with
+    /// `sendrecv` for them, and never enter an egress pool.
+    rejected: HashSet<Mid>,
 }
 
 impl PeerMids {
-    fn new(sections: Vec<MidSection>) -> Self {
-        let mut mids = Self { sections, ..Self::default() };
+    fn new(sections: Vec<MidSection>, rejected: HashSet<Mid>) -> Self {
+        let mut mids = Self { sections, rejected, ..Self::default() };
         mids.refresh_pools();
         mids
     }
@@ -187,12 +198,22 @@ impl PeerMids {
     pub fn publish_mid(&self, audio: bool) -> Option<Mid> {
         self.sections
             .iter()
-            .find(|section| section.audio == audio && section.direction.can_recv())
+            .find(|section| {
+                section.audio == audio && section.direction.can_recv() && !self.rejected.contains(&section.mid)
+            })
             .map(|section| section.mid)
     }
 
     /// Egress mid for one publisher, allocated lazily on first use.
+    ///
+    /// A publisher retired by `DropSource` gets `None` here: a late `Write`
+    /// from its dead task must not occupy a fresh egress slot (P2-1). The
+    /// explicit [`Self::ensure_source`] path re-arms it when the room announces
+    /// the publisher again.
     pub fn mid_for_source(&mut self, from: ParticipantId, audio: bool) -> Option<Mid> {
+        if self.retired_sources.contains(&(from, audio)) {
+            return None;
+        }
         let (map, pool) = if audio {
             (&mut self.src_audio, &mut self.audio_pool)
         } else {
@@ -209,6 +230,16 @@ impl PeerMids {
             return Some(mid);
         }
         None
+    }
+
+    /// Explicit (re-)announcement of a publisher, used by the eager
+    /// `EnsureSource` path. Clears the retired-source mark, so a publisher that
+    /// returns with the same `ParticipantId` (new generation, new str0m
+    /// session) gets a fresh mid; the old mid stays retired and is never
+    /// reused.
+    pub fn ensure_source(&mut self, from: ParticipantId, audio: bool) -> Option<Mid> {
+        self.retired_sources.remove(&(from, audio));
+        self.mid_for_source(from, audio)
     }
 
     /// Publisher currently mapped to an egress mid (used to route a browser PLI
@@ -231,6 +262,8 @@ impl PeerMids {
         if let Some(mid) = self.src_video.remove(&from) {
             self.retired.insert(mid);
         }
+        self.retired_sources.insert((from, true));
+        self.retired_sources.insert((from, false));
         self.refresh_pools();
     }
 
@@ -254,6 +287,9 @@ impl PeerMids {
     }
 
     fn set_direction(&mut self, mid: Mid, direction: MidDirection) {
+        // A section the offer rejected with port 0 stays inactive even if
+        // str0m reports it as sendrecv (`MediaAdded`/`MediaChanged`).
+        let direction = if self.rejected.contains(&mid) { MidDirection::Inactive } else { direction };
         if let Some(section) = self.sections.iter_mut().find(|section| section.mid == mid) {
             if section.direction != direction {
                 section.direction = direction;
@@ -263,7 +299,8 @@ impl PeerMids {
     }
 
     /// Rebuilds the section list after a re-offer, keeping live allocations.
-    fn rebuild(&mut self, sections: Vec<MidSection>) {
+    fn rebuild(&mut self, sections: Vec<MidSection>, rejected: HashSet<Mid>) {
+        self.rejected = rejected;
         let known: HashSet<Mid> = sections.iter().map(|section| section.mid).collect();
         let stale: Vec<Mid> = self
             .src_audio
@@ -292,6 +329,9 @@ impl PeerMids {
         let mut shared = VecDeque::new();
         for section in &self.sections {
             if section.audio != audio || !section.direction.can_send() {
+                continue;
+            }
+            if self.rejected.contains(&section.mid) {
                 continue;
             }
             if self.retired.contains(&section.mid) || allocated.contains(&section.mid) {
@@ -461,6 +501,11 @@ impl WebRtcPeer {
         // This transport does not apply trickled remote candidates; do not
         // advertise trickle support we cannot honour.
         let answer_sdp = answer.to_sdp_string().replace("a=ice-options:trickle\r\n", "");
+        // RFC 3264 §6.1: a section the browser offered with port 0 is rejected
+        // in the answer (`m=… 0 …` + `a=inactive`). str0m 0.24.1 answers
+        // `sendrecv` on a live port instead, so enforce the rule explicitly.
+        let rejected = offered_port_zero_mids(offer_sdp);
+        let answer_sdp = reject_port_zero_sections(offer_sdp, &answer_sdp);
         // Direction-aware sections: the answer carries one m-line per offered
         // section (RFC 3264 §6), `sendonly` for the browser's `recvonly`
         // pre-offered egress slots and `sendrecv` for its own publish stream.
@@ -471,7 +516,7 @@ impl WebRtcPeer {
             answer_sdp,
             local_addr,
             connected: false,
-            mids: PeerMids::new(sections),
+            mids: PeerMids::new(sections, rejected),
             remote_mids: mids_of(offer_sdp),
             remote_fingerprint: fingerprint_of(offer_sdp),
             next_timeout: None,
@@ -524,10 +569,12 @@ impl WebRtcPeer {
         // Do not advertise trickle: this transport never applies trickled
         // remote candidates.
         let answer_sdp = answer.to_sdp_string().replace("a=ice-options:trickle\r\n", "");
+        let rejected = offered_port_zero_mids(offer_sdp);
+        let answer_sdp = reject_port_zero_sections(offer_sdp, &answer_sdp);
         // Keep live per-source allocations across the re-offer; the rebuilt
         // section list only adds/removes egress slots. A mid that disappeared
         // is retired, never recycled (T11b).
-        self.mids.rebuild(parse_sections(&answer_sdp));
+        self.mids.rebuild(parse_sections(&answer_sdp), rejected);
         self.answer_sdp = answer_sdp.clone();
         let actions = self.drain()?;
         Ok((answer_sdp, actions))
@@ -572,8 +619,12 @@ impl WebRtcPeer {
 
     /// Allocates a publisher's egress mid ahead of its first frame, so mids are
     /// assigned in room registration order rather than packet arrival order.
+    ///
+    /// This is also the explicit re-announcement path: it clears the
+    /// retired-source mark, so a publisher that reconnects with the same
+    /// `ParticipantId` gets a fresh mid (the old one stays retired).
     pub fn ensure_source(&mut self, from: ParticipantId, audio: bool) -> bool {
-        self.mids.mid_for_source(from, audio).is_some()
+        self.mids.ensure_source(from, audio).is_some()
     }
 
     /// Retires a publisher's egress mids (publisher left the room). They are
@@ -779,6 +830,61 @@ fn fingerprint_of(offer: &str) -> Option<String> {
     offer.lines().find_map(|line| line.strip_prefix("a=fingerprint:")).map(|value| value.trim().to_ascii_lowercase())
 }
 
+/// Mids of offer sections rejected with port 0 (RFC 3264 §6.1).
+///
+/// `m=<kind> 0 …` means "do not use this stream". The answer must keep the
+/// section (same m-line count/order) but reject it with port 0; str0m 0.24.1
+/// ignores the offered port and answers `sendrecv` on a live port, so the
+/// answer is rewritten by [`reject_port_zero_sections`] and these mids are
+/// forced `Inactive` in [`PeerMids`].
+fn offered_port_zero_mids(offer: &str) -> HashSet<Mid> {
+    let mut rejected = HashSet::new();
+    let mut port_zero = false;
+    for line in offer.lines().map(|line| line.trim_end_matches('\r').trim()) {
+        if let Some(rest) = line.strip_prefix("m=") {
+            port_zero = rest.split_whitespace().nth(1) == Some("0");
+            continue;
+        }
+        if let Some(mid) = line.strip_prefix("a=mid:") {
+            if port_zero {
+                rejected.insert(Mid::from(mid.trim()));
+            }
+        }
+    }
+    rejected
+}
+
+/// Rewrites the sections of `answer` whose offer had port 0 to `m=… 0 …` and
+/// `a=inactive` (RFC 3264 §6.1), instead of the `sendrecv` str0m emits.
+fn reject_port_zero_sections(offer: &str, answer: &str) -> String {
+    let rejected = offered_port_zero_mids(offer);
+    if rejected.is_empty() {
+        return answer.to_string();
+    }
+    // Answers use CRLF; split on the m-line prefix so the header stays intact.
+    let mut parts: Vec<String> = answer.split("\r\nm=").map(str::to_string).collect();
+    for part in parts.iter_mut().skip(1) {
+        let Some(mid_line) = part.split("\r\n").find(|line| line.starts_with("a=mid:")) else { continue };
+        let mid = Mid::from(mid_line.trim_start_matches("a=mid:").trim());
+        if !rejected.contains(&mid) {
+            continue;
+        }
+        let mut lines: Vec<String> = part.split("\r\n").map(str::to_string).collect();
+        let mut header: Vec<&str> = lines[0].split_whitespace().collect();
+        if header.len() > 1 {
+            header[1] = "0";
+            lines[0] = header.join(" ");
+        }
+        for line in lines.iter_mut().skip(1) {
+            if matches!(line.as_str(), "a=sendonly" | "a=recvonly" | "a=sendrecv" | "a=inactive") {
+                *line = "a=inactive".to_string();
+            }
+        }
+        *part = lines.join("\r\n");
+    }
+    parts.join("\r\nm=")
+}
+
 /// Rejects offers this SFU cannot safely serve before str0m allocates state.
 ///
 /// T11b shape: one audio m-line per remote publisher (`1 + (N-1)`, there is no
@@ -798,14 +904,38 @@ pub(crate) fn validate_offer(offer: &str) -> Result<(), WebRtcError> {
     }
     let mut audio = 0;
     let mut video = 0;
-    for line in offer.lines() {
+    // A mid is the identity of an m-line; one mid cannot be an audio AND a
+    // video slot (the egress pools would alias and a reverse lookup would be
+    // ambiguous). Duplicates *within* one kind are left to str0m, which
+    // collapses the extra section (observed 0.24.1) - that behaviour predates
+    // T11b and cannot glue two clock domains.
+    let mut kinds_by_mid: HashMap<&str, bool> = HashMap::new();
+    let mut current_audio: Option<bool> = None;
+    for line in offer.lines().map(|line| line.trim_end_matches('\r').trim()) {
         if let Some(rest) = line.strip_prefix("m=") {
             if rest.starts_with("audio ") {
                 audio += 1;
+                current_audio = Some(true);
             } else if rest.starts_with("video ") {
                 video += 1;
+                current_audio = Some(false);
             } else {
                 return Err(WebRtcError::InvalidOffer(format!("unsupported media line: {line}")));
+            }
+            continue;
+        }
+        if let Some(mid) = line.strip_prefix("a=mid:") {
+            let mid = mid.trim();
+            if let Some(kind) = current_audio {
+                if let Some(previous_audio) = kinds_by_mid.get(mid) {
+                    if *previous_audio != kind {
+                        return Err(WebRtcError::Sdp(format!(
+                            "duplicate a=mid:{mid} across audio and video sections: one mid cannot carry both kinds"
+                        )));
+                    }
+                } else {
+                    kinds_by_mid.insert(mid, kind);
+                }
             }
         }
     }
@@ -833,26 +963,30 @@ pub(crate) fn validate_offer(offer: &str) -> Result<(), WebRtcError> {
 /// T11b: a pre-offer is `1 sendrecv + (N-1) recvonly`, so classifying only the
 /// first section of a kind gives the wrong answer as soon as the recvonly
 /// sections come first.
+///
+/// A port-0 section is a rejected stream (RFC 3264 §6.1): it can never publish,
+/// even with `a=sendonly` (P3-2).
 pub fn offer_publishes(offer: &str, audio: bool) -> bool {
-    fn publishes(current: Option<(bool, MidDirection)>, audio: bool) -> bool {
-        current.is_some_and(|(kind, direction)| kind == audio && direction.can_send())
+    fn publishes(current: Option<(bool, MidDirection, bool)>, audio: bool) -> bool {
+        current.is_some_and(|(kind, direction, port_zero)| kind == audio && !port_zero && direction.can_send())
     }
-    let mut current: Option<(bool, MidDirection)> = None;
+    let mut current: Option<(bool, MidDirection, bool)> = None;
     for line in offer.lines().map(|line| line.trim_end_matches('\r').trim()) {
         if let Some(rest) = line.strip_prefix("m=") {
             if publishes(current.take(), audio) {
                 return true;
             }
+            let port_zero = rest.split_whitespace().nth(1) == Some("0");
             current = if rest.starts_with("audio ") {
-                Some((true, MidDirection::SendRecv))
+                Some((true, MidDirection::SendRecv, port_zero))
             } else if rest.starts_with("video ") {
-                Some((false, MidDirection::SendRecv))
+                Some((false, MidDirection::SendRecv, port_zero))
             } else {
                 None
             };
             continue;
         }
-        if let Some((_, direction)) = current.as_mut() {
+        if let Some((_, direction, _)) = current.as_mut() {
             if let Some(parsed) = MidDirection::from_sdp_line(line) {
                 *direction = parsed;
             }
@@ -1544,5 +1678,108 @@ mod tests {
         let video_egress = peer.mid_for_source(ParticipantId::new(), false).expect("video egress slot");
         assert!(peer.payload_type_for_codec(video_egress, Codec::Vp8).is_some(), "no VP8 writer on the egress mid");
         let _ = video_mid;
+    }
+
+    // ---- T11b review B fix-ups ----------------------------------------------
+
+    /// P2-1 reviewer probe: after `DropSource` a late `Write` must not be handed
+    /// a fresh mid. Only an explicit re-announcement (`EnsureSource`) may
+    /// re-arm the publisher, and it gets a *fresh* mid while the old one stays
+    /// retired.
+    #[test]
+    fn retired_source_gets_no_fresh_mid_until_explicitly_reannounced() {
+        let mut peer = WebRtcPeer::accept_offer(&browser_offer_with(3, 3, true, true), B, &WebRtcConfig::default())
+            .expect("accept");
+        let publisher = ParticipantId::new();
+        let old_audio = peer.mid_for_source(publisher, true).expect("audio slot");
+        let old_video = peer.mid_for_source(publisher, false).expect("video slot");
+        peer.retire_source(publisher);
+        assert_eq!(peer.mid_for_source(publisher, true), None, "a late Write must not reallocate an audio mid");
+        assert_eq!(peer.mid_for_source(publisher, false), None, "a late Write must not reallocate a video mid");
+        assert_eq!(peer.source_for_mid(old_audio), None, "the retired source must be forgotten");
+        assert_eq!(peer.source_for_mid(old_video), None);
+        assert!(peer.mids.retired().contains(&old_audio), "old mid stays retired, never recycled");
+        assert!(peer.mids.retired().contains(&old_video));
+
+        // Explicit re-announcement (new generation): clears the mark and takes
+        // a fresh mid from the pool.
+        assert!(peer.ensure_source(publisher, true), "the returning publisher has a free audio slot");
+        let fresh_audio = peer.mid_for_source(publisher, true).expect("fresh audio slot");
+        assert_ne!(fresh_audio, old_audio, "the returning publisher must not reuse the retired mid");
+        assert!(peer.mids.retired().contains(&old_audio));
+        assert_eq!(peer.mid_for_source(publisher, false), None, "video was not re-announced yet");
+        let other = ParticipantId::new();
+        let other_mid = peer.mid_for_source(other, true).expect("another audio slot is still free");
+        assert_ne!(other_mid, old_audio, "a different publisher never inherits a retired mid");
+    }
+
+    /// P3-1: one mid cannot be both an audio and a video m-line; the offer must
+    /// be rejected with an explicit `Sdp` error before str0m allocates state.
+    #[test]
+    fn duplicate_mid_across_kinds_is_rejected_with_an_sdp_error() {
+        let offer = browser_offer();
+        let mids = mids_of(&offer);
+        assert_eq!(mids.len(), 2, "fixture must have one audio and one video section");
+        let duplicated = offer.replacen(&format!("a=mid:{}", mids[1]), &format!("a=mid:{}", mids[0]), 1);
+        assert_ne!(duplicated, offer, "fixture must actually duplicate the audio mid on the video section");
+        match WebRtcPeer::accept_offer(&duplicated, B, &WebRtcConfig::default()) {
+            Err(WebRtcError::Sdp(message)) => {
+                assert!(message.contains("duplicate a=mid"), "{message}");
+                assert!(message.contains(&mids[0]), "{message}");
+                assert!(message.contains("audio") && message.contains("video"), "{message}");
+            }
+            other => panic!("a cross-kind duplicate mid must be an explicit Sdp error, got {other:?}"),
+        }
+    }
+
+    /// P3-1 scope: a duplicate mid *within* one kind predates T11b and is
+    /// collapsed by str0m; only the cross-kind alias is ambiguous, so it stays
+    /// accepted here by design.
+    #[test]
+    fn duplicate_mid_within_one_kind_is_left_to_str0m() {
+        let offer = browser_offer_with(2, 0, true, true);
+        let mids = mids_of(&offer);
+        assert_eq!(mids.len(), 2);
+        let duplicated = offer.replacen(&format!("a=mid:{}", mids[1]), &format!("a=mid:{}", mids[0]), 1);
+        validate_offer(&duplicated).expect("single-kind duplicate is collapsed by str0m, not a cross-kind alias");
+    }
+
+    /// P3-2: a port-0 section is a rejected stream (RFC 3264 §6.1) and can
+    /// never make the peer a publisher of that kind, even with `a=sendonly`.
+    #[test]
+    fn offer_publishes_ignores_port_zero_sections() {
+        let offer = browser_offer();
+        let muted_video = offer.replacen("m=video 9 ", "m=video 0 ", 1);
+        assert_ne!(muted_video, offer);
+        assert!(!offer_publishes(&muted_video, false), "a rejected video section cannot publish");
+        assert!(offer_publishes(&muted_video, true), "the audio section still publishes");
+        let muted_audio = offer.replacen("m=audio 9 ", "m=audio 0 ", 1);
+        assert_ne!(muted_audio, offer);
+        assert!(!offer_publishes(&muted_audio, true), "a rejected audio section cannot publish");
+        assert!(offer_publishes(&muted_audio, false), "the video section still publishes");
+    }
+
+    /// P3-3: str0m answers a port-0 offer as `sendrecv` on a live port; the
+    /// answer must reject that section per RFC 3264 §6.1 and it must never
+    /// become an egress slot or a publish mid.
+    #[test]
+    fn port_zero_section_is_answered_inactive_and_never_becomes_an_egress_slot() {
+        let offer = browser_offer();
+        let muted = offer.replacen("m=video 9 ", "m=video 0 ", 1);
+        assert_ne!(muted, offer);
+        let mut peer = WebRtcPeer::accept_offer(&muted, B, &WebRtcConfig::default())
+            .expect("a port-0 section is answered (rejected), not a fatal error");
+        let video_header = peer.answer_sdp().lines().find(|line| line.starts_with("m=video")).expect("video m-line");
+        assert_eq!(
+            video_header.split_whitespace().nth(1),
+            Some("0"),
+            "answer must set the rejected section's port to 0: {video_header}"
+        );
+        assert!(peer.answer_sdp().lines().any(|line| line.trim() == "a=inactive"), "answer must mark it inactive");
+        let video = peer.sections().iter().find(|section| !section.audio).expect("video section");
+        assert_eq!(video.direction, MidDirection::Inactive, "a port-0 offer section is not usable");
+        assert_eq!(peer.publish_mid(false), None, "a rejected camera section cannot be a publish mid");
+        assert_eq!(peer.mid_for_source(ParticipantId::new(), false), None, "a rejected section is not an egress slot");
+        assert!(peer.publish_mid(true).is_some(), "the accepted audio section keeps working");
     }
 }
