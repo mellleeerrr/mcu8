@@ -22,7 +22,7 @@
 | T09a | Запись: Storage-контракт+гидратация+API+409+soak | P0 | T03a | ✅ 9.0 (`T09a_rereview3.md`, P1 был чужой — T11a clippy, исправлен `ce4f45f`) |
 | T09b | MP4: avcC/length-prefix/timescale/esds + tap | P1 | T09a | ⏳ |
 | T10 | T10b: directory в SQL + schema_state + удаление из JSON | P1 | T09a | ⏳ |
-| T11a | SFU: default transport+fail-closed, keyframe-gate, re-offer, кодеки | P0 | T04a | ⏳ |
+| T11a | SFU: default transport+fail-closed, keyframe-gate, re-offer, кодеки | P0 | T04a | ✅ 9.0 (`T11a_rereview6.md`, P0/P1=0, acceptance met; 9.5 не выставлен из-за P2 coverage gap — committed gate-re-arm test, inherent str0m ICE) |
 | T11b | Per-source: 8 mids (patch вендора) + маппинг + >2 пиров | P0 | T11a | ⏳ |
 | T11c | Удаление легаси-плоскости (2176/79) + 6 тестов | P1 | T11a,T11b | ⏳ |
 | T12 | P5: room_mode (on_client_hello), guards→bridge_available, audio+composite egress | P0 | T11a | ⏳ |
