@@ -36,6 +36,8 @@ pub struct JoinRoomResult {
     pub participants: Vec<String>,
     /// Снимок раскладки комнаты на момент входа (прото-раскладка сервера).
     pub layout: Option<vks_proto::signaling::Layout>,
+    /// Media plane комнаты на момент входа (SFU/MCU/unspecified).
+    pub room_mode: vks_proto::media::RoomMode,
 }
 
 /// Ошибка signaling.
@@ -207,18 +209,27 @@ impl SignalingClient {
 pub struct MockSignaling {
     pubok_hello: bool,
     pubok_join: bool,
+    /// Wire value of `JoinRoomResult.room_mode` (0 = unspecified keeps the SDK
+    /// default; 1 = SFU, 2 = MCU). Tests set it to prove pipeline auto-select.
+    room_mode: i32,
 }
 
 impl MockSignaling {
     #[must_use]
     pub fn ok() -> Self {
-        Self { pubok_hello: true, pubok_join: true }
+        Self { pubok_hello: true, pubok_join: true, room_mode: 0 }
+    }
+
+    /// Variant that reports the given room mode in `JoinRoomResult`.
+    #[must_use]
+    pub fn ok_with_room_mode(mode: vks_proto::media::RoomMode) -> Self {
+        Self { pubok_hello: true, pubok_join: true, room_mode: mode as i32 }
     }
 
     /// Variant с empty `server_version` (для теста `BadServerHello`).
     #[must_use]
     pub fn empty_server_hello() -> Self {
-        Self { pubok_hello: false, pubok_join: true }
+        Self { pubok_hello: false, pubok_join: true, room_mode: 0 }
     }
 }
 
@@ -245,6 +256,11 @@ impl SignalingTransport for MockSignaling {
                 join_nonce: "nonce-1".into(),
                 participants: vec!["p1".into()],
                 layout: None,
+                room_mode: match self.room_mode {
+                    value if value == vks_proto::media::RoomMode::Mcu as i32 => vks_proto::media::RoomMode::Mcu,
+                    value if value == vks_proto::media::RoomMode::Sfu as i32 => vks_proto::media::RoomMode::Sfu,
+                    _ => vks_proto::media::RoomMode::Unspecified,
+                },
             })
         } else {
             Err(SignalingError::RoomNotFound(room_id.into()))
@@ -336,6 +352,7 @@ mod tests {
                 join_nonce: "nonce-1".into(),
                 participants: vec!["p1".into()],
                 layout: None,
+                room_mode: vks_proto::media::RoomMode::Sfu,
             })
         }
         async fn leave_room(&self, _room_id: &str) -> Result<(), SignalingError> {

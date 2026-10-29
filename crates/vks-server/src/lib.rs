@@ -1296,6 +1296,18 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                             &snapshot.mode,
                                                         )
                                                     });
+                                                // Per-room mode override must win over the
+                                                // process-wide config snapshotted into the handler.
+                                                let mode = state
+                                                    .mode
+                                                    .lock()
+                                                    .ok()
+                                                    .map(|mode| mode.effective_mode(&rid))
+                                                    .unwrap_or(vks_core::RoomMode::Sfu);
+                                                res.room_mode = match mode {
+                                                    vks_core::RoomMode::Mcu => vks_proto::media::RoomMode::Mcu as i32,
+                                                    vks_core::RoomMode::Sfu => vks_proto::media::RoomMode::Sfu as i32,
+                                                };
                                             }
                                         }
 

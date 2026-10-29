@@ -230,8 +230,18 @@ impl Conference {
                 return Err(ConferenceError::Signaling(e));
             }
         };
-        self.join_nonce = Some(join_result.join_nonce);
+        self.join_nonce = Some(join_result.join_nonce.clone());
         self.nonce_acquired_at = Some(std::time::Instant::now());
+
+        // Auto-select the media pipeline from the join snapshot: waiting for the
+        // first RoomModeChanged push would render one mode with the other
+        // pipeline's semantics (a composite frame decoded as N tracks).
+        match join_result.room_mode {
+            vks_proto::media::RoomMode::Sfu => self.media.switch_mode(crate::media_engine::RoomMode::Sfu),
+            vks_proto::media::RoomMode::Mcu => self.media.switch_mode(crate::media_engine::RoomMode::Mcu),
+            // Unspecified/unknown: keep the default (SFU) until a mode push.
+            _ => {}
+        }
 
         // 3. Раскладка комнаты приходит снимком в JoinRoomResult — без гонки
         // с push-сообщением (поздний участник иначе рисовал бы авто-сетку до
@@ -457,6 +467,25 @@ mod tests {
         assert_eq!(c.room_id(), "r1");
     }
 
+    /// T08: JoinRoomResult.room_mode selects the pipeline immediately, before
+    /// any RoomModeChanged push arrives.
+    #[test]
+    fn join_auto_selects_the_media_pipeline_from_room_mode() {
+        let mut c = Conference::new(test_cfg());
+        let mut client = SignalingClient::with_transport(Arc::new(MockSignaling::ok_with_room_mode(
+            vks_proto::media::RoomMode::Mcu,
+        )));
+        c.start(&mut client).expect("join ok");
+        assert_eq!(c.media().mode(), crate::media_engine::RoomMode::Mcu, "MCU room must not render as SFU tracks");
+
+        let mut sfu = Conference::new(test_cfg());
+        let mut sfu_client = SignalingClient::with_transport(Arc::new(MockSignaling::ok_with_room_mode(
+            vks_proto::media::RoomMode::Sfu,
+        )));
+        sfu.start(&mut sfu_client).expect("join ok");
+        assert_eq!(sfu.media().mode(), crate::media_engine::RoomMode::Sfu);
+    }
+
     #[test]
     fn join_flow_active() {
         let mut c = Conference::new(test_cfg());
@@ -555,6 +584,7 @@ mod tests {
                 join_nonce: "nonce-1".into(),
                 participants: vec!["p1".into()],
                 layout: self.join_layout.lock().expect("join layout lock").clone(),
+                room_mode: vks_proto::media::RoomMode::Unspecified,
             })
         }
 

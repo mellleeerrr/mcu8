@@ -236,6 +236,9 @@ async fn test_signaling_ws_handshake() {
         Some(Payload::JoinRoomResult(res)) => {
             assert!(res.participant_id.starts_with("part-room-beta-"));
             assert_ne!(res.join_nonce, 0);
+            // T08: the media plane is part of the join contract so the SDK can
+            // pick its pipeline before the first RoomModeChanged push.
+            assert_eq!(res.room_mode, vks_proto::media::RoomMode::Sfu as i32);
         }
         other => panic!("expected JoinRoomResult, got {other:?}"),
     }

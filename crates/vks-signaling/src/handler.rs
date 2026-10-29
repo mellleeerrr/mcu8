@@ -336,6 +336,7 @@ impl SignalingHandler {
             publisher_tracks: Vec::new(),
             layout: None,
             caps: None,
+            room_mode: self.config.room_mode,
         };
         vec![Envelope::new(SignalingMessage { msg_id: 0, reply_to, payload: Some(Payload::JoinRoomResult(result)) })]
     }
@@ -511,6 +512,22 @@ mod tests {
         let retry = handler.handle(offer(4, OFFER_2));
         assert!(matches!(retry[0].payload(), Some(Payload::SdpAnswer(_))));
         assert_eq!(handler.state(), SessionState::Negotiating);
+    }
+
+    #[test]
+    fn join_result_carries_the_configured_room_mode() {
+        let config = HandlerConfig::default_test().with_room_mode(vks_proto::media::RoomMode::Mcu as i32);
+        let mut handler = SignalingHandler::new(config);
+        handler.handle(hello(1, 1));
+        let replies = handler.handle(join(2, "r1"));
+        let mode = replies
+            .iter()
+            .find_map(|envelope| match envelope.payload() {
+                Some(Payload::JoinRoomResult(result)) => Some(result.room_mode),
+                _ => None,
+            })
+            .expect("join result");
+        assert_eq!(mode, vks_proto::media::RoomMode::Mcu as i32, "SDK auto-selects the pipeline from this field");
     }
 
     #[test]

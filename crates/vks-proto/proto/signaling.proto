@@ -86,6 +86,9 @@ message JoinRoomResult {
   repeated vks.media.TrackInfo publisher_tracks = 4;
   Layout layout = 5;
   vks.media.RoomCaps caps = 6;
+  // Media plane negotiated for this room: the SDK picks the pipeline from it
+  // (no guessing before the first RoomModeChanged push).
+  vks.media.RoomMode room_mode = 7;
 }
 
 message ParticipantInfo {
