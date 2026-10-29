@@ -271,13 +271,15 @@ pub fn parse_opus_rtp(payload: &[u8]) -> Option<OpusRtpInfo> {
 mod tests {
     use super::*;
 
+    /// Реестр строится из включённых cargo-фич: тест проверяет соответствие
+    /// для любой комбинации (`--all-features` входит в CI), а не только default.
     #[test]
-    fn default_features_include_opus_and_vp8() {
+    fn registry_reflects_compiled_features() {
         let r = CodecRegistry::new();
-        assert!(r.contains("opus"));
-        assert!(r.contains("vp8"));
-        assert!(!r.contains("vp9"));
-        assert!(!r.contains("av1"));
+        assert_eq!(r.contains("opus"), cfg!(feature = "opus"), "opus");
+        assert_eq!(r.contains("vp8"), cfg!(feature = "vp8"), "vp8");
+        assert_eq!(r.contains("vp9"), cfg!(feature = "vp9"), "vp9");
+        assert_eq!(r.contains("av1"), cfg!(feature = "av1"), "av1");
     }
 
     #[test]
@@ -285,24 +287,46 @@ mod tests {
         let r = CodecRegistry::new();
         let audio: Vec<&str> = r.audio().iter().map(|e| e.name).collect();
         let video: Vec<&str> = r.video().iter().map(|e| e.name).collect();
-        assert!(audio.contains(&"opus"));
-        assert!(video.contains(&"vp8"));
-        assert!(!video.contains(&"opus"));
+        if cfg!(feature = "opus") {
+            assert!(audio.contains(&"opus"));
+            assert!(!video.contains(&"opus"));
+        }
+        if cfg!(feature = "vp8") {
+            assert!(video.contains(&"vp8"));
+        }
     }
 
     #[test]
     fn codec_names_for_caps() {
         let r = CodecRegistry::new();
-        assert_eq!(r.audio_names(), vec!["opus"]);
-        assert_eq!(r.video_names(), vec!["vp8"]);
+        let mut expect_audio = Vec::new();
+        if cfg!(feature = "opus") {
+            expect_audio.push("opus");
+        }
+        let mut expect_video = Vec::new();
+        if cfg!(feature = "vp8") {
+            expect_video.push("vp8");
+        }
+        if cfg!(feature = "vp9") {
+            expect_video.push("vp9");
+        }
+        if cfg!(feature = "av1") {
+            expect_video.push("av1");
+        }
+        assert_eq!(r.audio_names(), expect_audio);
+        assert_eq!(r.video_names(), expect_video);
     }
 
     #[test]
     fn display_joins_names() {
         let r = CodecRegistry::new();
         let s = r.to_string();
-        assert!(s.contains("opus"));
-        assert!(s.contains("vp8"));
+        if cfg!(feature = "opus") {
+            assert!(s.contains("opus"));
+        }
+        if cfg!(feature = "vp8") {
+            assert!(s.contains("vp8"));
+        }
     }
 
     #[test]

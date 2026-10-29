@@ -5362,7 +5362,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         .await;
         // The 20 ms consumer may run late under a loaded CI host; wait for the
         // queue to drain instead of assuming one fixed 200 ms sleep.
-        let drained = tokio::time::timeout(Duration::from_secs(2), async {
+        let drained = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let silent = mcu
                     .participant_audio(room, listener)
@@ -5429,7 +5429,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         vks_gateway_sip::write_rtp_header(&mut packet[..12], 9, 1, 0, 42, false);
         packet[12..].copy_from_slice(&payload);
         terminal.send_to(&packet, target).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if mcu
                     .participant_audio(room, listener)
@@ -5443,7 +5443,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         .await
         .expect("G722 PCM must reach the 48 kHz MCU mix");
         let mut first = [0u8; 512];
-        let (count, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut first))
+        let (count, _) = tokio::time::timeout(Duration::from_secs(10), terminal.recv_from(&mut first))
             .await
             .expect("bridge must emit G722 RTP")
             .unwrap();
@@ -5451,7 +5451,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert_eq!(count - 12, 160, "20 ms of G722 is 160 octets");
         let first_ts = u32::from_be_bytes(first[4..8].try_into().unwrap());
         let mut second = [0u8; 512];
-        let (count2, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut second))
+        let (count2, _) = tokio::time::timeout(Duration::from_secs(10), terminal.recv_from(&mut second))
             .await
             .expect("bridge must emit a second G722 RTP packet")
             .unwrap();

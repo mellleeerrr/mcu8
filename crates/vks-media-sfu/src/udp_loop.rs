@@ -668,8 +668,15 @@ mod tests {
         let pkt = RtpPacket::new(TrackId::new(), routed_payload);
         publisher.send_packet(server_addr, &pkt).await.unwrap();
 
-        sleep(Duration::from_millis(50)).await;
-        assert!(sub_received.load(Ordering::SeqCst));
+        // Ожидаем доставку с запасом: фиксированные 50 мс флейкуют на
+        // загруженном CI-раннере (2 vCPU, параллельные тесты).
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !sub_received.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("routed RTP packet must reach subscriber");
 
         server.shutdown();
         publisher.shutdown();

@@ -46,9 +46,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-check-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-check-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}
       # --locked: CI не имеет права молча обновить Cargo.lock.
-      # --all-features: компилирует oxideav/str0m — раньше эти фичи
+      # --all-features: компилирует str0m и все codec-фичи — раньше они
       # не компилировались ни в одном шаге CI.
       - run: cargo check --workspace --all-features --all-targets --locked
 
@@ -67,7 +67,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-clippy-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}
       - run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
 
   wasm-sdk:
@@ -85,7 +85,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-wasm-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}
       - name: cargo check (wasm32)
         run: cargo check -p vks-client-sdk --target wasm32-unknown-unknown --locked
 
@@ -103,11 +103,30 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-test-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}
       # --no-fail-fast: падение одного тестового бинарника не прячет остальные.
       # Фичи: default — полный набор тестов зелёный. Все фичи компилируются
       # жёстко в джобах check/clippy (--all-features --all-targets).
       - run: cargo test --workspace --locked --no-fail-fast
+
+  # All-features прогон: ловит cfg-рассинхрон тестов (codec-фичи) и
+  # feature-gated код, который компилируется, но не тестировался.
+  test-all-features:
+    name: test (all features)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-all-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}
+      - run: cargo test --workspace --all-features --locked --no-fail-fast
 
   test-postgres:
     name: test (PostgreSQL)
@@ -137,36 +156,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-postgres-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-postgres-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}
       - name: PG roundtrip (migrations + User/Room + TEXT UUID-биндинг)
         run: cargo test -p vks-storage --locked --no-fail-fast
         env:
           VKS_STORAGE_PG_URL: postgres://postgres:postgres@localhost:5432/vks
-
-  test-external:
-    name: test (feature-gated crates, soft)
-    runs-on: ubuntu-24.04
-    # Не блокирует: эти крейты под фичами (str0m/oxideav) могут требовать
-    # сеть, SIP-сервер или реальные устройства. Джоб показывает реальный список
-    # внешних зависимостей, но не роняет первый запуск CI. Компиляция всех фич
-    # жёстко гейтится в джобах check/clippy (--all-features --all-targets).
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-test-external-${{ hashFiles('**/Cargo.lock') }}
-      # SFU-транспорт (str0m) — может требовать сеть/ICE.
-      - run: cargo test -p vks-media-sfu --features str0m --locked --no-fail-fast
-      # MCU-композитор (oxideav) — требует GPU/видеоустройств.
-      - run: cargo test -p vks-media-mcu --features oxideav --locked --no-fail-fast
 
   test-serial:
     name: test (--test-threads=1)
@@ -182,7 +176,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-test-serial-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-test-serial-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}
       # Однопоточный прогон: ловит гонки через порядок выполнения.
       # ThreadSanitizer требует nightly — поэтому так, а не TSAN.
       - run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1
@@ -205,7 +199,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             vks build with spaces/target
-          key: cargo-spaces-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-spaces-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}
       - name: Сборка в пути с пробелом
         working-directory: vks build with spaces
         run: cargo build --workspace --locked
@@ -245,12 +239,6 @@ jobs:
       - name: Unit tests (ASN.1 / Q.931 / H.245 contracts)
         working-directory: crates/vks-gateway-h323/python
         run: python -m unittest -v test_h323_sidecar test_h323_listener
-      # S14: ядро патч-скриптов PNM (идемпотентность, fail-closed на дрейфе
-      # вендора, откат при битом синтаксисе). Импорт фронтенда прогоняет эти
-      # скрипты, поэтому их контракт проверяется отдельно.
-      - name: Unit tests (PNM patch lib)
-        working-directory: scripts
-        run: python -m unittest -v test_pnm_patch_lib
 
   frontend-integrity:
     name: PNM frontend integrity (manifest + vendor patches)
@@ -265,8 +253,20 @@ jobs:
       - name: Manifest SHA256 of deployed PNM bundles
         working-directory: client/pnm-frontend/deployed/pnm
         run: sha256sum -c ../../MANIFEST.sha256
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Синтаксис JS-слоёв проекта (вендорские бандлы и патчи): раньше не
+      # проверялся вообще, а синтаксическая ошибка в codian-layouts.js ломает UI.
+      - name: node --check (project JS layers)
+        run: |
+          for f in client/pnm-frontend/deployed/pnm/*.js; do node --check "$f"; done
+          for f in client/pnm-frontend/deployed/pnm/chunks/*.js; do node --check "$f"; done
       - name: Vendor patches are applied and idempotent
-        run: python3 scripts/patch-pnm-layout-crash.py --check
+        run: |
+          python3 scripts/patch-pnm-layout-crash.py --check
+          python3 scripts/patch-pnm-audio-in-layouts.py --check
+          python3 scripts/patch-pnm-chartjs.py --check
       - name: Unit tests (PNM patch lib)
         working-directory: scripts
         run: python -m unittest -v test_pnm_patch_lib
@@ -298,7 +298,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-release-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}
       - run: cargo build --workspace --release --locked
 
-  # E2E (chromiumoxide) добавляется в фазе 8 (ADR-0020).
+  # E2E (chromiumoxide/Playwright) — MANUAL-ONLY: сьюты требуют живого
+  # HTTP/SIP/WebRTC стенда, поэтому в CI не запускаются (см. tests/e2e/README.md).
+  # CI-safe гейты JS-слоя: node --check, MANIFEST, patch --check,
+  # Rust in-process calculate (см. frontend-integrity).
