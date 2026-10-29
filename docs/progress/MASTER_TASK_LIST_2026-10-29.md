@@ -17,7 +17,7 @@
 | T04b | CodecSpec SSOT + матрица диспозиций | P2 | T04a | ⏳ |
 | T05 | DTMF E-бит (60→200 мс) + send_to метрика | P1 | T03a | ✅ done 07:49 (`2a77be5`) |
 | T06 | Layout: normalize/резолвер/P2/тест S6/оракул e2e | P1 | T03a | ⏳ |
-| T07 | Frontend: deep link, импорт, gzip, тема, CI-гейты | P1 | T03a | ⏳ |
+| T07 | Frontend: deep link, импорт, gzip, тема, CI-гейты | P1 | T03a | 🔁 `25c9d99` (gzip metrics + atomic import + docs P2 fixed) → финальные `T07_rereviewA/B` |
 | T08 | SDK: room_mode в JoinRoomResult + auto-select + wasm | P1 | T03a | ✅ 9.6 (`T08_rereview2.md`) |
 | T09a | Запись: Storage-контракт+гидратация+API+409+soak | P0 | T03a | ✅ 9.0 (`T09a_rereview3.md`, P1 был чужой — T11a clippy, исправлен `ce4f45f`) |
 | T09b | MP4: avcC/length-prefix/timescale/esds + tap | P1 | T09a | ⏳ |
