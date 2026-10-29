@@ -790,8 +790,9 @@ const fn native_audio_count() -> usize {
         }
         i += 1;
     }
-    // G711 family alias.
-    count + 1
+    // Alias families (G711 today) are advertised by name in the native list.
+    // Iterate the table so a second family cannot be silently omitted.
+    count + ALIAS_FAMILIES.len()
 }
 
 const fn build_native_audio() -> [&'static str; native_audio_count()] {
@@ -811,7 +812,12 @@ const fn build_native_audio() -> [&'static str; native_audio_count()] {
         }
         i += 1;
     }
-    out[j] = ALIAS_FAMILIES[0].name;
+    let mut family = 0;
+    while family < ALIAS_FAMILIES.len() {
+        out[j] = ALIAS_FAMILIES[family].name;
+        j += 1;
+        family += 1;
+    }
     out
 }
 
@@ -914,8 +920,8 @@ const fn h323_audio_count() -> usize {
         }
         i += 1;
     }
-    // G711 family alias.
-    count + 1
+    // Alias families (G711 today) are advertised by name in the H.323 list.
+    count + ALIAS_FAMILIES.len()
 }
 
 const fn h323_audio_names() -> [&'static str; h323_audio_count()] {
@@ -935,7 +941,12 @@ const fn h323_audio_names() -> [&'static str; h323_audio_count()] {
         }
         i += 1;
     }
-    out[j] = ALIAS_FAMILIES[0].name;
+    let mut family = 0;
+    while family < ALIAS_FAMILIES.len() {
+        out[j] = ALIAS_FAMILIES[family].name;
+        j += 1;
+        family += 1;
+    }
     out
 }
 
@@ -974,8 +985,8 @@ const fn public_native_audio_count() -> usize {
         }
         i += 1;
     }
-    // G711 family alias is part of the public native list.
-    count + 1
+    // Alias families (G711 today) are part of the public native list.
+    count + ALIAS_FAMILIES.len()
 }
 
 /// Canonical (alias-free) public list: exactly one entry per native audio
@@ -992,7 +1003,12 @@ const fn build_public_native_audio() -> [&'static str; public_native_audio_count
         }
         i += 1;
     }
-    out[j] = ALIAS_FAMILIES[0].name;
+    let mut family = 0;
+    while family < ALIAS_FAMILIES.len() {
+        out[j] = ALIAS_FAMILIES[family].name;
+        j += 1;
+        family += 1;
+    }
     out
 }
 
@@ -1311,6 +1327,30 @@ mod tests {
     }
 
     #[test]
+    fn alias_families_are_audio_native_and_present_in_every_native_audio_slice() {
+        // The generated lists append every alias family by name. Iterating the
+        // table (instead of `ALIAS_FAMILIES[0]` + `count + 1`) keeps a second
+        // family from silently disappearing (review C P3-1); this test pins the
+        // invariant that makes the unconditional append truthful.
+        let native: BTreeSet<&str> = native_audio_names().iter().copied().collect();
+        let h323: BTreeSet<&str> = H323_AUDIO_NAMES.iter().copied().collect();
+        let public: BTreeSet<&str> = public_native_audio_names().iter().copied().collect();
+        for family in ALIAS_FAMILIES {
+            assert!(!family.members.is_empty(), "family {} has no members", family.name);
+            for member in family.members {
+                let spec = spec(*member);
+                assert_eq!(spec.kind, CodecKind::Audio, "family {} member must be audio", family.name);
+                assert_eq!(spec.sip, Disposition::Native, "family {} member is not SIP-native", family.name);
+                assert_eq!(spec.h323, Disposition::Native, "family {} member is not H.323-native", family.name);
+            }
+            assert!(native.contains(family.name), "family {} missing from native audio", family.name);
+            assert!(h323.contains(family.name), "family {} missing from H.323 audio", family.name);
+            assert!(public.contains(family.name), "family {} missing from public native audio", family.name);
+        }
+        assert_eq!(native_audio_names().len(), native.len(), "native audio has duplicates");
+    }
+
+    #[test]
     fn lookup_accepts_all_previously_accepted_spellings() {
         for (spelling, id) in [
             ("PCMU", CodecId::Pcmu),
@@ -1401,16 +1441,88 @@ mod tests {
         assert!(!webrtc_answer_names().contains(&"AV1"));
     }
 
+    /// `CodecSpec` struct body with comments removed, so a prose mention of a
+    /// payload type cannot hide (or trip) the field-name guard.
+    fn codec_spec_struct_code() -> String {
+        let source = include_str!("codec_spec.rs");
+        let start = source.find("pub struct CodecSpec {").expect("CodecSpec struct");
+        let end = source[start..].find("\n}").expect("CodecSpec end") + start;
+        let body = &source[start + "pub struct CodecSpec {".len()..end];
+        let mut code = String::with_capacity(body.len());
+        let mut chars = body.chars().peekable();
+        while let Some(character) = chars.next() {
+            match character {
+                '/' if chars.peek() == Some(&'/') => {
+                    for character in chars.by_ref() {
+                        if character == '\n' {
+                            code.push('\n');
+                            break;
+                        }
+                    }
+                }
+                '/' if chars.peek() == Some(&'*') => {
+                    chars.next();
+                    let mut depth = 1usize;
+                    let mut previous = '\0';
+                    for character in chars.by_ref() {
+                        if previous == '/' && character == '*' {
+                            depth += 1;
+                        } else if previous == '*' && character == '/' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        previous = character;
+                    }
+                }
+                _ => code.push(character),
+            }
+        }
+        code
+    }
+
+    /// The first identifier in `code` that names an RTP payload/PT field.
+    /// Unlike a plain substring search this also catches `pt`, `ptype` and
+    /// `pt_map` (review C P3-5).
+    fn payload_type_field(code: &str) -> Option<String> {
+        code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|identifier| !identifier.is_empty())
+            .find(|identifier| {
+                let identifier = identifier.to_ascii_lowercase();
+                identifier == "pt"
+                    || identifier.starts_with("pt_")
+                    || identifier.ends_with("_pt")
+                    || identifier.contains("_pt_")
+                    || identifier.contains("payload")
+                    || identifier.contains("ptype")
+                    || identifier.contains("packet_type")
+                    || identifier.contains("packettype")
+            })
+            .map(str::to_owned)
+    }
+
     #[test]
     fn specs_have_no_payload_type_field() {
         // T2: PT is transport-local. Guard the struct definition itself so a
-        // future refactor cannot move it into the SSOT unnoticed.
-        let source = include_str!("codec_spec.rs");
-        let struct_start = source.find("pub struct CodecSpec {").expect("struct");
-        let struct_end = source[struct_start..].find("\n}").expect("end") + struct_start;
-        let body = &source[struct_start..struct_end];
-        assert!(!body.contains("payload"), "CodecSpec must not carry an RTP payload type");
-        assert!(!body.contains("packet_type"), "CodecSpec must not carry an RTP payload type");
+        // future refactor cannot move it into the SSOT unnoticed. The scan is
+        // identifier-based, so short field names (`pt`, `ptype`) cannot slip
+        // through a "payload"/"packet_type" substring check (review C P3-5).
+        for fixture in [
+            "pub struct Fixture { pub payload_type: u8 }",
+            "pub struct Fixture { pub pt: u8 }",
+            "pub struct Fixture { ptype: u16 }",
+            "pub struct Fixture { rtp_pt: u8 }",
+        ] {
+            assert!(payload_type_field(fixture).is_some(), "the PT guard missed {fixture:?}");
+        }
+        assert_eq!(payload_type_field("pub struct Fixture { rtp_clock: u32, sample_rate: u32 }"), None);
+        let code = codec_spec_struct_code();
+        assert_eq!(payload_type_field(&code), None, "CodecSpec must not carry an RTP payload type");
+        // Keep the prose-level smell checks as well.
+        let lower = code.to_ascii_lowercase();
+        assert!(!lower.contains("payload"), "CodecSpec must not carry an RTP payload type");
+        assert!(!lower.contains("packet_type"), "CodecSpec must not carry an RTP payload type");
     }
 
     #[test]
@@ -1588,15 +1700,346 @@ mod tests {
         }
     }
 
-    /// Production part of a file: everything before its first `#[cfg(test)]`
-    /// module. Tests legitimately spell codec names and must not make the scan
-    /// useless (all Rust files in this repo keep tests after production code).
+    /// Production part of a file: every test module is removed, so production
+    /// code before **and after** a test module is scanned.
+    ///
+    /// Rule (why not "cut at the first `#[cfg(test)]`"): a `#[cfg(test)]`
+    /// attribute by itself is not a test module. Files legitimately gate a
+    /// `use`/`fn`/`static` helper with it in the middle of production code
+    /// (`gateways.rs`), and some files declare their test modules at the top and
+    /// keep production below (`api_v3/mod.rs`). Cutting at the first attribute
+    /// (or at the first module) hides every production tail after it from the
+    /// scanners (review C P2-1). Therefore:
+    ///
+    /// * an item is a test module when its attribute group contains
+    ///   `#[cfg(test)]` (or `#[cfg(all(test, ...))]`); the whole module —
+    ///   `mod tests { ... }`, `mod tests;` or `#[path = "..."] mod tests;` — is
+    ///   removed and scanning continues after it;
+    /// * a bare `mod tests` without attributes is removed only when its name
+    ///   looks like a test module and its body contains a `#[test]`-style
+    ///   attribute;
+    /// * test-only `use`/`fn`/`static` items stay in the scanned text: they are
+    ///   not modules and cannot hide a production tail.
+    ///
+    /// Files included from a `#[cfg(test)] mod` via `#[path]` are skipped by
+    /// name in [`is_test_source_file`].
     fn production_source(file: &str) -> String {
-        let source = read_crate_source(file);
-        match source.find("#[cfg(test)]") {
-            Some(index) => source[..index].to_string(),
-            None => source,
+        strip_test_modules(&read_crate_source(file))
+    }
+
+    /// `source` with all test modules removed; production text is otherwise
+    /// byte-identical.
+    fn strip_test_modules(source: &str) -> String {
+        let mut out = String::with_capacity(source.len());
+        let mut cursor = 0;
+        for range in test_module_ranges(source) {
+            out.push_str(&source[cursor..range.start]);
+            cursor = range.end;
         }
+        out.push_str(&source[cursor..]);
+        out
+    }
+
+    /// Byte ranges of the test modules in `source` (see [`production_source`]).
+    ///
+    /// The scanner is a small Rust lexer: comments and string/char literals are
+    /// skipped so braces or `mod` words inside them cannot confuse it.
+    fn test_module_ranges(source: &str) -> Vec<std::ops::Range<usize>> {
+        let bytes = source.as_bytes();
+        let mut ranges = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if let Some(end) = skip_comment_or_literal(bytes, i) {
+                i = end;
+                continue;
+            }
+            if bytes[i] == b'#' && bytes.get(i + 1) == Some(&b'[') {
+                if let Some((group_end, cfg_test)) = attribute_group(bytes, i) {
+                    let item = skip_visibility(bytes, skip_trivia(bytes, group_end));
+                    let module = module_name(bytes, item).and_then(|(name, name_end)| {
+                        let body = skip_trivia(bytes, name_end);
+                        module_end(bytes, body).filter(|&end| {
+                            cfg_test || (is_test_module_name(name) && body_contains_test_attribute(&source[body..end]))
+                        })
+                    });
+                    if let Some(end) = module {
+                        ranges.push(i..end);
+                        i = end;
+                        continue;
+                    }
+                    i = skip_trivia(bytes, group_end);
+                    continue;
+                }
+            }
+            if keyword_mod_at(bytes, i) {
+                if let Some((name, name_end)) = module_name(bytes, i) {
+                    if is_test_module_name(name) {
+                        let body = skip_trivia(bytes, name_end);
+                        if let Some(end) = module_end(bytes, body) {
+                            if body_contains_test_attribute(&source[body..end]) {
+                                ranges.push(i..end);
+                                i = end;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        ranges
+    }
+
+    /// End of the attribute group starting at `start` (a `#[`), plus whether
+    /// any attribute in it is a positive `cfg(test)` gate.
+    fn attribute_group(bytes: &[u8], start: usize) -> Option<(usize, bool)> {
+        let mut end = start;
+        let mut cfg_test = false;
+        loop {
+            if !(bytes.get(end) == Some(&b'#') && bytes.get(end + 1) == Some(&b'[')) {
+                return None;
+            }
+            let attribute_end = matching_delimiter(bytes, end + 1, b'[', b']')?;
+            let inner = std::str::from_utf8(bytes.get(end + 2..attribute_end - 1)?).ok()?;
+            cfg_test |= is_cfg_test_attribute(inner);
+            end = attribute_end;
+            let next = skip_trivia(bytes, end);
+            if bytes.get(next) == Some(&b'#') && bytes.get(next + 1) == Some(&b'[') {
+                end = next;
+            } else {
+                return Some((end, cfg_test));
+            }
+        }
+    }
+
+    /// `true` only for a gate that requires the test configuration.
+    /// `cfg(any(test, ...))` also compiles in production and `cfg(not(test))`
+    /// is production-only code, so neither may be treated as a test module.
+    fn is_cfg_test_attribute(attribute: &str) -> bool {
+        let compact: String = attribute.chars().filter(|c| !c.is_whitespace()).collect();
+        let Some(predicate) = compact.strip_prefix("cfg(").and_then(|rest| rest.strip_suffix(')')) else {
+            return false;
+        };
+        predicate == "test"
+            || (predicate.starts_with("all(") && contains_word(predicate, "test") && !predicate.contains("not("))
+    }
+
+    fn contains_word(haystack: &str, wanted: &str) -> bool {
+        haystack.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).any(|token| token == wanted)
+    }
+
+    fn is_test_module_name(name: &str) -> bool {
+        name == "tests"
+            || name.starts_with("test_")
+            || name.starts_with("tests_")
+            || name.ends_with("_tests")
+            || name.ends_with("_test")
+    }
+
+    fn body_contains_test_attribute(body: &str) -> bool {
+        body.contains("#[test]") || body.contains("::test]") || body.contains("#[rstest]")
+    }
+
+    /// End of a `mod` item whose name ends at `name_end` (`{ ... }` or `;`).
+    fn module_end(bytes: &[u8], body_start: usize) -> Option<usize> {
+        let body = skip_trivia(bytes, body_start);
+        match bytes.get(body) {
+            Some(b'{') => matching_delimiter(bytes, body, b'{', b'}'),
+            Some(b';') => Some(body + 1),
+            _ => None,
+        }
+    }
+
+    fn module_name(bytes: &[u8], start: usize) -> Option<(&str, usize)> {
+        let mut i = skip_trivia(bytes, start);
+        if !keyword_mod_at(bytes, i) {
+            return None;
+        }
+        i = skip_trivia(bytes, i + 3);
+        let name_start = i;
+        while bytes.get(i).is_some_and(|byte| is_ident_byte(*byte)) {
+            i += 1;
+        }
+        if i == name_start {
+            return None;
+        }
+        let name = std::str::from_utf8(bytes.get(name_start..i)?).ok()?;
+        Some((name, i))
+    }
+
+    fn keyword_mod_at(bytes: &[u8], i: usize) -> bool {
+        bytes.get(i..).is_some_and(|rest| rest.starts_with(b"mod"))
+            && (i == 0 || !is_ident_byte(bytes[i - 1]))
+            && bytes.get(i + 3).is_none_or(|next| !is_ident_byte(*next))
+    }
+
+    fn skip_visibility(bytes: &[u8], start: usize) -> usize {
+        let mut i = skip_trivia(bytes, start);
+        if bytes.get(i..).is_some_and(|rest| rest.starts_with(b"pub"))
+            && bytes.get(i + 3).is_none_or(|next| !is_ident_byte(*next))
+        {
+            i = skip_trivia(bytes, i + 3);
+            if bytes.get(i) == Some(&b'(') {
+                if let Some(end) = matching_delimiter(bytes, i, b'(', b')') {
+                    i = skip_trivia(bytes, end);
+                }
+            }
+        }
+        i
+    }
+
+    fn is_ident_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'_'
+    }
+
+    fn skip_trivia(bytes: &[u8], start: usize) -> usize {
+        let mut i = start;
+        loop {
+            while bytes.get(i).is_some_and(|byte| byte.is_ascii_whitespace()) {
+                i += 1;
+            }
+            if bytes.get(i) == Some(&b'/') && bytes.get(i + 1) == Some(&b'/') {
+                i = line_end(bytes, i);
+            } else if bytes.get(i) == Some(&b'/') && bytes.get(i + 1) == Some(&b'*') {
+                i = block_comment_end(bytes, i);
+            } else {
+                return i;
+            }
+        }
+    }
+
+    /// Skips a comment or a string/char literal starting at `i`; `None` when
+    /// the byte does not start one (an ordinary token).
+    fn skip_comment_or_literal(bytes: &[u8], i: usize) -> Option<usize> {
+        match *bytes.get(i)? {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => Some(line_end(bytes, i)),
+            b'/' if bytes.get(i + 1) == Some(&b'*') => Some(block_comment_end(bytes, i)),
+            b'"' => Some(string_end(bytes, i)),
+            b'\'' => char_literal_end(bytes, i),
+            b'r' | b'b' | b'c' if i == 0 || !is_ident_byte(bytes[i - 1]) => prefixed_literal_end(bytes, i),
+            _ => None,
+        }
+    }
+
+    fn line_end(bytes: &[u8], start: usize) -> usize {
+        let mut i = start;
+        while bytes.get(i).is_some_and(|byte| *byte != b'\n') {
+            i += 1;
+        }
+        i
+    }
+
+    fn block_comment_end(bytes: &[u8], start: usize) -> usize {
+        let mut depth = 0usize;
+        let mut i = start;
+        while i < bytes.len() {
+            if bytes[i..].starts_with(b"/*") {
+                depth += 1;
+                i += 2;
+            } else if bytes[i..].starts_with(b"*/") {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    return i;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        bytes.len()
+    }
+
+    fn string_end(bytes: &[u8], start: usize) -> usize {
+        let mut i = start + 1;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 2,
+                b'"' => return i + 1,
+                _ => i += 1,
+            }
+        }
+        bytes.len()
+    }
+
+    fn char_literal_end(bytes: &[u8], start: usize) -> Option<usize> {
+        let mut i = start + 1;
+        if bytes.get(i) == Some(&b'\\') {
+            i += 2;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' => i += 2,
+                    b'\'' => return Some(i + 1),
+                    _ => i += 1,
+                }
+            }
+            return None;
+        }
+        if bytes.get(i + 1) == Some(&b'\'') {
+            Some(i + 2)
+        } else {
+            None
+        }
+    }
+
+    /// Raw (`r"..."`, `r#"..."#`), byte (`b"..."`, `br"..."`) and C
+    /// (`c"..."`) strings. Returns `None` for raw identifiers (`r#type`).
+    fn prefixed_literal_end(bytes: &[u8], start: usize) -> Option<usize> {
+        let mut i = start;
+        match *bytes.get(i)? {
+            b'r' => i += 1,
+            b'b' | b'c' if bytes.get(i + 1) == Some(&b'r') => i += 2,
+            b'b' | b'c' => {
+                if bytes.get(i + 1) == Some(&b'"') {
+                    return Some(string_end(bytes, i + 1));
+                }
+                return None;
+            }
+            _ => return None,
+        }
+        let mut hashes = 0;
+        while bytes.get(i) == Some(&b'#') {
+            hashes += 1;
+            i += 1;
+        }
+        if bytes.get(i) != Some(&b'"') {
+            return None;
+        }
+        let mut cursor = i + 1;
+        while cursor < bytes.len() {
+            if bytes[cursor] == b'"' {
+                let mut trailing = 0;
+                while trailing < hashes && bytes.get(cursor + 1 + trailing) == Some(&b'#') {
+                    trailing += 1;
+                }
+                if trailing == hashes {
+                    return Some(cursor + 1 + hashes);
+                }
+            }
+            cursor += 1;
+        }
+        Some(bytes.len())
+    }
+
+    /// End of the balanced `open_byte`/`close_byte` pair starting at `open`.
+    fn matching_delimiter(bytes: &[u8], open: usize, open_byte: u8, close_byte: u8) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut i = open;
+        while i < bytes.len() {
+            if let Some(end) = skip_comment_or_literal(bytes, i) {
+                i = end;
+                continue;
+            }
+            if bytes[i] == open_byte {
+                depth += 1;
+            } else if bytes[i] == close_byte {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            i += 1;
+        }
+        None
     }
 
     /// Files that are tests themselves (`api_v3/tests.rs`, `*_tests.rs`) and
@@ -1733,5 +2176,109 @@ mod tests {
             "codec name tables outside the explicit allowlist: {offenders:#?}. \
              Derive from CODECS or add a documented allowlist entry with a proving test"
         );
+    }
+
+    #[test]
+    fn production_source_keeps_items_gated_by_cfg_test_without_a_module() {
+        // `#[cfg(test)] use/fn/static` helpers are common and must not cut the
+        // production tail. This is exactly the old bug: the first cfg(test)
+        // attribute appeared before all production code (review C P2-1).
+        let source = concat!(
+            "#[cfg(test)]\n",
+            "use crate::test_support::Storage;\n\n",
+            "#[cfg(test)]\n",
+            "fn helper() {}\n\n",
+            "const PRODUCTION: &str = \"kept\";\n",
+        );
+        assert_eq!(strip_test_modules(source), source);
+        assert!(codec_names_in(source).is_empty());
+    }
+
+    #[test]
+    fn production_source_strips_test_modules_and_keeps_production_tails() {
+        // Shape of `api_v3/mod.rs` (test declarations first, production below)
+        // plus the review C P2-1 regression: a second codec table injected late
+        // in the production tail must still be seen by the scanners.
+        let source = r#"
+#[cfg(test)]
+#[path = "observability_tests.rs"]
+mod observability_tests;
+#[cfg(test)]
+mod tests;
+
+pub struct Production;
+
+#[cfg(test)]
+mod late_tests {
+    const TEST_TABLE: &[&str] = &["OPUS", "VP8"];
+    #[test]
+    fn hidden() {}
+}
+
+const CODECS2: &[&str] = &["OPUS", "VP8"];
+"#;
+        let production = strip_test_modules(source);
+        assert!(production.contains("pub struct Production"), "production after early test modules was dropped");
+        assert!(production.contains("const CODECS2"), "late production tail was dropped: {production}");
+        assert!(!production.contains("observability_tests.rs"), "test module declaration leaked: {production}");
+        assert!(!production.contains("TEST_TABLE"), "test module body leaked: {production}");
+        assert_eq!(
+            codec_names_in(&production),
+            BTreeSet::from(["OPUS", "VP8"]),
+            "the scanner must see the late codec table now"
+        );
+    }
+
+    #[test]
+    fn production_source_strips_bare_test_modules_and_ignores_literals() {
+        let bare = "pub fn before() {}\n\nmod tests {\n    #[test]\n    fn hidden() {}\n}\n\npub fn after() {}\n";
+        let production = strip_test_modules(bare);
+        assert!(production.contains("pub fn before") && production.contains("pub fn after"));
+        assert!(!production.contains("mod tests"));
+        // Braces and `mod` words inside literals/comments are not module items.
+        let literals = concat!(
+            "const DOC: &str = \"mod tests { #[test] }\";\n",
+            "// #[cfg(test)] mod tests { }\n",
+            "const RAW: &str = r#\"}\\{\"#;\n",
+            "fn production() {}\n",
+        );
+        assert_eq!(strip_test_modules(literals), literals);
+    }
+
+    #[test]
+    fn production_source_keeps_real_repo_production_tails() {
+        // Every file whose production code follows a real test module must keep
+        // that tail in the scan (`api_v3/mod.rs` is the repository case).
+        let crates_root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let mut files = Vec::new();
+        collect_rust_files(std::path::Path::new(crates_root), &mut files);
+        let mut tails = 0;
+        for file in &files {
+            let source = read_crate_source(file);
+            let ranges = test_module_ranges(&source);
+            let Some(last) = ranges.last() else { continue };
+            let tail = source[last.end..].trim();
+            if tail.is_empty() {
+                continue;
+            }
+            tails += 1;
+            assert!(
+                production_source(file).contains(tail),
+                "{file}: production tail after the last test module was dropped from the scan"
+            );
+        }
+        assert!(tails > 0, "expected at least one file with production after its test modules");
+        // Files the old "first cfg(test)" cut blinded the scanners to.
+        for (file, marker) in [
+            ("vks-admin/src/api_v3/mod.rs", "pub struct ApiV3State"),
+            ("vks-admin/src/api_v3/directory_migrate.rs", "LEGACY_DIRECTORY_KEYS"),
+            ("vks-gateway-sip/src/rtp_bridge.rs", "VIDEO_OFFER"),
+            ("vks-server/src/gateways.rs", "SIP_AUDIO_PTS"),
+        ] {
+            assert!(
+                production_source(file).contains(marker),
+                "{file}: production marker {marker:?} is not scanned (review C P2-1)"
+            );
+        }
     }
 }
