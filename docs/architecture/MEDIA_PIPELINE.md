@@ -219,3 +219,47 @@ Feature flags: `vp8`, `vp9`, `h264`, `h265`, `av1`, `opus`, `g722`, `g711` (ADR-
 | CPU per room | 0.5 core | 4 cores |
 | Upstream/Downstream | 2 Gbps | 2.5 Mbps × 8 = 20 Mbps |
 | Signaling | 10k concurrent WS | — |
+
+## 7. T12: mixed room browser ↔ SIP/H.323 (audio bridge, honest scope)
+
+`bridge.rs` is the single place that decides mixed rooms through the asymmetric
+`bridge_available(caps, side, has_browser, has_gateway)` predicate:
+
+- `BridgeSide::BrowserJoining`: a browser may enter a room with a SIP/H.323
+  participant only when that gateway already exists;
+- `BridgeSide::GatewayLanding`: a gateway may land in a room only when a real
+  browser WebRTC peer already exists;
+- browser-only and gateway-only rooms stay SFU/MCU rooms; the predicate is
+  false there and admission keeps its old behaviour.
+
+The kill switch is `VKS_HYBRID_BRIDGE` (`0/false/off/no` disables, default on).
+When it is off, `gateway_room_conflict()` keeps the pre-T12 messages
+byte-identical; when it is on but the caps matrix is missing, the error names
+the reason (`hybrid_disabled`, `opus_unavailable`, `no_gateway`, `no_browser`,
+`allowed`).
+
+Delivered path is **audio-only**:
+browser Opus frame → tap → Opus decode → 20 ms PCM → one MCU tick → gateway-only
+`mix_participants_audio` → Opus encode → server-side bridge egress → every
+browser on SRTP; no audio is delivered twice because browsers still receive each
+other through SFU fanout and the bridge egress contains only the gateway mix.
+
+`McuEngine` enforces **one ticker per room** via `bridge_owns_tick`:
+while the bridge owns `tick_audio_at`, the legacy gateway RTP path's own
+`tick_audio_at` call is a no-op; `audio_ticks_total` proves the cadence in
+unit tests. The canonical lock order is
+`pending_layouts → rooms → frames → audio`; `apply_layout`,
+`remove_publisher`, `unbridge_participant` and `mix_participants_audio` obey it.
+
+Mixed-room **video is deliberately not delivered**. The codec SSOT marks
+`H264` as `webrtc: Unsupported(NoImplementation)`; `webrtc_answer_specs` is
+Opus+VP8 only; the MCU compositor emits H.264/H.265 and the MCU has no VP8
+decoder. A silent VP8 fallback would trade a building-block failure for a
+black screen, so T12 ships **audio only**, with no composite H.264 egress to
+the browser. Mixed gateway video continues to be consumed by MCU subscribers;
+only the browser hybrid bridge egress is blocked. The rest of the groundwork
+(StartView forwarding for `source_mid`, sprite view framing) is ready for a
+future VP8 decoder or H.264 RTP payloader, but is not claimed as delivered.
+
+No new admin hooks (mode switch, eviction) were added: mixed-room eviction
+still invokes the bridge watchdog when either plane disappears.

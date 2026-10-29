@@ -458,3 +458,14 @@ WS. `vks-server` монтирует `/wt` и `/wt/cert-hash` и добавляе
 | `docs/rules/BACKEND_RULES.md` | Правила бэкенда (детали) | v0.1 (черновик) |
 | `docs/rules/FRONTEND_RULES.md` | Правила фронтенда (детали) | v0.1 (черновик) |
 | `docs/rules/CODE_STYLE.md` | Стиль кода (детали) | v0.1 (черновик) |
+
+### 2.2 T12: mixed WebRTC browser + SIP/H.323 room (audio only for browsers)
+
+A mixed browser/gateway room is no longer a terminal "room busy" condition.
+`bridge.rs` decides admission with the asymmetric `bridge_available(...)` predicate
+and `VKS_HYBRID_BRIDGE`. The bridge is audio-only because the browser WebRTC
+answer slice is Opus+VP8 while the MCU compositor produces H.264/H.265 and the
+SSOT marks H.264 as `Unsupported(NoImplementation)` for WebRTC. Gateway video
+remains available to MCU participants; there is no silent VP8 fallback to a
+black screen. There is also one MCU tick per room: `tick_audio_at` is a no-op
+while the bridge owns the tick, verified by `audio_ticks_total()`.
