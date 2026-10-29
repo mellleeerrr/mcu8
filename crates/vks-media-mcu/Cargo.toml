@@ -1,11 +1,9 @@
-# vks-media-mcu — MCU-движок (compositor, oxideav-scene).
+# vks-media-mcu — MCU-движок (compositor, FFmpeg workers).
 # Фаза 3 (DEVELOPMENT_PLAN.md): MediaEngine-impl (MCU), compositor,
-# audio mixer, VAD, layout bridge. ADR-0004 (oxideav-scene, Q1).
+# audio mixer, VAD, layout bridge.
 #
-# Dep-light по умолчанию (базовый прогон workspace не затрагивается):
-# ядро компилируется на std + vks-core + vks-layout.
-# Реальный кодек/композиция (oxideav-scene, ffmpeg) — опциональные
-# фичи; дефолтный build их не тянет.
+# Dep-light: ядро компилируется на std + vks-core + vks-layout;
+# реальные кодеки/композиция — через FFmpeg workers.
 [package]
 name = "vks-media-mcu"
 version.workspace = true
@@ -13,7 +11,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "VKS MCU engine: compositor, decoder, encoder, audio mixer, VAD (oxideav-scene)"
+description = "VKS MCU engine: compositor, decoder, encoder, audio mixer, VAD (FFmpeg workers)"
 
 [dependencies]
 # Один syscall для убийства группы процессов FFmpeg (без порождения `/usr/bin/kill`).
@@ -34,14 +32,6 @@ vks-layout = { path = "../vks-layout" }
 vks-common = { path = "../vks-common" }
 # async-traits для MediaEngine-порта (vks-core использует async_trait).
 async-trait = "0.1"
-
-# Опциональные реальные кодеки/композиция (ADR-0004): за фичами,
-# дефолтный build — без них (dep-light).
-oxideav-scene = { version = "0.1", optional = true }
-
-[features]
-# Реальный compositor на oxideav-scene (ADR-0004).
-oxideav = ["dep:oxideav-scene"]
 
 [dev-dependencies]
 prometheus.workspace = true

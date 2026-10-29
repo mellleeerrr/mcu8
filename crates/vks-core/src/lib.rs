@@ -30,7 +30,6 @@ pub mod ports;
 pub mod room;
 pub mod session;
 pub mod track;
-pub mod transparency;
 
 // Re-exports for convenience (flat API).
 pub use media_policy::{EffectiveMedia, MediaLayer};
@@ -84,4 +83,3 @@ pub use ports::{
 pub use room::{Room, RoomId, RoomMode, RoomState, RoomTransitionError};
 pub use session::{Session, SessionError, SessionEvent, SessionId, SessionState};
 pub use track::{MediaKind, Track, TrackId, TrackKind};
-pub use transparency::{ClientView, ModeSwitcher, RoomModeChanged, SwitchClock, SwitchOutcome};

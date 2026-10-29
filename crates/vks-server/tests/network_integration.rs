@@ -727,33 +727,6 @@ async fn test_live_signaling_syncs_ui_sessions() {
 }
 
 #[tokio::test]
-async fn test_sfu_mcu_mode_switcher() {
-    use vks_core::room::{RoomId, RoomMode};
-    use vks_core::transparency::{ModeSwitcher, SwitchOutcome};
-    use vks_media_mcu::McuEngine;
-    use vks_media_sfu::SfuEngine;
-
-    let room_id = RoomId::new();
-    let sfu = Box::new(SfuEngine::new());
-    let mut switcher = ModeSwitcher::new(room_id, sfu, 100, 1);
-
-    assert_eq!(switcher.mode(), RoomMode::Sfu);
-    assert_eq!(switcher.epoch(), 0);
-
-    let mcu = Box::new(McuEngine::new());
-    let outcome = switcher.switch_mode(mcu);
-
-    assert_eq!(outcome, SwitchOutcome::Switched { epoch: 1 });
-    assert_eq!(switcher.mode(), RoomMode::Mcu);
-    assert_eq!(switcher.epoch(), 1);
-
-    let events = switcher.take_events();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].new_mode, RoomMode::Mcu);
-    assert_eq!(events[0].switch_epoch, 1);
-}
-
-#[tokio::test]
 async fn test_m5_gateway_sip_h323_integration() {
     use vks_admin::rooms::Rooms;
     use vks_gateway_h323::H323Codec;

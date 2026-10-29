@@ -24,9 +24,8 @@
 //!   contents, the compositor scaler (nearest-neighbor instead of
 //!   bilinear). Frame source and audio source are pluggable in the
 //!   engine so tests drive them.
-//! - Real (behind `oxideav` feature, ADR-0004): oxideav-scene codecs
-//!   and the bilinear compositor. The default build is dependency-light
-//!   so the workspace baseline (298 tests) stays green.
+//! - Real: FFmpeg workers (H.264/H.265) и собственный композитор;
+//!   oxideav-scene не используется (нет ни скейлера, ни композитора).
 //!
 //! ## Invariants
 //! - No `unsafe` in the engine; the only `unsafe` is the isolated
@@ -59,8 +58,3 @@ pub use farm::{
 pub use frame::Frame;
 pub use layout_bridge::{LayoutBridge, PixelRect, SlotKey, SlotRects, CROSSFADE_MS};
 pub use vad::{Vad, VadConfig, VadState, DEBOUNCE_MS, FRAME_MS, FRAME_SAMPLES};
-
-// The real compositor/codec (ADR-0004) sits behind the `oxideav`
-// feature; re-exported here for feature-gated consumers.
-#[cfg(feature = "oxideav")]
-pub use oxideav_scene;

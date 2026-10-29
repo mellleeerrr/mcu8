@@ -12,15 +12,12 @@
 //!   panic hook (не роняет процесс), watchdog (FFI call > 5s → restart).
 //!
 //! Текущая волна: self-contained testable core — [`codec`] (таблица
-//! соответствий), [`ffi`] (mock FFI-граница с watchdog и panic hook) и
-//! [`call`] (H.323-вызов FSM + in-memory шлюз). Реальная FFI-обёртка над
-//! H323Plus/OPAL — реальная FFI-граница появится вместе с библиотекой; дефолтная сборка
-//! dep-light, без `unsafe`.
+//! соответствий) и [`call`] (H.323-вызов FSM + in-memory шлюз). Транспорт —
+//! Python-сайдкар на pycrate; нативный Q.931/H.225/H.245 — отдельный эпик (см.
+//! docs/audit/2026-10-29/02_h323_p6.md); дефолтная сборка dep-light, без `unsafe`.
 //!
 //! ## Module
 //! - [`codec`] — H.323 ↔ WebRTC codec negotiation (deterministic map).
-//! - [`ffi`] — FFI boundary: [`ffi::H323PlusBridge`],
-//!   [`ffi::Watchdog`], panic hook (catch_unwind → Err).
 //! - [`call`] — H.323 call FSM (H.225/Q.931) and in-memory gateway.
 //!
 //! Dependency tree: vks-core, vks-common (ARCHITECTURE §3).
@@ -30,14 +27,12 @@ pub const H323_NATIVE_AUDIO_PTS: &[u8] = &[0, 4, 8, 9];
 
 pub mod call;
 pub mod codec;
-pub mod ffi;
 pub mod q931;
 pub mod uac;
 pub mod uas;
 
 pub use call::{H323Call, H323CallState, H323Gateway};
 pub use codec::{H323Codec, H323CodecMap, NegotiatedCodec, WebRtcCodec};
-pub use ffi::{FfiResult, H323PlusBridge, ModuleState, Watchdog, PRODUCTION_WATCHDOG_LIMIT};
 pub use q931::{
     build_q931_release_complete, encode_tpkt, parse_q931_message, Q931Message, MSG_ALERTING, MSG_CALL_PROCEEDING,
     MSG_CONNECT, MSG_RELEASE_COMPLETE, MSG_SETUP,
