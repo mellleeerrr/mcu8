@@ -39,8 +39,6 @@ pub struct Config {
     /// Пароль оператора (`VKS_ADMIN_PASSWORD`). Нужен для первого bootstrap
     /// или разовой ротации слабой БД; на каждом старте не обязателен.
     pub admin_password: String,
-    /// Адрес прослушивания WebRTC UDP-трафика (`VKS_MEDIA_LISTEN_ADDR`; dev: `127.0.0.1:0`).
-    pub media_listen_addr: String,
     /// Разрешить ли fallback на MemoryStorage при отказе БД (`VKS_STORAGE_ALLOW_FALLBACK`; dev: false).
     /// По умолчанию: false (fail-fast: сбой подключения к сконфигурированной БД прерывает startup).
     pub storage_allow_fallback: bool,
@@ -65,8 +63,6 @@ pub enum ConfigError {
     InvalidJwtTtl(i64),
     #[error("invalid listen_addr '{0}': {1}")]
     InvalidListenAddr(String, String),
-    #[error("invalid media_listen_addr '{0}': {1}")]
-    InvalidMediaListenAddr(String, String),
     #[error("invalid candidate_addr '{0}': must be a valid IP address")]
     InvalidCandidateAddr(String),
     #[error("insecure defaults are disabled but jwt_secret is shorter than 32 bytes or is the published dev secret")]
@@ -182,7 +178,6 @@ impl std::fmt::Debug for Config {
             .field("jwt_ttl_secs", &self.jwt_ttl_secs)
             .field("admin_login", &self.admin_login)
             .field("admin_password", &redact_secret(&self.admin_password))
-            .field("media_listen_addr", &self.media_listen_addr)
             .field("storage_allow_fallback", &self.storage_allow_fallback)
             .field("ice_servers", &self.ice_servers)
             .field("candidate_addr", &self.candidate_addr)
@@ -204,7 +199,6 @@ impl Default for Config {
             jwt_ttl_secs: 86_400,
             admin_login: "admin".into(),
             admin_password: String::new(),
-            media_listen_addr: "127.0.0.1:0".into(),
             storage_allow_fallback: false,
             allow_insecure_defaults: false,
             ice_servers: Vec::new(),
@@ -284,10 +278,6 @@ impl Config {
             return Err(ConfigError::InvalidListenAddr(self.listen_addr.clone(), e.to_string()));
         }
 
-        if let Err(e) = self.media_listen_addr.parse::<std::net::SocketAddr>() {
-            return Err(ConfigError::InvalidMediaListenAddr(self.media_listen_addr.clone(), e.to_string()));
-        }
-
         if let Some(ref cand) = self.candidate_addr {
             let trimmed = cand.trim();
             if !trimmed.is_empty() && trimmed.parse::<std::net::IpAddr>().is_err() {
@@ -345,7 +335,6 @@ mod tests {
         assert_eq!(c.jwt_ttl_secs, 86_400);
         assert_eq!(c.admin_login, "admin");
         assert_eq!(c.admin_password, "");
-        assert_eq!(c.media_listen_addr, "127.0.0.1:0");
         assert_eq!(c.candidate_addr, None);
     }
 
@@ -498,9 +487,6 @@ default_room_mode = "mcu"
     fn validate_rejects_invalid_socket_addrs() {
         let cfg = Config { listen_addr: "not_an_ip".into(), ..dev_config() };
         assert!(matches!(cfg.validate(), Err(ConfigError::InvalidListenAddr(_, _))));
-
-        let cfg2 = Config { media_listen_addr: "999.999.999.999:7777".into(), ..dev_config() };
-        assert!(matches!(cfg2.validate(), Err(ConfigError::InvalidMediaListenAddr(_, _))));
     }
 
     #[test]

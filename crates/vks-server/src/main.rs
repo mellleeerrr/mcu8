@@ -31,7 +31,6 @@ use vks_core::ports::Storage;
 use vks_server::frontend::Frontend;
 use vks_server::{build_app_with_services, ClusterManager, GatewayManager, RecorderManager};
 use vks_signaling::handler::HandlerConfig;
-use vks_signaling::sdp::RtpMap;
 use vks_storage::{MemoryStorage, PostgresStorage, SqliteStorage};
 
 /// Ошибка конфигурации: отдельный exit-код 78 (EX_CONFIG), чтобы systemd с
@@ -39,21 +38,6 @@ use vks_storage::{MemoryStorage, PostgresStorage, SqliteStorage};
 fn config_exit(err: impl std::fmt::Display) -> ! {
     error!(error = %err, "configuration rejected; aborting startup");
     std::process::exit(78);
-}
-
-/// Transport-local payload map of the SFU answer.
-///
-/// Payload numbers and wire spellings are transport details (the SSOT
-/// deliberately has no RTP PT field / case-sensitive names), but the codec
-/// identities and clocks must be exactly the SSOT WebRTC answer slice.
-/// `production_rtp_maps_match_the_ssot_webrtc_answer_slice` enforces that, so
-/// adding a codec here without adding it to the SSOT (review B mutation M9)
-/// fails a product test.
-fn production_rtp_maps() -> Vec<RtpMap> {
-    vec![
-        RtpMap { payload: 111, codec: "opus".into(), clock: 48_000, channels: 2 },
-        RtpMap { payload: 96, codec: "vp8".into(), clock: 90_000, channels: 0 },
-    ]
 }
 
 #[tokio::main]
@@ -106,20 +90,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_exit(e);
     }
 
-    // Fail before touching storage: an empty or unusable candidate must exit 78
-    // without creating/locking the SQLite database (the later preflight runs
-    // after storage init and also validates the *derived* address and ports).
+    // Fail before touching storage: the transport is mandatory (D1) and the
+    // candidate/socket/media preflight must pass before the DB lock is taken
+    // (D2). Exit 78 = EX_CONFIG, so systemd does not restart-loop a typo.
     // Dev configs (`allow_insecure_defaults`) keep the loopback escape hatch.
-    if vks_server::webrtc_runtime::enabled() && !config.allow_insecure_defaults {
-        let configured = config.candidate_addr.as_deref().unwrap_or("");
-        if configured.trim().is_empty() {
-            config_exit(
-                "VKS_WEBRTC_TRANSPORT is enabled but candidate_addr is empty; set VKS_CANDIDATE_ADDR/network.candidate_addr (or VKS_WEBRTC_TRANSPORT=0)".to_string(),
-            );
-        }
-        if let Err(error) = vks_server::webrtc_runtime::preflight_candidate(configured, false) {
-            config_exit(format!("WebRTC preflight failed: {error}"));
-        }
+    if let Err(error) = vks_server::webrtc_runtime::require_transport() {
+        config_exit(error);
+    }
+    let candidate_addr = config.candidate_addr.as_deref().unwrap_or("").trim().to_string();
+    if let Err(error) = vks_server::webrtc_runtime::preflight_candidate(&candidate_addr, config.allow_insecure_defaults)
+    {
+        config_exit(format!("WebRTC preflight failed: {error}"));
     }
 
     // Один владелец SQLite-файла: CLI dedup берёт тот же lock, поэтому не может
@@ -315,6 +296,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         admin_state.mode.lock().unwrap().global_mode
     };
     admin_state.webrtc_evict = Some(Arc::new(vks_server::webrtc_runtime::evict_rooms));
+    // D2: readiness comes from the real preflight that ran before storage.
+    admin_state.set_media_healthy(vks_server::webrtc_runtime::media_healthy());
     let admin_state = Arc::new(admin_state);
 
     // 6. Загрузка статики фронтенда PNM (fail-fast диагностика, но сервер не падает)
@@ -329,49 +312,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         FRONTEND_DENIED.with_label_values(&["not_configured"]).inc();
     }
 
-    // 7. Инициализация WebRTC медиа-движков и UDP медиа-лупа (M2.1, M2.4)
-    let sfu_engine = Arc::new(vks_media_sfu::SfuEngine::new());
+    // 7. Media roster + real WebRTC transport.
+    // Media itself is carried by a per-peer str0m task created on the first
+    // accepted offer (`webrtc_runtime::accept_offer`); there is no process-wide
+    // plaintext UDP loop (removed in T11c).
+    let sfu_engine = Arc::new(vks_media_sfu::MediaRegistry::new());
     let mcu_engine = Arc::new(vks_media_mcu::McuEngine::new());
 
-    let (udp_loop, receive_task, candidate_addr, candidate_port) = match vks_media_sfu::udp_loop::UdpMediaLoop::bind(
-        &config.media_listen_addr,
-    )
-    .await
-    {
-        Ok(loop_handle) => {
-            admin_state.set_media_healthy(true);
-            let local_addr = loop_handle.local_addr();
-            info!(addr = %local_addr, "WebRTC UDP media loop active");
-            let sfu = sfu_engine.clone();
-            let task = loop_handle.start_routing_loop(move |src, packet| sfu.route_udp_packet(src, packet.payload));
-            let ip = config
-                .candidate_addr
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| {
-                    if local_addr.ip().is_unspecified() {
-                        "127.0.0.1".into()
-                    } else {
-                        local_addr.ip().to_string()
-                    }
-                });
-            let port = local_addr.port();
-            info!(candidate_ip = %ip, candidate_port = %port, "WebRTC SDP ICE candidate configured");
-            if ip == "127.0.0.1" && local_addr.ip().is_unspecified() {
-                warn!("WebRTC candidate IP defaulted to 127.0.0.1 while listening on 0.0.0.0; external endpoints (e.g. 10.0.0.10) will fail to connect. Set candidate_addr in config or VKS_CANDIDATE_ADDR env.");
-            }
-            (Some(Arc::new(loop_handle)), Some(task), ip, port)
-        }
-        Err(e) => {
-            admin_state.set_media_healthy(false);
-            warn!(error = %e, addr = %config.media_listen_addr, "failed to bind UDP media loop");
-            (None, None, "127.0.0.1".to_string(), 0)
-        }
-    };
     // Один источник истины с ICE: conference-адреса (`sip:/h323:`) — тот же
-    // нормализованный candidate IP (trim/fallback/bind-fail уже учтены выше).
+    // нормализованный candidate IP (preflight уже проверил его до storage).
     let _ = admin_state.server_addr.set(candidate_addr.clone());
     if let Some(path) = vks_storage::db_lock::sqlite_path_from_url(&config.database_url) {
         // Абсолютный путь: systemd может стартовать из другого cwd, а статус
@@ -397,22 +346,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vks_core::RoomMode::Mcu => vks_proto::media::RoomMode::Mcu as i32,
         vks_core::RoomMode::Sfu => vks_proto::media::RoomMode::Sfu as i32,
     };
-    let handler_config = HandlerConfig::new(
-        "srv-0001",
-        &config.server_name,
-        "sfuufrag",
-        "sfupwd",
-        "sha-256 FF:00:11",
-        candidate_addr.clone(),
-        candidate_port,
-        production_rtp_maps(),
-    )
-    .with_ice_servers(ice_servers)
-    .with_room_mode(proto_room_mode)
-    // Codec caps come from the SSOT (`HandlerConfig::new` -> `webrtc_answer_specs`);
-    // only the transport flag is production state. Never overwrite `RoomCaps`
-    // with literals here: that silently hides new SSOT codecs from clients.
-    .with_dtls_srtp(vks_server::webrtc_runtime::enabled());
+    let handler_config = HandlerConfig::new("srv-0001", &config.server_name, candidate_addr.clone())
+        .with_ice_servers(ice_servers)
+        .with_room_mode(proto_room_mode)
+        // Codec caps come from the SSOT (`HandlerConfig::new` ->
+        // `webrtc_answer_specs`); only the transport flag is production state.
+        // Never overwrite `RoomCaps` with literals here: that silently hides
+        // new SSOT codecs from clients.
+        .with_dtls_srtp(true);
 
     // Codec worker probe is non-fatal by default: without it the gateway keeps
     // the native profile and never advertises codecs it cannot bridge.
@@ -458,11 +399,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "gateway audio codec availability (AAC needs probe + legal opt-in + pool preflight)"
     );
 
-    if let Err(error) = vks_server::webrtc_runtime::preflight(&handler_config, config.allow_insecure_defaults) {
-        error!(%error, "WebRTC preflight failed");
-        eprintln!("vks-server: WebRTC preflight failed: {error}");
-        std::process::exit(78);
-    }
+    // WebRTC preflight already ran before storage (D1/D2); no second gate
+    // here — a duplicate would validate a config derived after the DB lock.
 
     let gateway_manager =
         Arc::new(GatewayManager::new().with_mcu(mcu_engine.clone()).with_candidate_ip(&candidate_addr));
@@ -520,7 +458,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handler_config,
         sfu_engine.clone(),
         mcu_engine.clone(),
-        udp_loop.clone(),
         gateway_manager.clone(),
         recorder_manager.clone(),
         cluster_manager.clone(),
@@ -539,13 +476,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             uas_shutdown.shutdown_h323_uas().await;
         })
         .await?;
-
-    if let Some(loop_handle) = &udp_loop {
-        loop_handle.shutdown();
-    }
-    if let Some(task) = receive_task {
-        let _ = task.await;
-    }
 
     info!("vks-server gracefully terminated");
     Ok(())
@@ -585,18 +515,9 @@ mod production_codec_caps_tests {
 
     fn production_config(room_mode: vks_proto::media::RoomMode, dtls_srtp: bool) -> HandlerConfig {
         // The same builder chain production uses below (minus ICE servers).
-        HandlerConfig::new(
-            "srv-0001",
-            "vks-server-test",
-            "sfuufrag",
-            "sfupwd",
-            "sha-256 FF:00:11",
-            "127.0.0.1",
-            0,
-            production_rtp_maps(),
-        )
-        .with_room_mode(room_mode as i32)
-        .with_dtls_srtp(dtls_srtp)
+        HandlerConfig::new("srv-0001", "vks-server-test", "127.0.0.1")
+            .with_room_mode(room_mode as i32)
+            .with_dtls_srtp(dtls_srtp)
     }
 
     fn expected_caps_from_ssot() -> (Vec<i32>, Vec<i32>) {
@@ -638,36 +559,6 @@ mod production_codec_caps_tests {
     }
 
     #[test]
-    fn production_rtp_maps_match_the_ssot_webrtc_answer_slice() {
-        // Review B mutation M9: extra H265/G722 RtpMap rows used to pass every
-        // product test while the SFU answer and SSOT caps disagreed. Validate
-        // the production builder instead of trusting the literals.
-        use vks_common::codec_spec::{self, CodecKind, Disposition};
-        let maps = production_rtp_maps();
-        let answer: Vec<&codec_spec::CodecSpec> = codec_spec::webrtc_answer_specs().collect();
-        assert_eq!(maps.len(), answer.len(), "one RtpMap row per SSOT WebRTC answer codec");
-        let mut seen = std::collections::BTreeSet::new();
-        for map in &maps {
-            let spec = codec_spec::lookup(&map.codec)
-                .unwrap_or_else(|| panic!("production RtpMap codec {:?} is not in the SSOT", map.codec));
-            assert_eq!(codec_spec::normalize(&map.codec), codec_spec::normalize(spec.name), "canonical wire name");
-            assert_eq!(spec.webrtc, Disposition::WebRtc, "{} is not implemented on WebRTC", map.codec);
-            assert!(spec.webrtc_negotiable, "{} is not in the str0m answer slice", map.codec);
-            assert!(
-                answer.iter().any(|answer_spec| answer_spec.id == spec.id),
-                "{} is not in webrtc_answer_specs()",
-                map.codec
-            );
-            assert_eq!(map.clock, spec.rtp_clock, "{} RTP clock drifted from the SSOT", map.codec);
-            assert_ne!(spec.kind, CodecKind::Dtmf, "telephone-event is not a RoomCaps codec");
-            assert!(seen.insert(spec.id), "duplicate {} in the production RtpMap", map.codec);
-        }
-        // PTs are transport-local, but must still be unique.
-        let payloads: std::collections::BTreeSet<u32> = maps.iter().map(|map| map.payload).collect();
-        assert_eq!(payloads.len(), maps.len(), "duplicate RTP payload type in the production answer");
-    }
-
-    #[test]
     fn production_main_does_not_overwrite_the_ssot_caps() {
         // P1 regression guard: the binary itself must not build codec literals
         // or overwrite `HandlerConfig::caps` (which is SSOT-derived). Scan only
@@ -679,6 +570,10 @@ mod production_codec_caps_tests {
         assert!(!production.contains("video_codecs:"), "main must not build video codec literals");
         assert!(!production.contains("audio_codecs:"), "main must not build audio codec literals");
         assert!(!production.contains("RoomCaps {"), "main must not construct RoomCaps literals");
-        assert!(production.contains(".with_dtls_srtp(vks_server::webrtc_runtime::enabled())"));
+        assert!(production.contains(".with_dtls_srtp(true)"), "the only media plane is DTLS-SRTP");
+        // T11c: no fake answer material and no plaintext media loop in the binary.
+        for legacy in ["sfuufrag", "FF:00:11", "UdpMediaLoop", "media_listen_addr", "route_udp_packet"] {
+            assert!(!production.contains(legacy), "binary still references the deleted plane: {legacy}");
+        }
     }
 }

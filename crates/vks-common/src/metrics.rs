@@ -97,9 +97,12 @@ pub static WEBRTC_SOURCES: LazyLock<IntCounterVec> = LazyLock::new(|| {
         .expect("vks_webrtc_sources_total must register once")
 });
 
-/// Counter: offers that fell back to the legacy (non-WebRTC) answer.
+/// Counter: offers the real WebRTC transport rejected (`offer_rejected`).
+///
+/// T11c D4: there is no legacy fallback any more, so this metric must never
+/// grow a `disabled`/`legacy_offer` label.
 pub static WEBRTC_FALLBACK: LazyLock<IntCounterVec> = LazyLock::new(|| {
-    register_int_counter_vec!("vks_webrtc_fallback_total", "WebRTC fallback events", &["reason"])
+    register_int_counter_vec!("vks_webrtc_fallback_total", "Rejected WebRTC offers (no legacy fallback)", &["reason"])
         .expect("vks_webrtc_fallback_total must register once")
 });
 
@@ -273,7 +276,7 @@ pub fn init_default() {
         for result in ["allocated", "retired", "dropped_no_mid"] {
             WEBRTC_SOURCES.with_label_values(&[result]);
         }
-        WEBRTC_FALLBACK.with_label_values(&["disabled"]);
+        WEBRTC_FALLBACK.with_label_values(&["offer_rejected"]);
         for result in ["engine", "pending", "saved-only"] {
             LAYOUT_APPLY.with_label_values(&[result]);
         }

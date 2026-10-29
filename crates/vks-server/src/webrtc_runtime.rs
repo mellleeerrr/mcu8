@@ -6,27 +6,65 @@
 //! re-offer needs one round-trip to the peer's task; a brand-new offer is
 //! registered by the peer task and then re-validated under the admission lock,
 //! so the room-shape decision cannot be stale after the await).
-//! Real WebRTC is the default media plane: `VKS_WEBRTC_TRANSPORT` must be
-//! explicitly `0`/`false`/`off`/`no` to fall back to the legacy hand-built SDP
-//! answer (escape hatch for old clients and for bisecting live E2E failures).
-//! Enabled transport is fail-closed: a bad candidate address aborts startup
-//! instead of silently serving fake DTLS credentials.
+//!
+//! There is exactly one media plane: real DTLS/SRTP. `VKS_WEBRTC_TRANSPORT`
+//! is mandatory and has no off switch — unset/empty/garbage/`0` is a startup
+//! configuration error (exit 78). The legacy hand-built SDP answer and its
+//! plaintext UDP path were deleted in T11c, so silently "disabling" the
+//! transport would start a server that cannot serve media at all.
 
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use vks_common::metrics::WEBRTC_FALLBACK;
 use vks_media_sfu::webrtc::WebRtcConfig;
 use vks_media_sfu::webrtc_room::{AcceptedPeer, RoomLimits, WebRtcRoomRegistry};
 use vks_signaling::handler::HandlerConfig;
 
-/// `VKS_WEBRTC_TRANSPORT` defaults to ON (real str0m transport). Accepts
-/// 0/false/off/no as an explicit opt-out; an empty value keeps the default.
-pub fn enabled() -> bool {
-    match std::env::var("VKS_WEBRTC_TRANSPORT") {
-        Ok(value) => !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
-        Err(_) => true,
+/// The single place where the transport env var is named.
+pub const TRANSPORT_ENV: &str = "VKS_WEBRTC_TRANSPORT";
+
+/// Media-plane health as proven by the last startup preflight.
+///
+/// `/readyz` reads this through `AppState::is_media_healthy` (set from here by
+/// `main`), so readiness reflects a real candidate/socket/port check instead
+/// of a hardcoded `true`.
+static MEDIA_HEALTHY: AtomicBool = AtomicBool::new(false);
+
+/// Strict `VKS_WEBRTC_TRANSPORT` contract.
+///
+/// Only `1/true/on/yes` (case-insensitive, trimmed) enable the mandatory
+/// transport. Missing, empty, `0/false/off/no` (the removed opt-out) and any
+/// typo are configuration errors, not a default.
+pub fn parse_transport_env(raw: Option<&str>) -> Result<(), String> {
+    let Some(raw) = raw else {
+        return Err(format!(
+            "{TRANSPORT_ENV} is required and has no default: set {TRANSPORT_ENV}=1 \
+             (the legacy plaintext media plane was removed)"
+        ));
+    };
+    let value = raw.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "1" | "true" | "on" | "yes" => Ok(()),
+        "0" | "false" | "off" | "no" => Err(format!(
+            "{TRANSPORT_ENV}={raw:?}: the legacy plaintext media plane was removed; \
+             there is no off switch — set {TRANSPORT_ENV}=1"
+        )),
+        "" => Err(format!(
+            "{TRANSPORT_ENV} is empty: set {TRANSPORT_ENV}=1 \
+             (the legacy plaintext media plane was removed)"
+        )),
+        _ => Err(format!(
+            "{TRANSPORT_ENV}={raw:?} is not a valid value: only 1/true/on/yes is accepted \
+             (the legacy plaintext media plane was removed)"
+        )),
     }
+}
+
+/// Reads and validates [`TRANSPORT_ENV`] once, before storage is opened.
+pub fn require_transport() -> Result<(), String> {
+    let raw = std::env::var(TRANSPORT_ENV).ok();
+    parse_transport_env(raw.as_deref())
 }
 
 /// Validates the advertised candidate address.
@@ -38,7 +76,9 @@ pub fn enabled() -> bool {
 fn validate_candidate(candidate: &str, allow_loopback: bool) -> Result<IpAddr, String> {
     let candidate = candidate.trim();
     if candidate.is_empty() {
-        return Err("VKS_WEBRTC_TRANSPORT is enabled but candidate_addr is empty".into());
+        return Err(format!(
+            "{TRANSPORT_ENV}=1 requires candidate_addr: set VKS_CANDIDATE_ADDR/network.candidate_addr"
+        ));
     }
     let ip: IpAddr =
         candidate.parse().map_err(|error| format!("candidate_addr {candidate:?} is not a valid IP: {error}"))?;
@@ -70,9 +110,6 @@ fn validate_candidate(candidate: &str, allow_loopback: bool) -> Result<IpAddr, S
 }
 
 /// Validates WebRTC deployment settings before the listener starts.
-///
-/// Returns `Err` when the transport is enabled but cannot work; `main` exits
-/// nonzero instead of silently falling back to the fake legacy SDP.
 pub fn preflight(config: &HandlerConfig, allow_loopback: bool) -> Result<(), String> {
     preflight_candidate(&config.candidate_addr, allow_loopback)
 }
@@ -80,9 +117,12 @@ pub fn preflight(config: &HandlerConfig, allow_loopback: bool) -> Result<(), Str
 /// Same checks for a raw configured candidate (used before storage is opened,
 /// so a bad candidate exits 78 without creating/locking the database).
 pub fn preflight_candidate(candidate_addr: &str, allow_loopback: bool) -> Result<(), String> {
-    if !enabled() {
-        return Ok(());
-    }
+    let result = preflight_candidate_inner(candidate_addr, allow_loopback);
+    MEDIA_HEALTHY.store(result.is_ok(), Ordering::SeqCst);
+    result
+}
+
+fn preflight_candidate_inner(candidate_addr: &str, allow_loopback: bool) -> Result<(), String> {
     // Admission limits are part of the startup contract: a typo in
     // VKS_WEBRTC_MAX_PEERS_PER_ROOM / VKS_WEBRTC_MAX_PEERS must exit 78, not
     // silently fall back to a default (T11b D3).
@@ -129,6 +169,11 @@ pub fn preflight_candidate(candidate_addr: &str, allow_loopback: bool) -> Result
     Ok(())
 }
 
+/// Media health proven by the last preflight (used by `main` for `/readyz`).
+pub fn media_healthy() -> bool {
+    MEDIA_HEALTHY.load(Ordering::SeqCst)
+}
+
 /// Process-wide admission lock: serialises "check room shape -> register
 /// peer/gateway" and mode eviction, so a browser offer, SIP/H.323 landing and
 /// MCU switch cannot interleave into a half-bridged room.
@@ -140,97 +185,117 @@ pub fn admission() -> std::sync::MutexGuard<'static, ()> {
 /// Evicts real peers from one room (or all rooms) on an MCU mode switch.
 pub fn evict_rooms(room: Option<vks_core::RoomId>) {
     let _admission = admission();
-    if let Some(registry) = REGISTRY.get().and_then(|registry| registry.as_ref()) {
+    if let Some(registry) = REGISTRY.get().and_then(|registry| registry.as_ref().ok()) {
         registry.evict(room);
     }
 }
 
 /// Whether any participant in this room has a real str0m transport.
 pub fn room_has_peer(room: vks_core::RoomId) -> bool {
-    REGISTRY.get().and_then(|registry| registry.as_ref()).is_some_and(|registry| registry.room_has_peer(room))
+    REGISTRY.get().and_then(|registry| registry.as_ref().ok()).is_some_and(|registry| registry.room_has_peer(room))
 }
 
-static REGISTRY: OnceLock<Option<Arc<WebRtcRoomRegistry>>> = OnceLock::new();
+static REGISTRY: OnceLock<Result<Arc<WebRtcRoomRegistry>, String>> = OnceLock::new();
+
+fn build_registry(config: &HandlerConfig) -> Result<Arc<WebRtcRoomRegistry>, String> {
+    let ip: IpAddr = config
+        .candidate_addr
+        .parse()
+        .map_err(|error| format!("WebRTC candidate_addr {:?} is not a valid IP: {error}", config.candidate_addr))?;
+    if ip.is_loopback() && std::env::var("VKS_ALLOW_LOOPBACK_MEDIA").as_deref() != Ok("1") {
+        tracing::warn!(
+            candidate = %ip,
+            "WebRTC: loopback candidate is only reachable from this host; set VKS_ALLOW_LOOPBACK_MEDIA=1 for local tests"
+        );
+    }
+    let mut webrtc = WebRtcConfig::default();
+    if let Ok(value) = std::env::var("VKS_WEBRTC_BWE_INITIAL_BPS") {
+        if let Ok(bps) = value.parse::<u64>() {
+            webrtc.bwe_initial_bps = bps.clamp(64_000, 50_000_000);
+        }
+    }
+    // Fail closed: if `preflight` was skipped (library embedder), an invalid
+    // cap must still refuse the WebRTC plane rather than admit peers with a
+    // silent default.
+    let limits = RoomLimits::from_env().map_err(|error| format!("invalid WebRTC admission limits: {error}"))?;
+    Ok(WebRtcRoomRegistry::with_limits(webrtc, ip, limits))
+}
 
 /// Returns the process-wide registry, creating it once on the current runtime.
-pub fn registry(config: &HandlerConfig) -> Option<Arc<WebRtcRoomRegistry>> {
-    if !enabled() {
-        return None;
-    }
-    REGISTRY
-        .get_or_init(|| {
-            let ip: IpAddr = match config.candidate_addr.parse() {
-                Ok(ip) => ip,
-                Err(error) => {
-                    tracing::error!(
-                        candidate = %config.candidate_addr,
-                        %error,
-                        "WebRTC: candidate_addr is not a valid IP; offers will fail closed"
-                    );
-                    return None;
-                }
-            };
-            if ip.is_loopback() && std::env::var("VKS_ALLOW_LOOPBACK_MEDIA").as_deref() != Ok("1") {
-                tracing::warn!(
-                    candidate = %ip,
-                    "WebRTC: loopback candidate is only reachable from this host; set VKS_ALLOW_LOOPBACK_MEDIA=1 for local tests"
-                );
-            }
-            let mut webrtc = WebRtcConfig::default();
-            if let Ok(value) = std::env::var("VKS_WEBRTC_BWE_INITIAL_BPS") {
-                if let Ok(bps) = value.parse::<u64>() {
-                    webrtc.bwe_initial_bps = bps.clamp(64_000, 50_000_000);
-                }
-            }
-            // Fail closed: if `preflight` was skipped (library embedder), an
-            // invalid cap must still refuse the WebRTC plane rather than admit
-            // peers with a silent default.
-            let limits = match RoomLimits::from_env() {
-                Ok(limits) => limits,
-                Err(error) => {
-                    tracing::error!(%error, "WebRTC: invalid admission limits; offers fail closed");
-                    return None;
-                }
-            };
-            Some(WebRtcRoomRegistry::with_limits(webrtc, ip, limits))
-        })
-        .clone()
+///
+/// The candidate comes from the first `HandlerConfig` (in production this is
+/// the already-preflighted `VKS_CANDIDATE_ADDR`; in tests it is
+/// `HandlerConfig::default_test` = `127.0.0.1`). An invalid candidate is a
+/// hard error: the caller fails the offer closed instead of binding elsewhere.
+pub fn registry(config: &HandlerConfig) -> Result<Arc<WebRtcRoomRegistry>, String> {
+    REGISTRY.get_or_init(|| build_registry(config)).clone()
 }
 
 /// Whether this participant currently has a real str0m transport.
 pub fn has_peer(room: vks_core::RoomId, participant: vks_core::ParticipantId) -> bool {
-    REGISTRY.get().and_then(|registry| registry.as_ref()).is_some_and(|registry| registry.has_peer(room, participant))
+    REGISTRY
+        .get()
+        .and_then(|registry| registry.as_ref().ok())
+        .is_some_and(|registry| registry.has_peer(room, participant))
 }
 
 /// Removes a participant's real transport, if the registry was initialized.
 pub fn remove(room: vks_core::RoomId, participant: vks_core::ParticipantId) {
-    if let Some(Some(registry)) = REGISTRY.get() {
+    if let Some(Ok(registry)) = REGISTRY.get() {
         registry.remove(room, participant);
     }
 }
 
+/// Accepts a browser offer and returns the real str0m answer.
 ///
-/// Errors are returned to the caller, which fails the offer closed (the legacy
-/// answer is used only when the transport is disabled, never as a fallback)
-/// instead of dropping the signalling session.
+/// Errors are returned to the caller, which fails the offer closed with an
+/// explicit `Payload::Error`; there is no fallback answer to build.
 pub async fn accept_offer(
     config: &HandlerConfig,
     room: vks_core::RoomId,
     participant: vks_core::ParticipantId,
     offer_sdp: &str,
-) -> Option<Result<AcceptedPeer, vks_media_sfu::WebRtcError>> {
-    let Some(registry) = registry(config) else {
-        WEBRTC_FALLBACK.with_label_values(&["disabled"]).inc();
-        return None;
-    };
+) -> Result<AcceptedPeer, vks_media_sfu::WebRtcError> {
+    let registry = registry(config).map_err(|error| {
+        tracing::error!(%error, "WebRTC: registry is unavailable; offer fails closed");
+        vks_media_sfu::WebRtcError::Net(format!("WebRTC registry is unavailable: {error}"))
+    })?;
     // Re-offer is negotiated on the existing str0m session (same ICE/DTLS and
     // socket); a stale/failed peer is only replaced by a fresh registration.
-    Some(registry.accept_offer(room, participant, offer_sdp).await)
+    registry.accept_offer(room, participant, offer_sdp).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_setting_is_strict_and_has_no_off_switch() {
+        for raw in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("garbage"),
+            Some("2"),
+            Some("trueish"),
+            Some("0"),
+            Some("false"),
+            Some("FALSE"),
+            Some("off"),
+            Some("no"),
+        ] {
+            let error = parse_transport_env(raw).expect_err("must be rejected");
+            assert!(error.contains(TRANSPORT_ENV), "error must name the variable: {error}");
+        }
+        for raw in [Some("1"), Some("true"), Some("TRUE"), Some("on"), Some("yes"), Some("  on  "), Some(" Yes ")] {
+            assert_eq!(parse_transport_env(raw), Ok(()), "{raw:?} must enable the only media plane");
+        }
+        // The removed opt-out must say why it is not a rollback switch.
+        let off = parse_transport_env(Some("0")).expect_err("0 is not an off switch");
+        assert!(off.contains("legacy plaintext media plane was removed"), "{off}");
+        let unset = parse_transport_env(None).expect_err("unset is mandatory");
+        assert!(unset.contains("required"), "{unset}");
+    }
 
     #[test]
     fn candidate_validation_is_fail_closed() {
@@ -244,5 +309,21 @@ mod tests {
         assert!(validate_candidate("0.0.0.0", false).is_err(), "unspecified must fail");
         assert_eq!(validate_candidate("192.168.1.93", false).unwrap().to_string(), "192.168.1.93");
         assert!(validate_candidate("127.0.0.1", true).is_ok(), "explicit dev config may use loopback");
+    }
+
+    /// `/readyz` media flag comes from a real candidate/socket/port preflight,
+    /// not from a hardcoded `true`.
+    #[test]
+    fn media_health_comes_from_preflight() {
+        assert!(preflight_candidate("127.0.0.1", true).is_ok(), "loopback dev candidate must pass");
+        assert!(media_healthy(), "successful preflight must report healthy media");
+
+        let error = preflight_candidate("", true).expect_err("empty candidate must fail");
+        assert!(error.contains("candidate_addr"), "{error}");
+        assert!(!media_healthy(), "failed preflight must report unhealthy media");
+
+        let error = preflight_candidate("192.0.2.10", true).expect_err("TEST-NET must fail");
+        assert!(error.contains("TEST-NET"), "{error}");
+        assert!(!media_healthy(), "failed preflight must clear the media flag");
     }
 }

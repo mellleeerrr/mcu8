@@ -52,14 +52,15 @@ use crate::frontend::{statics_rel_path, Frontend};
 pub mod transcoder_runtime;
 pub mod webrtc_runtime;
 
-/// Контекст для WebSocket-сигналинга (состояние приложения + конфигурация сессии + медиа-движки SFU/MCU + UDP-луп + сервисы M5).
+/// Контекст для WebSocket-сигналинга (состояние приложения + конфигурация
+/// сессии + roster SFU/MCU + сервисы M5). Медиа несёт str0m-пир, а не этот
+/// контекст: plaintext UDP-луп удалён в T11c.
 #[derive(Clone)]
 pub struct WsContext {
     pub state: Arc<AppState>,
     pub handler_config: HandlerConfig,
-    pub sfu_engine: Arc<vks_media_sfu::SfuEngine>,
+    pub sfu_engine: Arc<vks_media_sfu::MediaRegistry>,
     pub mcu_engine: Arc<vks_media_mcu::McuEngine>,
-    pub udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
     pub gateways: Arc<GatewayManager>,
     pub recorder: Arc<RecorderManager>,
     pub cluster: Arc<ClusterManager>,
@@ -72,38 +73,36 @@ pub fn build_app(state: Arc<AppState>, frontend: &Frontend) -> Router {
 
 /// Собирает полное приложение сервера с заданной конфигурацией обработчика сигналинга.
 pub fn build_app_with_config(state: Arc<AppState>, frontend: &Frontend, handler_config: HandlerConfig) -> Router {
-    build_app_with_engine(state, frontend, handler_config, Arc::new(vks_media_sfu::SfuEngine::new()))
+    build_app_with_engine(state, frontend, handler_config, Arc::new(vks_media_sfu::MediaRegistry::new()))
 }
 
-/// Собирает полное приложение сервера с заданной конфигурацией сигналинга и инстансом SFU-движка.
+/// Собирает полное приложение сервера с заданным roster-инстансом SFU.
 pub fn build_app_with_engine(
     state: Arc<AppState>,
     frontend: &Frontend,
     handler_config: HandlerConfig,
-    sfu_engine: Arc<vks_media_sfu::SfuEngine>,
+    sfu_engine: Arc<vks_media_sfu::MediaRegistry>,
 ) -> Router {
-    build_app_full(state, frontend, handler_config, sfu_engine, None)
+    build_app_full(state, frontend, handler_config, sfu_engine)
 }
 
-/// Собирает полное приложение сервера с полной поддержкой WebRTC (SFU + UDP медиа-луп).
+/// Собирает полное приложение сервера с полной поддержкой WebRTC.
 pub fn build_app_full(
     state: Arc<AppState>,
     frontend: &Frontend,
     handler_config: HandlerConfig,
-    sfu_engine: Arc<vks_media_sfu::SfuEngine>,
-    udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
+    sfu_engine: Arc<vks_media_sfu::MediaRegistry>,
 ) -> Router {
-    build_app_with_mcu(state, frontend, handler_config, sfu_engine, Arc::new(vks_media_mcu::McuEngine::new()), udp_loop)
+    build_app_with_mcu(state, frontend, handler_config, sfu_engine, Arc::new(vks_media_mcu::McuEngine::new()))
 }
 
-/// Собирает полное приложение сервера с полной поддержкой WebRTC (SFU + MCU + UDP медиа-луп).
+/// Собирает полное приложение сервера с полной поддержкой WebRTC (SFU roster + MCU).
 pub fn build_app_with_mcu(
     state: Arc<AppState>,
     frontend: &Frontend,
     handler_config: HandlerConfig,
-    sfu_engine: Arc<vks_media_sfu::SfuEngine>,
+    sfu_engine: Arc<vks_media_sfu::MediaRegistry>,
     mcu_engine: Arc<vks_media_mcu::McuEngine>,
-    udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
 ) -> Router {
     build_app_with_services(
         state,
@@ -111,22 +110,20 @@ pub fn build_app_with_mcu(
         handler_config,
         sfu_engine,
         mcu_engine.clone(),
-        udp_loop,
         Arc::new(GatewayManager::new().with_mcu(mcu_engine)),
         Arc::new(RecorderManager::new()),
         Arc::new(ClusterManager::new("vks-node-1")),
     )
 }
 
-/// Собирает полное приложение сервера с полной поддержкой всех сервисов M5 (шлюзы, рекордер, кластер) и медиа-движков SFU/MCU (Package D).
+/// Собирает полное приложение сервера с полной поддержкой всех сервисов M5 (шлюзы, рекордер, кластер) и roster-движков SFU/MCU (Package D).
 #[allow(clippy::too_many_arguments)]
 pub fn build_app_with_services(
     state: Arc<AppState>,
     frontend: &Frontend,
     handler_config: HandlerConfig,
-    sfu_engine: Arc<vks_media_sfu::SfuEngine>,
+    sfu_engine: Arc<vks_media_sfu::MediaRegistry>,
     mcu_engine: Arc<vks_media_mcu::McuEngine>,
-    udp_loop: Option<Arc<vks_media_sfu::udp_loop::UdpMediaLoop>>,
     gateways: Arc<GatewayManager>,
     recorder: Arc<RecorderManager>,
     cluster: Arc<ClusterManager>,
@@ -151,7 +148,6 @@ pub fn build_app_with_services(
         handler_config,
         sfu_engine,
         mcu_engine,
-        udp_loop,
         gateways: gateways.clone(),
         recorder: recorder.clone(),
         cluster: cluster.clone(),
@@ -531,19 +527,6 @@ const MAX_WS_TRANSPORT_BYTES: usize = MAX_WS_MESSAGE_BYTES * 4;
 /// Лимит частоты: не более 60 сообщений/сек на соединение.
 const MAX_WS_MESSAGES_PER_SEC: usize = 60;
 
-/// Парсит IP и порт из строки SDP ICE-кандидата.
-fn parse_ice_candidate_addr(candidate: &str) -> Option<std::net::SocketAddr> {
-    let s = candidate.strip_prefix("candidate:").unwrap_or(candidate).trim();
-    let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() >= 6 {
-        let ip = parts[4];
-        let port = parts[5].parse::<u16>().ok()?;
-        format!("{ip}:{port}").parse().ok()
-    } else {
-        None
-    }
-}
-
 /// Ищет UUID в произвольном идентификаторе: целиком, в токене или скользящим
 /// окном 36 байт (UTF-8-safe). `None` — UUID нет, вызывающий решает сам
 /// (хешировать нельзя: слот раскладки никогда не совпадёт с реальным участником).
@@ -602,7 +585,7 @@ struct ActiveMembership {
 
 async fn cleanup_active_membership(
     membership: &mut Option<ActiveMembership>,
-    sfu_engine: &vks_media_sfu::SfuEngine,
+    sfu_engine: &vks_media_sfu::MediaRegistry,
     mcu_engine: &vks_media_mcu::McuEngine,
     state: &AppState,
     reason: u64,
@@ -641,48 +624,13 @@ async fn cleanup_active_membership(
     }
 }
 
-/// `b=AS` для SFU-ответа из живого профиля комнаты (конференция имеет
-/// приоритет над глобальным env); SFU не перекодирует, но обязан честно
-/// объявить полосу, которую реально отдаёт браузеру.
-/// Какие PT из `SdpAnswer.rtp_map` нужно переписать на egress SFU.
-/// Функция ровно та, что вызывает WS-обработчик после успешного offer.
-/// Offers without ICE/DTLS material are legacy clients (and integration
-/// tests): they keep the old hand-built answer. A real offer that str0m
-/// rejects is failed closed instead.
+/// Whether an SDP offer carries real ICE/DTLS material.
+///
+/// The plaintext plane is gone (T11c): an offer without ICE credentials and a
+/// DTLS fingerprint is rejected with an explicit error, never answered with
+/// fake credentials.
 fn offer_supports_real_webrtc(sdp: &str) -> bool {
     sdp.contains("a=ice-ufrag:") && sdp.contains("a=ice-pwd:") && sdp.contains("a=fingerprint:")
-}
-
-fn answer_payload_types(maps: &[vks_proto::signaling::RtpMap]) -> Vec<(vks_core::MediaKind, u8)> {
-    maps.iter()
-        .filter_map(|map| {
-            // Codec identity/class comes from the SSOT, not a second literal
-            // table: a new codec in the answer must not be silently dropped
-            // (and an unsupported one must not be guessed by spelling).
-            let kind = match vks_common::codec_spec::lookup(&map.codec)?.kind {
-                vks_common::codec_spec::CodecKind::Audio => vks_core::MediaKind::Audio,
-                vks_common::codec_spec::CodecKind::Video => vks_core::MediaKind::Video,
-                // RFC 4733 telephone-event rides the audio m-line but is not a
-                // selectable media codec.
-                vks_common::codec_spec::CodecKind::Dtmf => return None,
-            };
-            u8::try_from(map.payload).ok().map(|payload_type| (kind, payload_type))
-        })
-        .collect()
-}
-
-fn conference_video_bitrate(value: Option<&serde_json::Value>) -> Option<u32> {
-    let value = value?;
-    let payload = value.get("payload").unwrap_or(value);
-    payload
-        .get("bitrate")
-        .and_then(serde_json::Value::as_u64)
-        .map(|bitrate| u32::try_from(bitrate.clamp(64, 8192)).unwrap_or(2048))
-}
-
-fn room_video_bitrate(state: &Arc<AppState>, room: &vks_core::RoomId) -> Option<u32> {
-    let settings = state.api_v3.conference_settings.lock().ok()?;
-    conference_video_bitrate(settings.get(room))
 }
 
 /// Обработка сессии WebSocket-сигналинга.
@@ -696,10 +644,6 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
     let mut handler = SignalingHandler::new(handler_config.clone());
     let state = ctx.state;
     let mut current_membership: Option<ActiveMembership> = None;
-    // Set when the current SDP offer was answered by the real str0m peer; the
-    // legacy plaintext PT/SSRC/endpoint side effects are skipped for it.
-    let mut real_webrtc_peer;
-    let mut real_webrtc_attempted = false;
     let mut room_rx: Option<tokio::sync::broadcast::Receiver<vks_admin::hub::RoomBroadcastEvent>> = None;
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -885,74 +829,50 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                     }
                                 }
 
-                                // Живой профиль комнаты попадает в SFU-ответ до
-                                // FSM: PATCH комнаты применяется к следующему offer.
-                                if matches!(payload_opt, Some(Payload::SdpOffer(_))) {
-                                    if let Some(room) = handler
-                                        .room_id()
-                                        .and_then(|value| uuid::Uuid::parse_str(value).ok())
-                                        .map(vks_core::RoomId::from_uuid)
-                                    {
-                                        if let Some(bitrate) = room_video_bitrate(&state, &room) {
-                                            handler.set_video_bitrate(bitrate);
-                                        }
-                                    }
-                                }
                                 // Запрос исполняет FSM; сайд-эффекты — только по успешному результату.
                                 let request_msg_id = env.msg_id();
                                 let mut webrtc_failure: Option<(&'static str, String)> = None;
+                                // The handler is transport-agnostic: it validates the offer
+                                // and moves the FSM, but never returns SdpAnswer (T11c).
                                 let mut replies = handler.handle(env);
+                                let mut accepted_peer: Option<vks_media_sfu::AcceptedPeer> = None;
 
-                                // Real WebRTC transport: replace the legacy hand-built
-                                // answer before it is sent. If the transport is enabled
-                                // but rejects the offer, fail closed with Payload::Error;
-                                // only an explicit VKS_WEBRTC_TRANSPORT=0 may use legacy.
-                                real_webrtc_peer = false;
                                 if let (Some(Payload::SdpOffer(ref offer)), Some(ref membership)) =
                                     (&payload_opt, &current_membership)
                                 {
-                                    let _admission = crate::webrtc_runtime::admission();
-                                    // Re-check the room shape under the admission
-                                    // lock, not only before handler.handle.
-                                    let gateway_room = state.room_hub.list_participants(&membership.room_id).iter().any(
-                                        |participant| {
-                                            participant.participant_id.contains("@sip-gateway")
-                                                || participant.participant_id.contains("@h323-gateway")
-                                        },
-                                    );
-                                    // Mode may have switched while we waited for the
-                                    // admission lock; the decision must use the lock-time value.
-                                    let effective_room_mode = state
-                                        .mode
-                                        .lock()
-                                        .ok()
-                                        .map(|mode| mode.effective_mode(&membership.room_id))
-                                        .unwrap_or(vks_core::RoomMode::Sfu);
-                                    if replies.iter().any(|r| matches!(r.payload(), Some(Payload::SdpAnswer(_)))) {
-                                        let pid = parse_participant_id(&membership.participant_id);
+                                    let pid = parse_participant_id(&membership.participant_id);
+                                    // A malformed/out-of-state offer already produced an
+                                    // Error reply; never start a transport for it.
+                                    if replies.is_empty() {
+                                        let _admission = crate::webrtc_runtime::admission();
+                                        // Re-check the room shape under the admission
+                                        // lock, not only before handler.handle.
+                                        let gateway_room = state.room_hub.list_participants(&membership.room_id).iter().any(
+                                            |participant| {
+                                                participant.participant_id.contains("@sip-gateway")
+                                                    || participant.participant_id.contains("@h323-gateway")
+                                            },
+                                        );
+                                        // Mode may have switched while we waited for the
+                                        // admission lock; the decision must use the lock-time value.
+                                        let effective_room_mode = state
+                                            .mode
+                                            .lock()
+                                            .ok()
+                                            .map(|mode| mode.effective_mode(&membership.room_id))
+                                            .unwrap_or(vks_core::RoomMode::Sfu);
                                         if !offer_supports_real_webrtc(&offer.sdp) {
-                                            vks_common::metrics::WEBRTC_FALLBACK
-                                                .with_label_values(&["legacy_offer"])
-                                                .inc();
-                                            if crate::webrtc_runtime::enabled() {
-                                                // Enabled transport is authoritative: a
-                                                // non-ICE offer would receive fake DTLS
-                                                // credentials, so reject it instead.
-                                                real_webrtc_attempted = true;
-                                                webrtc_failure = Some((
-                                                    "webrtc_offer_unsupported",
-                                                    "WebRTC transport is enabled; SDP offer has no ICE/DTLS material"
-                                                        .to_string(),
-                                                ));
-                                            }
+                                            webrtc_failure = Some((
+                                                "webrtc_offer_unsupported",
+                                                "SDP offer has no ICE/DTLS material; the legacy plaintext answer plane was removed"
+                                                    .to_string(),
+                                            ));
                                         } else if effective_room_mode == vks_core::RoomMode::Mcu {
-                                            real_webrtc_attempted = true;
                                             webrtc_failure = Some((
                                                 "webrtc_mcu_room_unsupported",
                                                 "Real WebRTC is not bridged into MCU-mode rooms".to_string(),
                                             ));
                                         } else if gateway_room {
-                                            real_webrtc_attempted = true;
                                             warn!(
                                                 room = %membership.room_id,
                                                 participant = %pid,
@@ -967,7 +887,6 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             // async re-negotiation: holding a std
                                             // MutexGuard across `.await` is not Send.
                                             drop(_admission);
-                                            real_webrtc_attempted = true;
                                             match crate::webrtc_runtime::accept_offer(
                                                 &handler_config,
                                                 membership.room_id,
@@ -976,7 +895,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             )
                                             .await
                                             {
-                                                Some(Ok(accepted)) => {
+                                                Ok(accepted) => {
                                                     // The peer registered asynchronously without
                                                     // the admission lock; re-validate the room
                                                     // shape under it so a gateway landing or MCU
@@ -999,46 +918,45 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                         !gateway_now && mode_now != vks_core::RoomMode::Mcu
                                                     };
                                                     if !still_ok {
-                                                        if let Some(registry) =
-                                                            crate::webrtc_runtime::registry(&handler_config)
-                                                        {
-                                                            registry.remove(membership.room_id, pid);
-                                                        }
-                                                        real_webrtc_peer = false;
+                                                        crate::webrtc_runtime::remove(membership.room_id, pid);
                                                         webrtc_failure = Some((
                                                             "webrtc_room_changed",
                                                             "Room shape changed during negotiation (gateway/MCU); retry"
                                                                 .to_string(),
                                                         ));
                                                     } else {
-                                                    let rtp_maps = accepted.rtp_maps;
-                                                    if let Some(answer) = replies.iter_mut().find_map(|reply| {
-                                                        match reply.payload_mut() {
-                                                            Some(Payload::SdpAnswer(answer)) => Some(answer),
-                                                            _ => None,
-                                                        }
-                                                    }) {
-                                                        answer.sdp = accepted.answer_sdp;
-                                                        answer.rtp_map = rtp_maps
-                                                            .into_iter()
-                                                            .map(|(payload, codec, clock, channels)| vks_proto::signaling::RtpMap {
-                                                                payload: u32::from(payload),
-                                                                codec,
-                                                                clock,
-                                                                channels,
+                                                        let rtp_map = accepted
+                                                            .rtp_maps
+                                                            .iter()
+                                                            .map(|(payload, codec, clock, channels)| {
+                                                                vks_proto::signaling::RtpMap {
+                                                                    payload: u32::from(*payload),
+                                                                    codec: codec.clone(),
+                                                                    clock: *clock,
+                                                                    channels: *channels,
+                                                                }
                                                             })
                                                             .collect();
-                                                    }
-                                                    real_webrtc_peer = true;
-                                                    ctx.sfu_engine.remove_endpoint(membership.room_id, pid);
-                                                    info!(
-                                                        room = %membership.room_id,
-                                                        participant = %pid,
-                                                        "WebRTC: real str0m transport accepted"
-                                                    );
+                                                        replies.push(Envelope::new(SignalingMessage {
+                                                            msg_id: 0,
+                                                            reply_to: request_msg_id,
+                                                            payload: Some(Payload::SdpAnswer(
+                                                                vks_proto::signaling::SdpAnswer {
+                                                                    sdp: accepted.answer_sdp.clone(),
+                                                                    rtp_map,
+                                                                },
+                                                            )),
+                                                        }));
+                                                        info!(
+                                                            room = %membership.room_id,
+                                                            participant = %pid,
+                                                            reoffered = accepted.reoffered,
+                                                            "WebRTC: real str0m transport accepted"
+                                                        );
+                                                        accepted_peer = Some(accepted);
                                                     }
                                                 }
-                                                Some(Err(error)) => {
+                                                Err(error) => {
                                                     warn!(
                                                         room = %membership.room_id,
                                                         participant = %pid,
@@ -1062,33 +980,28 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                         format!("Real WebRTC transport rejected the offer: {error}"),
                                                     ));
                                                 }
-                                                None => {
-                                                    if crate::webrtc_runtime::enabled() {
-                                                        webrtc_failure = Some((
-                                                            "webrtc_unavailable",
-                                                            "WebRTC transport is enabled but failed to initialize".to_string(),
-                                                        ));
-                                                    }
-                                                }
                                             }
                                         }
                                     }
                                 }
-                                // The real transport is authoritative whenever it is
-                                // enabled: never answer with fake ICE/DTLS credentials if
-                                // str0m rejected the offer.
+                                // There is no fake answer to fall back to: a failed
+                                // real transport is an explicit Error, and the FSM is
+                                // rolled back so the same socket can retry.
                                 if let Some((code, message)) = webrtc_failure {
-                                    // handler.handle already moved InRoom->Negotiating;
-                                    // without rollback a retry on the same socket is
-                                    // rejected as bad_state.
                                     handler.rollback_offer();
                                     replies.retain(|reply| !matches!(reply.payload(), Some(Payload::SdpAnswer(_))));
                                     let retryable =
                                         matches!(
                                             code,
-                                            "room_full" | "webrtc_capacity" | "webrtc_room_changed" | "webrtc_offer_retry"
+                                            "room_full"
+                                                | "webrtc_capacity"
+                                                | "webrtc_room_changed"
+                                                | "webrtc_offer_retry"
+                                                | "webrtc_offer_unsupported"
                                         );
                                     replies.push(Envelope::error_reply(request_msg_id, code, &message, retryable));
+                                    // D4: the fallback metric only counts rejected
+                                    // offers; there is no legacy fallback any more.
                                     vks_common::metrics::WEBRTC_FALLBACK
                                         .with_label_values(&["offer_rejected"])
                                         .inc();
@@ -1097,152 +1010,85 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                 let joined_ok = replies.iter().any(|r| matches!(r.payload(), Some(Payload::JoinRoomResult(_))));
                                 let left_ok = was_leave && replies.iter().any(|r| matches!(r.payload(), Some(Payload::Ack(_))));
 
-                                // Mutate SFU engine only AFTER handler.handle successfully accepts the offer
-                                if let Some(Payload::SdpOffer(ref o)) = payload_opt {
-                                    if replies.iter().any(|r| matches!(r.payload(), Some(Payload::SdpAnswer(_)))) {
-                                        if let Ok(sdp) = vks_signaling::sdp::Sdp::parse(&o.sdp) {
-                                            if let Some(ref m) = current_membership {
-                                                let pid = parse_participant_id(&m.participant_id);
-                                                // The SDP answer can leave a video m-line
-                                                // rejected (e.g. H264-only publisher while we
-                                                // answer VP8). Do not announce tracks we did
-                                                // not actually negotiate.
-                                                let mut accepted_audio = true;
-                                                let mut accepted_video = true;
-                                                if let Some(answer) = replies.iter().find_map(|reply| match reply.payload() {
-                                                    Some(Payload::SdpAnswer(answer)) => Some(answer),
-                                                    _ => None,
-                                                }) {
-                                                    accepted_audio =
-                                                        answer.rtp_map.iter().any(|m| m.codec.eq_ignore_ascii_case("opus"));
-                                                    accepted_video = answer.rtp_map.iter().any(|m| {
-                                                        m.clock == 90000 && m.codec.to_ascii_uppercase().contains("VP8")
-                                                    });
-                                                    if !real_webrtc_peer {
-                                                        for (kind, payload_type) in answer_payload_types(&answer.rtp_map) {
-                                                            ctx.sfu_engine.set_subscriber_payload_type(
-                                                                m.room_id, pid, kind, payload_type,
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                                let tracks: Vec<vks_core::ports::media_engine::MediaTrack> =
-                                                    if real_webrtc_peer {
-                                                        // T11b: 1 + (N-1) m-lines per kind.
-                                                        real_peer_tracks(
-                                                            pid,
-                                                            &sdp.media,
-                                                            accepted_audio,
-                                                            accepted_video,
-                                                        )
-                                                    } else {
-                                                        let mut tracks = Vec::new();
-                                                        for media in &sdp.media {
-                                                            let track_kind = match media.kind {
-                                                                vks_signaling::sdp::MediaKind::Audio => {
-                                                                    vks_core::track::TrackKind::Audio
-                                                                }
-                                                                _ => vks_core::track::TrackKind::Video,
-                                                            };
-                                                            let track =
-                                                                vks_core::ports::media_engine::MediaTrack::new(pid, track_kind);
-                                                            for ssrc_str in &media.ssrcs {
-                                                                if let Ok(ssrc) = ssrc_str
-                                                                    .split_whitespace()
-                                                                    .next()
-                                                                    .unwrap_or("")
-                                                                    .parse::<u32>()
-                                                                {
-                                                                    ctx.sfu_engine.register_ssrc(m.room_id, pid, track.id, ssrc);
-                                                                }
-                                                            }
-                                                            tracks.push(track);
-                                                        }
-                                                        tracks
-                                                    };
-                                                if !tracks.is_empty() {
-                                                    // Публишер регистрируется в обоих движках при
-                                                    // любом транспорте: реестр паблишеров — это
-                                                    // состав участников и их треков, а не путь
-                                                    // доставки RTP (реальным WebRTC занимается
-                                                    // str0m). Раньше реальный пир в реестр не
-                                                    // попадал вовсе — участника не было видно
-                                                    // ни в списке треков, ни в раскладке.
-                                                    let previous_kinds =
-                                                        ctx.sfu_engine.publisher_track_kinds(m.room_id, pid);
-                                                    let _ = ctx.sfu_engine.add_publisher(m.room_id, pid, tracks.clone()).await;
-                                                    let _ = ctx.mcu_engine.add_publisher(m.room_id, pid, tracks.clone()).await;
-                                                    if real_webrtc_peer {
-                                                        // Реальный пир не подписан на композит
-                                                        // (своё медиа он получает через fanout
-                                                        // str0m), но обязан занять слот
-                                                        // раскладки: иначе `set_participant_frame`
-                                                        // выбросит его кадры.
-                                                        ctx.mcu_engine.seat_publisher(m.room_id, pid, tracks.clone());
-                                                    }
-                                                    // Announce only track kinds this participant
-                                                    // did not publish before (a re-offer must
-                                                    // not duplicate TrackAdded, but a newly
-                                                    // added audio/video track must be announced).
-                                                    let new_kinds = new_track_kinds(&previous_kinds, &tracks);
-                                                    for track in
-                                                        tracks.iter().filter(|track| new_kinds.contains(&track.media_kind))
-                                                    {
-                                                        let proto_kind = match track.media_kind {
-                                                            vks_core::MediaKind::Audio => vks_proto::media::TrackKind::Audio,
-                                                            vks_core::MediaKind::Video => vks_proto::media::TrackKind::Video,
-                                                            vks_core::MediaKind::Screen => vks_proto::media::TrackKind::Screen,
-                                                        };
-                                                        let proto_codec = match track.media_kind {
-                                                            vks_core::MediaKind::Audio => vks_proto::media::CodecId::Opus,
-                                                            _ => vks_proto::media::CodecId::Vp8,
-                                                        };
-                                                        let added_msg = SignalingMessage {
-                                                            msg_id: 0,
-                                                            reply_to: 0,
-                                                            payload: Some(Payload::TrackAdded(vks_proto::signaling::TrackAdded {
-                                                                participant_id: m.participant_id.clone(),
-                                                                track: Some(vks_proto::media::TrackInfo {
-                                                                    track_id: track.id.to_string(),
-                                                                    participant_id: m.participant_id.clone(),
-                                                                    kind: proto_kind as i32,
-                                                                    codec: proto_codec as i32,
-                                                                    ssrc: 0,
-                                                                    clock_rate: if proto_kind
-                                                                        == vks_proto::media::TrackKind::Audio
-                                                                    {
-                                                                        48_000
-                                                                    } else {
-                                                                        90_000
-                                                                    },
-                                                                    channels: if proto_kind
-                                                                        == vks_proto::media::TrackKind::Audio
-                                                                    {
-                                                                        2
-                                                                    } else {
-                                                                        0
-                                                                    },
-                                                                }),
-                                                            })),
-                                                        };
-                                                        let payload_bytes = Envelope::new(added_msg).encode();
-                                                        state.room_hub.broadcast(&m.room_id, Some(&m.participant_id), payload_bytes.into());
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // SFU ICE candidate exchange -> register participant UDP endpoint only if accepted
-                                if let Some(Payload::IceCandidate(ref c)) = payload_opt {
-                                    if !replies.iter().any(|r| matches!(r.payload(), Some(Payload::Error(_)))) {
-                                        if let Some(ref m) = current_membership {
-                                            let pid = parse_participant_id(&m.participant_id);
-                                            if !real_webrtc_attempted && !crate::webrtc_runtime::has_peer(m.room_id, pid) {
-                                                if let Some(addr) = parse_ice_candidate_addr(&c.candidate) {
-                                                    ctx.sfu_engine.register_endpoint(m.room_id, pid, addr);
-                                                }
+                                // Mutate the roster only AFTER a real answer was produced.
+                                if let (Some(Payload::SdpOffer(ref o)), Some(ref m), Some(ref accepted)) =
+                                    (&payload_opt, &current_membership, &accepted_peer)
+                                {
+                                    if let Ok(sdp) = vks_signaling::sdp::Sdp::parse(&o.sdp) {
+                                        let pid = parse_participant_id(&m.participant_id);
+                                        // The answer can leave a video m-line rejected
+                                        // (e.g. an H264-only publisher while we answer
+                                        // VP8). Do not announce tracks we did not negotiate.
+                                        let accepted_audio = accepted
+                                            .rtp_maps
+                                            .iter()
+                                            .any(|(_, codec, clock, _)| *clock == 48_000 && codec.eq_ignore_ascii_case("opus"));
+                                        let accepted_video = accepted.rtp_maps.iter().any(|(_, codec, clock, _)| {
+                                            *clock == 90_000 && codec.to_ascii_uppercase().contains("VP8")
+                                        });
+                                        // T11b: 1 + (N-1) m-lines per kind.
+                                        let tracks = real_peer_tracks(pid, &sdp.media, accepted_audio, accepted_video);
+                                        if !tracks.is_empty() {
+                                            // Публишер регистрируется в обоих движках:
+                                            // реестр паблишеров — это состав участников
+                                            // и их треков, а не путь доставки RTP.
+                                            let previous_kinds =
+                                                ctx.sfu_engine.publisher_track_kinds(m.room_id, pid);
+                                            let _ = ctx.sfu_engine.add_publisher(m.room_id, pid, tracks.clone()).await;
+                                            let _ = ctx.mcu_engine.add_publisher(m.room_id, pid, tracks.clone()).await;
+                                            // Реальный пир не подписан на композит
+                                            // (своё медиа он получает через fanout
+                                            // str0m), но обязан занять слот
+                                            // раскладки: иначе `set_participant_frame`
+                                            // выбросит его кадры.
+                                            ctx.mcu_engine.seat_publisher(m.room_id, pid, tracks.clone());
+                                            // Announce only track kinds this participant
+                                            // did not publish before (a re-offer must
+                                            // not duplicate TrackAdded, but a newly
+                                            // added audio/video track must be announced).
+                                            let new_kinds = new_track_kinds(&previous_kinds, &tracks);
+                                            for track in
+                                                tracks.iter().filter(|track| new_kinds.contains(&track.media_kind))
+                                            {
+                                                let proto_kind = match track.media_kind {
+                                                    vks_core::MediaKind::Audio => vks_proto::media::TrackKind::Audio,
+                                                    vks_core::MediaKind::Video => vks_proto::media::TrackKind::Video,
+                                                    vks_core::MediaKind::Screen => vks_proto::media::TrackKind::Screen,
+                                                };
+                                                let proto_codec = match track.media_kind {
+                                                    vks_core::MediaKind::Audio => vks_proto::media::CodecId::Opus,
+                                                    _ => vks_proto::media::CodecId::Vp8,
+                                                };
+                                                let added_msg = SignalingMessage {
+                                                    msg_id: 0,
+                                                    reply_to: 0,
+                                                    payload: Some(Payload::TrackAdded(vks_proto::signaling::TrackAdded {
+                                                        participant_id: m.participant_id.clone(),
+                                                        track: Some(vks_proto::media::TrackInfo {
+                                                            track_id: track.id.to_string(),
+                                                            participant_id: m.participant_id.clone(),
+                                                            kind: proto_kind as i32,
+                                                            codec: proto_codec as i32,
+                                                            ssrc: 0,
+                                                            clock_rate: if proto_kind
+                                                                == vks_proto::media::TrackKind::Audio
+                                                            {
+                                                                48_000
+                                                            } else {
+                                                                90_000
+                                                            },
+                                                            channels: if proto_kind
+                                                                == vks_proto::media::TrackKind::Audio
+                                                            {
+                                                                2
+                                                            } else {
+                                                                0
+                                                            },
+                                                        }),
+                                                    })),
+                                                };
+                                                let payload_bytes = Envelope::new(added_msg).encode();
+                                                state.room_hub.broadcast(&m.room_id, Some(&m.participant_id), payload_bytes.into());
                                             }
                                         }
                                     }
@@ -1261,7 +1107,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             track_ids: track_ids.clone(),
                                             audio_only: false,
                                         }).await;
-                                        if let Some(registry) = crate::webrtc_runtime::registry(&handler_config) {
+                                        if let Ok(registry) = crate::webrtc_runtime::registry(&handler_config) {
                                             registry.set_subscription(m.room_id, pid, true, !s.audio_only);
                                             registry.set_max_bitrate(m.room_id, pid, u64::from(s.max_bitrate_bps));
                                         }
@@ -1277,7 +1123,7 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                         let pid = parse_participant_id(&m.participant_id);
                                         let _ = ctx.sfu_engine.remove_subscriber(m.room_id, pid).await;
                                         let _ = ctx.mcu_engine.remove_subscriber(m.room_id, pid).await;
-                                        if let Some(registry) = crate::webrtc_runtime::registry(&handler_config) {
+                                        if let Ok(registry) = crate::webrtc_runtime::registry(&handler_config) {
                                             registry.set_subscription(m.room_id, pid, false, false);
                                         }
                                     }
@@ -1330,13 +1176,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             audio_only: false,
                                         }).await;
 
-                                        // RTCP PLI: запрашиваем ключевые кадры у видео-паблишеров для устранения чёрного экрана
-                                        if let Some(udp) = &ctx.udp_loop {
-                                            let plis = ctx.sfu_engine.generate_pli_for_room_publishers(rid);
-                                            for (dest, pli_bytes) in plis {
-                                                let _ = udp.send_raw(dest, &pli_bytes).await;
-                                            }
-                                        }
+                                        // Keyframe requests are issued per publisher by the
+                                        // str0m peer task (`webrtc_room`), not by a
+                                        // plaintext UDP loop.
 
                                         let now_secs = std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
@@ -1601,59 +1443,26 @@ mod tests {
     use axum::http::Request as HttpRequest;
     use tower::ServiceExt;
 
-    #[test]
-    fn room_bitrate_reaches_sfu_answer_without_overriding_env_when_absent() {
-        use vks_signaling::handler::{HandlerConfig, SignalingHandler};
+    /// T11c D2: `/readyz` media comes from the real preflight result stored in
+    /// `AppState`, not from a hardcoded `true`.
+    #[tokio::test]
+    async fn readyz_reflects_the_media_preflight() {
         let state = Arc::new(AppState::new());
-        let room = vks_core::RoomId::new();
-        let mut handler = SignalingHandler::new(HandlerConfig::default_test().with_video_bitrate(4096));
-        assert!(room_video_bitrate(&state, &room).is_none());
-        // Нет настройки комнаты — env/конструктор не затирается.
-        if let Some(bitrate) = room_video_bitrate(&state, &room) {
-            handler.set_video_bitrate(bitrate);
-        }
-        assert_eq!(handler.config().answer_profile().b_as, Some(4096));
+        let app = || vks_admin::handlers::router(state.clone());
+        let call = |app: Router| async move {
+            app.oneshot(HttpRequest::builder().uri("/readyz").body(Body::empty()).unwrap()).await.unwrap()
+        };
 
-        state
-            .api_v3
-            .conference_settings
-            .lock()
-            .unwrap()
-            .insert(room, serde_json::json!({"payload": {"bitrate": 1024}}));
-        if let Some(bitrate) = room_video_bitrate(&state, &room) {
-            handler.set_video_bitrate(bitrate);
-        }
-        assert_eq!(handler.config().answer_profile().b_as, Some(1024));
-    }
-
-    #[test]
-    fn answer_payload_types_maps_offer_pt_to_sfu_kinds() {
-        use vks_proto::signaling::RtpMap;
-        let maps = vec![
-            RtpMap { payload: 120, codec: "opus".into(), clock: 48000, channels: 2 },
-            RtpMap { payload: 100, codec: "VP8".into(), clock: 90000, channels: 0 },
-            RtpMap { payload: 102, codec: "h264".into(), clock: 90000, channels: 0 },
-            RtpMap { payload: 300, codec: "rtx".into(), clock: 90000, channels: 0 },
-        ];
-        assert_eq!(
-            answer_payload_types(&maps),
-            vec![
-                (vks_core::MediaKind::Audio, 120),
-                (vks_core::MediaKind::Video, 100),
-                (vks_core::MediaKind::Video, 102),
-            ]
+        assert!(
+            crate::webrtc_runtime::preflight_candidate("127.0.0.1", true).is_ok(),
+            "dev loopback candidate preflight"
         );
-    }
+        state.set_media_healthy(crate::webrtc_runtime::media_healthy());
+        assert_eq!(call(app()).await.status(), StatusCode::OK, "preflight OK => ready");
 
-    #[test]
-    fn conference_bitrate_reads_payload_and_clamps() {
-        use serde_json::json;
-        assert_eq!(conference_video_bitrate(None), None);
-        assert_eq!(conference_video_bitrate(Some(&json!({}))), None);
-        assert_eq!(conference_video_bitrate(Some(&json!({"bitrate": 4096}))), Some(4096));
-        assert_eq!(conference_video_bitrate(Some(&json!({"payload": {"bitrate": 512}}))), Some(512));
-        assert_eq!(conference_video_bitrate(Some(&json!({"payload": {"bitrate": 0}}))), Some(64));
-        assert_eq!(conference_video_bitrate(Some(&json!({"payload": {"bitrate": 99999}}))), Some(8192));
+        assert!(crate::webrtc_runtime::preflight_candidate("192.0.2.10", true).is_err(), "TEST-NET rejected");
+        state.set_media_healthy(crate::webrtc_runtime::media_healthy());
+        assert_eq!(call(app()).await.status(), StatusCode::SERVICE_UNAVAILABLE, "failed preflight => not ready");
     }
 
     #[test]
