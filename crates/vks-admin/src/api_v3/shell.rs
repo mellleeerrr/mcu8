@@ -349,6 +349,97 @@ pub async fn status_network(State(_state): State<SharedState>, Extension(auth): 
     Json(json!({"network": {"editable": true}})).into_response()
 }
 
+/// Vendor `/license` audio keys mapped to their SSOT spelling. This is only a
+/// name mapping: the boolean values are derived from `CODECS` dispositions and
+/// the same license/probe gate as the admin matrix, never hardcoded
+/// (review B P2-6). A hardcoded `true` here used to claim G.719/G.729/iLBC/
+/// H.261/H.263/H.264-SVC/H.264-HIGH were negotiable.
+const LICENSE_AUDIO_PARAMS: &[(&str, &str)] = &[
+    ("g711", "G711"),
+    ("g719", "G719"),
+    ("g722", "G722"),
+    ("g723", "G723"),
+    ("g726", "G726"),
+    ("g728", "G728"),
+    ("g729", "G729"),
+    ("ilbc", "ILBC"),
+    ("opus", "OPUS"),
+    ("aac-lc", "AAC"),
+    ("g722.1", "G7221"),
+    ("g722.1c", "G7221C"),
+];
+
+/// Vendor `/license` video codec keys mapped to their SSOT spelling.
+const LICENSE_VIDEO_PARAMS: &[(&str, &str)] = &[
+    ("vp8", "VP8"),
+    ("h261", "H261"),
+    ("h263", "H263"),
+    ("h264", "H264"),
+    ("h265", "H265"),
+    ("h264-svc", "H264-SVC"),
+    ("h264-high", "H264-HIGH"),
+    ("h263_plus", "H263+"),
+];
+
+/// `true` when the SSOT gives this codec at least one plane that can negotiate
+/// it (native/worker on SIP or H.323, or a negotiable WebRTC codec).
+fn license_name_has_negotiable_plane(name: &str) -> bool {
+    use vks_common::codec_spec::{self, Disposition};
+    let negotiable = |spec: &codec_spec::CodecSpec| {
+        spec.sip.is_bidirectional()
+            || spec.h323 == Disposition::Native
+            || (spec.webrtc == Disposition::WebRtc && spec.webrtc_negotiable)
+    };
+    if let Some(family) = codec_spec::family(name) {
+        return family.members.iter().any(|id| negotiable(codec_spec::spec(*id)));
+    }
+    if codec_spec::is_g726_name(name) {
+        return codec_spec::CODECS.iter().filter(|spec| spec.id.is_g726()).any(|spec| negotiable(spec));
+    }
+    codec_spec::lookup(name).is_some_and(|spec| negotiable(spec))
+}
+
+fn license_audio_codec_available(name: &str) -> bool {
+    use vks_common::codec_capabilities::is_supported_audio_variant;
+    use vks_common::codec_spec;
+    // Structural guard: no runtime state can make the license page claim a
+    // codec whose every SSOT plane is Unsupported/RxOnly (review B P2-6).
+    if !license_name_has_negotiable_plane(name) {
+        return false;
+    }
+    if let Some(family) = codec_spec::family(name) {
+        return family.members.iter().any(|id| {
+            let spec = codec_spec::spec(*id);
+            is_supported_audio_variant(spec.name, spec.bitrate)
+        });
+    }
+    if codec_spec::is_g726_name(name) {
+        return codec_spec::CODECS
+            .iter()
+            .filter(|spec| spec.id.is_g726())
+            .any(|spec| is_supported_audio_variant(spec.name, spec.bitrate));
+    }
+    codec_spec::lookup(name).is_some_and(|spec| {
+        spec.kind == codec_spec::CodecKind::Audio && is_supported_audio_variant(spec.name, spec.bitrate)
+    })
+}
+
+fn license_video_codec_available(name: &str) -> bool {
+    use vks_common::codec_capabilities::is_native_video;
+    use vks_common::codec_spec::{self, Disposition};
+    if !license_name_has_negotiable_plane(name) {
+        return false;
+    }
+    codec_spec::lookup(name).is_some_and(|spec| {
+        spec.kind == codec_spec::CodecKind::Video
+            && (is_native_video(spec.name) || (spec.webrtc == Disposition::WebRtc && spec.webrtc_negotiable))
+    })
+}
+
+fn license_codec_params(rows: &[(&str, &str)], available: fn(&str) -> bool) -> serde_json::Map<String, Value> {
+    rows.iter().map(|(key, name)| ((*key).to_string(), Value::Bool(available(name)))).collect()
+}
+
 /// `GET /api/v3/license` → постоянная лицензия в форме vendor-маппера `kk`.
 ///
 /// `last_expired: 0` vendor-UI рисует как «01.01.1970» и «Продлить», поэтому
@@ -365,6 +456,13 @@ pub async fn license(State(_state): State<SharedState>, Extension(auth): Extensi
 /// Общий конверт `/license` для регистрации/активации: UI читает те же поля.
 fn license_payload() -> Value {
     let now = crate::state::now_unix_ms() as i64 / 1000;
+    let audio_codecs = license_codec_params(LICENSE_AUDIO_PARAMS, license_audio_codec_available);
+    let mut video_codecs = license_codec_params(LICENSE_VIDEO_PARAMS, license_video_codec_available);
+    // Resolution/rate/packetization flags are capabilities, not codec rows:
+    // they have no SSOT spec, so they stay vendor constants.
+    for key in ["hd-4k", "hd-1080p", "advanced-nal-packetization"] {
+        video_codecs.insert(key.to_string(), Value::Bool(true));
+    }
     json!({
         "state": "VALID",
         "type": "PERMANENT",
@@ -376,21 +474,17 @@ fn license_payload() -> Value {
         "last_update_failed": false,
         "params": {
             "audio": {
-                "codecs": {
-                    "g711": true, "g719": true, "g722": true, "g723": true, "g726": true,
-                    "g728": true, "g729": true, "ilbc": true, "opus": true, "aac-lc": true,
-                    "g722.1": true, "g722.1c": true
-                },
+                // Values come from the SSOT dispositions + runtime license gate:
+                // a codec the matrix calls unsupported can never be `true` here.
+                "codecs": audio_codecs,
                 "active_speaker": true
             },
             "video": {
                 "fps": 60,
                 "fecc": true,
-                "codecs": {
-                    "vp8": true, "h261": true, "h263": true, "h264": true, "h265": true,
-                    "hd-4k": true, "h264-svc": true, "hd-1080p": true, "h263_plus": true,
-                    "h264-high": true, "advanced-nal-packetization": true
-                },
+                // Codec keys are derived; `video_codecs` also carries the
+                // non-codec capability flags inserted above.
+                "codecs": video_codecs,
                 "max_active": 100,
                 "presentation": {"enable": true},
                 "rate_adaption": true,
@@ -1127,7 +1221,7 @@ pub async fn engine_command(
 
 #[cfg(test)]
 mod tests {
-    use super::role_to_permissions;
+    use super::*;
     use vks_core::Role;
 
     /// Контракт прав профиля (T1.1).
@@ -1145,5 +1239,73 @@ mod tests {
                 "{role:?}: calibration:* retired"
             );
         }
+    }
+    /// Review B P2-6: `/api/v3/license.params` used to hardcode `true` for
+    /// codecs the SSOT calls unsupported (G.719/G.729/iLBC/H.261/H.263/
+    /// H.264-SVC/H.264-HIGH/AAC-LC). Every codec flag must now be derived,
+    /// and a codec with no negotiable SSOT plane can never be `true`.
+    #[test]
+    fn license_params_are_derived_from_ssot_dispositions() {
+        use vks_common::codec_spec;
+        let payload = license_payload();
+        let audio = payload["params"]["audio"]["codecs"].as_object().expect("audio codecs");
+        let video = payload["params"]["video"]["codecs"].as_object().expect("video codecs");
+
+        assert_eq!(audio.len(), LICENSE_AUDIO_PARAMS.len(), "no extra hardcoded audio codec key");
+        assert_eq!(
+            video.len(),
+            LICENSE_VIDEO_PARAMS.len() + 3,
+            "video codecs plus the three non-codec capability flags"
+        );
+        for (key, name) in LICENSE_AUDIO_PARAMS {
+            let flag = audio[*key].as_bool().unwrap_or_else(|| panic!("license audio {key} is not a bool"));
+            assert_eq!(flag, license_audio_codec_available(name), "license audio {key} must derive from the SSOT");
+            if flag {
+                assert!(
+                    license_name_has_negotiable_plane(name),
+                    "license page claims {name} but every SSOT plane is unavailable"
+                );
+                assert!(
+                    codec_spec::lookup(name).is_some()
+                        || codec_spec::family(name).is_some()
+                        || codec_spec::is_g726_name(name),
+                    "license audio {key} does not resolve to the SSOT"
+                );
+            }
+        }
+        for (key, name) in LICENSE_VIDEO_PARAMS {
+            let flag = video[*key].as_bool().unwrap_or_else(|| panic!("license video {key} is not a bool"));
+            assert_eq!(flag, license_video_codec_available(name), "license video {key} must derive from the SSOT");
+            let spec = codec_spec::lookup(name).unwrap_or_else(|| panic!("license video {name} is not in the SSOT"));
+            assert_eq!(spec.kind, codec_spec::CodecKind::Video, "{name}");
+            if flag {
+                assert!(
+                    license_name_has_negotiable_plane(name),
+                    "license page claims {name} but every SSOT plane is unavailable"
+                );
+            }
+        }
+
+        // The concrete P2-6 lies: these are Unsupported or RxOnly in the SSOT.
+        for key in ["g719", "g729", "ilbc", "g722.1", "g722.1c"] {
+            assert_eq!(audio[key], false, "license must not claim unsupported audio {key}");
+        }
+        for key in ["h261", "h263", "h264-svc", "h264-high", "h263_plus"] {
+            assert_eq!(video[key], false, "license must not claim unsupported video {key}");
+        }
+        // Still-bridgeable dispositions and non-codec capabilities.
+        for key in ["g711", "g722", "g723", "g726", "g728", "opus"] {
+            assert_eq!(audio[key], true, "{key} is bridgeable");
+        }
+        for key in ["vp8", "h264", "h265"] {
+            assert_eq!(video[key], true, "{key} has a negotiable plane");
+        }
+        for key in ["hd-4k", "hd-1080p", "advanced-nal-packetization"] {
+            assert_eq!(video[key], true, "{key} is a capability flag, not a codec");
+        }
+        // AAC-LC stays false in unit tests: no license accepted / probe green,
+        // and the flag must follow the same runtime gate as the admin matrix.
+        assert_eq!(audio["aac-lc"], false, "AAC license is not accepted in tests");
+        assert_eq!(audio["aac-lc"], vks_common::codec_capabilities::is_supported_audio_variant("AAC", None));
     }
 }
