@@ -1604,7 +1604,7 @@ mod tests {
         ),
         (
             "vks-server/src/main.rs",
-            "composition root: only RtpMap wire spellings; validated against webrtc_answer_specs by production_rtp_maps_match_the_ssot_webrtc_answer_slice",
+            "composition root: proto caps in the ServerHello test; validated against webrtc_answer_specs by production_handler_config_caps_match_ssot_webrtc_dispositions",
         ),
         (
             "vks-common/src/codec_capabilities.rs",
