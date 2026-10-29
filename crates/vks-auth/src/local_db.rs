@@ -774,6 +774,10 @@ mod tests {
                 db.authenticate_async(&format!("cancel{index}"), "correct horse battery").await
             }));
         }
+        // Let the spawned hashes actually reach `spawn_blocking` first: aborting
+        // immediately (before any yield) never starts them, which made this
+        // regression test pass even with the buggy permit placement.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         for task in aborted.drain(..3) {
             task.abort();
         }
