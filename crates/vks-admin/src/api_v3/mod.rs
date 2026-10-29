@@ -84,6 +84,10 @@ pub struct ApiV3State {
     pub history_exports: std::sync::Mutex<export_store::ExportStore>,
     /// Сгенерированные ZIP-экспорты журнала событий (`/static/log_events/{filename}`).
     pub log_exports: std::sync::Mutex<export_store::ExportStore>,
+    /// Глобальный token-bucket на все `/api/v3/*` запросы: 200 burst, 50/s
+    /// refill (BACKEND_RULES §1.4 / CLUSTERING). Инициализируется лениво, чтобы
+    /// `ApiV3State: Default` не тянул конфигурацию в конструктор.
+    pub global_ratelimit: std::sync::OnceLock<std::sync::Mutex<vks_common::ratelimit::RateLimiter>>,
 }
 
 /// Состояние медиа-настроек абонента (громкость, mute).

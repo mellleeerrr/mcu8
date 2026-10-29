@@ -20,14 +20,22 @@
 - Revocation: `DELETE /api-keys/{id}`, кеш TTL 60s.
 
 ### 1.3. Пароли (local_db)
-- **Argon2id** (m=64MiB, t=3, p=4). Бcrypt/SHA запрещены.
-- Min 12 символов, top-10k check.
+- **Argon2id**, `m=19456 KiB, t=2, p=1` (OWASP-базлайн; ADR-0033). Бcrypt/SHA
+  запрещены. PHC-строка хранится в `password_hash_hex`, `salt_hex` пустой.
+- PBKDF2-SHA256 (100 000) допускается **только** для проверки legacy-строк:
+  после успешного входа запись лениво перехешируется в Argon2id без смены
+  `generation` и `password_changed_at` (ADR-0033).
+- Максимум 128 байт пароля; одновременно ≤ 4 Argon2-хеша (семафор) + очередь
+  ожидания ≤ 128 запросов → при переполнении `429`/`Retry-After: 1`.
+- Min 12 символов, top-10k check (проверка сложности — в API-валидации).
 - TTL 365 дней. Сброс — одноразовый токен (email, TTL 15min).
 
 ### 1.4. Lockout / brute force
 - 5 failed login / 15min → lock 15min (per user+IP).
 - 10 failed / 5min per IP → block 15min.
 - Каждая неудача + блокировка → audit log.
+- Глобальный лимит API: token-bucket 200 burst / 50 токенов в секунду на
+  процесс (`ApiV3State::global_ratelimit`), превышение → `429` + `Retry-After`.
 
 ### 1.5. LDAP
 - ldap3 + GSSAPI/Kerberos (FreeIPA/AD).

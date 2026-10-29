@@ -348,6 +348,34 @@ async fn pnm_card_resources_roundtrip_regression() {
 }
 
 #[tokio::test]
+async fn global_api_bucket_limits_bursts_with_429() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let mut statuses = Vec::new();
+    for _ in 0..210 {
+        let response = send(&server, request("GET", "/api/v3/ui/sessions", Some(&token), json!({}))).await;
+        statuses.push(response.status());
+    }
+    assert!(statuses[..200].iter().all(|status| *status == StatusCode::OK), "burst within capacity must pass");
+    assert_eq!(statuses[200..], vec![StatusCode::TOO_MANY_REQUESTS; 10], "bucket must reject past 200");
+    // Retry-After tells the client when the next token arrives.
+    let response = send(&server, request("GET", "/api/v3/ui/sessions", Some(&token), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "1");
+}
+
+#[tokio::test]
+async fn login_rejects_oversized_passwords() {
+    let (state, _) = test_state();
+    let server = app(state);
+    let long = "x".repeat(129);
+    let response =
+        send(&server, request("POST", "/api/v3/login", None, json!({"login": "admin", "password": long}))).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
 async fn audio_codec_matrix_marks_unsupported_variants_instead_of_promising_them() {
     let (state, _) = test_state();
     let server = app(state);

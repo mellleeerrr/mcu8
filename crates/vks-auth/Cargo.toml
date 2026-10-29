@@ -17,6 +17,7 @@ ulid.workspace = true
 jsonwebtoken = "9"
 sha2.workspace = true
 pbkdf2 = "0.12"
+argon2.workspace = true
 subtle.workspace = true
 rand = "0.8"
 async-trait = "0.1"

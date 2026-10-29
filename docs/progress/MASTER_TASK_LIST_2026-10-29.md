@@ -9,11 +9,11 @@
 | ID | Задача | Приоритет | Зависит от | Статус |
 |---|---|---|---|---|
 | T01 | Перезапуск HEAD + live-верификация, бэкап БД | P0 | — | ✅ done 07:33 |
-| T02 | Auth: Argon2id+лимиты+sync-ldap+ADR | P0 | T01 | ⏳ |
+| T02 | Auth: Argon2id+лимиты+sync-ldap+ADR | P0 | T01 | 🔄 in progress (Argon2id+PBKDF2-миграция+429/sync-ldap 501 готовы) |
 | T03a | CI-гейты (all-features, cache, node/MANIFEST, лишние джобы) | P0 | T01 | ✅ done 07:44 (`9391a8a`) |
 | T03b | Доки к факту + doc-links gate | P1 | T03a | ⏳ (28 doc-диагностик собраны) |
 | T03c | Мёртвый код (−1080) + неиспользуемые deps | P1 | T03a | ✅ done 07:46 (`aef9257`) |
-| T04a | SDP/кодеки P0–P1 (H.264 PT98, cpresent, PT identity, G.726, лицензия) | P0 | T03a | 🔄 in progress (PT98/RX High/AAC/лицензия/PT2/матрица готовы) |
+| T04a | SDP/кодеки P0–P1 (H.264 PT98, cpresent, PT identity, G.726, лицензия) | P0 | T03a | ✅ `7cb7ba7`+`14834a8`: PT98/RX High/AAC/лицензия/PT2/матрица/audio-identity |
 | T04b | CodecSpec SSOT + матрица диспозиций | P2 | T04a | ⏳ |
 | T05 | DTMF E-бит (60→200 мс) + send_to метрика | P1 | T03a | ✅ done 07:49 (`2a77be5`) |
 | T06 | Layout: normalize/резолвер/P2/тест S6/оракул e2e | P1 | T03a | ⏳ |
@@ -39,7 +39,7 @@
 - **T03a:** `cargo test --workspace --all-features` зелёный (cfg-aware ожидания в `codec.rs`); CI-джобы без continue-on-error там, где должны падать; `node --check` на JS; MANIFEST проверяется; кэш-ключ учитывает `.cargo/config.toml`+toolchain.
 - **T03b:** `cargo doc --no-deps` с `-D warnings`; документы не обещают несделанного.
 - **T03c ✅:** −1080 строк (transparency 447 + qoe/slo 320 + ffi 279 + deps/lock); `ratelimit` сохранён осознанно — на нём T02; ни одной новой ошибки.
-- **T04a:** PT98 не ходит ни в один оффер; answer принимает Main/High на приём, TX остаётся baseline; AAC без `cpresent`/fmtp → UnsupportedAudio в обе стороны; G.726-32 по PT2 (только с rtpmap); матрица G.722.1/G.719 — `supported=false`; `VKS_CODEC_LICENSE_ACCEPTED` + legacy alias. Осталось: identity-резолвер PT↔codec в UAC/gateways (P1).
+- **T04a ✅:** PT98 не ходит ни в один оффер; answer принимает Main/High на приём, TX остаётся baseline; AAC без `cpresent`/fmtp → UnsupportedAudio в обе стороны; G.726-32 по PT2 (только с rtpmap); матрица G.722.1/G.719 — `supported=false`; `VKS_CODEC_LICENSE_ACCEPTED` + legacy alias; UAC/gateways резолвят аудио по name+clock (PT96 G722 и PT2 G726 тесты).
 - **T05 ✅:** маркер только на первом пакете, E=1 только на последнем; приёмник видит 200 мс; AAC использует ту же серию; `dtmf_tx_packets`/`dtmf_tx_errors` + rate-limited warn; negative-control тест на старые 60 мс.
 - **T06:** `normalize_loaded` пересчитывает size; один резолвер; тест n=5@1280×720; `preset_default_13` 400 задокументирован; оракул e2e стабилен.
 - **T07:** сценарий «deep link без токена → логин → та же сессия»; `content-encoding: gzip` в ответе `/pnm/`; meta theme-color == computed `--c-bg`; импорт сохраняет theme-toggle.js; MANIFEST 215/215.
@@ -66,3 +66,4 @@
 | 07:46 | T03c done: −1080 строк мёртвого кода/зависимостей; transparency/ffi/qoe/slo удалены, ratelimit оставлен для T02 |
 | 07:49 | T05 done: RFC 4733 E-бит (200 мс), метрики потерь DTMF, negative-control |
 | 07:56 | T04a в работе: PT98 убран из Full, RX Main/High при TX baseline, cpresent обязателен (in/out), лицензионный профиль `VKS_CODEC_LICENSE_ACCEPTED`, G.726-32 PT2, honest matrix |
+| 08:15 | T04a закрыт (`14834a8`): аудио по identity (name+clock), renumbered PT96 G722 больше не убивает мост; PT2 G726-32; тесты 154 SIP / 145 server |

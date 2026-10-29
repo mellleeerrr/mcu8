@@ -49,6 +49,8 @@ figment = { version = "0.10", features = ["toml", "env", "json"] }
 uncased = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# пароли
+argon2 = "0.5.3"
 # идентификаторы
 uuid = { version = "1", features = ["v4", "v7", "serde", "js"] }
 ulid = { version = "1", features = ["std", "serde"] }

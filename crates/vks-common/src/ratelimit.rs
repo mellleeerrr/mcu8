@@ -46,6 +46,7 @@ impl TokenBucket {
 pub const DEFAULT_MAX_BUCKETS: usize = 10_000;
 
 /// Rate limiter: per-key token buckets with bounded memory protection against OOM.
+#[derive(Debug)]
 pub struct RateLimiter {
     buckets: BTreeMap<String, TokenBucket>,
     /// Refill rate per tick (tokens/tick) for each key class.

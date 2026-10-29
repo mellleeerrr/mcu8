@@ -187,6 +187,13 @@ pub async fn token_middleware(State(state): State<SharedState>, mut request: Req
     if state.jwt_issuer.is_none() {
         return error_json(503, "Authentication is not configured");
     }
+    if !global_rate_limit_allows(&state) {
+        let mut response = error_json(429, "Too many requests");
+        if let Ok(value) = "1".parse() {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+        return response;
+    }
     let token = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -264,15 +271,27 @@ pub async fn login(
         return locked_response(retry_after);
     }
 
+    if body.password.len() > vks_auth::local_db::MAX_PASSWORD_BYTES {
+        LOGIN_ATTEMPTS.with_label_values(&["fail"]).inc();
+        audit(&state, &body.login, &ip, "login_fail");
+        return error_json(422, "Password is too long");
+    }
+
+    enum LoginError {
+        Invalid,
+        Busy,
+    }
+
     let auth_result = if let Some(provider) = &state.auth_provider {
         let creds =
             vks_core::ports::auth::Credentials { username: body.login.clone(), password: body.password.clone() };
-        provider.verify(&creds).await.map(|u| u.id.to_string())
+        provider.verify(&creds).await.map(|u| u.id.to_string()).map_err(|_| LoginError::Invalid)
     } else if let Some(db) = state.local_db.clone() {
-        db.authenticate_async(&body.login, &body.password)
-            .await
-            .map(|u| u.id)
-            .map_err(|_| vks_core::ports::auth::AuthError::InvalidCredentials)
+        match db.authenticate_async(&body.login, &body.password).await {
+            Ok(user) => Ok(user.id),
+            Err(vks_auth::local_db::LocalDbError::Busy) => Err(LoginError::Busy),
+            Err(_) => Err(LoginError::Invalid),
+        }
     } else {
         return error_json(503, "Authentication is not configured");
     };
@@ -282,9 +301,25 @@ pub async fn login(
             state.api_v3.lockout.record_success(&body.login, &ip);
             LOGIN_ATTEMPTS.with_label_values(&["ok"]).inc();
             audit(&state, &body.login, &ip, "login_ok");
+            // Lazy migration: a verified legacy PBKDF2 credential is upgraded
+            // to Argon2id in memory and persisted without touching generation
+            // or the password-changed mark (it is not a password change).
+            if let (Some(db), Ok(user)) = (&state.local_db, db_user_by_name(&state, &body.login)) {
+                if vks_auth::local_db::LocalDb::needs_rehash(&user) {
+                    match db.rehash_async(&user.id, &body.password).await {
+                        Ok(upgraded) => persist_lazy_rehash(&state, db, &upgraded).await,
+                        Err(error) => tracing::warn!(%error, "lazy Argon2id rehash failed; keeping PBKDF2 row"),
+                    }
+                }
+            }
             issue_token(&state, &user_id)
         }
-        Err(_) => {
+        Err(LoginError::Busy) => {
+            LOGIN_ATTEMPTS.with_label_values(&["fail"]).inc();
+            audit(&state, &body.login, &ip, "login_fail");
+            too_busy_response()
+        }
+        Err(LoginError::Invalid) => {
             let blocked_now = state.api_v3.lockout.record_failure(&body.login, &ip, now);
             if blocked_now {
                 LOGIN_ATTEMPTS.with_label_values(&["locked"]).inc();
@@ -310,6 +345,9 @@ pub async fn change_password(
     let Some(db) = state.local_db.clone() else {
         return error_json(503, "Authentication is not configured");
     };
+    if body.old_password.len() > vks_auth::local_db::MAX_PASSWORD_BYTES {
+        return unauthorized("Login rejected");
+    }
     let user = match db.authenticate_async(&body.username, &body.old_password).await {
         Ok(u) => u,
         Err(_) => {
@@ -320,6 +358,9 @@ pub async fn change_password(
     };
     if body.new_password.is_empty() {
         return error_json(422, "New password must not be empty");
+    }
+    if body.new_password.len() > vks_auth::local_db::MAX_PASSWORD_BYTES {
+        return error_json(422, "New password is too long");
     }
 
     if state.has_fault("db") {
@@ -398,6 +439,56 @@ fn issue_token(state: &AppState, user_id: &str) -> Response {
 }
 
 /// 401 + `Retry-After` (сек, минимум 1).
+/// Process-wide API request budget: 200-token burst, 50 tokens/s refill
+/// (BACKEND_RULES §1.4). One bucket per process state keeps memory bounded and
+/// makes the limit testable; per-IP WS limits stay in [`super::ws`].
+fn global_rate_limit_allows(state: &AppState) -> bool {
+    let limiter = state
+        .api_v3
+        .global_ratelimit
+        .get_or_init(|| std::sync::Mutex::new(vks_common::ratelimit::RateLimiter::new(200, 50.0)));
+    let now = now_unix().max(0) as u64;
+    limiter.lock().map(|mut limiter| limiter.allow("global", now)).unwrap_or(true)
+}
+
+/// HTTP 429 for a saturated password-hashing queue (Retry-After: 1s).
+fn too_busy_response() -> Response {
+    let mut response = error_json(429, "Authentication is temporarily busy");
+    if let Ok(value) = "1".parse() {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
+}
+
+fn db_user_by_name(
+    state: &AppState,
+    login: &str,
+) -> Result<vks_auth::local_db::User, vks_auth::local_db::LocalDbError> {
+    state
+        .local_db
+        .as_ref()
+        .ok_or_else(|| vks_auth::local_db::LocalDbError::NotFound(login.to_string()))?
+        .user_by_name(login)
+}
+
+/// Persists a lazy Argon2id upgrade, keeping token generation/mark unchanged.
+/// Failure is logged but never fails the login: the in-memory Argon2id hash is
+/// already authoritative for this process.
+async fn persist_lazy_rehash(state: &AppState, db: &vks_auth::local_db::LocalDb, user: &vks_auth::local_db::User) {
+    let Some(storage) = &state.storage else { return };
+    let user_id = vks_core::UserId::parse(&user.id).unwrap_or_else(|_| vks_core::UserId::bootstrap_operator());
+    let creds = vks_core::ports::storage::UserCredentials {
+        user_id,
+        password_hash_hex: user.password_hash_hex.clone(),
+        salt_hex: user.salt_hex.clone(),
+        password_changed_at: Some(db.password_changed_at(&user.id)),
+        generation: db.generation(&user.id),
+    };
+    if let Err(error) = storage.upsert_user_credentials(&creds).await {
+        tracing::warn!(%error, "lazy Argon2id rehash persisted only in memory");
+    }
+}
+
 fn locked_response(retry_after_secs: i64) -> Response {
     let mut resp = unauthorized("Too many attempts. Try again later");
     if let Ok(value) = retry_after_secs.max(1).to_string().parse() {

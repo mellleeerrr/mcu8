@@ -210,6 +210,10 @@ pub struct AppState {
     pub storage: Option<Arc<dyn vks_core::ports::Storage>>,
     /// Полиморфный AuthProvider (local / ldap / oidc).
     pub auth_provider: Option<Arc<dyn vks_core::ports::AuthProvider>>,
+    /// True only when a real LDAP client is configured. The mock LDAP provider
+    /// (lab, `VKS_ALLOW_MOCK_LDAP=1`) never enables `/users/sync-ldap`: syncing
+    /// fake users into the operator directory is worse than a 501.
+    pub ldap_sync_enabled: bool,
     /// JWT Issuer для проверки токенов доступа.
     pub jwt_issuer: Option<Arc<vks_auth::jwt::JwtIssuer>>,
     /// Встроенная база пользователей (local provider) для login `/api/v3` (§4.3).
@@ -315,6 +319,7 @@ impl AppState {
         Self {
             storage: None,
             auth_provider: None,
+            ldap_sync_enabled: false,
             jwt_issuer: None,
             local_db: None,
             api_v3: crate::api_v3::ApiV3State::default(),

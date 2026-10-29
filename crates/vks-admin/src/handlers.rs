@@ -544,8 +544,23 @@ pub async fn bulk_users(State(state): State<SharedState>, Json(body): Json<BulkU
     json_ok(serde_json::json!({ "touched": touched }))
 }
 
-/// `POST /api/v1/users/sync-ldap` — LDAP sync (mock; real in vks-auth).
+/// `POST /api/v1/users/sync-ldap` — LDAP directory sync.
+///
+/// The build has no real LDAP client (mock only), so without a configured LDAP
+/// provider this endpoint returns 501 instead of inventing users. The previous
+/// implementation always returned 200 with fake mock users, which looked like a
+/// successful sync to the operator.
 pub async fn sync_ldap(State(state): State<SharedState>) -> Response {
+    if !state.ldap_sync_enabled {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "error_code": "ldap_sync_unavailable",
+                "error": "LDAP directory sync requires a real LDAP client; this build has none"
+            })),
+        )
+            .into_response();
+    }
     let ldap = MockLdapProvider::fetch();
     let total = Users::sync_ldap(&state, ldap);
     json_ok(serde_json::json!({ "total": total }))
@@ -1004,5 +1019,15 @@ mod tests {
         let (app, _state, token) = authed_test_app();
         let resp = app.oneshot(authed_req(Method::GET, "/api/v1/rooms/not-a-uuid", &token)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ldap_sync_without_a_real_client_returns_501() {
+        let (app, _state, token) = authed_test_app();
+        let resp = app.oneshot(authed_req(Method::POST, "/api/v1/users/sync-ldap", &token)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error_code"], "ldap_sync_unavailable");
     }
 }

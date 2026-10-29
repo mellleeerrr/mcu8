@@ -37,6 +37,7 @@
 | 0030 | Контракт раскладки в сигналинге: нормализованные rect, 0-based slot_id, снимок в `JoinRoomResult` | accepted | 2026-10-23 | 0012, 0026 |
 | 0031 | Герметичный protoc для vks-proto (без системной зависимости) — BREAKING: снята фича `vendored-protoc` | accepted | 2026-10-23 | 0005, S15 |
 | 0032 | Метаданные раскладки на проводе: `preset/mode` в `Layout`, без `layout_id` и без `LayoutModeChanged` | accepted | 2026-10-24 | 0030, 0012, T10a |
+| 0033 | Пароли local_db — Argon2id; PBKDF2 только для проверки и ленивой миграции | accepted | 2026-10-29 | 0009, T02 |
 
 ## Правила ведения
 
