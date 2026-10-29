@@ -42,6 +42,9 @@ const MAX_DATAGRAM: usize = 4096;
 pub const DEFAULT_MAX_PEERS_PER_ROOM: usize = 8;
 /// Process-wide peer cap default, kept from the pre-T11b behaviour.
 pub const DEFAULT_MAX_PEERS: usize = 256;
+/// One UDP socket/FD per peer caps what a single process can plausibly hold;
+/// anything above this is almost certainly a config typo (review B P3-7).
+const MAX_SANE_PEERS: usize = 65_535;
 /// How often one `(publisher, kind)` keyframe request may be emitted.
 const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 const CONNECT_DEADLINE: Duration = Duration::from_secs(15);
@@ -114,6 +117,51 @@ impl RoomLimits {
         let per_room = std::env::var("VKS_WEBRTC_MAX_PEERS_PER_ROOM").ok();
         let total = std::env::var("VKS_WEBRTC_MAX_PEERS").ok();
         Self::parse(per_room.as_deref(), total.as_deref())
+    }
+
+    /// Warnings for caps that parse but cannot be met in practice.
+    ///
+    /// [`Self::from_env`] fails closed on syntax/zero; these are the
+    /// *feasibility* problems that otherwise surface only as later metrics
+    /// (review B P3-7): a per-room cap above the per-source mid ceiling, a
+    /// process cap above the UDP port range, or absurd values. The registry
+    /// logs every returned warning at startup, next to the preflight.
+    pub fn feasibility_warnings(&self, port_range: Option<(u16, u16)>) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let mid_ceiling = crate::webrtc::MAX_AUDIO_MIDS.min(crate::webrtc::MAX_VIDEO_MIDS);
+        if self.max_peers_per_room > mid_ceiling {
+            warnings.push(format!(
+                "VKS_WEBRTC_MAX_PEERS_PER_ROOM={} exceeds the per-source mid ceiling ({mid_ceiling}): each subscriber \
+                 can see at most {mid_ceiling} publishers per kind; extra sources are counted as \
+                 webrtc_sources{{result=\"dropped_no_mid\"}}",
+                self.max_peers_per_room
+            ));
+        }
+        if self.max_peers_per_room > self.max_peers {
+            warnings.push(format!(
+                "VKS_WEBRTC_MAX_PEERS_PER_ROOM={} is larger than the process cap VKS_WEBRTC_MAX_PEERS={}; the \
+                 per-room cap can never be reached",
+                self.max_peers_per_room, self.max_peers
+            ));
+        }
+        if self.max_peers > MAX_SANE_PEERS {
+            warnings.push(format!(
+                "VKS_WEBRTC_MAX_PEERS={} is implausibly large for one process (one UDP socket/FD per peer, hard port \
+                 limit {MAX_SANE_PEERS}); the effective cap is limited by FDs and the UDP range",
+                self.max_peers
+            ));
+        }
+        if let Some((min, max)) = port_range {
+            let slots = usize::from(max) - usize::from(min) + 1;
+            if self.max_peers > slots {
+                warnings.push(format!(
+                    "VKS_WEBRTC_MAX_PEERS={} exceeds the UDP range {min}..={max} ({slots} ports): peers beyond {slots} \
+                     fail with port_range_exhausted; size the range to the cap or lower the cap",
+                    self.max_peers
+                ));
+            }
+        }
+        warnings
     }
 }
 
@@ -253,18 +301,17 @@ impl std::fmt::Debug for WebRtcRoomRegistry {
 }
 
 impl WebRtcRoomRegistry {
-    /// Creates a registry bound to the current Tokio runtime.
+    /// Creates a registry bound to the current Tokio runtime, reading the
+    /// admission caps from the environment.
     ///
-    /// The server path uses [`Self::with_limits`] with validated limits; this
-    /// convenience constructor still fails closed at the *runtime* level by
-    /// logging loudly, and [`RoomLimits::from_env`] is what the preflight and
-    /// the process-wide registry validate before any peer is accepted.
-    pub fn new(config: WebRtcConfig, advertise_ip: IpAddr) -> Arc<Self> {
-        let limits = RoomLimits::from_env().unwrap_or_else(|error| {
-            tracing::error!(%error, "WebRTC admission limits are invalid; refusing the whole WebRTC plane");
-            RoomLimits::default()
-        });
-        Self::with_limits(config, advertise_ip, limits)
+    /// Fail-closed like the server's process-wide registry: an invalid
+    /// `VKS_WEBRTC_MAX_PEERS_PER_ROOM`/`VKS_WEBRTC_MAX_PEERS` returns `Err`
+    /// instead of silently falling back to defaults (review B P3-5). Tests and
+    /// embedders that must not depend on the ambient environment use
+    /// [`Self::with_limits`] directly.
+    pub fn new(config: WebRtcConfig, advertise_ip: IpAddr) -> Result<Arc<Self>, String> {
+        let limits = RoomLimits::from_env().map_err(|error| format!("invalid WebRTC admission limits: {error}"))?;
+        Ok(Self::with_limits(config, advertise_ip, limits))
     }
 
     /// Creates a registry with explicit admission limits (tests, preflight).
@@ -276,6 +323,12 @@ impl WebRtcRoomRegistry {
             (Some(min), Some(max)) if min > 0 && max >= min => Some((min, max)),
             _ => None,
         };
+        // P3-7: warn (never fail) on caps that parse but cannot be honoured;
+        // this runs at registry construction, i.e. in the startup/preflight
+        // path where the operator looks for config errors.
+        for warning in limits.feasibility_warnings(port_range) {
+            tracing::warn!("{warning}");
+        }
         Arc::new(Self {
             config,
             advertise_ip,
@@ -555,7 +608,20 @@ impl WebRtcRoomRegistry {
         }
 
         let registry = Arc::clone(self);
-        self.runtime.spawn(run_peer(registry, room, participant, generation, socket, peer, rx, max_bitrate_bps));
+        // The task owns the same gate set as its handle, so `DropSource` can
+        // close it without a registry round-trip (P2-1).
+        let video_ready = Arc::clone(&handle.video_ready);
+        self.runtime.spawn(run_peer(
+            registry,
+            room,
+            participant,
+            generation,
+            socket,
+            peer,
+            rx,
+            video_ready,
+            max_bitrate_bps,
+        ));
         Ok(AcceptedPeer { answer_sdp, rtp_maps, handle, reoffered: false })
     }
 
@@ -613,29 +679,56 @@ impl WebRtcRoomRegistry {
         }
         // Retire the departed publisher's egress mids in every surviving peer:
         // the mid must never be reused for a different publisher (a new RTP
-        // clock domain under a live decoder).
+        // clock domain under a live decoder). Close the per-publisher keyframe
+        // gate synchronously, before the command is queued, so a frame cannot
+        // slip through into the reopened gate in the meantime.
         for survivor in survivors {
+            survivor.forget_video(participant);
             let _ = survivor.tx.try_send(PeerCommand::DropSource { from: participant });
         }
     }
 
     /// Exits a peer task without deleting a newer generation of the same
     /// participant (re-offer/ICE restart race).
+    ///
+    /// A dead task is a departed publisher (the signalling session may still be
+    /// alive, e.g. ICE/DTLS death): survivors must be told to retire its
+    /// source exactly like [`Self::remove`] does, the PLI coalescing window
+    /// must be cleared, and the per-publisher keyframe gate must be closed so a
+    /// reconnect with the same `ParticipantId` waits for a fresh IDR (P2-1).
     fn remove_generation(&self, room: RoomId, participant: ParticipantId, generation: u64) {
-        let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut removed = false;
-        if let Some(peers) = rooms.get_mut(&room) {
-            if peers.get(&participant).is_some_and(|handle| handle.generation == generation) {
-                peers.remove(&participant);
-                self.peer_total.fetch_sub(1, Ordering::Relaxed);
-                removed = true;
+        let (removed, survivors) = {
+            let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut removed = false;
+            let mut survivors = Vec::new();
+            if let Some(peers) = rooms.get_mut(&room) {
+                if peers.get(&participant).is_some_and(|handle| handle.generation == generation) {
+                    peers.remove(&participant);
+                    self.peer_total.fetch_sub(1, Ordering::Relaxed);
+                    removed = true;
+                }
+                survivors = peers.values().cloned().collect();
+                if peers.is_empty() {
+                    rooms.remove(&room);
+                }
             }
-            if peers.is_empty() {
-                rooms.remove(&room);
+            if removed {
+                WEBRTC_PEERS.set(rooms.values().map(HashMap::len).sum::<usize>() as i64);
             }
+            (removed, survivors)
+        };
+        // A stale generation (already replaced by a re-offer) must not touch
+        // the new generation's coalescing state.
+        if !removed {
+            return;
         }
-        if removed {
-            WEBRTC_PEERS.set(rooms.values().map(HashMap::len).sum::<usize>() as i64);
+        self.last_keyframe_request
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(key_room, publisher, _), _| !(*key_room == room && *publisher == participant));
+        for survivor in survivors {
+            survivor.forget_video(participant);
+            let _ = survivor.tx.try_send(PeerCommand::DropSource { from: participant });
         }
     }
 
@@ -854,6 +947,9 @@ async fn run_peer(
     socket: UdpSocket,
     mut peer: WebRtcPeer,
     mut rx: mpsc::Receiver<PeerCommand>,
+    // Shared with `PeerHandle::video_ready`: the task closes this subscriber's
+    // per-publisher gate when it retires a source.
+    video_ready: Arc<Mutex<HashSet<ParticipantId>>>,
     max_bitrate_bps: Arc<AtomicU64>,
 ) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
@@ -935,6 +1031,14 @@ async fn run_peer(
                     }
                     PeerCommand::DropSource { from } => {
                         peer.retire_source(from);
+                        // Close this subscriber's keyframe gate for the retired
+                        // publisher: a reconnect with the same ParticipantId
+                        // starts a new RTP clock domain and must wait for a
+                        // fresh IDR, like any other new source (P2-1).
+                        video_ready
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&from);
                         no_egress_mid.retain(|(publisher, _)| *publisher != from);
                         WEBRTC_SOURCES.with_label_values(&["retired"]).inc();
                         continue;
@@ -1215,9 +1319,16 @@ mod tests {
         RoomLimits { max_peers_per_room: per_room, max_peers: DEFAULT_MAX_PEERS }
     }
 
+    /// Hermetic constructor: tests never read the ambient
+    /// `VKS_WEBRTC_MAX_PEERS*` environment (that path is unit-tested via
+    /// `RoomLimits::parse`, which is pure).
+    fn default_registry() -> Arc<WebRtcRoomRegistry> {
+        WebRtcRoomRegistry::with_limits(WebRtcConfig::default(), "127.0.0.1".parse().unwrap(), RoomLimits::default())
+    }
+
     #[tokio::test]
     async fn fanout_respects_participant_exclusion_and_audio_only() {
-        let registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+        let registry = default_registry();
         let room = RoomId::new();
         let publisher = ParticipantId::new();
         let audio_sub = ParticipantId::new();
@@ -1257,7 +1368,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_task_cannot_remove_a_newer_generation() {
-        let registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+        let registry = default_registry();
         let room = RoomId::new();
         let participant = ParticipantId::new();
         let (mut peer, _rx) = handle(participant);
@@ -1470,7 +1581,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_cap_rejects_first_peer_in_a_fresh_room() {
-        let mut registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+        let mut registry = default_registry();
         Arc::get_mut(&mut registry).expect("unique registry").max_peers = 0;
         let error =
             registry.accept_offer(RoomId::new(), ParticipantId::new(), "v=0\r\n").await.expect_err("global cap");
@@ -1480,7 +1591,7 @@ mod tests {
 
     #[tokio::test]
     async fn subscription_and_bitrate_caps_are_remembered_before_offer() {
-        let registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+        let registry = default_registry();
         let room = RoomId::new();
         let participant = ParticipantId::new();
         registry.set_subscription(room, participant, true, false);
@@ -1494,7 +1605,7 @@ mod tests {
 
     #[tokio::test]
     async fn removing_last_peer_drops_the_room_entry() {
-        let registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+        let registry = default_registry();
         let room = RoomId::new();
         let participant = ParticipantId::new();
         let (peer, _rx) = handle(participant);
@@ -1511,7 +1622,7 @@ mod tests {
     /// real UDP/DTLS handshake.
     #[tokio::test]
     async fn reoffer_is_answered_by_the_existing_peer_task() {
-        let registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+        let registry = default_registry();
         let room = RoomId::new();
         let participant = ParticipantId::new();
         let (peer, mut rx) = handle(participant);
@@ -1544,7 +1655,7 @@ mod tests {
 
     #[tokio::test]
     async fn reoffer_on_a_full_command_queue_errors_instead_of_forking_a_new_session() {
-        let registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+        let registry = default_registry();
         let room = RoomId::new();
         let participant = ParticipantId::new();
         let (peer, _rx) = handle(participant);
@@ -1557,5 +1668,108 @@ mod tests {
         assert!(error.to_string().contains("queue is full"), "{error}");
         assert_eq!(registry.peer_count(room), 1, "old session must survive a queue-full re-offer");
         assert!(registry.has_peer(room, participant), "registration must stay");
+    }
+
+    // ---- T11b review B fix-ups ----------------------------------------------
+
+    /// P2-1/P3-4 regression: the task-exit path (ICE/DTLS death, not a
+    /// signalling `remove`) must retire the source in every survivor, clear the
+    /// PLI coalescing window and re-arm the per-publisher keyframe gate.
+    #[tokio::test]
+    async fn a_dead_peer_task_retires_the_source_and_rearms_survivor_gates() {
+        let registry = default_registry();
+        let room = RoomId::new();
+        let publisher = ParticipantId::new();
+        let (publisher_handle, _publisher_rx) = handle_with(publisher, 7);
+        let (survivor, mut survivor_rx) = handle_with(ParticipantId::new(), 8);
+        let survivor_participant = survivor.participant;
+        {
+            let mut rooms = registry.rooms.lock().unwrap();
+            let peers = rooms.entry(room).or_default();
+            peers.insert(publisher, publisher_handle);
+            peers.insert(survivor_participant, survivor.clone());
+        }
+        registry.peer_total.store(2, Ordering::Relaxed);
+        // The subscriber already forwarded this publisher's IDR and a
+        // coalescing window is open for it.
+        assert!(survivor.admits_video(publisher, true));
+        registry.last_keyframe_request.lock().unwrap().insert((room, publisher, false), Instant::now());
+
+        registry.remove_generation(room, publisher, 7);
+
+        assert!(!survivor.admits_video(publisher, false), "task exit must close the subscriber's gate again");
+        assert!(!registry.has_peer(room, publisher));
+        assert_eq!(registry.peer_total.load(Ordering::Relaxed), 1);
+        assert!(
+            registry.last_keyframe_request.lock().unwrap().get(&(room, publisher, false)).is_none(),
+            "a stale PLI window must not suppress the returning publisher's first keyframe"
+        );
+        match survivor_rx.try_recv() {
+            Ok(PeerCommand::DropSource { from }) => assert_eq!(from, publisher),
+            _ => panic!("survivors must be told to retire the dead publisher's source"),
+        }
+    }
+
+    /// P2-1 reviewer probe, end-to-end through the real `run_peer` command
+    /// loop: a `DropSource` must reset the gate shared with the `PeerHandle`.
+    #[tokio::test]
+    async fn drop_source_command_closes_the_subscriber_gate_in_the_peer_task() {
+        let registry = default_registry();
+        let room = RoomId::new();
+        let subscriber = ParticipantId::new();
+        let publisher = ParticipantId::new();
+        let (handle, rx) = handle(subscriber);
+        let video_ready = Arc::clone(&handle.video_ready);
+        let std_socket = std::net::UdpSocket::bind(("127.0.0.1", 0)).expect("bind ephemeral socket");
+        std_socket.set_nonblocking(true).expect("nonblocking");
+        let socket = UdpSocket::from_std(std_socket).expect("tokio socket");
+        let local_addr = socket.local_addr().expect("local addr");
+        let peer = WebRtcPeer::accept_offer(&browser_offer(1, 1), local_addr, &WebRtcConfig::default())
+            .expect("accept a real 1+1 offer");
+        // The subscriber had already shown this publisher's IDR.
+        assert!(handle.admits_video(publisher, true));
+        let task = tokio::spawn(run_peer(
+            Arc::clone(&registry),
+            room,
+            subscriber,
+            1,
+            socket,
+            peer,
+            rx,
+            video_ready,
+            Arc::new(AtomicU64::new(0)),
+        ));
+        handle.tx.try_send(PeerCommand::DropSource { from: publisher }).expect("queue DropSource");
+        let mut closed = false;
+        for _ in 0..200 {
+            if !handle.admits_video(publisher, false) {
+                closed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(closed, "DropSource must close the subscriber's per-publisher video gate");
+        // Closing the handle closes the command channel; the task must exit.
+        drop(handle);
+        tokio::time::timeout(Duration::from_secs(5), task).await.expect("peer task exits").expect("peer task");
+    }
+
+    /// P3-7: parse-succeeding caps that cannot be honoured must be warned
+    /// about at startup (mid ceiling, ports vs process cap, absurd values).
+    #[test]
+    fn feasibility_warnings_cover_mid_ceiling_ports_and_huge_caps() {
+        let huge = RoomLimits { max_peers_per_room: 1_000_000, max_peers: 1_000_000 };
+        let warnings = huge.feasibility_warnings(Some((43_000, 43_100)));
+        assert!(warnings.iter().any(|warning| warning.contains("mid ceiling")), "{warnings:?}");
+        assert!(warnings.iter().any(|warning| warning.contains("UDP range")), "{warnings:?}");
+        assert!(warnings.iter().any(|warning| warning.contains("implausibly large")), "{warnings:?}");
+        let inverted = RoomLimits { max_peers_per_room: 16, max_peers: 8 };
+        let inverted_warnings = inverted.feasibility_warnings(None);
+        assert!(
+            inverted_warnings.iter().any(|warning| warning.contains("can never be reached")),
+            "{inverted_warnings:?}"
+        );
+        let sane = RoomLimits { max_peers_per_room: 8, max_peers: 101 };
+        assert!(sane.feasibility_warnings(Some((43_000, 43_100))).is_empty(), "no warning for a feasible config");
     }
 }
