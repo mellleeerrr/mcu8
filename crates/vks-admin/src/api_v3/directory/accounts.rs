@@ -136,9 +136,15 @@ pub async fn create_user_credentials(
         return error_json(409, "Login already exists");
     }
     let user_id = user.id.to_string();
-    if let Err(error) = db.register(&user_id, login, password) {
-        tracing::warn!(error = %error, "directory: local credential registration failed");
-        return error_json(409, "Login already exists");
+    match db.register_async(&user_id, login, password).await {
+        Ok(_) => {}
+        // Hash gate saturation must not look like a duplicate login.
+        Err(vks_auth::local_db::LocalDbError::Busy) => return crate::api_v3::auth::too_busy_response(),
+        Err(vks_auth::local_db::LocalDbError::PasswordTooLong) => return error_json(422, "Password is too long"),
+        Err(error) => {
+            tracing::warn!(error = %error, "directory: local credential registration failed");
+            return error_json(409, "Login already exists");
+        }
     }
     if let Err(error) = persist_credentials(&state, &user.id, None).await {
         tracing::error!(error = %error, "directory: credential persistence failed");

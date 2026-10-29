@@ -34,7 +34,7 @@ impl CoreAuthProvider for LocalAuth {
             Err(LocalDbError::NotFound(name)) => Err(CoreAuthError::UserNotFound(name)),
             Err(LocalDbError::AlreadyExists(e)) => Err(CoreAuthError::Other(e)),
             Err(LocalDbError::PasswordTooLong) => Err(CoreAuthError::InvalidCredentials),
-            Err(LocalDbError::Busy) => Err(CoreAuthError::Other("password hashing queue is saturated".into())),
+            Err(LocalDbError::Busy) => Err(CoreAuthError::Busy),
         }
     }
 

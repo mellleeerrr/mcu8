@@ -35,12 +35,20 @@
 - 10 failed / 5min per IP → block 15min.
 - Каждая неудача + блокировка → audit log.
 - Глобальный лимит API: token-bucket 200 burst / 50 токенов в секунду на
-  процесс (`ApiV3State::global_ratelimit`), превышение → `429` + `Retry-After`.
+  процесс (`ApiV3State::global_ratelimit`, outermost-слой **всего** `/api/v3`,
+  включая `login`/`ws`/`static`/catch-all; токен списывается до аутентификации,
+  поэтому неаутентифицированный флуд не доходит до Argon2), превышение →
+  `429` + `Retry-After`.
+- Насыщение очереди Argon2id — это `AuthError::Busy` → `429` + `Retry-After`,
+  а **не** неудачный логин: блокировка/audit `login_fail` не применяются.
 
 ### 1.5. LDAP
-- ldap3 + GSSAPI/Kerberos (FreeIPA/AD).
-- Bind DN, group mapping, timeout 5s.
-- Circuit breaker: 50% fail / 10s → OPEN 30s.
+- **План (не реализовано):** ldap3 + GSSAPI/Kerberos (FreeIPA/AD); строки
+  `ldap3` в `Cargo.toml` появятся только вместе с реальным клиентом.
+- **Сейчас:** только factory-gated mock (`VKS_ALLOW_MOCK_LDAP`) для тестов;
+  `sync_ldap` без реального клиента честно отвечает `501 ldap_sync_unavailable`.
+- Когда появится реальный клиент: Bind DN, group mapping, timeout 5s,
+  circuit breaker 50% fail / 10s → OPEN 30s.
 
 ### 1.6. MFA
 - TOTP (RFC 6238), опционально. Обязательна для Operator.

@@ -350,19 +350,122 @@ async fn pnm_card_resources_roundtrip_regression() {
 #[tokio::test]
 async fn global_api_bucket_limits_bursts_with_429() {
     let (state, _) = test_state();
-    let server = app(state);
+    let server = app(state.clone());
     let token = login_token(&server, "admin", "s3cret").await;
+    // Deterministic bucket: no refill, so the boundary cannot drift with
+    // wall-clock time (the previous 200/50 rps test flaked ~14%).
+    super::install_test_bucket(&state, vks_common::ratelimit::RateLimiter::new(5, 0.0));
     let mut statuses = Vec::new();
-    for _ in 0..210 {
+    for _ in 0..6 {
         let response = send(&server, request("GET", "/api/v3/ui/sessions", Some(&token), json!({}))).await;
         statuses.push(response.status());
     }
-    assert!(statuses[..200].iter().all(|status| *status == StatusCode::OK), "burst within capacity must pass");
-    assert_eq!(statuses[200..], vec![StatusCode::TOO_MANY_REQUESTS; 10], "bucket must reject past 200");
-    // Retry-After tells the client when the next token arrives.
-    let response = send(&server, request("GET", "/api/v3/ui/sessions", Some(&token), json!({}))).await;
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(statuses[..5], vec![StatusCode::OK; 5], "burst within capacity must pass");
+    assert_eq!(statuses[5], StatusCode::TOO_MANY_REQUESTS, "bucket must reject past capacity");
+    // The outer layer also covers the untokened login route.
+    let response =
+        send(&server, request("POST", "/api/v3/login", None, json!({"login":"admin","password":"s3cret"}))).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS, "login must be inside the global bucket");
     assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "1");
+}
+
+/// A saturated hash queue must be a typed `Busy`, not a bad password: the
+/// provider path in production goes through `state.auth_provider`, so a mock
+/// provider returning `Busy` must produce 429 (no lockout, no audit fail).
+struct BusyProvider;
+#[async_trait::async_trait]
+impl vks_core::ports::auth::AuthProvider for BusyProvider {
+    async fn verify(
+        &self,
+        _creds: &vks_core::ports::auth::Credentials,
+    ) -> Result<vks_core::ports::auth::User, vks_core::ports::auth::AuthError> {
+        Err(vks_core::ports::auth::AuthError::Busy)
+    }
+    async fn get_user(
+        &self,
+        _id: vks_core::participant::UserId,
+    ) -> Result<Option<vks_core::ports::auth::User>, vks_core::ports::auth::AuthError> {
+        Ok(None)
+    }
+    async fn get_user_by_name(
+        &self,
+        _username: &str,
+    ) -> Result<Option<vks_core::ports::auth::User>, vks_core::ports::auth::AuthError> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn provider_busy_returns_429_with_retry_after_and_does_not_lock_out() {
+    let (state, _) = test_state_with_provider(Some(Arc::new(BusyProvider)));
+    let server = app(state.clone());
+    for attempt in 0..5 {
+        let response =
+            send(&server, request("POST", "/api/v3/login", None, json!({"login":"admin","password":"s3cret"}))).await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS, "attempt {attempt} must be 429");
+        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "1");
+    }
+    // Five Busy replies must NOT be five failed logins.
+    let now =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    assert_eq!(state.api_v3.lockout.blocked_for("admin", "unknown", now), None, "busy must not lock the account");
+}
+
+/// Provider success must never mutate LocalDb credentials: an LDAP login whose
+/// username matches a local row used to overwrite the local password with the
+/// LDAP-typed one. Only a LocalDb-verified legacy row may be lazily upgraded.
+struct OkProvider;
+#[async_trait::async_trait]
+impl vks_core::ports::auth::AuthProvider for OkProvider {
+    async fn verify(
+        &self,
+        creds: &vks_core::ports::auth::Credentials,
+    ) -> Result<vks_core::ports::auth::User, vks_core::ports::auth::AuthError> {
+        Ok(vks_core::ports::auth::User {
+            id: vks_core::participant::UserId::from_uuid(
+                uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000043").unwrap(),
+            ),
+            username: creds.username.clone(),
+            role: vks_core::participant::Role::Participant,
+            groups: vec!["ldap".to_string()],
+        })
+    }
+    async fn get_user(
+        &self,
+        _id: vks_core::participant::UserId,
+    ) -> Result<Option<vks_core::ports::auth::User>, vks_core::ports::auth::AuthError> {
+        Ok(None)
+    }
+    async fn get_user_by_name(
+        &self,
+        _username: &str,
+    ) -> Result<Option<vks_core::ports::auth::User>, vks_core::ports::auth::AuthError> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn provider_login_never_rewrites_local_password() {
+    let (state, _) = test_state_with_provider(Some(Arc::new(OkProvider)));
+    let db = state.local_db.clone().expect("local db");
+    db.restore_user(
+        "u-ldap-local",
+        "ldapuser",
+        "49d49c25f597846209f0d92e7770ab64e1c75e94b4ce6c509265ee67175d2a1e",
+        "000102030405060708090a0b0c0d0e0f",
+        Some(1),
+        Some(1),
+    );
+    let server = app(state);
+    // LDAP-typed password "from-ldap" succeeds through the provider ...
+    let response =
+        send(&server, request("POST", "/api/v3/login", None, json!({"login":"ldapuser","password":"from-ldap"}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    // ... and the local PBKDF2 row is untouched: the local password still works
+    // and the row is still flagged for a future local-verified upgrade.
+    let local = db.authenticate("ldapuser", "correct horse battery staple").expect("local password unchanged");
+    assert!(LocalDb::needs_rehash(&local), "provider login must not migrate the local row");
+    assert!(db.authenticate("ldapuser", "from-ldap").is_err(), "LDAP password must not become the local password");
 }
 
 #[tokio::test]
@@ -531,6 +634,12 @@ async fn calls_patch_and_codec_patch_do_not_lose_each_other() {
 
 /// Состояние с issuer + LocalDb(`admin`/`s3cret`), как бутстрап `main.rs`.
 pub(crate) fn test_state() -> (SharedState, Arc<JwtIssuer>) {
+    test_state_with_provider(None)
+}
+
+pub(crate) fn test_state_with_provider(
+    auth_provider: Option<Arc<dyn vks_core::ports::auth::AuthProvider>>,
+) -> (SharedState, Arc<JwtIssuer>) {
     let issuer = Arc::new(JwtIssuer::new(JwtConfig {
         secret: "test_secret_api_v3_phase2".to_string(),
         ttl_secs: 86_400,
@@ -540,6 +649,7 @@ pub(crate) fn test_state() -> (SharedState, Arc<JwtIssuer>) {
     db.register("u-admin", "admin", "s3cret").expect("register admin");
     let mut state = AppState::new();
     state.jwt_issuer = Some(issuer.clone());
+    state.auth_provider = auth_provider;
     state.local_db = Some(db);
     // Как main.rs после bind UDP-лупа: conference-адреса строятся из candidate IP.
     state.server_addr.set("192.168.1.92".to_string()).expect("server_addr set once");

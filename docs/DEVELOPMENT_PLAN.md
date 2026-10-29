@@ -239,7 +239,7 @@
   - [x] `jwt.rs` — **RS256/PS256** (асимметричный), `kid` в header, rotation 90 дней (overlap 30д), TTL access 15min.
   - [x] `refresh.rs` — opaque refresh token (SHA-256 в БД), rotation (одноразовый), reuse detection (revoke family), TTL 30д.
   - [x] `api_key.rs` — формат `vks_key_<base62(32)>`, SHA-256 в БД, scopes (read/write/admin), rate limit 600req/min, revocation.
-  - [x] `password.rs` — **Argon2id** (m=64MiB, t=3, p=4), min 12 символов, top-10k check, TTL 365д.
+  - [x] `password.rs` — **Argon2id** (m=19 MiB, t=2, p=1 — OWASP 2024), min 12 символов, top-10k check, TTL 365д.
   - [x] `lockout.rs` — 5 failed/15min → lock 15min; IP: 10 failed/5min → block 15min.
   - [~] `ldap.rs` — trait + mock; реальный ldap3/GSSAPI-клиент не подключён.
   - [x] `local_db.rs` — встроенная БД юзеров (default).

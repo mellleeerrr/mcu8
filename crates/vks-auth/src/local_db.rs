@@ -46,21 +46,44 @@ fn argon2() -> Argon2<'static> {
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
+/// Number of tasks currently holding or waiting for a hash permit. Must be a
+/// single module-level static: separate function-local statics would not see
+/// each other and the counter would only ever grow.
+static HASH_WAITERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn hash_gate() -> &'static tokio::sync::Semaphore {
     static GATE: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
     GATE.get_or_init(|| tokio::sync::Semaphore::new(AUTH_HASH_PERMITS))
 }
 
-async fn hash_permit() -> Result<tokio::sync::SemaphorePermit<'static>, LocalDbError> {
-    static WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    use std::sync::atomic::Ordering;
-    if WAITING.fetch_add(1, Ordering::SeqCst) >= AUTH_QUEUE_CAPACITY {
-        WAITING.fetch_sub(1, Ordering::SeqCst);
-        return Err(LocalDbError::Busy);
+/// RAII slot in the bounded hashing queue.
+///
+/// The counter must survive future cancellation: a client that disconnects
+/// while waiting for a permit must still release its queue slot, otherwise
+/// repeated aborts leak the counter and permanently return `Busy`.
+struct QueueSlot;
+
+impl QueueSlot {
+    fn acquire() -> Result<Self, LocalDbError> {
+        use std::sync::atomic::Ordering;
+        if HASH_WAITERS.fetch_add(1, Ordering::SeqCst) >= AUTH_QUEUE_CAPACITY {
+            HASH_WAITERS.fetch_sub(1, Ordering::SeqCst);
+            return Err(LocalDbError::Busy);
+        }
+        Ok(Self)
     }
-    let permit = hash_gate().acquire().await.map_err(|_| LocalDbError::Busy);
-    WAITING.fetch_sub(1, Ordering::SeqCst);
-    permit
+}
+
+impl Drop for QueueSlot {
+    fn drop(&mut self) {
+        HASH_WAITERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+async fn hash_permit() -> Result<(QueueSlot, tokio::sync::SemaphorePermit<'static>), LocalDbError> {
+    let slot = QueueSlot::acquire()?;
+    let permit = hash_gate().acquire().await.map_err(|_| LocalDbError::Busy)?;
+    Ok((slot, permit))
 }
 
 /// A stored user.
@@ -109,6 +132,10 @@ impl LocalDb {
     }
 
     /// Register a user with a plaintext password (hashed on entry).
+    /// Synchronous registration convenience used by unit tests and bootstrap
+    /// fixtures ONLY. Production request paths MUST use
+    /// [`LocalDb::register_async`] so the 4-permit Argon2 gate applies.
+    #[doc(hidden)]
     pub fn register(&self, id: &str, username: &str, password: &str) -> Result<User, LocalDbError> {
         if password.len() > MAX_PASSWORD_BYTES {
             return Err(LocalDbError::PasswordTooLong);
@@ -153,9 +180,9 @@ impl LocalDb {
                 }
             }
             None => {
-                // Constant-time dummy hash to protect against timing-based user enumeration
-                let dummy_salt = [0u8; 16];
-                let _ = hash_password_with_salt(&dummy_salt, password);
+                // Same Argon2id work as a real verify: a PBKDF2 dummy is
+                // ~2.5x faster and leaks account existence through timing.
+                let _ = hash_password(password);
                 Err(LocalDbError::NotFound(username.to_string()))
             }
         }
@@ -260,7 +287,7 @@ impl LocalDb {
             return Err(LocalDbError::PasswordTooLong);
         }
         let pwd = new_password.to_string();
-        let _permit = hash_permit().await?;
+        let (_slot, _permit) = hash_permit().await?;
         let (hash_hex, salt_hex) =
             tokio::task::spawn_blocking(move || hash_password(&pwd)).await.map_err(|_| LocalDbError::AuthFailed)?;
         let (id, updated) = {
@@ -288,7 +315,7 @@ impl LocalDb {
         };
         let uname = username.to_string();
         let pwd = password.to_string();
-        let _permit = hash_permit().await?;
+        let (_slot, _permit) = hash_permit().await?;
         tokio::task::spawn_blocking(move || match user_opt {
             Some(user) => {
                 if verify_password(&user, &pwd) {
@@ -298,8 +325,7 @@ impl LocalDb {
                 }
             }
             None => {
-                let dummy_salt = [0u8; 16];
-                let _ = hash_password_with_salt(&dummy_salt, &pwd);
+                let _ = hash_password(&pwd);
                 Err(LocalDbError::NotFound(uname))
             }
         })
@@ -319,6 +345,18 @@ impl LocalDb {
     /// untouched: rehashing is not a password change and must not revoke
     /// sessions or fail the login.
     pub async fn rehash_async(&self, user_id: &str, password: &str) -> Result<User, LocalDbError> {
+        self.rehash_async_if_unchanged(user_id, None, password).await
+    }
+
+    /// Compare-and-swap lazy rehash: only upgrades when the stored hash still
+    /// equals `expected` (None = no CAS). Prevents a concurrent password change
+    /// from being overwritten by a stale login hash.
+    pub async fn rehash_async_if_unchanged(
+        &self,
+        user_id: &str,
+        expected: Option<&str>,
+        password: &str,
+    ) -> Result<User, LocalDbError> {
         let pwd = password.to_string();
         let permit = hash_permit().await?;
         let (hash_hex, salt_hex) =
@@ -326,6 +364,9 @@ impl LocalDb {
         drop(permit);
         let mut map = self.users.lock().unwrap();
         let user = map.get_mut(user_id).ok_or_else(|| LocalDbError::NotFound(user_id.to_string()))?;
+        if expected.is_some_and(|hash| user.password_hash_hex != hash) {
+            return Err(LocalDbError::AuthFailed);
+        }
         user.password_hash_hex = hash_hex;
         user.salt_hex = salt_hex;
         Ok(user.clone())
@@ -337,7 +378,7 @@ impl LocalDb {
             return Err(LocalDbError::PasswordTooLong);
         }
         let pwd = password.to_string();
-        let _permit = hash_permit().await?;
+        let (_slot, _permit) = hash_permit().await?;
         let (hash_hex, salt_hex) =
             tokio::task::spawn_blocking(move || hash_password(&pwd)).await.map_err(|_| LocalDbError::AuthFailed)?;
         let user = User { id: id.to_string(), username: username.to_string(), password_hash_hex: hash_hex, salt_hex };
@@ -602,6 +643,58 @@ mod tests {
         assert_eq!(db.generation("u43"), gen, "rehash is not a password change");
         assert_eq!(db.password_changed_at("u43"), mark);
         assert!(db.authenticate_async("legacy2", "correct horse battery staple").await.is_ok());
+    }
+
+    /// Regression for the P0 waiter-counter leak: aborting futures that are
+    /// queued for a hash permit must release their queue slots (RAII guard),
+    /// never make every later hash return `Busy` forever.
+    #[tokio::test]
+    async fn cancelled_waiters_release_their_queue_slots() {
+        let mut held = Vec::new();
+        for _ in 0..AUTH_HASH_PERMITS {
+            held.push(hash_permit().await.expect("initial permit"));
+        }
+        let mut tasks = Vec::new();
+        for _ in 0..40 {
+            tasks.push(tokio::spawn(async {
+                let _ = hash_permit().await;
+            }));
+        }
+        // Let them park on the semaphore, then cancel while still queued.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+        drop(held);
+        let _fresh = tokio::time::timeout(std::time::Duration::from_secs(2), hash_permit())
+            .await
+            .expect("cancelled waiters must not pin the queue")
+            .expect("queue slot must be available after cancellation");
+    }
+
+    #[tokio::test]
+    async fn cas_rehash_refuses_to_overwrite_a_newer_password() {
+        let db = LocalDb::new();
+        db.restore_user(
+            "u44",
+            "legacy3",
+            "49d49c25f597846209f0d92e7770ab64e1c75e94b4ce6c509265ee67175d2a1e",
+            "000102030405060708090a0b0c0d0e0f",
+            Some(1),
+            Some(1),
+        );
+        let stale = db.user_by_name("legacy3").unwrap().password_hash_hex;
+        // Model a concurrent password change that landed after the login read.
+        db.set_password_async("legacy3", "brand-new-password").await.unwrap();
+        let error = db
+            .rehash_async_if_unchanged("u44", Some(&stale), "correct horse battery staple")
+            .await
+            .expect_err("stale CAS must be rejected");
+        assert!(matches!(error, LocalDbError::AuthFailed));
+        assert!(db.authenticate_async("legacy3", "brand-new-password").await.is_ok());
     }
 
     #[test]

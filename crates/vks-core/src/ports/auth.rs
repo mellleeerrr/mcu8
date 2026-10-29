@@ -23,6 +23,9 @@ pub enum AuthError {
     /// Пользователь заблокирован.
     #[error("user locked out: {0}")]
     LockedOut(String),
+    /// Бэкенд перегружен (очередь хеширования заполнена); повторить позже.
+    #[error("authentication backend busy")]
+    Busy,
     /// Ошибка реализации.
     #[error("auth error: {0}")]
     Other(String),

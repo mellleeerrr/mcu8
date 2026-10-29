@@ -187,13 +187,6 @@ pub async fn token_middleware(State(state): State<SharedState>, mut request: Req
     if state.jwt_issuer.is_none() {
         return error_json(503, "Authentication is not configured");
     }
-    if !global_rate_limit_allows(&state) {
-        let mut response = error_json(429, "Too many requests");
-        if let Ok(value) = "1".parse() {
-            response.headers_mut().insert(header::RETRY_AFTER, value);
-        }
-        return response;
-    }
     let token = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -282,13 +275,23 @@ pub async fn login(
         Busy,
     }
 
+    enum LoginOk {
+        Provider(String),
+        Local(vks_auth::local_db::User),
+    }
+
     let auth_result = if let Some(provider) = &state.auth_provider {
         let creds =
             vks_core::ports::auth::Credentials { username: body.login.clone(), password: body.password.clone() };
-        provider.verify(&creds).await.map(|u| u.id.to_string()).map_err(|_| LoginError::Invalid)
+        match provider.verify(&creds).await {
+            Ok(user) => Ok(LoginOk::Provider(user.id.to_string())),
+            // Typed backpressure: a saturated hash queue is not a bad password.
+            Err(vks_core::ports::auth::AuthError::Busy) => Err(LoginError::Busy),
+            Err(_) => Err(LoginError::Invalid),
+        }
     } else if let Some(db) = state.local_db.clone() {
         match db.authenticate_async(&body.login, &body.password).await {
-            Ok(user) => Ok(user.id),
+            Ok(user) => Ok(LoginOk::Local(user)),
             Err(vks_auth::local_db::LocalDbError::Busy) => Err(LoginError::Busy),
             Err(_) => Err(LoginError::Invalid),
         }
@@ -297,26 +300,38 @@ pub async fn login(
     };
 
     match auth_result {
-        Ok(user_id) => {
+        Ok(ok) => {
             state.api_v3.lockout.record_success(&body.login, &ip);
             LOGIN_ATTEMPTS.with_label_values(&["ok"]).inc();
             audit(&state, &body.login, &ip, "login_ok");
-            // Lazy migration: a verified legacy PBKDF2 credential is upgraded
-            // to Argon2id in memory and persisted without touching generation
-            // or the password-changed mark (it is not a password change).
-            if let (Some(db), Ok(user)) = (&state.local_db, db_user_by_name(&state, &body.login)) {
-                if vks_auth::local_db::LocalDb::needs_rehash(&user) {
-                    match db.rehash_async(&user.id, &body.password).await {
-                        Ok(upgraded) => persist_lazy_rehash(&state, db, &upgraded).await,
-                        Err(error) => tracing::warn!(%error, "lazy Argon2id rehash failed; keeping PBKDF2 row"),
+            match ok {
+                LoginOk::Provider(user_id) => issue_token(&state, &user_id),
+                LoginOk::Local(user) => {
+                    // Lazy migration only for credentials verified by LocalDb:
+                    // an LDAP/OIDC login must never overwrite a local row with
+                    // the typed (remote) password. CAS on the stored hash also
+                    // keeps a concurrent password change from being reverted.
+                    if vks_auth::local_db::LocalDb::needs_rehash(&user) {
+                        if let Some(db) = &state.local_db {
+                            match db
+                                .rehash_async_if_unchanged(&user.id, Some(&user.password_hash_hex), &body.password)
+                                .await
+                            {
+                                Ok(upgraded) => persist_lazy_rehash(&state, db, &upgraded).await,
+                                Err(error) => {
+                                    tracing::warn!(%error, "lazy Argon2id rehash skipped; keeping current hash")
+                                }
+                            }
+                        }
                     }
+                    issue_token(&state, &user.id)
                 }
             }
-            issue_token(&state, &user_id)
         }
         Err(LoginError::Busy) => {
-            LOGIN_ATTEMPTS.with_label_values(&["fail"]).inc();
-            audit(&state, &body.login, &ip, "login_fail");
+            // Do NOT count this as a failed login: backpressure must not lock
+            // the account out. 429 + Retry-After for the client.
+            LOGIN_ATTEMPTS.with_label_values(&["busy"]).inc();
             too_busy_response()
         }
         Err(LoginError::Invalid) => {
@@ -350,6 +365,7 @@ pub async fn change_password(
     }
     let user = match db.authenticate_async(&body.username, &body.old_password).await {
         Ok(u) => u,
+        Err(vks_auth::local_db::LocalDbError::Busy) => return too_busy_response(),
         Err(_) => {
             LOGIN_ATTEMPTS.with_label_values(&["fail"]).inc();
             audit(&state, &body.username, &ip, "login_fail");
@@ -372,6 +388,7 @@ pub async fn change_password(
 
     let updated = match db.set_password_async(&body.username, &body.new_password).await {
         Ok(u) => u,
+        Err(vks_auth::local_db::LocalDbError::Busy) => return too_busy_response(),
         Err(e) => {
             tracing::error!(error = %e, "api_v3: password change failed");
             return error_json(500, "Internal error");
@@ -442,33 +459,37 @@ fn issue_token(state: &AppState, user_id: &str) -> Response {
 /// Process-wide API request budget: 200-token burst, 50 tokens/s refill
 /// (BACKEND_RULES §1.4). One bucket per process state keeps memory bounded and
 /// makes the limit testable; per-IP WS limits stay in [`super::ws`].
-fn global_rate_limit_allows(state: &AppState) -> bool {
-    let limiter = state
-        .api_v3
-        .global_ratelimit
-        .get_or_init(|| std::sync::Mutex::new(vks_common::ratelimit::RateLimiter::new(200, 50.0)));
-    let now = now_unix().max(0) as u64;
-    limiter.lock().map(|mut limiter| limiter.allow("global", now)).unwrap_or(true)
+/// Outermost `/api/v3` middleware: one process-wide token bucket (50 rps,
+/// burst 200). It deliberately covers untokened routes too — the bucket is
+/// charged before authentication, so an unauthenticated flood cannot reach
+/// Argon2 hashing or the handlers at all.
+pub async fn global_bucket_middleware(State(state): State<SharedState>, request: Request, next: Next) -> Response {
+    let allowed = {
+        let mut guard = state.api_v3.global_ratelimit.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let limiter = guard.get_or_insert_with(|| vks_common::ratelimit::RateLimiter::new(200, 50.0));
+        limiter.allow("global", now_unix().max(0) as u64)
+    };
+    if !allowed {
+        return too_many_requests_response();
+    }
+    next.run(request).await
 }
 
-/// HTTP 429 for a saturated password-hashing queue (Retry-After: 1s).
-fn too_busy_response() -> Response {
-    let mut response = error_json(429, "Authentication is temporarily busy");
+fn too_many_requests_response() -> Response {
+    let mut response = error_json(429, "Too many requests");
     if let Ok(value) = "1".parse() {
         response.headers_mut().insert(header::RETRY_AFTER, value);
     }
     response
 }
 
-fn db_user_by_name(
-    state: &AppState,
-    login: &str,
-) -> Result<vks_auth::local_db::User, vks_auth::local_db::LocalDbError> {
-    state
-        .local_db
-        .as_ref()
-        .ok_or_else(|| vks_auth::local_db::LocalDbError::NotFound(login.to_string()))?
-        .user_by_name(login)
+/// HTTP 429 for a saturated password-hashing queue (Retry-After: 1s).
+pub(crate) fn too_busy_response() -> Response {
+    let mut response = error_json(429, "Authentication is temporarily busy");
+    if let Ok(value) = "1".parse() {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
 }
 
 /// Persists a lazy Argon2id upgrade, keeping token generation/mark unchanged.

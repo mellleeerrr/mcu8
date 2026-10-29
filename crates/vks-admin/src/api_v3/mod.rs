@@ -87,7 +87,11 @@ pub struct ApiV3State {
     /// Глобальный token-bucket на все `/api/v3/*` запросы: 200 burst, 50/s
     /// refill (BACKEND_RULES §1.4 / CLUSTERING). Инициализируется лениво, чтобы
     /// `ApiV3State: Default` не тянул конфигурацию в конструктор.
-    pub global_ratelimit: std::sync::OnceLock<std::sync::Mutex<vks_common::ratelimit::RateLimiter>>,
+    /// Process-wide token bucket (200 burst / 50 rps) for **every**
+    /// `/api/v3` route, including the untokened login/ws/static/catch-all
+    /// paths (charged before authentication). `None` until the first request
+    /// initializes it; tests may pre-install a deterministic limiter.
+    pub global_ratelimit: std::sync::Mutex<Option<vks_common::ratelimit::RateLimiter>>,
 }
 
 /// Состояние медиа-настроек абонента (громкость, mute).
@@ -116,6 +120,11 @@ async fn normalize_stray_brace_middleware(
         }
     }
     next.run(req).await
+}
+
+/// Installs a deterministic bucket in tests (capacity/refill fully controlled).
+pub fn install_test_bucket(state: &crate::AppState, limiter: vks_common::ratelimit::RateLimiter) {
+    *state.api_v3.global_ratelimit.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(limiter);
 }
 
 /// Собирает `Router` адаптера `/api/v3/*`.
@@ -491,6 +500,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3", any(catch_all))
         // Fail-closed: jwt_issuer=None → 503 на **весь** /api/v3 (включая login и ws).
         .layer(middleware::from_fn_with_state(state.clone(), auth::fail_closed_middleware))
+        // Global token bucket covers the WHOLE /api/v3 surface, including the
+        // untokened login/ws/static routes (outermost layer runs first).
+        .layer(middleware::from_fn_with_state(state.clone(), auth::global_bucket_middleware))
         .with_state(state)
 }
 
