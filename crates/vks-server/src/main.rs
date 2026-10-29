@@ -91,16 +91,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_exit(e);
     }
 
-    // Fail before touching storage: an operator that enabled the transport but
-    // left candidate_addr empty must get the real reason (the later preflight
-    // validates the *derived* address, so an empty value would look like a
-    // loopback deployment instead).
-    if vks_server::webrtc_runtime::enabled()
-        && config.candidate_addr.as_deref().map(str::trim).is_none_or(str::is_empty)
-    {
-        config_exit(
-            "VKS_WEBRTC_TRANSPORT is enabled but candidate_addr is empty; set VKS_CANDIDATE_ADDR/network.candidate_addr (or VKS_WEBRTC_TRANSPORT=0)".to_string(),
-        );
+    // Fail before touching storage: an empty or unusable candidate must exit 78
+    // without creating/locking the SQLite database (the later preflight runs
+    // after storage init and also validates the *derived* address and ports).
+    // Dev configs (`allow_insecure_defaults`) keep the loopback escape hatch.
+    if vks_server::webrtc_runtime::enabled() && !config.allow_insecure_defaults {
+        let configured = config.candidate_addr.as_deref().unwrap_or("");
+        if configured.trim().is_empty() {
+            config_exit(
+                "VKS_WEBRTC_TRANSPORT is enabled but candidate_addr is empty; set VKS_CANDIDATE_ADDR/network.candidate_addr (or VKS_WEBRTC_TRANSPORT=0)".to_string(),
+            );
+        }
+        if let Err(error) = vks_server::webrtc_runtime::preflight_candidate(configured, false) {
+            config_exit(format!("WebRTC preflight failed: {error}"));
+        }
     }
 
     // Один владелец SQLite-файла: CLI dedup берёт тот же lock, поэтому не может

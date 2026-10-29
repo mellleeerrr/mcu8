@@ -224,11 +224,6 @@ impl WebRtcRoomRegistry {
                             }
                         }
                     }
-                    // A re-offer that starts publishing video needs a fresh IDR: re-arm
-                    // the gate so the new SSRC's first frames are not deltas.
-                    if reoffer.publishes_video {
-                        handle.waiting_keyframe.store(true, Ordering::Relaxed);
-                    }
                     return Ok(AcceptedPeer {
                         answer_sdp: reoffer.answer_sdp,
                         rtp_maps: reoffer.rtp_maps,

@@ -199,9 +199,13 @@ impl WebRtcPeer {
     pub fn accept_reoffer(&mut self, offer_sdp: &str) -> Result<(String, Vec<WebRtcAction>), WebRtcError> {
         validate_offer(offer_sdp)?;
         let next_mids = mids_of(offer_sdp);
-        if !next_mids.is_empty() && next_mids != self.remote_mids {
+        // Existing sections must keep their order/identity; a browser may append
+        // new m-lines (e.g. enabling the camera after an audio-only join).
+        let keeps_prefix =
+            next_mids.len() >= self.remote_mids.len() && next_mids[..self.remote_mids.len()] == self.remote_mids[..];
+        if !next_mids.is_empty() && !keeps_prefix {
             return Err(WebRtcError::InvalidOffer(
-                "m-line/mid order changed: this peer only supports re-negotiating the existing sections".into(),
+                "m-line/mid order changed: re-offers may only append new sections".into(),
             ));
         }
         if let (Some(current), Some(next)) = (&self.remote_fingerprint, fingerprint_of(offer_sdp)) {
@@ -216,7 +220,15 @@ impl WebRtcPeer {
         // transport failure.
         let offer = SdpOffer::from_sdp_string(offer_sdp)
             .map_err(|e| WebRtcError::InvalidOffer(format!("re-offer SDP is not valid: {e}")))?;
-        let answer = self.rtc.sdp_api().accept_offer(offer)?;
+        // str0m's `accept_offer` validates the new SDP against the existing
+        // remote description and fails before mutating it (verified: answer and
+        // a subsequent valid re-offer still work). Such rejections must keep the
+        // live session alive, exactly like our own `validate_offer` errors.
+        let answer = self
+            .rtc
+            .sdp_api()
+            .accept_offer(offer)
+            .map_err(|error| WebRtcError::InvalidOffer(format!("re-offer rejected by str0m: {error}")))?;
         // Do not advertise trickle: this transport never applies trickled
         // remote candidates.
         let answer_sdp = answer.to_sdp_string().replace("a=ice-options:trickle\r\n", "");
@@ -432,11 +444,6 @@ fn shared_dtls_cert() -> Option<str0m::crypto::dtls::DtlsCert> {
     CERT.get_or_init(|| str0m::crypto::from_feature_flags().dtls_provider.generate_certificate()).clone()
 }
 
-/// Rejects offers this SFU cannot safely serve before str0m allocates state.
-///
-/// The real path supports exactly one audio + one video m-line per peer and
-/// requires browser ICE/DTLS credentials. Application/data or extra m-lines
-/// are rejected explicitly instead of being silently mis-mapped.
 /// Extracts `a=mid:` values in SDP order.
 fn mids_of(offer: &str) -> Vec<String> {
     offer.lines().filter_map(|line| line.strip_prefix("a=mid:")).map(|value| value.trim().to_string()).collect()
@@ -447,6 +454,11 @@ fn fingerprint_of(offer: &str) -> Option<String> {
     offer.lines().find_map(|line| line.strip_prefix("a=fingerprint:")).map(|value| value.trim().to_ascii_lowercase())
 }
 
+/// Rejects offers this SFU cannot safely serve before str0m allocates state.
+///
+/// The real path supports at most one audio + one video m-line per peer and
+/// requires browser ICE/DTLS credentials. Application/data or extra m-lines
+/// are rejected explicitly instead of being silently mis-mapped.
 pub(crate) fn validate_offer(offer: &str) -> Result<(), WebRtcError> {
     if offer.len() > 64 * 1024 {
         return Err(WebRtcError::InvalidOffer("SDP larger than 64 KiB".into()));
@@ -607,6 +619,39 @@ mod tests {
         assert_eq!(peer.answer_sdp(), answer_before, "rejected re-offer must not rewrite the answer");
         assert_eq!(peer.mids().len(), 2, "session keeps both m-lines");
         peer.accept_reoffer(&offer_sdp).expect("valid re-offer after a rejected one");
+    }
+
+    /// Appending a section (audio-only join, then camera enabled) is a valid
+    /// re-offer: existing mids keep their order, the new video m-line is appended.
+    #[test]
+    fn audio_only_peer_can_append_a_video_section_on_reoffer() {
+        let full = browser_offer();
+        let audio_only = full.split("m=video").next().expect("audio section").to_string();
+        let mut peer = WebRtcPeer::accept_offer(&audio_only, B, &WebRtcConfig::default()).expect("audio-only accept");
+        assert_eq!(peer.mids().len(), 1);
+        let (answer_sdp, _actions) = peer.accept_reoffer(&full).expect("appended m-line is a valid re-offer");
+        assert_eq!(peer.mids().len(), 2, "the new video mid is registered");
+        assert!(!answer_sdp.is_empty());
+    }
+
+    /// Regression (re-review #2): a pre-mutation str0m rejection (missing
+    /// a=group:BUNDLE) must keep the live session, not just parse errors.
+    #[test]
+    fn reoffer_rejected_by_str0m_keeps_the_session() {
+        let offer_sdp = browser_offer();
+        let mut peer = WebRtcPeer::accept_offer(&offer_sdp, B, &WebRtcConfig::default()).expect("accept");
+        let answer_before = peer.answer_sdp().to_string();
+        let no_bundle: String = offer_sdp
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("a=group:BUNDLE"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        match peer.accept_reoffer(&no_bundle) {
+            Err(WebRtcError::InvalidOffer(_)) => {}
+            other => panic!("expected InvalidOffer for a str0m pre-mutation rejection, got {other:?}"),
+        }
+        assert_eq!(peer.answer_sdp(), answer_before, "rejected re-offer must not rewrite the answer");
+        peer.accept_reoffer(&offer_sdp).expect("valid re-offer after a str0m rejection");
     }
 
     /// A re-created browser PeerConnection has a new DTLS fingerprint that str0m
