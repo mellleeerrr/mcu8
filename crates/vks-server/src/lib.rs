@@ -554,22 +554,30 @@ pub(crate) fn embedded_uuid(value: &str) -> Option<uuid::Uuid> {
     if let Ok(uuid) = uuid::Uuid::parse_str(value) {
         return Some(uuid);
     }
-    // Токены `sip-<uuid>-in`, `part-room-<uuid>`, `urn:uuid:<uuid>`:
-    // разделитель — всё, что не hex-цифра и не дефис.
+    // Идентификаторы с двумя UUID: `part-<room>-<participant>` (WebRTC-пир).
+    // Значимый — ПОСЛЕДНИЙ: `<room>` — это комната, `<participant>` — сам пир.
+    // Возврат первого склеивал всех пиров комнаты в один ParticipantId, и второй
+    // браузер получал «DTLS fingerprint changed» вместо собственного транспорта.
+    // Токены `sip-<uuid>-in`, `urn:uuid:<uuid>` содержат один UUID — порядок
+    // поиска на них не влияет.
+    let mut found = None;
     for token in value.split(|c: char| !(c.is_ascii_hexdigit() || c == '-')) {
         if let Ok(uuid) = uuid::Uuid::parse_str(token) {
-            return Some(uuid);
+            found = Some(uuid);
         }
+    }
+    if found.is_some() {
+        return found;
     }
     // UUID «вклеен» в строку без разделителей — скользящее окно только по
     // границам UTF-8 (byte-слайс на не-ASCII строке паниковал бы).
     for start in 0..=value.len().saturating_sub(36) {
         let Some(window) = value.get(start..start + 36) else { continue };
         if let Ok(uuid) = uuid::Uuid::parse_str(window) {
-            return Some(uuid);
+            found = Some(uuid);
         }
     }
-    None
+    found
 }
 
 /// Извлекает стабильный ParticipantId из строки сессии (детерминированный UUIDv5 для псевдонимов).
@@ -1720,6 +1728,19 @@ mod tests {
         let infixed = format!("prefix-{}-audio-track", random_uuid);
         let pid_infixed = parse_participant_id(&infixed);
         assert_eq!(pid_infixed.to_string(), random_uuid.to_string());
+
+        // WebRTC: `part-<room>-<participant>` содержит ДВА UUID. Участник —
+        // последний, иначе все пиры комнаты получают один ParticipantId и
+        // второй браузер видит «DTLS fingerprint changed».
+        let room_uuid = uuid::Uuid::new_v4();
+        let peer_uuid = uuid::Uuid::new_v4();
+        let session = format!("part-{room_uuid}-{peer_uuid}");
+        assert_eq!(
+            parse_participant_id(&session).to_string(),
+            peer_uuid.to_string(),
+            "room uuid must not shadow the participant uuid"
+        );
+        assert_ne!(parse_participant_id(&session), parse_participant_id(&room_uuid.to_string()));
     }
 
     #[test]
