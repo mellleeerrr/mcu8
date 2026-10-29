@@ -1083,6 +1083,9 @@ pub struct RtpBridgeSession {
     pub audio_codec: Option<&'static str>,
     /// Первый входящий RTP-пакет может прийти с другого source (NAT).
     pub source_latch: bool,
+    /// H.323: peer IP is fixed by Q.931/H.245; accept the first packet from
+    /// any port on that IP, then pin port+SSRC. Egress stays on the OLC address.
+    pub ip_latch: bool,
     pub dtmf_payload_type: Option<u8>,
     /// RFC 4733 digits received from the peer, relayed into the room.
     pub dtmf_events: Option<tokio::sync::mpsc::UnboundedSender<u8>>,
@@ -1631,6 +1634,7 @@ impl GatewayManager {
             audio_payload_type,
             audio_codec: Some(audio_codec),
             source_latch: false,
+            ip_latch: is_h323,
             dtmf_payload_type,
             dtmf_events: None,
             media_stats: media_stats.clone(),
@@ -2825,6 +2829,7 @@ async fn serve_sip_uas_on(
                         audio_payload_type: media.audio_payload_type,
                         audio_codec: Some(media.audio_codec),
                         source_latch: true,
+                        ip_latch: false,
                         dtmf_payload_type: media.dtmf_payload_type,
                         dtmf_events: Some(dtmf_events_tx),
                         media_stats: stats.clone(),
@@ -3709,10 +3714,12 @@ async fn serve_h323_uas_session(
                     remote_audio_port,
                     audio_payload_type,
                     audio_codec: Some(audio_codec_name(audio_payload_type)),
-                    // H.323 already binds the media address via H.245. Any
-                    // first-packet relatch would let a LAN scanner hijack the
-                    // bridge/egress, so keep the OLC-pinned peer.
+                    // The peer IP is pinned to the Q.931 TCP peer; the ACK
+                    // mediaChannel is the peer's *receive* address, so its RTP
+                    // source port may legitimately differ. `ip_latch` accepts
+                    // that first packet by IP+SSRC and never moves egress.
                     source_latch: false,
+                    ip_latch: true,
                     dtmf_payload_type: None,
                     dtmf_events: None,
                     media_stats: pending_call.stats.clone(),
@@ -5319,6 +5326,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_payload_type: 0,
             audio_codec: None,
             source_latch: false,
+            ip_latch: false,
             dtmf_payload_type: None,
             dtmf_events: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
@@ -5374,6 +5382,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_payload_type: 0,
             audio_codec: None,
             source_latch: false,
+            ip_latch: false,
             dtmf_payload_type: None,
             dtmf_events: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
@@ -5425,6 +5434,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_payload_type: 8,
             audio_codec: None,
             source_latch: false,
+            ip_latch: false,
             dtmf_payload_type: None,
             dtmf_events: None,
             rtp_socket: socket,
@@ -5475,6 +5485,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_payload_type: 0,
             audio_codec: None,
             source_latch: false,
+            ip_latch: false,
             dtmf_payload_type: None,
             dtmf_events: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
@@ -5553,6 +5564,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_payload_type: 9,
             audio_codec: None,
             source_latch: false,
+            ip_latch: false,
             dtmf_payload_type: None,
             dtmf_events: None,
             media_stats: Arc::new(GatewayMediaStats::default()),
@@ -5710,6 +5722,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_payload_type: 96,
             audio_codec: Some("G726-32"),
             source_latch: false,
+            ip_latch: false,
             dtmf_payload_type: None,
             dtmf_events: None,
             media_stats: stats.clone(),
@@ -5836,6 +5849,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_payload_type: 96,
             audio_codec: Some("OPUS"),
             source_latch: false,
+            ip_latch: false,
             dtmf_payload_type: None,
             dtmf_events: None,
             media_stats: stats.clone(),
@@ -5921,6 +5935,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             audio_payload_type: 4,
             audio_codec: Some("G723"),
             source_latch: false,
+            ip_latch: false,
             dtmf_payload_type: None,
             dtmf_events: None,
             media_stats: stats,

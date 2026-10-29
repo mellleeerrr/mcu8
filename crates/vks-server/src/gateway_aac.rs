@@ -124,7 +124,9 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
             return;
         }
     };
-    let mut validator = if session.source_latch {
+    let mut validator = if session.ip_latch {
+        super::audio::RtpSource::new_ip_latched(target, session.audio_payload_type)
+    } else if session.source_latch {
         super::audio::RtpSource::new_latched(target, session.audio_payload_type)
     } else {
         super::audio::RtpSource::new(target, session.audio_payload_type)
@@ -204,7 +206,9 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                     }
                     continue;
                 };
-                if session.source_latch { egress = source; }
+                if session.source_latch && !session.ip_latch {
+                    egress = source;
+                }
                 if packet_in.payload.is_empty() || packet_in.payload.len() > MAX_AAC_PAYLOAD {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed);
                     continue;

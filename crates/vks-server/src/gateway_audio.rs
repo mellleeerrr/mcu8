@@ -219,7 +219,9 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
         session.media_stats.audio_codec_running.store(false, Relaxed);
         return;
     }
-    let mut validator = if session.source_latch {
+    let mut validator = if session.ip_latch {
+        RtpSource::new_ip_latched(target, session.audio_payload_type)
+    } else if session.source_latch {
         RtpSource::new_latched(target, session.audio_payload_type)
     } else {
         RtpSource::new(target, session.audio_payload_type)
@@ -574,6 +576,12 @@ pub(super) struct RtpSource {
     /// Входящий вызов: первый валидный RTP-latch с SDP-target разрешён,
     /// дальше источник фиксируется (NAT/перемаршрутизация порта).
     latch: bool,
+    /// H.323: IP already comes from the H.245 OLC/ACK and is pinned to the TCP
+    /// peer. The first valid packet may arrive from a different *port* (the
+    /// ACK mediaChannel is the peer's receive address, not its RTP source);
+    /// after that packet the exact port and SSRC are pinned. Egress is never
+    /// moved: it must stay on the OLC-negotiated receive address.
+    ip_latch: bool,
     allow_empty: bool,
     /// Видео: переупорядоченные пакеты (seq меньше последнего) не отбрасывать
     /// здесь — их ставит на место входной reorder-буфер (`VideoReorderBuffer`).
@@ -605,6 +613,7 @@ impl RtpSource {
             ssrc: None,
             sequence: None,
             latch: false,
+            ip_latch: false,
             allow_empty: false,
             reordered: false,
         }
@@ -627,6 +636,13 @@ impl RtpSource {
         Self { latch: true, ..Self::new(target, payload_type) }
     }
 
+    /// H.323 media: pin the peer IP but accept the first valid packet from any
+    /// source port, then pin that port and SSRC. Used when the OLC/ACK address
+    /// is the peer's receive endpoint rather than the RTP source.
+    pub(super) fn new_ip_latched(target: std::net::SocketAddr, payload_type: u8) -> Self {
+        Self { ip_latch: true, ..Self::new(target, payload_type) }
+    }
+
     /// Opus uses a zero-length payload as a lost/PLC indication (RFC 3550
     /// permits empty payloads); other codecs must carry a complete frame.
     pub(super) fn allow_empty_payloads(&mut self) {
@@ -634,7 +650,17 @@ impl RtpSource {
     }
 
     pub(super) fn accept<'a>(&mut self, source: std::net::SocketAddr, packet: &'a [u8]) -> Option<RtpPayload<'a>> {
-        if source != self.target {
+        if self.ip_latch {
+            // The peer IP is fixed by Q.931/H.245. Before the first packet any
+            // source port is acceptable; afterwards both port and SSRC are
+            // pinned (a port change is a different RTP session, not NAT).
+            if source.ip() != self.target.ip() {
+                return None;
+            }
+            if self.ssrc.is_some() && source != self.target {
+                return None;
+            }
+        } else if source != self.target {
             if !self.latch || self.ssrc.is_some() {
                 return None;
             }
@@ -675,6 +701,9 @@ impl RtpSource {
             !self.reordered && distance >= 0x8000
         }) {
             return None;
+        }
+        if self.ip_latch && self.ssrc.is_none() {
+            self.target = source;
         }
         self.ssrc = Some(ssrc);
         self.sequence = Some(seq);
@@ -821,6 +850,36 @@ mod tests {
         assert!(source.accept(attacker, &packet).is_none(), "source is pinned after latch");
         vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 3, 320, 42, false);
         assert!(source.accept(nat, &packet).is_some(), "latched source keeps flowing");
+    }
+
+    #[test]
+    fn ip_latched_h323_source_pins_ip_port_and_ssrc_without_moving_egress() {
+        // H.245 ACK mediaChannel is the peer's receive address; its RTP source
+        // port can differ. Only the IP is trusted a priori.
+        let advertised: std::net::SocketAddr = "192.0.2.1:40000".parse().unwrap();
+        let peer_source: std::net::SocketAddr = "192.0.2.1:62000".parse().unwrap();
+        let other_port: std::net::SocketAddr = "192.0.2.1:62001".parse().unwrap();
+        let other_ip: std::net::SocketAddr = "203.0.113.9:62000".parse().unwrap();
+        let mut source = RtpSource::new_ip_latched(advertised, 0);
+        let mut packet = [0u8; 172];
+        // A wrong payload must not latch anything.
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 9, 1, 0, 42, false);
+        assert!(source.accept(peer_source, &packet).is_none());
+        assert_eq!(source.target(), advertised, "rejected packet must not relatch");
+        assert_eq!(source.ssrc(), None);
+        // First valid packet from the negotiated IP but another port latches.
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 1, 0, 42, false);
+        assert!(source.accept(peer_source, &packet).is_some());
+        assert_eq!(source.target(), peer_source, "port is pinned after first packet");
+        assert_eq!(source.ssrc(), Some(42));
+        // After the latch the exact port and SSRC are strict.
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 2, 160, 42, false);
+        assert!(source.accept(other_port, &packet).is_none(), "port change after latch is rejected");
+        assert!(source.accept(other_ip, &packet).is_none(), "foreign IP is rejected");
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 3, 320, 43, false);
+        assert!(source.accept(peer_source, &packet).is_none(), "SSRC change after latch is rejected");
+        vks_gateway_sip::write_rtp_header(&mut packet[..12], 0, 3, 320, 42, false);
+        assert!(source.accept(peer_source, &packet).is_some(), "pinned source keeps flowing");
     }
 
     #[test]
