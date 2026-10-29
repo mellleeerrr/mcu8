@@ -15,6 +15,8 @@ pub mod error;
 pub mod ids;
 pub mod layout_defaults;
 pub mod metrics;
+#[cfg(unix)]
+pub mod net_tuning;
 pub mod ratelimit;
 pub mod text;
 pub mod tracing;

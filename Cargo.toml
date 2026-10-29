@@ -38,6 +38,8 @@ bytes = "1"
 http-body = "1"
 subtle = "2.6"
 libc = "0.2"
+# T15/L0: безопасная настройка SO_RCVBUF/SO_SNDBUF (0.6.5 уже в Cargo.lock).
+socket2 = "0.6"
 # ошибки
 thiserror = "2"
 anyhow = "1"

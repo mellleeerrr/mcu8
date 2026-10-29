@@ -25,6 +25,10 @@ ulid.workspace = true
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
+# T15/L0: SO_RCVBUF/SO_SNDBUF через безопасный API socket2 (crate уже в Cargo.lock).
+[target.'cfg(unix)'.dependencies]
+socket2.workspace = true
+
 [dev-dependencies]
 # proptest для property-тестов id-генерации
 proptest.workspace = true

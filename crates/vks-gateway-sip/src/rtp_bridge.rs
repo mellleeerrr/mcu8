@@ -36,7 +36,20 @@ impl RtpPortPool {
     }
 
     /// Выделяет пару свободных сокетов (RTP + RTCP) с привязкой к адресу.
+    ///
+    /// T15/L0: per-call сокеты получают `SO_RCVBUF`/`SO_SNDBUF` из
+    /// `VKS_GATEWAY_UDP_*` (дефолт 512 KiB), иначе sysctl-тюнинг бесполезен:
+    /// каждый звонок SIP/H.323 — это новый UDP-сокет с дефолтным буфером ядра.
     pub async fn allocate_pair(&self, bind_ip: &str) -> Option<PortPair> {
+        self.allocate_pair_with(bind_ip, vks_common::net_tuning::UdpBufferConfig::for_gateway_rtp()).await
+    }
+
+    /// `allocate_pair` с явным конфигом буферов (тесты/будущий конфиг-источник).
+    async fn allocate_pair_with(
+        &self,
+        bind_ip: &str,
+        buffers: vks_common::net_tuning::UdpBufferConfig,
+    ) -> Option<PortPair> {
         let ports: Vec<u16> = {
             let lock = self.free_ports.lock().ok()?;
             lock.iter().copied().collect()
@@ -47,6 +60,25 @@ impl RtpPortPool {
             let rtcp_addr = format!("{bind_ip}:{}", port + 1);
             if let Ok(rtp) = UdpSocket::bind(&rtp_addr).await {
                 if let Ok(rtcp) = UdpSocket::bind(&rtcp_addr).await {
+                    // Буферы — производительный тюнинг, а не admission-контракт:
+                    // ошибка не должна отменять уже выделенную пару портов.
+                    for (label, socket) in [("rtp", &rtp), ("rtcp", &rtcp)] {
+                        match vks_common::net_tuning::apply_udp_buffers(socket, &buffers) {
+                            Ok(effective) => tracing::debug!(
+                                stream = label,
+                                port,
+                                rcvbuf = effective.rcvbuf,
+                                sndbuf = effective.sndbuf,
+                                "gateway UDP socket buffers applied"
+                            ),
+                            Err(error) => tracing::warn!(
+                                stream = label,
+                                port,
+                                %error,
+                                "failed to apply gateway UDP socket buffers; keeping kernel defaults"
+                            ),
+                        }
+                    }
                     if let Ok(mut lock) = self.free_ports.lock() {
                         lock.remove(&port);
                     }
@@ -857,6 +889,24 @@ mod tests {
         for i in 1..159 {
             assert!((src_8k[i] - roundtrip_8k[i]).abs() < 0.2);
         }
+    }
+
+    /// T15/L0: per-call RTP **и** RTCP-сокеты должны получить буферы из env.
+    /// Без этого каждый новый звонок SIP/H.323 — снова дефолт ядра (212 KiB).
+    #[tokio::test]
+    async fn gateway_rtp_pair_applies_configured_socket_buffers() {
+        use vks_common::net_tuning::{read_udp_buffers, UdpBufferConfig, UdpSocketRole};
+
+        let pool = RtpPortPool::new(56_000, 56_010);
+        let config = UdpBufferConfig::with_sizes(UdpSocketRole::GatewayRtp, Some(65_536), Some(65_536));
+        let pair = pool.allocate_pair_with("127.0.0.1", config).await.expect("allocate RTP pair");
+        for socket in [&pair.rtp_socket, &pair.rtcp_socket] {
+            let effective = read_udp_buffers(socket, &config).expect("read effective buffers");
+            assert_eq!(effective.role, UdpSocketRole::GatewayRtp);
+            assert!(effective.rcvbuf >= 65_536, "SO_RCVBUF not applied: {} < 65536", effective.rcvbuf);
+            assert!(effective.sndbuf >= 65_536, "SO_SNDBUF not applied: {} < 65536", effective.sndbuf);
+        }
+        pool.release_port(pair.rtp_port);
     }
 
     #[test]
