@@ -213,34 +213,25 @@ Env-конфиг (значения в байтах; `0` = не трогать б
 |---|---|---|
 | `VKS_UDP_RCVBUF_BYTES` | `media_loop` | 4 MiB |
 | `VKS_UDP_SNDBUF_BYTES` | `media_loop` | 1 MiB |
+| `VKS_WEBRTC_UDP_RCVBUF_BYTES` | `webrtc_peer` | 1 MiB |
+| `VKS_WEBRTC_UDP_SNDBUF_BYTES` | `webrtc_peer` | 512 KiB |
 | `VKS_GATEWAY_UDP_RCVBUF_BYTES` | `gateway_rtp` | 512 KiB |
 | `VKS_GATEWAY_UDP_SNDBUF_BYTES` | `gateway_rtp` | 512 KiB |
 
-Где применяется сейчас:
+Где применяется:
 
+* **Per-peer WebRTC** — `crates/vks-media-sfu/src/webrtc_room.rs::bind_socket`:
+  после каждого успешного `bind` (и диапазон 43000–43100, и ephemeral) сокет
+  получает `webrtc_peer` (1 MiB rcv / 512 KiB snd). Это главная медиаплоскость;
+  при 256 пирах лимит ~256 MiB, а не 1 GiB, как с медиа-дефолтом 4 MiB.
+  Ошибка тюнинга не отказывает пиру: WARN + дефолт ядра.
+* **Legacy media loop** — `crates/vks-media-sfu/src/udp_loop.rs::bind` (`:40000`,
+  4 MiB): хук стоит до удаления legacy-плоскости в T11c; после удаления
+  доктор перестанет требовать `:40000`.
 * **SIP RTP/RTCP** — `RtpPortPool::allocate_pair` в
   `crates/vks-gateway-sip/src/rtp_bridge.rs`: каждый звонок получает новые
-  сокеты; без `setsockopt` sysctl-профиль бесполезен. Сделано.
-* **Per-call стоимость**: 20 звонков × 2 сокета × 512 KiB (лимит, не
-  выделенная память) — подобрано так, чтобы не резервировать 4 MiB на звонок.
-
-Где **нужно доделать на T17** (файлы вне зоны T15, их правят агенты
-T11b/T11c):
-
-* `crates/vks-media-sfu/src/webrtc_room.rs::bind_socket` — UDP-сокет на
-  каждого WebRTC-пира (43000–43100). Это главная медиаплоскость после T11c
-  (legacy plaintext media loop удалён). Нужен трёхстрочный хук:
-
-  ```rust
-  // after a successful std::net::UdpSocket::bind / port selection:
-  let buffers = vks_common::net_tuning::UdpBufferConfig::for_gateway_rtp();
-  if let Ok(effective) = vks_common::net_tuning::apply_udp_buffers(&socket, &buffers) {
-      tracing::debug!(rcvbuf = effective.rcvbuf, sndbuf = effective.sndbuf, "webrtc peer UDP buffers");
-  }
-  ```
-
-  Для 256 пиров 512 KiB — разумный per-peer лимит; если нужен отдельный
-  дефолт, добавить роль `WebRtcPeer` в `net_tuning` (сейчас роли две).
+  сокеты; 20 звонков × 2 сокета × 512 KiB (лимит, не выделенная память) —
+  без резервирования 4 MiB на звонок.
 * **H.323 sidecar (Python)** — сокеты создаёт Python; им достаётся только
   `net.core.rmem_default` (1 MiB из профиля). Явный `SO_RCVBUF` в
   `h323_listener.py` — отдельная задача владельца sidecar.
@@ -248,7 +239,7 @@ T11b/T11c):
 Проверка на живом процессе (после рестарта на новом бинаре):
 
 ```bash
-ss -u -m -p -a | grep -A1 vks-server      # skmem:(r...,rb8388608,...)
+ss -u -m -p -a | grep -A1 vks-server      # skmem:(r...,rb...,...)
 curl -s localhost:8080/metrics | grep vks_udp_
 scripts/host-doctor.sh                     # exit 0 только при совпадении
 ```
@@ -300,7 +291,7 @@ scripts/host-doctor.sh --require-active
 3. для `--prod` — значения `vks.slice` (cgroup v2);
 4. `/proc/<pid>/limits` — эффективный soft `NOFILE`;
 5. `ss -u -m -p -a` — фактический `SO_RCVBUF` медиа-сокетов по ролям
-   (`:40000`, 43000–43100 → media_loop; 41000–41199 → gateway_rtp), дефолты
+   (`:40000`, 43000–43100 → webrtc_peer; 41000–41199 → gateway_rtp), дефолты
    берутся из `net_tuning.rs` (single source of truth), env — из
    `/proc/<pid>/environ`.
 
@@ -332,7 +323,7 @@ drop-in не установлен, `MemoryMax=infinity`, `SO_RCVBUF=212992` у `
 ## 8. Тесты и dry-run (без root)
 
 ```bash
-bash scripts/tests/test_host_tune.sh       # 26 тестов, 0 failed
+bash scripts/tests/test_host_tune.sh       # 27 тестов, 0 failed
 bash -n scripts/host-tune.sh scripts/host-doctor.sh
 # shellcheck на стенде не установлен — пропущен (тест это печатает)
 ```
@@ -342,7 +333,7 @@ bash -n scripts/host-tune.sh scripts/host-doctor.sh
 `rollback` + повторный `rollback`, отказ удалять чужой файл без `--force`,
 установка/проверка/откат slice и drop-in'ов через фейковый `systemctl`,
 доктор: pass на согласованных фикстурах, fail на sysctl/cgroup/`SO_RCVBUF`
-drift, `--skip-socket`, `--require-active`, `--prod`.
+drift (media и webrtc_peer), `--skip-socket`, `--require-active`, `--prod`.
 
 Rust-тесты: `cargo test -p vks-common net_tuning`,
 `cargo test -p vks-gateway-sip gateway_rtp_pair_applies_configured_socket_buffers`.
@@ -358,8 +349,8 @@ Rust-тесты: `cargo test -p vks-common net_tuning`,
   IOWeight и отрицательный Nice только в system-юните.
 * `ip_local_reserved_ports` нужно синхронизировать с фактическими диапазонами
   портов при их изменении.
-* WebRTC per-peer сокеты и H.323 Python sidecar пока не вызывают
-  `net_tuning` — это хук T17 для владельцев файлов (см. §5.1); без него
-  `ss -u -m` для 43000–43100 останется 212 KiB.
+* H.323 Python sidecar не вызывает `net_tuning` и получает только
+  `net.core.rmem_default` (1 MiB) — явный `SO_RCVBUF` в Python-коде остаётся
+  задачей владельца sidecar.
 * Доктор без `--skip-socket` на старом бинаре даёт exit 1 — это не баг, а
   drift до рестарта.

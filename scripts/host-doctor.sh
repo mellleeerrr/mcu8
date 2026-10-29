@@ -230,16 +230,20 @@ check_socket_buffers() {
     fi
     # Defaults: vks_common::net_tuning (bytes). Env overrides come from the
     # process environment itself (what the running binary actually saw).
-    local media_default gateway_default rcv_media rcv_gateway
+    local media_default webrtc_default gateway_default rcv_media rcv_webrtc rcv_gateway
     media_default=$(rust_default_bytes DEFAULT_MEDIA_RCVBUF_BYTES 4194304)
+    webrtc_default=$(rust_default_bytes DEFAULT_WEBRTC_RCVBUF_BYTES 1048576)
     gateway_default=$(rust_default_bytes DEFAULT_GATEWAY_RCVBUF_BYTES 524288)
     rcv_media=$media_default
+    rcv_webrtc=$webrtc_default
     rcv_gateway=$gateway_default
     local env_file="$PROC_ROOT/proc/$pid/environ"
     if [ -r "$env_file" ]; then
         local value
         value=$(tr '\0' '\n' <"$env_file" | sed -n 's/^VKS_UDP_RCVBUF_BYTES=//p' | head -n1)
         case "$value" in '' | 0 | *[!0-9]*) : ;; *) rcv_media=$value ;; esac
+        value=$(tr '\0' '\n' <"$env_file" | sed -n 's/^VKS_WEBRTC_UDP_RCVBUF_BYTES=//p' | head -n1)
+        case "$value" in '' | 0 | *[!0-9]*) : ;; *) rcv_webrtc=$value ;; esac
         value=$(tr '\0' '\n' <"$env_file" | sed -n 's/^VKS_GATEWAY_UDP_RCVBUF_BYTES=//p' | head -n1)
         case "$value" in '' | 0 | *[!0-9]*) : ;; *) rcv_gateway=$value ;; esac
     else
@@ -263,8 +267,8 @@ check_socket_buffers() {
             role='media_loop'
             expected=$rcv_media
         elif [ "$p" -ge 43000 ] && [ "$p" -le 43100 ]; then
-            role='media_loop'
-            expected=$rcv_media
+            role='webrtc_peer'
+            expected=$rcv_webrtc
         elif [ "$p" -ge 41000 ] && [ "$p" -le 41199 ]; then
             role='gateway_rtp'
             expected=$rcv_gateway

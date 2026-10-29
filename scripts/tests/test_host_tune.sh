@@ -163,13 +163,21 @@ make_fake_proc_pid() {
 }
 
 write_ss_fixture() {
-    local file=$1 pid=$2 rb_media=$3 rb_gateway=$4
-    cat >"$file" <<EOF
+    local file=$1 pid=$2 rb_media=$3 rb_gateway=$4 rb_webrtc=${5:-}
+    {
+        cat <<EOF
 UNCONN 0 0 0.0.0.0:40000 0.0.0.0:* users:(("vks-server",pid=$pid,fd=12))
 	 skmem:(r0,rb$rb_media,t0,tb212992,f0,w0,o0,bl0,d0)
 UNCONN 0 0 0.0.0.0:41000 0.0.0.0:* users:(("vks-server",pid=$pid,fd=14))
 	 skmem:(r0,rb$rb_gateway,t0,tb212992,f0,w0,o0,bl0,d0)
 EOF
+        if [ -n "$rb_webrtc" ]; then
+            cat <<EOF
+UNCONN 0 0 0.0.0.0:43000 0.0.0.0:* users:(("vks-server",pid=$pid,fd=16))
+	 skmem:(r0,rb$rb_webrtc,t0,tb212992,f0,w0,o0,bl0,d0)
+EOF
+        fi
+    } >"$file"
 }
 
 # ---------------------------------------------------------------------------
@@ -392,7 +400,7 @@ FAKE_ROOT="$case_dir/root"
 make_fake_root "$FAKE_ROOT"
 PID=424242
 make_fake_proc_pid "$FAKE_ROOT" "$PID"
-write_ss_fixture "$case_dir/ss.out" "$PID" 131072 131072
+write_ss_fixture "$case_dir/ss.out" "$PID" 131072 131072 2097152
 
 export VKS_HOST_ROOT="$FAKE_ROOT"
 export VKS_HOST_TUNE_SYSCTL_BIN="$BINS/sysctl"
@@ -457,7 +465,20 @@ else
     fi
 fi
 make_fake_proc_pid "$FAKE_ROOT" "$PID"
-write_ss_fixture "$case_dir/ss.out" "$PID" 131072 131072
+write_ss_fixture "$case_dir/ss.out" "$PID" 131072 131072 2097152
+
+# One too-small WebRTC peer socket (default 1 MiB, effective 212992) must fail.
+write_ss_fixture "$case_dir/ss.out" "$PID" 131072 131072 212992
+if "$DOCTOR" >"$case_dir/doctor-webrtc.out" 2>&1; then
+    not_ok "host-doctor must fail on a too-small WebRTC peer SO_RCVBUF"
+else
+    if grep -q 'role=webrtc_peer SO_RCVBUF=212992' "$case_dir/doctor-webrtc.out"; then
+        ok "host-doctor fails on a too-small WebRTC peer SO_RCVBUF"
+    else
+        not_ok "WebRTC peer socket drift is not named by host-doctor"
+    fi
+fi
+write_ss_fixture "$case_dir/ss.out" "$PID" 131072 131072 2097152
 
 # --skip-socket must ignore the socket drift and pass on matching cgroup data.
 write_ss_fixture "$case_dir/ss.out" "$PID" 212992 212992
@@ -466,7 +487,7 @@ if "$DOCTOR" --skip-socket >/dev/null 2>&1; then
 else
     not_ok "--skip-socket still failed on socket buffers"
 fi
-write_ss_fixture "$case_dir/ss.out" "$PID" 131072 131072
+write_ss_fixture "$case_dir/ss.out" "$PID" 131072 131072 2097152
 
 # Inactive unit: default is a skip (exit 0), --require-active fails.
 export FAKE_IS_ACTIVE=3
@@ -488,7 +509,7 @@ mkdir -p -- "$case_dir"
 FAKE_ROOT="$case_dir/root"
 make_fake_root "$FAKE_ROOT"
 make_fake_proc_pid "$FAKE_ROOT" "$PID"
-write_ss_fixture "$case_dir/ss.out" "$PID" 131072 131072
+write_ss_fixture "$case_dir/ss.out" "$PID" 131072 131072 2097152
 export VKS_HOST_ROOT="$FAKE_ROOT"
 export VKS_HOST_DOCTOR_USER_UNIT_DIR="$case_dir/user"
 export VKS_HOST_DOCTOR_SYSTEMD_DIR="$case_dir/systemd"
