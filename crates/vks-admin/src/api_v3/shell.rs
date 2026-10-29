@@ -385,18 +385,18 @@ const LICENSE_VIDEO_PARAMS: &[(&str, &str)] = &[
 /// it (native/worker on SIP or H.323, or a negotiable WebRTC codec).
 fn license_name_has_negotiable_plane(name: &str) -> bool {
     use vks_common::codec_spec::{self, Disposition};
-    let negotiable = |spec: &codec_spec::CodecSpec| {
+    fn negotiable(spec: &codec_spec::CodecSpec) -> bool {
         spec.sip.is_bidirectional()
             || spec.h323 == Disposition::Native
             || (spec.webrtc == Disposition::WebRtc && spec.webrtc_negotiable)
-    };
+    }
     if let Some(family) = codec_spec::family(name) {
         return family.members.iter().any(|id| negotiable(codec_spec::spec(*id)));
     }
     if codec_spec::is_g726_name(name) {
-        return codec_spec::CODECS.iter().filter(|spec| spec.id.is_g726()).any(|spec| negotiable(spec));
+        return codec_spec::CODECS.iter().filter(|spec| spec.id.is_g726()).any(negotiable);
     }
-    codec_spec::lookup(name).is_some_and(|spec| negotiable(spec))
+    codec_spec::lookup(name).is_some_and(negotiable)
 }
 
 fn license_audio_codec_available(name: &str) -> bool {
