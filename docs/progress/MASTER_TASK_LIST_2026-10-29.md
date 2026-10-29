@@ -9,7 +9,7 @@
 | ID | Задача | Приоритет | Зависит от | Статус |
 |---|---|---|---|---|
 | T01 | Перезапуск HEAD + live-верификация, бэкап БД | P0 | — | ✅ done 07:33 |
-| T02 | Auth: Argon2id+лимиты+sync-ldap+ADR | P0 | T01 | 🔄 ревью: `eb514e2`, два независимых ревьюера |
+| T02 | Auth: Argon2id+лимиты+sync-ldap+ADR | P0 | T01 | ✅ fix `8dfc449` (2 ревью: 6.0/4.0 → P0/P1 закрыты; re-review идёт) |
 | T03a | CI-гейты (all-features, cache, node/MANIFEST, лишние джобы) | P0 | T01 | ✅ done 07:44 (`9391a8a`) |
 | T03b | Доки к факту + doc-links gate | P1 | T03a | ✅ `9a394ec`: все doc-ссылки, rustdoc-гейт блокирующий, oxideav/ldap3/Taffy/progenitor — к факту |
 | T03c | Мёртвый код (−1080) + неиспользуемые deps | P1 | T03a | ✅ done 07:46 (`aef9257`) |

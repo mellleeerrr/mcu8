@@ -879,13 +879,19 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                 "Real WebRTC in a room with SIP/H.323 participants is not supported yet".to_string(),
                                             ));
                                         } else {
+                                            // Release the admission lock before the
+                                            // async re-negotiation: holding a std
+                                            // MutexGuard across `.await` is not Send.
+                                            drop(_admission);
                                             real_webrtc_attempted = true;
                                             match crate::webrtc_runtime::accept_offer(
                                                 &handler_config,
                                                 membership.room_id,
                                                 pid,
                                                 &offer.sdp,
-                                            ) {
+                                            )
+                                            .await
+                                            {
                                                 Some(Ok(accepted)) => {
                                                     let rtp_maps = accepted.rtp_maps;
                                                     if let Some(answer) = replies.iter_mut().find_map(|reply| {

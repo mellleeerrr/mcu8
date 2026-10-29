@@ -70,11 +70,14 @@ VKS_SIP_UAS_MAX_CALLS=64
 
 ## WebRTC media
 
-Real browser WebRTC (str0m, ICE-lite, DTLS-SRTP) is **off by default**; the
-legacy SDP answer remains in place unless it is explicitly enabled:
+Real browser WebRTC (str0m, ICE-lite, DTLS-SRTP) is **on by default**; a
+non-ICE offer is rejected instead of receiving fake DTLS credentials. The
+legacy hand-built SDP answer is only a bisect/rollback escape hatch:
 
 ```bash
-VKS_WEBRTC_TRANSPORT=1
+# explicit opt-out back to the legacy answer path
+VKS_WEBRTC_TRANSPORT=0
+# production sizing (every peer owns one UDP socket)
 VKS_WEBRTC_PORT_MIN=43000
 VKS_WEBRTC_PORT_MAX=43100
 VKS_WEBRTC_MAX_PEERS=256
@@ -84,7 +87,10 @@ The effective concurrency is `min(VKS_WEBRTC_MAX_PEERS, size of the UDP
 range)` because every peer owns one UDP socket; size the range for the peer
 count you need (43000–43100 holds 101 peers).
 
-`candidate_addr` must be the address browsers can reach; startup preflight
+Auxiliary/secondary processes on the same host are also real WebRTC servers
+after this default flip; pass `VKS_WEBRTC_TRANSPORT=0` (or distinct UDP
+ports) to any process that must not serve media. `candidate_addr` must be the
+address browsers can reach; startup preflight
 fails with exit 78 if it is empty/loopback (unless
 `VKS_ALLOW_LOOPBACK_MEDIA=1`) or if the port pair is invalid/unbindable. Open
 the UDP range in the firewall and port-forward it 1:1 to the server (the

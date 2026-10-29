@@ -348,9 +348,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         room_mode: proto_room_mode,
         video_codecs: vec![vks_proto::media::CodecId::Vp8 as i32],
         audio_codecs: vec![vks_proto::media::CodecId::Opus as i32],
-        simulcast: true,
+        // No rid/simulcast forwarding exists yet; never advertise it.
+        simulcast: false,
         svc: false,
-        dtls_srtp: true,
+        // Legacy fake-SDP plane cannot do DTLS-SRTP; only claim it when the
+        // real transport is enabled.
+        dtls_srtp: vks_server::webrtc_runtime::enabled(),
     };
 
     let handler_config = HandlerConfig::new(
@@ -404,7 +407,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         aac_latm_legal, "gateway audio codec availability (AAC needs probe + legal opt-in + pool preflight)"
     );
 
-    if let Err(error) = vks_server::webrtc_runtime::preflight(&handler_config) {
+    if let Err(error) = vks_server::webrtc_runtime::preflight(&handler_config, config.allow_insecure_defaults) {
         error!(%error, "WebRTC preflight failed");
         eprintln!("vks-server: WebRTC preflight failed: {error}");
         std::process::exit(78);

@@ -113,8 +113,17 @@ async fn handle_ws(socket: WebSocket) {
     }
 }
 
+/// These integration tests build the legacy fake-SDP answer path (they send
+/// ICE-less offers); the real WebRTC transport is ON by default, so opt out
+/// once per test binary. Process env is the only switch the server reads.
+fn force_legacy_webrtc_transport() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("VKS_WEBRTC_TRANSPORT", "0"));
+}
+
 /// Helper to run live server on an ephemeral port (composition root: `build_app`).
 async fn spawn_live_server() -> SocketAddr {
+    force_legacy_webrtc_transport();
     let sqlite = Arc::new(SqliteStorage::init("sqlite::memory:").await.expect("init sqlite"));
     let state = Arc::new(AppState::with_storage(sqlite));
     let frontend = Frontend::load(&frontend_fixture_dir());
@@ -584,6 +593,7 @@ async fn test_composition_api_v3_login_chain() {
 }
 
 async fn spawn_live_server_with_auth() -> (SocketAddr, Arc<AppState>, String) {
+    force_legacy_webrtc_transport();
     let sqlite = Arc::new(SqliteStorage::init("sqlite::memory:").await.expect("init sqlite"));
     let mut state = AppState::with_storage(sqlite);
     let issuer = Arc::new(JwtIssuer::new(JwtConfig {
@@ -857,6 +867,7 @@ async fn test_m5_cluster_leases_and_backpressure() {
 }
 
 async fn spawn_live_server_with_sfu_udp() -> (SocketAddr, SocketAddr, Arc<AppState>, String) {
+    force_legacy_webrtc_transport();
     let sqlite = Arc::new(SqliteStorage::init("sqlite::memory:").await.expect("init sqlite"));
     let mut state = AppState::with_storage(sqlite);
     let issuer = Arc::new(JwtIssuer::new(JwtConfig {

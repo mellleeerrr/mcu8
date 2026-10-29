@@ -66,11 +66,12 @@
 
 ## Конфигурация
 
-- `VKS_WEBRTC_TRANSPORT` — по умолчанию **выключен**. `1` включает реальный
-  транспорт, `0|false|off|no` — выключает и оставляет прежний SDP. На стенде
-  включается в `deploy/systemd/vks-mcu.service`. При включении стартовый
-  preflight проверяет `candidate_addr`, оба порта диапазона и bind; ошибка —
-  exit 78, а не тихий откат на фиктивный SDP.
+- `VKS_WEBRTC_TRANSPORT` — по умолчанию **включён** (реальный транспорт).
+  `0|false|off|no` — явный opt-out на прежний SDP (для биссекта/отката).
+  Стартовый preflight проверяет `candidate_addr` (включая assignability на
+  хосте), оба порта диапазона и bind; ошибка — exit 78, а не тихий откат на
+  фиктивный SDP. Loopback допустим только при `allow_insecure_defaults=true`
+  или `VKS_ALLOW_LOOPBACK_MEDIA=1` (с предупреждением в лог).
 - `VKS_WEBRTC_BWE_INITIAL_BPS` — стартовая оценка BWE (64 kbit/s..50 Mbit/s).
 - `VKS_WEBRTC_MAX_PEERS` — глобальный лимит реальных пиров процесса
   (по умолчанию 256); исчерпание даёт `webrtc_capacity` с `retryable=true`.

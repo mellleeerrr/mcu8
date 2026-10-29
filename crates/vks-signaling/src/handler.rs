@@ -72,7 +72,7 @@ impl HandlerConfig {
                 room_mode: 1,
                 video_codecs: vec![1], // VP8; H.264 browser-leg не мостится в SFU до T06b
                 audio_codecs: vec![6], // OPUS
-                simulcast: true,
+                simulcast: false,
                 svc: false,
                 dtls_srtp: true,
             }),
@@ -127,7 +127,7 @@ impl HandlerConfig {
                 room_mode: 1,
                 video_codecs: vec![1],
                 audio_codecs: vec![6],
-                simulcast: true,
+                simulcast: false,
                 svc: false,
                 dtls_srtp: true,
             }),

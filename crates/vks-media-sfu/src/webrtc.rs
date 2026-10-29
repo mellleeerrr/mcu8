@@ -126,9 +126,10 @@ impl WebRtcPeer {
         validate_offer(offer_sdp)?;
         let mut builder = RtcConfig::new()
             .set_ice_lite(config.ice_lite)
-            // VKS SFU pipeline is Opus + VP8 only. Never let str0m's default
-            // H264/VP9/AV1/H265 set leak into an answer the rest of the
-            // server cannot forward or record.
+            // Honest SFU capabilities: Opus + VP8 only. The signalling caps,
+            // TrackInfo and metrics all say VP8 today; advertising VP9/AV1/
+            // H264/H265 here would make the answer disagree with all three
+            // (and browsers do not negotiate H.265 over WebRTC at all).
             .clear_codecs()
             .enable_opus(true, false)
             .enable_vp8(true)
@@ -172,6 +173,34 @@ impl WebRtcPeer {
         // here is a local ICE/DTLS action we must not silently keep queued.
         let _ = peer.drain()?;
         Ok(peer)
+    }
+
+    /// Re-negotiates on the SAME str0m session (no new ICE/DTLS, no new UDP
+    /// socket). Returns the fresh answer SDP plus the local actions produced
+    /// by the renegotiation, which the caller must transmit.
+    pub fn accept_reoffer(&mut self, offer_sdp: &str) -> Result<(String, Vec<WebRtcAction>), WebRtcError> {
+        validate_offer(offer_sdp)?;
+        let offer = SdpOffer::from_sdp_string(offer_sdp).map_err(|e| WebRtcError::Sdp(e.to_string()))?;
+        let answer = self.rtc.sdp_api().accept_offer(offer)?;
+        // Do not advertise trickle: this transport never applies trickled
+        // remote candidates.
+        let answer_sdp = answer.to_sdp_string().replace("a=ice-options:trickle\r\n", "");
+        self.mids.clear();
+        self.mid_audio.clear();
+        let mut current_audio = None;
+        for line in answer_sdp.lines() {
+            if line.starts_with("m=audio") {
+                current_audio = Some(true);
+            } else if line.starts_with("m=video") {
+                current_audio = Some(false);
+            } else if let Some(mid) = line.strip_prefix("a=mid:") {
+                self.mids.push(Mid::from(mid));
+                self.mid_audio.push(current_audio.unwrap_or(false));
+            }
+        }
+        self.answer_sdp = answer_sdp.clone();
+        let actions = self.drain()?;
+        Ok((answer_sdp, actions))
     }
 
     /// Whether ICE+DTLS+SRTP are fully established.
@@ -451,6 +480,30 @@ mod tests {
         // provider panics on the first Rtc::new; this fails fast if the
         // str0m feature wiring ever loses its provider.
         let _rtc = RtcConfig::new().set_ice_lite(true).build(Instant::now());
+    }
+
+    /// A re-offer is negotiated on the SAME str0m session: no new socket, no
+    /// new DTLS handshake (no second `Connected` action), same local address.
+    #[test]
+    fn accept_reoffer_reuses_the_same_session_and_socket() {
+        let mut client = RtcConfig::new().set_ice_lite(false).build(Instant::now());
+        client.add_local_candidate(Candidate::host(A, "udp").expect("candidate A"));
+        let mut change = client.sdp_api();
+        change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+        change.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
+        let (offer, _pending): (str0m::change::SdpOffer, SdpPendingOffer) = change.apply().expect("offer");
+        let offer_sdp = offer.to_sdp_string();
+
+        let mut peer = WebRtcPeer::accept_offer(&offer_sdp, B, &WebRtcConfig::default()).expect("accept");
+        let local_addr = peer.local_addr();
+        let (answer, actions) = peer.accept_reoffer(&offer_sdp).expect("re-offer");
+        assert_eq!(peer.local_addr(), local_addr, "re-offer must not bind a new socket");
+        assert!(
+            !actions.iter().any(|action| matches!(action, WebRtcAction::Connected)),
+            "re-offer must not restart DTLS"
+        );
+        assert!(answer.contains("VP8/90000"), "re-offer answer keeps VP8-only caps");
+        assert_eq!(peer.mids().len(), 2, "same two m-lines renegotiated");
     }
 
     #[test]

@@ -43,6 +43,9 @@ pub struct PeerHandle {
     video: Arc<AtomicBool>,
     /// Operator/client cap for BWE, 0 = unlimited.
     max_bitrate_bps: Arc<AtomicU64>,
+    /// A new/changed video subscription cannot decode until the next IDR:
+    /// delta frames are dropped and the publisher is asked for a keyframe.
+    waiting_keyframe: Arc<AtomicBool>,
     publishes_video: bool,
     generation: u64,
 }
@@ -61,11 +64,35 @@ pub struct AcceptedPeer {
     pub handle: PeerHandle,
 }
 
-#[derive(Debug)]
+/// Answer produced by re-negotiating on an existing str0m session.
+#[derive(Debug, Clone)]
+struct ReofferAnswer {
+    answer_sdp: String,
+    rtp_maps: Vec<(u8, String, u32, u32)>,
+    publishes_video: bool,
+}
+
 enum PeerCommand {
-    Write { audio: bool, params: PayloadParams, wallclock: Instant, rtp_time: MediaTime, data: Arc<[u8]> },
-    RequestKeyframe { audio: bool },
-    SetSubscription { audio: bool, video: bool },
+    Reoffer {
+        offer_sdp: String,
+        reply: tokio::sync::oneshot::Sender<Result<ReofferAnswer, String>>,
+    },
+    Write {
+        from: ParticipantId,
+        audio: bool,
+        is_keyframe: bool,
+        params: PayloadParams,
+        wallclock: Instant,
+        rtp_time: MediaTime,
+        data: Arc<[u8]>,
+    },
+    RequestKeyframe {
+        audio: bool,
+    },
+    SetSubscription {
+        audio: bool,
+        video: bool,
+    },
 }
 
 /// Registry of real WebRTC peers, keyed by room and participant.
@@ -149,7 +176,56 @@ impl WebRtcRoomRegistry {
     ///
     /// The answer advertises `advertise_ip` with the ephemeral port that was
     /// actually bound, so ICE host candidates always match the socket.
-    pub fn accept_offer(
+    pub async fn accept_offer(
+        self: &Arc<Self>,
+        room: RoomId,
+        participant: ParticipantId,
+        offer_sdp: &str,
+    ) -> Result<AcceptedPeer, WebRtcError> {
+        // Re-offer on an existing session: reuse the same str0m peer (DTLS is
+        // NOT restarted), which keeps ICE/DTLS keys and avoids a media gap.
+        let existing = {
+            let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            rooms.get(&room).and_then(|peers| peers.get(&participant)).cloned()
+        };
+        if let Some(handle) = existing {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            let command = PeerCommand::Reoffer { offer_sdp: offer_sdp.to_string(), reply };
+            if handle.tx.try_send(command).is_ok() {
+                match tokio::time::timeout(Duration::from_secs(2), answer).await {
+                    Ok(Ok(Ok(reoffer))) => {
+                        WEBRTC_OFFERS.with_label_values(&["reoffered"]).inc();
+                        // The participant may have started publishing video in
+                        // this negotiation; keep the handle's view current.
+                        if reoffer.publishes_video && !handle.publishes_video {
+                            if let Some(peers) =
+                                self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&room)
+                            {
+                                if let Some(current) = peers.get_mut(&participant) {
+                                    current.publishes_video = true;
+                                }
+                            }
+                        }
+                        return Ok(AcceptedPeer { answer_sdp: reoffer.answer_sdp, rtp_maps: reoffer.rtp_maps, handle });
+                    }
+                    Ok(Ok(Err(error))) => {
+                        WEBRTC_OFFERS.with_label_values(&["reoffer_rejected"]).inc();
+                        tracing::warn!(?room, ?participant, %error, "WebRTC re-offer rejected; keeping old session");
+                        return Err(WebRtcError::Sdp(error));
+                    }
+                    Ok(Err(_)) => {
+                        tracing::warn!(?room, ?participant, "WebRTC re-offer task dropped; replacing peer");
+                    }
+                    Err(_) => {
+                        tracing::warn!(?room, ?participant, "WebRTC re-offer timed out; replacing peer");
+                    }
+                }
+            }
+        }
+        self.accept_fresh_offer(room, participant, offer_sdp)
+    }
+
+    fn accept_fresh_offer(
         self: &Arc<Self>,
         room: RoomId,
         participant: ParticipantId,
@@ -206,12 +282,14 @@ impl WebRtcRoomRegistry {
         tracing::info!(?room, ?participant, audio, video, publishes_video, "WebRTC peer subscription at offer");
         let (tx, rx) = mpsc::channel(PEER_COMMAND_QUEUE);
         let max_bitrate_bps = Arc::new(AtomicU64::new(max_bitrate_bps));
+        let waiting_keyframe = Arc::new(AtomicBool::new(video));
         let handle = PeerHandle {
             participant,
             tx,
             audio: Arc::new(AtomicBool::new(audio)),
             video: Arc::new(AtomicBool::new(video)),
             max_bitrate_bps: Arc::clone(&max_bitrate_bps),
+            waiting_keyframe: Arc::clone(&waiting_keyframe),
             publishes_video,
             generation,
         };
@@ -257,7 +335,17 @@ impl WebRtcRoomRegistry {
         }
 
         let registry = Arc::clone(self);
-        self.runtime.spawn(run_peer(registry, room, participant, generation, socket, peer, rx, max_bitrate_bps));
+        self.runtime.spawn(run_peer(
+            registry,
+            room,
+            participant,
+            generation,
+            socket,
+            peer,
+            rx,
+            max_bitrate_bps,
+            waiting_keyframe,
+        ));
         Ok(AcceptedPeer { answer_sdp, rtp_maps, handle })
     }
 
@@ -424,7 +512,9 @@ impl WebRtcRoomRegistry {
             if target
                 .tx
                 .try_send(PeerCommand::Write {
+                    from,
                     audio,
+                    is_keyframe: data.is_keyframe(),
                     params: data.params,
                     wallclock: data.network_time,
                     rtp_time: data.time,
@@ -434,6 +524,11 @@ impl WebRtcRoomRegistry {
             {
                 WEBRTC_FRAMES_DROPPED.with_label_values(&["queue_full"]).inc();
                 tracing::debug!(participant = ?target.participant, "webrtc fanout queue full; dropping frame");
+                // The next delivered frame may be a delta after a gap: wait
+                // for a fresh keyframe instead of corrupting the decoder.
+                if !audio {
+                    target.waiting_keyframe.store(true, Ordering::Relaxed);
+                }
                 // Ask the publisher for a fresh keyframe so the slow
                 // subscriber can resynchronise after its queue drains.
                 self.request_keyframe_from(room, from, audio);
@@ -443,6 +538,21 @@ impl WebRtcRoomRegistry {
                     .inc_by(data.data.len() as u64);
             }
         }
+    }
+}
+
+/// Keyframe gate: a subscriber that is still waiting for an IDR must not
+/// receive delta frames (they would corrupt its decoder). The gate opens on
+/// the first keyframe and then lets everything through.
+fn gate_video(waiting: &AtomicBool, is_keyframe: bool) -> bool {
+    if !waiting.load(Ordering::Relaxed) {
+        return true;
+    }
+    if is_keyframe {
+        waiting.store(false, Ordering::Relaxed);
+        true
+    } else {
+        false
     }
 }
 
@@ -456,10 +566,12 @@ async fn run_peer(
     mut peer: WebRtcPeer,
     mut rx: mpsc::Receiver<PeerCommand>,
     max_bitrate_bps: Arc<AtomicU64>,
+    waiting_keyframe: Arc<AtomicBool>,
 ) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     let created_at = Instant::now();
     let mut last_seen = created_at;
+    let mut last_keyframe_request = Instant::now() - Duration::from_secs(1);
     loop {
         if !peer.is_connected() && created_at.elapsed() > CONNECT_DEADLINE {
             tracing::warn!(?participant, "WebRTC peer did not connect before deadline");
@@ -510,11 +622,51 @@ async fn run_peer(
                 let Some(command) = command else { break };
                 let now = Instant::now();
                 let actions = match command {
-                    PeerCommand::Write { audio, params, wallclock, rtp_time, data } => {
+                    PeerCommand::Write { from, audio, is_keyframe, params, wallclock, rtp_time, data } => {
+                        if !audio && !gate_video(&waiting_keyframe, is_keyframe) {
+                            WEBRTC_FRAMES_DROPPED.with_label_values(&["awaiting_keyframe"]).inc();
+                            // Ask the publisher for an IDR, but not on every
+                            // dropped frame (PLI storms are worse than waiting).
+                            if last_keyframe_request.elapsed() >= Duration::from_millis(500) {
+                                last_keyframe_request = Instant::now();
+                                registry.request_keyframe_from(room, from, false);
+                            }
+                            continue;
+                        }
                         let mid = peer.mid_for_kind(audio);
                         match mid {
                             Some(mid) => peer.write_media_matched(mid, params, wallclock, rtp_time, data),
                             None => Ok(Vec::new()),
+                        }
+                    }
+                    PeerCommand::Reoffer { offer_sdp, reply } => {
+                        let result: Result<(String, Vec<WebRtcAction>), WebRtcError> =
+                            peer.accept_reoffer(&offer_sdp);
+                        match result {
+                            Ok((answer_sdp, mut actions)) => {
+                                let _ = reply.send(Ok(ReofferAnswer {
+                                    answer_sdp,
+                                    rtp_maps: peer.rtp_maps(),
+                                    publishes_video: offer_publishes_video(&offer_sdp),
+                                }));
+                                // Local ICE/DTLS actions from the renegotiation
+                                // must be transmitted like any other output.
+                                let now = Instant::now();
+                                let mut tail = match peer.handle_timeout(now) {
+                                    Ok(tail) => tail,
+                                    Err(error) => {
+                                        tracing::warn!(?error, ?participant, "WebRTC re-offer timer failed");
+                                        break;
+                                    }
+                                };
+                                actions.append(&mut tail);
+                                Ok(actions)
+                            }
+                            Err(error) => {
+                                let _ = reply.send(Err(error.to_string()));
+                                tracing::warn!(?error, ?participant, "WebRTC re-offer failed; closing peer");
+                                break;
+                            }
                         }
                     }
                     PeerCommand::RequestKeyframe { audio } => {
@@ -531,6 +683,11 @@ async fn run_peer(
                         result
                     }
                     PeerCommand::SetSubscription { audio, video } => {
+                        if video {
+                            // Re-subscribing restarts the decoder state: wait
+                            // for a fresh keyframe instead of forwarding deltas.
+                            waiting_keyframe.store(true, Ordering::Relaxed);
+                        }
                         tracing::trace!(?participant, audio, video, "webrtc subscription updated");
                         continue;
                     }
@@ -677,6 +834,7 @@ mod tests {
                 audio: Arc::new(AtomicBool::new(true)),
                 video: Arc::new(AtomicBool::new(true)),
                 max_bitrate_bps: Arc::new(AtomicU64::new(0)),
+                waiting_keyframe: Arc::new(AtomicBool::new(true)),
                 publishes_video: true,
                 generation: 1,
             },
@@ -751,8 +909,10 @@ mod tests {
                 peers.insert(pid, handle(pid).0);
             }
         }
-        let error =
-            registry.accept_offer(room, ParticipantId::new(), "v=0\r\n").expect_err("third peer must be rejected");
+        let error = registry
+            .accept_offer(room, ParticipantId::new(), "v=0\r\n")
+            .await
+            .expect_err("third peer must be rejected");
         assert!(matches!(error, WebRtcError::RoomFull));
         assert_eq!(registry.peer_count(room), MAX_PEERS_PER_ROOM);
     }
@@ -761,7 +921,8 @@ mod tests {
     async fn global_cap_rejects_first_peer_in_a_fresh_room() {
         let mut registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
         Arc::get_mut(&mut registry).expect("unique registry").max_peers = 0;
-        let error = registry.accept_offer(RoomId::new(), ParticipantId::new(), "v=0\r\n").expect_err("global cap");
+        let error =
+            registry.accept_offer(RoomId::new(), ParticipantId::new(), "v=0\r\n").await.expect_err("global cap");
         assert!(matches!(error, WebRtcError::CapacityExceeded), "unexpected: {error:?}");
         assert_eq!(registry.peer_total.load(Ordering::Relaxed), 0);
     }
@@ -791,5 +952,56 @@ mod tests {
         registry.remove(room, participant);
         assert_eq!(registry.peer_count(room), 0);
         assert!(registry.rooms.lock().unwrap().get(&room).is_none());
+    }
+
+    /// A re-offer must be answered by the existing peer task through
+    /// `PeerCommand::Reoffer` (same str0m session/DTLS), never by binding a
+    /// second socket. This checks the registry plumbing end-to-end without a
+    /// real UDP/DTLS handshake.
+    #[tokio::test]
+    async fn reoffer_is_answered_by_the_existing_peer_task() {
+        let registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+        let room = RoomId::new();
+        let participant = ParticipantId::new();
+        let (peer, mut rx) = handle(participant);
+        let local_addr = peer.tx.clone();
+        registry.rooms.lock().unwrap().entry(room).or_default().insert(participant, peer);
+        let peer_task = tokio::spawn(async move {
+            let _keep = local_addr;
+            match rx.recv().await {
+                Some(PeerCommand::Reoffer { reply, .. }) => {
+                    reply
+                        .send(Ok(ReofferAnswer {
+                            answer_sdp: "v=0\r\na=mid:0\r\n".to_string(),
+                            rtp_maps: vec![(111, "opus".to_string(), 48_000, 2)],
+                            publishes_video: true,
+                        }))
+                        .expect("registry must await the answer");
+                }
+                _ => panic!("expected a Reoffer command"),
+            }
+        });
+        assert_eq!(registry.peer_count(room), 1, "re-offer must not add a peer");
+        let accepted =
+            registry.accept_offer(room, participant, "v=0\r\n").await.expect("existing peer must answer the re-offer");
+        assert_eq!(accepted.answer_sdp, "v=0\r\na=mid:0\r\n");
+        assert_eq!(accepted.rtp_maps.len(), 1);
+        assert_eq!(registry.peer_count(room), 1);
+        peer_task.await.expect("peer task");
+    }
+
+    #[test]
+    fn keyframe_gate_blocks_deltas_until_the_first_idr() {
+        let waiting = AtomicBool::new(true);
+        assert!(!gate_video(&waiting, false), "delta before IDR is dropped");
+        assert!(waiting.load(Ordering::Relaxed));
+        assert!(gate_video(&waiting, true), "IDR opens the gate");
+        assert!(!waiting.load(Ordering::Relaxed));
+        assert!(gate_video(&waiting, false), "deltas flow after the IDR");
+
+        // Re-subscription/queue overflow closes the gate again.
+        waiting.store(true, Ordering::Relaxed);
+        assert!(!gate_video(&waiting, false));
+        assert!(gate_video(&waiting, true));
     }
 }

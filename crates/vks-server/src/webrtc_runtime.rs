@@ -1,10 +1,15 @@
 //! Process-wide real WebRTC transport registry.
 //!
-//! The signalling handler is synchronous, while per-peer str0m sockets and
-//! timers are async. This module owns the single registry and exposes a
-//! synchronous "accept this browser offer" call from the WebSocket task.
-//! `VKS_WEBRTC_TRANSPORT=0` keeps the legacy hand-built SDP answer (escape
-//! hatch for old clients and for bisecting live E2E failures).
+//! The signalling handler runs inside the async WebSocket task, while each
+//! peer's str0m socket/timer runs in its own task. This module owns the single
+//! registry and exposes "accept this browser offer" as an `async` call (a
+//! re-offer needs one round-trip to the peer's task; a brand-new offer is
+//! registered synchronously under an admission lock).
+//! Real WebRTC is the default media plane: `VKS_WEBRTC_TRANSPORT` must be
+//! explicitly `0`/`false`/`off`/`no` to fall back to the legacy hand-built SDP
+//! answer (escape hatch for old clients and for bisecting live E2E failures).
+//! Enabled transport is fail-closed: a bad candidate address aborts startup
+//! instead of silently serving fake DTLS credentials.
 
 use std::net::IpAddr;
 use std::sync::{Arc, OnceLock};
@@ -14,31 +19,28 @@ use vks_media_sfu::webrtc::WebRtcConfig;
 use vks_media_sfu::webrtc_room::{AcceptedPeer, WebRtcRoomRegistry};
 use vks_signaling::handler::HandlerConfig;
 
-/// `VKS_WEBRTC_TRANSPORT` defaults to OFF: enabling a new media plane must be
-/// an explicit deployment decision. Accepts 0/false/off/no as disable.
+/// `VKS_WEBRTC_TRANSPORT` defaults to ON (real str0m transport). Accepts
+/// 0/false/off/no as an explicit opt-out; an empty value keeps the default.
 pub fn enabled() -> bool {
     match std::env::var("VKS_WEBRTC_TRANSPORT") {
         Ok(value) => !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
-        Err(_) => false,
+        Err(_) => true,
     }
 }
 
-/// Validates WebRTC deployment settings before the listener starts.
+/// Validates the advertised candidate address.
 ///
-/// Returns `Err` when the transport is enabled but cannot work; `main` exits
-/// nonzero instead of silently falling back to the fake legacy SDP.
-pub fn preflight(config: &HandlerConfig) -> Result<(), String> {
-    if !enabled() {
-        return Ok(());
-    }
-    let candidate = config.candidate_addr.trim();
+/// Fails closed for empty/invalid/TEST-NET (RFC 5737) values. Loopback and
+/// unspecified addresses are accepted only for explicit dev use
+/// (`allow_loopback` from `allow_insecure_defaults`) or
+/// `VKS_ALLOW_LOOPBACK_MEDIA=1`; they are unreachable from other hosts.
+fn validate_candidate(candidate: &str, allow_loopback: bool) -> Result<IpAddr, String> {
+    let candidate = candidate.trim();
     if candidate.is_empty() {
         return Err("VKS_WEBRTC_TRANSPORT is enabled but candidate_addr is empty".into());
     }
     let ip: IpAddr =
         candidate.parse().map_err(|error| format!("candidate_addr {candidate:?} is not a valid IP: {error}"))?;
-    // TEST-NET-1/2/3 (RFC 5737) — документационные адреса: они «выглядят»
-    // валидными, но в SDP кандидат недостижим, и браузер молча не подключится.
     let test_net = match ip {
         IpAddr::V4(ip) => {
             let octets = ip.octets();
@@ -51,10 +53,39 @@ pub fn preflight(config: &HandlerConfig) -> Result<(), String> {
     if test_net {
         return Err(format!("candidate_addr {ip} is a documentation (TEST-NET) address; set the real reachable IP"));
     }
-    if (ip.is_loopback() || ip.is_unspecified()) && std::env::var("VKS_ALLOW_LOOPBACK_MEDIA").as_deref() != Ok("1") {
+    let loopback_allowed = allow_loopback || std::env::var("VKS_ALLOW_LOOPBACK_MEDIA").as_deref() == Ok("1");
+    if (ip.is_loopback() || ip.is_unspecified()) && loopback_allowed {
+        tracing::warn!(
+            %ip,
+            "WebRTC candidate is loopback/unspecified: media works only on this host; set VKS_CANDIDATE_ADDR for real clients"
+        );
+    }
+    if (ip.is_loopback() || ip.is_unspecified()) && !loopback_allowed {
         return Err(format!(
             "candidate_addr {ip} is loopback/unspecified; set a reachable address or VKS_ALLOW_LOOPBACK_MEDIA=1"
         ));
+    }
+    Ok(ip)
+}
+
+/// Validates WebRTC deployment settings before the listener starts.
+///
+/// Returns `Err` when the transport is enabled but cannot work; `main` exits
+/// nonzero instead of silently falling back to the fake legacy SDP.
+pub fn preflight(config: &HandlerConfig, allow_loopback: bool) -> Result<(), String> {
+    if !enabled() {
+        return Ok(());
+    }
+    // Dev config (`allow_insecure_defaults = true`) is loopback-friendly so
+    // `cargo run` still works out of the box; production must set a real IP.
+    let ip = validate_candidate(&config.candidate_addr, allow_loopback)?;
+    // The advertised candidate must exist as a local interface address:
+    // binding it catches EADDRNOTAVAIL before clients get an unreachable SDP.
+    match std::net::UdpSocket::bind((ip, 0)) {
+        Ok(probe) => drop(probe),
+        Err(error) => {
+            return Err(format!("candidate_addr {ip} is not assignable on this host: {error}"));
+        }
     }
     match (std::env::var("VKS_WEBRTC_PORT_MIN"), std::env::var("VKS_WEBRTC_PORT_MAX")) {
         (Ok(min), Ok(max)) => {
@@ -153,7 +184,7 @@ pub fn remove(room: vks_core::RoomId, participant: vks_core::ParticipantId) {
 /// Errors are returned to the caller, which fails the offer closed (the legacy
 /// answer is used only when the transport is disabled, never as a fallback)
 /// instead of dropping the signalling session.
-pub fn accept_offer(
+pub async fn accept_offer(
     config: &HandlerConfig,
     room: vks_core::RoomId,
     participant: vks_core::ParticipantId,
@@ -163,8 +194,26 @@ pub fn accept_offer(
         WEBRTC_FALLBACK.with_label_values(&["disabled"]).inc();
         return None;
     };
-    // Re-offer: `accept_offer` installs a newer generation atomically and the
-    // old task exits on channel close; removing first would race the old task
-    // and could delete the new registration. On error the old peer stays.
-    Some(registry.accept_offer(room, participant, offer_sdp))
+    // Re-offer is negotiated on the existing str0m session (same ICE/DTLS and
+    // socket); a stale/failed peer is only replaced by a fresh registration.
+    Some(registry.accept_offer(room, participant, offer_sdp).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidate_validation_is_fail_closed() {
+        std::env::remove_var("VKS_ALLOW_LOOPBACK_MEDIA");
+        assert!(validate_candidate("", false).is_err(), "empty must fail");
+        assert!(validate_candidate("not-an-ip", false).is_err(), "garbage must fail");
+        assert!(validate_candidate("192.0.2.10", false).is_err(), "TEST-NET-1 must fail");
+        assert!(validate_candidate("198.51.100.7", false).is_err(), "TEST-NET-2 must fail");
+        assert!(validate_candidate("203.0.113.9", false).is_err(), "TEST-NET-3 must fail");
+        assert!(validate_candidate("127.0.0.1", false).is_err(), "loopback is not reachable off-host");
+        assert!(validate_candidate("0.0.0.0", false).is_err(), "unspecified must fail");
+        assert_eq!(validate_candidate("192.168.1.93", false).unwrap().to_string(), "192.168.1.93");
+        assert!(validate_candidate("127.0.0.1", true).is_ok(), "explicit dev config may use loopback");
+    }
 }
