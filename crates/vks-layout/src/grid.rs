@@ -179,6 +179,24 @@ mod tests {
         }
     }
 
+    /// S6 contract: 5 tiles on 1280x720 use a 3x2 grid with a centred last
+    /// row; the black area (16.72%) is intentional and matches the vendor
+    /// `preset_equal_3` semantics (stretching would distort cell aspect).
+    #[test]
+    fn grid_five_slots_at_1280x720_fill_is_83_28_percent() {
+        let canvas = Canvas::new(1280, 720);
+        let rects = super::grid_rects(5, &canvas);
+        assert_eq!(rects.len(), 5);
+        assert_eq!((rects[0].x, rects[0].y, rects[0].w, rects[0].h), (0, 0, 426, 360));
+        assert_eq!((rects[1].x, rects[2].x), (426, 852));
+        assert_eq!(rects[2].w, 428, "last tile in a full row takes the remainder");
+        assert_eq!((rects[3].x, rects[3].y, rects[3].w), (214, 360, 426), "last row is centred");
+        let covered: u64 = rects.iter().map(|rect| u64::from(rect.w) * u64::from(rect.h)).sum();
+        assert_eq!(covered, 767_520);
+        let ratio = covered as f64 / (1280.0 * 720.0);
+        assert!((ratio - 0.8328).abs() < 0.0001, "fill {ratio}");
+    }
+
     #[test]
     fn grid_five_six_eight_nine_balanced() {
         for n in [5usize, 6, 8, 9, 13, 16, 25] {

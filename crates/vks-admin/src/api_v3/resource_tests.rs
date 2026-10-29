@@ -2490,10 +2490,10 @@ async fn t00_attach_beyond_layout_size_is_conflict() {
     assert_eq!(response.status(), StatusCode::CONFLICT, "второй абонент не влезает в 1 окно");
 }
 
-/// S7: контракт `layout_size` — явный size, затем preset, затем слоты.
+/// S7/T06: один резолвер — ёмкость пресета приоритетнее устаревшего `size`.
 #[test]
-fn pnm_layout_size_prefers_explicit_size_over_preset() {
-    assert_eq!(super::layout_size(&json!({"preset":"vks_grid_25","size":7})), Some(7));
+fn pnm_layout_size_prefers_preset_capacity_over_stale_explicit_size() {
+    assert_eq!(super::layout_size(&json!({"preset":"vks_grid_25","size":7})), Some(25));
     assert_eq!(super::layout_size(&json!({"preset":"preset_default_13"})), Some(13));
     assert_eq!(super::layout_size(&json!({"size":7})), Some(7));
     assert_eq!(super::layout_size(&json!({"slots":[{"position":1},{"position":2}]})), Some(2));
@@ -2756,4 +2756,27 @@ async fn t00_attach_skips_auto_outside_capacity() {
         .collect();
     positions.sort_unstable();
     assert_eq!(positions, vec![1, 2, 5], "абоненты заняли валидные 1 и 2, окно 5 осталось свободным");
+}
+
+/// T06: `normalize_loaded` recalculates a stale `payload.size` from the preset
+/// capacity (single resolver), while `preset_equal` without a number keeps the
+/// explicitly stored size.
+#[test]
+fn t06_normalize_loaded_recalculates_stale_payload_size() {
+    let mut resources = crate::api_v3::resources::ResourceState::default();
+    resources.layouts.insert(
+        "stale".into(),
+        json!({"id":"stale","payload":{"mode":"dynamic","preset":"vks_grid_25","size":7,"type":"default","slots":[]}}),
+    );
+    resources.layouts.insert(
+        "explicit".into(),
+        json!({"id":"explicit","payload":{"mode":"dynamic","preset":"preset_equal","size":4,"type":"individual","slots":[]}}),
+    );
+    normalize_loaded(&mut resources);
+    assert_eq!(resources.layouts["stale"]["payload"]["size"], 25, "preset capacity wins over stale size");
+    assert_eq!(resources.layouts["explicit"]["payload"]["size"], 4, "preset_equal without N keeps explicit size");
+    // Idempotent: a second load does not drift.
+    let snapshot = resources.layouts.clone();
+    normalize_loaded(&mut resources);
+    assert_eq!(resources.layouts, snapshot);
 }

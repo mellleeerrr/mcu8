@@ -269,26 +269,15 @@ fn gallery(count: usize, width: f64, height: f64, gap: f64, margin: f64) -> Vec<
     rects
 }
 
-/// Штраф за пустые окна в ряду выбора «галереи».
-///
-/// 0 — приоритет формы ячейки: раскладка минимизирует отклонение ячейки от
-/// 16:9, даже если последний ряд неполный (N=43 → 7×7 с одним окном).
-/// Ненулевой вес (прежние 20) предпочитал заполнение сетки: меньше пустых
-/// окон ценой растянутой ячейки. Выбор зафиксирован golden-эталоном N=1..100;
-/// 36 значений 43–96 меняют rows×cols (43: 5×9 → 7×7 и т.п.).
-const WASTE_WEIGHT: f64 = 0.0;
-
 fn gallery_cost(count: usize, rows: usize, width: f64, height: f64, gap: f64) -> f64 {
     let rows = rows.max(1);
     let cols = count.div_ceil(rows);
     let cell_w = (width - (cols - 1) as f64 * gap) / cols as f64;
     let cell_h = (height - (rows - 1) as f64 * gap) / rows as f64;
     let aspect = cell_w / cell_h.max(1.0);
-    let deviation = (aspect - 16.0 / 9.0).abs() * 100.0;
-    if WASTE_WEIGHT == 0.0 {
-        return deviation;
-    }
-    deviation + (cols * rows - count) as f64 * WASTE_WEIGHT
+    // Cell-aspect deviation only: the golden set N=1..100 fixes this choice
+    // (N=43 -> 7x7 with one empty window), so there is no waste weight knob.
+    (aspect - 16.0 / 9.0).abs() * 100.0
 }
 
 /// Конфигурация модульной матрицы C x R для 1 крупного окна:

@@ -369,16 +369,12 @@ fn singular(kind: &str) -> &'static str {
     }
 }
 
-/// Контрактный размер раскладки для attach/валидации: явный `payload.size`
-/// (его поддерживает `recalc_layout_size`), затем id пресета, затем слоты.
+/// Контрактный размер раскладки для attach/валидации. Один резолвер на
+/// весь модуль: ёмкость пресета (конструктор/Codian/вендорский `preset_*`)
+/// приоритетнее кэшированного `payload.size`, иначе раскладку можно
+/// «сжать» устаревшим числом.
 pub(crate) fn layout_size(payload: &Value) -> Option<usize> {
-    payload
-        .get("size")
-        .and_then(Value::as_u64)
-        .filter(|size| *size > 0)
-        .map(|size| size as usize)
-        .or_else(|| payload.get("preset").and_then(Value::as_str).and_then(vks_layout::preset_size))
-        .or_else(|| payload.get("slots").and_then(Value::as_array).map(Vec::len).filter(|count| *count > 0))
+    derived_layout_size(payload)
 }
 
 /// Ёмкость раскладки: явный id пресета (параметрический конструктор, Codian,
@@ -1128,6 +1124,9 @@ pub fn normalize_loaded(resources: &mut ResourceState) {
         }
         let slots = layout["payload"]["slots"].as_array().cloned().unwrap_or_default();
         layout["payload"]["slots"] = json!(slots.into_iter().filter(Value::is_object).collect::<Vec<_>>());
+        // Persisted `payload.size` may be stale (preset changed, slots edited):
+        // normalize it on load with the same resolver every write path uses.
+        recalc_layout_size(layout);
         ensure_slot_roles(layout);
         layout["abonents"] = layout_record_abonents(Vec::new());
         if !layout.get("contacts").is_some_and(Value::is_object) {
