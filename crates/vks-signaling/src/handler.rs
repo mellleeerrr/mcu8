@@ -11,37 +11,30 @@
 use vks_proto::media;
 use vks_proto::signaling as sig;
 use vks_proto::signaling::SignalingMessage;
-use vks_proto::signaling::{signaling_message::Payload, IceComplete as ProtoIceComplete, SdpAnswer};
+use vks_proto::signaling::{signaling_message::Payload, IceComplete as ProtoIceComplete};
 
 use crate::envelope::Envelope;
-use crate::sdp::{RtpMap, Sdp, SfuAnswerProfile};
+use crate::sdp::Sdp;
 use crate::session::{Session, SessionEvent, SessionState};
 
 /// (config/defaults)
 const MIN_V2: u32 = 1;
 const MAX_V2: u32 = 1;
 
-/// (config/defaults)
+/// Signalling handler configuration.
+///
+/// Deliberately contains **no ICE/DTLS material and no RTP payload table**:
+/// the SDP answer is produced by the real str0m peer (`vks_server::
+/// webrtc_runtime`), never by this transport-agnostic handler. The only
+/// transport field left is `candidate_addr`, used by preflight/registry.
 #[derive(Debug, Clone)]
 pub struct HandlerConfig {
     pub server_id: String,
     pub server_name: String,
-    pub ufrag: String,
-    pub pwd: String,
-    pub fingerprint: String,
     pub candidate_addr: String,
-    pub candidate_port: u16,
-    pub rtp_maps: Vec<RtpMap>,
     pub ice_servers: Vec<sig::IceServer>,
     pub room_mode: i32,
     pub caps: Option<vks_proto::media::RoomCaps>,
-    /// `b=AS` для SFU video m-line, kbit/s.
-    pub video_bitrate_kbps: u32,
-}
-
-/// Parse/clamp `VKS_SFU_VIDEO_BITRATE_KBPS`: invalid/empty → 2048, range 64..20000.
-fn video_bitrate_from(raw: Option<&str>) -> u32 {
-    raw.and_then(|value| value.trim().parse::<u32>().ok()).unwrap_or(2048).clamp(64, 20_000)
 }
 
 /// Proto [`media::RoomCaps`] for the WebRTC plane, derived from the codec SSOT
@@ -80,37 +73,19 @@ fn webrtc_room_caps() -> media::RoomCaps {
 
 impl HandlerConfig {
     /// Создаёт конфигурацию обработчика с явными параметрами.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         server_id: impl Into<String>,
         server_name: impl Into<String>,
-        ufrag: impl Into<String>,
-        pwd: impl Into<String>,
-        fingerprint: impl Into<String>,
         candidate_addr: impl Into<String>,
-        candidate_port: u16,
-        rtp_maps: Vec<RtpMap>,
     ) -> Self {
         Self {
             server_id: server_id.into(),
             server_name: server_name.into(),
-            ufrag: ufrag.into(),
-            pwd: pwd.into(),
-            fingerprint: fingerprint.into(),
             candidate_addr: candidate_addr.into(),
-            candidate_port,
-            rtp_maps,
             ice_servers: Vec::new(),
             room_mode: 1, // ROOM_MODE_SFU
             caps: Some(webrtc_room_caps()),
-            video_bitrate_kbps: video_bitrate_from(std::env::var("VKS_SFU_VIDEO_BITRATE_KBPS").ok().as_deref()),
         }
-    }
-
-    /// Переопределяет `b=AS` видео для SFU-ответа (kbit/s).
-    pub fn with_video_bitrate(mut self, kbps: u32) -> Self {
-        self.video_bitrate_kbps = kbps.clamp(64, 20_000);
-        self
     }
 
     /// Задает список ICE-серверов (STUN/TURN).
@@ -137,55 +112,10 @@ impl HandlerConfig {
         self
     }
 
-    /// (config/defaults)
+    /// (config/defaults) — loopback candidate so in-process tests never
+    /// advertise a TEST-NET (RFC 5737) address to the real transport registry.
     pub fn default_test() -> Self {
-        Self {
-            server_id: "srv-0001".into(),
-            server_name: "vks-signaling-test".into(),
-            ufrag: "sfuufrag".into(),
-            pwd: "sfupwd".into(),
-            fingerprint: "sha-256 FF:00:11".into(),
-            candidate_addr: "203.0.113.7".into(),
-            candidate_port: 49152,
-            rtp_maps: vec![
-                RtpMap { payload: 111, codec: "opus".into(), clock: 48000, channels: 2 },
-                RtpMap { payload: 96, codec: "vp8".into(), clock: 90000, channels: 0 },
-            ],
-            ice_servers: Vec::new(),
-            room_mode: 1,
-            caps: Some(webrtc_room_caps()),
-            video_bitrate_kbps: 2048,
-        }
-    }
-
-    /// (config/defaults)
-    pub fn answer_profile(&self) -> SfuAnswerProfile {
-        SfuAnswerProfile {
-            rtp_maps: self.rtp_maps.clone(),
-            ufrag: self.ufrag.clone(),
-            pwd: self.pwd.clone(),
-            host_candidate: crate::sdp::IceCandidate {
-                ufrag: self.ufrag.clone(),
-                pwd: self.pwd.clone(),
-                addr: self.candidate_addr.clone(),
-                port: self.candidate_port,
-                typ: "host".into(),
-            },
-            fingerprint: self.fingerprint.clone(),
-            b_as: Some(self.video_bitrate_kbps.clamp(64, 20_000)),
-            fmtp: Vec::new(),
-            rtcp_fb: vec![
-                "96 nack".into(),
-                "96 nack pli".into(),
-                "96 ccm fir".into(),
-                "96 goog-remb".into(),
-                "96 transport-cc".into(),
-            ],
-            extmap: vec![
-                "1 urn:ietf:params:rtp-hdrext:sdes:mid".into(),
-                "3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01".into(),
-            ],
-        }
+        Self::new("srv-0001", "vks-signaling-test", "127.0.0.1")
     }
 }
 
@@ -224,14 +154,9 @@ impl SignalingHandler {
         }
     }
 
-    /// Текущая конфигурация ответа (для тестов и диагностики).
+    /// Текущая конфигурация обработчика (для тестов и диагностики).
     pub fn config(&self) -> &HandlerConfig {
         &self.config
-    }
-
-    /// Переопределяет `b=AS` видео из живого профиля комнаты.
-    pub fn set_video_bitrate(&mut self, kbps: u32) {
-        self.config.video_bitrate_kbps = kbps.clamp(64, 20_000);
     }
 
     /// (config/defaults)
@@ -364,6 +289,10 @@ impl SignalingHandler {
         vec![Envelope::new(SignalingMessage { msg_id: 0, reply_to, payload: Some(Payload::JoinRoomResult(result)) })]
     }
 
+    /// Validates and moves the session into negotiation, but **never builds an
+    /// SDP answer**: the real answer is produced by the str0m peer in the
+    /// server transport runtime. Returning it here would resurrect the deleted
+    /// fake `FF:00:11`/`sfuufrag` plane (T11c D3).
     fn on_sdp_offer(&mut self, offer: &sig::SdpOffer, reply_to: u64) -> Vec<Envelope> {
         let state = self.session.state();
         if !matches!(state, SessionState::InRoom | SessionState::MediaActive | SessionState::Negotiating) {
@@ -374,25 +303,14 @@ impl SignalingHandler {
                 false,
             )];
         }
-        let offer_doc = match Sdp::parse(&offer.sdp) {
-            Ok(d) => d,
-            Err(e) => {
-                return vec![Envelope::error_reply(reply_to, "sdp_parse_error", &e.to_string(), true)];
-            }
-        };
+        if let Err(e) = Sdp::parse(&offer.sdp) {
+            return vec![Envelope::error_reply(reply_to, "sdp_parse_error", &e.to_string(), true)];
+        }
         self.pre_offer_state = Some(state);
         if let Err(e) = self.session.apply(SessionEvent::SdpOffer) {
             return vec![Envelope::error_reply(reply_to, "bad_state", &format!("offer: {e}"), false)];
         }
-        let profile = self.config.answer_profile();
-        let (answer_doc, rtp_maps) = offer_doc.sfu_answer(&profile);
-        let answer = answer_doc.with_ice_candidates(&[profile.host_candidate]);
-        let proto_maps = rtp_maps
-            .iter()
-            .map(|r| sig::RtpMap { payload: r.payload, codec: r.codec.clone(), clock: r.clock, channels: r.channels })
-            .collect();
-        let answer_msg = SdpAnswer { sdp: answer.to_sdp_text(), rtp_map: proto_maps };
-        vec![Envelope::new(SignalingMessage { msg_id: 0, reply_to, payload: Some(Payload::SdpAnswer(answer_msg)) })]
+        Vec::new()
     }
 
     fn on_ice_candidate(&mut self, reply_to: u64) -> Vec<Envelope> {
@@ -533,7 +451,7 @@ mod tests {
         handler.rollback_offer();
         assert_eq!(handler.state(), SessionState::InRoom);
         let retry = handler.handle(offer(4, OFFER_2));
-        assert!(matches!(retry[0].payload(), Some(Payload::SdpAnswer(_))));
+        assert!(retry.is_empty(), "the handler never answers an offer");
         assert_eq!(handler.state(), SessionState::Negotiating);
     }
 
@@ -568,7 +486,7 @@ mod tests {
         assert!(matches!(reply[0].payload(), Some(Payload::Error(_))));
         assert_eq!(handler.state(), SessionState::InRoom);
         let retry = handler.handle(offer(5, OFFER_2));
-        assert!(matches!(retry[0].payload(), Some(Payload::SdpAnswer(_))));
+        assert!(retry.is_empty(), "retry is negotiated by the real transport, not the handler");
     }
 
     #[test]
@@ -600,19 +518,10 @@ mod tests {
         assert!(handler.participant_id().unwrap().starts_with("part-r1-"));
         assert_eq!(handler.room_id(), Some("r1"));
 
-        // SdpOffer → SdpAnswer (m-lines preserved, ICE-candidates added).
+        // SdpOffer → no reply: the real transport builds the answer.
         let resp = handler.handle(offer(3, OFFER_2));
         assert_eq!(handler.state(), SessionState::Negotiating);
-        match &resp[0].payload() {
-            Some(Payload::SdpAnswer(a)) => {
-                let sdp = &a.sdp;
-                assert!(sdp.lines().any(|l| l.starts_with("m=audio")));
-                assert!(sdp.lines().any(|l| l.starts_with("m=video")));
-                assert!(sdp.contains("ice-ufrag"));
-                assert!(!a.rtp_map.is_empty());
-            }
-            other => panic!("expected SdpAnswer, got {other:?}"),
-        }
+        assert!(resp.is_empty(), "handler must not generate a fake SDP answer");
 
         // IceComplete → Ack, MediaActive.
         let ice = Envelope::new(SignalingMessage {
@@ -656,12 +565,28 @@ mod tests {
     fn transport_agnostic_with_mock_wt() {
         let mut handler = SignalingHandler::new(HandlerConfig::default_test());
         let mut wt = MockWt::new();
+        let mut sent = 0;
         for env in [hello(1, 1), join(2, "r1"), offer(3, OFFER_2)] {
             let r = handler.handle(env);
-            wt.send(r[0].encode());
+            for reply in r {
+                wt.send(reply.encode());
+                sent += 1;
+            }
         }
-        assert_eq!(wt.take_sent().len(), 3);
+        assert_eq!(sent, 2, "only ClientHello and JoinRoom get a handler reply");
+        assert_eq!(wt.take_sent().len(), 2);
         assert_eq!(handler.state(), SessionState::Negotiating);
+    }
+
+    /// T11c D3: the transport-agnostic handler must never synthesize ICE/DTLS
+    /// material or RTP caps for an answer; that plane is gone.
+    #[test]
+    fn sdp_offer_never_builds_a_fake_answer() {
+        let mut handler = SignalingHandler::new(HandlerConfig::default_test());
+        handler.handle(hello(1, 1));
+        handler.handle(join(2, "r1"));
+        let replies = handler.handle(offer(3, OFFER_2));
+        assert!(replies.is_empty(), "no SdpAnswer may come from the handler");
     }
 
     #[test]
@@ -735,31 +660,13 @@ mod tests {
     }
 
     #[test]
-    fn room_video_bitrate_setter_reaches_answer_with_clamp() {
+    fn sdp_parse_error_is_retryable() {
         let mut handler = SignalingHandler::new(HandlerConfig::default_test());
-        handler.set_video_bitrate(4096);
-        assert_eq!(handler.config.answer_profile().b_as, Some(4096));
-        handler.set_video_bitrate(0);
-        assert_eq!(handler.config.answer_profile().b_as, Some(64));
-        handler.set_video_bitrate(100_000);
-        assert_eq!(handler.config.answer_profile().b_as, Some(20_000));
-    }
-
-    #[test]
-    fn sfu_video_bitrate_is_clamped_in_constructor_and_answer() {
-        assert_eq!(video_bitrate_from(Some("0")), 64);
-        assert_eq!(video_bitrate_from(Some("100000")), 20_000);
-        assert_eq!(video_bitrate_from(Some("4096")), 4096);
-        assert_eq!(video_bitrate_from(Some("junk")), 2048);
-        assert_eq!(video_bitrate_from(None), 2048);
-        let mut low = HandlerConfig::default_test();
-        low.video_bitrate_kbps = 0;
-        assert_eq!(low.answer_profile().b_as, Some(64));
-        let mut high = HandlerConfig::default_test();
-        high.video_bitrate_kbps = 100_000;
-        assert_eq!(high.answer_profile().b_as, Some(20_000));
-        let configured = HandlerConfig::default_test().with_video_bitrate(4096);
-        assert_eq!(configured.answer_profile().b_as, Some(4096));
+        handler.handle(hello(1, 1));
+        handler.handle(join(2, "r1"));
+        let resp = handler.handle(offer(3, ""));
+        assert!(matches!(resp[0].payload(), Some(Payload::Error(e)) if e.code == "sdp_parse_error" && e.retryable));
+        assert_eq!(handler.state(), SessionState::InRoom, "a malformed offer must not advance the FSM");
     }
 }
 
@@ -802,18 +709,7 @@ mod codec_caps_tests {
         // Mirrors the production call chain in vks-server/src/main.rs:
         // HandlerConfig::new -> with_room_mode -> with_dtls_srtp. There is no
         // RoomCaps literal to overwrite the SSOT-derived codec fields.
-        let base = || {
-            HandlerConfig::new(
-                "srv-0001",
-                "vks-signaling-test",
-                "sfuufrag",
-                "sfupwd",
-                "sha-256 FF:00:11",
-                "203.0.113.7",
-                49152,
-                Vec::new(),
-            )
-        };
+        let base = || HandlerConfig::new("srv-0001", "vks-signaling-test", "127.0.0.1");
         let (video, audio) = expected_caps_from_ssot();
         let sfu = base().with_room_mode(media::RoomMode::Sfu as i32).with_dtls_srtp(true);
         let sfu_caps = sfu.caps.as_ref().expect("caps");

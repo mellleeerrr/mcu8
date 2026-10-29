@@ -1,10 +1,11 @@
 //! SDP offer/answer модель + минимальный текстовый кодек.
 //!
 //! Основание: `docs/architecture/SIGNALING_PROTOCOL.md` §4 (SDP / ICE).
-//! Протокол переносит SDP как **опaque string** (`SdpOffer.sdp`), поэтому
-//! здесь: структура `Sdp` (session-атрибуты + `Vec<Media>`) с text-кодеком
-//! (строки `v=`, `o=`, `s=`, `m=`, `a=`) и builder `SdpOffer` → `SdpAnswer`,
-//! который echo-ит m-lines кодеками SFU и добавляет ICE-candidates.
+//! Протокол переносит SDP как **opaque string** (`SdpOffer.sdp`), поэтому
+//! здесь только структура `Sdp` (session-атрибуты + `Vec<Media>`) с
+//! text-кодеком (строки `v=`, `o=`, `s=`, `m=`, `a=`). Answer не строится:
+//! его производит реальный str0m-пир; локальный builder с fake ICE/DTLS
+//! удалён в T11c.
 //!
 //! Кодек минимальный (под протокол/тесты, не full RFC 8843): поддерживаются
 //! `v=`, `o=`, `s=`, session `a=`, m-lines с `a=rtpmap`/`a=ice-ufrag`/
@@ -48,21 +49,6 @@ pub struct RtpMap {
     pub codec: String,
     pub clock: u32,
     pub channels: u32,
-}
-
-/// ICE-кандидат (RFC 8445, host — ICE-lite).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IceCandidate {
-    /// ufrag (ICE user fragment) — SDP `a=ice-ufrag`.
-    pub ufrag: String,
-    /// password — SDP `a=ice-pwd`.
-    pub pwd: String,
-    /// IP-адрес кандидата.
-    pub addr: String,
-    /// UDP-порт кандидата.
-    pub port: u16,
-    /// Тип кандидата: "host" | "srflx" | "relay".
-    pub typ: String,
 }
 
 /// Медиа-секция SDP (одна `m=`-line + её атрибуты).
@@ -406,173 +392,8 @@ impl Default for Sdp {
     }
 }
 
-/// SFU-сторона: builder `SdpOffer` → `SdpAnswer` (SIGNALING_PROTOCOL §4).
-///
-/// Echo-ит m-lines оффера (порядок и количество сохранены), подставляет
-/// payload types SFU (из `SfuAnswerProfile`), добавляет ICE-candidates
-/// (ICE-lite: host-only) и fingerprint.
-#[derive(Debug, Clone)]
-pub struct SfuAnswerProfile {
-    /// RTP-maps, которые SFU объявляет в ответе (кодеки).
-    pub rtp_maps: Vec<RtpMap>,
-    /// ICE-ufrag/pwd SFU (одни на все m-lines — ICE-lite).
-    pub ufrag: String,
-    pub pwd: String,
-    /// host-candidate (адрес:порт), один на все m-lines.
-    pub host_candidate: IceCandidate,
-    /// DTLS fingerprint (sha-256, colon-separated hex).
-    pub fingerprint: String,
-    /// `b=AS:<kbps>` для media-секций (0/None — не объявлять).
-    pub b_as: Option<u32>,
-    /// `a=fmtp` строки (полный формат `"96 profile-level-id=..."`).
-    pub fmtp: Vec<String>,
-    /// `a=rtcp-fb` строки (`"96 nack pli"`).
-    pub rtcp_fb: Vec<String>,
-    /// `a=extmap` строки (`"3 urn:ietf:params:rtp-hdrext:toffset"`).
-    pub extmap: Vec<String>,
-}
-
-impl Sdp {
-    /// Строит ответ SFU на offer: m-lines echo-ятся, payload types заменяются
-    /// на SFU-профиль, добавляются ICE/fingerprint.
-    ///
-    /// Возвращает `(answer, rtp_maps)` — rtp_maps дублируются в
-    /// `SdpAnswer.rtp_map` (proto-поле) для convenience.
-    #[must_use]
-    pub fn sfu_answer(&self, profile: &SfuAnswerProfile) -> (Self, Vec<RtpMap>) {
-        let mut answer = Sdp {
-            version: self.version,
-            origin: profile.origin_line().to_string(),
-            session_name: format!("vks-sfu (offer s={})", self.session_name),
-            session_attrs: vec!["group:BUNDLE 0-{}".to_string() /* patched below */],
-            media: Vec::new(),
-        };
-        let bundle_port = profile.host_candidate.port.max(9);
-        let mut answer_maps: Vec<RtpMap> = Vec::new();
-        for (i, media) in self.media.iter().enumerate() {
-            let direction = match media.direction.as_deref() {
-                Some("sendonly") => "recvonly",
-                Some("recvonly") => "sendonly",
-                Some("inactive") => "inactive",
-                _ => "sendrecv",
-            };
-            // Answer is a subset of the offer: only SFU codecs of this media
-            // kind, reusing the offer's payload type for the same codec. A
-            // codec the browser did not offer is never announced (and an
-            // m-line with no common codec is rejected with port 0).
-            let mut selected: Vec<RtpMap> = Vec::new();
-            for map in &profile.rtp_maps {
-                // Codec kind comes from the SSOT: an unknown name is not a
-                // video codec (a typo used to create a bogus m=video answer).
-                let kind = match vks_common::codec_spec::lookup(&map.codec).map(|spec| spec.kind) {
-                    Some(vks_common::codec_spec::CodecKind::Audio | vks_common::codec_spec::CodecKind::Dtmf) => {
-                        MediaKind::Audio
-                    }
-                    Some(vks_common::codec_spec::CodecKind::Video) => MediaKind::Video,
-                    None => continue,
-                };
-                if kind != media.kind {
-                    continue;
-                }
-                if let Some(offered) = media.rtp_maps.iter().find(|o| o.codec.eq_ignore_ascii_case(&map.codec)) {
-                    let mut selected_map = map.clone();
-                    selected_map.payload = offered.payload;
-                    if !selected.iter().any(|m| m.payload == selected_map.payload) {
-                        selected.push(selected_map);
-                    }
-                }
-            }
-            let port = if media.port == 0 || selected.is_empty() { 0 } else { bundle_port };
-            for map in &selected {
-                if !answer_maps.iter().any(|m| m.payload == map.payload) {
-                    answer_maps.push(map.clone());
-                }
-            }
-            // Rejected m-line must still carry at least one fmt token
-            // (RFC 8866 §5.14): keep the offered formats with port 0 instead
-            // of serializing `m=... 0 UDP/TLS/RTP/SAVPF` without a format.
-            let rejected = selected.is_empty();
-            let mut payload_types: Vec<u32> =
-                if rejected { media.payload_types.clone() } else { selected.iter().map(|r| r.payload).collect() };
-            // `m=application` (Data) may arrive without RTP formats; a
-            // rejected m-line still needs one fmt token to stay parseable.
-            if payload_types.is_empty() {
-                payload_types.push(0);
-            }
-            let selected_video_pt =
-                selected.iter().find(|map| map.codec.eq_ignore_ascii_case("vp8")).map(|map| map.payload);
-            let selected_h264 = selected.iter().any(|map| map.codec.eq_ignore_ascii_case("h264"));
-            let rewrite_fb = |feedback: &str| match selected_video_pt {
-                Some(payload) => feedback
-                    .split_once(' ')
-                    .map_or_else(|| format!("{payload} {feedback}"), |(_, rest)| format!("{payload} {rest}")),
-                None => feedback.to_string(),
-            };
-            let m = Media {
-                kind: media.kind,
-                port,
-                payload_types,
-                mid: media.mid.clone().or_else(|| Some(i.to_string())),
-                msid: Some(format!("sfu-out {i}")),
-                ssrcs: vec![format!("ssrc-sfu-{i}")],
-                rtp_maps: selected,
-                ice_ufrag: Some(profile.ufrag.clone()),
-                ice_pwd: Some(profile.pwd.clone()),
-                fingerprint: Some(profile.fingerprint.clone()),
-                setup: Some("passive".to_string()),
-                direction: Some(direction.to_string()),
-                candidates: Vec::new(),
-                // b=AS/fmtp/rtcp-fb are codec-specific: announce them only on
-                // the video m-line, so an audio section never claims 96/fmtp.
-                b_as: if media.kind == MediaKind::Video { profile.b_as } else { None },
-                fmtp: if media.kind == MediaKind::Video && !rejected && selected_h264 {
-                    profile.fmtp.iter().map(|line| rewrite_fb(line)).collect()
-                } else {
-                    Vec::new()
-                },
-                rtcp_fb: if media.kind == MediaKind::Video && !rejected {
-                    profile.rtcp_fb.iter().map(|feedback| rewrite_fb(feedback)).collect()
-                } else {
-                    Vec::new()
-                },
-                extmap: profile.extmap.clone(),
-                rid: Vec::new(),
-                simulcast: None,
-            };
-            answer.media.push(m);
-        }
-        // BUNDLE group из настоящих mids и объявление RFC 8445 ice-lite.
-        let mids: Vec<String> = answer.media.iter().map(|m| m.mid.clone().unwrap_or_else(|| "0".into())).collect();
-        answer.session_attrs = vec![format!("group:BUNDLE {}", mids.join(" ")), "ice-lite".to_string()];
-        (answer, answer_maps)
-    }
-
-    /// Добавляет ICE-candidate в каждую m-line (ICE-lite: host-only).
-    #[must_use]
-    pub fn with_ice_candidates(mut self, candidates: &[IceCandidate]) -> Self {
-        for c in candidates {
-            for media in &mut self.media {
-                if media.ice_ufrag.is_none() {
-                    media.ice_ufrag = Some(c.ufrag.clone());
-                }
-                if media.ice_pwd.is_none() {
-                    media.ice_pwd = Some(c.pwd.clone());
-                }
-                media.candidates.push(format!("1 1 UDP 2130706431 {} {} typ {}", c.addr, c.port, c.typ));
-            }
-        }
-        self
-    }
-}
-
-impl SfuAnswerProfile {
-    /// Строит `o=`-строку для ответа.
-    #[must_use]
-    pub fn origin_line(&self) -> String {
-        let sid = self.ufrag.chars().take(8).collect::<String>();
-        format!("{sid} 1 0 IN IP4 0.0.0.0")
-    }
-}
+// SDP is parsed and round-tripped only; answers come from the real str0m peer.
+// The old fake `sfu_answer`/`SfuAnswerProfile` builder was deleted in T11c.
 
 #[cfg(test)]
 mod tests {
@@ -632,143 +453,6 @@ mod tests {
         }
     }
 
-    fn sfu_profile() -> SfuAnswerProfile {
-        SfuAnswerProfile {
-            rtp_maps: vec![
-                RtpMap { payload: 111, codec: "opus".into(), clock: 48000, channels: 2 },
-                RtpMap { payload: 96, codec: "vp8".into(), clock: 90000, channels: 0 },
-            ],
-            ufrag: "sfuufrag".into(),
-            pwd: "sfupwd".into(),
-            host_candidate: IceCandidate {
-                ufrag: "sfuufrag".into(),
-                pwd: "sfupwd".into(),
-                addr: "203.0.113.7".into(),
-                port: 49152,
-                typ: "host".into(),
-            },
-            fingerprint: "sha-256 FF:00:11".into(),
-            b_as: Some(2048),
-            fmtp: vec!["96 profile-level-id=42e01f;packetization-mode=1".into()],
-            rtcp_fb: vec!["96 nack".into(), "96 nack pli".into(), "96 ccm fir".into()],
-            extmap: vec!["1 urn:ietf:params:rtp-hdrext:sdes:mid".into()],
-        }
-    }
-
-    #[test]
-    fn offer_to_answer_preserves_mlines_and_adds_candidates() {
-        let offer = two_line_offer();
-        let profile = sfu_profile();
-        let (answer0, rtp) = offer.sfu_answer(&profile);
-        let answer = answer0.with_ice_candidates(std::slice::from_ref(&profile.host_candidate));
-
-        // m-lines сохранены по количеству и kind'у.
-        assert_eq!(answer.media.len(), 2);
-        assert_eq!(answer.media[0].kind, MediaKind::Audio);
-        assert_eq!(answer.media[1].kind, MediaKind::Video);
-        // SFU payload types подставлены в обе m-lines (SFU-профиль).
-        assert_eq!(answer.media[0].payload_types, vec![111]);
-        assert_eq!(answer.media[1].payload_types, vec![96]);
-        // ICE candidates присутствуют.
-        assert_eq!(answer.media[0].ice_ufrag.as_deref(), Some("sfuufrag"));
-        assert_eq!(answer.media[1].ice_pwd.as_deref(), Some("sfupwd"));
-        assert!(!answer.media[0].ssrcs.is_empty());
-        // rtp_maps продублированы в proto-совместимый список.
-        assert_eq!(rtp.len(), 2);
-        // fingerprint на каждой m-line.
-        assert_eq!(answer.media[0].fingerprint.as_deref(), Some("sha-256 FF:00:11"));
-        // b=AS/fmtp/rtcp-fb — только на video, не на audio.
-        assert_eq!(answer.media[0].b_as, None);
-        assert!(answer.media[0].fmtp.is_empty());
-        assert_eq!(answer.media[1].b_as, Some(2048));
-        // H.264 fmtp не приклеивается к VP8: SFU объявляет только VP8.
-        assert!(answer.media[1].fmtp.is_empty());
-    }
-
-    #[test]
-    fn sfu_answer_reuses_offer_payload_types_and_keeps_cross_kind_out() {
-        let mut offer = two_line_offer();
-        offer.media[0].payload_types = vec![120];
-        offer.media[0].rtp_maps[0].payload = 120;
-        offer.media[1].payload_types = vec![100];
-        offer.media[1].rtp_maps[0].payload = 100;
-        let (answer, maps) = offer.sfu_answer(&sfu_profile());
-        assert_eq!(answer.media[0].payload_types, vec![120]);
-        assert_eq!(answer.media[1].payload_types, vec![100]);
-        assert!(answer.media[0].rtp_maps.iter().all(|m| m.codec == "opus"));
-        assert!(answer.media[1].rtp_maps.iter().all(|m| m.codec == "vp8"));
-        assert_eq!(maps.len(), 2);
-        assert!(maps.iter().any(|m| m.payload == 120 && m.codec == "opus"));
-        assert!(maps.iter().any(|m| m.payload == 100 && m.codec == "vp8"));
-    }
-
-    #[test]
-    fn sfu_answer_rejects_missing_codec_with_valid_fmt_and_no_dangling_attrs() {
-        let mut offer = two_line_offer();
-        // Browser offers only PCMA and H.264; SFU profile is opus/video-vp8.
-        offer.media[0].payload_types = vec![8];
-        offer.media[0].rtp_maps = vec![RtpMap { payload: 8, codec: "pcma".into(), clock: 8000, channels: 1 }];
-        offer.media[1].payload_types = vec![102];
-        offer.media[1].rtp_maps = vec![RtpMap { payload: 102, codec: "h264".into(), clock: 90000, channels: 0 }];
-
-        let (answer, maps) = offer.sfu_answer(&sfu_profile());
-        assert!(maps.is_empty());
-        for media in &answer.media {
-            assert_eq!(media.port, 0);
-            assert!(!media.payload_types.is_empty(), "RFC 8866 requires at least one fmt token");
-            assert!(media.fmtp.is_empty(), "no dangling fmtp on rejected m-line");
-            assert!(media.rtcp_fb.is_empty(), "no dangling rtcp-fb on rejected m-line");
-        }
-        let text = answer.to_sdp_text();
-        let parsed = Sdp::parse(&text).expect("rejected answer must still parse");
-        assert_eq!(parsed.media.len(), 2);
-        assert!(parsed.media.iter().all(|media| media.port == 0));
-        assert!(text.contains("m=audio 0"));
-        assert!(text.contains("m=video 0"));
-    }
-
-    #[test]
-    fn unknown_codec_does_not_land_on_video_mline() {
-        // `_ => Video` used to turn any typo/unknown name into a video answer.
-        let mut offer = two_line_offer();
-        offer.media[1].payload_types = vec![101];
-        offer.media[1].rtp_maps = vec![RtpMap { payload: 101, codec: "h246".into(), clock: 90000, channels: 0 }];
-        let mut profile = sfu_profile();
-        profile.rtp_maps.push(RtpMap { payload: 101, codec: "h246".into(), clock: 90000, channels: 0 });
-        let (answer, maps) = offer.sfu_answer(&profile);
-        assert_eq!(answer.media[1].port, 0, "unknown codec must reject the video m-line");
-        assert!(answer.media[1].rtp_maps.is_empty());
-        assert!(!maps.iter().any(|map| map.codec == "h246"), "unknown codec selected: {maps:?}");
-    }
-
-    #[test]
-    fn sfu_answer_data_mline_without_formats_stays_valid() {
-        let mut offer = two_line_offer();
-        offer.media[1].kind = MediaKind::Data;
-        offer.media[1].payload_types = Vec::new();
-        offer.media[1].rtp_maps = Vec::new();
-        let (answer, _maps) = offer.sfu_answer(&sfu_profile());
-        let data = &answer.media[1];
-        assert_eq!(data.port, 0);
-        assert_eq!(data.payload_types, vec![0], "fmt token required even for Data rejection");
-        assert!(Sdp::parse(&answer.to_sdp_text()).is_ok());
-    }
-
-    #[test]
-    fn sfu_answer_rewrites_rtcp_fb_to_selected_pt() {
-        let mut offer = two_line_offer();
-        offer.media[1].payload_types = vec![100];
-        offer.media[1].rtp_maps = vec![RtpMap { payload: 100, codec: "vp8".into(), clock: 90000, channels: 0 }];
-        let (answer, _maps) = offer.sfu_answer(&sfu_profile());
-        let video = &answer.media[1];
-        assert_eq!(video.payload_types, vec![100]);
-        assert!(video.rtcp_fb.iter().all(|line| line.starts_with("100 ")), "{:?}", video.rtcp_fb);
-        assert!(video.fmtp.is_empty(), "H.264 fmtp must not be attached to VP8");
-        let text = answer.to_sdp_text();
-        assert!(!text.contains("a=rtcp-fb:96"));
-        assert!(text.contains("a=rtcp-fb:100 nack"));
-    }
-
     #[test]
     fn sdp_text_roundtrip() {
         let doc = two_line_offer();
@@ -787,32 +471,6 @@ mod tests {
         assert_eq!(parsed.media[1].rtp_maps[0].payload, 96);
         assert_eq!(parsed.media[1].ice_ufrag.as_deref(), Some("aufrag"));
         assert_eq!(parsed.media[1].fingerprint.as_deref(), Some("sha-256 AA:BB:CC"));
-    }
-
-    #[test]
-    fn answer_text_roundtrip() {
-        let offer = two_line_offer();
-        let profile = sfu_profile();
-        let (answer0, _rtp) = offer.sfu_answer(&profile);
-        let answer = answer0.with_ice_candidates(std::slice::from_ref(&profile.host_candidate));
-        let text = answer.to_sdp_text();
-        let parsed = Sdp::parse(&text).expect("parse");
-        assert_eq!(parsed.media.len(), 2);
-        assert!(parsed.session_attrs.iter().any(|a| a.starts_with("group:BUNDLE")));
-        assert!(parsed.session_attrs.iter().any(|a| a == "ice-lite"));
-        assert_eq!(parsed.media[0].payload_types, vec![111]);
-    }
-
-    #[test]
-    fn sfu_answer_handles_inactive_and_port_zero() {
-        let mut offer = two_line_offer();
-        offer.media[0].direction = Some("inactive".into());
-        offer.media[1].port = 0; // rejected stream
-        let profile = sfu_profile();
-        let (answer, _) = offer.sfu_answer(&profile);
-        assert_eq!(answer.media[0].direction.as_deref(), Some("inactive"));
-        assert_eq!(answer.media[0].port, 49152);
-        assert_eq!(answer.media[1].port, 0); // RFC 3264 §6
     }
 
     #[test]

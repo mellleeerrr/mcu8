@@ -20,7 +20,7 @@ pub mod wt;
 
 pub use envelope::Envelope;
 pub use handler::{HandlerConfig, SignalingHandler};
-pub use sdp::{IceCandidate, Media, MediaKind, Sdp, SfuAnswerProfile};
+pub use sdp::{Media, MediaKind, Sdp};
 pub use session::{InvalidTransition, Session, SessionEvent, SessionState};
 pub use ws::{MockWs, WsSession};
 pub use wt::{MockWt, WebTransportSession};
