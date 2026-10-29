@@ -388,6 +388,30 @@ pub(crate) fn layout_size(payload: &Value) -> Option<usize> {
     Some(capacity.min(vks_layout::grids::MAX_WINDOWS))
 }
 
+/// Слот занят участником — ОДИН предикат для ёмкости и для ролей UI.
+///
+/// `abonent_id` — не единственный идентификатор: SIP-абонент приходит через
+/// `contact_id`/`call_string_id`, MCU-слот может нести `connection_id`, а UI
+/// исторически пишет и camelCase-варианты. Если считать занятость только по
+/// `abonent_id`, запись с 9 contact-only слотами и пресетом на 5 нормализуется
+/// в size=5: MCU при этом рисует 9 окон по assignment'ам, а следующий PATCH
+/// получает 409 — «успешная запись отравляет запись» (T06 re-review #3, P1-2).
+/// Пустые AUTO-окна не несут ни одного идентификатора и ёмкость не раздувают.
+fn slot_holds_participant(slot: &Value) -> bool {
+    [
+        "abonent_id",
+        "contact_id",
+        "abonentId",
+        "contactId",
+        "call_string_id",
+        "callStringId",
+        "connection_id",
+        "connectionId",
+    ]
+    .iter()
+    .any(|key| slot.get(*key).and_then(Value::as_str).is_some_and(|id| !id.trim().is_empty()))
+}
+
 /// 1-based `position` максимума по ЗАНЯТЫМ слотам payload. Legacy-запись с 9
 /// занятыми окнами должна сохранять ёмкость 9 даже при пресете на 5; пустые
 /// AUTO-окна вне ёмкости (мусор прежних версий) ёмкость не раздувают.
@@ -397,7 +421,7 @@ fn max_slot_position(payload: &Value) -> Option<usize> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|slot| slot.get("abonent_id").and_then(Value::as_str).is_some())
+        .filter(|slot| slot_holds_participant(slot))
         .filter_map(|slot| slot.get("position").and_then(Value::as_u64))
         .max()
         .map(|position| position as usize)
@@ -1387,10 +1411,7 @@ fn ensure_slot_roles(record: &mut Value) {
         if UI_SLOT_ROLES.contains(&current) {
             continue;
         }
-        let occupied = ["abonent_id", "contact_id", "abonentId", "contactId", "call_string_id", "callStringId"]
-            .iter()
-            .any(|key| slot.get(*key).and_then(Value::as_str).is_some_and(|id| !id.is_empty()));
-        let role = if occupied {
+        let role = if slot_holds_participant(slot) {
             "PEER"
         } else if slot.get("z_order").and_then(Value::as_i64).unwrap_or(0) > 0 {
             "PRESENTATION"

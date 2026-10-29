@@ -180,9 +180,19 @@
 - Ёмкость раскладки (`payload.size`) вычисляет один резолвер:
   `grids::slot_count` → `codian::slot_count` → `preset_size` →
   `payload.size` → `slots.len`; после merge запроса size пересчитывается.
-- `size` никогда не опускается ниже `max(slot.position)`: legacy-запись с
-  большим числом занятых окон не должна ломать PATCH/attach — attach,
-  validate и mode используют один и тот же резолвер ёмкости.
+- `size` никогда не опускается ниже позиции самого дальнего ЗАНЯТОГО окна:
+  `effective_capacity = max(резолвер, max(position) по слотам с участником)`.
+  Занятость определяется ОДНИМ предикатом (`slot_holds_participant`:
+  `abonent_id`/`contact_id`/`call_string_id`/`connection_id` + camelCase;
+  непустое значение) — тот же, что назначает `role=PEER` в UI. Иначе запись
+  с contact-only слотами нормализуется в меньший size, MCU рисует больше
+  окон, а следующий PATCH получает 409.
+- Пустые AUTO-окна (без идентификатора участника) вне ёмкости сетки/пресета
+  ёмкость НЕ раздувают.
+- Legacy-запись с большим числом занятых окон не должна ломать PATCH/attach:
+  attach, validate и mode используют один и тот же резолвер ёмкости, причём
+  validate берёт ёмкость из СОХРАНЁННОЙ записи (до merge), чтобы новые
+  позиции в запросе не расширяли ёмкость.
 - `preset_size` от PNM парсится из untrusted id и зажимается в `1..=100`.
 - `preset_default_13` в `POST /ui/video_layouts/calculate` → 400
   `invalid.preset` — политика реестра, а не дефект (см. LAYOUT_ENGINE §13).

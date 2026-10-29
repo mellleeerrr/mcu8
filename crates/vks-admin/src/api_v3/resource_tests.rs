@@ -2526,6 +2526,72 @@ fn legacy_layout_capacity_never_drops_below_occupied_slots() {
         // A sparse preset still keeps its own capacity.
         assert_eq!(super::layout_size(&json!({"preset":"preset_equal_5"})), Some(5), "{preset}: no slots -> preset");
     }
+    // Occupancy is the SAME predicate as UI roles: SIP contact-only slots count
+    // too, otherwise a successful write can poison the record (T06 rr3 P1-2).
+    for key in ["contact_id", "call_string_id", "connection_id", "contactId", "callStringId"] {
+        let positions: Vec<_> = (1..=9)
+            .map(|position| json!({"position": position, "role": "PEER", key: format!("id-{position}")}))
+            .collect();
+        let payload = json!({"preset": "preset_equal_5", "size": 5, "slots": positions});
+        assert_eq!(super::layout_size(&payload), Some(9), "{key}: contact-only windows keep capacity");
+        assert!(super::validate_layout_assignments_with_capacity(&payload, Some(9)).is_ok(), "{key}: stays editable");
+    }
+    // Empty AUTO windows still must not inflate capacity.
+    let empty_auto = json!({"preset":"vks_grid_4","slots":[{"position":5,"role":"AUTO"}]});
+    assert_eq!(super::layout_size(&empty_auto), Some(4), "empty AUTO beyond grid does not inflate");
+}
+
+/// T06 rr3 P1-2, route-level: create preset_equal_9 -> PATCH 9 contact-only
+/// slots -> PATCH preset_equal_5 (legacy shrink) -> rename must stay 200.
+/// Before the fix capacity dropped to 5 and the rename got 409 while the MCU
+/// still drew 9 assignments (a successful write poisoned the record).
+#[tokio::test]
+async fn contact_only_legacy_slots_keep_capacity_across_preset_shrink() {
+    let state = state();
+    let layout_id = create_layout(
+        &state,
+        "Contact legacy",
+        json!({"mode":"manual","preset":"preset_equal_9","type":"individual","slots":[]}),
+    )
+    .await;
+    let path = format!("/api/v3/video_layouts/{layout_id}");
+    let contact_slots: Vec<_> = (1..=9)
+        .map(|position| json!({"position": position, "role": "PEER", "contact_id": format!("cs-contacts-{position}")}))
+        .collect();
+    let response = edit_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&path),
+        Path(layout_id.clone()),
+        Json(json!({"payload": {"preset": "preset_equal_9", "slots": contact_slots}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "9 contact-only slots are a valid layout");
+
+    let response = edit_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&path),
+        Path(layout_id.clone()),
+        Json(json!({"payload": {"preset": "preset_equal_5"}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "legacy preset shrink is accepted");
+    let size = {
+        let resources = state.api_v3.resources.lock().await;
+        resources.layouts.get(&layout_id).expect("layout exists")["payload"]["size"].as_u64()
+    };
+    assert_eq!(size, Some(9), "capacity keeps 9 occupied contact-only windows");
+
+    let response = edit_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri(&path),
+        Path(layout_id),
+        Json(json!({"display_name": "Contact legacy renamed"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "record stays editable (no 409)");
 }
 
 /// S7-регрессия: `preset_equal` без числа не должен раздувать явный `size` до
