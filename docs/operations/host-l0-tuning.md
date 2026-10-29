@@ -169,10 +169,18 @@ systemctl --user daemon-reload        # делает сам скрипт
 systemctl --user show vks-mcu.service -p MemoryHigh,MemoryMax,CPUWeight,LimitNOFILE,Nice
 ```
 
-Drop-in ставится рядом с live-юнитом, но T15 его **не устанавливал**.
-Ограничения user-менеджера (см. §2): нет `IOWeight`, `Nice` только `0`.
+Drop-in установлен на стенде при T15 live-apply; после `daemon-reload` и
+рестарта значения эффективны. Ограничения user-менеджера (см. §2): нет
+`IOWeight`, `Nice` только `0`.
 Лимиты стенда: `MemoryHigh=1536M`, `MemoryMax=2G`, `CPUWeight=200`,
 `LimitNOFILE=65536`.
+
+Для проверки сокета доктором media loop слушает `:40000`
+(`Environment=VKS_MEDIA_LISTEN_ADDR=0.0.0.0:40000` в локальном
+`~/.config/systemd/user/vks-mcu.service.d/stand.conf`; порт уже зарезервирован
+в `net.ipv4.ip_local_reserved_ports`). Без этого dev-дефолт `127.0.0.1:0`
+даёт эфемерный порт, и `host-doctor` пропустит socket-check (exit 0, но без
+доказательства `SO_RCVBUF`).
 
 ### 4.3 Значения и обоснование
 
