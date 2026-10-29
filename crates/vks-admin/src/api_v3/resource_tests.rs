@@ -2767,6 +2767,69 @@ async fn mode_capacity_is_declared_only_by_size_or_preset() {
     assert_eq!(response.status(), StatusCode::CONFLICT, "explicit slot beyond declared capacity");
 }
 
+/// T06 rr6/rr8 P2-1: mode и PATCH используют один резолвер ёмкости
+/// (пресет раньше size), поэтому конфликтующий payload «preset+size» даёт
+/// одинаковый результат, без тихого вырезания слотов.
+#[tokio::test]
+async fn mode_and_patch_agree_on_preset_with_stale_size() {
+    let state = state();
+    let room = Rooms::create_async(&state, "T06 precedence").await.unwrap();
+    let layout_id = create_layout(&state, "Precedence", json!({"type":"default"})).await;
+    assert_eq!(attach_session_to(&state, &room, &layout_id).await, StatusCode::NO_CONTENT);
+    let mode = |payload: Value| {
+        let state = state.clone();
+        let room = room.clone();
+        let layout_id = layout_id.clone();
+        async move {
+            let extra = payload.as_object().cloned().unwrap_or_default();
+            crate::api_v3::shell::switch_video_layout_mode(
+                State(state),
+                Extension(operator()),
+                Json(crate::api_v3::shell::SwitchVideoLayoutModeRequest {
+                    session_id: Some(room.id.to_string()),
+                    conference_id: None,
+                    mode: Some("manual".into()),
+                    video_layout_id: Some(layout_id),
+                    extra,
+                }),
+            )
+            .await
+        }
+    };
+    let patch = |payload: Value| {
+        let state = state.clone();
+        let layout_id = layout_id.clone();
+        async move {
+            let uri = uri(&format!("/api/v3/video_layouts/{layout_id}"));
+            edit_global(State(state), Extension(operator()), uri, Path(layout_id), Json(json!({"payload": payload})))
+                .await
+        }
+    };
+    let slots: Vec<_> = (1..=25).map(|position| json!({"position": position, "role": "AUTO"})).collect();
+    let capacity = |state: &SharedState| {
+        let state = state.clone();
+        let layout_id = layout_id.clone();
+        async move {
+            let resources = state.api_v3.resources.lock().await;
+            resources.layouts.get(&layout_id).expect("layout exists")["payload"]["size"].as_u64()
+        }
+    };
+    let before = capacity(&state).await;
+    // Конфликт на свежей записи: preset13 задаёт ёмкость, слот 25 за ней — 409
+    // у обоих путей, без тихого вырезания слотов.
+    let response = mode(json!({"preset": "preset_equal_13", "size": 25, "slots": slots.clone()})).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT, "mode: slot beyond preset capacity");
+    let response = patch(json!({"preset": "preset_equal_13", "size": 25, "slots": slots.clone()})).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT, "PATCH: slot beyond preset capacity");
+    assert_eq!(capacity(&state).await, before, "rejected payload must not change the record");
+    // Пре preset25 важнее устаревшего size13: оба пути расширяют до 25.
+    let response = mode(json!({"preset": "preset_equal_25", "size": 13, "slots": slots.clone()})).await;
+    assert_eq!(response.status(), StatusCode::OK, "mode precedence: preset wins");
+    let response = patch(json!({"preset": "preset_equal_25", "size": 13, "slots": slots})).await;
+    assert_eq!(response.status(), StatusCode::OK, "PATCH precedence: preset wins");
+    assert_eq!(capacity(&state).await, Some(25), "record keeps the accepted capacity");
+}
+
 /// T06 rr3 NC-C: mode-переключение обязано пересчитывать `size` (иначе на
 /// 13-оконной записи остаётся 13 при пресете на 5/25).
 #[tokio::test]

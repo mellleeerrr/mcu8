@@ -65,6 +65,7 @@ pub(crate) async fn run(
                 });
                 if let Err(error) = result {
                     warn!(room = %room, %error, "recorder tap stopped: writer rejected a video sample");
+                    // ContainerError: без внешнего префикса, stop обернёт один раз.
                     return Some(error.to_string());
                 }
             }

@@ -49,6 +49,13 @@ impl RecordingControl for RecorderControl {
         let state = self.state.upgrade().ok_or_else(|| "server state is gone".to_string())?;
         // Idempotent retry: the running session already owns its tap.
         if self.recorder.is_recording(&room_id) {
+            // Окно автофинализации после ухода последнего зрителя: группа уже
+            // закрыта, но сессия ещё жива 10–20 мс. Честный ответ — ошибка
+            // «запись завершается», а не 200 со старым id на запись, которая
+            // уже ничего не пишет (T09b review D P2-1).
+            if self.active_h264_groups(room_id) == 0 {
+                return Err("запись завершается: живой H.264-группы больше нет; повторите старт".to_string());
+            }
             return self
                 .recorder
                 .start_recording(&state, &room_id, RecordingMode::Mcu)
@@ -116,7 +123,17 @@ impl RecordingControl for RecorderControl {
             }
             return Ok(());
         }
-        self.recorder.stop_recording_async(&state, &room_id).await.map(|_| ()).map_err(|error| error.to_string())
+        self.recorder
+            .stop_recording_async(&state, &room_id)
+            .await
+            .map(|_| ())
+            // Канал admin возвращает строку; повторный DELETE отдаёт
+            // закэшированную причину без Display-префикса — приводим оба пути к
+            // одной форме, иначе идемпотентный ответ «врёт» другим текстом.
+            .map_err(|error| match error {
+                RecordingError::Container(message) => message,
+                other => other.to_string(),
+            })
     }
 
     fn active_h264_groups(&self, room_id: RoomId) -> usize {
@@ -340,11 +357,7 @@ impl RecorderManager {
                 None => {
                     // Проверяем кэш недавно остановленных сессий (идемпотентность)
                     if let Some((meta, finalize_error)) = self.stopped_cache.lock().unwrap().get(room_id).cloned() {
-                        return Ok(StopOutcome {
-                            meta,
-                            entry: None,
-                            finalize_error: finalize_error.map(RecordingError::Container),
-                        });
+                        return Ok(StopOutcome { meta, entry: None, finalize_error });
                     }
                     return Err(RecordingError::NotStarted);
                 }
@@ -394,7 +407,14 @@ impl RecorderManager {
 
         // 3. Фиксация в хранилище записей
         self.storage.lock().unwrap().save(meta.clone());
-        let finalize_error = stop_result.as_ref().err().map(ToString::to_string).or(tap_error);
+        let finalize_error = stop_result
+            .as_ref()
+            .err()
+            .map(|error| match error {
+                RecordingError::Container(message) => message.clone(),
+                other => other.to_string(),
+            })
+            .or(tap_error);
         self.stopped_cache.lock().unwrap().insert(*room_id, (meta.clone(), finalize_error.clone()));
 
         // 4. Строка AppState.records: сохраняем фактические width/height/
@@ -431,7 +451,13 @@ impl RecorderManager {
         }
 
         info!(room_id = %room_id, duration_ms = meta.duration_ms, size_bytes = meta.size_bytes, "Recording stopped for room");
-        Ok(StopOutcome { meta, entry: Some(entry), finalize_error: stop_result.err() })
+        Ok(StopOutcome {
+            meta,
+            entry: Some(entry),
+            // Причиной может быть и ошибка tap'а (writer отверг сэмпл), а не
+            // только finalize контейнера (review D P3-2).
+            finalize_error,
+        })
     }
 
     /// Снимает recorder-участника с RoomHub и рассылает ParticipantLeft.
@@ -505,7 +531,7 @@ impl RecorderManager {
     pub fn stop_recording(&self, state: &Arc<AppState>, room_id: &RoomId) -> Result<RecordingMeta, RecordingError> {
         let outcome = self.stop_recording_internal(state, room_id, true)?;
         match outcome.finalize_error {
-            Some(error) => Err(error),
+            Some(message) => Err(RecordingError::Container(message)),
             None => Ok(outcome.meta),
         }
     }
@@ -522,9 +548,9 @@ impl RecorderManager {
             storage.upsert_record(&entry).await.map_err(|error| RecordingError::Storage(error.to_string()))?;
         }
         match outcome.finalize_error {
-            Some(error) => {
-                warn!(room = %room_id, %error, "recording stopped, but container finalize failed");
-                Err(error)
+            Some(message) => {
+                warn!(room = %room_id, %message, "recording stopped, but container finalize failed");
+                Err(RecordingError::Container(message))
             }
             None => Ok(outcome.meta),
         }
@@ -539,7 +565,7 @@ type StoppedRecord = (RecordingMeta, Option<String>);
 struct StopOutcome {
     meta: RecordingMeta,
     entry: Option<RecordEntry>,
-    finalize_error: Option<RecordingError>,
+    finalize_error: Option<String>,
 }
 
 /// `ContainerConfig` из фактического профиля группы фермы (T09b/P1-1).
