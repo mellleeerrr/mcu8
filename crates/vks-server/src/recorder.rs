@@ -41,15 +41,46 @@ impl RecorderControl {
 impl RecordingControl for RecorderControl {
     async fn start(&self, room_id: RoomId) -> Result<String, String> {
         let state = self.state.upgrade().ok_or_else(|| "server state is gone".to_string())?;
-        self.recorder
-            .start_recording(&state, &room_id, RecordingMode::Mcu)
-            .map(|id| id.to_string())
-            .map_err(|error| error.to_string())
+        // A recording that was active when the process died leaves an
+        // unfinalized row (duration_sec == 0). Starting again must reuse the
+        // room's recording slot, not accumulate duplicate active rows.
+        if !self.recorder.is_recording(&room_id) {
+            if let Some(storage) = state.storage.clone() {
+                if let Ok(records) = storage.list_records(Some(room_id)).await {
+                    for stale in records.iter().filter(|entry| entry.duration_sec == 0) {
+                        let _ = storage.delete_record(&stale.id).await;
+                        state.records.lock().unwrap().remove(&stale.id);
+                    }
+                }
+            }
+        }
+        let record_id =
+            self.recorder.start_recording(&state, &room_id, RecordingMode::Mcu).map_err(|error| error.to_string())?;
+        // Persist synchronously: "started" must mean storage has the row.
+        if let Some(storage) = state.storage.clone() {
+            let entry = { state.records.lock().unwrap().get(&record_id.to_string()).cloned() };
+            if let Some(entry) = entry {
+                storage.upsert_record(&entry).await.map_err(|error| format!("record persistence failed: {error}"))?;
+            }
+        }
+        Ok(record_id.to_string())
     }
 
     async fn stop(&self, room_id: RoomId) -> Result<(), String> {
         let state = self.state.upgrade().ok_or_else(|| "server state is gone".to_string())?;
         if !self.recorder.is_recording(&room_id) {
+            // After a restart the in-memory session is gone but the DB may hold
+            // an unfinalized row; finalize it so DELETE actually stops it.
+            if let Some(storage) = state.storage.clone() {
+                if let Ok(records) = storage.list_records(Some(room_id)).await {
+                    for mut entry in records.into_iter().filter(|entry| entry.duration_sec == 0) {
+                        let now_ms = vks_admin::state::now_unix_ms();
+                        entry.duration_sec = (((now_ms.saturating_sub(entry.created_ms)) / 1000).max(1)) as u32;
+                        let _ = storage.upsert_record(&entry).await;
+                        state.records.lock().unwrap().insert(entry.id.clone(), entry);
+                    }
+                }
+            }
             return Ok(());
         }
         self.recorder.stop_recording_async(&state, &room_id).await.map(|_| ()).map_err(|error| error.to_string())
@@ -157,8 +188,10 @@ impl RecorderManager {
         let payload_bytes = Envelope::new(joined_msg).encode();
         state.room_hub.broadcast(room_id, None, payload_bytes.into());
 
-        // 3. Persist the new record immediately so a restart shows an active
-        // recording; the stop path updates duration/size on the same row.
+        // 3. The record row is kept in `AppState.records`; the async caller
+        // (`RecorderControl::start`) awaits the storage upsert so a successful
+        // POST is immediately visible to storage-backed GETs, and a failed
+        // write is returned instead of being swallowed by a detached task.
         let record_id = session.record_id().ok_or(RecordingError::NotStarted)?;
         let profile = RecorderProfile::default();
         let entry = RecordEntry {
@@ -171,12 +204,7 @@ impl RecorderManager {
             width: profile.width,
             height: profile.height,
         };
-        state.records.lock().unwrap().insert(entry.id.clone(), entry.clone());
-        if let Some(storage) = state.storage.clone() {
-            tokio::spawn(async move {
-                let _ = storage.upsert_record(&entry).await;
-            });
-        }
+        state.records.lock().unwrap().insert(entry.id.clone(), entry);
 
         // 4. Сохраняем сессию
         guard.insert(*room_id, session);

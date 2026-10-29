@@ -44,6 +44,14 @@ fn forbid(auth: &AuthContext) -> Option<Response> {
     None
 }
 
+/// Recording control is `ManageRecording` (Moderator+), not Operator-only.
+fn forbid_recording(auth: &AuthContext) -> Option<Response> {
+    if !vks_core::Permissions::has(auth.role, vks_core::Permission::ManageRecording) {
+        return Some(error_json(403, "Forbidden: Moderator role required"));
+    }
+    None
+}
+
 fn unsupported(what: &str) -> Response {
     error_json(501, &format!("{what} is not supported by this MCU build (read-only mode): the change was not applied"))
         .into_response()
@@ -645,11 +653,15 @@ pub async fn terminals_empty_list(Extension(auth): Extension<AuthContext>) -> Re
 
 fn record_json(record: &RecordEntry) -> Value {
     let started_at = (record.created_ms / 1000) as i64;
+    // An unfinalized row (duration 0) is still recording: `stopped_at` must not
+    // pretend it stopped at the same instant it started.
+    let active = record.duration_sec == 0;
     json!({
         "id": record.id,
         "display_name": record.id,
+        "active": active,
         "started_at": started_at,
-        "stopped_at": started_at + record.duration_sec as i64,
+        "stopped_at": if active { Value::Null } else { json!(started_at + record.duration_sec as i64) },
         "session": {"id": record.room_id.to_string(), "display_name": record.room_id.to_string()},
         "video_layout": {"id": Value::Null, "display_name": Value::Null},
         "payload": {
@@ -700,7 +712,7 @@ pub async fn session_videorecords_list(
     Query(query): Query<PageQuery>,
 ) -> Response {
     super::track("sessions/{id}/videorecords");
-    if let Some(response) = forbid(&auth) {
+    if let Some(response) = forbid_recording(&auth) {
         return response;
     }
     let records =
@@ -750,7 +762,7 @@ pub async fn videorecords_start(
     body: Option<Json<Value>>,
 ) -> Response {
     super::track("sessions/{id}/videorecords");
-    if let Some(response) = forbid(&auth) {
+    if let Some(response) = forbid_recording(&auth) {
         return response;
     }
     let settings = body.map(|Json(value)| value).unwrap_or(Value::Null);
@@ -801,7 +813,7 @@ pub async fn videorecords_stop(
     Path((session_id, connection_id)): Path<(String, String)>,
 ) -> Response {
     super::track("sessions/{id}/videorecords/{id}");
-    if let Some(response) = forbid(&auth) {
+    if let Some(response) = forbid_recording(&auth) {
         return response;
     }
     let Some(room_id) = parse_room_id(&session_id) else {

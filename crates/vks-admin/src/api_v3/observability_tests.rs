@@ -634,6 +634,52 @@ async fn start_recording_in_sfu_room_returns_501_before_any_encoder_probe() {
 }
 
 #[tokio::test]
+async fn recording_control_is_moderator_plus_and_unknown_session_is_404() {
+    let (state, issuer) = test_state();
+    state.mode.lock().unwrap().global_mode = vks_core::RoomMode::Mcu;
+    let room = crate::rooms::Rooms::create_async(&state, "rec-rbac".to_string()).await.expect("room");
+    state.set_recording(std::sync::Arc::new(FakeRecording::new(1)));
+    let server = app(state.clone());
+    let moderator = role_token(&issuer, &state, Role::Moderator);
+    let started = send(
+        &server,
+        request("POST", &format!("/api/v3/sessions/{}/videorecords", room.id), Some(&moderator), json!({})),
+    )
+    .await;
+    assert_eq!(started.status(), StatusCode::OK, "ManageRecording is Moderator+");
+    let viewer = role_token(&issuer, &state, Role::Viewer);
+    let forbidden =
+        send(&server, request("POST", &format!("/api/v3/sessions/{}/videorecords", room.id), Some(&viewer), json!({})))
+            .await;
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    let missing = send(
+        &server,
+        request(
+            "POST",
+            &format!("/api/v3/sessions/{}/videorecords", uuid::Uuid::new_v4()),
+            Some(&moderator),
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn estimated_time_is_derived_from_the_bitrate_model_not_a_constant() {
+    let (state, _issuer) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let body =
+        json_body(send(&server, auth_request("GET", "/api/v3/sessions/any/videorecords/estimated_time", &token)).await)
+            .await;
+    let seconds = body["recording_time"].as_u64().expect("recording_time");
+    assert_ne!(seconds, 3600, "must not be the old hardcoded constant: {body}");
+    // 64..8192 kbps at 720p30 on any real disk gives far more than 1 hour.
+    assert!(seconds == 0 || seconds > 3600, "{body}");
+}
+
+#[tokio::test]
 async fn videorecords_report_the_stored_profile_instead_of_hardcoded_720p() {
     let (state, _issuer) = test_state();
     state.records.lock().unwrap().insert(

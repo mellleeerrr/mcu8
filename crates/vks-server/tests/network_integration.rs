@@ -2221,3 +2221,61 @@ async fn test_farm_metrics_and_api_v3_snapshot_reflect_encoder_group_lifecycle()
         None => std::env::remove_var("VKS_METRICS_TOKEN"),
     }
 }
+
+/// T09a: the recording control port persists synchronously, finalizes a row
+/// left unfinalized by a restart, and never accumulates duplicate ACTIVE rows.
+#[tokio::test]
+async fn recording_control_persists_immediately_and_reuses_the_room_slot_after_restart() {
+    use vks_admin::state::RecordingControl as _;
+    use vks_core::ports::Storage as _;
+    use vks_server::RecorderControl;
+    use vks_server::RecorderManager;
+
+    let storage = Arc::new(vks_storage::MemoryStorage::new());
+    let room_id = vks_core::RoomId::new();
+
+    let state_a = Arc::new(AppState::with_storage(storage.clone()));
+    let control_a = RecorderControl::new(
+        RecorderManager::new(),
+        Arc::downgrade(&state_a),
+        Arc::new(vks_media_mcu::McuEngine::new()),
+    );
+    let record_id = control_a.start(room_id).await.expect("start");
+    assert!(!record_id.is_empty());
+    // Persistence is awaited: the row is visible without polling.
+    let row = storage.get_record(&record_id).await.expect("get").expect("persisted immediately");
+    assert_eq!(row.room_id, room_id);
+    assert_eq!(row.duration_sec, 0);
+    assert!(row.bitrate_kbps > 0 && row.width > 0 && row.height > 0, "profile is stored: {row:?}");
+
+    // Path A: "restart" then start again without stopping. The unfinalized row
+    // from the dead process must be replaced, not duplicated.
+    drop(state_a);
+    let state_b = Arc::new(AppState::with_storage(storage.clone()));
+    let control_b = RecorderControl::new(
+        RecorderManager::new(),
+        Arc::downgrade(&state_b),
+        Arc::new(vks_media_mcu::McuEngine::new()),
+    );
+    let second_id = control_b.start(room_id).await.expect("start after restart");
+    assert_ne!(second_id, record_id, "a new recording gets a new record id");
+    let rows = storage.list_records(Some(room_id)).await.expect("list");
+    assert_eq!(rows.len(), 1, "restart must not leave a stale unfinalized duplicate: {rows:?}");
+    assert_eq!(rows[0].id, second_id);
+
+    // Path B: restart again, then DELETE. The unfinalized row is finalized by
+    // the stop path (the in-memory session no longer exists after restart).
+    drop(state_b);
+    let state_c = Arc::new(AppState::with_storage(storage.clone()));
+    let control_c = RecorderControl::new(
+        RecorderManager::new(),
+        Arc::downgrade(&state_c),
+        Arc::new(vks_media_mcu::McuEngine::new()),
+    );
+    control_c.stop(room_id).await.expect("stop after restart finalizes the row");
+    let finalized = storage.get_record(&second_id).await.expect("get").expect("row");
+    assert!(finalized.duration_sec >= 1, "restarted stop must finalize duration: {finalized:?}");
+    let active =
+        storage.list_records(Some(room_id)).await.expect("list").into_iter().filter(|e| e.duration_sec == 0).count();
+    assert_eq!(active, 0, "no row may stay active after DELETE");
+}

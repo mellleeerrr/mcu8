@@ -17,7 +17,7 @@ pub mod room_events;
 
 pub use cluster::ClusterManager;
 pub use gateways::GatewayManager;
-pub use recorder::RecorderManager;
+pub use recorder::{RecorderControl, RecorderManager};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
