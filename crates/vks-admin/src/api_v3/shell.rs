@@ -285,8 +285,11 @@ pub async fn ui_system_status(State(state): State<SharedState>) -> Response {
             // В этой сборке транскодера нет: `full` — lab-гейт для SDP,
             // а не признак наличия транскодирующих воркеров (T06b).
             "transcoder": false,
-            "native_audio": vks_common::codec_capabilities::NATIVE_AUDIO,
-            "native_video": vks_common::codec_capabilities::NATIVE_VIDEO
+            // Canonical, alias-free lists: `G726-16` / `G723` appear once,
+            // `G72616` / `G7231` / `HEVC` stay validation aliases only. Pinned
+            // by `public_codec_lists_are_canonical_and_pinned`.
+            "native_audio": vks_common::codec_capabilities::PUBLIC_NATIVE_AUDIO,
+            "native_video": vks_common::codec_capabilities::PUBLIC_NATIVE_VIDEO
         },
         "engine": {
             "status": engine_status,
@@ -1004,21 +1007,18 @@ pub async fn switch_video_layout_mode(
     }
     let previous = resources.clone();
     let mut draft = source;
-    // Ёмкость, объявленная для валидации: только `size > 0` из запроса или
-    // ёмкость присланного пресета. `slots.len` сюда НЕ входит — иначе mode
-    // без preset/size расширял бы запись номерами слотов (T06 rr5 P1-5).
-    let declared_from_request = |size: Option<u64>| -> Option<u64> {
-        size.filter(|size| *size > 0).or_else(|| {
-            preset_field
-                .as_ref()
-                .and_then(Value::as_str)
-                .and_then(|preset| {
-                    vks_layout::grids::slot_count(preset)
-                        .or_else(|| vks_layout::codian::slot_count(preset))
-                        .or_else(|| vks_layout::preset_size(preset))
-                })
-                .map(|capacity| capacity as u64)
-        })
+    // Ёмкость, объявленная для валидации: ровно тот же резолвер, что в PATCH
+    // (`explicit_layout_capacity`: пресет раньше size, `slots.len` НЕ входит),
+    // иначе mode и PATCH расходились на payload «пресет+size» (T06 rr6 P2-1).
+    let declared_from_request = |_size: Option<u64>| -> Option<u64> {
+        let mut declared_payload = serde_json::Map::new();
+        if let Some(preset) = preset_field.clone() {
+            declared_payload.insert("preset".to_string(), preset);
+        }
+        if let Some(size) = size {
+            declared_payload.insert("size".to_string(), json!(size));
+        }
+        super::resources::explicit_layout_capacity(&Value::Object(declared_payload)).map(|capacity| capacity as u64)
     };
     let mut declared_capacity: Option<u64> = None;
     if size.is_some() || slots.is_some() || preset_present {

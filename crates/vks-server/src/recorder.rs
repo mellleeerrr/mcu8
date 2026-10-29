@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::task::AbortHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use vks_admin::hub::ParticipantSnapshot;
@@ -133,7 +133,7 @@ pub struct RecorderManager {
     storage: Arc<Mutex<MemoryStore>>,
     /// Недавно остановленные записи: метаданные + ошибка finalize (если была)
     /// для честного повторного DELETE (T09b review A P2-1).
-    stopped_cache: Arc<Mutex<HashMap<RoomId, (RecordingMeta, Option<String>)>>>,
+    stopped_cache: Arc<Mutex<HashMap<RoomId, StoppedRecord>>>,
     containers: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     /// Abort-хэндлы tap-тасков по комнатам (non-owning подписки на группы).
     taps: Arc<Mutex<HashMap<RoomId, AbortHandle>>>,
@@ -289,7 +289,6 @@ impl RecorderManager {
             let manager = self.clone();
             let tap_state = Arc::clone(state);
             let tap_errors = Arc::clone(&self.tap_errors);
-            let manager_for_tap = manager.clone();
             let handle = tokio::spawn(async move {
                 let tap_error = recorder_tap::run(tap_room, tap, sessions).await;
                 if let Some(error) = tap_error {
@@ -297,9 +296,10 @@ impl RecorderManager {
                 }
                 // T09b review A P1-1: группа ретировалась вместе с последним
                 // зрителем — запись не должна остаться ACTIVE без источника.
-                // Штатный stop абортит этот таск, поэтому финализация здесь
-                // выполняется только при естественном выходе tap'а.
-                manager_for_tap.finalize_after_tap_stop(&tap_state, &tap_room).await;
+                // Финализация запускается ОТДЕЛЬНЫМ таском: stop абортит
+                // AbortHandle этого tap-таска, и раньше он отменял сам себя
+                // посреди storage.upsert (review C P1).
+                manager.finalize_after_tap_stop(&tap_state, &tap_room, record_id).await;
             });
             self.taps.lock().unwrap().insert(*room_id, handle.abort_handle());
         }
@@ -470,16 +470,30 @@ impl RecorderManager {
     /// Финализирует запись, чей tap завершился сам (группа закрылась или
     /// writer отверг сэмпл): без этого сессия оставалась Running/ACTIVE без
     /// источника, а повторный start не переподписывался (T09b review A P1-1).
-    async fn finalize_after_tap_stop(&self, state: &Arc<AppState>, room_id: &RoomId) {
+    async fn finalize_after_tap_stop(&self, state: &Arc<AppState>, room_id: &RoomId, expected: Uuid) {
         if !self.is_recording(room_id) {
             return;
         }
-        match self.stop_recording_async(state, room_id).await {
-            Ok(meta) => {
-                info!(room = %room_id, size_bytes = meta.size_bytes, "recording finalized after encoder group closed")
+        let manager = self.clone();
+        let state = Arc::clone(state);
+        let room_id = *room_id;
+        // Отдельный таск: stop абортит AbortHandle tap-таска, и выполнение
+        // финализации внутри него отменялось посреди storage.upsert (review C P1).
+        tokio::spawn(async move {
+            let still_same =
+                manager.sessions.lock().unwrap().get(&room_id).and_then(vks_recorder::RecordingSession::record_id)
+                    == Some(expected);
+            if !still_same {
+                debug!(room = %room_id, "recording already replaced/stopped; detached finalize skipped");
+                return;
             }
-            Err(error) => warn!(room = %room_id, %error, "recording finalized with container error after tap stop"),
-        }
+            match manager.stop_recording_async(&state, &room_id).await {
+                Ok(meta) => {
+                    info!(room = %room_id, size_bytes = meta.size_bytes, "recording finalized after encoder group closed")
+                }
+                Err(error) => warn!(room = %room_id, %error, "recording finalized with container error after tap stop"),
+            }
+        });
     }
 
     /// Останавливает запись комнаты и сохраняет метаданные.
@@ -516,6 +530,9 @@ impl RecorderManager {
         }
     }
 }
+
+/// Недавно остановленная запись: метаданные + ошибка финализации (если была).
+type StoppedRecord = (RecordingMeta, Option<String>);
 
 /// Итог остановки: метаданные + строка (для persistence) + ошибка finalize,
 /// которую нельзя терять, но и нельзя мешать cleanup (P1-5).
