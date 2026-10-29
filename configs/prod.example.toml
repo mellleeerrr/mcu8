@@ -11,20 +11,20 @@
 
 server_name = "vks-mcu-prod"
 listen_addr = "0.0.0.0:8080"
-media_listen_addr = "0.0.0.0:40000"
 
 # Публичный IPv4, который анонсируется в SDP (обязателен за NAT).
 # ВАЖНО: принимается только IP-адрес (DNS-имя сервер отвергает).
 # Public address browsers use for the ICE host candidate. The real transport is
-# ON by default (VKS_WEBRTC_TRANSPORT=0 is the explicit rollback), so a valid
-# candidate is mandatory; open the UDP range VKS_WEBRTC_PORT_MIN..MAX (or accept
-# ephemeral ports). ICE-lite cannot gather TURN relay candidates itself.
+# mandatory (VKS_WEBRTC_TRANSPORT=1; unset/0 is exit 78 — there is no legacy
+# fallback), so a valid candidate is mandatory; open the UDP range
+# VKS_WEBRTC_PORT_MIN..MAX (or accept ephemeral ports). ICE-lite cannot gather
+# TURN relay candidates itself.
 # Пустое значение обязательно к заполнению: префлайт отвергает пусто и
 # документационные TEST-NET адреса (RFC 5737) — лучше громкий exit 78, чем
 # браузер, который молча не подключается.
-# REAL WebRTC is ON by default: fill this with the public/LAN address or
-# startup fails closed (exit 78). Set VKS_WEBRTC_TRANSPORT=0 only to run the
-# legacy fake-SDP plane during a migration window.
+# REAL WebRTC is the only media plane: fill this with the public/LAN address or
+# startup fails closed (exit 78). VKS_WEBRTC_TRANSPORT=1 must be set explicitly
+# in the environment; the legacy fake-SDP plane was removed.
 candidate_addr = ""
 
 # Аутентификация: JWT-секрет только из env, минимум 32 случайных байта:

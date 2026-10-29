@@ -10,9 +10,9 @@ allow_insecure_defaults = true
 # Server identity
 server_name = "vks-mcu"
 listen_addr = "0.0.0.0:8080"
-media_listen_addr = "0.0.0.0:40000"
 # WebRTC/шлюзовый Candidate IP announced in SDP.
-# Реальный транспорт ВКЛЮЧЁН по умолчанию: preflight отвергает пустое значение,
+# Реальный транспорт ОБЯЗАТЕЛЕН (VKS_WEBRTC_TRANSPORT=1; выключателя нет):
+# preflight отвергает пустое значение,
 # TEST-NET (RFC 5737) и невалидный IP (exit 78). Loopback допустим только в
 # dev-конфиге (`allow_insecure_defaults = true`) или при
 # VKS_ALLOW_LOOPBACK_MEDIA=1. Для стенда задайте реальный LAN IP

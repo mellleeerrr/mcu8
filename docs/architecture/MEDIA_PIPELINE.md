@@ -25,49 +25,43 @@ pub trait MediaEngine: Send + Sync {
 
 ## 2. SFU pipeline (vks-media-sfu)
 
-### 2.1. Архитектура
+### 2.1. Архитектура (T11c)
+
+Медиаплоскость — **только WebRTC/DTLS-SRTP**. Отдельного plaintext RTP-пути,
+UDP-медиалупа и серверного forwarder'а нет.
+
 ```
-Client A (publish) ──RTP──→ SFU Forwarder ──RTP──→ Client B (subscribe)
-Client C (publish) ──RTP──→ SFU Forwarder ──RTP──→ Client D (subscribe)
-```
-
-### 2.2. Forwarder
-- `HashMap<TrackId, Vec<SubscriberHandle>>`.
-- 1-to-1: один publisher → один subscriber.
-- N-to-N: множественные publishers → subscribers.
-- Subscription model: full-mesh по умолчанию.
-
-### 2.3. Simulcast
-- Клиент шлёт 3 spatial layers (low/med/high) — разные SSRC.
-- `SimulcastSelector.select(bwe)`: High ≥ 800kbps, Med ≥ 200kbps, Low.
-- При смене layer — PLI/FIR на keyframe нового layer.
-
-### 2.4. BWE
-- **TWCC**: subscriber → SFU (transport-wide RTCP feedback).
-- **REMB**: subscriber → SFU (estimated bitrate RTCP).
-- `effective_bps = min(remb, twcc_estimate)`.
-- SFU НЕ шлёт BWE обратно (subscriber знает свою downlink).
-
-### 2.5. Congestion ladder
-```
-Normal → DegradeSpatial (High→Med→Low) → DegradeTemporal (drop temporal) → AudioOnly
-Recovery: hysteresis +5% (anti-flap)
+Browser A ──SRTP──→ str0m peer (per-participant task) ──SRTP──→ Browser B
+Browser C ──SRTP──→ str0m peer                         ──SRTP──→ Browser D
 ```
 
-### 2.6. NACK / FEC
-- NACK: subscriber → SFU, SFU retransmits из jitter buffer (~200ms, 60 pkts @ 30fps).
-- FEC: SFU НЕ генерирует (задача publisher). SFU форвардит RED/UlpFec.
+- `WebRtcRoomRegistry` (`webrtc_room.rs`) держит `(RoomId, ParticipantId)` →
+  `WebRtcPeer` + UDP-сокет + Tokio-задачу.
+- `WebRtcPeer` (`webrtc.rs`) — sans-I/O обёртка `str0m::Rtc`: ICE-lite host
+  candidate, DTLS, SRTP/SRTCP, jitter buffer, NACK/RTX, pacing, TWCC/REMB.
+- `MediaRegistry` (`registry.rs`) — только roster (комнаты, паблишеры, треки,
+  подписки) для сигналинга; RTP через него не проходит.
 
-### 2.7. DTLS / SRTP
-- str0m: per-session self-signed X.509, fingerprint в SDP.
-- SRTP: AES-128-CM, SRTCP: HMAC-SHA1 80-bit.
-- PFS: ECDHE ephemeral.
-- WebRTC: client = DTLS client. Gateway: gateway = DTLS server.
+### 2.2. Доставка
+- Каждый паблишер получает собственный egress mid на вид (T11b); два
+  паблишера никогда не склеиваются в один mid/часовой домен.
+- Подписка (`SubscribeRequest`) задаёт `(audio, video)` и `max_bitrate_bps`;
+  без явной подписки — `(true, true)`.
+- Keyframe-gate — per publisher: дельты не уходят подписчику до IDR;
+  PLI-запросы коалесцируются (500 мс на `(room, publisher, kind)`).
 
-### 2.8. ICE
-- SFU/MCU = **ICE-lite** (RFC 8445 §2): host candidates only.
-- Client = full ICE (host + srflx + relay).
-- TURN: client → TURN (ALLOCATE, CREATE_PERMISSION, BINDING to SFU).
+### 2.3. Re-negotiation
+- Повторный оффер на живом пире идёт в ту же str0m-сессию (`accept_reoffer`)
+  без нового ICE/DTLS и без нового сокета; m-lines можно только добавлять.
+- Смена DTLS fingerprint означает новый PeerConnection — сервер отвечает
+  ошибкой, а не пересоздаёт транспорт молча.
+
+### 2.4. Ёмкость и отказ
+- `VKS_WEBRTC_MAX_PEERS_PER_ROOM` (8) и `VKS_WEBRTC_MAX_PEERS` (256) —
+  fail-closed env; сверх лимита `room_full`/`webrtc_capacity`.
+- Оффер без ICE/DTLS → `webrtc_offer_unsupported`; H264-only (без Opus/VP8)
+  → `InvalidOffer` без паники; str0m-ошибка → `webrtc_offer_rejected`.
+- Никакого fake SDP: answer всегда сгенерирован str0m.
 
 ## 3. MCU pipeline (vks-media-mcu)
 

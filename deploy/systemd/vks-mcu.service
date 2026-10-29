@@ -20,6 +20,7 @@ WorkingDirectory=%h/mcu
 # нет, иначе unit молча перекрывает env и «единый источник» нарушается.
 # Включается H.323 тоже снаружи: VKS_H323_UAS_ENABLED=1 в том же env/drop-in.
 # Real str0m ICE-lite/DTLS-SRTP browser transport (1 on this stand).
+# Mandatory (no off switch): unset/0 exits 78.
 Environment=VKS_WEBRTC_TRANSPORT=1
 # DEV ONLY: входящий SIP на стенде (в шаблоне по умолчанию выключен).
 Environment=VKS_SIP_UAS_ENABLED=1

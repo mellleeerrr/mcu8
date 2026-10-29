@@ -25,13 +25,13 @@
    `Output::Transmit`, вызывает `handle_timeout` по `next_timeout()`
    (ICE/DTLS-ретарсмиты, RTCP, BWE/pacer), а медиа-кадры передаёт другим
    пирам комнаты.
-3. `vks-server` подменяет legacy `SdpAnswer.sdp` на реальный ответ до
-   отправки клиенту. Оффер без ICE/DTLS-материала считается legacy-клиентом
-   и получает прежний ответ; реальный оффер, отвергнутый str0m или
-   неинициализированным транспортом, получает `Payload::Error` (fail-closed).
-   `VKS_WEBRTC_TRANSPORT=0|false|off|no` — единственный путь к legacy-SDP.
-   Для реального пира сервер **не** регистрирует plaintext-endpoint/SSRC/PT
-   в `SfuEngine` и очищает ранее зарегистрированный endpoint/reverse-map.
+3. `vks-server` отправляет клиенту **только** реальный `AcceptedPeer.answer_sdp`
+   от str0m. Оффер без ICE/DTLS-материала отклоняется
+   (`webrtc_offer_unsupported`), реальный оффер, отвергнутый str0m, —
+   `webrtc_offer_rejected`; оба — `Payload::Error` с откатом FSM. Собственного
+   SDP-конструктора в signalling больше нет, `VKS_WEBRTC_TRANSPORT` не имеет
+   значения «выключено» (T11c). Пир не регистрируется в plaintext-реестре
+   endpoint/SSRC/PT.
 4. `SubscribeRequest` (в proto добавлено `bool audio_only = 5`) сохраняется
    даже до SDP-оффера и задаёт `(audio, video)`; без явной подписки новый пир
    получает `(true, true)` для совместимости, audio-only пир не получает видео. `max_bitrate_bps`
@@ -59,17 +59,17 @@
    Лимиты парсятся fail-closed: пустое/нечисловое/нулевое значение — ошибка
    старта (exit 78), а не тихий default. Сверх лимита — явная `room_full`
    (`retryable=true`), исчерпание портов — транспортная ошибка, не `room_full`.
-   Легаси-клиент с одним audio+video mid в комнате 3+ паблишеров получает
-   ровно одного детерминированного паблишера (по generation), остальные
+   Реальный 1+1 клиент в комнате 3+ паблишеров получает ровно одного
+   детерминированного паблишера (по generation), остальные
    источники явно деградируют с метрикой `webrtc_sources{dropped_no_mid}` —
    без склейки часов и без тишины.
    Keyframe-gate — per publisher: дельты паблишера не уходят подписчику до его
    IDR, PLI-запросы коалесцируются (500 мс на `(room, publisher, kind)`).
-8. Отказ закрытый: если транспорт включён и str0m отверг оффер, сервер
-   возвращает `Payload::Error` (`webrtc_offer_rejected`), а не поддельный
-   legacy-SDP с `FF:00:11`; оффер без ICE/DTLS-материала при включённом
-   транспорте также отклоняется (`webrtc_offer_unsupported`). Legacy-SDP
-   остаётся только при явном `VKS_WEBRTC_TRANSPORT=0|false|off|no`. В комнате
+8. Отказ закрытый: если str0m отверг оффер, сервер возвращает
+   `Payload::Error` (`webrtc_offer_rejected`), а не поддельный SDP с
+   `FF:00:11`; оффер без ICE/DTLS-материала отклоняется
+   (`webrtc_offer_unsupported`). Legacy-SDP не существует: T11c удалил и
+   серверный конструктор, и `SfuAnswerProfile`, и plaintext UDP-луп. В комнате
    с SIP/H.323-участником реальный браузерный WebRTC отклоняется
    (`webrtc_gateway_room_unsupported`), а шлюз не приземляется в комнату с
    реальным пиром; моста plaintext↔SRTP нет.
@@ -80,13 +80,26 @@
    логируются на `info`/`warn`. Пир удаляется при ошибке `Rtc`, по
    дедлайну подключения (15 с) и по idle-таймауту (30 с).
 
+## T11c (2026-10-29): легаси-плоскость удалена
+
+- `SignalingHandler` больше не строит SDP-ответ: он валидирует оффер и двигает
+  FSM, ответ приходит только от `WebRtcRoomRegistry`/str0m.
+- Удалены `SfuAnswerProfile`, `IceCandidate`-билдер, `b=AS`,
+  `VKS_SFU_VIDEO_BITRATE_KBPS`, `SfuEngine`, `UdpMediaLoop` и модули
+  `bwe/congestion/codec/dtls/forwarder/ice/simulcast`.
+- `MediaRegistry` (roster) заменил `SfuEngine`; медиа идёт только через
+  per-peer str0m-задачи.
+- `/readyz` `media_healthy` = результат реального preflight, а не `true`.
+- `WEBRTC_FALLBACK{reason}` теперь только `offer_rejected`.
+
 ## Конфигурация
 
-- `VKS_WEBRTC_TRANSPORT` — по умолчанию **включён** (реальный транспорт).
-  `0|false|off|no` — явный opt-out на прежний SDP (для биссекта/отката).
-  Стартовый preflight проверяет `candidate_addr` (включая assignability на
-  хосте), оба порта диапазона и bind; ошибка — exit 78, а не тихий откат на
-  фиктивный SDP. Loopback допустим только при `allow_insecure_defaults=true`
+- `VKS_WEBRTC_TRANSPORT` — **обязателен**: только `1/true/on/yes` (без
+  учёта регистра) запускает сервер; unset/пусто/`0/false/off/no`/мусор —
+  exit 78. Это не opt-out: другого media plane нет. Стартовый preflight
+  проверяет `candidate_addr` (включая assignability на хосте), оба порта
+  диапазона и bind до открытия storage; его результат питает
+  `/readyz.media_healthy`. Loopback допустим только при `allow_insecure_defaults=true`
   или `VKS_ALLOW_LOOPBACK_MEDIA=1` (с предупреждением в лог).
 - `VKS_WEBRTC_BWE_INITIAL_BPS` — стартовая оценка BWE (64 kbit/s..50 Mbit/s).
 - `VKS_WEBRTC_MAX_PEERS_PER_ROOM` — лимит реальных пиров **на комнату**

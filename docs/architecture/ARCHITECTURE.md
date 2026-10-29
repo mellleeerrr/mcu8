@@ -183,17 +183,14 @@ vks/
 │   │   └── src/
 │   │       ├── ws.rs          # tokio-tungstenite
 │   │       ├── wt.rs          # wtransport (QUIC/quinn)
-│   │       ├── sdp.rs         # SDP offer/answer, ICE
+│   │       ├── sdp.rs         # SDP parse/model (answer строит str0m)
 │   │       └── handler.rs     # join/leave/track/layout/mode_changed
 │   │
-│   ├── vks-media-sfu/       # ⚡ SFU-ДВИЖОК (str0m)
+│   ├── vks-media-sfu/       # ⚡ SFU-ДВИЖОК (str0m, только DTLS/SRTP)
 │   │   ├── src/
-│   │   │   ├── engine.rs      # impl MediaEngine (SFU)
-│   │   │   ├── forwarder.rs   # N-to-N forwarding
-│   │   │   ├── simulcast.rs   # 3 spatial layers, выбор по BWE
-│   │   │   ├── bwe.rs         # TWCC/REMB
-│   │   │   ├── dtls.rs        # DTLS-SRTP
-│   │   │   └── congestion.rs  # congestion ladder (degrade)
+│   │   │   ├── registry.rs    # MediaRegistry: impl MediaEngine (roster)
+│   │   │   ├── webrtc.rs      # WebRtcPeer: sans-I/O обёртка str0m
+│   │   │   └── webrtc_room.rs # WebRtcRoomRegistry: UDP/таймер на пира
 │   │   └── README.md
 │   │
 │   ├── vks-media-mcu/       # 🎛️ MCU-ДВИЖОК (compositor)

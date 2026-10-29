@@ -34,11 +34,12 @@ cargo build --release -p vks-server
    export VKS_DATABASE_URL='postgres://vks:<пароль>@db.internal:5432/vks'
    VKS_CONFIG_PATH=/etc/vks/server.toml ./target/release/vks-server
    ```
-3. Реальный WebRTC-транспорт **включён по умолчанию**; `candidate_addr`
-   должен быть публичным **IPv4** (SDP за NAT; DNS-имя не принимается):
-   preflight отвергает пусто, TEST-NET (RFC 5737), loopback/unspecified,
-   неassignable IP и занятый UDP-порт с exit 78. Явный opt-out на legacy SDP —
-   `VKS_WEBRTC_TRANSPORT=0` (только для биссекта/откката). БД — PostgreSQL;
+3. Реальный WebRTC-транспорт — **обязателен и единственный**:
+   `VKS_WEBRTC_TRANSPORT=1` (только `1/true/on/yes`; unset/пусто/`0`/мусор —
+   exit 78, выключателя и legacy-SDP больше нет). `candidate_addr` должен быть
+   публичным **IPv4** (SDP за NAT; DNS-имя не принимается): preflight
+   отвергает пусто, TEST-NET (RFC 5737), loopback/unspecified, неassignable IP
+   и занятый UDP-порт с exit 78. БД — PostgreSQL;
    TLS/reverse-proxy и ограничение доступа к `/pnm/` — на уровне
    инфраструктуры.
 4. Production fail-closed: `configs/prod.example.toml` содержит
