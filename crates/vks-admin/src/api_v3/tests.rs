@@ -1308,6 +1308,35 @@ async fn system_status_uses_real_ip_db_size_and_last_gateway_dial() {
 }
 
 #[tokio::test]
+async fn public_codec_lists_are_canonical_and_pinned() {
+    // Review A P2-6: `/net/status` (today `/ui/system/status`) used to expose
+    // 18 audio names with alias duplicates (G726-16 + G72616, G723 + G7231).
+    // The public contract is now canonical; changing it must be deliberate.
+    let (state, _) = test_state();
+    let server = app(state);
+    let token = login_token(&server, "admin", "s3cret").await;
+    let response = send(&server, request("GET", "/api/v3/ui/system/status", Some(&token), json!({}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let audio: Vec<&str> =
+        body["codecs"]["native_audio"].as_array().expect("native_audio").iter().filter_map(Value::as_str).collect();
+    assert_eq!(
+        audio,
+        ["PCMU", "PCMA", "G722", "G723", "G726-16", "G726-24", "G726-32", "G726-40", "G728", "OPUS", "G711"],
+        "public native_audio changed; update the contract intentionally"
+    );
+    let video: Vec<&str> =
+        body["codecs"]["native_video"].as_array().expect("native_video").iter().filter_map(Value::as_str).collect();
+    assert_eq!(video, ["H264", "H265"], "public native_video changed");
+    // No alias duplicates in either public list.
+    let unique: std::collections::BTreeSet<&str> = audio.iter().chain(video.iter()).copied().collect();
+    assert_eq!(unique.len(), audio.len() + video.len());
+    for alias in ["G72616", "G7231", "G711U", "G711A", "HEVC"] {
+        assert!(!audio.contains(&alias) && !video.contains(&alias), "alias {alias} leaked into public JSON");
+    }
+}
+
+#[tokio::test]
 async fn shell_monitoring_shapes_and_lifecycle_m4() {
     let (state, _) = test_state();
     let app = app(state);

@@ -17,6 +17,12 @@ pub const NATIVE_AUDIO: &[&str] = &codec_spec::native_audio_names();
 pub const NATIVE_VIDEO: &[&str] = &codec_spec::native_video_names();
 /// Worker/transcode-срез (AAC-LATM и алиасы).
 pub const WORKER_CODECS: &[&str] = &codec_spec::worker_codec_names();
+/// Canonical native audio names for public JSON (`/net/status`): one entry per
+/// codec, no alias duplicates (`G726-16` but not `G72616`; `G723` but not
+/// `G7231`). Settings validation keeps using [`NATIVE_AUDIO`].
+pub const PUBLIC_NATIVE_AUDIO: &[&str] = &codec_spec::public_native_audio_names();
+/// Canonical native video names for public JSON (`H264`, `H265`; no `HEVC`).
+pub const PUBLIC_NATIVE_VIDEO: &[&str] = &codec_spec::public_native_video_names();
 
 static H264_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static H265_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -32,16 +38,38 @@ pub struct VideoCodecAvailability {
 /// решения оператора.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioCodecAvailability {
-    /// MP4A-LATM bridge: проба FFmpeg + license opt-in + pool≥2. `false` means
-    /// the codec must not appear in SDP or the admin matrix as supported.
-    pub aac_latm: bool,
+    /// Operator accepted `VKS_CODEC_LICENSE_ACCEPTED=aac-latm`.
+    pub aac_latm_license: bool,
+    /// FFmpeg probe found the encoder + `latm` muxer and decoder + `loas`
+    /// demuxer.
+    pub aac_latm_probe: bool,
+    /// Worker pool can serve at least two AAC workers (encode + decode).
+    pub aac_latm_pool: bool,
 }
 
-static AAC_LATM_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+impl AudioCodecAvailability {
+    /// The bridge is usable only when all three independent gates are green.
+    #[must_use]
+    pub const fn aac_latm_available(self) -> bool {
+        self.aac_latm_license && self.aac_latm_probe && self.aac_latm_pool
+    }
+}
+
+static AAC_LATM_LICENSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static AAC_LATM_PROBE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static AAC_LATM_POOL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Записывает доступность аудио-мостов (один раз на старте сервера).
 pub fn set_audio_codec_availability(availability: AudioCodecAvailability) {
-    AAC_LATM_AVAILABLE.store(availability.aac_latm, std::sync::atomic::Ordering::Release);
+    AAC_LATM_LICENSE.store(availability.aac_latm_license, std::sync::atomic::Ordering::Release);
+    AAC_LATM_PROBE.store(availability.aac_latm_probe, std::sync::atomic::Ordering::Release);
+    AAC_LATM_POOL.store(availability.aac_latm_pool, std::sync::atomic::Ordering::Release);
+}
+
+fn aac_latm_available() -> bool {
+    AAC_LATM_LICENSE.load(std::sync::atomic::Ordering::Acquire)
+        && AAC_LATM_PROBE.load(std::sync::atomic::Ordering::Acquire)
+        && AAC_LATM_POOL.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Записывает доступность видео-мостов (один раз на старте сервера).
@@ -58,7 +86,7 @@ fn is_aac_latm(name: &str) -> bool {
 /// возвращает `false`, чтобы SDP никогда не обещал AAC без воркера.
 #[must_use]
 pub fn audio_codec_available(name: &str) -> bool {
-    audio_codec_available_with(name, AAC_LATM_AVAILABLE.load(std::sync::atomic::Ordering::Acquire))
+    audio_codec_available_with(name, aac_latm_available())
 }
 
 fn audio_codec_available_with(name: &str, aac_latm: bool) -> bool {
@@ -103,7 +131,7 @@ pub fn is_native_audio_variant(name: &str, bitrate: Option<u32>) -> bool {
 /// the license. H.323 callers must not use this (its matrix is static).
 #[must_use]
 pub fn is_supported_audio_variant(name: &str, bitrate: Option<u32>) -> bool {
-    supported_audio_variant_with(name, bitrate, AAC_LATM_AVAILABLE.load(std::sync::atomic::Ordering::Acquire))
+    supported_audio_variant_with(name, bitrate, aac_latm_available())
 }
 
 fn supported_audio_variant_with(name: &str, bitrate: Option<u32>, aac_latm: bool) -> bool {
@@ -147,14 +175,47 @@ fn native_video_with(name: &str, h264: bool, h265: bool) -> bool {
 /// supported right now (`None` when it is).
 #[must_use]
 pub fn audio_unavailable_reason(name: &str, bitrate: Option<u32>) -> Option<&'static str> {
-    if is_supported_audio_variant(name, bitrate) {
+    audio_unavailable_reason_with(
+        name,
+        bitrate,
+        AAC_LATM_LICENSE.load(std::sync::atomic::Ordering::Acquire),
+        AAC_LATM_PROBE.load(std::sync::atomic::Ordering::Acquire),
+        AAC_LATM_POOL.load(std::sync::atomic::Ordering::Acquire),
+    )
+}
+
+/// Truthful reason order for a worker codec: license first (only when it is
+/// actually the blocker), then probe, then pool, then the spec reason. Before
+/// this helper every AAC row said `license_not_accepted` even when the operator
+/// had accepted the license and FFmpeg/pool was the real cause (review A P2-7).
+fn audio_unavailable_reason_with(
+    name: &str,
+    bitrate: Option<u32>,
+    license: bool,
+    probe: bool,
+    pool: bool,
+) -> Option<&'static str> {
+    if supported_audio_variant_with(name, bitrate, license && probe && pool) {
         return None;
     }
     match codec_spec::lookup_variant(name, bitrate) {
-        // Worker codec is gated by the operator license (and probe); the
-        // process exposes only the combined availability flag.
-        Some(spec) if spec.sip == Disposition::Worker => Some(Reason::LicenseNotAccepted.as_id()),
+        Some(spec) if spec.sip == Disposition::Worker => {
+            if spec.license.token().is_some() && !license {
+                Some(Reason::LicenseNotAccepted.as_id())
+            } else if !probe {
+                Some(Reason::ProbeUnavailable.as_id())
+            } else if !pool {
+                Some(Reason::WorkerPoolUnavailable.as_id())
+            } else {
+                Some(spec.reason.unwrap_or(Reason::NoImplementation).as_id())
+            }
+        }
         Some(spec) => Some(spec.reason.unwrap_or(Reason::NoImplementation).as_id()),
+        // `G726:20` is a known codec with a bitrate outside the matrix: report
+        // the real cause instead of "unknown_codec" (review A P2-6/7).
+        None if codec_spec::is_g726_name(name) || codec_spec::is_variant_codec(name) => {
+            Some(Reason::UnsupportedBitrate.as_id())
+        }
         None => Some(Reason::UnknownCodec.as_id()),
     }
 }
@@ -294,6 +355,27 @@ mod tests {
         }
         assert!(video_unavailable_reason("H264").is_none());
         assert!(audio_unavailable_reason("PCMU", None).is_none());
+        // G.726 has known variants: an unsupported bitrate is not an unknown codec.
+        assert_eq!(audio_unavailable_reason("G726", Some(20)), Some("unsupported_bitrate"));
+        assert_eq!(audio_unavailable_reason("G726:20", None), Some("unsupported_bitrate"));
+        assert_eq!(audio_unavailable_reason("G72648", None), Some("unsupported_bitrate"));
+        assert_eq!(audio_unavailable_reason("G726", Some(32)), None);
+        assert_eq!(audio_unavailable_reason("G7221C", Some(48)), Some("no_implementation"));
+        assert_eq!(audio_unavailable_reason("G7221C", Some(64)), Some("unsupported_bitrate"));
+    }
+
+    #[test]
+    fn aac_reason_order_is_license_then_probe_then_pool() {
+        // The operator has not accepted the license: license is the real cause.
+        assert_eq!(audio_unavailable_reason_with("AAC", None, false, true, true), Some("license_not_accepted"));
+        // License accepted, FFmpeg probe missing: a license error would lie.
+        assert_eq!(audio_unavailable_reason_with("AAC", None, true, false, true), Some("probe_unavailable"));
+        // Probe green, pool too small: report the worker pool.
+        assert_eq!(audio_unavailable_reason_with("AAC", None, true, true, false), Some("worker_pool_unavailable"));
+        // All gates green: supported, no reason.
+        assert_eq!(audio_unavailable_reason_with("AAC", None, true, true, true), None);
+        // Non-worker codecs never report a license/probe cause.
+        assert_eq!(audio_unavailable_reason_with("G729", None, false, false, false), Some("encoder_not_bit_exact"));
     }
 
     #[test]
@@ -322,5 +404,15 @@ mod tests {
         assert!(NATIVE_AUDIO.contains(&"G7231"));
         assert!(NATIVE_VIDEO.contains(&"HEVC"));
         assert!(!NATIVE_VIDEO.contains(&"H264-HIGH"));
+        assert_eq!(PUBLIC_NATIVE_AUDIO, &codec_spec::public_native_audio_names());
+        assert_eq!(PUBLIC_NATIVE_VIDEO, &codec_spec::public_native_video_names());
+        // Public lists are canonical: no aliases, no duplicates (review A P2-6).
+        assert!(!PUBLIC_NATIVE_AUDIO.contains(&"G72616"));
+        assert!(PUBLIC_NATIVE_AUDIO.contains(&"G726-16"));
+        assert!(!PUBLIC_NATIVE_AUDIO.contains(&"G7231"));
+        assert!(PUBLIC_NATIVE_AUDIO.contains(&"G723"));
+        assert!(!PUBLIC_NATIVE_VIDEO.contains(&"HEVC"));
+        let unique: std::collections::BTreeSet<&str> = PUBLIC_NATIVE_AUDIO.iter().copied().collect();
+        assert_eq!(unique.len(), PUBLIC_NATIVE_AUDIO.len());
     }
 }

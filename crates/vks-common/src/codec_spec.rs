@@ -53,6 +53,14 @@ pub enum CodecId {
     TelephoneEvent,
 }
 
+impl CodecId {
+    /// `true` for the four G.726 bitrate specs.
+    #[must_use]
+    pub const fn is_g726(self) -> bool {
+        matches!(self, Self::G726_16 | Self::G726_24 | Self::G726_32 | Self::G726_40)
+    }
+}
+
 /// Media class of a codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodecKind {
@@ -75,6 +83,12 @@ pub enum Reason {
     SvcNotForwarded,
     H323NoAlternative,
     ProbeUnavailable,
+    /// The codec variant exists but the requested bitrate is not in the
+    /// matrix (`G726:20`).
+    UnsupportedBitrate,
+    /// The FFmpeg probe was green but the worker pool cannot serve the bridge
+    /// (fewer than two workers).
+    WorkerPoolUnavailable,
     UnknownCodec,
 }
 
@@ -92,6 +106,8 @@ impl Reason {
             Self::SvcNotForwarded => "svc_not_forwarded",
             Self::H323NoAlternative => "h323_no_alternative",
             Self::ProbeUnavailable => "probe_unavailable",
+            Self::UnsupportedBitrate => "unsupported_bitrate",
+            Self::WorkerPoolUnavailable => "worker_pool_unavailable",
             Self::UnknownCodec => "unknown_codec",
         }
     }
@@ -481,12 +497,15 @@ pub const CODECS: &[CodecSpec] = &[
         rtp_clock: 90_000,
         sample_rate: 90_000,
         bitrate: None,
-        sip: Disposition::Unsupported(Reason::WebRtcOnly),
-        h323: Disposition::Unsupported(Reason::WebRtcOnly),
+        // The matrix says "not offered" on every plane: the missing piece is
+        // the RTP payloader, not the WebRTC transport. `webrtc_only` would
+        // contradict the empty WebRTC column (review A P2-5).
+        sip: Disposition::Unsupported(Reason::PendingPayloader),
+        h323: Disposition::Unsupported(Reason::PendingPayloader),
         webrtc: Disposition::Unsupported(Reason::PendingPayloader),
         webrtc_negotiable: false,
         license: License::Free,
-        reason: Some(Reason::WebRtcOnly),
+        reason: Some(Reason::PendingPayloader),
     },
     CodecSpec {
         id: CodecId::Av1,
@@ -496,12 +515,12 @@ pub const CODECS: &[CodecSpec] = &[
         rtp_clock: 90_000,
         sample_rate: 90_000,
         bitrate: None,
-        sip: Disposition::Unsupported(Reason::WebRtcOnly),
-        h323: Disposition::Unsupported(Reason::WebRtcOnly),
+        sip: Disposition::Unsupported(Reason::PendingPayloader),
+        h323: Disposition::Unsupported(Reason::PendingPayloader),
         webrtc: Disposition::Unsupported(Reason::PendingPayloader),
         webrtc_negotiable: false,
         license: License::Free,
-        reason: Some(Reason::WebRtcOnly),
+        reason: Some(Reason::PendingPayloader),
     },
     CodecSpec {
         id: CodecId::H261,
@@ -580,6 +599,62 @@ pub const CODECS: &[CodecSpec] = &[
     },
 ];
 
+/// One truthful variant of a codec whose identity alone does not determine the
+/// wire parameters: G.722.1 is 16 kHz, G.722.1C is 32 kHz, and the same
+/// `G7221` SDP name is used for both (RFC 4749 has no separate encoding name).
+///
+/// The table is keyed by `(id, rtp_clock)`. Payload types stay transport-local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodecVariant {
+    pub id: CodecId,
+    /// RTP timestamp clock: 16 kHz for G.722.1, 32 kHz for G.722.1C.
+    pub rtp_clock: u32,
+    /// Bitrates (bit/s) valid with this clock.
+    pub bitrates: &'static [u32],
+}
+
+/// Every codec variant that cannot be derived from [`CodecSpec`] alone.
+///
+/// `G7221C` is an alias of [`CodecId::G7221`] (the wire identity is unchanged);
+/// this table is what tells the 16 kHz and 32 kHz forms apart. Consumers that
+/// resolve an SDP row must use [`resolve_clock`], not `spec.rtp_clock`.
+pub const CODEC_VARIANTS: &[CodecVariant] = &[
+    CodecVariant { id: CodecId::G7221, rtp_clock: 16_000, bitrates: &[24_000, 32_000] },
+    CodecVariant { id: CodecId::G7221, rtp_clock: 32_000, bitrates: &[24_000, 32_000, 48_000] },
+];
+
+/// Variants declared for a codec id (empty when the spec has one fixed form).
+pub fn variants(id: CodecId) -> impl Iterator<Item = &'static CodecVariant> {
+    CODEC_VARIANTS.iter().filter(move |variant| variant.id == id)
+}
+
+/// The exact variant for `(id, clock)`.
+#[must_use]
+pub fn variant(id: CodecId, rtp_clock: u32) -> Option<&'static CodecVariant> {
+    variants(id).find(|variant| variant.rtp_clock == rtp_clock)
+}
+
+/// A spec resolved together with its exact wire variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedCodec {
+    pub spec: &'static CodecSpec,
+    /// `Some` for codecs with a [`CODEC_VARIANTS`] entry, `None` otherwise.
+    pub variant: Option<&'static CodecVariant>,
+}
+
+/// Resolve an SDP `(name, clock)` pair to a spec and, for variant codecs, to
+/// the exact variant row. A clock that does not belong to the spec (for
+/// example `G7221/8000`) is rejected instead of being silently accepted.
+#[must_use]
+pub fn resolve_clock(name: &str, rtp_clock: u32) -> Option<ResolvedCodec> {
+    let spec = lookup(name)?;
+    if variants(spec.id).next().is_some() {
+        let variant = variant(spec.id, rtp_clock)?;
+        return Some(ResolvedCodec { spec, variant: Some(variant) });
+    }
+    (spec.rtp_clock == rtp_clock).then_some(ResolvedCodec { spec, variant: None })
+}
+
 /// `G711` is not one codec: it is the law-agnostic family of PCMU and PCMA.
 /// It must never be offered as a name of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -599,6 +674,14 @@ pub fn normalize(name: &str) -> String {
     // variant key handled by [`lookup_variant`], not part of the codec name.
     let base = name.trim().split([':', '/']).next().unwrap_or_default();
     base.to_ascii_uppercase().replace(['.', '-', '_', ' '], "")
+}
+
+/// `true` for the G.726 family spellings (`G726`, `G72616`, `G726:20`,
+/// `G.726-32`), including invalid bitrates that must be reported as
+/// `unsupported_bitrate` rather than `unknown_codec`.
+#[must_use]
+pub fn is_g726_name(name: &str) -> bool {
+    normalize(name).starts_with("G726")
 }
 
 /// Resolve a codec name or alias (not an alias family).
@@ -625,13 +708,37 @@ pub fn family(name: &str) -> Option<&'static AliasFamily> {
 #[must_use]
 pub fn lookup_variant(name: &str, bitrate: Option<u32>) -> Option<&'static CodecSpec> {
     if normalize(name) == "G726" {
-        return lookup(&format!("G726{}", bitrate?));
+        // Variants live in the SSOT: look the bitrate up instead of
+        // concatenating a name (`G72620` must not accidentally become a codec).
+        let bitrate = bitrate?;
+        return CODECS.iter().find(|spec| spec.id.is_g726() && spec.bitrate == Some(bitrate));
     }
     let spec = lookup(name)?;
-    match (spec.bitrate, bitrate) {
-        (Some(expected), Some(given)) if expected != given => None,
-        _ => Some(spec),
+    if let (Some(expected), Some(given)) = (spec.bitrate, bitrate) {
+        if expected != given {
+            return None;
+        }
     }
+    // Variant codecs (G.722.1 / G.722.1C) only accept bitrates their clock
+    // actually supports; `G7221C:64` is not a real variant. Settings spell the
+    // bitrate in kbit/s (`G7221:24`) while SDP `bitrate=` is in bit/s
+    // (`bitrate=24000`); the table stores bit/s.
+    if variants(spec.id).next().is_some() {
+        if let Some(given) = bitrate {
+            let wire_bitrate = if given < 1_000 { given.saturating_mul(1_000) } else { given };
+            if !variants(spec.id).any(|variant| variant.bitrates.contains(&wire_bitrate)) {
+                return None;
+            }
+        }
+    }
+    Some(spec)
+}
+
+/// `true` when the name resolves to a codec whose clock/bitrate variants live
+/// in [`CODEC_VARIANTS`] (G.722.1 / G.722.1C).
+#[must_use]
+pub fn is_variant_codec(name: &str) -> bool {
+    lookup(name).is_some_and(|spec| variants(spec.id).next().is_some())
 }
 
 /// Spec by closed id. The table is small and this is never in a hot loop; a
@@ -858,10 +965,81 @@ const fn h323_video_names() -> [&'static str; h323_video_count()] {
     out
 }
 
+const fn public_native_audio_count() -> usize {
+    let mut i = 0;
+    let mut count = 0;
+    while i < CODECS.len() {
+        if spec_sip_native(&CODECS[i]) && matches!(CODECS[i].kind, CodecKind::Audio) {
+            count += 1;
+        }
+        i += 1;
+    }
+    // G711 family alias is part of the public native list.
+    count + 1
+}
+
+/// Canonical (alias-free) public list: exactly one entry per native audio
+/// codec, plus the `G711` family name. `/api/v3/net/status` uses this so aliases
+/// such as `G72616`/`G7231` never show up as duplicate codecs.
+const fn build_public_native_audio() -> [&'static str; public_native_audio_count()] {
+    let mut out = [""; public_native_audio_count()];
+    let mut i = 0;
+    let mut j = 0;
+    while i < CODECS.len() {
+        if spec_sip_native(&CODECS[i]) && matches!(CODECS[i].kind, CodecKind::Audio) {
+            out[j] = CODECS[i].name;
+            j += 1;
+        }
+        i += 1;
+    }
+    out[j] = ALIAS_FAMILIES[0].name;
+    out
+}
+
+const fn public_native_video_count() -> usize {
+    let mut i = 0;
+    let mut count = 0;
+    while i < CODECS.len() {
+        if spec_sip_native(&CODECS[i]) && matches!(CODECS[i].kind, CodecKind::Video) {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+/// Canonical (alias-free) public video list (H264 + H265 today; `HEVC` is an
+/// alias and must not look like a separate codec in `/net/status`).
+const fn build_public_native_video() -> [&'static str; public_native_video_count()] {
+    let mut out = [""; public_native_video_count()];
+    let mut i = 0;
+    let mut j = 0;
+    while i < CODECS.len() {
+        if spec_sip_native(&CODECS[i]) && matches!(CODECS[i].kind, CodecKind::Video) {
+            out[j] = CODECS[i].name;
+            j += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
 /// Native (non-transcoding) audio names, including aliases, in matrix order.
 #[must_use]
 pub const fn native_audio_names() -> [&'static str; native_audio_count()] {
     build_native_audio()
+}
+
+/// Canonical native audio names for public JSON (no alias duplicates).
+#[must_use]
+pub const fn public_native_audio_names() -> [&'static str; public_native_audio_count()] {
+    build_public_native_audio()
+}
+
+/// Canonical native video names for public JSON (no alias duplicates).
+#[must_use]
+pub const fn public_native_video_names() -> [&'static str; public_native_video_count()] {
+    build_public_native_video()
 }
 
 /// Native (non-transcoding) video names, including aliases.
@@ -1030,6 +1208,8 @@ mod tests {
             Reason::SvcNotForwarded,
             Reason::H323NoAlternative,
             Reason::ProbeUnavailable,
+            Reason::UnsupportedBitrate,
+            Reason::WorkerPoolUnavailable,
             Reason::UnknownCodec,
         ];
         for spec in CODECS {
@@ -1043,6 +1223,81 @@ mod tests {
         assert_eq!(lookup("G719").unwrap().reason, Some(Reason::NoImplementation));
         assert_eq!(lookup("H264-HIGH").unwrap().reason, Some(Reason::TxProfileUnsupported));
         assert_eq!(lookup("VP8").unwrap().reason, Some(Reason::WebRtcOnly));
+        // VP9/AV1 are not offered anywhere, so their public reason must not
+        // claim "WebRTC only" (review A P2-5).
+        assert_eq!(lookup("VP9").unwrap().reason, Some(Reason::PendingPayloader));
+        assert_eq!(lookup("AV1").unwrap().reason, Some(Reason::PendingPayloader));
+    }
+
+    #[test]
+    fn g7221_variants_model_both_clocks_truthfully() {
+        // G.722.1 is 16 kHz / 24-32 kbit; G.722.1C is the 32 kHz form of the
+        // same wire codec (24/32/48 kbit). Five SIP identity rows, five variants.
+        assert_eq!(
+            CODEC_VARIANTS,
+            &[
+                CodecVariant { id: CodecId::G7221, rtp_clock: 16_000, bitrates: &[24_000, 32_000] },
+                CodecVariant { id: CodecId::G7221, rtp_clock: 32_000, bitrates: &[24_000, 32_000, 48_000] },
+            ]
+        );
+        let sixteen = resolve_clock("G7221", 16_000).expect("G.722.1 row");
+        assert_eq!(sixteen.spec.id, CodecId::G7221);
+        assert_eq!(sixteen.variant.expect("16k variant").bitrates, &[24_000, 32_000]);
+        let thirty_two = resolve_clock("G7221C", 32_000).expect("G.722.1C row");
+        assert_eq!(thirty_two.spec.id, CodecId::G7221, "G7221C keeps the G7221 wire identity");
+        assert_eq!(thirty_two.variant.expect("32k variant").bitrates, &[24_000, 32_000, 48_000]);
+        // The alias still resolves to the same spec: no new wire id or PT.
+        assert_eq!(lookup("G7221C").map(|spec| spec.id), Some(CodecId::G7221));
+        assert_eq!(variant(CodecId::G7221, 8_000), None);
+        assert_eq!(resolve_clock("G7221", 8_000), None);
+        assert_eq!(resolve_clock("G722", 8_000).expect("fixed clock").variant, None);
+        assert_eq!(resolve_clock("G722", 16_000), None);
+        // Bitrates are part of the variant truth, not a free-form suffix.
+        assert!(lookup_variant("G7221C", Some(48)).is_some());
+        assert!(lookup_variant("G7221", Some(64)).is_none());
+        assert!(lookup_variant("G7221C", Some(16)).is_none());
+        assert!(is_variant_codec("G7221C"));
+        assert!(!is_variant_codec("G729"));
+    }
+
+    #[test]
+    fn public_native_lists_are_canonical_and_deduplicated() {
+        let audio = public_native_audio_names();
+        let unique: BTreeSet<&str> = audio.iter().copied().collect();
+        assert_eq!(unique.len(), audio.len(), "public native audio has duplicate names: {audio:?}");
+        assert_eq!(
+            unique,
+            BTreeSet::from([
+                "PCMU", "PCMA", "G722", "G723", "G726-16", "G726-24", "G726-32", "G726-40", "G728", "OPUS", "G711"
+            ])
+        );
+        // Aliases stay available for settings validation but not in the public
+        // list: G72616/G7231/HEVC must not look like extra codecs.
+        for alias in ["G72616", "G7231", "G711U", "G711A", "HEVC"] {
+            assert!(!audio.contains(&alias), "alias {alias} leaked into public native_audio");
+        }
+        let video = public_native_video_names();
+        assert_eq!(video, ["H264", "H265"]);
+        assert!(!video.contains(&"HEVC"));
+        // Every canonical public name resolves to exactly one spec.
+        for name in audio.iter().chain(video.iter()) {
+            assert!(lookup(name).is_some() || family(name).is_some(), "public name {name} is not in the SSOT");
+        }
+    }
+
+    #[test]
+    fn matrix_reason_does_not_contradict_the_unavailable_plane() {
+        let matrix = render_markdown_matrix();
+        for (name, expected_reason) in
+            [("VP8", "webrtc_only"), ("VP9", "pending_payloader"), ("AV1", "pending_payloader")]
+        {
+            let row = matrix.lines().find(|line| line.starts_with(&format!("| {name} |"))).expect("row");
+            assert!(row.ends_with(&format!("| {expected_reason} |")), "{name} row: {row}");
+        }
+        let vp9 = matrix.lines().find(|line| line.starts_with("| VP9 |")).expect("VP9 row");
+        assert!(vp9.contains("| — | — | — |"), "VP9 must not claim WebRTC availability: {vp9}");
+        let vp8 = matrix.lines().find(|line| line.starts_with("| VP8 |")).expect("VP8 row");
+        assert!(vp8.contains("| webrtc |"), "VP8 is available on the WebRTC plane: {vp8}");
     }
 
     #[test]
@@ -1183,13 +1438,140 @@ mod tests {
         );
     }
 
+    /// Every source file that imports the codec SSOT (directly or via the
+    /// `codec_capabilities` facade). Kept explicit so a new consumer must be
+    /// reviewed; `ssot_consumer_scan_list_is_complete` proves it matches reality.
+    const SSOT_CONSUMER_FILES: &[&str] = &[
+        "vks-admin/src/api_v3/shell.rs",
+        "vks-admin/src/settings.rs",
+        "vks-common/src/codec_capabilities.rs",
+        "vks-common/src/codec_spec.rs",
+        "vks-common/src/lib.rs",
+        "vks-gateway-h323/src/lib.rs",
+        "vks-gateway-sip/src/rtp_bridge.rs",
+        "vks-gateway-sip/src/uas.rs",
+        "vks-media-sfu/src/webrtc.rs",
+        "vks-server/src/codec_policy.rs",
+        "vks-server/src/gateway_aac.rs",
+        "vks-server/src/gateway_audio.rs",
+        "vks-server/src/gateways.rs",
+        "vks-server/src/main.rs",
+        "vks-server/src/transcoder_runtime.rs",
+        "vks-signaling/src/handler.rs",
+        "vks-signaling/src/sdp.rs",
+    ];
+
+    /// Explicit, reviewed allowlist of files that may spell canonical codec
+    /// names outside `codec_spec.rs`. Every entry states why the spelling is a
+    /// transport/UI artifact and which test ties it back to the SSOT. Files not
+    /// listed here must not grow a second codec table.
+    const NAME_SPELLING_ALLOWLIST: &[(&str, &str)] = &[
+        ("vks-common/src/codec_spec.rs", "the SSOT itself"),
+        (
+            "vks-gateway-sip/src/rtp_bridge.rs",
+            "AUDIO_OFFER/VIDEO_OFFER are transport rows keyed by CodecId; checked by offer_rows_match_spec",
+        ),
+        (
+            "vks-gateway-sip/src/uas.rs",
+            "SIP UAS static PT map; checked against Disposition by uas_static_pt_map_matches_ssot",
+        ),
+        (
+            "vks-server/src/gateways.rs",
+            "server SIP PT maps; checked against Disposition by sip_pt_maps_match_ssot_disposition",
+        ),
+        (
+            "vks-admin/src/settings.rs",
+            "operator-intent matrix, not capability truth; every entry resolves via default_codec_matrix_entries_map_to_specs",
+        ),
+        (
+            "vks-media-sfu/src/webrtc.rs",
+            "str0m builder branches keyed by CodecId; checked by webrtc_answer_slice_matches_peer_builder",
+        ),
+        (
+            "vks-server/src/transcoder_runtime.rs",
+            "prometheus metric labels; subset check worker_metric_labels_are_subset_of_specs",
+        ),
+        (
+            "vks-server/src/main.rs",
+            "composition root: only RtpMap wire spellings; RoomCaps come from HandlerConfig (production caps test)",
+        ),
+    ];
+
+    /// Files that still contain a codec-name list but cannot import the SSOT.
+    /// Documented instead of silently skipped.
+    const NON_CONSUMER_EXCEPTIONS: &[(&str, &str)] = &[
+        (
+            "vks-core/src/media_policy.rs",
+            "unused legacy defaults; vks-core deliberately has no vks-common dependency (P3/T04c)",
+        ),
+        ("vks-gateway-sip/src/codec.rs", "dead legacy CodecMap, removed in T04c"),
+        ("vks-gateway-h323/src/codec.rs", "dead legacy CodecMap, removed in T04c"),
+    ];
+
+    fn read_crate_source(file: &str) -> String {
+        let path = format!("{}/{file}", concat!(env!("CARGO_MANIFEST_DIR"), "/.."));
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {path}"))
+    }
+
+    fn collect_rust_files(dir: &std::path::Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap_or_else(|error| panic!("read_dir {}: {error}", dir.display())) {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rust_files(&path, out);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let relative = path
+                    .strip_prefix(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
+                    .expect("crate-relative path")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push(relative);
+            }
+        }
+    }
+
+    #[test]
+    fn ssot_consumer_scan_list_is_complete() {
+        // T1: the scan list must cover every crate that imports the SSOT. The
+        // walk catches a new consumer file even if nobody remembers to add it.
+        let crates_root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let mut files = Vec::new();
+        collect_rust_files(std::path::Path::new(crates_root), &mut files);
+        let mut actual = BTreeSet::new();
+        for file in &files {
+            let source = read_crate_source(file);
+            if source.contains("codec_spec") || source.contains("codec_capabilities") {
+                actual.insert(file.clone());
+            }
+        }
+        let expected: BTreeSet<String> = SSOT_CONSUMER_FILES.iter().map(|file| (*file).to_string()).collect();
+        assert_eq!(
+            actual, expected,
+            "SSOT consumer scan list drifted: update SSOT_CONSUMER_FILES (or document a NON_CONSUMER_EXCEPTIONS entry)"
+        );
+        // Documented exceptions must really be non-consumers and must exist.
+        for (file, reason) in NON_CONSUMER_EXCEPTIONS {
+            assert!(!reason.is_empty());
+            let source = read_crate_source(file);
+            assert!(
+                !source.contains("codec_spec") && !source.contains("codec_capabilities"),
+                "{file} is listed as a non-consumer exception but imports the SSOT"
+            );
+        }
+        // Every allowlist reason is documented and the file is a real consumer.
+        for (file, reason) in NAME_SPELLING_ALLOWLIST {
+            assert!(!reason.is_empty(), "{file} allowlist entry needs a reason");
+            assert!(expected.contains(*file), "{file} is allowlisted but not in SSOT_CONSUMER_FILES");
+        }
+    }
+
     #[test]
     fn no_second_codec_name_table_outside_allowlist() {
         // T1: the SSOT is only useful if no consumer keeps its own literal
-        // table. The allowlist is exactly the SIP offer tables (`AUDIO_OFFER`/
-        // `VIDEO_OFFER`) and the dead H.323 CodecMap (T04c), which are
-        // transport/legacy models, not capability truth.
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        // capability table. These needles are the known historical copies; the
+        // explicit allowlist above documents the legitimate transport/UI
+        // spellings, so a new table must either derive from CODECS or add an
+        // allowlist entry with a test that ties it back to the SSOT.
         let forbidden: &[(&str, &str)] = &[
             ("vks-server/src/gateways.rs", "const H323_AUDIO"),
             ("vks-server/src/gateways.rs", "const H323_VIDEO"),
@@ -1200,25 +1582,22 @@ mod tests {
             ("vks-gateway-sip/src/rtp_bridge.rs", "pub native: bool"),
             ("vks-gateway-h323/src/lib.rs", "pub const H323_NATIVE_AUDIO_PTS: &[u8] = &[0, 4, 8, 9]"),
             ("vks-signaling/src/sdp.rs", "\"opus\" | \"pcmu\" | \"pcma\" | \"g722\""),
+            // P1: the production composition root must not rebuild RoomCaps
+            // codec fields or overwrite the SSOT-derived caps.
+            ("vks-server/src/main.rs", "video_codecs: vec!["),
+            ("vks-server/src/main.rs", "audio_codecs: vec!["),
+            ("vks-server/src/main.rs", ".with_caps("),
         ];
         for (file, needle) in forbidden {
-            let path = format!("{root}/{file}");
-            let source = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {path}"));
+            let source = read_crate_source(file);
             assert!(!source.contains(needle), "{file} still contains a second codec table: {needle}");
         }
-        for file in [
-            "vks-common/src/codec_capabilities.rs",
-            "vks-server/src/gateways.rs",
-            "vks-server/src/gateway_audio.rs",
-            "vks-server/src/gateway_aac.rs",
-            "vks-gateway-sip/src/rtp_bridge.rs",
-            "vks-gateway-sip/src/uas.rs",
-            "vks-gateway-h323/src/lib.rs",
-            "vks-signaling/src/sdp.rs",
-        ] {
-            let path = format!("{root}/{file}");
-            let source = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {path}"));
-            assert!(source.contains("codec_spec"), "{file} does not consume the codec SSOT");
+        for file in SSOT_CONSUMER_FILES {
+            let source = read_crate_source(file);
+            assert!(
+                source.contains("codec_spec") || source.contains("codec_capabilities"),
+                "{file} does not consume the codec SSOT"
+            );
         }
     }
 }

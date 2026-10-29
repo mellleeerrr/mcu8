@@ -195,8 +195,8 @@ enum MediaEngineState {
 | H264-HIGH | video | rx-only | — | — | tx_profile_unsupported |
 | H265 | video | native | — | — | — |
 | VP8 | video | — | — | webrtc | webrtc_only |
-| VP9 | video | — | — | — | webrtc_only |
-| AV1 | video | — | — | — | webrtc_only |
+| VP9 | video | — | — | — | pending_payloader |
+| AV1 | video | — | — | — | pending_payloader |
 | H261 | video | — | — | — | no_implementation |
 | H263 | video | — | — | — | no_implementation |
 | H263+ | video | — | — | — | no_implementation |
