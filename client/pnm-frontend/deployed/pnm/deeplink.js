@@ -8,11 +8,10 @@
  *   1) запоминает целевой URL глубокой ссылки (sessionStorage, TTL 10 минут);
  *   2) на странице авторизации, как только появляется токен, возвращает на
  *      запомненный URL (poll — вендор меняет location после логина сам);
- *   3) на hard reload/unload сохраняет цель через pagehide — страховка
- *      разлогина с перезагрузкой. Ограничение: вендорский SPA-логаут с
- *      истёкшим токеном идёт через History API (pagehide не срабатывает),
- *      поэтому cold deep-link с протухшим токеном цель не сохраняет — это
- *      принятое ограничение T07 (см. review B P2-1), а не «покрытый 401».
+ *   3) на hard reload/unload сохраняет цель через pagehide — но это НЕ
+ *      страховка SPA-логаута: вендор уходит на /pnm/authorization через
+ *      History API, pagehide не срабатывает, и cold deep-link с протухшим
+ *      токеном цель не сохраняет. Принятое ограничение T07 (review B P2-1).
  * Проектный слой, CSP-safe (внешний файл, без inline-скриптов).
  */
 (function () {
@@ -23,6 +22,10 @@
   var TTL_MS = 10 * 60 * 1000;
   var AUTH_PATH = '/pnm/authorization';
   var DEEP_RE = /^\/pnm\/monitoring\/sessions\/[^/?#]+/;
+  // Polling на странице авторизации ограничен тем же TTL, что и метка: раньше
+  // 240×250мс=60с, и логин дольше минуты терял deep-link при живом TTL 10 мин
+  // (review B P2, воспроизведено на 65с). 2400×250мс = 600с.
+  var MAX_POLL_TRIES = (TTL_MS / 250) | 0;
 
   function storage(kind) {
     try {
@@ -64,15 +67,22 @@
       var raw = store.getItem(RETURN_KEY);
       if (!raw) return '';
       var saved = JSON.parse(raw);
-      if (!saved || typeof saved.url !== 'string' || typeof saved.at !== 'number') return '';
+      if (!saved || typeof saved.url !== 'string' || typeof saved.at !== 'number') {
+        store.removeItem(RETURN_KEY);
+        return '';
+      }
       if (Date.now() - saved.at > TTL_MS) {
         store.removeItem(RETURN_KEY);
         return '';
       }
       var url = saved.url;
-      if (!DEEP_RE.test(url) || url.indexOf('//') === 0) return '';
+      if (!DEEP_RE.test(url) || url.indexOf('//') === 0) {
+        store.removeItem(RETURN_KEY);
+        return '';
+      }
       return url;
     } catch (_) {
+      forget();
       return '';
     }
   }
@@ -115,7 +125,7 @@
   var tries = 0;
   var poll = window.setInterval(function () {
     tries += 1;
-    if (tries > 240) {
+    if (tries > MAX_POLL_TRIES) {
       window.clearInterval(poll);
       return;
     }

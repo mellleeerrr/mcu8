@@ -1216,6 +1216,10 @@ pub fn normalize_loaded(resources: &mut ResourceState) {
         layout["payload"]["slots"] = json!(slots.into_iter().filter(Value::is_object).collect::<Vec<_>>());
         // Persisted `payload.size` may be stale (preset changed, slots edited):
         // normalize it on load with the same resolver every write path uses.
+        // Пустые AUTO за ёмкостью — мусор прежних пресетов: иначе UI сохраняет
+        // их обратно (full-save) и получает 409 (T06 rr5 P2).
+        recalc_layout_size(layout);
+        prune_empty_slots_beyond_capacity(layout);
         recalc_layout_size(layout);
         ensure_slot_roles(layout);
         layout["abonents"] = layout_record_abonents(Vec::new());

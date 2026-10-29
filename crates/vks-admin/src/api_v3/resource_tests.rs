@@ -2715,6 +2715,54 @@ async fn detached_empty_windows_do_not_poison_record() {
     assert_eq!(response.status(), StatusCode::OK, "record stays editable after detach");
 }
 
+/// T06 rr5 P1-5: mode не расширяет ёмкость номерами слотов; слот за
+/// объявленной ёмкостью — 409, а не тихое вырезание.
+#[tokio::test]
+async fn mode_capacity_is_declared_only_by_size_or_preset() {
+    let state = state();
+    let room = Rooms::create_async(&state, "T06 mode cap").await.unwrap();
+    let layout_id = create_layout(&state, "Mode cap", json!({"type":"default"})).await;
+    assert_eq!(attach_session_to(&state, &room, &layout_id).await, StatusCode::NO_CONTENT);
+    let call = |payload: Value| {
+        let state = state.clone();
+        let room = room.clone();
+        let layout_id = layout_id.clone();
+        async move {
+            let mut extra = serde_json::Map::new();
+            for (key, value) in payload.as_object().cloned().unwrap_or_default() {
+                extra.insert(key, value);
+            }
+            crate::api_v3::shell::switch_video_layout_mode(
+                State(state),
+                Extension(operator()),
+                Json(crate::api_v3::shell::SwitchVideoLayoutModeRequest {
+                    session_id: Some(room.id.to_string()),
+                    conference_id: None,
+                    mode: Some("manual".into()),
+                    video_layout_id: Some(layout_id),
+                    extra,
+                }),
+            )
+            .await
+        }
+    };
+    // slots-only: 25 окон на записи с ёмкостью 13 — 409.
+    let slots: Vec<_> = (1..=25).map(|position| json!({"position": position, "role": "AUTO"})).collect();
+    let response = call(json!({"slots": slots})).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT, "slots must not widen capacity");
+    let response = call(json!({"preset": "preset_equal_25"})).await;
+    assert_eq!(response.status(), StatusCode::OK, "declared preset growth is legal");
+    let size = {
+        let resources = state.api_v3.resources.lock().await;
+        resources.layouts.get(&layout_id).expect("layout exists")["payload"]["size"].as_u64()
+    };
+    assert_eq!(size, Some(25));
+    // preset 25 + явный слот 26 — 409 (не вырезать молча).
+    let slots: Vec<_> = (1..=26).map(|position| json!({"position": position, "role": "AUTO"})).collect();
+    let response = call(json!({"preset": "preset_equal_25", "slots": slots})).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT, "explicit slot beyond declared capacity");
+}
+
 /// T06 rr3 NC-C: mode-переключение обязано пересчитывать `size` (иначе на
 /// 13-оконной записи остаётся 13 при пресете на 5/25).
 #[tokio::test]

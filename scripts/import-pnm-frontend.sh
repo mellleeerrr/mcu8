@@ -2,7 +2,7 @@
 # Импорт рантайма PNM-Frontend (TrueConf MCU Web UI, PROSTOR-сборка) из архива.
 #
 # Использование:
-#   VKS_PNM_ARCHIVE=<путь к zip> ./scripts/import-pnm-frontend.sh [--force] [--with-source] [--gzip]
+#   VKS_PNM_ARCHIVE=<путь к zip> ./scripts/import-pnm-frontend.sh [--force] [--with-source]
 #
 # Что делает:
 #   1. Проверяет sha256 исходного архива (якорь: ea0314f8…cbdfa).
@@ -22,8 +22,8 @@
 #        --force       — перезаписать непустой deployed/ (иначе отказ);
 #        --with-source — дополнительно распаковать `source/extracted_frontend/`
 #                        (реконструкция исходников; по умолчанию НЕ распаковывается);
-#        --gzip        — сгенерировать `.gz` рядом с текстовыми файлами
-#                        (для tower-http precompressed_gzip; в архиве .gz нет).
+#        --gzip        — legacy-флаг, игнорируется: gzip делает tower-http
+#                        CompressionLayer в рантайме (файлы `.gz` не нужны).
 #
 # Идемпотентность: без --force повторный запуск в непустой deployed/ не выполняется.
 set -euo pipefail
@@ -127,7 +127,8 @@ fi
 
 # 3. Копирование рантайма 1:1 (кроме *.bak*; симлинки вычищаются — политика NOTES.md).
 # Сначала сохраняем ПРОЕКТНЫЙ слой: perf-overrides.js, api-errors.js,
-# codian-layouts.js и блок CSS-override из index.html. Их нет в вендорском
+# codian-layouts.js, theme-toggle.js, deeplink.js, блок CSS-override и блок
+# project <script> из index.html. Их нет в вендорском
 # архиве, а копирование 1:1 (rm -rf + распаковка) уничтожило бы их — вместе
 # с правками T1.1/T12b/T13/T14/T15, которые в них живут.
 log "сохранение проектного слоя (perf-overrides.js, api-errors.js, codian-layouts.js, theme-toggle.js, deeplink.js, CSS-override)"
@@ -228,6 +229,10 @@ restore_previous_runtime() {
     exit "$rc"
 }
 trap restore_previous_runtime EXIT
+# P3 review A: сигнал во время импорта даёт rc=0 в EXIT-trap и восстановление
+# пропускалось. Приводим сигналы к ненулевому rc, чтобы .pnm-prev вернулся.
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 
 BAK_COUNT="$(find "$TMP/deployed/pnm" -name '*.bak*' | wc -l)"
 FILE_COUNT="$(find "$DEST" -type f | wc -l)"

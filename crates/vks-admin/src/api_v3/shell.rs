@@ -573,10 +573,13 @@ pub async fn settings_audio_codecs(State(state): State<SharedState>, headers: He
         .iter()
         .map(|spec| {
             let (name, bitrate) = crate::settings::CodecConfig::audio_parts(spec);
+            let supported = vks_common::codec_capabilities::is_supported_audio_variant(&name, bitrate);
+            let reason = vks_common::codec_capabilities::audio_unavailable_reason(&name, bitrate);
             json!({
                 "name": name,
                 "bitrate": bitrate,
-                "supported": vks_common::codec_capabilities::is_supported_audio_variant(&name, bitrate)
+                "supported": supported,
+                "reason": reason
             })
         })
         .collect();
@@ -589,7 +592,28 @@ pub async fn settings_video_codecs(State(state): State<SharedState>, headers: He
     let s = SettingsService::get(&state);
     let supported_video: Vec<&String> =
         s.codecs.video.iter().filter(|name| vks_common::codec_capabilities::is_native_video(name)).collect();
-    codec_response(&headers, json!({ "video_codecs": s.codecs.video, "supported_video_codecs": supported_video }))
+    // Machine-readable reason for every unsupported entry: the public matrix
+    // must not say "false" without saying why (T22).
+    let video_details: Vec<serde_json::Value> = s
+        .codecs
+        .video
+        .iter()
+        .map(|name| {
+            json!({
+                "name": name,
+                "supported": vks_common::codec_capabilities::is_native_video(name),
+                "reason": vks_common::codec_capabilities::video_unavailable_reason(name)
+            })
+        })
+        .collect();
+    codec_response(
+        &headers,
+        json!({
+            "video_codecs": s.codecs.video,
+            "supported_video_codecs": supported_video,
+            "video_codec_details": video_details
+        }),
+    )
 }
 
 /// Кодеки меняются только PATCH'ем, поэтому отдаём strong ETag и
@@ -980,6 +1004,22 @@ pub async fn switch_video_layout_mode(
     }
     let previous = resources.clone();
     let mut draft = source;
+    // Ёмкость, объявленная для валидации: только `size > 0` из запроса или
+    // ёмкость присланного пресета. `slots.len` сюда НЕ входит — иначе mode
+    // без preset/size расширял бы запись номерами слотов (T06 rr5 P1-5).
+    let declared_from_request = |size: Option<u64>| -> Option<u64> {
+        size.filter(|size| *size > 0).or_else(|| {
+            preset_field
+                .as_ref()
+                .and_then(Value::as_str)
+                .and_then(|preset| {
+                    vks_layout::grids::slot_count(preset)
+                        .or_else(|| vks_layout::codian::slot_count(preset))
+                        .or_else(|| vks_layout::preset_size(preset))
+                })
+                .map(|capacity| capacity as u64)
+        })
+    };
     let mut declared_capacity: Option<u64> = None;
     if size.is_some() || slots.is_some() || preset_present {
         let inferred_size = size
@@ -1007,7 +1047,7 @@ pub async fn switch_video_layout_mode(
             .or_else(|| draft["payload"]["preset"].as_str().and_then(vks_layout::preset_size).map(|size| size as u64))
             .unwrap_or(13);
         patch.insert("size".to_string(), json!(inferred_size));
-        declared_capacity = Some(inferred_size);
+        declared_capacity = declared_from_request(size);
     }
     let stored_capacity = super::resources::layout_size(&draft["payload"]);
     if let Some(payload) = draft["payload"].as_object_mut() {
