@@ -74,7 +74,7 @@ crates/vks-server/src/lib.rs:1441..1446: the unit test
 So there is exactly one production call site, inside the `TrackAdded` loop, and
 the helper (`lib.rs:1418-1431`) is no longer dead in non-test builds. The loop
 semantics are unchanged for supported offers: `previous_kinds` still comes from
-`publisher_track_kinds` (`lib.rs:1089`), and `tracks` still contains only
+`publisher_track_kinds` (`lib.rs:1083`), and `tracks` still contains only
 accepted audio/video media tracks, so "kinds in `new_kinds`" == "kinds not in
 `previous_kinds`". No behaviour regression in the 4-line change.
 
@@ -124,7 +124,7 @@ committed test exercises the WS loop → `TrackAdded` emission on a re-offer. A
 semantic regression that keeps the helper referenced (e.g. filtering on the
 wrong set) would not be caught by any test. This is the residual P2-1 below,
 not a live defect: the code is correct by inspection for the only shapes
-`validate_offer` admits (≤1 audio + ≤1 video m-line, `webrtc.rs:481-484`).
+`validate_offer` admits (≤1 audio + ≤1 video m-line, `webrtc.rs:487-489`).
 
 Note the test comment "appears exactly once even if the re-offer lists it twice"
 (`lib.rs:1443`) is still not exercised: the test never passes two tracks of the
@@ -177,9 +177,9 @@ flake noted in re-review #5 did not recur).
 | # | Criterion | Verdict | Evidence |
 |---|---|---|---|
 | 1 | Default transport = 1 + preflight (fail-closed) | **PASS** | `webrtc_runtime.rs:23-33`: env unset/empty → on, only `0/false/off/no` opt out; `main.rs:96-108` early preflight exits 78 before the DB lock (`:112`) and storage init (`:134`); `validate_candidate` rejects empty/invalid/TEST-NET/loopback without dev opt-in (`webrtc_runtime.rs:38-70`) |
-| 2 | Keyframe gate | **PASS** | `webrtc_room.rs:576-584` `gate_video`; gate check at `:655`; drops counted as `awaiting_keyframe`; keyframe request rate-limited to 500 ms (`:659-661`); unit test `keyframe_gate_blocks_deltas_until_the_first_idr` (`:1051`) passes. Real-UDP observation from #5 (deltas blocked until first IDR; fresh keyframe forwarded) still applies — code identical |
-| 3 | Re-offer without a new DTLS session | **PASS** | `webrtc_room.rs:671-695` answers through `PeerCommand::Reoffer` on the existing task; `webrtc.rs:205-250` rejects structural changes but keeps the session; real-UDP #5: `reoffered=true`, same server ufrag and candidate port, both peers still forwarding, appended m-line accepted on the same peer. Verified files byte-identical to #5 |
-| 4 | VP9/AV1/H264/H265 caps advertised honestly | **PASS** | `webrtc.rs:138-143`: `clear_codecs().enable_opus(true,false).enable_vp8(true)`; answer test forbids `H264/90000`, `VP9/90000`, `AV1/90000`, `H265/90000` (`webrtc.rs:704-707`); transport doc `:20` states "only Opus/VP8 (+VP8 RTX)" |
+| 2 | Keyframe gate | **PASS** | `webrtc_room.rs:576-586` `gate_video`; gate check at `:655`; drops counted as `awaiting_keyframe`; keyframe request rate-limited to 500 ms (`:659-661`); unit test `keyframe_gate_blocks_deltas_until_the_first_idr` (`:1051`) passes. Real-UDP observation from #5 (deltas blocked until first IDR; fresh keyframe forwarded) still applies — code identical |
+| 3 | Re-offer without a new DTLS session | **PASS** | `webrtc_room.rs:671-694` answers through `PeerCommand::Reoffer` on the existing task; `webrtc.rs:199-250` rejects structural changes but keeps the session; real-UDP #5: `reoffered=true`, same server ufrag and candidate port, both peers still forwarding, appended m-line accepted on the same peer. Verified files byte-identical to #5 |
+| 4 | VP9/AV1/H264/H265 caps advertised honestly | **PASS** | `webrtc.rs:138-143`: `clear_codecs().enable_opus(true,false).enable_vp8(true)`; answer test forbids `H264/90000`, `VP9/90000`, `AV1/90000`, `H265/90000` (`webrtc.rs:704-706`); transport doc `:20` states "only Opus/VP8 (+VP8 RTX)" |
 | 5 | Docs accurate | **PASS** | No `before mutating` / `without touching` / `untouched` / `fails before` / `не трогает` strings in `crates/vks-media-sfu/src` implementation docs or `docs/implementation/` (only the underscored test name at `webrtc.rs:588`, already P3). Transport doc `:51-58` correctly states session reuse, rejected structural shapes, silently accepted BUNDLE-tag/`a=setup`/PT changes, and the `add_ice_details`-before-validation ufrag rotation. Files byte-identical to #5, where the str0m probe reproduced both the same-credential (no rotation) and new-credential (rotation) cases |
 
 Plus this review's specific requirement: `new_track_kinds` is called by the
@@ -223,7 +223,7 @@ No regression since #5.
 2. **`TrackInfo` is hardcoded.** `ssrc: 0` (`lib.rs:1122`), fixed 48 kHz/2 for
    audio and 90 kHz/0 for video (`:1123-1134`). A client cannot correlate the
    announced track (including an appended video track) with the real SSRC.
-3. **A rejected re-offer still mutates str0m ICE state.** `webrtc.rs:223-231`
+3. **A rejected re-offer still mutates str0m ICE state.** `webrtc.rs:223-234`
    calls str0m `accept_offer`; str0m applies `add_ice_details`
    (`str0m-0.24.1/src/change/sdp.rs:84`) before the consistency check
    (`:112`/`:947`). The call survives and media flows, but the server ufrag can
@@ -233,7 +233,7 @@ No regression since #5.
    is the specific item re-review #5 named as the remaining 9.5 condition, and
    it is still absent: `waiting_keyframe.store` remains only at
    `webrtc_room.rs:438` (`set_subscription`), `:559` (queue-full) and `:729`
-   (`SetSubscription` arm); the success re-offer arm (`:671-695`) contains no
+   (`SetSubscription` arm); the success re-offer arm (`:671-694`) contains no
    store, but `keyframe_gate_blocks_deltas_until_the_first_idr` only tests the
    pure predicate, and `reoffer_is_answered_by_the_existing_peer_task` asserts
    session/peer count, not gate state. A re-introduced re-arm would be caught by
@@ -246,8 +246,8 @@ No regression since #5.
    automated test asserts "exit 78 without creating the DB" for a dev config.
 6. **Queue-full `webrtc_offer_retry`/`retryable=1` is untested.**
    `webrtc_room.rs:212` returns `Sdp("re-offer queue is full; retry")`;
-   `lib.rs:978-980` maps any SDP error containing `"retry"` to
-   `webrtc_offer_retry` and `:1010-1014` makes it retryable. No signalling-layer
+   `lib.rs:973-981` maps any SDP error containing `"retry"` to
+   `webrtc_offer_retry` and `:1010-1015` makes it retryable. No signalling-layer
    test drives the queue-full path; the substring heuristic is brittle.
 7. **`WEBRTC_FALLBACK{offer_rejected}` counts a live peer's rejected re-offer.**
    `lib.rs:1016-1018` increments the legacy-fallback metric on any
@@ -257,11 +257,11 @@ No regression since #5.
    updated without the task seeing the command. No test covers it.
 9. **Re-offer reply before the peer's timer actions are flushed.** The oneshot
    reply is sent at `webrtc_room.rs:676-681`, then `handle_timeout` runs at
-   `:683-690`, and `run_peer` calls it again (`:742-748`). The answer can reach
+   `:683-691`, and `run_peer` calls it again (`:742-748`). The answer can reach
    signalling before local ICE/DTLS actions are transmitted, and the timer runs
    twice.
 10. **An H264 video publisher (with Opus audio) is accepted.** `validate_offer`
-    (`webrtc.rs:462-496`) only requires Opus or VP8 anywhere in the SDP; an
+    (`webrtc.rs:464-500`) only requires Opus or VP8 anywhere in the SDP; an
     Opus-audio + H264-video offer passes, then the video m-line is answered
     rejected while the publisher believes video works. The SFU advertises only
     Opus/VP8.
@@ -276,14 +276,14 @@ No regression since #5.
    re-offer), so appended-section renames/reorders bypass it and are caught only
    by str0m (non-fatal `InvalidOffer`).
 2. The offer's `a=group:BUNDLE` tags and `a=setup` changes are not validated
-   (`webrtc.rs:462-496`); changed BUNDLE tags, `a=setup:passive` and changed
+   (`webrtc.rs:464-500`); changed BUNDLE tags, `a=setup:passive` and changed
    Opus PT are silently accepted. The transport doc states this explicitly
    (`WEBRTC_TRANSPORT_2026-10-22.md:51-58`), so it is documented behaviour, not
    an overclaim.
 3. `InvalidOffer` is downgraded to `WebRtcError::Sdp` at the registry boundary
-   (`webrtc_room.rs:236-239`), losing the typed cause; the adjacent log still
+   (`webrtc_room.rs:237-240`), losing the typed cause; the adjacent log still
    says "keeping old session" even when the ICE state was already touched.
-4. Duplicated `a=ice-options:trickle` stripping (`webrtc.rs:161` and `:234`)
+4. Duplicated `a=ice-options:trickle` stripping (`webrtc.rs:163` and `:236`)
    plus the double `handle_timeout` on the re-offer path (same as P2-9) —
    cosmetic and timer-order.
 5. Process-global env mutation in server tests (`network_integration.rs:121`,
@@ -355,12 +355,13 @@ functional fix:
   was started or restarted; no UDP ranges were bound outside the pristine test
   binaries (tests use loopback/ephemeral ports).
 * **HEAD moved concurrently.** While this review ran, another task advanced the
-  live branch from `2442a16` to `0febfe5` (`fix(T06): one occupancy predicate…`).
-  The reviewed archive is exactly `2442a16`; `git diff --name-only 2442a16
-  0febfe5` shows no changes to `crates/vks-media-sfu`, `crates/vks-server/src/lib.rs`
-  or `docs/implementation/WEBRTC_TRANSPORT_2026-10-22.md`, so this verdict applies
-  unchanged to the T11a surface at `0febfe5`. Other tasks' gates at `0febfe5`
-  are out of scope here.
+  live branch from `2442a16` to `0febfe5` (`fix(T06): one occupancy predicate…`),
+  then to `0999267` (`docs(tracker): close T11a …`), which adds this report and
+  the tracker row. The reviewed archive is exactly `2442a16`; `git diff
+  --name-only 2442a16 HEAD` shows no changes to `crates/vks-media-sfu`,
+  `crates/vks-server/src/lib.rs` or `docs/implementation/WEBRTC_TRANSPORT_2026-10-22.md`,
+  so this verdict applies unchanged to the T11a code surface at `0999267`.
+  Other tasks' gates at the newer HEAD are out of scope here.
 * **Scratch removed.** The archive tree, its logs/backup copies and
   `/home/pro/.cache/t11a_rr6_target` were deleted before this report was
   finalised; the `/dev/shm` dir file pointer was removed too.
