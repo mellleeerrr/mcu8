@@ -2832,6 +2832,142 @@ async fn mode_and_patch_agree_on_preset_with_stale_size() {
     assert_eq!(capacity(&state).await, Some(25), "record keeps the accepted capacity");
 }
 
+/// T06 rr9 P2-1: явный `size` сверх `MAX_WINDOWS` — invalid payload, а не
+/// повод клампить до 100 в PATCH и молча игнорировать в mode. Оба пути обязаны
+/// ответить 422 до любого prune и не менять запись.
+#[tokio::test]
+async fn explicit_size_beyond_max_is_422_in_mode_and_patch() {
+    let state = state();
+    let room = Rooms::create_async(&state, "T06 size>MAX").await.unwrap();
+    let layout_id = create_layout(&state, "Size over max", json!({"type":"default"})).await;
+    assert_eq!(attach_session_to(&state, &room, &layout_id).await, StatusCode::NO_CONTENT);
+    let mode = |payload: Value| {
+        let state = state.clone();
+        let room = room.clone();
+        let layout_id = layout_id.clone();
+        async move {
+            let extra = payload.as_object().cloned().unwrap_or_default();
+            crate::api_v3::shell::switch_video_layout_mode(
+                State(state),
+                Extension(operator()),
+                Json(crate::api_v3::shell::SwitchVideoLayoutModeRequest {
+                    session_id: Some(room.id.to_string()),
+                    conference_id: None,
+                    mode: Some("manual".into()),
+                    video_layout_id: Some(layout_id),
+                    extra,
+                }),
+            )
+            .await
+        }
+    };
+    let patch = |payload: Value| {
+        let state = state.clone();
+        let layout_id = layout_id.clone();
+        async move {
+            let uri = uri(&format!("/api/v3/video_layouts/{layout_id}"));
+            edit_global(State(state), Extension(operator()), uri, Path(layout_id), Json(json!({"payload": payload})))
+                .await
+        }
+    };
+    let payload_now = {
+        let state = state.clone();
+        let layout_id = layout_id.clone();
+        move || {
+            let state = state.clone();
+            let layout_id = layout_id.clone();
+            async move {
+                let resources = state.api_v3.resources.lock().await;
+                resources.layouts.get(&layout_id).expect("layout exists")["payload"].clone()
+            }
+        }
+    };
+    let before = payload_now().await;
+    assert_eq!(before["size"], 13, "fresh default record has capacity 13");
+    let slots25 = || json!((1..=25).map(|position| json!({"position": position, "role": "AUTO"})).collect::<Vec<_>>());
+    let invalid = [
+        json!({"size": vks_layout::grids::MAX_WINDOWS as u64 + 1}),
+        json!({"size": vks_layout::grids::MAX_WINDOWS as u64 + 1, "slots": slots25()}),
+        json!({"size": 1000}),
+        json!({"size": 1000, "slots": slots25()}),
+    ];
+    for payload in invalid {
+        // UI кладёт поля во вложенный `payload`; верхний уровень — legacy-форма.
+        // Обе формы mode обязаны дать тот же 422, что и PATCH.
+        for shape in [payload.clone(), json!({"payload": payload.clone()})] {
+            let response = mode(shape).await;
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "mode: {payload}");
+            let error = body(response).await;
+            assert_eq!(error["error"]["code"], 422, "mode: {payload}");
+            assert_eq!(
+                error["error"]["description"], "payload.size must be in 1..=100",
+                "mode error description: {payload}"
+            );
+        }
+        let response = patch(payload.clone()).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "PATCH: {payload}");
+        let error = body(response).await;
+        assert_eq!(error["error"]["code"], 422, "PATCH: {payload}");
+        assert_eq!(
+            error["error"]["description"], "payload.size must be in 1..=100",
+            "PATCH error description: {payload}"
+        );
+        assert_eq!(payload_now().await, before, "rejected payload must not change the record: {payload}");
+    }
+}
+
+/// T06 rr9 P2-1: ровно `MAX_WINDOWS` — валидная граница, и mode/PATCH снова
+/// согласованы (оба 200, эффективная ёмкость 100). Проверяется на отдельных
+/// свежих записях, чтобы ни один путь не опирался на результат другого.
+#[tokio::test]
+async fn explicit_size_at_max_is_200_in_mode_and_patch() {
+    let state = state();
+    let room = Rooms::create_async(&state, "T06 size=MAX").await.unwrap();
+    // Пресет снят (`null`), чтобы `preset-first` не перекрывал проверяемую
+    // границу: иначе preset_default_13 оставил бы ёмкость 13 при size=100.
+    let mode_layout =
+        create_layout(&state, "Size max mode", json!({"type":"individual","preset":null,"size":13})).await;
+    let patch_layout =
+        create_layout(&state, "Size max PATCH", json!({"type":"individual","preset":null,"size":13})).await;
+    assert_eq!(attach_session_to(&state, &room, &mode_layout).await, StatusCode::NO_CONTENT);
+
+    let response = crate::api_v3::shell::switch_video_layout_mode(
+        State(state.clone()),
+        Extension(operator()),
+        Json(
+            serde_json::from_value(json!({
+                "session_id": room.id.to_string(),
+                "new_mode": "manual",
+                "video_layout_id": mode_layout.clone(),
+                "payload": {"size": vks_layout::grids::MAX_WINDOWS}
+            }))
+            .expect("mode request"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "mode accepts size == MAX_WINDOWS");
+    assert_eq!(body(response).await["payload"]["size"], vks_layout::grids::MAX_WINDOWS as u64);
+
+    let uri = uri(&format!("/api/v3/video_layouts/{patch_layout}"));
+    let response = edit_global(
+        State(state.clone()),
+        Extension(operator()),
+        uri,
+        Path(patch_layout.clone()),
+        Json(json!({"payload": {"size": vks_layout::grids::MAX_WINDOWS}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "PATCH accepts size == MAX_WINDOWS");
+    assert_eq!(body(response).await["video_layout"]["payload"]["size"], vks_layout::grids::MAX_WINDOWS as u64);
+
+    let capacities = {
+        let resources = state.api_v3.resources.lock().await;
+        [&mode_layout, &patch_layout]
+            .map(|layout_id| resources.layouts.get(layout_id).expect("layout exists")["payload"]["size"].as_u64())
+    };
+    assert_eq!(capacities, [Some(100), Some(100)], "mode and PATCH agree on effective capacity");
+}
+
 /// T06 rr3 NC-C: mode-переключение обязано пересчитывать `size` (иначе на
 /// 13-оконной записи остаётся 13 при пресете на 5/25).
 #[tokio::test]

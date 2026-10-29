@@ -509,6 +509,19 @@ fn max_slot_position(payload: &Value) -> Option<usize> {
         .map(|position| position as usize)
 }
 
+/// Явно запрошенный `size` сверх `MAX_WINDOWS` — невалидный запрос, а не
+/// повод молча клампить его до 100 в PATCH и игнорировать в mode: такой вход
+/// должен одним и тем же 422 отклоняться обоими путями до любого clamp/prune
+/// (T06 rr9 P2-1).
+pub(super) fn validate_explicit_layout_size(size: Option<u64>) -> Result<(), String> {
+    match size {
+        Some(size) if size > vks_layout::grids::MAX_WINDOWS as u64 => {
+            Err(format!("payload.size must be in 1..={}", vks_layout::grids::MAX_WINDOWS))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Ёмкость, ЯВНО объявленная входящим payload: id пресета или `size > 0`.
 ///
 /// Нужна для валидации PATCH: пользователь вправе увеличить сетку
@@ -1465,6 +1478,9 @@ fn validate_layout_payload(payload: &Value) -> Result<(), String> {
             return Err("payload.type must be \"default\" or \"individual\"".to_string());
         }
     }
+    // Явный `size` сверх MAX_WINDOWS — 422, а не тихий clamp до 100: PATCH и
+    // mode обязаны отвечать на такой запрос одинаково (T06 rr9 P2-1).
+    validate_explicit_layout_size(payload.get("size").and_then(Value::as_u64))?;
     if let Some(slots) = payload.get("slots") {
         let Some(slots) = slots.as_array() else {
             return Err("payload.slots must be an array".to_string());
