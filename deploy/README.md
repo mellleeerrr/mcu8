@@ -133,6 +133,45 @@ serving media, stop the service; there is no legacy rollback path.
 [`../docs/operations/cluster-bus.md`](../docs/operations/cluster-bus.md).
 Не включайте этот стек в прод-профиль до разблокировки зависимостей.
 
+## Native WebTransport (T13, opt-in, native clients only)
+
+WebTransport is a **UDP/QUIC (HTTP/3, TLS 1.3)** signaling transport for native
+clients. It is not enabled by the normal production build: compile with
+`--features vks-server/webtransport`, then set `VKS_WEBTRANSPORT=1` plus an
+operator certificate/key. With the feature compiled but the env unset, the
+application is the WS-only app: `/wt` is 404 and no `Alt-Svc` header is sent.
+
+```bash
+cargo build --release -p vks-server --features vks-server/webtransport
+# /etc/vks/vks.env:
+#   VKS_WEBTRANSPORT=1
+#   VKS_WT_BIND=0.0.0.0:8443
+#   VKS_WT_CERT=/etc/vks/wt-cert.pem
+#   VKS_WT_KEY=/etc/vks/wt-key.pem
+```
+
+`VKS_WT_CERT`/`VKS_WT_KEY` are mandatory when enabled (there is no self-signed
+production fallback); missing/unreadable PEM or a malformed value exits 78
+(`EX_CONFIG`). The certificate must be valid TLS 1.3 cert material; native
+clients pin it with `SHA-256(DER)` obtained from
+`GET /wt/cert-hash` (JSON `{"algorithm":"sha-256","sha256":"…","port":…}`).
+Only while enabled:
+
+- `GET /wt` — informational JSON (the real session is the UDP endpoint);
+- `GET /wt/cert-hash` — pinning hash and actual UDP port;
+- normal HTTP responses (including `/healthz`, `/readyz`) carry
+  `Alt-Svc: h3=":<port>"; ma=86400`.
+
+WS (`/ws`) stays available in both modes. Pre-accept guards: only path `/wt`,
+JWT verification before `request.accept()` (same JWT policy as `/ws`), a
+connection ceiling (`VKS_WT_MAX_CONNECTIONS`, default 64), per-frame ceiling
+(64 KiB), handshake/idle timeouts. Frames are `u32` big-endian length +
+protobuf `SignalingMessage` on a reliable bi-stream; datagrams are not used for
+SDP/signaling. **Browser WebTransport is not claimed**: Chromium requires
+`serverCertificateHashes` with a ≤14-day ECDSA certificate and UDP/QUIC on the
+path. Open UDP 8443 only to native-client networks; TLS terminates in the
+listener (no reverse proxy can forward QUIC).
+
 ## First start
 
 ```bash

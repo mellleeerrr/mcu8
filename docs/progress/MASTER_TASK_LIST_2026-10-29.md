@@ -26,7 +26,7 @@
 | T11b | Per-source: mid-маппинг + >2 пиров (патч вендора снят: в бандле нет SDP → drift-guard) | P0 | T11a | 🔁 `14e7027` (multi-mid, cap 8 fail-closed, gate per publisher, drift-guard; 112/151 тестов) |
 | T11c | Удаление легаси-плоскости (2176/79) + 6 тестов | P1 | T11a,T11b | ⏳ |
 | T12 | P5: room_mode (on_client_hello), guards→bridge_available, audio+composite egress | P0 | T11a | ⏳ |
-| T13 | WebTransport native (wtransport, cert-hash, Alt-Svc) | P2 | T11a | ⏳ |
+| T13 | WebTransport native (wtransport, cert-hash, Alt-Svc) | P2 | T11a | 🔁 native UDP/QUIC listener (`wtransport 0.7.2`, feature `vks-server/webtransport`), `/wt` ClientHello→ServerHello, `/wt/cert-hash`, Alt-Svc only when on, 404 off, WS regression; review pending |
 | T14 | NATS/OTLP (UUIDv7, CI-сервисы, shutdown) | P2 | T03a | 🔁 partial: UUIDv7 + wire v1 + LocalTransport/fail-open + shutdown guard + lease-move twin готовы; **NATS/OTLP blocked** (нет `async-nats`/`opentelemetry*` в офлайн-реестре) |
 | T15 | L0: SO_RCVBUF, RT-потоки, sysctl, systemd slice | P2 | T01 | ⏳ |
 | T16 | H.323: убрать ffi, RX-латч, fail-closed H.235, UII, active_calls, golden+ADR | P2 | T03c | ✅ 9.0 (ffi уже удалён T03c; RX IP+SSRC, H.235 fail-closed, UII, честный active_calls, golden+ADR-0034; сайдкар сохранён по аудиту — нативный ASN.1 остаётся P2) |
@@ -51,7 +51,7 @@
 - **T11b:** 3+ пира в комнате (тест через mpsc + e2e 3 страницы); pre-offer `1+(N-1)` обоих видов, answer зеркалит все m-lines; per-source `(publisher,kind)→mid`, mid не переиспользуется (retire), N−1 аудио без микширования; `VKS_WEBRTC_MAX_PEERS_PER_ROOM=8` fail-closed + `room_full` сверх лимита; keyframe-gate per publisher; легаси 1+1 — явная деградация с метрикой; вендор без SDP → `check-pnm-webrtc-drift.py --check` (no-op сегодня).
 - **T11c:** легаси-плоскость удалена; 6 новых тестов; `VKS_WEBRTC_TRANSPORT` обязателен.
 - **T12:** mixed room: браузер+шлюз; audio-мост; composite H.264; guards заменены `bridge_available`.
-- **T13:** нативный WT-клиент ClientHello→ServerHello; `/wt/cert-hash`; Alt-Svc только при on; 404 при off; WS жив.
+- **T13:** нативный WT-клиент ClientHello→ServerHello (реальный QUIC/TLS 1.3 in-process тест, SHA-256 pinning); `/wt/cert-hash`; Alt-Svc только при on; 404/без Alt-Svc при off; WS жив; bad/missing PEM → exit 78. Браузерный WT не заявлен (ADR: serverCertificateHashes). Осталось: независимое ревью.
 - **T14:** ✅ UUIDv7 (`Msg::id`), стабильный wire v1, `Transport`+`LocalTransport`, fail-open по `VKS_NATS_URL`, lease-move двух узлов (in-process twin), shutdown-guard с timeout. ⛔ NATS (`async-nats`) и OTLP (`opentelemetry-otlp`) — blocked: крейтов нет в офлайн-реестре; CI-сервисы не добавлены. Детали/evidence: `docs/operations/cluster-bus.md`.
 - **T15:** `ss -u -m` показывает rcvbuf; `chrt -p` RT; systemd slice/memory лимиты; sysctl применён.
 - **T16 ✅:** ffi удалён (T03c); RX-латч по IP+SSRC; H.235 fail-closed; UII — один IA5-символ; active_calls честный; golden-харнесс; ADR-0034. Python-сайдкар сохранён до паритета нативного ASN.1 (P2), fastStart/reverse OLC/H.239 не заявляются.
@@ -72,3 +72,4 @@
 | 16:16 | T16 done: RX IP+SSRC, H.235 fail-closed, UII, честный active_calls, golden+ADR-0034; сайдкар оставлен до паритета |
 | 17:20 | T14 partial: UUIDv7/wire v1/LocalTransport fallback/shutdown guard/lease-move twin; NATS+OTLP blocked (нет `async-nats`/`opentelemetry*` в офлайн-реестре) |
 | 17:20 | T06 rr9 P2-1 fixed: explicit `size > MAX_WINDOWS` → 422 в mode и PATCH до clamp/prune (запись не меняется); §4.6 обновлён (preset-first, size>MAX=422, slots-only=409), регрессионные тесты |
+| 17:35 | T13 implemented (native WT: wtransport 0.7.2, `/wt`, `/wt/cert-hash`, Alt-Svc gated, 404 off, WS regression, QUIC handshake + cert-pin tests; review pending) |

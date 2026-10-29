@@ -13,7 +13,7 @@
 | R2 | Режим MCU **и** SFU, выбор — оператором, **прозрачно для клиента** | Обязательное |
 | R3 | Все популярные аудио/видео кодеки (VP8, VP9, H.264, H.265, AV1; Opus, G.722, G.711) | Обязательное |
 | R4 | Протоколы: H.323, SIP, WebRTC | Обязательное |
-| R5 | WS/WSS + WebTransport (QUIC) приёмник для WebRTC-клиентов | Обязательное |
+| R5 | WS/WSS + WebTransport (QUIC) приёмник: WS — браузеры, WT — нативные клиенты (T13; браузерный WT не в этом релизе) | Обязательное |
 | R6 | Управление сервером из фронтенда: имя, IP, БД (своя или LDAP/FreeIPA) | Обязательное |
 | R7 | Токены авторизации + API-ключи для управления | Обязательное |
 | R8 | Современные плитки-сетки, кастомные раскладки, сохранение раскладки | Обязательное |
@@ -182,7 +182,8 @@ vks/
 │   ├── vks-signaling/       # 📡 СИГНАЛИЗАЦИЯ (WS/WSS + WebTransport)
 │   │   └── src/
 │   │       ├── ws.rs          # tokio-tungstenite
-│   │       ├── wt.rs          # wtransport (QUIC/quinn)
+│   │       ├── wt.rs          # mock transport port (transport-agnostic tests)
+│   │       ├── webtransport.rs# real wtransport UDP/QUIC listener (feature)
 │   │       ├── sdp.rs         # SDP parse/model (answer строит str0m)
 │   │       └── handler.rs     # join/leave/track/layout/mode_changed
 │   │
@@ -378,7 +379,7 @@ Mediа-ядро (SFU/MCU) не владеет сокетами. Транспор
 | Веб-фреймворк | axum | Современный, минималистичный, хорошо с tokio |
 | Медиа-ядро (SFU) | str0m | Sans-I/O WebRTC, полный контроль, VP8/VP9/H.264/AV1/Opus/G.722 |
 | MCU-композитор | ADR-0004 выбрал oxideav-scene; в текущей сборке — собственный nearest-neighbour scaler (интеграция oxideav отложена, T05b) | Чистый Rust, без FFI; зависимость пока не подключена |
-| Сигнализация | tokio-tungstenite (WS), wtransport (WebTransport/QUIC) | Совместимость + низкая задержка |
+| Сигнализация | tokio-tungstenite (WS), wtransport **0.7.2** (WT/QUIC, feature `webtransport`) | Совместимость + низкая задержка; WT — native-only в этом релизе |
 | Шлюз SIP | rvoip | Универсальный фасад SIP/WebRTC |
 | Шлюз H.323 | FFI над **H323Plus** (ADR-0007, Q2) | Специализированная H.323, предсказуемая FFI |
 | Layout-движок | свой движок геометрии в `vks-layout` (ADR-0012, Q4); Taffy/hadrone-core — план, не подключены | Flexbox/Grid + DnD + speaker/focus |
@@ -394,6 +395,16 @@ Mediа-ядро (SFU/MCU) не владеет сокетами. Транспор
 | E2E-тесты | chromiumoxide | Реальные браузеры |
 | Протокол | protobuf (prost) | Компактный, версионированный |
 | IDs | UUIDv7 / ULID | Времяупорядоченные, децентрализованные |
+
+**T13 WebTransport:** `vks-signaling::webtransport` (feature `webtransport`)
+поднимает UDP/QUIC endpoint, принимает WebTransport-сессию на `/wt`, требует
+JWT **до `accept()`**, читает `u32 BE length + protobuf` кадры с bi-stream и
+отвечает `ServerHello` (с `room_mode`) через тот же `SignalingHandler`, что и
+WS. `vks-server` монтирует `/wt` и `/wt/cert-hash` и добавляет
+`Alt-Svc: h3=":<port>"` только при `VKS_WEBTRANSPORT=1`; при выключенном
+флаге — 404 и никакого Alt-Svc. Сертификат — только операторский PEM
+(fail-closed), пининг — SHA-256 DER. Браузерный WT требует
+`serverCertificateHashes` и не заявлен.
 
 ---
 

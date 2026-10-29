@@ -10,6 +10,13 @@ license.workspace = true
 authors.workspace = true
 description = "VKS signaling: session FSM, envelope codec, SDP, WS/WebTransport ports (mocks)"
 
+[features]
+default = []
+# T13: real WebTransport/UDP listener for native clients. The HTTP route,
+# Alt-Svc header and cert-hash endpoint live in vks-server behind the same
+# named feature; without it the binary is the WS-only server.
+webtransport = ["dep:tokio", "dep:wtransport"]
+
 [dependencies]
 thiserror.workspace = true
 tracing.workspace = true
@@ -17,3 +24,8 @@ prost.workspace = true
 uuid.workspace = true
 vks-common = { path = "../vks-common" }
 vks-proto = { path = "../vks-proto" }
+# T13: QUIC/TLS 1.3 server for native WebTransport clients. Pinned: the 0.6→0.7
+# API break is the one every stale example gets wrong (Endpoint::server is sync,
+# accept_bi lives on Connection). TLS backend is ring (no cmake/nasm).
+wtransport = { version = "=0.7.2", optional = true, default-features = false, features = ["ring", "self-signed"] }
+tokio = { workspace = true, optional = true }

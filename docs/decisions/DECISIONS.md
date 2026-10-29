@@ -39,6 +39,7 @@
 | 0032 | Метаданные раскладки на проводе: `preset/mode` в `Layout`, без `layout_id` и без `LayoutModeChanged` | accepted | 2026-10-24 | 0030, 0012, T10a |
 | 0033 | Пароли local_db — Argon2id; PBKDF2 только для проверки и ленивой миграции | accepted | 2026-10-29 | 0009, T02 |
 | 0034 | Нативный H.323: поэтапный стек, pycrate-сайдкар на T16, H.235 fail-closed | accepted | 2026-10-29 | 0007, T16 |
+| 0035 | WebTransport — нативные клиенты; браузерный WT (`serverCertificateHashes`) отложен | accepted | 2026-10-29 | 0001, 0005, 0018, T13 |
 
 ## Правила ведения
 

@@ -21,6 +21,10 @@ use std::sync::Arc;
 
 use tracing::{error, info, warn};
 
+#[cfg(feature = "webtransport")]
+use axum::routing::get;
+#[cfg(feature = "webtransport")]
+use axum::Json;
 use vks_admin::state::AppState;
 use vks_auth::jwt::{JwtConfig, JwtIssuer};
 use vks_auth::local_db::LocalDb;
@@ -31,6 +35,8 @@ use vks_core::ports::Storage;
 use vks_server::frontend::Frontend;
 use vks_server::{build_app_with_services, ClusterManager, GatewayManager, RecorderManager};
 use vks_signaling::handler::HandlerConfig;
+#[cfg(feature = "webtransport")]
+use vks_signaling::webtransport::{WtConfig, WtServer, WtTokenVerifier, WT_PATH};
 use vks_storage::{MemoryStorage, PostgresStorage, SqliteStorage};
 
 // T14: bin-only wiring (`vks-server/src/lib.rs` принадлежит параллельной T13) —
@@ -42,6 +48,88 @@ mod observability;
 fn config_exit(err: impl std::fmt::Display) -> ! {
     error!(error = %err, "configuration rejected; aborting startup");
     std::process::exit(78);
+}
+
+/// T13: build without the `webtransport` feature must not silently ignore an
+/// operator's `VKS_WEBTRANSPORT=1` (that would look like a dead UDP port).
+#[cfg(not(feature = "webtransport"))]
+fn reject_webtransport_without_feature() {
+    if std::env::var("VKS_WEBTRANSPORT")
+        .is_ok_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+    {
+        config_exit(
+            "VKS_WEBTRANSPORT is enabled, but this binary was built without the `webtransport` feature \
+             (build with --features vks-server/webtransport)",
+        );
+    }
+}
+
+/// T13: bind the native QUIC endpoint and mount the HTTP contract.
+///
+/// The HTTP `/wt` route is informational (the actual session is UDP/QUIC on the
+/// advertised port); `/wt/cert-hash` serves the SHA-256 pinning value. Until the
+/// operator enables the transport (env + valid PEM identity) neither route nor
+/// `Alt-Svc` exists, so `/wt` is a plain 404 and the WS-only app is unchanged.
+#[cfg(feature = "webtransport")]
+async fn attach_webtransport(app: axum::Router, handler_config: HandlerConfig, state: Arc<AppState>) -> axum::Router {
+    let config = match WtConfig::from_env() {
+        Ok(Some(config)) => config,
+        Ok(None) => return app,
+        Err(error) => config_exit(format!("WebTransport configuration rejected: {error}")),
+    };
+    // Same JWT policy as `/ws`: verification happens before `accept()`, so an
+    // unauthenticated UDP peer never gets a WebTransport session object.
+    let verifier: WtTokenVerifier = Arc::new(move |token: &str| state.verify_token(token).is_some());
+    let server = match WtServer::bind(config, handler_config, Some(verifier)).await {
+        Ok(server) => server,
+        Err(error) => config_exit(format!("WebTransport startup rejected: {error}")),
+    };
+    let port = server.port();
+    let cert_hash = server.cert_sha256_hex().to_string();
+    info!(port, path = WT_PATH, "native WebTransport endpoint listening (UDP/QUIC)");
+    tokio::spawn(server.run());
+
+    let info_cert = cert_hash.clone();
+    let hash_cert = cert_hash;
+    let alt_svc = format!("h3=\":{port}\"; ma=86400");
+    app.route(
+        "/wt",
+        get(move || {
+            let cert_hash = info_cert.clone();
+            async move {
+                Json(serde_json::json!({
+                    "transport": "webtransport",
+                    "path": WT_PATH,
+                    "port": port,
+                    "certificate_sha256": cert_hash,
+                }))
+            }
+        }),
+    )
+    .route(
+        "/wt/cert-hash",
+        get(move || {
+            let cert_hash = hash_cert.clone();
+            async move {
+                Json(serde_json::json!({
+                    "algorithm": "sha-256",
+                    "sha256": cert_hash,
+                    "port": port,
+                    "path": WT_PATH,
+                }))
+            }
+        }),
+    )
+    .layer(axum::middleware::from_fn(move |request: axum::extract::Request, next: axum::middleware::Next| {
+        let alt_svc = alt_svc.clone();
+        async move {
+            let mut response = next.run(request).await;
+            if let Ok(value) = axum::http::HeaderValue::from_str(&alt_svc) {
+                response.headers_mut().insert(axum::http::header::HeaderName::from_static("alt-svc"), value);
+            }
+            response
+        }
+    }))
 }
 
 #[tokio::main]
@@ -93,6 +181,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = config.validate() {
         config_exit(e);
     }
+
+    #[cfg(not(feature = "webtransport"))]
+    reject_webtransport_without_feature();
 
     // Fail before touching storage: the transport is mandatory (D1) and the
     // candidate/socket/media preflight must pass before the DB lock is taken
@@ -461,6 +552,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // 10. Сборка маршрутов (единая точка — vks_server::build_app_with_services)
+    #[cfg(feature = "webtransport")]
+    let wt_handler_config = handler_config.clone();
+    #[cfg(feature = "webtransport")]
+    let wt_state = admin_state.clone();
     let app = build_app_with_services(
         admin_state,
         &frontend,
@@ -471,6 +566,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         recorder_manager.clone(),
         cluster_manager.clone(),
     );
+
+    // T13: mounts `/wt`, `/wt/cert-hash` and Alt-Svc only when the operator
+    // enabled the native transport (and the identity loaded). Otherwise the
+    // router is returned untouched: `/wt` stays 404 and no Alt-Svc is added.
+    #[cfg(feature = "webtransport")]
+    let app = attach_webtransport(app, wt_handler_config, wt_state).await;
 
     // 10. Привязка сокета и запуск сервера
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;

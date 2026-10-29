@@ -69,3 +69,17 @@ ice_servers = [
 # NATS-адаптер и OTLP не собраны (blocked, см. docs/operations/cluster-bus.md);
 # установленный VKS_NATS_URL даёт fail-open LocalTransport, сервер не падает.
 
+# --- Native WebTransport (T13, P2; env-only, OFF by default) ----------------
+# Build with `--features vks-server/webtransport`, then provision an operator
+# certificate/key (TLS 1.3; ECDSA P-256 if native clients pin the hash) and set:
+#   VKS_WEBTRANSPORT=1
+#   VKS_WT_BIND=0.0.0.0:8443
+#   VKS_WT_CERT=/etc/vks/wt-cert.pem
+#   VKS_WT_KEY=/etc/vks/wt-key.pem
+# Fail-closed: malformed values or unreadable PEM files exit 78. With the flag
+# unset, /wt is 404, no Alt-Svc header is advertised and WS-only HTTP remains
+# the production default. Open UDP 8443 only to native-client networks; the
+# browser is not a supported WT client in this release.
+# Optional limits: VKS_WT_MAX_CONNECTIONS=64, VKS_WT_MAX_FRAME_BYTES=65536,
+# VKS_WT_HANDSHAKE_TIMEOUT_SECS=10, VKS_WT_IDLE_TIMEOUT_SECS=30,
+# VKS_WT_KEEPALIVE_SECS=15.

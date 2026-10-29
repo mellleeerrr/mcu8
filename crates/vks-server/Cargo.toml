@@ -9,6 +9,13 @@ license.workspace = true
 authors.workspace = true
 description = "VKS server binary (composition root)"
 
+[features]
+default = []
+# T13: native WebTransport (UDP/QUIC listener, /wt, /wt/cert-hash, Alt-Svc).
+# Enabling the feature is not enough: the listener still requires
+# VKS_WEBTRANSPORT=1 plus certificate/key paths and fails closed otherwise.
+webtransport = ["vks-signaling/webtransport"]
+
 [dependencies]
 vks-common = { path = "../vks-common" }
 vks-core = { path = "../vks-core" }
@@ -53,3 +60,5 @@ path = "src/main.rs"
 [dev-dependencies]
 tokio-tungstenite = "0.29"
 tower = { version = "0.5", features = ["util"] }
+# T13 integration test: real native WebTransport client (cert pinning + QUIC).
+wtransport = { version = "=0.7.2", default-features = false, features = ["ring"] }

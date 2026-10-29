@@ -52,6 +52,27 @@ cargo build --release -p vks-server
 5. Перед выкладкой: `cargo fmt --all --check`, `cargo clippy --workspace
    --all-targets -- -D warnings`, `cargo test --workspace`.
 
+## Native WebTransport (T13, opt-in)
+
+Второй сигнальный транспорт — **UDP/QUIC (HTTP/3, TLS 1.3)** для нативных
+клиентов. По умолчанию выключен и отсутствует в обычной сборке:
+
+```bash
+cargo build --release -p vks-server --features vks-server/webtransport
+VKS_WEBTRANSPORT=1 VKS_WT_BIND=0.0.0.0:8443 \
+VKS_WT_CERT=/etc/vks/wt-cert.pem VKS_WT_KEY=/etc/vks/wt-key.pem \
+./target/release/vks-server --config /etc/vks/server.toml
+```
+
+При включении появляются `GET /wt` (info) и `GET /wt/cert-hash` (SHA-256 DER
+сертификата для пининга), а обычные HTTP-ответы/`/healthz` получают
+`Alt-Svc: h3=":<port>"`. При выключенном флаге — `/wt` = 404, Alt-Svc нет,
+`/ws` работает как раньше. Невалидные/отсутствующие PEM — exit 78. Клиент WT:
+protobuf `ClientHello` → `ServerHello` (с `room_mode`) по bi-stream, без
+фальшивого SDP. **Браузерный WebTransport в этом релизе не заявлен** (нужны
+`serverCertificateHashes` и короткоживущий ECDSA-сертификат). Подробности:
+[`deploy/README.md`](deploy/README.md#native-webtransport-t13-opt-in-native-clients-only).
+
 ## Документация
 
 | Документ | Назначение |
