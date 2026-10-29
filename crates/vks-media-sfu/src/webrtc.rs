@@ -107,6 +107,10 @@ pub struct WebRtcPeer {
     mids: Vec<Mid>,
     /// Parallel to `mids`; true for `m=audio`.
     mid_audio: Vec<bool>,
+    /// Mids in the order of the first accepted offer: a re-offer must keep
+    /// the same m-line order (str0m rejects changes before mutating anything,
+    /// and we classify that as a rejected re-offer rather than a dead call).
+    remote_mids: Vec<String>,
     /// Remote DTLS fingerprint from the accepted offer. A re-offer from a
     /// recreated PeerConnection has a new fingerprint that str0m silently
     /// ignores, so it must be rejected instead of leaving 30s dead media.
@@ -178,6 +182,7 @@ impl WebRtcPeer {
             connected: false,
             mids,
             mid_audio,
+            remote_mids: mids_of(offer_sdp),
             remote_fingerprint: fingerprint_of(offer_sdp),
             next_timeout: None,
         };
@@ -193,6 +198,12 @@ impl WebRtcPeer {
     /// by the renegotiation, which the caller must transmit.
     pub fn accept_reoffer(&mut self, offer_sdp: &str) -> Result<(String, Vec<WebRtcAction>), WebRtcError> {
         validate_offer(offer_sdp)?;
+        let next_mids = mids_of(offer_sdp);
+        if !next_mids.is_empty() && next_mids != self.remote_mids {
+            return Err(WebRtcError::InvalidOffer(
+                "m-line/mid order changed: this peer only supports re-negotiating the existing sections".into(),
+            ));
+        }
         if let (Some(current), Some(next)) = (&self.remote_fingerprint, fingerprint_of(offer_sdp)) {
             if *current != next {
                 return Err(WebRtcError::InvalidOffer(
@@ -426,6 +437,11 @@ fn shared_dtls_cert() -> Option<str0m::crypto::dtls::DtlsCert> {
 /// The real path supports exactly one audio + one video m-line per peer and
 /// requires browser ICE/DTLS credentials. Application/data or extra m-lines
 /// are rejected explicitly instead of being silently mis-mapped.
+/// Extracts `a=mid:` values in SDP order.
+fn mids_of(offer: &str) -> Vec<String> {
+    offer.lines().filter_map(|line| line.strip_prefix("a=mid:")).map(|value| value.trim().to_string()).collect()
+}
+
 /// Extracts the first `a=fingerprint:<algo> <value>` line.
 fn fingerprint_of(offer: &str) -> Option<String> {
     offer.lines().find_map(|line| line.strip_prefix("a=fingerprint:")).map(|value| value.trim().to_ascii_lowercase())
@@ -571,14 +587,47 @@ mod tests {
         peer.accept_reoffer(&offer_sdp).expect("valid re-offer after a rejected one");
     }
 
+    /// Regression: a re-offer with swapped m-line order is rejected before
+    /// str0m mutates the session (it used to close the live call).
+    #[test]
+    fn swapped_m_line_reoffer_is_rejected_and_keeps_the_session() {
+        let offer_sdp = browser_offer();
+        let mut peer = WebRtcPeer::accept_offer(&offer_sdp, B, &WebRtcConfig::default()).expect("accept");
+        let answer_before = peer.answer_sdp().to_string();
+        // Swap the whole audio and video sections (m-line + its attributes).
+        let (head, rest) = offer_sdp.split_once("m=audio").expect("audio section");
+        let (audio, video) = rest.split_once("m=video").expect("video section");
+        let audio_section = format!("m=audio{audio}");
+        let video_section = format!("m=video{video}");
+        let swapped = format!("{head}{video_section}{audio_section}");
+        match peer.accept_reoffer(&swapped) {
+            Err(WebRtcError::InvalidOffer(message)) => assert!(message.contains("mid"), "{message}"),
+            other => panic!("expected a rejected re-offer, got {other:?}"),
+        }
+        assert_eq!(peer.answer_sdp(), answer_before, "rejected re-offer must not rewrite the answer");
+        assert_eq!(peer.mids().len(), 2, "session keeps both m-lines");
+        peer.accept_reoffer(&offer_sdp).expect("valid re-offer after a rejected one");
+    }
+
     /// A re-created browser PeerConnection has a new DTLS fingerprint that str0m
     /// silently ignores; accepting it would leave dead media for 30s.
     #[test]
     fn reoffer_with_a_new_dtls_fingerprint_is_rejected() {
-        let mut peer =
-            WebRtcPeer::accept_offer(&browser_offer(), B, &WebRtcConfig::default()).expect("accept first client");
-        let other_client_offer = browser_offer();
-        match peer.accept_reoffer(&other_client_offer) {
+        let offer_sdp = browser_offer();
+        let mut peer = WebRtcPeer::accept_offer(&offer_sdp, B, &WebRtcConfig::default()).expect("accept first client");
+        // Keep the same mids, only replace the DTLS certificate fingerprint.
+        let altered = offer_sdp
+            .lines()
+            .map(|line| {
+                if line.starts_with("a=fingerprint:") {
+                    "a=fingerprint:sha-256 FF:EE:DD:CC:BB:AA:99:88:77:66:55:44:33:22:11:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00"
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        match peer.accept_reoffer(&altered) {
             Err(WebRtcError::InvalidOffer(message)) => assert!(message.contains("fingerprint"), "{message}"),
             other => panic!("expected a fingerprint rejection, got {other:?}"),
         }

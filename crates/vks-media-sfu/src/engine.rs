@@ -339,6 +339,18 @@ impl SfuEngine {
         out
     }
 
+    /// Track kinds already registered for a publisher (used to announce only
+    /// genuinely new tracks when the participant re-offers).
+    pub fn publisher_track_kinds(&self, room: RoomId, publisher: ParticipantId) -> Vec<vks_core::MediaKind> {
+        self.rooms
+            .lock()
+            .unwrap()
+            .get(&room)
+            .and_then(|state| state.publisher_tracks.get(&publisher))
+            .map(|tracks| tracks.iter().map(|track| track.media_kind).collect())
+            .unwrap_or_default()
+    }
+
     /// Генерация RTCP PLI пакетов для видео-паблишеров комнаты (для мгновенного keyframe новому подписчику).
     pub fn generate_pli_for_room_publishers(&self, room: RoomId) -> Vec<(SocketAddr, Bytes)> {
         let mut plis = Vec::new();
@@ -617,6 +629,22 @@ mod tests {
         e.create_room(cfg(rid)).await.unwrap();
         let err = e.create_room(cfg(rid)).await.unwrap_err();
         assert!(matches!(err, MediaEngineError::RoomAlreadyExists(_)));
+    }
+
+    #[tokio::test]
+    async fn publisher_track_kinds_diffs_new_tracks_for_reoffer_announcements() {
+        let e = SfuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let pub1 = p(1);
+        assert!(e.publisher_track_kinds(rid, pub1).is_empty(), "unknown publisher has no kinds");
+        e.add_publisher(rid, pub1, vec![audio_track(pub1)]).await.unwrap();
+        assert_eq!(e.publisher_track_kinds(rid, pub1), vec![vks_core::MediaKind::Audio]);
+        // A re-offer adding video must be able to detect the genuinely new kind.
+        e.add_publisher(rid, pub1, vec![audio_track(pub1), video_track(pub1)]).await.unwrap();
+        let kinds = e.publisher_track_kinds(rid, pub1);
+        assert!(kinds.contains(&vks_core::MediaKind::Audio));
+        assert!(kinds.contains(&vks_core::MediaKind::Video));
     }
 
     #[tokio::test]

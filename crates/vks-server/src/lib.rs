@@ -623,8 +623,6 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
     // Set when the current SDP offer was answered by the real str0m peer; the
     // legacy plaintext PT/SSRC/endpoint side effects are skipped for it.
     let mut real_webrtc_peer;
-    // Set when the current AcceptedPeer answered an existing session.
-    let mut is_reoffer = false;
     let mut real_webrtc_attempted = false;
     let mut room_rx: Option<tokio::sync::broadcast::Receiver<vks_admin::hub::RoomBroadcastEvent>> = None;
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
@@ -937,7 +935,6 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                                 .to_string(),
                                                         ));
                                                     } else {
-                                                    is_reoffer = accepted.reoffered;
                                                     let rtp_maps = accepted.rtp_maps;
                                                     if let Some(answer) = replies.iter_mut().find_map(|reply| {
                                                         match reply.payload_mut() {
@@ -977,6 +974,11 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                         vks_media_sfu::WebRtcError::CapacityExceeded => {
                                                             "webrtc_capacity"
                                                         }
+                                                        vks_media_sfu::WebRtcError::Sdp(ref message)
+                                                            if message.contains("retry") =>
+                                                        {
+                                                            "webrtc_offer_retry"
+                                                        }
                                                         _ => "webrtc_offer_rejected",
                                                     };
                                                     webrtc_failure = Some((
@@ -1006,7 +1008,10 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                     handler.rollback_offer();
                                     replies.retain(|reply| !matches!(reply.payload(), Some(Payload::SdpAnswer(_))));
                                     let retryable =
-                                        matches!(code, "room_full" | "webrtc_capacity" | "webrtc_room_changed");
+                                        matches!(
+                                            code,
+                                            "room_full" | "webrtc_capacity" | "webrtc_room_changed" | "webrtc_offer_retry"
+                                        );
                                     replies.push(Envelope::error_reply(request_msg_id, code, &message, retryable));
                                     vks_common::metrics::WEBRTC_FALLBACK
                                         .with_label_values(&["offer_rejected"])
@@ -1075,6 +1080,8 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                     // str0m). Раньше реальный пир в реестр не
                                                     // попадал вовсе — участника не было видно
                                                     // ни в списке треков, ни в раскладке.
+                                                    let previous_kinds =
+                                                        ctx.sfu_engine.publisher_track_kinds(m.room_id, pid);
                                                     let _ = ctx.sfu_engine.add_publisher(m.room_id, pid, tracks.clone()).await;
                                                     let _ = ctx.mcu_engine.add_publisher(m.room_id, pid, tracks.clone()).await;
                                                     if real_webrtc_peer {
@@ -1085,9 +1092,14 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                         // выбросит его кадры.
                                                         ctx.mcu_engine.seat_publisher(m.room_id, pid, tracks.clone());
                                                     }
-                                                    // A re-offer re-sends TrackAdded for
-                                                    // tracks the room already knows about.
-                                                    for track in tracks.iter().filter(|_| !is_reoffer) {
+                                                    // Announce only track kinds this participant
+                                                    // did not publish before (a re-offer must
+                                                    // not duplicate TrackAdded, but a newly
+                                                    // added audio/video track must be announced).
+                                                    for track in tracks
+                                                        .iter()
+                                                        .filter(|track| !previous_kinds.contains(&track.media_kind))
+                                                    {
                                                         let proto_kind = match track.media_kind {
                                                             vks_core::MediaKind::Audio => vks_proto::media::TrackKind::Audio,
                                                             vks_core::MediaKind::Video => vks_proto::media::TrackKind::Video,

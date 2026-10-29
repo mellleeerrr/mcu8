@@ -127,6 +127,12 @@ pub struct RecordEntry {
     pub duration_sec: u32,
     /// Размер, байты.
     pub size_bytes: u64,
+    /// Целевой битрейт записи, kbps (0 = неизвестен).
+    pub bitrate_kbps: u32,
+    /// Ширина кадра (0 = неизвестна).
+    pub width: u32,
+    /// Высота кадра (0 = неизвестна).
+    pub height: u32,
 }
 
 /// Порт Storage — CRUD для Room/Participant/Layout/ApiKey/User/Audit.
@@ -291,24 +297,16 @@ pub trait Storage: Send + Sync + 'static {
     // --- Records (M5.5) ---
 
     /// Сохраняет или обновляет запись.
-    async fn upsert_record(&self, _record: &RecordEntry) -> Result<(), StorageError> {
-        Ok(())
-    }
+    async fn upsert_record(&self, record: &RecordEntry) -> Result<(), StorageError>;
 
     /// Загружает запись по id.
-    async fn get_record(&self, _id: &str) -> Result<Option<RecordEntry>, StorageError> {
-        Ok(None)
-    }
+    async fn get_record(&self, id: &str) -> Result<Option<RecordEntry>, StorageError>;
 
     /// Список всех записей.
-    async fn list_records(&self, _room_id: Option<RoomId>) -> Result<Vec<RecordEntry>, StorageError> {
-        Ok(Vec::new())
-    }
+    async fn list_records(&self, room_id: Option<RoomId>) -> Result<Vec<RecordEntry>, StorageError>;
 
     /// Удаляет запись по id.
-    async fn delete_record(&self, _id: &str) -> Result<(), StorageError> {
-        Ok(())
-    }
+    async fn delete_record(&self, id: &str) -> Result<(), StorageError>;
 
     // --- Helpers ---
 

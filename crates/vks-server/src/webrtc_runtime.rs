@@ -4,7 +4,8 @@
 //! peer's str0m socket/timer runs in its own task. This module owns the single
 //! registry and exposes "accept this browser offer" as an `async` call (a
 //! re-offer needs one round-trip to the peer's task; a brand-new offer is
-//! registered synchronously under an admission lock).
+//! registered by the peer task and then re-validated under the admission lock,
+//! so the room-shape decision cannot be stale after the await).
 //! Real WebRTC is the default media plane: `VKS_WEBRTC_TRANSPORT` must be
 //! explicitly `0`/`false`/`off`/`no` to fall back to the legacy hand-built SDP
 //! answer (escape hatch for old clients and for bisecting live E2E failures).
@@ -73,12 +74,18 @@ fn validate_candidate(candidate: &str, allow_loopback: bool) -> Result<IpAddr, S
 /// Returns `Err` when the transport is enabled but cannot work; `main` exits
 /// nonzero instead of silently falling back to the fake legacy SDP.
 pub fn preflight(config: &HandlerConfig, allow_loopback: bool) -> Result<(), String> {
+    preflight_candidate(&config.candidate_addr, allow_loopback)
+}
+
+/// Same checks for a raw configured candidate (used before storage is opened,
+/// so a bad candidate exits 78 without creating/locking the database).
+pub fn preflight_candidate(candidate_addr: &str, allow_loopback: bool) -> Result<(), String> {
     if !enabled() {
         return Ok(());
     }
     // Dev config (`allow_insecure_defaults = true`) is loopback-friendly so
     // `cargo run` still works out of the box; production must set a real IP.
-    let ip = validate_candidate(&config.candidate_addr, allow_loopback)?;
+    let ip = validate_candidate(candidate_addr, allow_loopback)?;
     // The advertised candidate must exist as a local interface address:
     // binding it catches EADDRNOTAVAIL before clients get an unreachable SDP.
     match std::net::UdpSocket::bind((ip, 0)) {

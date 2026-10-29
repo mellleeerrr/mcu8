@@ -2,9 +2,12 @@
 //!
 //! Each peer gets an ephemeral UDP socket (ICE-lite host candidate) and a
 //! dedicated Tokio task that is the only owner of its [`WebRtcPeer`]. Signalling
-//! calls [`WebRtcRoomRegistry::accept_offer`] synchronously and sends back the
-//! real str0m answer; media then flows through SRTP, is depayloaded to frames,
-//! and is re-encrypted separately for every receiving browser.
+//! awaits [`WebRtcRoomRegistry::accept_offer`]: a re-offer is forwarded to the
+//! peer's task (same str0m session, no new socket/DTLS), a brand-new offer is
+//! registered under the process-wide admission lock re-validated after the
+//! await. A re-offer the peer cannot negotiate is rejected without touching the
+//! live session. Media then flows through SRTP, is depayloaded to frames, and
+//! is re-encrypted separately for every receiving browser.
 //!
 //! This is intentionally a small SFU fanout, not the legacy plaintext
 //! [`crate::SfuEngine`] path: SRTP keys, RTP sequence numbers, NACK/RTX/FEC and
