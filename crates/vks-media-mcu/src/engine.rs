@@ -1,4 +1,4 @@
-//! MCU engine — impl [`MediaEngine`](vks_core::MediaEngine) (MCU).
+//! MCU engine — impl [`MediaEngine`] (MCU).
 //!
 //! In-memory MCU that wires [`Compositor`] + [`AudioMixer`] + [`Vad`] +
 //! [`LayoutBridge`]. The `MediaEngine` trait is the only surface the core

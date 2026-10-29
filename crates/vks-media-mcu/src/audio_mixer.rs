@@ -2,8 +2,8 @@
 //!
 //! Фаза 3 (DEVELOPMENT_PLAN.md): N Opus → 1 mixed (PCM sum, AGC = 1/√N,
 //! soft-clip). The Opus decode step is out of scope of this module (the
-//! inputs are already decoded PCM); the real Opus codec sits behind the
-//! `oxideav` feature.
+//! inputs are already decoded PCM); Opus/RTP wiring lives in the server and
+//! SFU, not here.
 //!
 //! The mix is deterministic:
 //! 1. Sum the inputs sample-wise (missing samples of shorter buffers are
@@ -57,8 +57,8 @@ impl AudioMixer {
         self.mix_and_mix_minus(inputs, output_len).0
     }
 
-    /// Mix-minus (N-1): produces N output buffers, where output[k] contains the mix of
-    /// all inputs EXCEPT inputs[k].
+    /// Mix-minus (N-1): produces N output buffers, where `output[k]` contains the mix of
+    /// all inputs EXCEPT `inputs[k]`.
     pub fn mix_minus(&self, inputs: &[&[f32]], output_len: usize) -> Vec<Vec<f32>> {
         self.mix_and_mix_minus(inputs, output_len).1
     }

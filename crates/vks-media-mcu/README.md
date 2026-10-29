@@ -11,8 +11,8 @@ subscriber (MCU/SFU transparency, ARCHITECTURE §2).
 | Module | Role |
 |---|---|
 | `engine` | `McuEngine` — impl `MediaEngine` (MCU); in-memory room state wiring compositor + mixer + VAD + layout bridge. Pluggable mock frame/audio sources drive the tests. |
-| `frame` | `Frame` / `CompositeFrame` placeholder raw-frame types; `VideoEncoder` / `VideoDecoder` abstractions with deterministic mock codecs (stand-in for H.264/VP8; real codecs behind the `oxideav` feature, ADR-0004). |
-| `compositor` | N input frames + per-slot `PixelRect`s → a 1920×1080 `CompositeFrame`. Default: nearest-neighbour uniform-fit (letterbox, centered). The real bilinear (libyuv) compositor is feature-gated. |
+| `frame` | `Frame` / `CompositeFrame` placeholder raw-frame types; `VideoEncoder` / `VideoDecoder` abstractions with deterministic mock codecs (stand-in for H.264/VP8; real codecs still not wired). |
+| `compositor` | N input frames + per-slot `PixelRect`s → a 1920×1080 `CompositeFrame`. Default: nearest-neighbour uniform-fit (letterbox, centered); the 2D bilinear scaler is T05b. |
 | `audio_mixer` | N PCM buffers (f32, 48 kHz) → 1 mixed output: sample-wise sum × `1/√N` (AGC), tanh soft-clip at ±1.0. |
 | `vad` | Speaker detection: RMS + zero-crossing on 20 ms frames (960 samples @ 48 kHz), 500 ms debounce (hysteresis — no flapping). |
 | `layout_bridge` | `vks-layout::Layout` → pixel `Rect`s with a 300 ms crossfade on layout changes (linear interpolation over the window, snap after). |
@@ -66,9 +66,10 @@ transparency invariant: the client does not know which mode serves it).
 - **Mocked (default build):** video encode/decode (deterministic mock
   codec with a header), frame contents (pluggable sources), the
   compositor scaler (nearest-neighbour instead of bilinear).
-- **Real (behind `oxideav` feature, ADR-0004):** oxideav-scene codecs and
-  the bilinear compositor. The default build is dependency-light so the
-  workspace baseline stays green.
+- **Not wired yet:** real H.264/VP8 codecs and the 2D bilinear compositor
+  (T05b). There is no `oxideav` feature in this crate: the previously empty
+  feature/dependency pair was removed in T03c, and the README must not
+  promise it.
 
 ## Invariants
 
@@ -79,7 +80,6 @@ transparency invariant: the client does not know which mode serves it).
 ## Build
 
 ```text
-cargo build -p vks-media-mcu                 # default (dependency-light)
-cargo build -p vks-media-mcu --features oxideav   # real compositor/codec
+cargo build -p vks-media-mcu   # dependency-light, mock codecs
 cargo test -p vks-media-mcu
 ```

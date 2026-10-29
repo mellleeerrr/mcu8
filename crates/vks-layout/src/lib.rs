@@ -8,10 +8,10 @@
 //! Источник: `docs/architecture/LAYOUT_ENGINE.md` (ADR-0012).
 //!
 //! ## Модули
-//! - [`core`] — [`Layout`], [`LayoutKind`], [`Slot`], `ParticipantId`, `SlotId`.
-//! - [`rect`] — [`Rect`], [`Canvas`] (пиксельная геометрия).
-//! - [`grid`] — [`GridLayout`]: N тайлов в балансированную сетку.
-//! - [`focus`] — [`FocusLayout`]: крупный фокус + полоса мелких.
+//! - `core` — [`Layout`], [`LayoutKind`], [`Slot`], `ParticipantId`, `SlotId`.
+//! - `rect` — [`Rect`], [`Canvas`] (пиксельная геометрия).
+//! - `grid` — [`GridLayout`]: N тайлов в балансированную сетку.
+//! - `focus` — [`FocusLayout`]: крупный фокус + полоса мелких.
 //! - [`preset`] — вендорные пресеты PNM: id, схемы и геометрия слотов.
 //! - [`codian`] — 52 раскладки Codian MCU 4200 + 2 кастомные.
 //! - [`grids`] — конструктор «Схема расположения участников»: `vks_grid_*`, `vks_pin_*`.

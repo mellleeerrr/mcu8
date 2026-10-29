@@ -343,7 +343,7 @@ pub fn build_stun_binding_response(request: &[u8], src: SocketAddr) -> Option<Ve
 /// Возвращает `None` для не-RTP датаграмм, в том числе для RTCP: у RTCP поле
 /// PT занимает все 8 бит второго октета (192..=223), поэтому байты 8..12 —
 /// это SSRC получателя/медиа, а не SSRC отправителя медиа-потока. Вызывать
-/// эту функцию на RTCP нельзя (см. [`classify_incoming`]).
+/// эту функцию на RTCP нельзя (см. `classify_incoming`).
 pub fn parse_rtp_ssrc(data: &[u8]) -> Option<u32> {
     // Ранние отказы: не-RTP version и RTCP (PT 192..=223) не должны давать SSRC.
     if data.len() < 12 || (data[0] >> 6) != 2 || (192..=223).contains(&data[1]) {

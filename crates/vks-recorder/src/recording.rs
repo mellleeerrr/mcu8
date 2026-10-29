@@ -116,7 +116,7 @@ impl Segment {
     }
 }
 
-/// Метаданные завершённой записи (что «запись» несёт в [`Storage`](crate::storage)).
+/// Метаданные завершённой записи (что «запись» несёт в `Storage`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingMeta {
     /// Уникальный идентификатор записи (UUIDv4).

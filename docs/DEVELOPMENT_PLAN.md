@@ -146,16 +146,21 @@
 
 **Предусловие:** ADR-0004 (MCU-композитор: oxideav-scene) — `accepted` (Q1 ✅).
 
+> Фактическое состояние (2026-10-29): кодеки и композитор в `vks-media-mcu` —
+> детерминированные mock-реализации, scaler — nearest-neighbour letterbox;
+> oxideav-scene в сборку не подключён (T05b). Отметки `[x]` ниже означают
+> «интерфейс и тесты есть», а не «реальный кодек подключён».
+
 ### Задачи
 - [x] Крейт `vks-media-mcu`:
   - [x] `engine.rs` — impl `MediaEngine` (MCU).
   - [x] `decoder.rs` — декодирование входящих RTP (VP8/VP9/H.264/AV1).
-  - [x] `compositor.rs` — композитор (Q1: oxideav-scene / ffmpeg-next + libyuv): N видео → canvas 1920×1080.
+  - [x] `compositor.rs` — композитор: N видео → canvas 1920×1080 (nearest-neighbour; bilinear — T05b).
   - [x] `encoder.rs` — кодирование композита (H.264, 1080p30, 2.5 Mbps CBR — ADR).
   - [x] `audio_mixer.rs` — N Opus → 1 mixed (PCM sum, AGC=1/√N, soft-clip, mix-minus N-1).
   - [x] `vad.rs` — speaker detection (RMS + zero-crossing, 20ms frames, 500ms debounce).
   - [x] `layout_bridge.rs` — vks-layout → пиксельные Rect (crossfade 300ms при смене).
-  - [x] Scale: libyuv bilinear; letterbox/crop по slot fit.
+  - [~] Scale: сейчас nearest-neighbour letterbox; libyuv bilinear — T05b.
   - [x] Frame rate: фикс 30fps (drop/repeat, без interpolation).
 - [x] `vks-client-sdk`: `mcu_renderer` — отображение композитного трека.
 - [x] **Тест прозрачности**: переключение SFU↔MCU на лету.
@@ -177,7 +182,7 @@
 
 ## Фаза 4 — Layout-движок (2 недели)
 
-**Предусловие:** ADR-0012 (Layout: Taffy + hadrone-core + свой) — `accepted` (Q4 ✅).
+**Предусловие:** ADR-0012 (Layout: свой движок геометрии; Taffy/hadrone-core — план) — `accepted` (Q4 ✅).
 
 ### Задачи
 > **Сверка с кодом — 2026-10-23.** Ниже `[x]` означает «реализовано в той или иной
@@ -213,7 +218,7 @@
   - [x] Participant avatar → slot = `Fixed(pid)`.
   - [ ] Создание/сохранение кастомных раскладок (`PUT /api/layouts/{id}`).
   - [ ] Назначение по умолчанию, назначение на комнату.
-  - [x] hadrone-core (Q4) — drag-and-drop.
+  - [~] hadrone-core (Q4) — DnD реализован собственным слоем; библиотека не подключена.
 - [x] REST CRUD в `vks-admin` для layouts.
 
 ### Критерий готовности
@@ -236,7 +241,7 @@
   - [x] `api_key.rs` — формат `vks_key_<base62(32)>`, SHA-256 в БД, scopes (read/write/admin), rate limit 600req/min, revocation.
   - [x] `password.rs` — **Argon2id** (m=64MiB, t=3, p=4), min 12 символов, top-10k check, TTL 365д.
   - [x] `lockout.rs` — 5 failed/15min → lock 15min; IP: 10 failed/5min → block 15min.
-  - [x] `ldap.rs` — ldap3 + GSSAPI/Kerberos (FreeIPA/AD), bind DN, group mapping, timeout 5s.
+  - [~] `ldap.rs` — trait + mock; реальный ldap3/GSSAPI-клиент не подключён.
   - [x] `local_db.rs` — встроенная БД юзеров (default).
   - [x] `provider.rs` — trait `AuthProvider` (стратегия: local/ldap/oidc), **hot-reload через NATS** (Q: выбор из админки).
   - [x] **RBAC matrix** (ADR-0022): Operator/Moderator/Participant/Viewer — конкретные права (см. ADR).
@@ -254,7 +259,7 @@
   - [x] `monitors.rs` — метрики, QoE, алерты.
   - [x] `backup.rs` — snapshot БД, restore, история.
   - [x] **API versioning**: `/api/v1/...` и `/api/v3/...` (унифицированный слой для PNM UI).
-- [x] Генерация API-клиента (progenitor из openapi.json) в vks-admin-ui.
+- [~] Генерация API-клиента (progenitor) — план; клиент PNM рукописный.
 - [x] Secrets: env vars (VKS_JWT_PRIVATE_KEY, VKS_DB_PASSWORD, VKS_LDAP_BIND_PASSWORD, VKS_TURN_CREDENTIAL).
 - [x] PostgreSQL: `sslmode=verify-ca`, pool 50, statement_timeout 30s.
 
@@ -266,7 +271,7 @@
 - [x] Admin REST полный CRUD + `/healthz` + `/readyz` + audit + records + backup.
 - [x] Выбор AuthProvider из админки (hot-reload).
 - [x] Переключение MCU/SFU из админки — работает (глобальный + per-room, Q7).
-- [x] `/openapi.json` корректен, progenitor генерирует клиент.
+- [x] `/openapi.json` корректен (генерация клиента — план).
 - [x] MFA (TOTP) для Operator.
 
 ---

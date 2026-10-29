@@ -6,11 +6,11 @@
 //!
 //! **В этом крейте — самодостаточное ядро** (без реального I/O,
 //! кодеков, сети):
-//! - [`recording`] — [`RecordingSession`], [`Segment`], [`RecordingMeta`]
+//! - `recording` — [`RecordingSession`], [`Segment`], [`RecordingMeta`]
 //!   (детерминированное, часы параметризованы).
-//! - [`storage`] — абстракция [`RecordingStore`] + [`MemoryStore`]
+//! - `storage` — абстракция [`RecordingStore`] + [`MemoryStore`]
 //!   (реальные S3/postgres — за фичами, позже).
-//! - [`retention`] — [`RetentionPolicy`] (age + count),
+//! - `retention` — [`RetentionPolicy`] (age + count),
 //!   [`select_for_purge`].
 //!
 //! Что мокнуто / что реально (подробнее в [README.md](README.md)):
@@ -27,7 +27,7 @@
 //! крейт самодостаточен (dep-light: thiserror, uuid).
 //!
 //! ## Инварианты
-//! - Детерминированность: время — через [`Clock`](recording::Clock).
+//! - Детерминированность: время — через `recording::Clock`.
 //! - **No `unsafe`** (CODE_STYLE §6).
 //! - English identifiers, Russian comments (CODE_STYLE §8).
 

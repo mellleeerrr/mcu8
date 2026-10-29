@@ -1,4 +1,4 @@
-//! SFU engine — impl [`MediaEngine`](vks_core::MediaEngine) (SFU).
+//! SFU engine — impl [`MediaEngine`] (SFU).
 //!
 //! In-memory SFU, который связывает:
 //! - [`Forwarder】 (full-mesh N-to-N routing),

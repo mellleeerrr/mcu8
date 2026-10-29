@@ -2,15 +2,15 @@
 //! backpressure, circuit breaker.
 //!
 //! Фаза 7 (DEVELOPMENT_PLAN.md, CLUSTERING.md):
-//! - [`bus`] — in-memory pub/sub, заменяющий NATS JetStream (ADR-0014).
+//! - `bus` — in-memory pub/sub, заменяющий NATS JetStream (ADR-0014).
 //!   Темы `vks.cluster.*`, DLQ `vks.cluster.dlq.*`, idempotency по `message_id`
 //!   (ADR-0019).
-//! - [`ownership`] — room ownership: consistent hashing + NATS lease (TTL 30s),
+//! - `ownership` — room ownership: consistent hashing + NATS lease (TTL 30s),
 //!   split-brain resolution (lowest instance_id wins).
-//! - [`heartbeat`] — discovery инстансов (10s interval), «dead» flag.
-//! - [`shutdown`] — graceful shutdown sequence (5 шагов, timeout 30s → Killed).
-//! - [`backpressure`] — очередь >10000 → drop non-critical, retry critical.
-//! - [`circuit`] — circuit breaker 50% fail/10s → OPEN 30s → HALF-OPEN.
+//! - `heartbeat` — discovery инстансов (10s interval), «dead» flag.
+//! - `shutdown` — graceful shutdown sequence (5 шагов, timeout 30s → Killed).
+//! - `backpressure` — очередь >10000 → drop non-critical, retry critical.
+//! - `circuit` — circuit breaker 50% fail/10s → OPEN 30s → HALF-OPEN.
 //!
 //! **В этом крейте — самодостаточное ядро** (без реального NATS, без сети):
 //! NATS моделируется как in-memory bus, время — в ticks (parameterized).

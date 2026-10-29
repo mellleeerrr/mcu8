@@ -3,10 +3,10 @@
 //!
 //! Фаза 3 (DEVELOPMENT_PLAN.md): N видео → canvas 1920×1080. The default
 //! implementation is a deterministic nearest-neighbour scaler with
-//! letterboxing (uniform fit, centered) into each rect region; the real
-//! bilinear (libyuv) compositor sits behind the `oxideav` feature
-//! (ADR-0004). Frame rate is fixed at 30 fps (drop/repeat, no
-//! interpolation) — see the engine.
+//! letterboxing (uniform fit, centered) into each rect region; the 2D
+//! bilinear scaler is T05b. There is no `oxideav` feature in this crate
+//! (the empty feature was removed in T03c). Frame rate is fixed at 30 fps
+//! (drop/repeat, no interpolation) — see the engine.
 //!
 //! No `unsafe`.
 

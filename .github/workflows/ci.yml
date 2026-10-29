@@ -210,11 +210,8 @@ jobs:
   doc:
     name: rustdoc
     runs-on: ubuntu-24.04
-    # Не блокирует: ~30 предсуществующих битых intra-doc-ссылок в 10 крейтах
-    # (vks-admin, vks-client-sdk, vks-cluster, vks-common, vks-gateway-h323,
-    # vks-layout, vks-media-mcu, vks-media-sfu, vks-recorder, vks-storage).
-    # Сборка доков проходит; гейт станет жёстким после починки ссылок.
-    continue-on-error: true
+    # Блокирующий гейт: все intra-doc-ссылки починены (T03b), `-D warnings`
+    # ловит новые битые ссылки/HTML в PR.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master

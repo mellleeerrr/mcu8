@@ -1,4 +1,4 @@
-//! Layout bridge: `vks-layout::Layout` → pixel [`Rect`]s for the
+//! Layout bridge: `vks-layout::Layout` → pixel `Rect`s for the
 //! compositor, with a 300 ms crossfade on layout changes.
 //!
 //! Фаза 3 (DEVELOPMENT_PLAN.md): vks-layout → пиксельные Rect

@@ -145,7 +145,7 @@ vks/
 │   │   └── src/
 │   │       ├── jwt.rs         # jsonwebtoken, access/refresh
 │   │       ├── api_key.rs     # API-ключи для управления
-│   │       ├── ldap.rs        # ldap3 + GSSAPI/Kerberos (FreeIPA)
+│   │       ├── ldap.rs        # trait LdapClient + mock; реальный ldap3-клиент — план
 │   │       ├── local_db.rs    # встроенная БД юзеров
 │   │       └── provider.rs    # trait AuthProvider (стратегия)
 │   │
@@ -185,7 +185,7 @@ vks/
 │   ├── vks-media-mcu/       # 🎛️ MCU-ДВИЖОК (compositor)
 │   │   ├── src/
 │   │   │   ├── engine.rs      # impl MediaEngine (MCU)
-│   │   │   ├── compositor.rs  # oxideav-scene / ffmpeg-next + libyuv
+│   │   │   ├── compositor.rs  # nearest-neighbour letterbox (bilinear — T05b)
 │   │   │   ├── decoder.rs
 │   │   │   ├── encoder.rs
 │   │   │   ├── audio_mixer.rs # N Opus → 1 mixed
@@ -366,20 +366,20 @@ Mediа-ядро (SFU/MCU) не владеет сокетами. Транспор
 | Асинхронный рантайм | tokio | Стандарт де-факто, огромная экосистема |
 | Веб-фреймворк | axum | Современный, минималистичный, хорошо с tokio |
 | Медиа-ядро (SFU) | str0m | Sans-I/O WebRTC, полный контроль, VP8/VP9/H.264/AV1/Opus/G.722 |
-| MCU-композитор | **oxideav-scene** (ADR-0004, Q1) | Чистый Rust, без FFI, 0.1.4 |
+| MCU-композитор | ADR-0004 выбрал oxideav-scene; в текущей сборке — собственный nearest-neighbour scaler (интеграция oxideav отложена, T05b) | Чистый Rust, без FFI; зависимость пока не подключена |
 | Сигнализация | tokio-tungstenite (WS), wtransport (WebTransport/QUIC) | Совместимость + низкая задержка |
 | Шлюз SIP | rvoip | Универсальный фасад SIP/WebRTC |
 | Шлюз H.323 | FFI над **H323Plus** (ADR-0007, Q2) | Специализированная H.323, предсказуемая FFI |
-| Layout-движок | **Taffy** (геометрия) + **hadrone-core** (DnD) + свой (пресеты) (ADR-0012, Q4) | Flexbox/Grid + DnD + speaker/focus |
+| Layout-движок | свой движок геометрии в `vks-layout` (ADR-0012, Q4); Taffy/hadrone-core — план, не подключены | Flexbox/Grid + DnD + speaker/focus |
 | БД | sqlx / sea-orm + PostgreSQL | sqlx — контроль, sea-orm — скорость |
-| Аутентификация | jsonwebtoken + ldap3 | JWT + LDAP/FreeIPA/AD |
+| Аутентификация | jsonwebtoken; LDAP — trait + mock (ldap3 — план) | JWT + LDAP/FreeIPA/AD |
 | TURN-сервер | **turn-rs** (ADR-0015, Q3) | Чистый Rust, 40M msg/s, gRPC API |
 | Мониторинг | tracing + prometheus (metrics) | Логи + метрики |
 | Оркестрация | Docker + Docker Compose / Kubernetes (Helm) | Стандарт |
 | Шина сообщений | NATS | Легковесная, высокопроизводительная pub/sub |
-| Фронтенд (админка) | Dioxus + dioxus-shadcn + Tailwind v4 | Rust, типобезопасность |
+| Фронтенд (админка) | legacy PNM adopt-and-shim (ADR-0027); Dioxus + dioxus-shadcn — план | Совместимость с вендорским UI |
 | Фронтенд (meeting) | Dioxus + vks-client-sdk | Rust, PWA |
-| API-клиент | progenitor (из OpenAPI utoipa) | Типобезопасная генерация |
+| API-клиент | ручной клиент PNM; progenitor — план | Типобезопасная генерация |
 | E2E-тесты | chromiumoxide | Реальные браузеры |
 | Протокол | protobuf (prost) | Компактный, версионированный |
 | IDs | UUIDv7 / ULID | Времяупорядоченные, децентрализованные |

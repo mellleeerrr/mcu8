@@ -4,7 +4,7 @@
 //! - [`memory::MemoryStorage`] — thread-safe in-memory (тесты);
 //! - [`sqlite::SqliteStorage`] — SQLite (single-node);
 //! - [`postgres::PostgresStorage`] — PostgreSQL (cluster/prod);
-//! - [`migrations/0001_initial.sql`](migrations) — общая схема (users, rooms,
+//! - `migrations/0001_initial.sql` — общая схема (users, rooms,
 //!   room_mode_override, layouts, api_keys, audit_log).
 //!
 //! Crate самодостаточен: порт `Storage` строится параллельно в `vks-core`,

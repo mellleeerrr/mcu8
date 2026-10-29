@@ -1,6 +1,6 @@
 //! `vks-client-sdk` — SDK для видеоконференций (Rust + WASM).
 //!
-//! Единый API [`Conference::join()`] + signaling (WS/WebTransport) + media
+//! Единый API `Conference::join()` + signaling (WS/WebTransport) + media
 //! renderers (SFU/MCU через vks-layout) + WebRTC glue.
 //!
 //! Основание: `docs/architecture/ARCHITECTURE.md` §233-243 (SDK-дерево),

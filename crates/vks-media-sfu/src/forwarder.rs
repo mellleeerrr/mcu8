@@ -55,7 +55,7 @@ pub trait Sink: Send {
     fn track_withdrawn(&mut self, track: &TrackId);
 }
 
-/// Конфигурация [`Forwarder】::new`].
+/// Конфигурация `Forwarder::new`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForwarderConfig {
     /// Full-mesh по умолчанию: новый подписчик подписывается на все

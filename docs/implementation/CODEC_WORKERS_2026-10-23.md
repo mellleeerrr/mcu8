@@ -97,7 +97,8 @@
 |---|---|---|
 | `VKS_FFMPEG_BIN` | `ffmpeg` | путь к FFmpeg |
 | `VKS_CODEC_WORKER_POOL` | `8` | максимум одновременных дочерних процессов |
-| `VKS_AAC_LATM_LEGAL_ACCEPTED` | off | явное юридическое согласие на AAC-LC; без него AAC-LATM не рекламируется и не принимается даже при успешном probe |
+| `VKS_CODEC_LICENSE_ACCEPTED` | off | список принятых лицензий (например `aac-latm`); без `aac-latm` AAC-LATM не рекламируется и не принимается даже при успешном probe |
+| `VKS_AAC_LATM_LEGAL_ACCEPTED` | off | legacy-alias: `1` эквивалентен `aac-latm` в списке; оставлен для существующих конфигов |
 | `VKS_TRANSCODER_REQUIRED` | `0` | `1` — падать при отсутствии FFmpeg (exit 78) |
 
 ## Следующий этап

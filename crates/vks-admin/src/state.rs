@@ -203,8 +203,8 @@ pub trait OutboundDialer: Send + Sync {
 /// Обёрнуто в `Arc` на уровне `Router` (axum: `State(Arc<AppState>)`).
 /// Мутирующие хранилища — `Mutex` (production: PostgreSQL/NATS).
 ///
-/// `Clone` — ручная: `Mutex` не клонируется, но данные внутри `ш
-/// копируются (для `Arc<AppState>` — ` handlers).
+/// `Clone` — ручная: `Mutex` не клонируется, поэтому хранилища разделяются
+/// через `Arc`; копируются только дешёвые поля (для `Arc<AppState>` — хендлеры).
 pub struct AppState {
     /// Персистентное хранилище (Postgres / SQLite / Memory).
     pub storage: Option<Arc<dyn vks_core::ports::Storage>>,
