@@ -370,18 +370,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vks_core::RoomMode::Mcu => vks_proto::media::RoomMode::Mcu as i32,
         vks_core::RoomMode::Sfu => vks_proto::media::RoomMode::Sfu as i32,
     };
-    let caps = vks_proto::media::RoomCaps {
-        room_mode: proto_room_mode,
-        video_codecs: vec![vks_proto::media::CodecId::Vp8 as i32],
-        audio_codecs: vec![vks_proto::media::CodecId::Opus as i32],
-        // No rid/simulcast forwarding exists yet; never advertise it.
-        simulcast: false,
-        svc: false,
-        // Legacy fake-SDP plane cannot do DTLS-SRTP; only claim it when the
-        // real transport is enabled.
-        dtls_srtp: vks_server::webrtc_runtime::enabled(),
-    };
-
     let handler_config = HandlerConfig::new(
         "srv-0001",
         &config.server_name,
@@ -397,7 +385,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_ice_servers(ice_servers)
     .with_room_mode(proto_room_mode)
-    .with_caps(caps);
+    // Codec caps come from the SSOT (`HandlerConfig::new` -> `webrtc_answer_specs`);
+    // only the transport flag is production state. Never overwrite `RoomCaps`
+    // with literals here: that silently hides new SSOT codecs from clients.
+    .with_dtls_srtp(vks_server::webrtc_runtime::enabled());
 
     // Codec worker probe is non-fatal by default: without it the gateway keeps
     // the native profile and never advertises codecs it cannot bridge.
@@ -421,16 +412,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !accepted_codecs.is_empty() {
         info!(accepted_codecs = ?accepted_codecs, "operator accepted patent-encumbered codec bridges");
     }
-    let aac_latm = aac_latm_legal
-        && vks_server::transcoder_runtime::pool().is_some_and(|pool| pool.max_workers() >= 2)
-        && vks_server::transcoder_runtime::capabilities()
-            .is_some_and(vks_media_mcu::codec_worker::ffmpeg::FfmpegCapabilities::has_audio_latm_bridge);
+    // Keep the three gates separate: the admin API must report the real cause
+    // (`license_not_accepted` / `probe_unavailable` / `worker_pool_unavailable`)
+    // instead of blaming the license for every failure (review A P2-7).
+    let aac_latm_probe = vks_server::transcoder_runtime::capabilities()
+        .is_some_and(vks_media_mcu::codec_worker::ffmpeg::FfmpegCapabilities::has_audio_latm_bridge);
+    let aac_latm_pool = vks_server::transcoder_runtime::pool().is_some_and(|pool| pool.max_workers() >= 2);
+    let aac_latm = aac_latm_legal && aac_latm_probe && aac_latm_pool;
     vks_common::codec_capabilities::set_audio_codec_availability(
-        vks_common::codec_capabilities::AudioCodecAvailability { aac_latm },
+        vks_common::codec_capabilities::AudioCodecAvailability {
+            aac_latm_license: aac_latm_legal,
+            aac_latm_probe,
+            aac_latm_pool,
+        },
     );
     info!(
         aac_latm,
-        aac_latm_legal, "gateway audio codec availability (AAC needs probe + legal opt-in + pool preflight)"
+        aac_latm_legal,
+        aac_latm_probe,
+        aac_latm_pool,
+        "gateway audio codec availability (AAC needs probe + legal opt-in + pool preflight)"
     );
 
     if let Err(error) = vks_server::webrtc_runtime::preflight(&handler_config, config.allow_insecure_defaults) {
@@ -551,5 +552,82 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => info!("received Ctrl+C (SIGINT), initiating shutdown"),
         _ = terminate => info!("received SIGTERM, initiating shutdown"),
+    }
+}
+
+#[cfg(test)]
+mod production_codec_caps_tests {
+    use super::*;
+
+    fn production_config(room_mode: vks_proto::media::RoomMode, dtls_srtp: bool) -> HandlerConfig {
+        // The same builder chain production uses below (minus ICE servers).
+        HandlerConfig::new(
+            "srv-0001",
+            "vks-server-test",
+            "sfuufrag",
+            "sfupwd",
+            "sha-256 FF:00:11",
+            "127.0.0.1",
+            0,
+            vec![
+                RtpMap { payload: 111, codec: "opus".into(), clock: 48000, channels: 2 },
+                RtpMap { payload: 96, codec: "vp8".into(), clock: 90000, channels: 0 },
+            ],
+        )
+        .with_room_mode(room_mode as i32)
+        .with_dtls_srtp(dtls_srtp)
+    }
+
+    fn expected_caps_from_ssot() -> (Vec<i32>, Vec<i32>) {
+        let mut video = Vec::new();
+        let mut audio = Vec::new();
+        for spec in vks_common::codec_spec::webrtc_answer_specs() {
+            let id = match spec.id {
+                vks_common::codec_spec::CodecId::Opus => vks_proto::media::CodecId::Opus as i32,
+                vks_common::codec_spec::CodecId::Vp8 => vks_proto::media::CodecId::Vp8 as i32,
+                other => panic!("SSOT answer slice has an unmapped codec {other:?}"),
+            };
+            match spec.kind {
+                vks_common::codec_spec::CodecKind::Audio => audio.push(id),
+                vks_common::codec_spec::CodecKind::Video => video.push(id),
+                vks_common::codec_spec::CodecKind::Dtmf => panic!("DTMF is not a RoomCaps codec"),
+            }
+        }
+        (video, audio)
+    }
+
+    #[test]
+    fn production_handler_config_caps_match_ssot_webrtc_dispositions() {
+        let (video, audio) = expected_caps_from_ssot();
+        let sfu = production_config(vks_proto::media::RoomMode::Sfu, true);
+        let sfu_caps = sfu.caps.as_ref().expect("caps");
+        assert_eq!(sfu_caps.video_codecs, video);
+        assert_eq!(sfu_caps.audio_codecs, audio);
+        assert_eq!(sfu_caps.room_mode, vks_proto::media::RoomMode::Sfu as i32);
+        assert!(sfu_caps.dtls_srtp);
+
+        // The MCU production path flips room_mode and the legacy DTLS flag; the
+        // SSOT codec lists must survive unchanged.
+        let mcu = production_config(vks_proto::media::RoomMode::Mcu, false);
+        let mcu_caps = mcu.caps.as_ref().expect("caps");
+        assert_eq!(mcu_caps.video_codecs, sfu_caps.video_codecs, "room_mode change dropped video caps");
+        assert_eq!(mcu_caps.audio_codecs, sfu_caps.audio_codecs, "room_mode change dropped audio caps");
+        assert_eq!(mcu_caps.room_mode, vks_proto::media::RoomMode::Mcu as i32);
+        assert!(!mcu_caps.dtls_srtp);
+    }
+
+    #[test]
+    fn production_main_does_not_overwrite_the_ssot_caps() {
+        // P1 regression guard: the binary itself must not build codec literals
+        // or overwrite `HandlerConfig::caps` (which is SSOT-derived).
+        let source = include_str!("main.rs");
+        // Split the needles so this test's own source does not match them.
+        let with_caps = [".with_caps", "("].concat();
+        let video_literal = ["video_codecs: ", "vec!["].concat();
+        let audio_literal = ["audio_codecs: ", "vec!["].concat();
+        assert!(!source.contains(&with_caps), "main must not overwrite SSOT RoomCaps");
+        assert!(!source.contains(&video_literal), "main must not build video codec literals");
+        assert!(!source.contains(&audio_literal), "main must not build audio codec literals");
+        assert!(source.contains(".with_dtls_srtp(vks_server::webrtc_runtime::enabled())"));
     }
 }

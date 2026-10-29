@@ -47,14 +47,22 @@ fn video_bitrate_from(raw: Option<&str>) -> u32 {
 /// Proto [`media::RoomCaps`] for the WebRTC plane, derived from the codec SSOT
 /// (`webrtc_negotiable` slice = Opus + VP8). No raw enum numbers: adding a
 /// proto tag cannot silently change the caps.
-fn webrtc_room_caps() -> media::RoomCaps {
+///
+/// `room_mode` and `dtls_srtp` are transport/room state, so they are
+/// parameters; the codec fields are *always* rebuilt from the SSOT. Production
+/// (`vks-server/src/main.rs`) uses the `HandlerConfig` setters, never a literal
+/// `RoomCaps`.
+fn room_caps_for(room_mode: i32, dtls_srtp: bool) -> media::RoomCaps {
     let mut video_codecs = Vec::new();
     let mut audio_codecs = Vec::new();
     for spec in vks_common::codec_spec::webrtc_answer_specs() {
         let id = match spec.id {
             vks_common::codec_spec::CodecId::Opus => media::CodecId::Opus,
             vks_common::codec_spec::CodecId::Vp8 => media::CodecId::Vp8,
-            _ => continue,
+            // A new negotiable codec must be decided here and in the SFU
+            // builder; skipping it silently would leave `ServerHello.caps`
+            // stale while the answer carries the codec.
+            other => panic!("codec SSOT answer slice contains {other:?}, add it to RoomCaps"),
         };
         match spec.kind {
             vks_common::codec_spec::CodecKind::Audio => audio_codecs.push(id as i32),
@@ -62,14 +70,12 @@ fn webrtc_room_caps() -> media::RoomCaps {
             vks_common::codec_spec::CodecKind::Dtmf => {}
         }
     }
-    media::RoomCaps {
-        room_mode: 1, // ROOM_MODE_SFU
-        video_codecs,
-        audio_codecs,
-        simulcast: false,
-        svc: false,
-        dtls_srtp: true,
-    }
+    media::RoomCaps { room_mode, video_codecs, audio_codecs, simulcast: false, svc: false, dtls_srtp }
+}
+
+/// Test/default convenience caps: SFU room with the real DTLS-SRTP transport.
+fn webrtc_room_caps() -> media::RoomCaps {
+    room_caps_for(media::RoomMode::Sfu as i32, true)
 }
 
 impl HandlerConfig {
@@ -113,18 +119,21 @@ impl HandlerConfig {
         self
     }
 
-    /// Задает режим комнаты (M0.5, 1 = SFU, 2 = MCU).
+    /// Задает режим комнаты (M0.5, 1 = SFU, 2 = MCU). Rebuilds the caps from
+    /// the SSOT so switching mode can never drop the codec list.
     pub fn with_room_mode(mut self, mode: i32) -> Self {
         self.room_mode = mode;
-        if let Some(c) = &mut self.caps {
-            c.room_mode = mode;
-        }
+        let dtls_srtp = self.caps.as_ref().is_some_and(|caps| caps.dtls_srtp);
+        self.caps = Some(room_caps_for(mode, dtls_srtp));
         self
     }
 
-    /// Задает возможности комнаты (M0.5).
-    pub fn with_caps(mut self, caps: vks_proto::media::RoomCaps) -> Self {
-        self.caps = Some(caps);
+    /// Declares whether the real DTLS-SRTP transport is enabled. The codec
+    /// fields are regenerated from the SSOT; production must use this setter
+    /// instead of overwriting `RoomCaps`.
+    pub fn with_dtls_srtp(mut self, enabled: bool) -> Self {
+        let room_mode = self.caps.as_ref().map_or(self.room_mode, |caps| caps.room_mode);
+        self.caps = Some(room_caps_for(room_mode, enabled));
         self
     }
 
@@ -758,19 +767,76 @@ mod tests {
 mod codec_caps_tests {
     use super::*;
 
+    /// RoomCaps codec fields projected from the SSOT answer slice. Both planes
+    /// are covered: a new negotiable audio codec must not be silently skipped.
+    fn expected_caps_from_ssot() -> (Vec<i32>, Vec<i32>) {
+        let mut video = Vec::new();
+        let mut audio = Vec::new();
+        for spec in vks_common::codec_spec::webrtc_answer_specs() {
+            let id = match spec.id {
+                vks_common::codec_spec::CodecId::Opus => media::CodecId::Opus as i32,
+                vks_common::codec_spec::CodecId::Vp8 => media::CodecId::Vp8 as i32,
+                other => panic!("SSOT answer slice has an unmapped codec {other:?}"),
+            };
+            match spec.kind {
+                vks_common::codec_spec::CodecKind::Audio => audio.push(id),
+                vks_common::codec_spec::CodecKind::Video => video.push(id),
+                vks_common::codec_spec::CodecKind::Dtmf => panic!("DTMF is not a RoomCaps codec"),
+            }
+        }
+        (video, audio)
+    }
+
     #[test]
     fn proto_caps_match_ssot_webrtc_slice() {
         let caps = webrtc_room_caps();
-        assert_eq!(caps.video_codecs, vec![media::CodecId::Vp8 as i32]);
-        assert_eq!(caps.audio_codecs, vec![media::CodecId::Opus as i32]);
-        let expected: Vec<i32> = vks_common::codec_spec::webrtc_answer_specs()
-            .filter(|spec| spec.kind == vks_common::codec_spec::CodecKind::Video)
-            .map(|spec| match spec.id {
-                vks_common::codec_spec::CodecId::Vp8 => media::CodecId::Vp8 as i32,
-                other => panic!("unexpected video codec {other:?}"),
-            })
-            .collect();
-        assert_eq!(caps.video_codecs, expected);
+        let (video, audio) = expected_caps_from_ssot();
+        assert_eq!(caps.video_codecs, video);
+        assert_eq!(caps.audio_codecs, audio);
+        assert_eq!(video, vec![media::CodecId::Vp8 as i32]);
+        assert_eq!(audio, vec![media::CodecId::Opus as i32]);
+    }
+
+    #[test]
+    fn production_handler_config_keeps_ssot_caps_across_room_mode_and_dtls() {
+        // Mirrors the production call chain in vks-server/src/main.rs:
+        // HandlerConfig::new -> with_room_mode -> with_dtls_srtp. There is no
+        // RoomCaps literal to overwrite the SSOT-derived codec fields.
+        let base = || {
+            HandlerConfig::new(
+                "srv-0001",
+                "vks-signaling-test",
+                "sfuufrag",
+                "sfupwd",
+                "sha-256 FF:00:11",
+                "203.0.113.7",
+                49152,
+                Vec::new(),
+            )
+        };
+        let (video, audio) = expected_caps_from_ssot();
+        let sfu = base().with_room_mode(media::RoomMode::Sfu as i32).with_dtls_srtp(true);
+        let sfu_caps = sfu.caps.as_ref().expect("caps");
+        assert_eq!(sfu_caps.video_codecs, video);
+        assert_eq!(sfu_caps.audio_codecs, audio);
+        assert_eq!(sfu_caps.room_mode, media::RoomMode::Sfu as i32);
+        assert!(sfu_caps.dtls_srtp);
+
+        // Changing the room mode (the exact production sequence with MCU) must
+        // not drop or reorder the codec lists.
+        let mcu = base().with_room_mode(media::RoomMode::Mcu as i32).with_dtls_srtp(false);
+        let mcu_caps = mcu.caps.as_ref().expect("caps");
+        assert_eq!(mcu_caps.video_codecs, video, "room_mode change dropped video caps");
+        assert_eq!(mcu_caps.audio_codecs, audio, "room_mode change dropped audio caps");
+        assert_eq!(mcu_caps.room_mode, media::RoomMode::Mcu as i32);
+        assert!(!mcu_caps.dtls_srtp, "legacy SDP plane must not claim DTLS-SRTP");
+
+        // with_room_mode alone also preserves the codecs.
+        let only_mode = base().with_room_mode(media::RoomMode::Mcu as i32);
+        let caps = only_mode.caps.as_ref().expect("caps");
+        assert_eq!(caps.video_codecs, video);
+        assert_eq!(caps.audio_codecs, audio);
+        assert!(caps.dtls_srtp, "room mode must not reset the DTLS flag");
     }
 
     #[test]
