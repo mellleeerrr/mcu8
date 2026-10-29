@@ -3421,3 +3421,146 @@ async fn t7_rbac_patches_and_duplicate_names() {
     assert_eq!(rename_dup.status(), StatusCode::CONFLICT);
     assert_eq!(json_body(rename_dup).await["error"]["code"], 409);
 }
+
+#[tokio::test]
+async fn test_abonent_info_popup_synchronization() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let admin = login_token(&app, "admin", "s3cret").await;
+    let room_id = RoomId::new();
+    let session_id = room_id.to_string();
+
+    // 1. Preview routes: POST / GET / DELETE
+    let abonent_sip = "sip-e5dceff9-8984-4fa4-8cea-da80d2ad89a2@sip-gateway";
+    let post_prev = send(
+        &app,
+        request("POST", &format!("/api/v3/sessions/{session_id}/previews/{abonent_sip}"), Some(&admin), json!({})),
+    )
+    .await;
+    assert_eq!(post_prev.status(), StatusCode::OK);
+    let post_prev_body = json_body(post_prev).await;
+    assert_eq!(post_prev_body["status"], "started");
+    assert_eq!(post_prev_body["abonent_id"], abonent_sip);
+    assert_eq!(post_prev_body["abonentId"], abonent_sip);
+    assert_eq!(post_prev_body["call_string_id"], abonent_sip);
+    assert_eq!(post_prev_body["callStringId"], abonent_sip);
+    assert_eq!(post_prev_body["preview"]["status"], "started");
+    assert_eq!(post_prev_body["preview"]["call_string_id"], abonent_sip);
+    let stream_id = post_prev_body["preview_stream_id"].as_str().expect("stream_id").to_string();
+    assert_eq!(post_prev_body["streamId"], stream_id);
+    assert_eq!(post_prev_body["preview"]["preview_stream_id"], stream_id);
+    assert_eq!(post_prev_body["preview"]["streamId"], stream_id);
+
+    // Trailing slash route
+    let post_prev_slash = send(
+        &app,
+        request("POST", &format!("/api/v3/sessions/{session_id}/previews/{abonent_sip}/"), Some(&admin), json!({})),
+    )
+    .await;
+    assert_eq!(post_prev_slash.status(), StatusCode::OK);
+
+    let get_prev = send(
+        &app,
+        request("GET", &format!("/api/v3/sessions/{session_id}/previews/{stream_id}"), Some(&admin), json!({})),
+    )
+    .await;
+    assert_eq!(get_prev.status(), StatusCode::NO_CONTENT);
+    assert_eq!(get_prev.headers().get("cache-control").unwrap(), "public, max-age=1");
+
+    let del_prev = send(
+        &app,
+        request("DELETE", &format!("/api/v3/sessions/{session_id}/previews/ab-101"), Some(&admin), json!({})),
+    )
+    .await;
+    assert_eq!(del_prev.status(), StatusCode::NO_CONTENT);
+
+    // 2. Fail-soft audio processing (auto_gain_control & noise_suppression)
+    let room = crate::RoomRecord::new(room_id, "sync-room", None);
+    state.rooms.lock().unwrap().insert(room_id, room);
+    let p_snap = crate::hub::ParticipantSnapshot {
+        participant_id: "ab-101".into(),
+        display_name: "Abonent 101".into(),
+        is_recorder: false,
+        is_speaking: false,
+        track_ids: vec!["t1".into()],
+        is_audio_muted: false,
+        is_video_muted: false,
+        connected_at: 1700000000,
+    };
+    let (_rx, _) = state.room_hub.register_participant(&room_id, p_snap);
+
+    let agc_resp = send(
+        &app,
+        request("POST", "/api/v3/abonents/ab-101/auto_gain_control", Some(&admin), json!({"auto_gain_control": "ON"})),
+    )
+    .await;
+    assert_eq!(agc_resp.status(), StatusCode::OK);
+    let agc_body = json_body(agc_resp).await;
+    assert_eq!(agc_body["status"], "ok");
+    assert_eq!(agc_body["mode"], "ON");
+    assert_eq!(agc_body["effective"], false);
+
+    let ns_resp = send(
+        &app,
+        request("POST", "/api/v3/abonents/ab-101/noise_suppression", Some(&admin), json!({"noise_suppression": "ON"})),
+    )
+    .await;
+    assert_eq!(ns_resp.status(), StatusCode::OK);
+    let ns_body = json_body(ns_resp).await;
+    assert_eq!(ns_body["status"], "ok");
+    assert_eq!(ns_body["mode"], "ON");
+    assert_eq!(ns_body["effective"], false);
+
+    // 3. FECC: unsupported returns HTTP 200 with status "not_supported"
+    let fecc_resp =
+        send(&app, request("POST", "/api/v3/abonents/ab-101/fecc", Some(&admin), json!({"command": "pan_left"}))).await;
+    assert_eq!(fecc_resp.status(), StatusCode::OK);
+    let fecc_body = json_body(fecc_resp).await;
+    assert_eq!(fecc_body["status"], "not_supported");
+    assert_eq!(fecc_body["fecc"], false);
+
+    // 4. Engine abonents with sanitize_id on session_id containing braces
+    let engine_resp = send(
+        &app,
+        request("GET", &format!("/api/v3/engine/abonents?session_id={{{session_id}}}"), Some(&admin), json!({})),
+    )
+    .await;
+    assert_eq!(engine_resp.status(), StatusCode::OK);
+    let engine_body = json_body(engine_resp).await;
+    assert_eq!(engine_body["count"], 1);
+    let ab = &engine_body["abonents"][0];
+    assert!(ab["details"]["user_agent"].is_string());
+    assert!(!ab["details"]["user_agent"].as_str().unwrap().is_empty());
+    assert_eq!(ab["details"]["fecc"], false);
+
+    // Video rx/tx telemetry metrics
+    assert!(ab["details"]["video"]["rx"]["lost_packets"].is_number());
+    assert!(ab["details"]["video"]["rx"]["lossrate"].is_number());
+    assert!(ab["details"]["video"]["rx"]["jitter"].is_number());
+    assert!(ab["details"]["video"]["rx"]["key_frame_requests"].is_number());
+    assert!(ab["details"]["video"]["rx"]["key_frame_request_ratio"].is_number());
+    assert_eq!(ab["details"]["video"]["rx"]["quality"], 4);
+    assert!(ab["details"]["video"]["tx"]["lost_packets"].is_number());
+    assert!(ab["details"]["video"]["tx"]["lossrate"].is_number());
+    assert!(ab["details"]["video"]["tx"]["jitter"].is_number());
+    assert_eq!(ab["details"]["video"]["tx"]["quality"], 4);
+
+    // Audio rx/tx telemetry metrics
+    assert!(ab["details"]["audio"]["rx"]["lost_packets"].is_number());
+    assert!(ab["details"]["audio"]["rx"]["lossrate"].is_number());
+    assert!(ab["details"]["audio"]["rx"]["jitter"].is_number());
+    assert_eq!(ab["details"]["audio"]["rx"]["quality"], 4);
+    assert!(ab["details"]["audio"]["tx"]["lost_packets"].is_number());
+    assert!(ab["details"]["audio"]["tx"]["lossrate"].is_number());
+    assert!(ab["details"]["audio"]["tx"]["jitter"].is_number());
+    assert_eq!(ab["details"]["audio"]["tx"]["quality"], 4);
+
+    // 5. FECC with braces in abonent ID
+    let fecc_braces =
+        send(&app, request("POST", "/api/v3/abonents/{ab-101}/fecc", Some(&admin), json!({"command": "tilt_up"})))
+            .await;
+    assert_eq!(fecc_braces.status(), StatusCode::OK);
+    let fecc_braces_body = json_body(fecc_braces).await;
+    assert_eq!(fecc_braces_body["status"], "not_supported");
+    assert_eq!(fecc_braces_body["fecc"], false);
+}

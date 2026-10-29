@@ -344,6 +344,7 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 if let Some(last) = last_sequence {
                     let missing = usize::from(packet.sequence.wrapping_sub(last).wrapping_sub(1));
                     if missing > 0 {
+                        session.media_stats.audio_rx_lost_packets.fetch_add(missing as u64, Relaxed);
                         let concealed = bridge_codec.conceal(missing, packet.payload);
                         if !concealed.is_empty() {
                             while queue.len() + concealed.len() > AUDIO_QUEUE_LIMIT { queue.pop_front(); }
@@ -356,6 +357,10 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                     session.media_stats.rejected_packets.fetch_add(1, Relaxed);
                     continue;
                 };
+                let now = std::time::Instant::now();
+                let clock_rate = bridge_codec.timestamp_step().saturating_mul(50).max(8000);
+                let jitter = session.media_stats.audio_jitter_calc.update(packet.timestamp, now, clock_rate);
+                session.media_stats.audio_rx_jitter_ms.store(jitter, Relaxed);
                 // Only complete, decodable frames count as received audio;
                 // partial G.726 groups are rejected above and must not feed
                 // the "call is alive" watchdog.

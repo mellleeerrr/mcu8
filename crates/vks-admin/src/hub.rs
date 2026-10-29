@@ -102,7 +102,16 @@ impl RoomHub {
     pub fn unregister_participant(&self, room_id: &RoomId, participant_id: &str) -> Option<usize> {
         let mut map = self.channels.write().expect("RoomHub lock poisoned");
         if let Some(entry) = map.get_mut(room_id) {
-            entry.participants.remove(participant_id);
+            if entry.participants.remove(participant_id).is_none() {
+                let clean = crate::api_v3::sessions::sanitize_id(participant_id);
+                if entry.participants.remove(clean).is_none() {
+                    let matching_key =
+                        entry.participants.keys().find(|k| crate::api_v3::sessions::sanitize_id(k) == clean).cloned();
+                    if let Some(k) = matching_key {
+                        entry.participants.remove(&k);
+                    }
+                }
+            }
             let remaining = entry.participants.len();
             if remaining == 0 && entry.sender.receiver_count() == 0 {
                 map.remove(room_id);
@@ -148,6 +157,21 @@ impl RoomHub {
                 return Some((*room_id, snap.clone()));
             }
         }
+        let clean = crate::api_v3::sessions::sanitize_id(participant_id);
+        if clean != participant_id {
+            for (room_id, entry) in map.iter() {
+                if let Some(snap) = entry.participants.get(clean) {
+                    return Some((*room_id, snap.clone()));
+                }
+            }
+        }
+        for (room_id, entry) in map.iter() {
+            for (pid, snap) in entry.participants.iter() {
+                if crate::api_v3::sessions::sanitize_id(pid) == clean {
+                    return Some((*room_id, snap.clone()));
+                }
+            }
+        }
         None
     }
 
@@ -191,7 +215,16 @@ impl RoomHub {
     ) -> Option<ParticipantSnapshot> {
         let mut map = self.channels.write().expect("RoomHub lock poisoned");
         let entry = map.get_mut(room_id)?;
-        let p = entry.participants.get_mut(participant_id)?;
+        let clean = crate::api_v3::sessions::sanitize_id(participant_id);
+        let p = if entry.participants.contains_key(participant_id) {
+            entry.participants.get_mut(participant_id)?
+        } else if entry.participants.contains_key(clean) {
+            entry.participants.get_mut(clean)?
+        } else {
+            let matching_key =
+                entry.participants.keys().find(|k| crate::api_v3::sessions::sanitize_id(k) == clean)?.clone();
+            entry.participants.get_mut(&matching_key)?
+        };
         if let Some(a) = audio_muted {
             p.is_audio_muted = a;
         }
@@ -202,5 +235,53 @@ impl RoomHub {
             p.display_name = name;
         }
         Some(p.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_room_hub_sanitized_id_fallbacks() {
+        let hub = RoomHub::new();
+        let room_id = RoomId::new();
+        let p_snap = ParticipantSnapshot {
+            participant_id: "terminal-alpha".into(),
+            display_name: "Alpha Terminal".into(),
+            is_recorder: false,
+            is_speaking: false,
+            track_ids: vec!["t1".into()],
+            is_audio_muted: false,
+            is_video_muted: false,
+            connected_at: 1000,
+        };
+        let _ = hub.register_participant(&room_id, p_snap);
+
+        // 1. Direct search
+        assert!(hub.find_participant_room("terminal-alpha").is_some());
+
+        // 2. Fallback search with curly braces {id}}
+        let found = hub.find_participant_room("{terminal-alpha}}");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().1.participant_id, "terminal-alpha");
+
+        // 3. Fallback update media with braces
+        let updated = hub.update_participant_media(
+            &room_id,
+            "{{terminal-alpha}}",
+            Some(true),
+            None,
+            Some("Renamed Alpha".into()),
+        );
+        assert!(updated.is_some());
+        let snap = updated.unwrap();
+        assert!(snap.is_audio_muted);
+        assert_eq!(snap.display_name, "Renamed Alpha");
+
+        // 4. Fallback unregister with braces
+        let remaining = hub.unregister_participant(&room_id, "{terminal-alpha}}");
+        assert_eq!(remaining, Some(0));
+        assert!(hub.find_participant_room("terminal-alpha").is_none());
     }
 }

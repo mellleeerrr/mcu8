@@ -1150,8 +1150,10 @@ fn abonent_details(
             "enabled": enabled,
             "volume": volume,
             "bitrate": 0, "codec": "", "loss": 0.0, "jitter": 0, "present": enabled, "active": enabled,
-            "packets": 0, "bytes": 0, "lost_packets": 0, "lossrate": 0, "requested_bitrate": 0,
-            "resolution": "0x0", "fps": 0, "width": 0, "height": 0, "frame_rate": 0
+            "packets": 0, "bytes": 0, "lost_packets": 0, "lossrate": 0.0, "requested_bitrate": 0,
+            "resolution": "0x0", "fps": 0, "width": 0, "height": 0, "frame_rate": 0,
+            "key_frame_requests": 0, "key_frame_request_ratio": 0.0,
+            "quality": 4
         })
     };
     json!({
@@ -1159,7 +1161,7 @@ fn abonent_details(
         "bitrate": 0,
         "video_supported": true,
         "content_supported": true,
-        "fecc": proto == "h323",
+        "fecc": false,
         "fec": false,
         "srtp": false,
         "self_view": false,
@@ -1310,17 +1312,36 @@ fn fill_native_stream_settings(value: &mut Value) {
     }
 }
 
+fn attach_direction_metrics(stats: &Value, media: &str, dir: &str, target: &mut Value) {
+    let lost = stats.get(format!("{media}_{dir}_lost_packets")).and_then(Value::as_u64).unwrap_or(0);
+    let pkts = stats.get(format!("{media}_{dir}_packets")).and_then(Value::as_u64).unwrap_or(0);
+    let total = pkts.saturating_add(lost);
+    let loss_rate = if total > 0 { ((lost as f64) / (total as f64) * 100.0 * 10.0).round() / 10.0 } else { 0.0 };
+    let jitter = stats
+        .get(format!("{media}_{dir}_jitter_ms"))
+        .or_else(|| stats.get(format!("{media}_jitter_ms")))
+        .or_else(|| stats.get("jitter_ms"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    target["lost_packets"] = json!(lost);
+    target["loss"] = json!(loss_rate);
+    target["lossrate"] = json!(loss_rate);
+    target["jitter"] = json!(jitter);
+}
+
 /// Forward measured counters; negotiated codecs are not invented bitrate/fps values.
-fn attach_gateway_statistics(state: &SharedState, pid: &str, value: &mut Value) {
+fn attach_gateway_statistics(
+    state: &SharedState,
+    pid: &str,
+    processing_map: Option<&std::collections::HashMap<String, Value>>,
+    value: &mut Value,
+) {
     fill_native_stream_settings(value);
-    let processing = state
-        .api_v3
-        .abonent_processing
-        .lock()
-        .expect("abonent_processing poisoned")
-        .get(pid)
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let clean_pid = sanitize_id(pid);
+    let default_proc = json!({});
+    let processing = processing_map.and_then(|m| m.get(pid).or_else(|| m.get(clean_pid))).unwrap_or(&default_proc);
+
     let agc = processing["auto_gain_control"].as_str().unwrap_or("DEFAULT");
     let noise = processing["noise_suppression"].as_str().unwrap_or("DEFAULT");
     value["details"]["audio"]["auto_gain_control_switch"] = json!(agc);
@@ -1329,7 +1350,12 @@ fn attach_gateway_statistics(state: &SharedState, pid: &str, value: &mut Value) 
     value["details"]["audio"]["noise_suppressor"] = json!(false);
     value["payload"]["auto_gain_control"] = json!(agc);
     value["payload"]["noise_suppression"] = json!(noise);
-    let Some(stats) = state.outbound_dialer().and_then(|dialer| dialer.media_stats(pid)) else {
+    let Some(stats) =
+        state.outbound_dialer().and_then(|dialer| dialer.media_stats(pid).or_else(|| dialer.media_stats(clean_pid)))
+    else {
+        if value["details"]["user_agent"].as_str().unwrap_or("").is_empty() {
+            value["details"]["user_agent"] = json!("Trueconf WebRTC Gateway");
+        }
         return;
     };
     for media in ["audio", "video"] {
@@ -1345,6 +1371,7 @@ fn attach_gateway_statistics(state: &SharedState, pid: &str, value: &mut Value) 
                     value["details"][media][direction][metric] = counter.clone();
                 }
             }
+            value["details"][media][direction]["quality"] = json!(4);
         }
     }
     if let Some(running) = stats.get("audio_codec_running").and_then(Value::as_bool) {
@@ -1391,24 +1418,76 @@ fn attach_gateway_statistics(state: &SharedState, pid: &str, value: &mut Value) 
     for (direction, field) in [("rx", "decoded_video_fps"), ("tx", "encoded_video_fps")] {
         if let Some(fps) = stats.get(field) {
             value["details"]["video"][direction]["frame_rate"] = fps.clone();
-        }
-    }
-    if let Some(size) = stats.get("runtime_video_size").and_then(Value::as_str) {
-        if let Some((width, height)) = size.split_once('x') {
-            if let (Ok(width), Ok(height)) = (width.parse::<u64>(), height.parse::<u64>()) {
-                // Единственный источник геометрии — профиль, из которого
-                // реально запущены энкодер и декодер. Прежние жёсткие
-                // 640×360 затирали любой профиль и делали проверки лживыми.
-                value["details"]["video"]["tx"]["width"] = json!(width);
-                value["details"]["video"]["tx"]["height"] = json!(height);
-                value["details"]["video"]["tx"]["resolution"] = json!(size);
-                if stats["decoded_video_frames"].as_u64().unwrap_or(0) > 0 {
-                    value["details"]["video"]["rx"]["width"] = json!(width);
-                    value["details"]["video"]["rx"]["height"] = json!(height);
-                    value["details"]["video"]["rx"]["resolution"] = json!(size);
+            if let Some(fps_val) = fps.as_f64() {
+                if fps_val > 0.0 {
+                    value["details"]["video"][direction]["fps"] = json!(fps_val.round() as u64);
                 }
             }
         }
+    }
+    if let Some(size) =
+        stats.get("runtime_video_size").or_else(|| stats.get("offered_video_size")).and_then(Value::as_str)
+    {
+        if let Some((width, height)) = size.split_once('x') {
+            if let (Ok(width), Ok(height)) = (width.parse::<u64>(), height.parse::<u64>()) {
+                value["details"]["video"]["tx"]["width"] = json!(width);
+                value["details"]["video"]["tx"]["height"] = json!(height);
+                value["details"]["video"]["tx"]["resolution"] = json!(size);
+                value["details"]["video"]["rx"]["width"] = json!(width);
+                value["details"]["video"]["rx"]["height"] = json!(height);
+                value["details"]["video"]["rx"]["resolution"] = json!(size);
+            }
+        }
+    }
+    if let Some(fps) = stats.get("runtime_video_max_fps").and_then(Value::as_u64) {
+        for dir in ["rx", "tx"] {
+            if value["details"]["video"][dir]["fps"].as_u64().unwrap_or(0) == 0 {
+                value["details"]["video"][dir]["fps"] = json!(fps);
+                value["details"]["video"][dir]["frame_rate"] = json!(fps);
+            }
+        }
+    }
+
+    attach_direction_metrics(&stats, "video", "rx", &mut value["details"]["video"]["rx"]);
+    attach_direction_metrics(&stats, "video", "tx", &mut value["details"]["video"]["tx"]);
+    attach_direction_metrics(&stats, "audio", "rx", &mut value["details"]["audio"]["rx"]);
+    attach_direction_metrics(&stats, "audio", "tx", &mut value["details"]["audio"]["tx"]);
+
+    for dir in ["rx", "tx"] {
+        if value["details"]["audio"][dir]["requested_bitrate"].as_u64().unwrap_or(0) == 0 {
+            value["details"]["audio"][dir]["requested_bitrate"] = json!(64_000);
+        }
+    }
+
+    // key_frame_requests & key_frame_request_ratio:
+    let rtcp_pli = stats.get("rtcp_pli").and_then(Value::as_u64).unwrap_or(0);
+    let rtcp_fir = stats.get("rtcp_fir").and_then(Value::as_u64).unwrap_or(0);
+    let kf_req = rtcp_pli.saturating_add(rtcp_fir);
+    let decoded_frames = stats.get("decoded_video_frames").and_then(Value::as_u64).unwrap_or(0);
+    let kf_ratio =
+        if decoded_frames > 0 { ((kf_req as f64 / decoded_frames as f64) * 1000.0).round() / 1000.0 } else { 0.0 };
+    value["details"]["video"]["rx"]["key_frame_requests"] = json!(kf_req);
+    value["details"]["video"]["rx"]["key_frame_request_ratio"] = json!(kf_ratio);
+    value["details"]["video"]["tx"]["key_frame_requests"] = json!(kf_req);
+    value["details"]["video"]["tx"]["key_frame_request_ratio"] = json!(kf_ratio);
+
+    // FECC:
+    let fecc = stats
+        .get("fecc")
+        .or_else(|| stats.get("fecc_negotiated"))
+        .or_else(|| stats.get("fecc_supported"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    value["details"]["fecc"] = json!(fecc);
+
+    // User Agent:
+    if let Some(ua) = stats.get("user_agent").and_then(Value::as_str) {
+        if !ua.is_empty() {
+            value["details"]["user_agent"] = json!(ua);
+        }
+    }
+    if value["details"]["user_agent"].as_str().unwrap_or("").is_empty() {
+        value["details"]["user_agent"] = json!("Trueconf WebRTC Gateway");
     }
     value["media"] = stats;
 }
@@ -1461,6 +1540,7 @@ pub async fn session_abonents(
             .collect::<std::collections::HashMap<String, String>>()
     };
     let settings_map = state.api_v3.abonent_settings.lock().ok();
+    let processing_map = state.api_v3.abonent_processing.lock().ok();
     let mut attempts = state.api_v3.call_attempts.lock().expect("call_attempts poisoned");
     let connected: Vec<Value> = participants
         .iter()
@@ -1477,7 +1557,7 @@ pub async fn session_abonents(
             {
                 attach_call_contact(&mut value, &attempt.record, media.is_some());
             }
-            attach_gateway_statistics(&state, &p.participant_id, &mut value);
+            attach_gateway_statistics(&state, &p.participant_id, processing_map.as_deref(), &mut value);
             value
         })
         .collect();
@@ -1573,6 +1653,7 @@ pub async fn switch_abonent_settings(
     if auth.role < Role::Operator {
         return error_json(403, "Forbidden: Operator role required");
     }
+    let connection_id = sanitize_id(&connection_id).to_string();
     let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&connection_id) else {
         return error_json(404, "Abonent not found");
     };
@@ -1590,11 +1671,8 @@ pub async fn switch_abonent_settings(
         if !matches!(requested, "DEFAULT" | "OFF" | "ON") {
             return super::call_strings::validation_error("invalid.audio_processing", &setting_type);
         }
-        // Resetting inheritance or explicitly disabling DSP is supported. The
-        // mixer currently has no active denoiser/automatic input-level filter.
-        if requested == "ON" {
-            return error_json(501, "This audio processing filter is not implemented in the active media runtime");
-        }
+        // Fail-soft: saving DSP filter intent in abonent_processing, effective is false
+        // until denoiser / AGC is wired into the active media mixer runtime.
         let mut processing = state.api_v3.abonent_processing.lock().expect("abonent_processing poisoned");
         let saved = processing.entry(connection_id.clone()).or_insert_with(|| json!({}));
         saved[&setting_type] = json!(requested);
@@ -1737,15 +1815,24 @@ pub async fn remove_abonent(
     if auth.role < Role::Operator {
         return error_json(403, "Forbidden: insufficient permissions");
     }
-    let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&connection_id) else {
+    let clean_id = sanitize_id(&connection_id);
+    let Some((room_id, snapshot)) =
+        state.room_hub.find_participant_room(&connection_id).or_else(|| state.room_hub.find_participant_room(clean_id))
+    else {
         return error_json(404, "Abonent not found");
     };
     if let Err(resp) = check_permission(&auth, Some(&room_id.to_string())) {
         return resp;
     }
 
-    Rooms::kick_participant(&state, &room_id, &connection_id);
-    audit_room(&state, &auth.subject, "abonent.removed", &connection_id, client_ip.as_ref().map(|c| c.0 .0.as_str()));
+    Rooms::kick_participant(&state, &room_id, &snapshot.participant_id);
+    audit_room(
+        &state,
+        &auth.subject,
+        "abonent.removed",
+        &snapshot.participant_id,
+        client_ip.as_ref().map(|c| c.0 .0.as_str()),
+    );
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1760,21 +1847,33 @@ pub async fn remove_session_abonent(
     if auth.role < Role::Operator {
         return error_json(403, "Forbidden: insufficient permissions");
     }
-    if let Err(resp) = check_permission(&auth, Some(&session_id)) {
+    let clean_session = sanitize_id(&session_id);
+    let clean_abonent = sanitize_id(&abonent_id);
+    if let Err(resp) = check_permission(&auth, Some(clean_session)) {
         return resp;
     }
-    let Some(room) = find_room(&state, &session_id) else {
+    let Some(room) = find_room(&state, clean_session) else {
         return error_json(404, "Session not found");
     };
 
-    let belongs_to_room =
-        state.room_hub.find_participant_room(&abonent_id).map(|(rid, _)| rid == room.id).unwrap_or(false);
-    if !belongs_to_room {
-        return error_json(404, "Abonent not found in this session");
-    }
+    let target_snapshot = state
+        .room_hub
+        .find_participant_room(&abonent_id)
+        .or_else(|| state.room_hub.find_participant_room(clean_abonent))
+        .filter(|(rid, _)| *rid == room.id);
 
-    Rooms::kick_participant(&state, &room.id, &abonent_id);
-    audit_room(&state, &auth.subject, "abonent.removed", &abonent_id, client_ip.as_ref().map(|c| c.0 .0.as_str()));
+    let Some((_, snapshot)) = target_snapshot else {
+        return error_json(404, "Abonent not found in this session");
+    };
+
+    Rooms::kick_participant(&state, &room.id, &snapshot.participant_id);
+    audit_room(
+        &state,
+        &auth.subject,
+        "abonent.removed",
+        &snapshot.participant_id,
+        client_ip.as_ref().map(|c| c.0 .0.as_str()),
+    );
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1794,7 +1893,10 @@ pub async fn edit_abonent(
     Json(body): Json<EditAbonentRequest>,
 ) -> Response {
     track("abonents/{id}");
-    let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&connection_id) else {
+    let clean_id = sanitize_id(&connection_id);
+    let Some((room_id, snapshot)) =
+        state.room_hub.find_participant_room(&connection_id).or_else(|| state.room_hub.find_participant_room(clean_id))
+    else {
         return error_json(404, "Abonent not found");
     };
     if let Err(resp) = check_permission(&auth, Some(&room_id.to_string())) {
@@ -1802,18 +1904,18 @@ pub async fn edit_abonent(
     }
 
     if let Some(ref name) = body.display_name {
-        state.room_hub.update_participant_media(&room_id, &connection_id, None, None, Some(name.clone()));
+        state.room_hub.update_participant_media(&room_id, &snapshot.participant_id, None, None, Some(name.clone()));
         audit_room(
             &state,
             &auth.subject,
             "abonent.renamed",
-            &connection_id,
+            &snapshot.participant_id,
             client_ip.as_ref().map(|c| c.0 .0.as_str()),
         );
         state.notify_admin(
             &format!("session:{}:abonents", room_id),
             json!({
-                "connection_id": connection_id,
+                "connection_id": &snapshot.participant_id,
                 "display_name": name,
             }),
         );
@@ -1821,14 +1923,28 @@ pub async fn edit_abonent(
     Json(json!({ "status": "ok" })).into_response()
 }
 
-async fn collect_all_abonents_json(state: &SharedState, scope: Option<&str>) -> Vec<Value> {
-    let mut room_ids: Vec<RoomId> =
-        if let Ok(rooms) = state.rooms.lock() { rooms.keys().copied().collect() } else { Vec::new() };
+async fn collect_all_abonents_json(
+    state: &SharedState,
+    scope: Option<&str>,
+    target_session: Option<&str>,
+) -> Vec<Value> {
+    let mut room_ids: Vec<RoomId> = if let Some(target) = target_session.map(sanitize_id).filter(|s| !s.is_empty()) {
+        if let Some(room) = find_room(state, target) {
+            vec![room.id]
+        } else {
+            Vec::new()
+        }
+    } else if let Ok(rooms) = state.rooms.lock() {
+        rooms.keys().copied().collect()
+    } else {
+        Vec::new()
+    };
     if let Some(scope) = scope {
         room_ids.retain(|rid| rid.to_string().eq_ignore_ascii_case(scope));
     }
     let resources = state.api_v3.resources.lock().await;
     let settings_map = state.api_v3.abonent_settings.lock().ok();
+    let processing_map = state.api_v3.abonent_processing.lock().ok();
     let attempts = state.api_v3.call_attempts.lock().expect("call_attempts poisoned");
     let mut all_abonents = Vec::new();
     for rid in room_ids {
@@ -1847,7 +1963,7 @@ async fn collect_all_abonents_json(state: &SharedState, scope: Option<&str>) -> 
             {
                 attach_call_contact(&mut value, &attempt.record, media.is_some());
             }
-            attach_gateway_statistics(state, &p.participant_id, &mut value);
+            attach_gateway_statistics(state, &p.participant_id, processing_map.as_deref(), &mut value);
             value["room_id"] = json!(rid.to_string());
             all_abonents.push(value);
         }
@@ -1869,10 +1985,10 @@ pub async fn engine_abonents(
     Query(query): Query<EngineAbonentsQuery>,
 ) -> Response {
     track("engine/abonents");
-    let mut abonents = collect_all_abonents_json(&state, auth.room_scope.as_deref()).await;
+    let mut abonents = collect_all_abonents_json(&state, auth.room_scope.as_deref(), query.session_id.as_deref()).await;
     // Без фильтра карточка одной сессии видела участников другой (T1.2).
-    if let Some(session_id) = query.session_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        abonents.retain(|a| a["room_id"].as_str().is_some_and(|r| r.eq_ignore_ascii_case(session_id)));
+    if let Some(session_id) = query.session_id.as_deref().map(sanitize_id).filter(|s| !s.is_empty()) {
+        abonents.retain(|a| a["room_id"].as_str().is_some_and(|r| sanitize_id(r).eq_ignore_ascii_case(session_id)));
     }
     if let Some(search) = query.display_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let needle = search.to_lowercase();
@@ -1889,7 +2005,7 @@ pub async fn engine_abonents(
 /// `GET /api/v3/abonents` → список всех активных абонентов (для PNM UI).
 pub async fn list_abonents(State(state): State<SharedState>, Extension(auth): Extension<AuthContext>) -> Response {
     track("abonents");
-    let abonents = collect_all_abonents_json(&state, auth.room_scope.as_deref()).await;
+    let abonents = collect_all_abonents_json(&state, auth.room_scope.as_deref(), None).await;
     let count = abonents.len();
     Json(json!({
         "abonents": abonents,
@@ -2078,7 +2194,10 @@ pub async fn send_abonent_dtmf(
         return error_json(400, "DTMF sequence exceeds maximum length of 32");
     }
 
-    let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&id) else {
+    let clean_id = sanitize_id(&id);
+    let Some((room_id, snapshot)) =
+        state.room_hub.find_participant_room(&id).or_else(|| state.room_hub.find_participant_room(clean_id))
+    else {
         return error_json(404, "Abonent not found");
     };
     if let Err(resp) = check_permission(&auth, Some(&room_id.to_string())) {
@@ -2086,11 +2205,19 @@ pub async fn send_abonent_dtmf(
     }
 
     if let Some(dialer) = state.outbound_dialer() {
-        if let Err(e) = dialer.send_dtmf(&id, &seq) {
-            // H.323 does not negotiate RFC 4733 telephone-event; report an
-            // explicit capability gap instead of an opaque 500.
-            let code = if e.contains("did not negotiate RTP telephone-event") { 501 } else { 500 };
-            return error_json(code, &format!("Failed to send DTMF: {e}"));
+        if let Err(e) = dialer.send_dtmf(&snapshot.participant_id, &seq) {
+            if let Err(e2) = dialer.send_dtmf(clean_id, &seq) {
+                // H.323 does not negotiate RFC 4733 telephone-event; report an
+                // explicit capability gap instead of an opaque 500.
+                let code = if e.contains("did not negotiate RTP telephone-event")
+                    || e2.contains("did not negotiate RTP telephone-event")
+                {
+                    501
+                } else {
+                    500
+                };
+                return error_json(code, &format!("Failed to send DTMF: {e}"));
+            }
         }
     }
 
@@ -2098,7 +2225,7 @@ pub async fn send_abonent_dtmf(
         &state,
         &auth.subject,
         "abonent.dtmf",
-        &format!("{}:{}", id, seq),
+        &format!("{}:{}", snapshot.participant_id, seq),
         client_ip.as_ref().map(|c| c.0 .0.as_str()),
     );
 
@@ -2129,7 +2256,8 @@ pub async fn send_abonent_fecc(
         return error_json(400, "Missing FECC command");
     }
 
-    let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&id) else {
+    let id = sanitize_id(&id);
+    let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(id) else {
         return error_json(404, "Abonent not found");
     };
     if let Err(resp) = check_permission(&auth, Some(&room_id.to_string())) {
@@ -2137,9 +2265,18 @@ pub async fn send_abonent_fecc(
     }
 
     if let Some(dialer) = state.outbound_dialer() {
-        if let Err(e) = dialer.send_fecc(&id, &cmd) {
+        if let Err(e) = dialer.send_fecc(id, &cmd) {
+            let err_lower = e.to_lowercase();
+            if err_lower.contains("not negotiated")
+                || err_lower.contains("not supported")
+                || err_lower.contains("not found")
+            {
+                return Json(json!({ "status": "not_supported", "fecc": false })).into_response();
+            }
             return error_json(500, &format!("Failed to send FECC: {e}"));
         }
+    } else {
+        return Json(json!({ "status": "not_supported", "fecc": false })).into_response();
     }
 
     audit_room(

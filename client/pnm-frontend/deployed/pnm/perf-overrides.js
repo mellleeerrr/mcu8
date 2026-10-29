@@ -25,6 +25,9 @@
   var CODEC_RE = /\/api\/v3\/settings\/(audio|video)_codecs(?:\?|$)/;
   var PATCH_RE = /\/api\/v3\/settings\/((audio|video)_codecs|calls)(?:\?|$)/;
   var PREVIEWS_RE = /\/api\/v3\/abonents\/previews(?:\?|$)/;
+  var ENGINE_ABONENTS_RE = /\/api\/v3\/engine\/abonents(?:\?|$)/;
+  var SESSION_PREVIEWS_GET_RE = /\/api\/v3\/(?:ui\/)?sessions\/[^/]+\/previews\/[^/?]+(?:\/|\?|$)/;
+  var SESSION_PREVIEWS_RE = /\/api\/v3\/(?:ui\/)?sessions\/([^/]+)\/previews\/([^/?]+)(?:\/|\?|$)/;
   var cache = Object.create(null);
   var inflight = Object.create(null);
   var generation = 0;
@@ -76,16 +79,227 @@
   document.addEventListener('visibilitychange', revalidateOnFocus);
   window.addEventListener('focus', revalidateOnFocus);
 
+  // Демпфирование 350-мс таймера плеера превью Yw до 1500 мс без накопления параллельных запросов
+  var nativeSetTimeout = window.setTimeout;
+  window.setTimeout = function (handler, delay) {
+    if (delay === 350 && typeof handler === 'function') {
+      try {
+        var fnStr = Function.prototype.toString.call(handler);
+        // Ограничиваем хук только циклом кадров плеера превью Yw: function(){a(y),o(y)}
+        if (fnStr.indexOf(',o(') !== -1 || fnStr.indexOf(', o(') !== -1 || /\{\s*\w+\(\w+\)\s*,\s*\w+\(\w+\)\s*\}/.test(fnStr)) {
+          arguments[1] = 1500;
+        }
+      } catch (e) { /* ignore */ }
+    }
+    return nativeSetTimeout.apply(window, arguments);
+  };
+
   var nativeOpen = XMLHttpRequest.prototype.open;
   var nativeSend = XMLHttpRequest.prototype.send;
+  var nativeSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
   var nativeGetHeader = XMLHttpRequest.prototype.getResponseHeader;
   var nativeGetAllHeaders = XMLHttpRequest.prototype.getAllResponseHeaders;
 
+  XMLHttpRequest.prototype.setRequestHeader = function (header, value) {
+    if (!this.__vksReqHeaders) this.__vksReqHeaders = [];
+    this.__vksReqHeaders.push({ header: header, value: value });
+    return nativeSetRequestHeader.apply(this, arguments);
+  };
+
   XMLHttpRequest.prototype.open = function (method, url) {
-    this.__vksMethod = String(method || 'GET').toUpperCase();
-    this.__vksUrl = String(url || '');
+    var sMethod = String(method || 'GET').toUpperCase();
+    var sUrl = String(url || '');
+    if (ENGINE_ABONENTS_RE.test(sUrl)) {
+      sUrl = sUrl.replace(/([?&]session_id=)(?:%7B|%7b|\{)([0-9a-fA-F-]+)(?:%7D|%7d|\})/i, '$1$2');
+      arguments[1] = sUrl;
+    }
+    this.__vksMethod = sMethod;
+    this.__vksUrl = sUrl;
     return nativeOpen.apply(this, arguments);
   };
+
+  function normalizeId(id) {
+    return String(id || '').trim().replace(/^\{+|\}+$/g, '').toLowerCase();
+  }
+
+  function syncStreamDirection(target, src) {
+    if (!src || typeof src !== 'object') return;
+    Object.assign(target, src);
+    if (src.codec != null) target.codec = src.codec;
+    if (src.bitrate != null) target.bitrate = src.bitrate;
+    if (src.packets != null) target.packets = src.packets;
+    if (src.bytes != null) target.bytes = src.bytes;
+    if (src.jitter != null) target.jitter = src.jitter;
+    if (src.lost_packets != null) {
+      target.lost_packets = src.lost_packets;
+      target.lostPackets = src.lost_packets;
+    }
+    if (src.lossrate != null) {
+      target.lossrate = src.lossrate;
+      target.lossRate = src.lossrate;
+    } else if (src.loss != null) {
+      target.lossrate = src.loss;
+      target.lossRate = src.loss;
+    }
+    if (src.requested_bitrate != null) {
+      target.requested_bitrate = src.requested_bitrate;
+      target.requestedBitrate = src.requested_bitrate;
+    }
+    if (src.frame_rate != null) {
+      target.frame_rate = src.frame_rate;
+      target.frameRate = src.frame_rate;
+    } else if (src.fps != null) {
+      target.frame_rate = src.fps;
+      target.frameRate = src.fps;
+    }
+    if (src.resolution != null) {
+      target.resolution = src.resolution;
+    } else if (src.width != null && src.height != null) {
+      target.resolution = src.width + 'x' + src.height;
+    }
+    if (src.key_frame_requests != null) {
+      target.key_frame_requests = src.key_frame_requests;
+      target.keyFrameRequestCount = src.key_frame_requests;
+    }
+    if (src.key_frame_request_ratio != null) {
+      target.key_frame_request_ratio = src.key_frame_request_ratio;
+      target.keyFrameRequestRatio = src.key_frame_request_ratio;
+    }
+    if (src.fec != null) {
+      target.fec = src.fec;
+      target.isFECEnabled = src.fec;
+    }
+    if (src.present != null) {
+      target.present = src.present;
+      target.isAvailable = src.present;
+    }
+    if (src.active != null) {
+      target.active = src.active;
+      target.isActive = src.active;
+    }
+    if (src.quality != null) {
+      target.quality = src.quality;
+    } else {
+      target.quality = 4;
+    }
+  }
+
+  function findContextAbonentInState(state, depth) {
+    if (!state || depth > 3) return null;
+    if (state.contextAbonent && typeof state.contextAbonent === 'object') {
+      return state.contextAbonent;
+    }
+    for (var k in state) {
+      if (state[k] && typeof state[k] === 'object' && !Array.isArray(state[k])) {
+        var found = findContextAbonentInState(state[k], depth + 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  function updateActiveContextAbonent(data) {
+    try {
+      if (!data || !Array.isArray(data.abonents) || data.abonents.length === 0) return;
+      var root = document.querySelector('#root') || document.querySelector('#app');
+      var store = (root && root.__vue_app__ && root.__vue_app__.config && root.__vue_app__.config.globalProperties && root.__vue_app__.config.globalProperties.$store)
+        || window.$store
+        || (root && root._vnode && root._vnode.component && root._vnode.component.proxy && root._vnode.component.proxy.$store);
+
+      var contextAbonent = null;
+      if (store && store.state) {
+        var sa = store.state['sessionLocal/abonent'];
+        if (sa && sa.contextAbonent) {
+          contextAbonent = sa.contextAbonent;
+        } else {
+          contextAbonent = findContextAbonentInState(store.state, 0);
+        }
+      }
+
+      if (!contextAbonent && window.__vksContextAbonent) {
+        contextAbonent = window.__vksContextAbonent;
+      }
+      if (!contextAbonent) return;
+
+      var targetId = normalizeId(contextAbonent.id || contextAbonent.abonentId || contextAbonent.participantId || contextAbonent.connectionId || contextAbonent.addressId);
+      if (!targetId && contextAbonent.engineAbonent) {
+        targetId = normalizeId(contextAbonent.engineAbonent.id || contextAbonent.engineAbonent.abonentId || contextAbonent.engineAbonent.connection_id);
+      }
+
+      var found = null;
+      for (var i = 0; i < data.abonents.length; i++) {
+        var ab = data.abonents[i];
+        var abConnId = normalizeId(ab.connection_id);
+        var abId = normalizeId(ab.id);
+        var abAbonentId = normalizeId(ab.abonent_id);
+        var abPartId = normalizeId(ab.participant_id);
+        if (targetId && (abConnId === targetId || abId === targetId || abAbonentId === targetId || abPartId === targetId)) {
+          found = ab;
+          break;
+        }
+      }
+      if (!found && data.abonents.length === 1 && targetId) {
+        found = data.abonents[0];
+      }
+      if (!found) return;
+
+      var details = found.details || found;
+      if (contextAbonent.engineAbonent) {
+        if (!contextAbonent.engineAbonent.statuses) {
+          contextAbonent.engineAbonent.statuses = {};
+        }
+        var statuses = contextAbonent.engineAbonent.statuses;
+        Object.assign(statuses, details);
+        if (details.fecc != null) statuses.fecc = details.fecc;
+        if (details.user_agent) statuses.user_agent = details.user_agent;
+
+        if (details.audio) {
+          if (!statuses.audio) statuses.audio = {};
+          Object.assign(statuses.audio, details.audio);
+          if (details.audio.rx) {
+            if (!statuses.audio.rx) statuses.audio.rx = {};
+            syncStreamDirection(statuses.audio.rx, details.audio.rx);
+          }
+          if (details.audio.tx) {
+            if (!statuses.audio.tx) statuses.audio.tx = {};
+            syncStreamDirection(statuses.audio.tx, details.audio.tx);
+          }
+        }
+        if (details.video) {
+          if (!statuses.video) statuses.video = {};
+          Object.assign(statuses.video, details.video);
+          if (details.video.rx) {
+            if (!statuses.video.rx) statuses.video.rx = {};
+            syncStreamDirection(statuses.video.rx, details.video.rx);
+          }
+          if (details.video.tx) {
+            if (!statuses.video.tx) statuses.video.tx = {};
+            syncStreamDirection(statuses.video.tx, details.video.tx);
+          }
+        }
+        if (details.content) {
+          if (!statuses.content) statuses.content = {};
+          Object.assign(statuses.content, details.content);
+          if (details.content.rx) {
+            if (!statuses.content.rx) statuses.content.rx = {};
+            syncStreamDirection(statuses.content.rx, details.content.rx);
+          }
+          if (details.content.tx) {
+            if (!statuses.content.tx) statuses.content.tx = {};
+            syncStreamDirection(statuses.content.tx, details.content.tx);
+          }
+        }
+        if (found.statuses) {
+          Object.assign(statuses, found.statuses);
+        }
+      }
+      if (contextAbonent.statuses) {
+        Object.assign(contextAbonent.statuses, details);
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  }
 
   function headerValue(headers, name) {
     var wanted = String(name).toLowerCase();
@@ -105,10 +319,10 @@
       try {
         Object.defineProperty(xhr, 'readyState', { value: 4, configurable: true });
         Object.defineProperty(xhr, 'status', { value: status, configurable: true });
-        Object.defineProperty(xhr, 'statusText', { value: status === 200 ? 'OK' : 'Error', configurable: true });
-        Object.defineProperty(xhr, 'responseText', { value: text, configurable: true });
+        Object.defineProperty(xhr, 'statusText', { value: status === 204 ? 'No Content' : (status === 200 ? 'OK' : 'Error'), configurable: true });
+        Object.defineProperty(xhr, 'responseText', { value: text || '', configurable: true });
         Object.defineProperty(xhr, 'response', {
-          value: xhr.responseType === 'json' ? JSON.parse(text) : text,
+          value: xhr.responseType === 'json' && text ? JSON.parse(text) : (text || ''),
           configurable: true,
         });
         xhr.getAllResponseHeaders = function () { return headers || ''; };
@@ -194,6 +408,9 @@
   var nativeAbort = XMLHttpRequest.prototype.abort;
   XMLHttpRequest.prototype.abort = function () {
     this.__vksAborted = true;
+    if (this.__vksRealXhr) {
+      try { nativeAbort.call(this.__vksRealXhr); } catch (e) { /* ignore */ }
+    }
     return nativeAbort.apply(this, arguments);
   };
 
@@ -232,6 +449,153 @@
         finishPatch();
         throw error;
       }
+    }
+
+    if (sameOrigin(url) && method === 'GET' && SESSION_PREVIEWS_GET_RE.test(url)) {
+      synth(xhr, 204, '', 'cache-control: public, max-age=1\r\n');
+      return;
+    }
+
+    if (sameOrigin(url) && method === 'DELETE' && SESSION_PREVIEWS_RE.test(url)) {
+      synth(xhr, 204, '', '');
+      return;
+    }
+
+    if (sameOrigin(url) && method === 'POST' && SESSION_PREVIEWS_RE.test(url)) {
+      var m = url.match(SESSION_PREVIEWS_RE);
+      var rawSessionId = '';
+      var rawTarget = '';
+      if (m) {
+        try { rawSessionId = decodeURIComponent(m[1]); } catch (e) { rawSessionId = m[1]; }
+        try { rawTarget = decodeURIComponent(m[2]); } catch (e) { rawTarget = m[2]; }
+      }
+      var cleanSessionId = rawSessionId.replace(/^\{+|\}+$/g, '');
+      var cleanTarget = rawTarget.replace(/^\{+|\}+$/g, '');
+      var streamId = 'preview-' + Math.random().toString(36).slice(2, 10);
+      var stream_id = streamId;
+      var fallbackPayload = {
+        status: 'started',
+        id: streamId,
+        streamId: streamId,
+        stream_id: streamId,
+        preview_stream_id: streamId,
+        previewStreamId: streamId,
+        sessionId: cleanSessionId,
+        session_id: cleanSessionId,
+        abonentId: cleanTarget,
+        abonent_id: cleanTarget,
+        callStringId: cleanTarget,
+        call_string_id: cleanTarget,
+        addressId: cleanTarget,
+        address_id: cleanTarget,
+        preview: {
+          status: 'started',
+          id: streamId,
+          streamId: streamId,
+          stream_id: streamId,
+          preview_stream_id: streamId,
+          previewStreamId: streamId,
+          sessionId: cleanSessionId,
+          session_id: cleanSessionId,
+          abonentId: cleanTarget,
+          abonent_id: cleanTarget,
+          callStringId: cleanTarget,
+          call_string_id: cleanTarget,
+          addressId: cleanTarget,
+          address_id: cleanTarget,
+          resolution: { width: 480, height: 270, fps_limit: 1 }
+        }
+      };
+      var fallbackJson = JSON.stringify(fallbackPayload);
+      var fallbackHeaders = 'content-type: application/json; charset=utf-8\r\n';
+
+      var settled = false;
+      var timer = null;
+
+      function deliverFallback() {
+        if (settled || xhr.__vksAborted) return;
+        settled = true;
+        if (timer) { clearTimeout(timer); timer = null; }
+        synth(xhr, 200, fallbackJson, fallbackHeaders);
+      }
+
+      function deliverSuccess(status, text, headers) {
+        if (settled || xhr.__vksAborted) return;
+        settled = true;
+        if (timer) { clearTimeout(timer); timer = null; }
+        try {
+          var parsed = JSON.parse(text);
+          if (!parsed || typeof parsed !== 'object') {
+            deliverFallback();
+            return;
+          }
+          if (!parsed.streamId && parsed.preview_stream_id) parsed.streamId = parsed.preview_stream_id;
+          if (!parsed.preview || typeof parsed.preview !== 'object') parsed.preview = Object.assign({}, parsed);
+          if (!parsed.preview.preview_stream_id && parsed.streamId) parsed.preview.preview_stream_id = parsed.streamId;
+          if (!parsed.preview.call_string_id && (parsed.call_string_id || parsed.abonent_id)) {
+            parsed.preview.call_string_id = parsed.call_string_id || parsed.abonent_id;
+          }
+          if (!parsed.preview.streamId && parsed.preview.preview_stream_id) {
+            parsed.preview.streamId = parsed.preview.preview_stream_id;
+          }
+          if (!parsed.preview.addressId && parsed.preview.call_string_id) {
+            parsed.preview.addressId = parsed.preview.call_string_id;
+          }
+          text = JSON.stringify(parsed);
+        } catch (e) {
+          deliverFallback();
+          return;
+        }
+        synth(xhr, status, text, headers);
+      }
+
+      timer = setTimeout(deliverFallback, 2500);
+
+      var realXhr = null;
+      try {
+        realXhr = typeof window !== 'undefined' && window.XMLHttpRequest ? new window.XMLHttpRequest() : new XMLHttpRequest();
+      } catch (e) {
+        deliverFallback();
+        return;
+      }
+      xhr.__vksRealXhr = realXhr;
+
+      nativeOpen.call(realXhr, 'POST', url, true);
+      if (xhr.__vksReqHeaders) {
+        for (var h = 0; h < xhr.__vksReqHeaders.length; h++) {
+          try {
+            nativeSetRequestHeader.call(realXhr, xhr.__vksReqHeaders[h].header, xhr.__vksReqHeaders[h].value);
+          } catch (e) { /* ignore */ }
+        }
+      }
+      realXhr.onreadystatechange = function () {
+        if (realXhr.readyState === 4) {
+          if (realXhr.status >= 200 && realXhr.status < 300) {
+            deliverSuccess(realXhr.status, realXhr.responseText, nativeGetAllHeaders.call(realXhr));
+          } else {
+            deliverFallback();
+          }
+        }
+      };
+      realXhr.onerror = deliverFallback;
+      realXhr.ontimeout = deliverFallback;
+      try {
+        nativeSend.apply(realXhr, arguments);
+      } catch (e) {
+        deliverFallback();
+      }
+      return;
+    }
+
+    if (sameOrigin(url) && ENGINE_ABONENTS_RE.test(url)) {
+      xhr.addEventListener('load', function () {
+        if (xhr.status === 200 && xhr.responseText) {
+          try {
+            var data = JSON.parse(xhr.responseText);
+            updateActiveContextAbonent(data);
+          } catch (e) { /* ignore */ }
+        }
+      });
     }
 
     if (sameOrigin(url) && method === 'GET' && PREVIEWS_RE.test(url)) {

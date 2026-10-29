@@ -19,6 +19,7 @@ pub mod directory_migrate;
 pub mod export_store;
 pub mod history;
 pub mod observability;
+pub mod previews;
 pub mod resources;
 pub mod sessions;
 pub mod settings_admin;
@@ -470,6 +471,22 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/v3/abonents/{id}/fecc", post(sessions::send_abonent_fecc))
         .route("/api/v3/sessions/{id}/abonents/{abonent_id}", delete(sessions::remove_session_abonent))
         .route("/api/v3/ui/sessions/{id}/abonents/{abonent_id}", delete(sessions::remove_session_abonent))
+        .route(
+            "/api/v3/sessions/{id}/previews/{target}",
+            post(previews::start_preview).get(previews::get_preview_frame).delete(previews::stop_preview),
+        )
+        .route(
+            "/api/v3/sessions/{id}/previews/{target}/",
+            post(previews::start_preview).get(previews::get_preview_frame).delete(previews::stop_preview),
+        )
+        .route(
+            "/api/v3/ui/sessions/{id}/previews/{target}",
+            post(previews::start_preview).get(previews::get_preview_frame).delete(previews::stop_preview),
+        )
+        .route(
+            "/api/v3/ui/sessions/{id}/previews/{target}/",
+            post(previews::start_preview).get(previews::get_preview_frame).delete(previews::stop_preview),
+        )
         // T2.2: история конференций (vendor /call_history*).
         .route("/api/v3/call_history", get(history::list))
         .route("/api/v3/call_history/", get(history::list))
