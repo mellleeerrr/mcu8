@@ -250,6 +250,12 @@ jobs:
       - name: Manifest SHA256 of deployed PNM bundles
         working-directory: client/pnm-frontend/deployed/pnm
         run: sha256sum -c ../../MANIFEST.sha256
+      # T07: манифест по фактическим файлам не ловит 404 на <script src> и
+      # stale .gz; тема в светлом режиме не имела --c-bg.
+      - name: Runtime invariants (file count, script refs, no stale .gz)
+        run: python3 scripts/check-pnm-runtime.py
+      - name: Theme invariant (meta theme-color == --c-bg, manifest #17212B)
+        run: python3 scripts/check-pnm-theme.py
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

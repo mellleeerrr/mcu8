@@ -130,10 +130,10 @@ fi
 # codian-layouts.js и блок CSS-override из index.html. Их нет в вендорском
 # архиве, а копирование 1:1 (rm -rf + распаковка) уничтожило бы их — вместе
 # с правками T1.1/T12b/T13/T14/T15, которые в них живут.
-log "сохранение проектного слоя (perf-overrides.js, api-errors.js, codian-layouts.js, CSS-override)"
+log "сохранение проектного слоя (perf-overrides.js, api-errors.js, codian-layouts.js, theme-toggle.js, deeplink.js, CSS-override)"
 PROJECT_LAYER="$TMP/project-layer"
 mkdir -p "$PROJECT_LAYER"
-for f in perf-overrides.js api-errors.js codian-layouts.js; do
+for f in perf-overrides.js api-errors.js codian-layouts.js theme-toggle.js deeplink.js; do
     if [ -f "$DEST/$f" ]; then
         cp -p "$DEST/$f" "$PROJECT_LAYER/$f"
         log "  сохранён: $f"
@@ -160,7 +160,7 @@ else:
 # повторный импорт восстанавливает его байт-в-байт (без эвристик вставки).
 block = re.search(r'<!-- prostor:project-layer:start -->.*?<!-- prostor:project-layer:end -->', text, re.S)
 if not block:
-    PROJECT_JS = ("api-errors.js", "perf-overrides.js", "codian-layouts.js")
+    PROJECT_JS = ("api-errors.js", "perf-overrides.js", "codian-layouts.js", "theme-toggle.js", "deeplink.js")
     tags = [
         tag
         for tag in re.findall(
@@ -221,7 +221,7 @@ log "файлов в рантайме: $FILE_COUNT ($TOTAL_BYTES байт)"
 # собственные скрипты), затем патчи вендорских чанков, затем — манифест
 # (шаг 4), который считается уже по итоговым байтам.
 log "восстановление проектного слоя"
-for f in perf-overrides.js api-errors.js codian-layouts.js; do
+for f in perf-overrides.js api-errors.js codian-layouts.js theme-toggle.js deeplink.js; do
     if [ -f "$PROJECT_LAYER/$f" ]; then
         cp -p "$PROJECT_LAYER/$f" "$DEST/$f"
         log "  восстановлен: $f"
@@ -281,6 +281,53 @@ for patch in "$ROOT/scripts/patch-pnm-chartjs.py" "$ROOT/scripts/patch-pnm-audio
     fi
 done
 
+# 3.55. Тема: вендорский index.html/manifest несут старые цвета (#0097A7),
+# а токен --c-bg есть только в тёмной теме. Проектный слой задаёт оба токена;
+# здесь детерминированно правим статический meta и manifest (идемпотентно),
+# иначе повторный импорт откатывал бы T07.
+log "применение инварианта темы (meta theme-color, manifest)"
+python3 - "$DEST/index.html" "$DEST/assets/manifest.webmanifest" <<'PYEOF'
+import re, sys, pathlib
+index_path, manifest_path = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+text = index_path.read_text(encoding="utf-8")
+dark = re.search(r"html\.theme-dark\s*\{[^}]*--c-bg:\s*(#[0-9a-fA-F]{6})", text, re.S)
+if not dark:
+    print("не найден html.theme-dark --c-bg: тема не применена", file=sys.stderr)
+    sys.exit(1)
+bg = dark.group(1)
+text, count = re.subn(r'(<meta name="theme-color" content=")#[0-9a-fA-F]{6}(")', r"\g<1>" + bg + r"\g<2>", text, count=1)
+if count != 1:
+    print("не найден статический meta[name=theme-color]", file=sys.stderr)
+    sys.exit(1)
+index_path.write_text(text, encoding="utf-8")
+manifest = manifest_path.read_text(encoding="utf-8")
+manifest, count = re.subn(r'("theme_color"\s*:\s*")#[0-9a-fA-F]{6}(")', r"\g<1>#17212B\g<2>", manifest, count=1)
+if count != 1:
+    print("не найден theme_color в manifest", file=sys.stderr)
+    sys.exit(1)
+manifest_path.write_text(manifest, encoding="utf-8")
+print(f"  meta theme-color: {bg}; manifest theme_color: #17212B")
+PYEOF
+
+# 3.6. Fail-closed: каждый проектный <script src="/mcu/...js"> обязан быть в
+# рантайме. Импорт без theme-toggle.js уже давал 404 при зелёном sha256sum,
+# потому что манифест считается по фактическим файлам.
+log "проверка ссылок на проектные скрипты"
+python3 - "$DEST/index.html" "$DEST" <<'PYEOF'
+import re, sys, pathlib
+index, dest = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+text = index.read_text(encoding="utf-8")
+missing = []
+for src in re.findall(r'<script[^>]*src="(/mcu/[^"]+)"[^>]*></script>', text):
+    path = dest / src[len("/mcu/"):]
+    if not path.is_file():
+        missing.append(src)
+if missing:
+    print("ОТСУТСТВУЮТ скрипты, на которые ссылается index.html: " + ", ".join(missing), file=sys.stderr)
+    sys.exit(1)
+print("  ссылки на скрипты: ok")
+PYEOF
+
 log "ВНИМАНИЕ: слой PROSTOR-ребренда (frontend/06-rebrand, вне репозитория) этим"
 log "  скриптом НЕ применяется. После импорта проверьте index.html (title=PROSTOR,"
 log "  локали ru_RU/en_US) и примените ребренд вручную — см. NOTES.md, «Как обновлять»."
@@ -288,7 +335,9 @@ log "  локали ru_RU/en_US) и примените ребренд вручн
 # 4. MANIFEST.sha256.
 # LC_ALL=C: порядок должен совпадать с Python `sorted()` (codepoint), который
 # пишет patch-pnm-layout-crash.py; иначе локаль ru_RU переставляет 55 строк.
-( cd "$DEST" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum ) > "$MANIFEST"
+# *.gz не должны попадать в манифест: это gitignored артефакты, их наличие
+# в рантайме сделало бы CI-checkout невалидным (T07).
+( cd "$DEST" && find . -type f ! -name '*.gz' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum ) > "$MANIFEST"
 log "манифест: $MANIFEST ($(wc -l < "$MANIFEST") строк)"
 
 # 5. Опционально: source/.
@@ -299,14 +348,10 @@ if [ "$WITH_SOURCE" -eq 1 ]; then
     tar -C "$TMP" -cf - source/extracted_frontend | tar -C "$ROOT/client/pnm-frontend/source" -xf -
 fi
 
-# 6. Опционально: предсжатие .gz.
+# 6. Предсжатие .gz удалено (T07): static-сжатие делает tower-http
+# CompressionLayer в рантайме, а .gz-артефакты ломали манифест/CI.
 if [ "$WITH_GZIP" -eq 1 ]; then
-    log "генерация .gz (precompressed_gzip)"
-    find "$DEST" -type f \
-        \( -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.svg' \
-           -o -name '*.json' -o -name '*.xml' -o -name '*.webmanifest' -o -name '*.txt' \) \
-        -exec gzip -9 -k -f {} \;
-    log "сгенерировано .gz-файлов: $(find "$DEST" -name '*.gz' | wc -l)"
+    log "ВНИМАНИЕ: --gzip больше не нужен (runtime CompressionLayer), флаг игнорируется"
 fi
 
 log "готово."

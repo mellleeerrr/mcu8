@@ -61,7 +61,7 @@ prost-build = "0.13"
 axum = { version = "0.8", features = ["ws", "multipart"] }
 # Статика фронтенда PNM: ServeDir/ServeFile (ADR-0027, docs/progress/archive/FRONTEND_PORT_PLAN.md §4.2).
 # Мержит `fs`-фичу (без default, чтобы не тянуть trace/cors в бинарник).
-tower-http = { version = "0.6", default-features = false, features = ["fs"] }
+tower-http = { version = "0.6", default-features = false, features = ["fs", "compression-gzip"] }
 # CSP-хэши inline-скриптов index.html (frontend.rs).
 sha2 = "0.10"
 base64 = "0.22"

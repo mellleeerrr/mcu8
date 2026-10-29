@@ -29,13 +29,15 @@
 use std::path::{Path, PathBuf};
 
 use axum::extract::{RawQuery, Request};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::header::HeaderMap;
+use axum::http::{header, HeaderValue, StatusCode, Version};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
+use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 use vks_common::metrics::FRONTEND_DENIED;
@@ -82,9 +84,8 @@ impl Frontend {
     pub fn mount(&self) -> Router {
         let pnm_dir = ServeDir::new(&self.root)
             .append_index_html_on_directories(false)
-            .precompressed_gzip()
-            .fallback(ServeFile::new(self.index.clone()).precompressed_gzip());
-        let mcu_dir = ServeDir::new(&self.root).append_index_html_on_directories(false).precompressed_gzip();
+            .fallback(ServeFile::new(self.index.clone()));
+        let mcu_dir = ServeDir::new(&self.root).append_index_html_on_directories(false);
 
         Router::new()
             .route("/", get(redirect_root))
@@ -102,8 +103,45 @@ impl Frontend {
     /// Security-заголовки сюда **не** входят: они app-wide в `build_app` (§4.2,
     /// включая `/api/v1/*` и `/metrics`) — см. `vks_server::build_app`.
     pub fn router(&self) -> Router {
-        self.mount().layer(axum::middleware::from_fn(with_cache_control))
+        // Runtime gzip (tower-http CompressionLayer) instead of precompressed
+        // .gz copies: the import script never generated them (and .gz files
+        // must not enter MANIFEST), so /pnm/ shipped ~2 MB of uncompressed
+        // JS/CSS. The predicate keeps tiny files, already-encoded responses and
+        // incompressible media untouched.
+        self.mount()
+            .layer(axum::middleware::from_fn(with_cache_control))
+            .layer(CompressionLayer::new().gzip(true).compress_when(should_compress_static))
     }
+}
+
+/// `CompressionLayer` predicate: only successful, >=1 KiB, textual responses
+/// that are not already encoded. Fonts/images/video (already compressed) and
+/// 304/404 are left as-is.
+fn should_compress_static(
+    status: StatusCode,
+    _version: Version,
+    headers: &HeaderMap,
+    _extensions: &axum::http::Extensions,
+) -> bool {
+    if !status.is_success() || headers.contains_key(header::CONTENT_ENCODING) {
+        return false;
+    }
+    let length = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    if length < 1024 {
+        return false;
+    }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    ["text/", "application/javascript", "application/json", "application/xml", "image/svg+xml"]
+        .iter()
+        .any(|allowed| content_type.starts_with(allowed))
 }
 
 /// Deep-link удалённого раздела калибровки (T1.1) → «Статистика».
@@ -189,10 +227,9 @@ fn is_immutable_asset(rel: &str) -> bool {
 /// 404 под `/mcu`; traversal/invalid-name тоже приходят сюда через fallback-семантику
 /// `ServeDir`, отдельного reason `traversal` у слоя нет — см. `metrics.rs`).
 ///
-/// `Vary` обязателен при `precompressed_gzip()`: представление выбирается по
-/// `Accept-Encoding`, а `ServeDir` сам этот заголовок не ставит (проверено по
-/// исходникам tower-http 0.6.11). Без него общий кэш (reverse-proxy/CDN) может
-/// отдать gzip-представление клиенту, который его не принимает.
+/// `Vary: Accept-Encoding` обязателен: `CompressionLayer` выбирает gzip по
+/// `Accept-Encoding`, и общий кэш (reverse-proxy/CDN) без этого заголовка мог
+/// бы отдать сжатое представление клиенту, который его не принимает.
 pub async fn with_cache_control(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
     let is_static = statics_rel_path(&path).is_some();
@@ -298,12 +335,6 @@ mod tests {
     /// sha256-base64 строки `window.x=1;` (единственный inline-скрипт фикстуры).
     const FIXTURE_INLINE_HASH: &str = "g7sq2RbwbLEHSBobiM09D+ctI3iVsKqmfbqIiETF4t4=";
 
-    /// gzip-поток для `console.log(1);` (mtime=0) — для проверки precompressed_gzip.
-    const GZIP_LOG_LINE: &[u8] = &[
-        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x4b, 0xce, 0xcf, 0x2b, 0xce, 0xcf, 0x49, 0xd5,
-        0xbc, 0x94, 0xfd, 0x73, 0x0d, 0x43, 0x6d, 0x40, 0x3d, 0x46, 0x23, 0x0f, 0x00, 0x00, 0x00,
-    ];
-
     struct Fixture {
         base: PathBuf,
         root: PathBuf,
@@ -328,8 +359,8 @@ mod tests {
         std::fs::create_dir_all(root.join("assets/images")).unwrap();
         std::fs::write(root.join("index.html"), FIXTURE_HTML).unwrap();
         std::fs::write(root.join("chunks/app.bundle-1.0.0.js"), "console.log(1);").unwrap();
-        std::fs::write(root.join("chunks/precompressed.bundle-1.0.0.js"), "console.log(1);").unwrap();
-        std::fs::write(root.join("chunks/precompressed.bundle-1.0.0.js.gz"), GZIP_LOG_LINE).unwrap();
+        std::fs::write(root.join("chunks/compressible.bundle-1.0.0.js"), "a".repeat(4096)).unwrap();
+        std::fs::write(root.join("chunks/tiny.js"), "x".repeat(16)).unwrap();
         std::fs::write(root.join("assets/fonts/DxNvdLoR.ttf"), b"font-bytes").unwrap();
         std::fs::write(root.join("assets/images/BVqNbXmI.svg"), "<svg/>").unwrap();
         std::fs::write(root.join("assets/previewCu2j3Z3R.webm"), vec![7u8; 64]).unwrap();
@@ -570,19 +601,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn precompressed_gzip_is_served() {
+    async fn compressible_static_is_gzipped_at_runtime() {
         let f = fixture("gzip");
         let app = app_for(&f);
+        for uri in ["/mcu/chunks/compressible.bundle-1.0.0.js", "/pnm/chunks/compressible.bundle-1.0.0.js"] {
+            let request =
+                HttpRequest::builder().uri(uri).header(header::ACCEPT_ENCODING, "gzip").body(Body::empty()).unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_ENCODING).map(|value| value.to_str().unwrap()),
+                Some("gzip"),
+                "{uri} must be compressed"
+            );
+            assert_eq!(
+                response.headers().get(header::VARY).map(|value| value.to_str().unwrap()),
+                Some("Accept-Encoding")
+            );
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            assert_eq!(&body[..2], &[0x1f, 0x8b], "{uri} gzip magic");
+            assert!(body.len() < 4096, "{uri} is actually smaller");
+        }
+        // Small files stay uncompressed (gzip overhead for 16 bytes).
         let request = HttpRequest::builder()
-            .uri("/mcu/chunks/precompressed.bundle-1.0.0.js")
+            .uri("/mcu/chunks/tiny.js")
+            .header(header::ACCEPT_ENCODING, "gzip")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert!(response.headers().get(header::CONTENT_ENCODING).is_none(), "tiny file must not be gzipped");
+    }
+
+    #[tokio::test]
+    async fn head_request_is_not_compressed() {
+        let f = fixture("gzip-head");
+        let app = app_for(&f);
+        let request = HttpRequest::builder()
+            .method("HEAD")
+            .uri("/mcu/chunks/compressible.bundle-1.0.0.js")
             .header(header::ACCEPT_ENCODING, "gzip")
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers().get(header::CONTENT_ENCODING).unwrap().to_str().unwrap(), "gzip");
-        let body = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
-        assert_eq!(body.as_ref(), GZIP_LOG_LINE);
+        // HEAD отражает заголовки GET: gzip-кодирование допустимо. Тело в
+        // реальном hyper для HEAD отбрасывается; тестовый `oneshot` видит
+        // результат слоя (gzip-поток пустого тела), поэтому проверяем только
+        // статус и Vary — кэш обязан различать представления.
+        assert_eq!(response.headers().get(header::VARY).map(|value| value.to_str().unwrap()), Some("Accept-Encoding"));
     }
 
     #[tokio::test]

@@ -23,8 +23,15 @@
     var isDark = theme === DARK;
     root.classList.toggle('theme-dark', isDark);
     root.classList.toggle('theme-light', !isDark);
+    // Meta theme-color должен совпадать с фактическим фоном документа
+    // (инвариант T07): читаем вычисленный --c-bg, а не константу primary.
+    var bg = '';
+    try {
+      bg = getComputedStyle(root).getPropertyValue('--c-bg').trim();
+    } catch (_) {}
+    if (!bg) bg = isDark ? '#0e1621' : '#f8f8f8';
     var meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', isDark ? '#0E1621' : '#0088CC');
+    if (meta) meta.setAttribute('content', bg);
 
     var label = isDark ? 'Переключить на светлую тему' : 'Переключить на тёмную тему';
     if (btn) {
@@ -79,7 +86,13 @@
   }
 
   mount();
-  document.addEventListener('DOMContentLoaded', mount);
+  // Ранний вызов apply() идёт до появления <meta theme-color> и таблиц
+  // стилей: класс темы ставится сразу (без вспышки), а инвариант
+  // meta == computed --c-bg доводится после разбора документа.
+  document.addEventListener('DOMContentLoaded', function () {
+    apply(currentTheme());
+    mount();
+  });
   window.addEventListener('load', mount);
   window.addEventListener('pageshow', function (e) {
     if (e.persisted) apply(currentTheme());

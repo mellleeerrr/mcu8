@@ -34,7 +34,7 @@
 
 ## Критерии приёмки по задачам (кратко)
 
-- **T01 ✅:** release HEAD = `cbad4986…`; `/proc/<pid>/exe` не `(deleted)`; бэкап БД `backups/2026-10-29/vks_data.db.pre-d82ce4d` integrity ok; smoke `:18082` (healthz/readyz 200, m5 401, fake JWT 401, login 200, MANIFEST 214/214); live: LAN `/metrics` 403, anon m5 401, sidecar child, SIP/H.323 READY.
+- **T01 ✅:** release HEAD = `cbad4986…`; `/proc/<pid>/exe` не `(deleted)`; бэкап БД `backups/2026-10-29/vks_data.db.pre-d82ce4d` integrity ok; smoke `:18082` (healthz/readyz 200, m5 401, fake JWT 401, login 200, MANIFEST 214/214 на момент T01); live: LAN `/metrics` 403, anon m5 401, sidecar child, SIP/H.323 READY.
 - **T02:** LDAP mock только при `allow_mock_ldap` (уже factory-level fail-closed — не сломать); `sync-ldap` → 501 без LDAP-провайдера; Argon2id m=19456,t=2,p=1, семaphore 4 + bounded queue + 429; глобальный token-bucket 50/с burst 200; пароль ≤128; PBKDF2-хеш логинится и лениво перехешируется, generation не сброшен; ADR-обновление allowed-deps.
 - **T03a:** `cargo test --workspace --all-features` зелёный (cfg-aware ожидания в `codec.rs`); CI-джобы без continue-on-error там, где должны падать; `node --check` на JS; MANIFEST проверяется; кэш-ключ учитывает `.cargo/config.toml`+toolchain.
 - **T03b ✅:** `cargo doc --workspace --no-deps` c `RUSTDOCFLAGS="-D warnings"` зелёный; CI rustdoc-джоба больше не `continue-on-error`; README/DOC убрали oxideav-фичу; ldap3/Taffy/hadrone-core/dioxus-shadcn/progenitor помечены как план.

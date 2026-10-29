@@ -44,10 +44,10 @@
 
 1. **Размещение** (структура — наша, внутренности — архива 1:1):
    - `client/pnm-frontend/archive/PNM-Frontend-20261016.zip` — оригинал (юридический якорь, не распаковывается);
-   - `client/pnm-frontend/deployed/pnm/` — рантайм (извлечён 1:1, исключены только `*.bak*`; `MANIFEST.sha256` — 210 файлов); формула: **замыкание ссылок `index.html` (+ LICENSE.txt)**;
+   - `client/pnm-frontend/deployed/pnm/` — рантайм (извлечён 1:1, исключены только `*.bak*`; `MANIFEST.sha256` — 215 файлов); формула: **замыкание ссылок `index.html` (+ LICENSE.txt)**;
    - `scripts/import-pnm-frontend.sh` — идемпотентный импорт/переимпорт (sha256-якорь, recovery, `--with-source`, `--gzip`).
 2. **Раздача статики**: крейт `vks-server`, модуль `frontend.rs` на `tower_http::ServeDir`/`ServeFile` 0.6.11 (ADR + запись в `deny.toml`). Роуты: `/` 307→`/pnm/`; `/pnm` 308→`/pnm/` (+query); `/pnm/…` — файл, иначе SPA-fallback `index.html`; `/mcu/…` — файл, иначе 404; `/admin(/` 307→`/pnm/administration` (до Dioxus-админки, фаза 8).
-3. **Кэш**: `immutable` — только реально хэшированные (`assets/fonts/**`, `assets/images/**`, `assets/*<hash>.webm`); всё остальное (в т.ч. `chunks/**`, `index.html`) — `no-cache`; `Vary: Accept-Encoding` (precompressed gzip); процедура cache-bust при ручных правках — `NOTES.md`.
+3. **Кэш**: `immutable` — только реально хэшированные (`assets/fonts/**`, `assets/images/**`, `assets/*<hash>.webm`); всё остальное (в т.ч. `chunks/**`, `index.html`) — `no-cache`; `Vary: Accept-Encoding` (runtime gzip через `CompressionLayer`); процедура cache-bust при ручных правках — `NOTES.md`.
 4. **CSP и заголовки**: `script-src 'self'` + sha256 **всех** inline-скриптов `index.html` (в сборке их 5; вычисляются при старте — правки index.html не ломают политику), `style-src 'self' 'unsafe-inline'`, `media-src 'self' blob:`, `img-src 'self' data: blob:`, `connect-src 'self'`; app-wide `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: same-origin`; HSTS — только prod-TLS.
 5. **Адаптер `/api/v3`** (`crates/vks-admin/src/api_v3/`): тонкий маппер на домен (комнаты = `ui/sessions`/`conferences`); catch-all → `501` JSON + `tracing::warn!` + метрика (не 404: 404 UI трактует как «метода нет»); WS `/api/v3/ws` — токен в каждом сообщении, `error.code=401` → logout клиента, технические ошибки не рвут соединение; лимиты: кадр ≤16 KB, ping 30 s, rate-limit реконнектов 100/s (BACKEND_RULES §2.4/§2.5).
 6. **Аутентификация**: `/api/v3` middleware **fail-closed** (`jwt_issuer=None` → 503, включая login); `POST login`/`GET login/status`/`system/about`/`about`/`references` — exempt; TTL **86400 c** (отклонение от BACKEND_RULES §1.1 «900»: legacy UI не умеет refresh — зафиксировано здесь); lockout — по BACKEND_RULES §1.4 (5 неудач/15 мин per user+IP; 10/5 мин per IP; блок 15 мин) + аудит (ADR-0019) + метрика; токены/пароли **не логируются** (§6.3).
@@ -82,7 +82,7 @@
 
 | Библиотека | Версия | Лицензия | Почему | Альтернативы отвергнуты |
 |---|---|---|---|---|
-| tower-http (`fs`) | 0.6.11 | MIT | ServeDir: decode-once, покомпонентная валидация путей, Range/HEAD/304/Last-Modified, precompressed_gzip, fallback | свой сервер (риск уязвимостей), `tower::ServeDir` (устар.), `axum-extra` (не покрывает) |
+| tower-http (`fs`) | 0.6.11 | MIT | ServeDir: decode-once, покомпонентная валидация путей, Range/HEAD/304/Last-Modified, fallback; сжатие — `CompressionLayer` | свой сервер (риск уязвимостей), `tower::ServeDir` (устар.), `axum-extra` (не покрывает) |
 | sha2 | 0.10 | MIT OR Apache-2.0 | sha256 inline-скриптов для CSP | `ring` (тяжелее, не для wasm-соседей) |
 | base64 | 0.22 | MIT OR Apache-2.0 | base64 для CSP-хэшей | ручной энкодер |
 | tokio-tungstenite (dev) | 0.29 | MIT (OR Apache-2.0) | тесты WS `/api/v3/ws` | сырой TCP-клиент |
@@ -90,6 +90,6 @@
 ## Документация, изученная перед решением
 
 - axum 0.8.9: `src/routing/path_router.rs` (nest/route, трейлинг-слэш, отсутствие авто-редиректов) — https://docs.rs/axum/0.8
-- tower-http 0.6.11: `src/services/fs/serve_dir/*` (валидация путей, fallback, Range/HEAD/304, precompressed) — https://docs.rs/tower-http/0.6
+- tower-http 0.6.11: `src/services/fs/serve_dir/*` (валидация путей, fallback, Range/HEAD/304) — https://docs.rs/tower-http/0.6
 - cargo-deny 0.18: схема `[graph]/[licenses]/[advisories]/[sources]` — https://embarkstudios.github.io/cargo-deny/checks/cfg.html
 - Контракт UI: `scripts/pnm-smoke/observed_endpoints.json` + трассировка бандла (`docs/progress/archive/FRONTEND_PORT_PLAN.md` Приложение A)

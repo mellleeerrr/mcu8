@@ -108,7 +108,7 @@
 |---|---|---|
 | Deep link на сессию | ✅ | Работает при живом токене (проверено). **Реальный дефект** — гард/логин теряют URL; T07 патчит `patch-pnm-auth-deeplink.py`. |
 | `#0097A7` → `#17212B` | 🟡 | `#17212B` — surface, акцент `#0088cc`; `theme-color #0097A7` перетирается `theme-toggle.js`. T07: привести theme-color/manifest к принятой палитре, не ломая вендорский CSS. |
-| MANIFEST/CSP | 🟡 | MANIFEST — provenance (214 файлов, CI проверяет), CSP считается при старте из inline. T07: импорт сохраняет `theme-toggle.js`/manifest; CSP-правка требует рестарта — задокументировать. |
+| MANIFEST/CSP | ✅ | MANIFEST — provenance (215 файлов, CI проверяет sha256 + count/refs/theme), CSP считается при старте из inline; CSP-правка требует рестарта — задокументировано. |
 | Gzip (precompressed) | ❌ | T07: реально отдавать `.gz` (tower-http compression/precompressed), иначе 12,75 МБ вместо 2,89 МБ. |
 | WASM SDK `ServerHello.room_mode` | 🟡 | T08: SDK теряет поле — прокинуть, выбирать конвейер при join, `RoomModeChanged`; публичный `#[wasm_bindgen]` — минимальный. |
 | CSS/Taffy в SDK | ⛔ | Клиент получает прямоугольники; Taffy не внедрять. |
@@ -183,7 +183,7 @@
 - **T04b. CodecSpec SSOT.** Одна таблица `native/worker/webrtc/unsupported+reason` + 3 генерированных среза + мета-тест «у каждого элемента ровно один оффер/ветка»; замена 6 списков. Приёмка: нет лжи в публичной матрице.
 - **T05. DTMF.** Маркер только на `step==0`, общий timestamp/`started`, `duration` +160 мс; `send_to` → метрика/лог; тесты `dtmf_packets()` + receiver_tone_ms()==200 (сейчас 60).
 - **T06. Layout.** `normalize_loaded` recalc + единый резолвер size (4 порядка → 1); переписать `resource_tests.rs:2495` (size>preset → 25) после смены контракта; P2-5/6/8/9/13; тест движка n=5@1280×720 (центрирование, fill 83,28%); `preset_default_13` — 400 **намеренный** (тесты `resource_tests.rs:821–860`), чинить оракул `layout_constructor_ui.js:311` (vendor400Count>0, unexpected===0), не сервер; docs `BACKEND_RULES.md`/`LAYOUT_ENGINE.md`.
-- **T07. Frontend PNM.** Сохранение deep link в гарде/логине (внешний JS или python-патч бандла); импорт сохраняет `theme-toggle.js`/manifest; `CompressionLayer` (не precompressed .gz — их 0 и они в .gitignore), curl-приёмка `content-encoding: gzip`; тема: инвариант `meta[theme-color] == computed --c-bg` (`#0E1621` dark; `#17212B` только в manifest), + `check-pnm-theme.sh`; CI-гейты. Приёмка: e2e «deep link без токена → логин → та же сессия», 214/214 MANIFEST + CSP-хэши после рестарта.
+- **T07. Frontend PNM.** Сохранение deep link в гарде/логине (внешний JS или python-патч бандла); импорт сохраняет `theme-toggle.js`/manifest; `CompressionLayer` (не precompressed .gz — их 0 и они в .gitignore), curl-приёмка `content-encoding: gzip`; тема: инвариант `meta[theme-color] == computed --c-bg` (`#0E1621` dark; `#17212B` только в manifest), + `check-pnm-theme.sh`; CI-гейты. Приёмка: e2e «deep link без токена → логин → та же сессия», 215/215 MANIFEST + CSP-хэши после рестарта.
 - **T08. SDK.** `ServerHello.room_mode` в структуре + выбор конвейера при join + `RoomModeChanged`; wasm32 check; тест 51/51.
 
 ### Фаза 2 — данные и запись
