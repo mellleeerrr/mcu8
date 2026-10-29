@@ -1455,6 +1455,7 @@ mod tests {
         "vks-server/src/gateway_aac.rs",
         "vks-server/src/gateway_audio.rs",
         "vks-server/src/gateways.rs",
+        "vks-server/src/lib.rs",
         "vks-server/src/main.rs",
         "vks-server/src/transcoder_runtime.rs",
         "vks-signaling/src/handler.rs",
@@ -1493,7 +1494,15 @@ mod tests {
         ),
         (
             "vks-server/src/main.rs",
-            "composition root: only RtpMap wire spellings; RoomCaps come from HandlerConfig (production caps test)",
+            "composition root: only RtpMap wire spellings; validated against webrtc_answer_specs by production_rtp_maps_match_the_ssot_webrtc_answer_slice",
+        ),
+        (
+            "vks-common/src/codec_capabilities.rs",
+            "native video id dispatch (H264/H265 probe atomics); slices are generated and checked by native_consts_equal_generated_slices",
+        ),
+        (
+            "vks-admin/src/api_v3/shell.rs",
+            "vendor /license keys mapped to SSOT spellings; every boolean is derived, checked by license_params_are_derived_from_ssot_dispositions",
         ),
     ];
 
@@ -1506,6 +1515,55 @@ mod tests {
         ),
         ("vks-gateway-sip/src/codec.rs", "dead legacy CodecMap, removed in T04c"),
         ("vks-gateway-h323/src/codec.rs", "dead legacy CodecMap, removed in T04c"),
+    ];
+
+    /// Production-only exceptions: these files do not import the SSOT but
+    /// legitimately spell more than one canonical codec name (transport rows,
+    /// FFmpeg probe ids, dead legacy maps retired in T04c). Every entry names
+    /// the test that ties the spelling back to the SSOT.
+    const NON_CONSUMER_NAME_CLUSTER_ALLOWLIST: &[(&str, &str)] = &[
+        (
+            "vks-gateway-sip/src/uac.rs",
+            "SDP fmtp helpers for H264/H265 only; offer rows are validated by offer_rows_match_spec",
+        ),
+        (
+            "vks-gateway-sip/src/g726.rs",
+            "G.726 bitrate-to-wire-name helpers; variants live in CODEC_VARIANTS and g726_variants_require_a_supported_bitrate",
+        ),
+        (
+            "vks-server/src/gateway_video.rs",
+            "FFmpeg probe enum H264/H265; availability is published into the SSOT atomics in main and checked by video tests",
+        ),
+        (
+            "vks-core/src/media_policy.rs",
+            "unused legacy defaults; vks-core deliberately has no vks-common dependency (P3/T04c)",
+        ),
+        ("vks-gateway-sip/src/codec.rs", "dead legacy CodecMap, removed in T04c"),
+        ("vks-gateway-h323/src/codec.rs", "dead legacy CodecMap, removed in T04c"),
+    ];
+
+    /// Literal capability tables the SSOT already replaced. Scanned in the
+    /// production part of every `crates/vks-*/src/**/*.rs` file (not only in
+    /// the files above) so a regression cannot hide behind a new module.
+    const FORBIDDEN_CODEC_LITERALS: &[(&str, &[&str], &str)] = &[
+        (".with_caps(", &[], "production must not overwrite SSOT-derived RoomCaps"),
+        (
+            "video_codecs: vec![",
+            &["vks-proto/src/lib.rs", "vks-media-mcu/src/engine.rs"],
+            "proto round-trip / MCU engine test fixtures, not capability truth",
+        ),
+        ("audio_codecs: vec![", &[], "production must not build an audio codec list"),
+        ("const H323_AUDIO:", &[], "H.323 audio list must derive from CODECS"),
+        ("const H323_VIDEO:", &[], "H.323 video list must derive from CODECS"),
+        ("107 => \"G726-16\"", &[], "server PT table must derive from the SSOT"),
+        ("Some(\"G72616\")", &[], "gateway audio codec names must resolve via the SSOT"),
+        ("matches!(normalized.as_str(), \"AAC\"", &[], "AAC identity must come from CodecId"),
+        ("\"G72616\" => \"G726-16\"", &[], "UAS PT map must derive from the SSOT"),
+        ("pub native: bool", &[], "offer rows must be keyed by CodecId, not a native bit"),
+        ("H323_NATIVE_AUDIO_PTS: &[u8] = &[", &[], "H.323 PTs must derive from CODECS"),
+        ("\"opus\" | \"pcmu\" | \"pcma\" | \"g722\"", &[], "SDP audio classification must come from CodecKind"),
+        ("\"g719\": true", &[], "/license params must derive from the SSOT"),
+        ("\"h264-svc\": true", &[], "/license params must derive from the SSOT"),
     ];
 
     fn read_crate_source(file: &str) -> String {
@@ -1528,6 +1586,44 @@ mod tests {
                 out.push(relative);
             }
         }
+    }
+
+    /// Production part of a file: everything before its first `#[cfg(test)]`
+    /// module. Tests legitimately spell codec names and must not make the scan
+    /// useless (all Rust files in this repo keep tests after production code).
+    fn production_source(file: &str) -> String {
+        let source = read_crate_source(file);
+        match source.find("#[cfg(test)]") {
+            Some(index) => source[..index].to_string(),
+            None => source,
+        }
+    }
+
+    /// Files that are tests themselves (`api_v3/tests.rs`, `*_tests.rs`) and
+    /// are included from a `#[cfg(test)] mod` elsewhere. They do not carry an
+    /// inner `#[cfg(test)]` marker, so skip them by name.
+    fn is_test_source_file(file: &str) -> bool {
+        let name = file.rsplit('/').next().unwrap_or(file);
+        name == "tests.rs" || name.ends_with("_tests.rs")
+    }
+
+    /// Canonical SSOT names (spec names, aliases and alias families) that
+    /// appear as quoted string literals in `source`.
+    fn codec_names_in(source: &str) -> BTreeSet<&'static str> {
+        let mut names = BTreeSet::new();
+        for spec in CODECS {
+            for name in std::iter::once(spec.name).chain(spec.aliases.iter().copied()) {
+                if source.contains(&format!("\"{name}\"")) {
+                    names.insert(name);
+                }
+            }
+        }
+        for family in ALIAS_FAMILIES {
+            if source.contains(&format!("\"{}\"", family.name)) {
+                names.insert(family.name);
+            }
+        }
+        names
     }
 
     #[test]
@@ -1567,31 +1663,30 @@ mod tests {
 
     #[test]
     fn no_second_codec_name_table_outside_allowlist() {
-        // T1: the SSOT is only useful if no consumer keeps its own literal
-        // capability table. These needles are the known historical copies; the
-        // explicit allowlist above documents the legitimate transport/UI
-        // spellings, so a new table must either derive from CODECS or add an
-        // allowlist entry with a test that ties it back to the SSOT.
-        let forbidden: &[(&str, &str)] = &[
-            ("vks-server/src/gateways.rs", "const H323_AUDIO"),
-            ("vks-server/src/gateways.rs", "const H323_VIDEO"),
-            ("vks-server/src/gateways.rs", "107 => \"G726-16\""),
-            ("vks-server/src/gateway_audio.rs", "Some(\"G72616\")"),
-            ("vks-server/src/gateway_aac.rs", "matches!(normalized.as_str(), \"AAC\""),
-            ("vks-gateway-sip/src/uas.rs", "\"G72616\" => \"G726-16\""),
-            ("vks-gateway-sip/src/rtp_bridge.rs", "pub native: bool"),
-            ("vks-gateway-h323/src/lib.rs", "pub const H323_NATIVE_AUDIO_PTS: &[u8] = &[0, 4, 8, 9]"),
-            ("vks-signaling/src/sdp.rs", "\"opus\" | \"pcmu\" | \"pcma\" | \"g722\""),
-            // P1: the production composition root must not rebuild RoomCaps
-            // codec fields or overwrite the SSOT-derived caps.
-            ("vks-server/src/main.rs", "video_codecs: vec!["),
-            ("vks-server/src/main.rs", "audio_codecs: vec!["),
-            ("vks-server/src/main.rs", ".with_caps("),
-        ];
-        for (file, needle) in forbidden {
-            let source = read_crate_source(file);
-            assert!(!source.contains(needle), "{file} still contains a second codec table: {needle}");
+        // T1: the SSOT is only useful if no file keeps its own literal
+        // capability table. The known historical copies are scanned in the
+        // production part of **every** `crates/vks-*/src/**/*.rs`, so a
+        // regression cannot hide in a freshly added module (review B P2-7).
+        let crates_root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let mut files = Vec::new();
+        collect_rust_files(std::path::Path::new(crates_root), &mut files);
+        let src_files: Vec<String> =
+            files.into_iter().filter(|file| file.contains("/src/") && !is_test_source_file(file)).collect();
+        assert!(src_files.len() > 40, "scan must cover the real src tree, got {}", src_files.len());
+        for (needle, allowed_files, reason) in FORBIDDEN_CODEC_LITERALS {
+            for file in &src_files {
+                let source = production_source(file);
+                if source.contains(needle) {
+                    assert!(
+                        allowed_files.contains(&file.as_str()),
+                        "{file} still contains a literal codec table ({needle:?}): {reason}. \
+                         Derive it from CODECS or add a documented allowlist entry with a proving test"
+                    );
+                }
+            }
         }
+        // Consumers must still import the SSOT (the completeness test above
+        // enforces the exact file list).
         for file in SSOT_CONSUMER_FILES {
             let source = read_crate_source(file);
             assert!(
@@ -1599,5 +1694,44 @@ mod tests {
                 "{file} does not consume the codec SSOT"
             );
         }
+    }
+
+    #[test]
+    fn no_codec_name_cluster_outside_allowlist() {
+        // A fresh file such as `const CODECS2: &[&str] = &["OPUS", "VP8"];` is
+        // exactly the T1 regression the SSOT exists to prevent. Catch any
+        // production file that spells two or more canonical codec names unless
+        // it is explicitly allowlisted with a proving test.
+        assert_eq!(
+            codec_names_in("const T: &[&str] = &[\"OPUS\", \"VP8\"];").len(),
+            2,
+            "the cluster scanner itself must detect a fresh literal table"
+        );
+        let crates_root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let mut files = Vec::new();
+        collect_rust_files(std::path::Path::new(crates_root), &mut files);
+        let src_files: Vec<String> =
+            files.into_iter().filter(|file| file.contains("/src/") && !is_test_source_file(file)).collect();
+        let allowlist: BTreeSet<&str> = NAME_SPELLING_ALLOWLIST
+            .iter()
+            .chain(NON_CONSUMER_NAME_CLUSTER_ALLOWLIST.iter())
+            .map(|(file, _)| *file)
+            .collect();
+        for (file, reason) in NAME_SPELLING_ALLOWLIST.iter().chain(NON_CONSUMER_NAME_CLUSTER_ALLOWLIST.iter()) {
+            assert!(!reason.is_empty(), "{file} allowlist entry needs a reason");
+            assert!(src_files.iter().any(|candidate| candidate.as_str() == *file), "{file} allowlist entry is stale");
+        }
+        let mut offenders = Vec::new();
+        for file in &src_files {
+            let names = codec_names_in(&production_source(file));
+            if names.len() >= 2 && !allowlist.contains(file.as_str()) {
+                offenders.push(format!("{file}: {names:?}"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "codec name tables outside the explicit allowlist: {offenders:#?}. \
+             Derive from CODECS or add a documented allowlist entry with a proving test"
+        );
     }
 }

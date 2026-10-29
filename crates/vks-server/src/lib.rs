@@ -656,10 +656,15 @@ fn offer_supports_real_webrtc(sdp: &str) -> bool {
 fn answer_payload_types(maps: &[vks_proto::signaling::RtpMap]) -> Vec<(vks_core::MediaKind, u8)> {
     maps.iter()
         .filter_map(|map| {
-            let kind = match map.codec.to_ascii_lowercase().as_str() {
-                "opus" | "pcmu" | "pcma" | "g722" => vks_core::MediaKind::Audio,
-                "vp8" | "h264" => vks_core::MediaKind::Video,
-                _ => return None,
+            // Codec identity/class comes from the SSOT, not a second literal
+            // table: a new codec in the answer must not be silently dropped
+            // (and an unsupported one must not be guessed by spelling).
+            let kind = match vks_common::codec_spec::lookup(&map.codec)?.kind {
+                vks_common::codec_spec::CodecKind::Audio => vks_core::MediaKind::Audio,
+                vks_common::codec_spec::CodecKind::Video => vks_core::MediaKind::Video,
+                // RFC 4733 telephone-event rides the audio m-line but is not a
+                // selectable media codec.
+                vks_common::codec_spec::CodecKind::Dtmf => return None,
             };
             u8::try_from(map.payload).ok().map(|payload_type| (kind, payload_type))
         })
