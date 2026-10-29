@@ -17,7 +17,7 @@ use std::sync::{Arc, OnceLock};
 
 use vks_common::metrics::WEBRTC_FALLBACK;
 use vks_media_sfu::webrtc::WebRtcConfig;
-use vks_media_sfu::webrtc_room::{AcceptedPeer, WebRtcRoomRegistry};
+use vks_media_sfu::webrtc_room::{AcceptedPeer, RoomLimits, WebRtcRoomRegistry};
 use vks_signaling::handler::HandlerConfig;
 
 /// `VKS_WEBRTC_TRANSPORT` defaults to ON (real str0m transport). Accepts
@@ -82,6 +82,18 @@ pub fn preflight(config: &HandlerConfig, allow_loopback: bool) -> Result<(), Str
 pub fn preflight_candidate(candidate_addr: &str, allow_loopback: bool) -> Result<(), String> {
     if !enabled() {
         return Ok(());
+    }
+    // Admission limits are part of the startup contract: a typo in
+    // VKS_WEBRTC_MAX_PEERS_PER_ROOM / VKS_WEBRTC_MAX_PEERS must exit 78, not
+    // silently fall back to a default (T11b D3).
+    let limits = RoomLimits::from_env().map_err(|error| format!("WebRTC admission limits are invalid: {error}"))?;
+    if limits.max_peers_per_room > vks_media_sfu::webrtc::MAX_VIDEO_MIDS {
+        tracing::warn!(
+            max_peers_per_room = limits.max_peers_per_room,
+            mid_ceiling = vks_media_sfu::webrtc::MAX_VIDEO_MIDS,
+            "VKS_WEBRTC_MAX_PEERS_PER_ROOM exceeds the per-source mid ceiling: subscribers offering the \
+             maximum 1+(N-1) mids will not see every publisher (counted as webrtc_sources result=dropped_no_mid)"
+        );
     }
     // Dev config (`allow_insecure_defaults = true`) is loopback-friendly so
     // `cargo run` still works out of the box; production must set a real IP.
@@ -170,7 +182,17 @@ pub fn registry(config: &HandlerConfig) -> Option<Arc<WebRtcRoomRegistry>> {
                     webrtc.bwe_initial_bps = bps.clamp(64_000, 50_000_000);
                 }
             }
-            Some(WebRtcRoomRegistry::new(webrtc, ip))
+            // Fail closed: if `preflight` was skipped (library embedder), an
+            // invalid cap must still refuse the WebRTC plane rather than admit
+            // peers with a silent default.
+            let limits = match RoomLimits::from_env() {
+                Ok(limits) => limits,
+                Err(error) => {
+                    tracing::error!(%error, "WebRTC: invalid admission limits; offers fail closed");
+                    return None;
+                }
+            };
+            Some(WebRtcRoomRegistry::with_limits(webrtc, ip, limits))
         })
         .clone()
 }

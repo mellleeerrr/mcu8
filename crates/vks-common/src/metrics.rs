@@ -86,6 +86,17 @@ pub static WEBRTC_FRAMES_DROPPED: LazyLock<IntCounterVec> = LazyLock::new(|| {
         .expect("vks_webrtc_frames_dropped_total must register once")
 });
 
+/// Counter: per-source egress mids on the real WebRTC plane (T11b).
+///
+/// `result` = `allocated` | `retired` | `dropped_no_mid`. A non-zero
+/// `dropped_no_mid` is the explicit (never silent) degradation of a subscriber
+/// whose SDP has fewer egress mids than the room has publishers: that publisher
+/// is not visible there, two sources are never glued into one mid.
+pub static WEBRTC_SOURCES: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!("vks_webrtc_sources_total", "WebRTC per-source egress mids", &["result"])
+        .expect("vks_webrtc_sources_total must register once")
+});
+
 /// Counter: offers that fell back to the legacy (non-WebRTC) answer.
 pub static WEBRTC_FALLBACK: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!("vks_webrtc_fallback_total", "WebRTC fallback events", &["reason"])
@@ -257,6 +268,11 @@ pub fn init_default() {
             WEBRTC_ICE_FAILURES.with_label_values(&[reason]);
         }
         WEBRTC_FRAMES_DROPPED.with_label_values(&["queue_full"]);
+        WEBRTC_FRAMES_DROPPED.with_label_values(&["awaiting_keyframe"]);
+        WEBRTC_FRAMES_DROPPED.with_label_values(&["no_egress_mid"]);
+        for result in ["allocated", "retired", "dropped_no_mid"] {
+            WEBRTC_SOURCES.with_label_values(&[result]);
+        }
         WEBRTC_FALLBACK.with_label_values(&["disabled"]);
         for result in ["engine", "pending", "saved-only"] {
             LAYOUT_APPLY.with_label_values(&[result]);

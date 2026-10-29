@@ -15,6 +15,11 @@
 //! - [`ice`] — ICE-lite (host candidates only, RFC 8445 §2).
 //! - [`codec`] — codec feature flags (ADR-0017).
 //!
+//! **T11b:** [`webrtc`] is direction-aware and multi-mid (`1 + (N-1)` m-lines
+//! per kind), [`webrtc_room`] fans every publisher into its own egress mid
+//! (N-1 audio mids, no mixing), gates video per publisher, and enforces an
+//! honest per-room cap ([`RoomLimits`]).
+//!
 //! **MediaEngine-порт:** `SfuEngine` реализует `vks_core::MediaEngine`
 //! (SFU). Клиентский SDK работает с трейтом — MCU/SFU-прозрачность
 //! (ARCHITECTURE.md §2).
@@ -49,9 +54,14 @@ pub use ice::{HostCandidate, IceLite, LocalAddrProvider, LoopbackProvider, Stati
 pub use simulcast::{Selection, SimulcastConfig, SimulcastLayer, SimulcastSelector};
 pub use udp_loop::{UdpMediaLoop, UdpMediaStats};
 #[cfg(feature = "str0m")]
-pub use webrtc::{WebRtcAction, WebRtcConfig, WebRtcError, WebRtcPeer};
+pub use webrtc::{
+    MidDirection, MidSection, PeerMids, WebRtcAction, WebRtcConfig, WebRtcError, WebRtcPeer, MAX_AUDIO_MIDS,
+    MAX_VIDEO_MIDS,
+};
 #[cfg(feature = "str0m")]
-pub use webrtc_room::{AcceptedPeer, PeerHandle, WebRtcRoomRegistry};
+pub use webrtc_room::{
+    AcceptedPeer, PeerHandle, RoomLimits, WebRtcRoomRegistry, DEFAULT_MAX_PEERS, DEFAULT_MAX_PEERS_PER_ROOM,
+};
 
 /// str0m (optional, feature `str0m`) — re-export для фаз3 (реальный
 /// DTLS handshake + SRTP). Без feature крейт компилируется.

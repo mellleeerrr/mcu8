@@ -13,6 +13,7 @@
 //! Mutations follow str0m's single-mutation invariant: every public method
 //! that mutates the inner [`Rtc`] drains `poll_output()` before returning.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -22,6 +23,289 @@ use str0m::format::{Codec, PayloadParams};
 use str0m::media::{KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig, RtcError};
+use vks_core::ParticipantId;
+
+/// Upper bound on audio m-lines in one browser offer (T11b).
+///
+/// The SFU has no audio mixer: every remote publisher needs its own audio
+/// m-line, so a room of `N` peers needs `1 + (N-1)` audio mids. Eight matches
+/// the default per-room peer cap of eight.
+pub const MAX_AUDIO_MIDS: usize = 8;
+
+/// Upper bound on video m-lines in one browser offer (T11b).
+///
+/// Same shape as [`MAX_AUDIO_MIDS`]: one sendrecv (the browser camera) plus
+/// `N-1` recvonly pre-offered egress slots. The limit is required: without it a
+/// 500-m-line offer (which still fits the 64 KiB SDP cap) is cheap state churn.
+pub const MAX_VIDEO_MIDS: usize = 8;
+
+/// Direction of one negotiated m-line from the SFU's point of view.
+///
+/// Taken from the SDP answer and refreshed from str0m's `MediaAdded` /
+/// `MediaChanged` events (the browser's `sendrecv` is the SFU's `sendrecv`,
+/// its `recvonly` becomes our `sendonly`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MidDirection {
+    /// SFU only sends (the browser offered `recvonly`: an egress slot).
+    SendOnly,
+    /// SFU only receives (the browser offered `sendonly`).
+    RecvOnly,
+    /// Both directions (a legacy 1+1 browser's own publish m-line).
+    SendRecv,
+    /// Rejected (`m=… 0`) or explicitly `a=inactive`: never usable.
+    Inactive,
+}
+
+impl MidDirection {
+    /// Whether the SFU may write media on this m-line.
+    pub fn can_send(self) -> bool {
+        matches!(self, Self::SendOnly | Self::SendRecv)
+    }
+
+    /// Whether the browser may publish on this m-line.
+    pub fn can_recv(self) -> bool {
+        matches!(self, Self::RecvOnly | Self::SendRecv)
+    }
+
+    fn from_sdp_line(line: &str) -> Option<Self> {
+        match line.trim() {
+            "a=sendonly" => Some(Self::SendOnly),
+            "a=recvonly" => Some(Self::RecvOnly),
+            "a=sendrecv" => Some(Self::SendRecv),
+            "a=inactive" => Some(Self::Inactive),
+            _ => None,
+        }
+    }
+}
+
+impl From<str0m::media::Direction> for MidDirection {
+    fn from(direction: str0m::media::Direction) -> Self {
+        match direction {
+            str0m::media::Direction::SendOnly => Self::SendOnly,
+            str0m::media::Direction::RecvOnly => Self::RecvOnly,
+            str0m::media::Direction::SendRecv => Self::SendRecv,
+            str0m::media::Direction::Inactive => Self::Inactive,
+        }
+    }
+}
+
+/// One negotiated m-line: mid, media kind and the SFU-local direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MidSection {
+    pub mid: Mid,
+    /// `true` for `m=audio`.
+    pub audio: bool,
+    pub direction: MidDirection,
+}
+
+/// Parses `a=mid`, direction and port-rejection state out of an SDP answer.
+///
+/// A rejected m-line (`m=video 0 …`) is `Inactive` regardless of its direction
+/// attribute: str0m returns no writer for it, so it must never enter a pool.
+fn parse_sections(answer_sdp: &str) -> Vec<MidSection> {
+    let mut sections: Vec<MidSection> = Vec::new();
+    let mut current_audio: Option<bool> = None;
+    let mut current_port_zero = false;
+    let mut current_direction: Option<MidDirection> = None;
+    let mut current_index: Option<usize> = None;
+    for line in answer_sdp.lines().map(|line| line.trim_end_matches('\r').trim()) {
+        if let Some(rest) = line.strip_prefix("m=") {
+            current_audio = if rest.starts_with("audio ") {
+                Some(true)
+            } else if rest.starts_with("video ") {
+                Some(false)
+            } else {
+                None
+            };
+            current_port_zero = rest.split_whitespace().nth(1).and_then(|port| port.parse::<u16>().ok()) == Some(0);
+            current_direction = None;
+            current_index = None;
+            continue;
+        }
+        if let Some(direction) = MidDirection::from_sdp_line(line) {
+            if current_audio.is_some() {
+                current_direction = Some(direction);
+                if let Some(index) = current_index {
+                    sections[index].direction = if current_port_zero { MidDirection::Inactive } else { direction };
+                }
+            }
+            continue;
+        }
+        if let Some(mid) = line.strip_prefix("a=mid:") {
+            if let Some(audio) = current_audio {
+                let direction = if current_port_zero {
+                    MidDirection::Inactive
+                } else {
+                    current_direction.unwrap_or(MidDirection::SendRecv)
+                };
+                sections.push(MidSection { mid: Mid::from(mid.trim()), audio, direction });
+                current_index = Some(sections.len() - 1);
+            }
+        }
+    }
+    sections
+}
+
+/// Egress mid bookkeeping for one peer (T11b per-source fanout).
+///
+/// Invariants:
+/// - one egress mid carries at most one publisher per kind: two RTP clock
+///   domains in one mid corrupt the subscriber's decoder;
+/// - an egress mid is handed out once per session and never reassigned to a
+///   different publisher (`retired`), so an SSRC/clock-domain switch cannot
+///   slide into a live decoder;
+/// - sections the answer rejected (port 0 / `inactive`) never enter a pool;
+/// - pool exhaustion returns `None` (the caller drops the frame and counts it),
+///   it never panics and never reuses a mid.
+#[derive(Debug, Default)]
+pub struct PeerMids {
+    sections: Vec<MidSection>,
+    /// Dedicated `sendonly` sections first, then the peer's own `sendrecv`
+    /// publish m-line: a legacy 1+1 browser only has that one, and it used to
+    /// carry the remote stream before T11b, so it must keep working.
+    audio_pool: VecDeque<Mid>,
+    video_pool: VecDeque<Mid>,
+    src_audio: HashMap<ParticipantId, Mid>,
+    src_video: HashMap<ParticipantId, Mid>,
+    retired: HashSet<Mid>,
+}
+
+impl PeerMids {
+    fn new(sections: Vec<MidSection>) -> Self {
+        let mut mids = Self { sections, ..Self::default() };
+        mids.refresh_pools();
+        mids
+    }
+
+    /// Negotiated m-lines in SDP order.
+    pub fn sections(&self) -> &[MidSection] {
+        &self.sections
+    }
+
+    /// The mid carrying the browser's own audio/video publish stream (first
+    /// m-line the SFU may receive on), never an egress-only section.
+    pub fn publish_mid(&self, audio: bool) -> Option<Mid> {
+        self.sections
+            .iter()
+            .find(|section| section.audio == audio && section.direction.can_recv())
+            .map(|section| section.mid)
+    }
+
+    /// Egress mid for one publisher, allocated lazily on first use.
+    pub fn mid_for_source(&mut self, from: ParticipantId, audio: bool) -> Option<Mid> {
+        let (map, pool) = if audio {
+            (&mut self.src_audio, &mut self.audio_pool)
+        } else {
+            (&mut self.src_video, &mut self.video_pool)
+        };
+        if let Some(mid) = map.get(&from) {
+            return Some(*mid);
+        }
+        while let Some(mid) = pool.pop_front() {
+            if self.retired.contains(&mid) {
+                continue;
+            }
+            map.insert(from, mid);
+            return Some(mid);
+        }
+        None
+    }
+
+    /// Publisher currently mapped to an egress mid (used to route a browser PLI
+    /// to the exact publisher instead of broadcasting it).
+    pub fn source_for_mid(&self, mid: Mid) -> Option<ParticipantId> {
+        self.src_video
+            .iter()
+            .chain(self.src_audio.iter())
+            .find(|(_, candidate)| **candidate == mid)
+            .map(|(from, _)| *from)
+    }
+
+    /// Retires every egress mid of a publisher: the mids stay allocated (never
+    /// returned to the pool) because a new publisher on the same mid would
+    /// restart an RTP clock domain under the subscriber's decoder.
+    pub fn retire_source(&mut self, from: ParticipantId) {
+        if let Some(mid) = self.src_audio.remove(&from) {
+            self.retired.insert(mid);
+        }
+        if let Some(mid) = self.src_video.remove(&from) {
+            self.retired.insert(mid);
+        }
+        self.refresh_pools();
+    }
+
+    /// Number of egress mids handed out to publishers.
+    pub fn allocated(&self) -> usize {
+        self.src_audio.len() + self.src_video.len()
+    }
+
+    /// Mids retired from reuse (observability/tests).
+    pub fn retired(&self) -> &HashSet<Mid> {
+        &self.retired
+    }
+
+    fn set_kind(&mut self, mid: Mid, audio: bool) {
+        if let Some(section) = self.sections.iter_mut().find(|section| section.mid == mid) {
+            if section.audio != audio {
+                section.audio = audio;
+                self.refresh_pools();
+            }
+        }
+    }
+
+    fn set_direction(&mut self, mid: Mid, direction: MidDirection) {
+        if let Some(section) = self.sections.iter_mut().find(|section| section.mid == mid) {
+            if section.direction != direction {
+                section.direction = direction;
+                self.refresh_pools();
+            }
+        }
+    }
+
+    /// Rebuilds the section list after a re-offer, keeping live allocations.
+    fn rebuild(&mut self, sections: Vec<MidSection>) {
+        let known: HashSet<Mid> = sections.iter().map(|section| section.mid).collect();
+        let stale: Vec<Mid> = self
+            .src_audio
+            .values()
+            .chain(self.src_video.values())
+            .filter(|mid| !known.contains(mid))
+            .copied()
+            .collect();
+        for mid in stale {
+            self.retired.insert(mid);
+        }
+        self.src_audio.retain(|_, mid| known.contains(mid));
+        self.src_video.retain(|_, mid| known.contains(mid));
+        self.sections = sections;
+        self.refresh_pools();
+    }
+
+    fn refresh_pools(&mut self) {
+        let allocated: HashSet<Mid> = self.src_audio.values().chain(self.src_video.values()).copied().collect();
+        self.audio_pool = self.egress_pool(true, &allocated);
+        self.video_pool = self.egress_pool(false, &allocated);
+    }
+
+    fn egress_pool(&self, audio: bool, allocated: &HashSet<Mid>) -> VecDeque<Mid> {
+        let mut dedicated = VecDeque::new();
+        let mut shared = VecDeque::new();
+        for section in &self.sections {
+            if section.audio != audio || !section.direction.can_send() {
+                continue;
+            }
+            if self.retired.contains(&section.mid) || allocated.contains(&section.mid) {
+                continue;
+            }
+            match section.direction {
+                MidDirection::SendOnly => dedicated.push_back(section.mid),
+                _ => shared.push_back(section.mid),
+            }
+        }
+        dedicated.extend(shared);
+        dedicated
+    }
+}
 
 /// Transport configuration for one peer.
 #[derive(Debug, Clone)]
@@ -94,8 +378,11 @@ pub enum WebRtcAction {
     Bitrate(u64),
     /// Remote closed DTLS or the whole session.
     Closed,
-    /// A browser asked for a video keyframe; forward it to the publisher.
-    KeyframeRequest { audio: bool },
+    /// A browser asked for a video keyframe. `source` is the publisher that owns
+    /// the egress mid the browser complained about; `None` when the mid is not
+    /// mapped yet (or the request came for the browser's own publish stream), in
+    /// which case the caller falls back to broadcasting.
+    KeyframeRequest { audio: bool, source: Option<ParticipantId> },
 }
 
 /// One passive WebRTC peer (browser → SFU).
@@ -104,9 +391,9 @@ pub struct WebRtcPeer {
     answer_sdp: String,
     local_addr: SocketAddr,
     connected: bool,
-    mids: Vec<Mid>,
-    /// Parallel to `mids`; true for `m=audio`.
-    mid_audio: Vec<bool>,
+    /// Negotiated m-lines (kind + local direction) and the per-source egress
+    /// mid map (T11b). One mid never carries two publishers.
+    mids: PeerMids,
     /// Mids in the order of the first accepted offer: a re-offer must keep the
     /// same m-line order (str0m rejects structural changes; the SDP body is not
     /// applied, but its ICE credentials may already be — see `accept_reoffer`).
@@ -147,7 +434,15 @@ impl WebRtcPeer {
             builder = match spec.id {
                 vks_common::codec_spec::CodecId::Opus => builder.enable_opus(true, false),
                 vks_common::codec_spec::CodecId::Vp8 => builder.enable_vp8(true),
-                other => unreachable!("webrtc_answer_specs returned {other:?}"),
+                // Fail closed instead of panicking: if the codec SSOT answer
+                // slice ever grows (VP9/AV1/H264), the answer must not claim a
+                // codec this forwarding path cannot carry. The error is
+                // surfaced as a rejected offer, not an `unreachable!` abort.
+                other => {
+                    return Err(WebRtcError::Sdp(format!(
+                        "codec SSOT answer slice contains {other:?}, but the str0m peer builder enables Opus+VP8 only"
+                    )));
+                }
             };
         }
         if config.bwe {
@@ -166,27 +461,17 @@ impl WebRtcPeer {
         // This transport does not apply trickled remote candidates; do not
         // advertise trickle support we cannot honour.
         let answer_sdp = answer.to_sdp_string().replace("a=ice-options:trickle\r\n", "");
-        let mut mids = Vec::new();
-        let mut mid_audio = Vec::new();
-        let mut current_audio = None;
-        for line in answer_sdp.lines() {
-            if line.starts_with("m=audio") {
-                current_audio = Some(true);
-            } else if line.starts_with("m=video") {
-                current_audio = Some(false);
-            } else if let Some(mid) = line.strip_prefix("a=mid:") {
-                mids.push(Mid::from(mid));
-                mid_audio.push(current_audio.unwrap_or(false));
-            }
-        }
+        // Direction-aware sections: the answer carries one m-line per offered
+        // section (RFC 3264 §6), `sendonly` for the browser's `recvonly`
+        // pre-offered egress slots and `sendrecv` for its own publish stream.
+        let sections = parse_sections(&answer_sdp);
 
         let mut peer = Self {
             rtc,
             answer_sdp,
             local_addr,
             connected: false,
-            mids,
-            mid_audio,
+            mids: PeerMids::new(sections),
             remote_mids: mids_of(offer_sdp),
             remote_fingerprint: fingerprint_of(offer_sdp),
             next_timeout: None,
@@ -239,19 +524,10 @@ impl WebRtcPeer {
         // Do not advertise trickle: this transport never applies trickled
         // remote candidates.
         let answer_sdp = answer.to_sdp_string().replace("a=ice-options:trickle\r\n", "");
-        self.mids.clear();
-        self.mid_audio.clear();
-        let mut current_audio = None;
-        for line in answer_sdp.lines() {
-            if line.starts_with("m=audio") {
-                current_audio = Some(true);
-            } else if line.starts_with("m=video") {
-                current_audio = Some(false);
-            } else if let Some(mid) = line.strip_prefix("a=mid:") {
-                self.mids.push(Mid::from(mid));
-                self.mid_audio.push(current_audio.unwrap_or(false));
-            }
-        }
+        // Keep live per-source allocations across the re-offer; the rebuilt
+        // section list only adds/removes egress slots. A mid that disappeared
+        // is retired, never recycled (T11b).
+        self.mids.rebuild(parse_sections(&answer_sdp));
         self.answer_sdp = answer_sdp.clone();
         let actions = self.drain()?;
         Ok((answer_sdp, actions))
@@ -273,8 +549,48 @@ impl WebRtcPeer {
     }
 
     /// Negotiated media mids in SDP order (audio, video, ...).
-    pub fn mids(&self) -> &[Mid] {
-        &self.mids
+    pub fn mids(&self) -> Vec<Mid> {
+        self.mids.sections().iter().map(|section| section.mid).collect()
+    }
+
+    /// Negotiated m-lines with kind and SFU-local direction (T11b).
+    pub fn sections(&self) -> &[MidSection] {
+        self.mids.sections()
+    }
+
+    /// The mid carrying this peer's own audio/video publish stream: the first
+    /// m-line the SFU may receive on. PLI and connected-time keyframe requests
+    /// must use it, never an egress-only (`sendonly`) section.
+    pub fn publish_mid(&self, audio: bool) -> Option<Mid> {
+        self.mids.publish_mid(audio)
+    }
+
+    /// Egress mid for one publisher, allocated on first use.
+    pub fn mid_for_source(&mut self, from: ParticipantId, audio: bool) -> Option<Mid> {
+        self.mids.mid_for_source(from, audio)
+    }
+
+    /// Allocates a publisher's egress mid ahead of its first frame, so mids are
+    /// assigned in room registration order rather than packet arrival order.
+    pub fn ensure_source(&mut self, from: ParticipantId, audio: bool) -> bool {
+        self.mids.mid_for_source(from, audio).is_some()
+    }
+
+    /// Retires a publisher's egress mids (publisher left the room). They are
+    /// never reassigned: a new publisher would restart an RTP clock domain on a
+    /// mid the subscriber's decoder already tracks.
+    pub fn retire_source(&mut self, from: ParticipantId) {
+        self.mids.retire_source(from);
+    }
+
+    /// Publisher currently mapped to an egress mid (routes a browser PLI to the
+    /// exact publisher instead of broadcasting it to everyone).
+    pub fn source_for_mid(&self, mid: Mid) -> Option<ParticipantId> {
+        self.mids.source_for_mid(mid)
+    }
+
+    fn is_audio_mid(&self, mid: Mid) -> Option<bool> {
+        self.mids.sections().iter().find(|section| section.mid == mid).map(|section| section.audio)
     }
 
     /// Negotiated primary RTP maps `(pt, codec, clock, channels)` from the answer.
@@ -302,15 +618,6 @@ impl WebRtcPeer {
     /// First negotiated payload type for a mid (codec chosen by str0m).
     pub fn payload_type(&mut self, mid: Mid) -> Option<Pt> {
         self.rtc.writer(mid)?.payload_params().next().map(|p| p.pt())
-    }
-
-    /// The negotiated mid for an audio/video frame from the browser.
-    pub fn mid_for_kind(&self, audio: bool) -> Option<Mid> {
-        self.mids.iter().zip(&self.mid_audio).find(|(_, is_audio)| **is_audio == audio).map(|(mid, _)| *mid)
-    }
-
-    fn is_audio_mid(&self, mid: Mid) -> bool {
-        self.mids.iter().zip(&self.mid_audio).find(|(candidate, _)| **candidate == mid).is_some_and(|(_, audio)| *audio)
     }
 
     /// Write a depayloaded frame from another peer: match its codec parameters
@@ -417,9 +724,14 @@ impl WebRtcPeer {
                     }
                     Event::IceConnectionStateChange(state) => actions.push(WebRtcAction::IceState(state)),
                     Event::MediaAdded(added) => {
-                        if let Some(index) = self.mids.iter().position(|mid| *mid == added.mid) {
-                            self.mid_audio[index] = matches!(added.kind, MediaKind::Audio);
-                        }
+                        // str0m is authoritative for kind/direction; this keeps
+                        // the pools in sync even if an answer line was parsed
+                        // conservatively.
+                        self.mids.set_kind(added.mid, matches!(added.kind, MediaKind::Audio));
+                        self.mids.set_direction(added.mid, added.direction.into());
+                    }
+                    Event::MediaChanged(changed) => {
+                        self.mids.set_direction(changed.mid, changed.direction.into());
                     }
                     Event::MediaData(data) => actions.push(WebRtcAction::Media(Box::new(data))),
                     Event::EgressBitrateEstimate(kind) => {
@@ -436,7 +748,13 @@ impl WebRtcPeer {
                         actions.push(WebRtcAction::Closed);
                     }
                     Event::KeyframeRequest(request) => {
-                        actions.push(WebRtcAction::KeyframeRequest { audio: self.is_audio_mid(request.mid) });
+                        // A browser PLI on one egress mid names exactly one
+                        // publisher: forward it there instead of broadcasting a
+                        // PLI to every publisher in the room (T11b).
+                        actions.push(WebRtcAction::KeyframeRequest {
+                            audio: self.is_audio_mid(request.mid).unwrap_or(false),
+                            source: self.mids.source_for_mid(request.mid),
+                        });
                     }
                     _ => {}
                 },
@@ -463,9 +781,11 @@ fn fingerprint_of(offer: &str) -> Option<String> {
 
 /// Rejects offers this SFU cannot safely serve before str0m allocates state.
 ///
-/// The real path supports at most one audio + one video m-line per peer and
-/// requires browser ICE/DTLS credentials. Application/data or extra m-lines
-/// are rejected explicitly instead of being silently mis-mapped.
+/// T11b shape: one audio m-line per remote publisher (`1 + (N-1)`, there is no
+/// SFU mixer) and one video m-line per remote publisher, with hard ceilings
+/// ([`MAX_AUDIO_MIDS`]/[`MAX_VIDEO_MIDS`]) so a huge m-line count cannot churn
+/// state inside the 64 KiB SDP cap. Browser ICE/DTLS credentials are still
+/// mandatory; application/data m-lines are rejected explicitly.
 pub(crate) fn validate_offer(offer: &str) -> Result<(), WebRtcError> {
     if offer.len() > 64 * 1024 {
         return Err(WebRtcError::InvalidOffer("SDP larger than 64 KiB".into()));
@@ -489,8 +809,10 @@ pub(crate) fn validate_offer(offer: &str) -> Result<(), WebRtcError> {
             }
         }
     }
-    if audio > 1 || video > 1 {
-        return Err(WebRtcError::InvalidOffer(format!("too many media lines: audio={audio} video={video}")));
+    if audio > MAX_AUDIO_MIDS || video > MAX_VIDEO_MIDS {
+        return Err(WebRtcError::InvalidOffer(format!(
+            "too many media lines: audio={audio} video={video} (max {MAX_AUDIO_MIDS} audio + {MAX_VIDEO_MIDS} video)"
+        )));
     }
     if audio == 0 && video == 0 {
         return Err(WebRtcError::InvalidOffer("no audio or video m-line".into()));
@@ -504,6 +826,40 @@ pub(crate) fn validate_offer(offer: &str) -> Result<(), WebRtcError> {
     Ok(())
 }
 
+/// Whether the browser offer publishes `audio`/`video`: **any** m-line of that
+/// kind with a sending direction (`sendonly`/`sendrecv`, and `sendrecv` is the
+/// SDP default when the direction attribute is absent).
+///
+/// T11b: a pre-offer is `1 sendrecv + (N-1) recvonly`, so classifying only the
+/// first section of a kind gives the wrong answer as soon as the recvonly
+/// sections come first.
+pub fn offer_publishes(offer: &str, audio: bool) -> bool {
+    fn publishes(current: Option<(bool, MidDirection)>, audio: bool) -> bool {
+        current.is_some_and(|(kind, direction)| kind == audio && direction.can_send())
+    }
+    let mut current: Option<(bool, MidDirection)> = None;
+    for line in offer.lines().map(|line| line.trim_end_matches('\r').trim()) {
+        if let Some(rest) = line.strip_prefix("m=") {
+            if publishes(current.take(), audio) {
+                return true;
+            }
+            current = if rest.starts_with("audio ") {
+                Some((true, MidDirection::SendRecv))
+            } else if rest.starts_with("video ") {
+                Some((false, MidDirection::SendRecv))
+            } else {
+                None
+            };
+            continue;
+        }
+        if let Some((_, direction)) = current.as_mut() {
+            if let Some(parsed) = MidDirection::from_sdp_line(line) {
+                *direction = parsed;
+            }
+        }
+    }
+    publishes(current, audio)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,13 +933,125 @@ mod tests {
     }
 
     fn browser_offer() -> String {
+        browser_offer_with(1, 1, true, true)
+    }
+
+    /// Browser offer with `audio_sections`/`video_sections` m-lines, T11b shape:
+    /// the first section of each kind is `sendrecv` (the browser publishes), the
+    /// rest are `recvonly` (pre-offered per-source egress slots).
+    fn browser_offer_with(audio_sections: usize, video_sections: usize, audio_send: bool, video_send: bool) -> String {
         let mut client = RtcConfig::new().set_ice_lite(false).build(Instant::now());
         client.add_local_candidate(Candidate::host(A, "udp").expect("candidate A"));
         let mut change = client.sdp_api();
-        change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
-        change.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
+        for index in 0..audio_sections {
+            let direction = if index == 0 && audio_send { Direction::SendRecv } else { Direction::RecvOnly };
+            change.add_media(MediaKind::Audio, direction, None, None, None);
+        }
+        for index in 0..video_sections {
+            let direction = if index == 0 && video_send { Direction::SendRecv } else { Direction::RecvOnly };
+            change.add_media(MediaKind::Video, direction, None, None, None);
+        }
         let (offer, _pending): (str0m::change::SdpOffer, SdpPendingOffer) = change.apply().expect("offer");
         offer.to_sdp_string()
+    }
+
+    /// Swaps two whole m-line sections (1-based, header excluded) of an SDP.
+    fn swap_offer_sections(offer: &str, a: usize, b: usize) -> String {
+        let mut parts: Vec<String> = offer.split("\r\nm=").map(str::to_string).collect();
+        assert!(a > 0 && b > 0 && a < parts.len() && b < parts.len(), "section index out of range");
+        parts.swap(a, b);
+        parts.join("\r\nm=")
+    }
+
+    fn connect(client: &mut Rtc, peer: &mut WebRtcPeer, now: &mut Instant) -> bool {
+        for _ in 0..300 {
+            *now += std::time::Duration::from_millis(10);
+            client.handle_input(Input::Timeout(*now)).expect("client timeout");
+            let client_out = drain(client);
+            let server_actions = deliver(peer, client_out, *now);
+            let mut server_out = Vec::new();
+            for action in &server_actions {
+                if let WebRtcAction::Send { source, destination, contents } = action {
+                    server_out.push((*source, *destination, contents.clone()));
+                }
+            }
+            for (source, destination, contents) in server_out {
+                client
+                    .handle_input(Input::Receive(
+                        *now,
+                        Receive::new(Protocol::Udp, source, destination, &contents).expect("receive"),
+                    ))
+                    .expect("client receive");
+            }
+            let client_tail = drain(client);
+            for (source, destination, contents) in client_tail {
+                peer.handle_receive(*now, source, destination, &contents).expect("server receive");
+            }
+            if client.is_connected() && peer.is_connected() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Datagram tuple used throughout the in-process negotiation tests.
+    type Datagram = (SocketAddr, SocketAddr, Vec<u8>);
+
+    /// Drains output of a raw client `Rtc`, keeping received media data.
+    fn drain_media(rtc: &mut Rtc) -> (Vec<Datagram>, Vec<MediaData>) {
+        let mut out = Vec::new();
+        let mut media = Vec::new();
+        loop {
+            match rtc.poll_output().expect("poll") {
+                Output::Timeout(_) => break,
+                Output::Transmit(t) => out.push((t.source, t.destination, t.contents.into())),
+                Output::Event(str0m::Event::MediaData(data)) => media.push(data),
+                Output::Event(_) => {}
+            }
+        }
+        (out, media)
+    }
+
+    /// Pumps both sides and returns every `MediaData` the browser received.
+    fn pump_browser_media(
+        client: &mut Rtc,
+        peer: &mut WebRtcPeer,
+        now: &mut Instant,
+        actions: Vec<WebRtcAction>,
+    ) -> Vec<MediaData> {
+        let mut received = Vec::new();
+        let mut pending = actions;
+        for _ in 0..40 {
+            *now += std::time::Duration::from_millis(10);
+            for action in pending.drain(..) {
+                if let WebRtcAction::Send { source, destination, contents } = action {
+                    client
+                        .handle_input(Input::Receive(
+                            *now,
+                            Receive::new(Protocol::Udp, source, destination, &contents).expect("receive"),
+                        ))
+                        .expect("client receive");
+                }
+            }
+            client.handle_input(Input::Timeout(*now)).expect("client tick");
+            let (client_out, client_media) = drain_media(client);
+            received.extend(client_media);
+            for (source, destination, contents) in client_out {
+                pending.extend(peer.handle_receive(*now, source, destination, &contents).expect("server receive"));
+            }
+            pending.extend(peer.handle_timeout(*now).expect("server tick"));
+            let mut keep = Vec::new();
+            for action in pending.drain(..) {
+                if let WebRtcAction::Send { source, destination, contents } = action {
+                    keep.push(WebRtcAction::Send { source, destination, contents });
+                }
+            }
+            pending = keep;
+            if received.len() >= 3 {
+                break;
+            }
+        }
+        received
     }
 
     /// Regression: a re-offer that passes our own validation but is rejected by
@@ -819,7 +1287,7 @@ mod tests {
         let mut back = 0usize;
         let mut sent_total = 0usize;
         let audio_params = received_params.expect("no Opus frame params captured");
-        assert_eq!(peer.mid_for_kind(true), Some(audio_id));
+        assert_eq!(peer.publish_mid(true), Some(audio_id));
         for i in 0..10 {
             now += std::time::Duration::from_millis(20);
             let mut out = peer
@@ -863,5 +1331,218 @@ mod tests {
         for forbidden in ["vp9/90000", "av1/90000", "h264/90000", "h265/90000"] {
             assert!(!answer.contains(forbidden), "unexpected {forbidden} in answer");
         }
+    }
+
+    // ---- T11b: multi-peer / per-source mids ---------------------------------
+
+    #[test]
+    fn offer_validation_accepts_eight_plus_eight_and_rejects_nine() {
+        validate_offer(&browser_offer_with(8, 8, true, true)).expect("1+7 audio and 1+7 video is the T11b ceiling");
+        validate_offer(&browser_offer_with(8, 1, true, true)).expect("eight audio m-lines");
+        validate_offer(&browser_offer_with(1, 8, true, true)).expect("eight video m-lines");
+        let too_many_audio = validate_offer(&browser_offer_with(9, 1, true, true));
+        assert!(matches!(too_many_audio, Err(WebRtcError::InvalidOffer(_))), "{too_many_audio:?}");
+        let too_many_video = validate_offer(&browser_offer_with(1, 9, true, true));
+        assert!(matches!(too_many_video, Err(WebRtcError::InvalidOffer(_))), "{too_many_video:?}");
+        // The pre-T11b cap of one m-line per kind must be gone.
+        validate_offer(&browser_offer_with(2, 2, true, true)).expect("two publishers' mids are legal");
+    }
+
+    #[test]
+    fn answer_sections_are_direction_aware_and_reject_port_zero() {
+        let answer = concat!(
+            "v=0\r\n",
+            "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\na=sendrecv\r\n",
+            "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:1\r\na=sendonly\r\n",
+            "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:2\r\na=inactive\r\n",
+            "m=video 0 UDP/TLS/RTP/SAVPF 96\r\na=mid:3\r\na=sendonly\r\n",
+            "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:4\r\n"
+        );
+        let sections = parse_sections(answer);
+        assert_eq!(sections.len(), 5);
+        assert_eq!(sections[0], MidSection { mid: Mid::from("0"), audio: true, direction: MidDirection::SendRecv });
+        assert_eq!(sections[1].direction, MidDirection::SendOnly);
+        assert_eq!(sections[2].direction, MidDirection::Inactive, "a=inactive is unusable");
+        assert_eq!(sections[3].direction, MidDirection::Inactive, "port 0 is rejected regardless of a=sendonly");
+        assert_eq!(sections[4].direction, MidDirection::SendRecv, "missing direction defaults to sendrecv");
+    }
+
+    #[test]
+    fn offer_publishes_reads_every_section_not_only_the_first() {
+        let offer = concat!(
+            "v=0\r\n",
+            "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:0\r\na=recvonly\r\n",
+            "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:1\r\na=sendrecv\r\n"
+        );
+        assert!(offer_publishes(offer, false), "sendrecv after a recvonly section still publishes");
+        assert!(!offer_publishes(offer, true), "no audio section at all");
+        let all_recv = offer.replace("a=sendrecv", "a=recvonly");
+        assert!(!offer_publishes(&all_recv, false), "view-only peer does not publish");
+        let default_direction = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:0\r\n";
+        assert!(offer_publishes(default_direction, false), "missing direction defaults to sendrecv");
+    }
+
+    #[test]
+    fn multi_mid_offer_is_answered_with_one_section_per_m_line() {
+        let offer = browser_offer_with(8, 8, true, true);
+        let peer = WebRtcPeer::accept_offer(&offer, B, &WebRtcConfig::default()).expect("accept 16 m-lines");
+        let sections = peer.sections();
+        // RFC 3264 §6: the answer has exactly one m-line per offered m-line.
+        assert_eq!(sections.len(), 16, "answer must not collapse the 8+8 offer");
+        assert_eq!(sections.iter().filter(|section| section.audio).count(), 8);
+        assert_eq!(sections.iter().filter(|section| !section.audio).count(), 8);
+        assert_eq!(peer.mids().len(), 16);
+        assert_eq!(peer.publish_mid(true), Some(sections[0].mid), "first audio sendrecv is the mic");
+        assert_eq!(peer.publish_mid(false), Some(sections[8].mid), "first video sendrecv is the camera");
+        for section in &sections[1..8] {
+            assert_eq!(section.direction, MidDirection::SendOnly, "browser recvonly becomes SFU sendonly");
+        }
+        for section in &sections[9..] {
+            assert_eq!(section.direction, MidDirection::SendOnly, "pre-offered video egress slot");
+        }
+    }
+
+    #[test]
+    fn per_source_audio_mids_are_unique_and_never_reused_after_retirement() {
+        let mut peer = WebRtcPeer::accept_offer(&browser_offer_with(8, 8, true, true), B, &WebRtcConfig::default())
+            .expect("accept");
+        let first = ParticipantId::new();
+        let first_mid = peer.mid_for_source(first, true).expect("audio slot");
+        assert_eq!(peer.mid_for_source(first, true), Some(first_mid), "a publisher keeps its mid");
+        assert_eq!(peer.source_for_mid(first_mid), Some(first));
+        assert_ne!(first_mid, peer.publish_mid(true).expect("mic mid"), "egress never uses the mic mid");
+
+        // Eight audio slots exist for 1 + 7 peers.
+        let mut mids = vec![first_mid];
+        for _ in 0..7 {
+            mids.push(peer.mid_for_source(ParticipantId::new(), true).expect("audio slot"));
+        }
+        let unique: std::collections::HashSet<Mid> = mids.iter().copied().collect();
+        assert_eq!(unique.len(), 8, "every publisher gets its own audio mid (no mixing)");
+        assert!(peer.mid_for_source(ParticipantId::new(), true).is_none(), "ninth publisher has no slot");
+
+        // Retirement: the mid is not returned to the pool.
+        peer.retire_source(first);
+        assert_eq!(peer.source_for_mid(first_mid), None);
+        assert!(peer.mids.retired().contains(&first_mid), "retired mid must never be reassigned");
+        assert!(peer.mid_for_source(ParticipantId::new(), true).is_none(), "no slot left after retirement");
+        let next = ParticipantId::new();
+        assert_eq!(peer.mid_for_source(next, true), None, "a retired mid cannot be handed to another publisher");
+    }
+
+    #[test]
+    fn legacy_1_plus_1_peer_gets_deterministic_single_video_slot() {
+        let mut peer = WebRtcPeer::accept_offer(&browser_offer(), B, &WebRtcConfig::default()).expect("accept");
+        let first = ParticipantId::new();
+        let second = ParticipantId::new();
+        let mid = peer.mid_for_source(first, false).expect("legacy peer still receives video");
+        assert_eq!(peer.mid_for_source(first, false), Some(mid), "same publisher keeps the slot");
+        assert_eq!(peer.mid_for_source(second, false), None, "second publisher is explicitly dropped, not glued");
+        let audio_mid = peer.mid_for_source(first, true).expect("one audio slot for the first publisher");
+        assert_ne!(audio_mid, mid);
+        assert_eq!(peer.mid_for_source(second, true), None, "a second audio source has no mid (no mixing)");
+    }
+
+    #[test]
+    fn reoffer_with_sixteen_mids_keeps_the_order_and_survives_a_rejection() {
+        let offer = browser_offer_with(8, 8, true, true);
+        let mut peer = WebRtcPeer::accept_offer(&offer, B, &WebRtcConfig::default()).expect("accept");
+        assert_eq!(peer.sections().len(), 16);
+        peer.accept_reoffer(&offer).expect("identical 16 m-lines re-offer");
+        assert_eq!(peer.sections().len(), 16, "re-offer must not drop sections");
+        match peer.accept_reoffer(&swap_offer_sections(&offer, 2, 4)) {
+            Err(WebRtcError::InvalidOffer(message)) => assert!(message.contains("order"), "{message}"),
+            other => panic!("reordered m-lines must be rejected, got {other:?}"),
+        }
+        peer.accept_reoffer(&offer).expect("live session survives a rejected re-offer");
+        assert_eq!(peer.sections().len(), 16);
+    }
+
+    /// Full str0m negotiation without a browser: 1 mic + 7 pre-offered audio
+    /// egress slots + camera + 7 video slots, then real SRTP media delivered to
+    /// three different publishers' mids.
+    #[test]
+    fn real_dtls_handshake_with_eight_audio_mids_delivers_per_source_streams() {
+        let mut client = RtcConfig::new().set_ice_lite(false).build(Instant::now());
+        client.add_local_candidate(Candidate::host(A, "udp").expect("candidate A"));
+        let mut change = client.sdp_api();
+        let audio_mid = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+        for _ in 0..7 {
+            change.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None);
+        }
+        let video_mid = change.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
+        let (offer, pending): (str0m::change::SdpOffer, SdpPendingOffer) = change.apply().expect("offer");
+
+        let mut peer = WebRtcPeer::accept_offer(&offer.to_sdp_string(), B, &WebRtcConfig::default())
+            .expect("accept 1 audio + 7 audio + 1 video");
+        let answer = SdpAnswer::from_sdp_string(peer.answer_sdp()).expect("answer parses");
+        client.sdp_api().accept_answer(pending, answer).expect("accept answer");
+
+        let mut now = Instant::now();
+        assert!(connect(&mut client, &mut peer, &mut now), "DTLS handshake failed");
+
+        // The published mic frame: the only sendrecv audio section.
+        let opus_pt = client
+            .writer(audio_mid)
+            .expect("audio writer")
+            .payload_params()
+            .find(|params| params.spec().codec == Codec::Opus)
+            .expect("opus payload")
+            .pt();
+        client
+            .writer(audio_mid)
+            .expect("audio writer")
+            .write(opus_pt, now, MediaTime::from_millis(0), vec![0x55u8; 40])
+            .expect("write opus");
+        client.handle_input(Input::Timeout(now)).expect("client tick");
+
+        let (client_out, _) = drain_media(&mut client);
+        let mut server_actions = Vec::new();
+        for (source, destination, contents) in client_out {
+            server_actions.extend(peer.handle_receive(now, source, destination, &contents).expect("receive"));
+        }
+        server_actions.extend(peer.handle_timeout(now).expect("server tick"));
+        let audio_params = server_actions
+            .iter()
+            .find_map(|action| match action {
+                WebRtcAction::Media(data) => Some(data.params),
+                _ => None,
+            })
+            .expect("no Opus frame from the browser");
+
+        // Three publishers, three distinct egress audio mids (N-1 without a mixer).
+        let publishers: Vec<ParticipantId> = (0..3).map(|_| ParticipantId::new()).collect();
+        let mids: Vec<Mid> = publishers
+            .iter()
+            .map(|publisher| peer.mid_for_source(*publisher, true).expect("audio egress slot"))
+            .collect();
+        assert_eq!(mids.iter().collect::<std::collections::HashSet<_>>().len(), 3, "mids must differ");
+
+        let mut actions = Vec::new();
+        for (index, mid) in mids.iter().enumerate() {
+            actions.extend(
+                peer.write_media_matched(
+                    *mid,
+                    audio_params,
+                    now,
+                    MediaTime::from_millis(20 * index as u64),
+                    vec![0x60u8 + index as u8; 40],
+                )
+                .expect("write to a per-source mid"),
+            );
+        }
+        let received = pump_browser_media(&mut client, &mut peer, &mut now, actions);
+        assert_eq!(received.len(), 3, "browser must receive three separate audio streams");
+        for (index, mid) in mids.iter().enumerate() {
+            let frame = received
+                .iter()
+                .find(|data| data.mid == *mid)
+                .unwrap_or_else(|| panic!("no media on publisher mid {mid}"));
+            assert_eq!(&*frame.data, &vec![0x60u8 + index as u8; 40], "wrong payload on mid {mid}");
+        }
+        // The answer's video sections are usable egress slots too.
+        let video_egress = peer.mid_for_source(ParticipantId::new(), false).expect("video egress slot");
+        assert!(peer.payload_type_for_codec(video_egress, Codec::Vp8).is_some(), "no VP8 writer on the egress mid");
+        let _ = video_mid;
     }
 }

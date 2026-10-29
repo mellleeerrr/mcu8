@@ -15,7 +15,7 @@
 //! [`crate::SfuEngine`] path: SRTP keys, RTP sequence numbers, NACK/RTX/FEC and
 //! BWE are per-peer state and cannot be shared through the plaintext forwarder.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,21 +23,84 @@ use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use vks_common::metrics::{MEDIA_BYTES, WEBRTC_FRAMES_DROPPED, WEBRTC_ICE_FAILURES, WEBRTC_OFFERS, WEBRTC_PEERS};
+use vks_common::metrics::{
+    MEDIA_BYTES, WEBRTC_FRAMES_DROPPED, WEBRTC_ICE_FAILURES, WEBRTC_OFFERS, WEBRTC_PEERS, WEBRTC_SOURCES,
+};
 use vks_core::{ParticipantId, RoomId};
 
-use crate::webrtc::{WebRtcAction, WebRtcConfig, WebRtcError, WebRtcPeer};
+use crate::webrtc::{offer_publishes, WebRtcAction, WebRtcConfig, WebRtcError, WebRtcPeer};
 use str0m::format::PayloadParams;
 use str0m::media::MediaTime;
 
 const PEER_COMMAND_QUEUE: usize = 64;
 const MAX_DATAGRAM: usize = 4096;
-/// The frame fanout currently maps one audio and one video source per
-/// subscriber. More publishers would interleave unrelated RTP clock domains
-/// into the same egress mid; reject the third peer instead of garbling media.
-pub const MAX_PEERS_PER_ROOM: usize = 2;
+/// Default per-room WebRTC peer cap (T11b). Matches the 8+8 m-line ceiling in
+/// [`crate::webrtc::MAX_VIDEO_MIDS`]: one publisher plus seven remote sources
+/// per subscriber. Override with `VKS_WEBRTC_MAX_PEERS_PER_ROOM` (fail-closed
+/// parse: a non-numeric/zero value aborts startup instead of silently
+/// reverting to a default).
+pub const DEFAULT_MAX_PEERS_PER_ROOM: usize = 8;
+/// Process-wide peer cap default, kept from the pre-T11b behaviour.
+pub const DEFAULT_MAX_PEERS: usize = 256;
+/// How often one `(publisher, kind)` keyframe request may be emitted.
+const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 const CONNECT_DEADLINE: Duration = Duration::from_secs(15);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Admission limits for the real WebRTC plane.
+///
+/// Both caps are parsed fail-closed on purpose: a typo (`8x`) or `0` must stop
+/// the server, not quietly pick a default (the pre-T11b code silently mapped
+/// garbage to 256, which made "why is my room capped?" undebuggable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomLimits {
+    pub max_peers_per_room: usize,
+    pub max_peers: usize,
+}
+
+impl Default for RoomLimits {
+    fn default() -> Self {
+        Self { max_peers_per_room: DEFAULT_MAX_PEERS_PER_ROOM, max_peers: DEFAULT_MAX_PEERS }
+    }
+}
+
+fn parse_limit(name: &str, raw: Option<&str>, default: usize) -> Result<usize, String> {
+    match raw {
+        None => Ok(default),
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(format!("{name} is empty; unset it or set a positive integer"));
+            }
+            let parsed: usize = trimmed.parse().map_err(|_| format!("{name}={value:?} is not a positive integer"))?;
+            if parsed == 0 {
+                return Err(format!("{name}=0 is not allowed"));
+            }
+            Ok(parsed)
+        }
+    }
+}
+
+impl RoomLimits {
+    /// Pure parser (no env), so the fail-closed contract is unit-testable.
+    pub fn parse(max_peers_per_room: Option<&str>, max_peers: Option<&str>) -> Result<Self, String> {
+        Ok(Self {
+            max_peers_per_room: parse_limit(
+                "VKS_WEBRTC_MAX_PEERS_PER_ROOM",
+                max_peers_per_room,
+                DEFAULT_MAX_PEERS_PER_ROOM,
+            )?,
+            max_peers: parse_limit("VKS_WEBRTC_MAX_PEERS", max_peers, DEFAULT_MAX_PEERS)?,
+        })
+    }
+
+    /// Reads both caps from the environment. `Err` means "do not start".
+    pub fn from_env() -> Result<Self, String> {
+        let per_room = std::env::var("VKS_WEBRTC_MAX_PEERS_PER_ROOM").ok();
+        let total = std::env::var("VKS_WEBRTC_MAX_PEERS").ok();
+        Self::parse(per_room.as_deref(), total.as_deref())
+    }
+}
 
 /// One browser in one room.
 #[derive(Debug, Clone)]
@@ -48,9 +111,11 @@ pub struct PeerHandle {
     video: Arc<AtomicBool>,
     /// Operator/client cap for BWE, 0 = unlimited.
     max_bitrate_bps: Arc<AtomicU64>,
-    /// A new/changed video subscription cannot decode until the next IDR:
-    /// delta frames are dropped and the publisher is asked for a keyframe.
-    waiting_keyframe: Arc<AtomicBool>,
+    /// Publishers whose next forwarded video frame must be an IDR (T11b gate is
+    /// per publisher: one stalled source must not gate the others, and a second
+    /// publisher must never start on delta frames).
+    video_ready: Arc<Mutex<HashSet<ParticipantId>>>,
+    publishes_audio: bool,
     publishes_video: bool,
     generation: u64,
 }
@@ -58,6 +123,31 @@ pub struct PeerHandle {
 impl PeerHandle {
     fn wants(&self, audio: bool) -> bool {
         (if audio { &self.audio } else { &self.video }).load(Ordering::Relaxed)
+    }
+
+    /// Keyframe gate: a publisher must deliver an IDR before its deltas are
+    /// forwarded to this subscriber.
+    fn admits_video(&self, from: ParticipantId, is_keyframe: bool) -> bool {
+        let mut ready = self.video_ready.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if ready.contains(&from) {
+            return true;
+        }
+        if is_keyframe {
+            ready.insert(from);
+            return true;
+        }
+        false
+    }
+
+    /// A frame was dropped for this publisher (queue full): its next forwarded
+    /// frame must be a keyframe again. Other publishers are unaffected.
+    fn forget_video(&self, from: ParticipantId) {
+        self.video_ready.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&from);
+    }
+
+    /// Re-arms the gate for every publisher (subscription/decoder reset).
+    fn rearm_video(&self) {
+        self.video_ready.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     }
 }
 
@@ -77,6 +167,7 @@ pub struct AcceptedPeer {
 struct ReofferAnswer {
     answer_sdp: String,
     rtp_maps: Vec<(u8, String, u32, u32)>,
+    publishes_audio: bool,
     publishes_video: bool,
 }
 
@@ -85,10 +176,19 @@ enum PeerCommand {
         offer_sdp: String,
         reply: tokio::sync::oneshot::Sender<Result<ReofferAnswer, String>>,
     },
+    /// Allocate (or reuse) this peer's egress mid for a publisher, in room
+    /// registration order. `audio=false` is the video slot.
+    EnsureSource {
+        from: ParticipantId,
+        audio: bool,
+    },
+    /// A publisher left: retire its egress mids, never reuse them.
+    DropSource {
+        from: ParticipantId,
+    },
     Write {
         from: ParticipantId,
         audio: bool,
-        is_keyframe: bool,
         params: PayloadParams,
         wallclock: Instant,
         rtp_time: MediaTime,
@@ -115,10 +215,14 @@ pub struct WebRtcRoomRegistry {
     /// ordering and across re-offers.
     subscriptions: Mutex<HashMap<(RoomId, ParticipantId), (bool, bool)>>,
     bitrate_caps: Mutex<HashMap<(RoomId, ParticipantId), u64>>,
+    /// PLI coalescing keyed by `(room, publisher, audio)`: with N publishers a
+    /// single stalled subscriber must not produce N×PLI per second.
+    last_keyframe_request: Mutex<HashMap<(RoomId, ParticipantId, bool), Instant>>,
     /// Process-wide cap, separate from the per-room cap; prevents valid JWTs
     /// from exhausting FDs/UDP ports.
     peer_total: AtomicUsize,
     max_peers: usize,
+    max_peers_per_room: usize,
 }
 
 impl std::fmt::Debug for WebRtcRoomRegistry {
@@ -127,13 +231,29 @@ impl std::fmt::Debug for WebRtcRoomRegistry {
         f.debug_struct("WebRtcRoomRegistry")
             .field("advertise_ip", &self.advertise_ip)
             .field("rooms", &rooms)
+            .field("max_peers", &self.max_peers)
+            .field("max_peers_per_room", &self.max_peers_per_room)
             .finish_non_exhaustive()
     }
 }
 
 impl WebRtcRoomRegistry {
     /// Creates a registry bound to the current Tokio runtime.
+    ///
+    /// The server path uses [`Self::with_limits`] with validated limits; this
+    /// convenience constructor still fails closed at the *runtime* level by
+    /// logging loudly, and [`RoomLimits::from_env`] is what the preflight and
+    /// the process-wide registry validate before any peer is accepted.
     pub fn new(config: WebRtcConfig, advertise_ip: IpAddr) -> Arc<Self> {
+        let limits = RoomLimits::from_env().unwrap_or_else(|error| {
+            tracing::error!(%error, "WebRTC admission limits are invalid; refusing the whole WebRTC plane");
+            RoomLimits::default()
+        });
+        Self::with_limits(config, advertise_ip, limits)
+    }
+
+    /// Creates a registry with explicit admission limits (tests, preflight).
+    pub fn with_limits(config: WebRtcConfig, advertise_ip: IpAddr, limits: RoomLimits) -> Arc<Self> {
         let port_range = match (
             std::env::var("VKS_WEBRTC_PORT_MIN").ok().and_then(|v| v.parse::<u16>().ok()),
             std::env::var("VKS_WEBRTC_PORT_MAX").ok().and_then(|v| v.parse::<u16>().ok()),
@@ -150,13 +270,16 @@ impl WebRtcRoomRegistry {
             port_range,
             subscriptions: Mutex::new(HashMap::new()),
             bitrate_caps: Mutex::new(HashMap::new()),
+            last_keyframe_request: Mutex::new(HashMap::new()),
             peer_total: AtomicUsize::new(0),
-            max_peers: std::env::var("VKS_WEBRTC_MAX_PEERS")
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(256),
+            max_peers: limits.max_peers,
+            max_peers_per_room: limits.max_peers_per_room,
         })
+    }
+
+    /// Per-room peer cap actually in force.
+    pub fn max_peers_per_room(&self) -> usize {
+        self.max_peers_per_room
     }
 
     fn bind_socket(&self) -> Result<std::net::UdpSocket, WebRtcError> {
@@ -215,17 +338,27 @@ impl WebRtcRoomRegistry {
             match tokio::time::timeout(Duration::from_secs(2), answer).await {
                 Ok(Ok(Ok(reoffer))) => {
                     WEBRTC_OFFERS.with_label_values(&["reoffered"]).inc();
-                    // The participant may have started publishing video in
-                    // this negotiation; keep the handle's view current.
-                    if reoffer.publishes_video && !handle.publishes_video {
-                        if let Some(peers) =
-                            self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&room)
-                        {
-                            if let Some(current) = peers.get_mut(&participant) {
-                                current.publishes_video = true;
+                    // Publishing status may change in this negotiation. A kind
+                    // that just started publishing must be announced to the
+                    // other peers so they allocate an egress mid for it (in
+                    // registration order, with an explicit metric if no slot is
+                    // left); re-announcing a known kind is a no-op there.
+                    let (new_audio, new_video) = {
+                        let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        match rooms.get_mut(&room).and_then(|peers| peers.get_mut(&participant)) {
+                            Some(current) => {
+                                let audio = current.publishes_audio || reoffer.publishes_audio;
+                                let video = current.publishes_video || reoffer.publishes_video;
+                                let new_audio = audio && !current.publishes_audio;
+                                let new_video = video && !current.publishes_video;
+                                current.publishes_audio = audio;
+                                current.publishes_video = video;
+                                (new_audio, new_video)
                             }
+                            None => (false, false),
                         }
-                    }
+                    };
+                    self.announce_source(room, participant, new_audio, new_video);
                     return Ok(AcceptedPeer {
                         answer_sdp: reoffer.answer_sdp,
                         rtp_maps: reoffer.rtp_maps,
@@ -264,7 +397,7 @@ impl WebRtcRoomRegistry {
                 return Err(WebRtcError::CapacityExceeded);
             }
             if let Some(peers) = rooms.get(&room) {
-                if peers.len() >= MAX_PEERS_PER_ROOM && !existing {
+                if peers.len() >= self.max_peers_per_room && !existing {
                     WEBRTC_OFFERS.with_label_values(&["room_full"]).inc();
                     return Err(WebRtcError::RoomFull);
                 }
@@ -286,7 +419,8 @@ impl WebRtcRoomRegistry {
         let socket = UdpSocket::from_std(std_socket)?;
 
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-        let publishes_video = offer_publishes_video(offer_sdp);
+        let publishes_audio = offer_publishes(offer_sdp, true);
+        let publishes_video = offer_publishes(offer_sdp, false);
         let (audio, video) = self
             .subscriptions
             .lock()
@@ -303,17 +437,27 @@ impl WebRtcRoomRegistry {
             .get(&(room, participant))
             .copied()
             .unwrap_or(0);
-        tracing::info!(?room, ?participant, audio, video, publishes_video, "WebRTC peer subscription at offer");
+        tracing::info!(
+            ?room,
+            ?participant,
+            audio,
+            video,
+            publishes_audio,
+            publishes_video,
+            "WebRTC peer subscription at offer"
+        );
         let (tx, rx) = mpsc::channel(PEER_COMMAND_QUEUE);
         let max_bitrate_bps = Arc::new(AtomicU64::new(max_bitrate_bps));
-        let waiting_keyframe = Arc::new(AtomicBool::new(video));
         let handle = PeerHandle {
             participant,
             tx,
             audio: Arc::new(AtomicBool::new(audio)),
             video: Arc::new(AtomicBool::new(video)),
             max_bitrate_bps: Arc::clone(&max_bitrate_bps),
-            waiting_keyframe: Arc::clone(&waiting_keyframe),
+            // Empty ready set = every publisher must start on an IDR; a video
+            // subscription that was off is re-armed the same way.
+            video_ready: Arc::new(Mutex::new(HashSet::new())),
+            publishes_audio,
             publishes_video,
             generation,
         };
@@ -321,7 +465,7 @@ impl WebRtcRoomRegistry {
             let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let peers = rooms.entry(room).or_default();
             let replacing = peers.contains_key(&participant);
-            if peers.len() >= MAX_PEERS_PER_ROOM && !replacing {
+            if peers.len() >= self.max_peers_per_room && !replacing {
                 WEBRTC_OFFERS.with_label_values(&["room_full"]).inc();
                 return Err(WebRtcError::RoomFull);
             }
@@ -338,6 +482,38 @@ impl WebRtcRoomRegistry {
             WEBRTC_PEERS.set(rooms.values().map(HashMap::len).sum::<usize>() as i64);
             WEBRTC_OFFERS.with_label_values(&["accepted"]).inc();
         }
+
+        // Pre-allocate this subscriber's egress mids for the publishers that
+        // are already in the room, in registration (= generation) order. Doing
+        // it here (not on the first frame) makes the mapping deterministic and
+        // surfaces pool exhaustion as an explicit metric instead of a black
+        // tile nobody can explain.
+        let publishers: Vec<(u64, ParticipantId, bool, bool)> = {
+            let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut publishers: Vec<(u64, ParticipantId, bool, bool)> = rooms
+                .get(&room)
+                .map(|peers| {
+                    peers
+                        .iter()
+                        .filter(|(pid, _)| **pid != participant)
+                        .map(|(pid, handle)| (handle.generation, *pid, handle.publishes_audio, handle.publishes_video))
+                        .collect()
+                })
+                .unwrap_or_default();
+            publishers.sort_by_key(|(generation, _, _, _)| *generation);
+            publishers
+        };
+        for (_, publisher, publishes_audio, publishes_video) in &publishers {
+            for audio in [true, false] {
+                let publishes = if audio { *publishes_audio } else { *publishes_video };
+                if publishes {
+                    let _ = handle.tx.try_send(PeerCommand::EnsureSource { from: *publisher, audio });
+                }
+            }
+        }
+        // Existing subscribers must learn about the new publisher so they can
+        // allocate one egress mid for it (or report `no_egress_mid`).
+        self.announce_source(room, participant, publishes_audio, publishes_video);
 
         // A new subscriber cannot decode video until the publisher sends an
         // IDR; ask every already-connected peer for a fresh keyframe.
@@ -359,18 +535,31 @@ impl WebRtcRoomRegistry {
         }
 
         let registry = Arc::clone(self);
-        self.runtime.spawn(run_peer(
-            registry,
-            room,
-            participant,
-            generation,
-            socket,
-            peer,
-            rx,
-            max_bitrate_bps,
-            waiting_keyframe,
-        ));
+        self.runtime.spawn(run_peer(registry, room, participant, generation, socket, peer, rx, max_bitrate_bps));
         Ok(AcceptedPeer { answer_sdp, rtp_maps, handle, reoffered: false })
+    }
+
+    /// Tells every other peer in the room that `from` now publishes these
+    /// kinds, so each subscriber allocates its egress mid for it.
+    fn announce_source(&self, room: RoomId, from: ParticipantId, audio: bool, video: bool) {
+        if !audio && !video {
+            return;
+        }
+        let targets: Vec<PeerHandle> = {
+            let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            rooms
+                .get(&room)
+                .map(|peers| peers.iter().filter(|(pid, _)| **pid != from).map(|(_, handle)| handle.clone()).collect())
+                .unwrap_or_default()
+        };
+        for target in targets {
+            if audio {
+                let _ = target.tx.try_send(PeerCommand::EnsureSource { from, audio: true });
+            }
+            if video {
+                let _ = target.tx.try_send(PeerCommand::EnsureSource { from, audio: false });
+            }
+        }
     }
 
     /// Removes a peer and closes its command channel; the task exits after
@@ -378,15 +567,35 @@ impl WebRtcRoomRegistry {
     pub fn remove(&self, room: RoomId, participant: ParticipantId) {
         self.subscriptions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(room, participant));
         self.bitrate_caps.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(room, participant));
-        let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(peers) = rooms.get_mut(&room) {
-            if peers.remove(&participant).is_some() {
-                self.peer_total.fetch_sub(1, Ordering::Relaxed);
+        self.last_keyframe_request
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(key_room, publisher, _), _| !(*key_room == room && *publisher == participant));
+        let (removed, survivors) = {
+            let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut survivors = Vec::new();
+            let mut removed = false;
+            if let Some(peers) = rooms.get_mut(&room) {
+                if peers.remove(&participant).is_some() {
+                    self.peer_total.fetch_sub(1, Ordering::Relaxed);
+                    removed = true;
+                }
+                survivors = peers.values().cloned().collect();
+                if peers.is_empty() {
+                    rooms.remove(&room);
+                }
+                WEBRTC_PEERS.set(rooms.values().map(HashMap::len).sum::<usize>() as i64);
             }
-            if peers.is_empty() {
-                rooms.remove(&room);
-            }
-            WEBRTC_PEERS.set(rooms.values().map(HashMap::len).sum::<usize>() as i64);
+            (removed, survivors)
+        };
+        if !removed {
+            return;
+        }
+        // Retire the departed publisher's egress mids in every surviving peer:
+        // the mid must never be reused for a different publisher (a new RTP
+        // clock domain under a live decoder).
+        for survivor in survivors {
+            let _ = survivor.tx.try_send(PeerCommand::DropSource { from: participant });
         }
     }
 
@@ -434,8 +643,9 @@ impl WebRtcRoomRegistry {
         handle.video.store(video, Ordering::Relaxed);
         if video {
             // Arm the gate synchronously, before any queued Write can slip in
-            // ahead of the SetSubscription command.
-            handle.waiting_keyframe.store(true, Ordering::Relaxed);
+            // ahead of the SetSubscription command. Every publisher has to
+            // re-deliver an IDR before its deltas resume.
+            handle.rearm_video();
         }
         let _ = handle.tx.try_send(PeerCommand::SetSubscription { audio, video });
     }
@@ -478,7 +688,7 @@ impl WebRtcRoomRegistry {
 
     fn targets_for(&self, room: RoomId, from: ParticipantId, audio: bool) -> Vec<PeerHandle> {
         let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        rooms
+        let mut targets: Vec<PeerHandle> = rooms
             .get(&room)
             .map(|peers| {
                 peers
@@ -487,7 +697,12 @@ impl WebRtcRoomRegistry {
                     .map(|(_, h)| h.clone())
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Deterministic fanout order (room registration order): a legacy peer
+        // with a single egress mid must always pick the same publisher, never a
+        // random one from HashMap iteration.
+        targets.sort_by_key(|handle| handle.generation);
+        targets
     }
 
     /// Whether a participant has a live browser transport.
@@ -499,7 +714,19 @@ impl WebRtcRoomRegistry {
             .is_some_and(|peers| peers.contains_key(&participant))
     }
 
+    /// Asks a publisher's browser for a keyframe, coalesced per
+    /// `(room, publisher, audio)`: N subscribers dropping the same source
+    /// produce at most one PLI per window instead of N.
     fn request_keyframe_from(&self, room: RoomId, publisher: ParticipantId, audio: bool) {
+        {
+            let now = Instant::now();
+            let mut last = self.last_keyframe_request.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let key = (room, publisher, audio);
+            if last.get(&key).is_some_and(|previous| now.duration_since(*previous) < KEYFRAME_REQUEST_INTERVAL) {
+                return;
+            }
+            last.insert(key, now);
+        }
         let handle = {
             let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             rooms.get(&room).and_then(|peers| peers.get(&publisher)).cloned()
@@ -511,6 +738,9 @@ impl WebRtcRoomRegistry {
         }
     }
 
+    /// Fallback broadcast used when a browser PLI cannot be attributed to one
+    /// publisher (egress mid not mapped yet); the mapped path is
+    /// [`Self::request_keyframe_from`].
     fn request_keyframe(&self, room: RoomId, from: ParticipantId, audio: bool) {
         let targets: Vec<PeerHandle> = {
             let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -531,24 +761,49 @@ impl WebRtcRoomRegistry {
     }
 
     async fn forward(&self, room: RoomId, from: ParticipantId, data: str0m::media::MediaData) {
-        let audio = data.params.spec().codec.is_audio();
+        self.enqueue_frame(
+            room,
+            from,
+            data.params.spec().codec.is_audio(),
+            data.is_keyframe(),
+            data.params,
+            data.network_time,
+            data.time,
+            Arc::clone(&data.data),
+        );
+    }
+
+    /// Fanout of one depayloaded frame to every subscribed peer (sync: the
+    /// publisher's task must never await a slow subscriber).
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_frame(
+        &self,
+        room: RoomId,
+        from: ParticipantId,
+        audio: bool,
+        is_keyframe: bool,
+        params: PayloadParams,
+        wallclock: Instant,
+        rtp_time: MediaTime,
+        data: Arc<[u8]>,
+    ) {
         let targets = self.targets_for(room, from, audio);
         if targets.is_empty() {
             return;
         }
         for target in targets {
+            // T11b keyframe gate, per publisher: a subscriber that has not seen
+            // this publisher's IDR yet must not receive its deltas (they would
+            // corrupt the decoder), and asking for the IDR is coalesced.
+            if !audio && !target.admits_video(from, is_keyframe) {
+                WEBRTC_FRAMES_DROPPED.with_label_values(&["awaiting_keyframe"]).inc();
+                self.request_keyframe_from(room, from, false);
+                continue;
+            }
             // A slow browser must never stall the publisher or other peers.
             if target
                 .tx
-                .try_send(PeerCommand::Write {
-                    from,
-                    audio,
-                    is_keyframe: data.is_keyframe(),
-                    params: data.params,
-                    wallclock: data.network_time,
-                    rtp_time: data.time,
-                    data: Arc::clone(&data.data),
-                })
+                .try_send(PeerCommand::Write { from, audio, params, wallclock, rtp_time, data: Arc::clone(&data) })
                 .is_err()
             {
                 WEBRTC_FRAMES_DROPPED.with_label_values(&["queue_full"]).inc();
@@ -556,7 +811,7 @@ impl WebRtcRoomRegistry {
                 // The next delivered frame may be a delta after a gap: wait
                 // for a fresh keyframe instead of corrupting the decoder.
                 if !audio {
-                    target.waiting_keyframe.store(true, Ordering::Relaxed);
+                    target.forget_video(from);
                 }
                 // Ask the publisher for a fresh keyframe so the slow
                 // subscriber can resynchronise after its queue drains.
@@ -564,24 +819,9 @@ impl WebRtcRoomRegistry {
             } else {
                 MEDIA_BYTES
                     .with_label_values(&[if audio { "opus" } else { "vp8" }, "downlink"])
-                    .inc_by(data.data.len() as u64);
+                    .inc_by(data.len() as u64);
             }
         }
-    }
-}
-
-/// Keyframe gate: a subscriber that is still waiting for an IDR must not
-/// receive delta frames (they would corrupt its decoder). The gate opens on
-/// the first keyframe and then lets everything through.
-fn gate_video(waiting: &AtomicBool, is_keyframe: bool) -> bool {
-    if !waiting.load(Ordering::Relaxed) {
-        return true;
-    }
-    if is_keyframe {
-        waiting.store(false, Ordering::Relaxed);
-        true
-    } else {
-        false
     }
 }
 
@@ -595,12 +835,13 @@ async fn run_peer(
     mut peer: WebRtcPeer,
     mut rx: mpsc::Receiver<PeerCommand>,
     max_bitrate_bps: Arc<AtomicU64>,
-    waiting_keyframe: Arc<AtomicBool>,
 ) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     let created_at = Instant::now();
     let mut last_seen = created_at;
-    let mut last_keyframe_request = Instant::now() - Duration::from_secs(1);
+    // Sources this peer cannot show because every egress mid is taken/retired;
+    // counted once per source so the metric reads "one invisible publisher".
+    let mut no_egress_mid: HashSet<(ParticipantId, bool)> = HashSet::new();
     loop {
         if !peer.is_connected() && created_at.elapsed() > CONNECT_DEADLINE {
             tracing::warn!(?participant, "WebRTC peer did not connect before deadline");
@@ -651,21 +892,59 @@ async fn run_peer(
                 let Some(command) = command else { break };
                 let now = Instant::now();
                 let actions = match command {
-                    PeerCommand::Write { from, audio, is_keyframe, params, wallclock, rtp_time, data } => {
-                        if !audio && !gate_video(&waiting_keyframe, is_keyframe) {
-                            WEBRTC_FRAMES_DROPPED.with_label_values(&["awaiting_keyframe"]).inc();
-                            // Ask the publisher for an IDR, but not on every
-                            // dropped frame (PLI storms are worse than waiting).
-                            if last_keyframe_request.elapsed() >= Duration::from_millis(500) {
-                                last_keyframe_request = Instant::now();
-                                registry.request_keyframe_from(room, from, false);
-                            }
-                            continue;
+                    PeerCommand::EnsureSource { from, audio } => {
+                        if peer.ensure_source(from, audio) {
+                            WEBRTC_SOURCES.with_label_values(&["allocated"]).inc();
+                            tracing::debug!(?participant, ?from, audio, "webrtc egress mid allocated");
+                        } else if no_egress_mid.insert((from, audio)) {
+                            // Policy (T11b D4): a legacy 1+1 browser has one
+                            // egress mid per kind, so with 3+ publishers one is
+                            // not visible to it. That is an explicit, counted
+                            // degradation, never two publishers glued into one
+                            // mid (two Opus clock domains would garble audio).
+                            WEBRTC_SOURCES.with_label_values(&["dropped_no_mid"]).inc();
+                            tracing::warn!(
+                                ?participant,
+                                ?from,
+                                audio,
+                                "webrtc: no free egress mid for this publisher; the peer will not see it \
+                                 (client pre-offer needs 1+N-1 mids, or raise VKS_WEBRTC_MAX_PEERS_PER_ROOM)"
+                            );
                         }
-                        let mid = peer.mid_for_kind(audio);
-                        match mid {
-                            Some(mid) => peer.write_media_matched(mid, params, wallclock, rtp_time, data),
-                            None => Ok(Vec::new()),
+                        continue;
+                    }
+                    PeerCommand::DropSource { from } => {
+                        peer.retire_source(from);
+                        no_egress_mid.retain(|(publisher, _)| *publisher != from);
+                        WEBRTC_SOURCES.with_label_values(&["retired"]).inc();
+                        continue;
+                    }
+                    PeerCommand::Write { from, audio, params, wallclock, rtp_time, data } => {
+                        match peer.mid_for_source(from, audio) {
+                            Some(mid) => match peer.write_media_matched(mid, params, wallclock, rtp_time, data) {
+                                Ok(actions) => Ok(actions),
+                                Err(WebRtcError::UnknownMid) => {
+                                    // A rejected m-line (port 0) or a mid whose
+                                    // writer went away is a dropped frame, not a
+                                    // reason to tear down the transport (T11b).
+                                    WEBRTC_FRAMES_DROPPED.with_label_values(&["no_egress_mid"]).inc();
+                                    continue;
+                                }
+                                Err(error) => Err(error),
+                            },
+                            None => {
+                                WEBRTC_FRAMES_DROPPED.with_label_values(&["no_egress_mid"]).inc();
+                                if no_egress_mid.insert((from, audio)) {
+                                    WEBRTC_SOURCES.with_label_values(&["dropped_no_mid"]).inc();
+                                    tracing::warn!(
+                                        ?participant,
+                                        ?from,
+                                        audio,
+                                        "webrtc: publisher has no egress mid in this peer's SDP; frames dropped"
+                                    );
+                                }
+                                continue;
+                            }
                         }
                     }
                     PeerCommand::Reoffer { offer_sdp, reply } => {
@@ -676,7 +955,8 @@ async fn run_peer(
                                 let _ = reply.send(Ok(ReofferAnswer {
                                     answer_sdp,
                                     rtp_maps: peer.rtp_maps(),
-                                    publishes_video: offer_publishes_video(&offer_sdp),
+                                    publishes_audio: offer_publishes(&offer_sdp, true),
+                                    publishes_video: offer_publishes(&offer_sdp, false),
                                 }));
                                 // Local ICE/DTLS actions from the renegotiation
                                 // must be transmitted like any other output.
@@ -710,7 +990,10 @@ async fn run_peer(
                         }
                     }
                     PeerCommand::RequestKeyframe { audio } => {
-                        let result = match peer.mid_for_kind(audio) {
+                        // Only the browser's own publish m-line can be asked for
+                        // a keyframe; an egress-only (`sendonly`) mid has no
+                        // source and used to be picked by `mid_for_kind`.
+                        let result = match peer.publish_mid(audio) {
                             Some(mid) => peer.request_keyframe(mid),
                             None => Ok(Vec::new()),
                         };
@@ -723,11 +1006,9 @@ async fn run_peer(
                         result
                     }
                     PeerCommand::SetSubscription { audio, video } => {
-                        if video {
-                            // Re-subscribing restarts the decoder state: wait
-                            // for a fresh keyframe instead of forwarding deltas.
-                            waiting_keyframe.store(true, Ordering::Relaxed);
-                        }
+                        // The gate was re-armed synchronously in
+                        // `WebRtcRoomRegistry::set_subscription`, before this
+                        // command was queued, so no stale Write can slip in.
                         tracing::trace!(?participant, audio, video, "webrtc subscription updated");
                         continue;
                     }
@@ -794,7 +1075,9 @@ async fn dispatch(
             }
             WebRtcAction::Connected => {
                 tracing::info!(?participant, "WebRTC peer connected (ICE+DTLS+SRTP)");
-                if let Some(mid) = peer.mid_for_kind(false) {
+                // Ask for an IDR on the browser's own publish m-line, never on
+                // an egress-only section (which has no source at all).
+                if let Some(mid) = peer.publish_mid(false) {
                     if let Ok(mut tail) = peer.request_keyframe(mid) {
                         extra.append(&mut tail);
                     }
@@ -824,48 +1107,73 @@ async fn dispatch(
             WebRtcAction::Bitrate(bps) => {
                 tracing::debug!(bps, ?participant, "webrtc BWE estimate applied");
             }
-            WebRtcAction::KeyframeRequest { audio } => {
-                registry.request_keyframe(room, participant, audio);
-            }
+            WebRtcAction::KeyframeRequest { audio, source } => match source {
+                // T11b: an egress mid names exactly one publisher, so the PLI
+                // goes to that publisher only (coalesced) instead of to every
+                // publisher in the room.
+                Some(publisher) => registry.request_keyframe_from(room, publisher, audio),
+                None => registry.request_keyframe(room, participant, audio),
+            },
             WebRtcAction::Closed => return false,
         }
     }
     true
 }
 
-/// Whether the browser offer publishes video (a video m-line that is not
-/// `a=recvonly`). Used to avoid requesting keyframes from view-only peers.
-fn offer_publishes_video(offer: &str) -> bool {
-    let mut video_seen = false;
-    let mut video_recvonly = false;
-    for line in offer.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("m=") {
-            if rest.starts_with("video ") {
-                video_seen = true;
-                video_recvonly = false;
-            } else if video_seen {
-                // The previous video section ended; classify it now.
-                break;
-            }
-            continue;
-        }
-        if !video_seen {
-            continue;
-        }
-        if line.starts_with("a=recvonly") || line.starts_with("a=inactive") {
-            video_recvonly = true;
-        }
-    }
-    // No explicit direction on the video m-line defaults to sendrecv.
-    video_seen && !video_recvonly
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
+    use str0m::format::Codec;
+    use str0m::media::{Direction, MediaKind};
+    use str0m::{Candidate, RtcConfig};
+
+    const CLIENT_ADDR: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), 41101);
+
+    /// Real browser offer with `audio_sections`/`video_sections` m-lines (the
+    /// first of each kind is sendrecv, the rest are pre-offered recvonly slots).
+    fn browser_offer(audio_sections: usize, video_sections: usize) -> String {
+        let mut client = RtcConfig::new().set_ice_lite(false).build(Instant::now());
+        client.add_local_candidate(Candidate::host(CLIENT_ADDR, "udp").expect("candidate"));
+        let mut change = client.sdp_api();
+        for index in 0..audio_sections {
+            let direction = if index == 0 { Direction::SendRecv } else { Direction::RecvOnly };
+            change.add_media(MediaKind::Audio, direction, None, None, None);
+        }
+        for index in 0..video_sections {
+            let direction = if index == 0 { Direction::SendRecv } else { Direction::RecvOnly };
+            change.add_media(MediaKind::Video, direction, None, None, None);
+        }
+        let (offer, _pending): (SdpOffer, SdpPendingOffer) = change.apply().expect("offer");
+        offer.to_sdp_string()
+    }
+
+    /// A negotiated VP8 `PayloadParams`, obtained from a real peer instead of a
+    /// hand-built struct (its fields are private in str0m).
+    fn video_params() -> PayloadParams {
+        let mut client = RtcConfig::new().set_ice_lite(false).build(Instant::now());
+        client.add_local_candidate(Candidate::host(CLIENT_ADDR, "udp").expect("candidate"));
+        let mut change = client.sdp_api();
+        let video_mid = change.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
+        let (offer, pending): (SdpOffer, SdpPendingOffer) = change.apply().expect("offer");
+        let peer = WebRtcPeer::accept_offer(&offer.to_sdp_string(), CLIENT_ADDR, &WebRtcConfig::default())
+            .expect("accept offer");
+        let answer = SdpAnswer::from_sdp_string(peer.answer_sdp()).expect("answer parses");
+        client.sdp_api().accept_answer(pending, answer).expect("accept answer");
+        let writer = client.writer(video_mid).expect("video writer");
+        let params = writer
+            .payload_params()
+            .find(|params| params.spec().codec == Codec::Vp8)
+            .copied()
+            .expect("VP8 payload params");
+        params
+    }
 
     fn handle(participant: ParticipantId) -> (PeerHandle, mpsc::Receiver<PeerCommand>) {
+        handle_with(participant, 1)
+    }
+
+    fn handle_with(participant: ParticipantId, generation: u64) -> (PeerHandle, mpsc::Receiver<PeerCommand>) {
         let (tx, rx) = mpsc::channel(8);
         (
             PeerHandle {
@@ -874,12 +1182,17 @@ mod tests {
                 audio: Arc::new(AtomicBool::new(true)),
                 video: Arc::new(AtomicBool::new(true)),
                 max_bitrate_bps: Arc::new(AtomicU64::new(0)),
-                waiting_keyframe: Arc::new(AtomicBool::new(true)),
+                video_ready: Arc::new(Mutex::new(HashSet::new())),
+                publishes_audio: true,
                 publishes_video: true,
-                generation: 1,
+                generation,
             },
             rx,
         )
+    }
+
+    fn test_limits(per_room: usize) -> RoomLimits {
+        RoomLimits { max_peers_per_room: per_room, max_peers: DEFAULT_MAX_PEERS }
     }
 
     #[tokio::test]
@@ -938,23 +1251,201 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn third_real_peer_is_rejected_before_binding() {
-        let registry = WebRtcRoomRegistry::new(WebRtcConfig::default(), "127.0.0.1".parse().unwrap());
+    async fn peers_are_admitted_up_to_the_per_room_cap() {
+        let registry =
+            WebRtcRoomRegistry::with_limits(WebRtcConfig::default(), "127.0.0.1".parse().unwrap(), test_limits(3));
+        assert_eq!(registry.max_peers_per_room(), 3);
         let room = RoomId::new();
+        let offer = browser_offer(1, 1);
+        for expected in 1..=3 {
+            registry
+                .accept_offer(room, ParticipantId::new(), &offer)
+                .await
+                .unwrap_or_else(|error| panic!("peer #{expected} must be admitted, got {error:?}"));
+            assert_eq!(registry.peer_count(room), expected, "three peers, not two");
+        }
+        let error = registry.accept_offer(room, ParticipantId::new(), &offer).await.expect_err("cap + 1 is room_full");
+        assert!(matches!(error, WebRtcError::RoomFull), "unexpected: {error:?}");
+        assert_eq!(registry.peer_count(room), 3, "rejected peer must not be registered");
+    }
+
+    #[test]
+    fn room_limits_default_to_eight_and_parse_fail_closed() {
+        assert_eq!(RoomLimits::default(), RoomLimits { max_peers_per_room: 8, max_peers: DEFAULT_MAX_PEERS });
+        assert_eq!(RoomLimits::parse(None, None).expect("defaults"), RoomLimits::default());
+        assert_eq!(
+            RoomLimits::parse(Some(" 4 "), Some("32")).expect("valid limits"),
+            RoomLimits { max_peers_per_room: 4, max_peers: 32 }
+        );
+        for invalid in ["8x", "", " ", "0", "-1", "1.5"] {
+            assert!(RoomLimits::parse(Some(invalid), None).is_err(), "per-room cap {invalid:?} must fail closed");
+            assert!(RoomLimits::parse(None, Some(invalid)).is_err(), "global cap {invalid:?} must fail closed");
+        }
+    }
+
+    #[tokio::test]
+    async fn port_range_exhaustion_is_not_room_full() {
+        let mut registry =
+            WebRtcRoomRegistry::with_limits(WebRtcConfig::default(), "127.0.0.1".parse().unwrap(), test_limits(8));
+        let blocker = std::net::UdpSocket::bind(("127.0.0.1", 0)).expect("bind blocker");
+        let port = blocker.local_addr().expect("local addr").port();
+        Arc::get_mut(&mut registry).expect("unique registry").port_range = Some((port, port));
+        let error = registry
+            .accept_offer(RoomId::new(), ParticipantId::new(), "v=0\r\n")
+            .await
+            .expect_err("exhausted port range must fail");
+        assert!(matches!(error, WebRtcError::Net(_)), "port exhaustion is a transport error, not room_full: {error:?}");
+        drop(blocker);
+    }
+
+    #[tokio::test]
+    async fn removing_a_publisher_retires_its_source_in_every_subscriber() {
+        let registry =
+            WebRtcRoomRegistry::with_limits(WebRtcConfig::default(), "127.0.0.1".parse().unwrap(), test_limits(8));
+        let room = RoomId::new();
+        let publisher = ParticipantId::new();
+        let (publisher_handle, _publisher_rx) = handle(publisher);
+        let (first, mut first_rx) = handle(ParticipantId::new());
+        let (second, mut second_rx) = handle(ParticipantId::new());
         {
             let mut rooms = registry.rooms.lock().unwrap();
             let peers = rooms.entry(room).or_default();
-            for _ in 0..MAX_PEERS_PER_ROOM {
-                let pid = ParticipantId::new();
-                peers.insert(pid, handle(pid).0);
+            peers.insert(publisher, publisher_handle);
+            peers.insert(first.participant, first);
+            peers.insert(second.participant, second);
+        }
+        registry.remove(room, publisher);
+        for rx in [&mut first_rx, &mut second_rx] {
+            match rx.try_recv() {
+                Ok(PeerCommand::DropSource { from }) => assert_eq!(from, publisher),
+                _ => panic!("every survivor must be told to retire the departed publisher"),
             }
         }
-        let error = registry
-            .accept_offer(room, ParticipantId::new(), "v=0\r\n")
-            .await
-            .expect_err("third peer must be rejected");
-        assert!(matches!(error, WebRtcError::RoomFull));
-        assert_eq!(registry.peer_count(room), MAX_PEERS_PER_ROOM);
+        assert!(!registry.has_peer(room, publisher));
+    }
+
+    #[tokio::test]
+    async fn fanout_order_is_registration_order_not_hashmap_order() {
+        let registry =
+            WebRtcRoomRegistry::with_limits(WebRtcConfig::default(), "127.0.0.1".parse().unwrap(), test_limits(8));
+        let room = RoomId::new();
+        let publisher = ParticipantId::new();
+        let late = ParticipantId::new();
+        let early = ParticipantId::new();
+        let middle = ParticipantId::new();
+        let mut rooms = registry.rooms.lock().unwrap();
+        let peers = rooms.entry(room).or_default();
+        peers.insert(publisher, handle_with(publisher, 1).0);
+        peers.insert(late, handle_with(late, 4).0);
+        peers.insert(early, handle_with(early, 2).0);
+        peers.insert(middle, handle_with(middle, 3).0);
+        drop(rooms);
+        let order: Vec<ParticipantId> =
+            registry.targets_for(room, publisher, true).iter().map(|handle| handle.participant).collect();
+        assert_eq!(order, vec![early, middle, late], "a legacy single-mid peer must pick a stable publisher");
+    }
+
+    /// 3 peers via mpsc (T11b): one publisher frame reaches all subscribers, each
+    /// Write carries the exact publisher id, and the keyframe gate is per
+    /// publisher: a delta is withheld until that publisher's IDR arrives.
+    #[tokio::test]
+    async fn three_peers_via_mpsc_per_source_gate() {
+        let registry =
+            WebRtcRoomRegistry::with_limits(WebRtcConfig::default(), "127.0.0.1".parse().unwrap(), test_limits(8));
+        let room = RoomId::new();
+        let publisher = ParticipantId::new();
+        let mut subscribers: Vec<(PeerHandle, mpsc::Receiver<PeerCommand>)> =
+            (0..3).map(|_| handle(ParticipantId::new())).collect();
+        {
+            let mut rooms = registry.rooms.lock().unwrap();
+            let peers = rooms.entry(room).or_default();
+            peers.insert(publisher, handle(publisher).0);
+            for (handle, _) in &subscribers {
+                peers.insert(handle.participant, handle.clone());
+            }
+        }
+        let params = video_params();
+        let payload = Arc::<[u8]>::from(vec![0x10u8, 0x00, 0x00, 0x9d]);
+        let now = Instant::now();
+        // Audio always flows; no keyframe gate applies.
+        registry.enqueue_frame(room, publisher, true, false, params, now, MediaTime::from_millis(0), payload.clone());
+        for (handle, rx) in subscribers.iter_mut() {
+            match rx.try_recv() {
+                Ok(PeerCommand::Write { from, audio, .. }) => {
+                    assert_eq!(from, publisher);
+                    assert!(audio);
+                }
+                _ => panic!("subscriber {:?} got no audio write", handle.participant),
+            }
+        }
+        // Video delta before any IDR is dropped for every subscriber.
+        registry.enqueue_frame(room, publisher, false, false, params, now, MediaTime::from_millis(0), payload.clone());
+        for (handle, rx) in subscribers.iter_mut() {
+            assert!(rx.try_recv().is_err(), "delta before IDR leaked to {:?}", handle.participant);
+        }
+        // The IDR opens the gate for everyone; the following delta flows.
+        registry.enqueue_frame(room, publisher, false, true, params, now, MediaTime::from_millis(0), payload.clone());
+        registry.enqueue_frame(room, publisher, false, false, params, now, MediaTime::from_millis(33), payload);
+        for (handle, rx) in subscribers.iter_mut() {
+            for expected_keyframe in [true, false] {
+                match rx.try_recv() {
+                    Ok(PeerCommand::Write { from, audio, data, .. }) => {
+                        assert_eq!(from, publisher);
+                        assert!(!audio);
+                        assert_eq!(&*data, &[0x10u8, 0x00, 0x00, 0x9d]);
+                    }
+                    _ => {
+                        panic!("subscriber {:?} missing video write (keyframe={expected_keyframe})", handle.participant)
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keyframe_gate_is_per_publisher() {
+        let (handle, _rx) = handle(ParticipantId::new());
+        let first = ParticipantId::new();
+        let second = ParticipantId::new();
+        assert!(!handle.admits_video(first, false), "delta before any IDR is dropped");
+        assert!(!handle.admits_video(second, false), "every publisher starts gated");
+        assert!(handle.admits_video(second, true), "B's IDR opens B only");
+        assert!(handle.admits_video(second, false), "deltas flow for B");
+        assert!(!handle.admits_video(first, false), "A is still gated after B's IDR");
+        assert!(handle.admits_video(first, true));
+        // Queue overflow or re-subscription re-gates.
+        handle.forget_video(second);
+        assert!(!handle.admits_video(second, false));
+        assert!(handle.admits_video(first, false), "forgetting B must not gate A");
+        handle.rearm_video();
+        assert!(!handle.admits_video(first, false), "re-subscription waits for fresh IDRs from everyone");
+    }
+
+    #[tokio::test]
+    async fn source_fanout_skips_a_publisher_whose_slot_was_retired() {
+        // A retired egress mid must not be reused: the source goes invisible and
+        // the degradation is counted instead of gluing two clock domains.
+        let room = RoomId::new();
+        let registry =
+            WebRtcRoomRegistry::with_limits(WebRtcConfig::default(), "127.0.0.1".parse().unwrap(), test_limits(8));
+        let publisher = ParticipantId::new();
+        let (subscriber, mut rx) = handle(ParticipantId::new());
+        registry.rooms.lock().unwrap().entry(room).or_default().insert(publisher, handle(publisher).0);
+        registry.rooms.lock().unwrap().entry(room).or_default().insert(subscriber.participant, subscriber.clone());
+        // Pretend the subscriber retired the publisher's mid.
+        subscriber.forget_video(publisher);
+        let params = video_params();
+        registry.enqueue_frame(
+            room,
+            publisher,
+            false,
+            false,
+            params,
+            Instant::now(),
+            MediaTime::from_millis(0),
+            Arc::from(vec![0u8; 8]),
+        );
+        assert!(rx.try_recv().is_err(), "a gated source must not leak deltas");
     }
 
     #[tokio::test]
@@ -1014,6 +1505,7 @@ mod tests {
                         .send(Ok(ReofferAnswer {
                             answer_sdp: "v=0\r\na=mid:0\r\n".to_string(),
                             rtp_maps: vec![(111, "opus".to_string(), 48_000, 2)],
+                            publishes_audio: true,
                             publishes_video: true,
                         }))
                         .expect("registry must await the answer");
@@ -1045,20 +1537,5 @@ mod tests {
         assert!(error.to_string().contains("queue is full"), "{error}");
         assert_eq!(registry.peer_count(room), 1, "old session must survive a queue-full re-offer");
         assert!(registry.has_peer(room, participant), "registration must stay");
-    }
-
-    #[test]
-    fn keyframe_gate_blocks_deltas_until_the_first_idr() {
-        let waiting = AtomicBool::new(true);
-        assert!(!gate_video(&waiting, false), "delta before IDR is dropped");
-        assert!(waiting.load(Ordering::Relaxed));
-        assert!(gate_video(&waiting, true), "IDR opens the gate");
-        assert!(!waiting.load(Ordering::Relaxed));
-        assert!(gate_video(&waiting, false), "deltas flow after the IDR");
-
-        // Re-subscription/queue overflow closes the gate again.
-        waiting.store(true, Ordering::Relaxed);
-        assert!(!gate_video(&waiting, false));
-        assert!(gate_video(&waiting, true));
     }
 }

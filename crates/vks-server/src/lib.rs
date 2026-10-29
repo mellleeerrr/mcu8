@@ -1113,28 +1113,40 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                         }
                                                     }
                                                 }
-                                                let mut tracks = Vec::new();
-                                                for media in &sdp.media {
-                                                    let track_kind = match media.kind {
-                                                        vks_signaling::sdp::MediaKind::Audio => vks_core::track::TrackKind::Audio,
-                                                        _ => vks_core::track::TrackKind::Video,
-                                                    };
-                                                    if real_webrtc_peer
-                                                        && ((track_kind == vks_core::track::TrackKind::Audio && !accepted_audio)
-                                                            || (track_kind == vks_core::track::TrackKind::Video && !accepted_video))
-                                                    {
-                                                        continue;
-                                                    }
-                                                    let track = vks_core::ports::media_engine::MediaTrack::new(pid, track_kind);
-                                                    if !real_webrtc_peer {
-                                                        for ssrc_str in &media.ssrcs {
-                                                            if let Ok(ssrc) = ssrc_str.split_whitespace().next().unwrap_or("").parse::<u32>() {
-                                                                ctx.sfu_engine.register_ssrc(m.room_id, pid, track.id, ssrc);
+                                                let tracks: Vec<vks_core::ports::media_engine::MediaTrack> =
+                                                    if real_webrtc_peer {
+                                                        // T11b: 1 + (N-1) m-lines per kind.
+                                                        real_peer_tracks(
+                                                            pid,
+                                                            &sdp.media,
+                                                            accepted_audio,
+                                                            accepted_video,
+                                                        )
+                                                    } else {
+                                                        let mut tracks = Vec::new();
+                                                        for media in &sdp.media {
+                                                            let track_kind = match media.kind {
+                                                                vks_signaling::sdp::MediaKind::Audio => {
+                                                                    vks_core::track::TrackKind::Audio
+                                                                }
+                                                                _ => vks_core::track::TrackKind::Video,
+                                                            };
+                                                            let track =
+                                                                vks_core::ports::media_engine::MediaTrack::new(pid, track_kind);
+                                                            for ssrc_str in &media.ssrcs {
+                                                                if let Ok(ssrc) = ssrc_str
+                                                                    .split_whitespace()
+                                                                    .next()
+                                                                    .unwrap_or("")
+                                                                    .parse::<u32>()
+                                                                {
+                                                                    ctx.sfu_engine.register_ssrc(m.room_id, pid, track.id, ssrc);
+                                                                }
                                                             }
+                                                            tracks.push(track);
                                                         }
-                                                    }
-                                                    tracks.push(track);
-                                                }
+                                                        tracks
+                                                    };
                                                 if !tracks.is_empty() {
                                                     // Публишер регистрируется в обоих движках при
                                                     // любом транспорте: реестр паблишеров — это
@@ -1475,6 +1487,41 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
     cleanup_active_membership(&mut current_membership, &ctx.sfu_engine, &ctx.mcu_engine, &state, 1).await;
 }
 
+/// One local `MediaTrack` per published kind for a real str0m peer (T11b).
+///
+/// A real browser pre-offers `1 + (N-1)` m-lines per kind: the first is its own
+/// camera/mic, the rest are per-source egress slots. Only the first is a local
+/// track — registering one track per m-line duplicated `TrackAdded` (8× for a
+/// 1+8 offer) and inflated the publisher registry/layout. Legacy plaintext
+/// peers keep one track per m-line because each carries its own SSRC, so they
+/// are handled separately by the caller.
+fn real_peer_tracks(
+    pid: vks_core::ParticipantId,
+    media: &[vks_signaling::sdp::Media],
+    accepted_audio: bool,
+    accepted_video: bool,
+) -> Vec<vks_core::ports::media_engine::MediaTrack> {
+    let mut tracks = Vec::new();
+    let mut kinds: Vec<vks_core::track::TrackKind> = Vec::new();
+    for section in media {
+        let track_kind = match section.kind {
+            vks_signaling::sdp::MediaKind::Audio => vks_core::track::TrackKind::Audio,
+            _ => vks_core::track::TrackKind::Video,
+        };
+        if (track_kind == vks_core::track::TrackKind::Audio && !accepted_audio)
+            || (track_kind == vks_core::track::TrackKind::Video && !accepted_video)
+        {
+            continue;
+        }
+        if kinds.contains(&track_kind) {
+            continue;
+        }
+        kinds.push(track_kind);
+        tracks.push(vks_core::ports::media_engine::MediaTrack::new(pid, track_kind));
+    }
+    tracks
+}
+
 /// Kinds published now that were not published before, de-duplicated: a
 /// re-offer of the same tracks announces nothing, a genuinely added kind is
 /// announced exactly once.
@@ -1508,6 +1555,35 @@ mod tests {
         assert_eq!(new_track_kinds(&[MediaKind::Audio], &[audio.clone(), video.clone()]), vec![MediaKind::Video]);
         assert_eq!(new_track_kinds(&[], &[audio, video]), vec![MediaKind::Audio, MediaKind::Video]);
     }
+
+    /// T11b: a 1+8 pre-offer has nine m-lines but exactly two local tracks, so
+    /// `TrackAdded` is announced once per kind (not eight times for video).
+    #[test]
+    fn real_peer_tracks_are_one_per_kind() {
+        let pid = vks_core::ParticipantId::new();
+        let mut sdp = String::from("v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n");
+        for index in 0..8 {
+            let direction = if index == 0 { "sendrecv" } else { "recvonly" };
+            sdp.push_str(&format!("m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:a{index}\r\na={direction}\r\n"));
+        }
+        for index in 0..8 {
+            let direction = if index == 0 { "sendrecv" } else { "recvonly" };
+            sdp.push_str(&format!("m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:v{index}\r\na={direction}\r\n"));
+        }
+        let parsed = vks_signaling::sdp::Sdp::parse(&sdp).expect("SDP parses");
+        assert_eq!(parsed.media.len(), 16, "fixture must look like a real 1+7 pre-offer");
+        let tracks = real_peer_tracks(pid, &parsed.media, true, true);
+        assert_eq!(tracks.len(), 2, "8+8 pre-offer must yield exactly two tracks: {tracks:?}");
+        assert_eq!(tracks[0].media_kind, vks_core::MediaKind::Audio);
+        assert_eq!(tracks[1].media_kind, vks_core::MediaKind::Video);
+        assert_ne!(tracks[0].id, tracks[1].id);
+        assert_eq!(new_track_kinds(&[], &tracks), vec![vks_core::MediaKind::Audio, vks_core::MediaKind::Video]);
+        // A rejected codec drops the kind instead of announcing a dead track.
+        let video_only = real_peer_tracks(pid, &parsed.media, false, true);
+        assert_eq!(video_only.len(), 1);
+        assert_eq!(video_only[0].media_kind, vks_core::MediaKind::Video);
+    }
+
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use tower::ServiceExt;
