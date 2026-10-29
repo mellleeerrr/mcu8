@@ -159,6 +159,19 @@ impl SignalingHandler {
         &self.config
     }
 
+    /// Sets the room mode reported in the next `ServerHello`/`JoinRoomResult`
+    /// (T12/B). The server derives it from the live room shape (a bridged
+    /// mixed room is MCU), which is why this is a per-session setter and not a
+    /// process-wide config mutation.
+    ///
+    /// Caps are rebuilt from the codec SSOT with the same DTLS-SRTP flag, so
+    /// the advertised mode and caps can never disagree.
+    pub fn set_room_mode(&mut self, mode: i32) {
+        let dtls_srtp = self.config.caps.as_ref().is_some_and(|caps| caps.dtls_srtp);
+        self.config.room_mode = mode;
+        self.config.caps = Some(room_caps_for(mode, dtls_srtp));
+    }
+
     /// (config/defaults)
     pub fn handle(&mut self, env: Envelope) -> Vec<Envelope> {
         let reply_to = env.msg_id();

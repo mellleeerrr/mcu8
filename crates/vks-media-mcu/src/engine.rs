@@ -631,6 +631,26 @@ type FrameSource = Arc<Mutex<BTreeMap<RoomId, BTreeMap<u32, Arc<Frame>>>>>;
 /// Room → (participant → 20 ms PCM frame): pluggable mock audio source.
 type AudioSource = Arc<Mutex<BTreeMap<RoomId, BTreeMap<ParticipantId, Vec<f32>>>>>;
 
+/// Canonical lock order for [`McuEngine`] (T12; fixes the P0 deadlock risk in
+/// `docs/audit/2026-10-29/pitfalls/T12.md` §P0-3):
+///
+/// ```text
+/// bridge_tick_rooms → pending_layouts → rooms → frames → audio
+/// ```
+///
+/// `bridge_tick_rooms` is only ever taken alone (never while another engine lock
+/// is held) and `audio` is always the innermost lock, so every method takes
+/// locks **left to right**. Two inversions existed before
+/// T12 and are fixed here:
+/// - `apply_layout` took `rooms → pending_layouts`, while
+///   `ensure_room`/`bridge_participant`/`seat_publisher` take
+///   `pending_layouts → rooms`;
+/// - `remove_publisher` took `rooms → audio → frames`, while `tick`/`tick_at`
+///   take `rooms → frames → audio`.
+///
+/// The room event sink is invoked only after all engine locks are released
+/// (see [`McuEngine::emit`]): a sink may take roster/room-hub locks that are not
+/// part of this order.
 #[derive(Debug, Default)]
 pub struct McuEngine {
     rooms: Arc<Mutex<BTreeMap<RoomId, RoomState>>>,
@@ -651,6 +671,16 @@ pub struct McuEngine {
     /// `O7`: ферма энкодеров — один энкодер на группу (комната + профиль + холст).
     /// Живёт рядом с раскладкой: это свойство медиаядра, а не HTTP-слоя.
     farm: EncoderFarm,
+    /// Accepted audio ticks (T12): lets the mixed-room bridge prove that the
+    /// gateway RTP loop and the bridge clock do not double-tick the same room.
+    audio_ticks: std::sync::atomic::AtomicU64,
+    /// Rooms whose 20 ms audio clock is owned by the server's hybrid bridge
+    /// (T12). While a room is listed, [`McuEngine::tick_audio_at`] is a no-op
+    /// for every other caller (gateway RTP loop, AAC egress), so no path can
+    /// advance a room's mix twice per 20 ms; the bridge calls
+    /// [`McuEngine::tick_audio_at_bridge`]. Leaf lock: never taken while another
+    /// engine lock is held.
+    bridge_tick_rooms: Mutex<std::collections::BTreeSet<RoomId>>,
 }
 
 fn layout_has_video(tracks: &[MediaTrack]) -> bool {
@@ -891,8 +921,25 @@ impl McuEngine {
     }
 
     /// Advances only the audio pipeline at a specific monotonic timestamp `now_ms` (20 ms cadence).
-    /// Returns true if an audio tick was executed, or false if rejected by the 18 ms guard.
+    ///
+    /// Returns true if an audio tick was executed, or false if rejected by the
+    /// 18 ms guard **or if the room's tick is owned by the hybrid bridge**
+    /// ([`McuEngine::set_bridge_tick_owner`]): one clock per room.
     pub fn tick_audio_at(&self, room: RoomId, now_ms: u64) -> bool {
+        if self.bridge_owns_tick(room) {
+            return false;
+        }
+        self.tick_audio_at_impl(room, now_ms)
+    }
+
+    /// Bridge-privileged 20 ms tick (T12): ignores the tick-ownership guard.
+    ///
+    /// Only the mixed-room bridge task calls this while it owns the room clock.
+    pub fn tick_audio_at_bridge(&self, room: RoomId, now_ms: u64) -> bool {
+        self.tick_audio_at_impl(room, now_ms)
+    }
+
+    fn tick_audio_at_impl(&self, room: RoomId, now_ms: u64) -> bool {
         let (ran, events, seating) = {
             let mut g = self.rooms.lock().unwrap();
             let state = match g.get_mut(&room) {
@@ -907,6 +954,9 @@ impl McuEngine {
                 .collect();
             state.tick_audio_at(now_ms, &audio_inputs)
         };
+        if ran {
+            self.audio_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         // Кадр принадлежит участнику: после голосовой пересадки переносим
         // пиксели в новые слоты, иначе в главном окне остаётся видео прежнего
         // жильца (и навсегда, если тот выключил камеру).
@@ -915,6 +965,57 @@ impl McuEngine {
         }
         self.emit(room, events);
         ran
+    }
+
+    /// Marks the room's 20 ms audio clock as owned by the hybrid bridge.
+    ///
+    /// While owned, [`McuEngine::tick_audio_at`] returns `false` without advancing
+    /// the mix (gateway RTP loop and AAC egress become non-tickers), so the mix
+    /// cannot be double-advanced when a browser and a gateway share a room.
+    pub fn set_bridge_tick_owner(&self, room: RoomId, owned: bool) {
+        let mut g = self.bridge_tick_rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if owned {
+            g.insert(room);
+        } else {
+            g.remove(&room);
+        }
+    }
+
+    /// Whether the hybrid bridge currently owns this room's audio tick.
+    pub fn bridge_owns_tick(&self, room: RoomId) -> bool {
+        self.bridge_tick_rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&room)
+    }
+
+    /// Accepted audio-tick count since start (T12 single-clock proof).
+    ///
+    /// The mixed-room bridge owns the 20 ms tick while it is active; the
+    /// gateway RTP loop must then skip `tick_audio_at`. A test can assert that
+    /// the room is ticked ~50/s instead of ~100/s.
+    pub fn audio_ticks_total(&self) -> u64 {
+        self.audio_ticks.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Mix only the listed participants' current 20 ms PCM slices.
+    ///
+    /// Used by the mixed-room audio bridge for the **gateway-only** egress mix:
+    /// browsers keep receiving each other through the SFU fanout, so their PCM
+    /// must not be part of the stream the bridge sends back to them (that would
+    /// double-deliver every browser voice and would echo the listener to
+    /// itself). Gain/soft-clip are the same [`AudioMixer`] as the room mix.
+    ///
+    /// Takes only the audio lock: it must stay safe to call on the bridge clock
+    /// while the room is being ticked.
+    pub fn mix_participants_audio(&self, room: RoomId, participants: &[ParticipantId]) -> Vec<f32> {
+        let audio_guard = self.audio.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(room_audio) = audio_guard.get(&room) else {
+            return vec![0.0; 960];
+        };
+        let slices: Vec<&[f32]> =
+            participants.iter().filter_map(|pid| room_audio.get(pid).map(Vec::as_slice)).collect();
+        if slices.is_empty() {
+            return vec![0.0; 960];
+        }
+        AudioMixer.mix(&slices, 960)
     }
 
     /// Ставит приёмник событий комнат (S12: `SpeakingStateChanged` и
@@ -1475,7 +1576,6 @@ impl McuEngine {
                 state.active_speaker = None;
             }
             state.participant_audio.remove(&pid);
-            self.audio.lock().unwrap().entry(room).or_default().remove(&pid);
 
             let removed_slot = state.layout.as_mut().and_then(|desc| desc.assignments.remove(&pid));
             if let Some(slot_id) = removed_slot {
@@ -1498,6 +1598,9 @@ impl McuEngine {
 
             let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
             state.process_video(&frames);
+            // T12 lock order: frames before audio (same inversion as
+            // `remove_publisher`).
+            self.audio.lock().unwrap().entry(room).or_default().remove(&pid);
         }
     }
 
@@ -1589,8 +1692,10 @@ impl MediaEngine for McuEngine {
             state.active_speaker = None;
         }
         state.participant_audio.remove(&publisher);
-        self.audio.lock().unwrap().entry(room).or_default().remove(&publisher);
 
+        // T12 lock order: rooms → frames → audio. `frames` is taken before
+        // `audio` (this used to be rooms → audio → frames, the exact inverse of
+        // `tick`/`tick_at`); the audio map is cleared last.
         // M3.2: Eliminate ghost frames and clean up layout bindings
         let removed_slot = state.layout.as_mut().and_then(|desc| desc.assignments.remove(&publisher));
         if let Some(slot_id) = removed_slot {
@@ -1614,6 +1719,7 @@ impl MediaEngine for McuEngine {
         // Re-compose composite frame immediately so departed publisher's video is purged
         let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
         state.process_video(&frames);
+        self.audio.lock().unwrap().entry(room).or_default().remove(&publisher);
         Ok(())
     }
 
@@ -1639,16 +1745,21 @@ impl MediaEngine for McuEngine {
 
     async fn apply_layout(&self, room: RoomId, mut layout: LayoutDescriptor) -> Result<(), MediaEngineError> {
         sanitize_assignments(&mut layout);
+        // T12 lock order: pending_layouts → rooms. This used to take `rooms`
+        // first and then `pending_layouts`, the inverse of
+        // `ensure_room`/`bridge_participant`/`seat_publisher` → a concurrent
+        // gateway landing and layout apply could deadlock (P0-3).
+        let mut pending = self.pending_layouts.lock().unwrap();
         let mut g = self.rooms.lock().unwrap();
         let Some(state) = g.get_mut(&room) else {
-            drop(g);
             // SFU-сессия без шлюза не должна аллоцировать MCU-композит.
-            self.pending_layouts.lock().unwrap().insert(room, layout);
+            pending.insert(room, layout);
             return Ok(());
         };
         // Комната уже есть: pending устарел, иначе он мог бы «оживить» старую
-        // раскладку на следующем bridge. Порядок локов rooms → pending.
-        self.pending_layouts.lock().unwrap().remove(&room);
+        // раскладку на следующем bridge.
+        pending.remove(&room);
+        drop(pending);
         // Уже забридженные видео-паблишеры не должны потерять ячейку: раскладка
         // может прийти вообще без привязок («Очистить все видеоокна» → все окна
         // AUTO, auto-пресет, возврат к «Общей» после удаления ручной). Иначе
@@ -3177,5 +3288,151 @@ mod tests {
         e.bridge_participant(rid, second, vec![video_track(second)]);
         let layout = e.layout_descriptor(rid).expect("layout");
         assert_eq!(layout.assignments[&second], 1, "свободный geometry-слот 1");
+    }
+
+    /// T12/P0-3: canonical `pending_layouts → rooms → frames → audio` order.
+    ///
+    /// Before the fix `seat_publisher`/`apply_layout` took the two first locks
+    /// in opposite orders, so a gateway landing concurrent with a layout apply
+    /// could deadlock. The stress test runs both sides with a hard timeout: a
+    /// deadlock fails the test instead of hanging the suite.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn lock_order_stress_landing_vs_layout_and_remove() {
+        use std::sync::Arc;
+
+        for iteration in 0..200u64 {
+            let e = Arc::new(McuEngine::new());
+            let rid = room_id();
+            e.create_room(cfg(rid)).await.unwrap();
+            let pid_layout = p(1000 + iteration * 2);
+            let pid_bridge = p(1001 + iteration * 2);
+
+            let start = Arc::new(std::sync::Barrier::new(3));
+            let eng_a = e.clone();
+            let eng_b = e.clone();
+            let eng_c = e.clone();
+            let b1 = start.clone();
+            let b2 = start.clone();
+            let b3 = start.clone();
+            let a = std::thread::spawn(move || {
+                b1.wait();
+                eng_a.seat_publisher(rid, pid_layout, vec![video_track(pid_layout)]);
+            });
+            let b = std::thread::spawn(move || {
+                b2.wait();
+                eng_b.bridge_participant(rid, pid_bridge, vec![Track::new(pid_bridge, TrackKind::Audio)]);
+            });
+            let c = std::thread::spawn(move || {
+                b3.wait();
+                let handle = eng_c.clone();
+                let task = handle.apply_layout(
+                    rid,
+                    LayoutDescriptor {
+                        layout_id: format!("stress_{iteration}"),
+                        version: 1,
+                        assignments: Default::default(),
+                        geometry: Vec::new(),
+                        ..Default::default()
+                    },
+                );
+                // A current-thread runtime would be required for `block_on`;
+                // instead poll the future to completion on a fresh runtime.
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime")
+                    .block_on(task)
+                    .expect("apply_layout");
+                eng_c.unbridge_participant(rid, pid_layout);
+            });
+
+            let joined = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                a.join().expect("thread a");
+                b.join().expect("thread b");
+                c.join().expect("thread c");
+            })
+            .await;
+            assert!(joined.is_ok(), "iteration {iteration}: lock-order deadlock (2 s timeout)");
+        }
+    }
+
+    /// T12: the bridge egress mix contains only the listed participants (the
+    /// gateways), never the browser that receives it — that is what keeps the
+    /// SFU browser↔browser fanout from being double-delivered.
+    #[tokio::test]
+    async fn mix_participants_audio_is_scoped_to_the_listed_sources() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        let browser = p(30);
+        let gateway = p(31);
+        let second_gateway = p(32);
+        e.create_room(cfg(rid)).await.unwrap();
+        for pid in [browser, gateway, second_gateway] {
+            e.bridge_participant(rid, pid, vec![Track::new(pid, TrackKind::Audio)]);
+        }
+        e.set_audio(rid, browser, vec![0.8; 960]);
+        e.set_audio(rid, gateway, vec![0.4; 960]);
+        e.set_audio(rid, second_gateway, vec![0.2; 960]);
+
+        let gateway_only = e.mix_participants_audio(rid, &[gateway, second_gateway]);
+        assert_eq!(gateway_only.len(), 960);
+        // gain 1/√2 over (0.4 + 0.2): the browser's 0.8 must not appear.
+        let expected = (0.4 + 0.2) / 2.0f32.sqrt();
+        assert!(
+            (gateway_only[0] - expected).abs() < 1e-5,
+            "gateway mix must exclude the browser: got {} expected {expected}",
+            gateway_only[0]
+        );
+        assert!(gateway_only[0] < 0.6, "browser echo leaked into the bridge mix");
+        // No listed source → silence, never the full room mix.
+        assert!(e.mix_participants_audio(rid, &[]).iter().all(|s| *s == 0.0));
+        // Unknown room → silence, not a panic.
+        assert!(e.mix_participants_audio(RoomId::new(), &[gateway]).iter().all(|s| *s == 0.0));
+    }
+
+    /// T12: accepted audio ticks are counted so the mixed-room e2e can prove
+    /// the bridge clock replaced (not duplicated) the gateway tick.
+    #[tokio::test]
+    async fn audio_tick_counter_advances_once_per_accepted_tick() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let start = e.audio_ticks_total();
+        assert!(e.tick_audio_at(rid, 100), "first tick");
+        assert!(!e.tick_audio_at(rid, 110), "the 18 ms guard rejects the duplicate");
+        assert!(e.tick_audio_at(rid, 120), "next 20 ms tick");
+        assert_eq!(e.audio_ticks_total(), start + 2, "only accepted ticks are counted");
+    }
+
+    /// T12: while the bridge owns a room's tick, every other caller's
+    /// `tick_audio_at` is a no-op; only the bridge-privileged entry point
+    /// advances the mix. This is what makes "one ticker per room" a property of
+    /// the engine, not a convention every call site must remember.
+    #[tokio::test]
+    async fn bridge_tick_ownership_blocks_other_tickers_and_is_released() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        let other = RoomId::new();
+        e.create_room(cfg(rid)).await.unwrap();
+        e.create_room(cfg(other)).await.unwrap();
+        assert!(!e.bridge_owns_tick(rid));
+        let start = e.audio_ticks_total();
+
+        e.set_bridge_tick_owner(rid, true);
+        assert!(e.bridge_owns_tick(rid), "ownership is visible to the gateway loop");
+        assert!(!e.tick_audio_at(rid, 100), "a gateway/AAC tick must be rejected while the bridge owns the room");
+        assert!(e.tick_audio_at(other, 100), "other rooms are unaffected");
+        assert!(e.tick_audio_at_bridge(rid, 100), "the bridge itself still ticks");
+        assert!(!e.tick_audio_at_bridge(rid, 110), "the bridge obeys the 18 ms guard too");
+        assert!(e.tick_audio_at_bridge(rid, 120));
+        assert_eq!(e.audio_ticks_total(), start + 3, "2 bridge ticks + 1 other room");
+
+        e.set_bridge_tick_owner(rid, false);
+        assert!(!e.bridge_owns_tick(rid));
+        assert!(e.tick_audio_at(rid, 200), "after release the gateway loop ticks again");
+        assert!(!e.tick_audio_at(rid, 205), "and the 18 ms guard still applies");
+        // Idempotent release.
+        e.set_bridge_tick_owner(rid, false);
+        assert!(!e.bridge_owns_tick(rid));
     }
 }

@@ -258,6 +258,17 @@ enum PeerCommand {
         rtp_time: MediaTime,
         data: Arc<[u8]>,
     },
+    /// Server-side bridge egress (T12): a frame produced by the mixed-room
+    /// bridge, written on the reserved [`crate::webrtc::bridge_source`] mid.
+    /// The payload type is resolved per peer from the negotiated codec, so
+    /// bridges never hardcode 96/111/102.
+    WriteBridge {
+        audio: bool,
+        codec: str0m::format::Codec,
+        wallclock: Instant,
+        rtp_time: MediaTime,
+        data: Arc<[u8]>,
+    },
     RequestKeyframe {
         audio: bool,
     },
@@ -265,6 +276,18 @@ enum PeerCommand {
         audio: bool,
         video: bool,
     },
+}
+
+/// A non-blocking tap for media received from a browser (T12 mixed room).
+///
+/// Called from the publisher's peer task for every depayloaded frame, **after**
+/// the SFU fanout decision and **before** any bridge processing. Implementations
+/// must only enqueue (`try_send`) and return: a slow bridge must never stall a
+/// publisher's socket task or the fanout to other browsers.
+pub trait MediaTap: Send + Sync {
+    /// One depayloaded frame arrived from `from` in `room`. `audio` is the
+    /// kind of the negotiated m-line the frame arrived on.
+    fn on_media(&self, room: RoomId, from: ParticipantId, audio: bool, data: &str0m::media::MediaData);
 }
 
 /// Registry of real WebRTC peers, keyed by room and participant.
@@ -282,6 +305,9 @@ pub struct WebRtcRoomRegistry {
     /// PLI coalescing keyed by `(room, publisher, audio)`: with N publishers a
     /// single stalled subscriber must not produce N×PLI per second.
     last_keyframe_request: Mutex<HashMap<(RoomId, ParticipantId, bool), Instant>>,
+    /// Mixed-room media taps (T12): one per room, installed by the server-side
+    /// bridge. Absent in SFU-only rooms, so the hot path is unchanged there.
+    taps: Mutex<HashMap<RoomId, Arc<dyn MediaTap>>>,
     /// Process-wide cap, separate from the per-room cap; prevents valid JWTs
     /// from exhausting FDs/UDP ports.
     peer_total: AtomicUsize,
@@ -340,6 +366,7 @@ impl WebRtcRoomRegistry {
             subscriptions: Mutex::new(HashMap::new()),
             bitrate_caps: Mutex::new(HashMap::new()),
             last_keyframe_request: Mutex::new(HashMap::new()),
+            taps: Mutex::new(HashMap::new()),
             peer_total: AtomicUsize::new(0),
             max_peers: limits.max_peers,
             max_peers_per_room: limits.max_peers_per_room,
@@ -776,6 +803,83 @@ impl WebRtcRoomRegistry {
         }
     }
 
+    /// Installs the mixed-room media tap for one room (T12).
+    ///
+    /// Idempotent: replacing the tap is allowed (a bridge restart), and the
+    /// previous tap simply stops receiving frames. No lock is held while the tap
+    /// runs, so a tap that takes its own locks cannot deadlock the registry.
+    pub fn set_media_tap(&self, room: RoomId, tap: Arc<dyn MediaTap>) {
+        self.taps.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(room, tap);
+    }
+
+    /// Removes the mixed-room media tap for one room (bridge stopped).
+    pub fn clear_media_tap(&self, room: RoomId) {
+        self.taps.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&room);
+    }
+
+    /// Whether a media tap is installed for the room (bridge is active).
+    pub fn room_has_tap(&self, room: RoomId) -> bool {
+        self.taps.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(&room)
+    }
+
+    /// Feeds one depayloaded frame to the room's media tap, if any.
+    ///
+    /// The tap Arc is cloned and the tap lock released before `on_media`, so the
+    /// callback can take any lock it needs (including registry/engine locks).
+    pub(crate) fn tap_media(&self, room: RoomId, from: ParticipantId, audio: bool, data: &str0m::media::MediaData) {
+        let tap = {
+            let taps = self.taps.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            taps.get(&room).cloned()
+        };
+        if let Some(tap) = tap {
+            tap.on_media(room, from, audio, data);
+        }
+    }
+
+    /// Sends one bridge-produced frame to every real peer in the room.
+    ///
+    /// Sync and bounded (`try_send`): the bridge clock must never await a slow
+    /// browser. Returns how many peers accepted the frame. The payload type is
+    /// resolved inside each peer task from the codec it negotiated, so a bridge
+    /// never hardcodes a PT and a peer that did not negotiate the codec simply
+    /// drops the frame.
+    pub fn write_bridge_media(
+        &self,
+        room: RoomId,
+        audio: bool,
+        codec: str0m::format::Codec,
+        wallclock: Instant,
+        rtp_time: MediaTime,
+        data: Arc<[u8]>,
+    ) -> usize {
+        let targets: Vec<PeerHandle> = {
+            let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            rooms.get(&room).map(|peers| peers.values().cloned().collect()).unwrap_or_default()
+        };
+        let mut sent = 0usize;
+        for target in targets {
+            if target
+                .tx
+                .try_send(PeerCommand::WriteBridge { audio, codec, wallclock, rtp_time, data: Arc::clone(&data) })
+                .is_ok()
+            {
+                sent += 1;
+            } else {
+                WEBRTC_FRAMES_DROPPED.with_label_values(&["bridge_queue_full"]).inc();
+            }
+        }
+        sent
+    }
+
+    /// Participant ids of every real peer currently registered in the room.
+    pub fn peer_participants(&self, room: RoomId) -> Vec<ParticipantId> {
+        let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut participants: Vec<ParticipantId> =
+            rooms.get(&room).map(|peers| peers.keys().copied().collect()).unwrap_or_default();
+        participants.sort_by_key(|pid| pid.to_string());
+        participants
+    }
+
     /// Removes real peers, either one room or all rooms (mode switch to MCU).
     pub fn evict(&self, room: Option<RoomId>) {
         let victims: Vec<(RoomId, ParticipantId)> = {
@@ -1072,6 +1176,38 @@ async fn run_peer(
                             }
                         }
                     }
+                    PeerCommand::WriteBridge { audio, codec, wallclock, rtp_time, data } => {
+                        // T12: bridge egress resolves the PT per peer. A peer
+                        // that negotiated no such codec drops the frame instead
+                        // of being torn down (never silently substitute VP8 for
+                        // a terminal's H.264: that is a black screen).
+                        let mid = peer.bridge_egress_mid(audio);
+                        let Some(mid) = mid else {
+                            WEBRTC_FRAMES_DROPPED.with_label_values(&["bridge_no_mid"]).inc();
+                            if no_egress_mid.insert((crate::webrtc::bridge_source(), audio)) {
+                                tracing::warn!(
+                                    ?participant,
+                                    audio,
+                                    "webrtc: no free egress mid for the mixed-room bridge stream; bridge frames dropped"
+                                );
+                            }
+                            continue;
+                        };
+                        match peer.payload_type_for_codec(mid, codec) {
+                            Some(pt) => match peer.write_media(mid, pt, wallclock, rtp_time, data) {
+                                Ok(actions) => Ok(actions),
+                                Err(WebRtcError::UnknownMid) => {
+                                    WEBRTC_FRAMES_DROPPED.with_label_values(&["bridge_no_mid"]).inc();
+                                    continue;
+                                }
+                                Err(error) => Err(error),
+                            },
+                            None => {
+                                WEBRTC_FRAMES_DROPPED.with_label_values(&["bridge_codec_not_negotiated"]).inc();
+                                continue;
+                            }
+                        }
+                    }
                     PeerCommand::Reoffer { offer_sdp, reply } => {
                         let result: Result<(String, Vec<WebRtcAction>), WebRtcError> =
                             peer.accept_reoffer(&offer_sdp);
@@ -1220,6 +1356,10 @@ async fn dispatch(
                 let _ = socket.send_to(&contents, destination).await;
             }
             WebRtcAction::Media(data) => {
+                // T12: the mixed-room tap sees every depayloaded frame. It only
+                // enqueues, so SFU fanout below is never delayed by the bridge.
+                let audio = peer.is_audio_mid(data.mid).unwrap_or(false);
+                registry.tap_media(room, participant, audio, &data);
                 registry.forward(room, participant, *data).await;
             }
             WebRtcAction::Connected => {}
@@ -1772,5 +1912,171 @@ mod tests {
         );
         let sane = RoomLimits { max_peers_per_room: 8, max_peers: 101 };
         assert!(sane.feasibility_warnings(Some((43_000, 43_100))).is_empty(), "no warning for a feasible config");
+    }
+
+    /// A negotiated Opus `PayloadParams` (T12 tap tests).
+    fn opus_params() -> PayloadParams {
+        let mut client = RtcConfig::new().set_ice_lite(false).build(Instant::now());
+        client.add_local_candidate(Candidate::host(CLIENT_ADDR, "udp").expect("candidate"));
+        let mut change = client.sdp_api();
+        let audio_mid = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+        let (offer, pending): (SdpOffer, SdpPendingOffer) = change.apply().expect("offer");
+        let peer = WebRtcPeer::accept_offer(&offer.to_sdp_string(), CLIENT_ADDR, &WebRtcConfig::default())
+            .expect("accept offer");
+        let answer = SdpAnswer::from_sdp_string(peer.answer_sdp()).expect("answer parses");
+        client.sdp_api().accept_answer(pending, answer).expect("accept answer");
+        let writer = client.writer(audio_mid).expect("audio writer");
+        let params = writer
+            .payload_params()
+            .find(|params| params.spec().codec == Codec::Opus)
+            .copied()
+            .expect("Opus payload params");
+        params
+    }
+
+    fn audio_media_data(params: PayloadParams, payload: &[u8]) -> str0m::media::MediaData {
+        str0m::media::MediaData {
+            mid: str0m::media::Mid::from("0"),
+            pt: params.pt(),
+            rid: None,
+            params,
+            time: MediaTime::from_millis(0),
+            network_time: Instant::now(),
+            seq_range: str0m::rtp::SeqNo::from(0)..=str0m::rtp::SeqNo::from(0),
+            contiguous: true,
+            data: Arc::from(payload),
+            ext_vals: Default::default(),
+            codec_extra: str0m::format::CodecExtra::None,
+            last_sender_info: None,
+            audio_start_of_talk_spurt: true,
+        }
+    }
+
+    /// T12: the bridge tap is called for every audio frame, and replacing or
+    /// clearing it never leaks frames to the previous bridge.
+    #[tokio::test]
+    async fn media_tap_receives_frames_and_can_be_replaced() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountingTap {
+            audio: AtomicUsize,
+            video: AtomicUsize,
+            last: Mutex<Vec<u8>>,
+        }
+        impl MediaTap for CountingTap {
+            fn on_media(&self, _room: RoomId, _from: ParticipantId, audio: bool, data: &str0m::media::MediaData) {
+                if audio {
+                    self.audio.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.video.fetch_add(1, Ordering::Relaxed);
+                }
+                *self.last.lock().unwrap() = (*data.data).to_vec();
+            }
+        }
+
+        let registry = default_registry();
+        let room = RoomId::new();
+        let from = ParticipantId::new();
+        let params = opus_params();
+        let first = Arc::new(CountingTap {
+            audio: AtomicUsize::new(0),
+            video: AtomicUsize::new(0),
+            last: Mutex::new(Vec::new()),
+        });
+        registry.set_media_tap(room, first.clone());
+        assert!(registry.room_has_tap(room));
+        let frame = audio_media_data(params, &[0x11, 0x22, 0x33]);
+        registry.tap_media(room, from, true, &frame);
+        assert_eq!(first.audio.load(Ordering::Relaxed), 1, "audio frame must reach the tap");
+        assert_eq!(*first.last.lock().unwrap(), vec![0x11, 0x22, 0x33]);
+
+        // Replacing the tap: the old bridge must stop receiving frames.
+        let second = Arc::new(CountingTap {
+            audio: AtomicUsize::new(0),
+            video: AtomicUsize::new(0),
+            last: Mutex::new(Vec::new()),
+        });
+        registry.set_media_tap(room, second.clone());
+        registry.tap_media(room, from, true, &frame);
+        assert_eq!(first.audio.load(Ordering::Relaxed), 1, "replaced tap keeps receiving");
+        assert_eq!(second.audio.load(Ordering::Relaxed), 1, "new tap receives");
+
+        registry.clear_media_tap(room);
+        assert!(!registry.room_has_tap(room));
+        registry.tap_media(room, from, true, &frame);
+        assert_eq!(second.audio.load(Ordering::Relaxed), 1, "cleared tap receives nothing");
+        // A room without a tap must be a no-op, not a panic.
+        registry.tap_media(RoomId::new(), from, true, &frame);
+    }
+
+    /// T12: the bridge egress writes to the reserved bridge source mid and is
+    /// bounded — a full peer queue drops frames instead of blocking the clock.
+    #[tokio::test]
+    async fn bridge_egress_is_bounded_and_targets_every_peer() {
+        let registry = default_registry();
+        let room = RoomId::new();
+        let peer_a = ParticipantId::new();
+        let peer_b = ParticipantId::new();
+        let (handle_a, mut rx_a) = handle_with(peer_a, 1);
+        let (handle_b, mut rx_b) = handle_with(peer_b, 1);
+        {
+            let mut rooms = registry.rooms.lock().unwrap();
+            let peers = rooms.entry(room).or_default();
+            peers.insert(peer_a, handle_a);
+            peers.insert(peer_b, handle_b);
+        }
+        let params = opus_params();
+        assert_eq!(params.spec().codec, Codec::Opus, "the tap test uses the negotiated Opus PT");
+        let sent = registry.write_bridge_media(
+            room,
+            true,
+            Codec::Opus,
+            Instant::now(),
+            MediaTime::from_millis(0),
+            Arc::from(&[0x5au8; 40][..]),
+        );
+        assert_eq!(sent, 2, "every peer in the room is a bridge target");
+        for rx in [&mut rx_a, &mut rx_b] {
+            match rx.try_recv().expect("bridge frame queued") {
+                PeerCommand::WriteBridge { audio, codec, data, .. } => {
+                    assert!(audio);
+                    assert_eq!(codec, Codec::Opus);
+                    assert_eq!(&*data, &[0x5au8; 40]);
+                }
+                _ => panic!("expected a WriteBridge command"),
+            }
+        }
+        // Queue is bounded at 8: the 9th frame is dropped, not awaited.
+        for _ in 0..8 {
+            let _ = registry.write_bridge_media(
+                room,
+                true,
+                Codec::Opus,
+                Instant::now(),
+                MediaTime::from_millis(0),
+                Arc::from(&[0x5au8; 40][..]),
+            );
+        }
+        let sent = registry.write_bridge_media(
+            room,
+            true,
+            Codec::Opus,
+            Instant::now(),
+            MediaTime::from_millis(0),
+            Arc::from(&[0x5au8; 40][..]),
+        );
+        assert_eq!(sent, 0, "a full queue drops bridge frames instead of blocking");
+        // Empty room: nothing to write.
+        assert_eq!(
+            registry.write_bridge_media(
+                RoomId::new(),
+                true,
+                Codec::Opus,
+                Instant::now(),
+                MediaTime::from_millis(0),
+                Arc::from(&[0x5au8; 40][..]),
+            ),
+            0
+        );
     }
 }

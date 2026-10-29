@@ -195,6 +195,15 @@ pub fn room_has_peer(room: vks_core::RoomId) -> bool {
     REGISTRY.get().and_then(|registry| registry.as_ref().ok()).is_some_and(|registry| registry.room_has_peer(room))
 }
 
+/// The process-wide registry if it was already created (never initializes it).
+///
+/// T12 uses this from predicates that must not build a registry as a side
+/// effect: an uninitialized registry means no real browser peer exists yet, so
+/// the bridge predicate fails closed.
+pub fn existing_registry() -> Option<Arc<WebRtcRoomRegistry>> {
+    REGISTRY.get().and_then(|registry| registry.as_ref().ok()).cloned()
+}
+
 static REGISTRY: OnceLock<Result<Arc<WebRtcRoomRegistry>, String>> = OnceLock::new();
 
 fn build_registry(config: &HandlerConfig) -> Result<Arc<WebRtcRoomRegistry>, String> {

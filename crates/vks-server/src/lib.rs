@@ -5,6 +5,7 @@
 //! auth-at-handshake + лимиты) и статика фронтенда PNM (`/pnm/`, `/mcu/*`).
 //! Используется и `main.rs` (композиционный корень), и интеграционными тестами.
 
+pub mod bridge;
 pub mod cluster;
 pub mod codec_policy;
 pub mod farm_metrics;
@@ -577,6 +578,24 @@ pub fn parse_participant_id(pid_str: &str) -> vks_core::ParticipantId {
     vks_core::ParticipantId::from_uuid(u)
 }
 
+/// Resolves a room reference (UUID or human name) **without creating** a room.
+///
+/// T12/B: `ServerHello.room_mode` must be derived from the live room shape at
+/// `ClientHello` time, when only the client-supplied room reference exists.
+/// An unknown reference returns `None` and the handler keeps its default mode;
+/// the authoritative answer follows in `JoinRoomResult`.
+fn resolve_room_ref(state: &AppState, reference: &str) -> Option<vks_core::RoomId> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return None;
+    }
+    if let Ok(uuid) = uuid::Uuid::parse_str(reference) {
+        return Some(vks_core::RoomId::from_uuid(uuid));
+    }
+    let rooms = state.rooms.lock().ok()?;
+    rooms.iter().find(|(_, room)| room.name == reference).map(|(id, _)| *id)
+}
+
 #[derive(Debug, Clone)]
 struct ActiveMembership {
     room_id: vks_core::RoomId,
@@ -832,6 +851,16 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                 // Запрос исполняет FSM; сайд-эффекты — только по успешному результату.
                                 let request_msg_id = env.msg_id();
                                 let mut webrtc_failure: Option<(&'static str, String)> = None;
+                                // T12/B: `ClientHello.room_mode` must describe the room
+                                // the client is asking about, not only the process
+                                // default. A mixed room is MCU (derived), so the client
+                                // learns before the offer that its media will be bridged.
+                                if let Some(Payload::ClientHello(ref hello)) = payload_opt {
+                                    if let Some(room) = resolve_room_ref(&state, &hello.room_id) {
+                                        let mode = crate::bridge::browser_join_room_mode(&state, room);
+                                        handler.set_room_mode(mode as i32);
+                                    }
+                                }
                                 // The handler is transport-agnostic: it validates the offer
                                 // and moves the FSM, but never returns SdpAnswer (T11c).
                                 let mut replies = handler.handle(env);
@@ -847,12 +876,8 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                         let _admission = crate::webrtc_runtime::admission();
                                         // Re-check the room shape under the admission
                                         // lock, not only before handler.handle.
-                                        let gateway_room = state.room_hub.list_participants(&membership.room_id).iter().any(
-                                            |participant| {
-                                                participant.participant_id.contains("@sip-gateway")
-                                                    || participant.participant_id.contains("@h323-gateway")
-                                            },
-                                        );
+                                        let gateway_now = crate::bridge::gateway_presence(&state, membership.room_id);
+                                        let gateway_room = gateway_now.any();
                                         // Mode may have switched while we waited for the
                                         // admission lock; the decision must use the lock-time value.
                                         let effective_room_mode = state
@@ -861,27 +886,62 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             .ok()
                                             .map(|mode| mode.effective_mode(&membership.room_id))
                                             .unwrap_or(vks_core::RoomMode::Sfu);
+                                        // T12: ONE asymmetric predicate instead of the old
+                                        // fail-closed `room_has_peer` guards. A browser may
+                                        // join a gateway room (and an MCU-mode room that is
+                                        // bridged); it may not join an MCU-mode room alone.
+                                        let bridge_caps = crate::bridge::caps();
+                                        let bridge_ok = crate::bridge::bridge_allowed(
+                                            bridge_caps,
+                                            crate::bridge::BridgeSide::BrowserJoining,
+                                            true,
+                                            gateway_room,
+                                        );
                                         if !offer_supports_real_webrtc(&offer.sdp) {
                                             webrtc_failure = Some((
                                                 "webrtc_offer_unsupported",
                                                 "SDP offer has no ICE/DTLS material; the legacy plaintext answer plane was removed"
                                                     .to_string(),
                                             ));
-                                        } else if effective_room_mode == vks_core::RoomMode::Mcu {
+                                        } else if effective_room_mode == vks_core::RoomMode::Mcu && !bridge_ok {
+                                            // Byte-identical pre-T12 error: an MCU room
+                                            // without a bridgeable gateway shape stays closed.
                                             webrtc_failure = Some((
                                                 "webrtc_mcu_room_unsupported",
                                                 "Real WebRTC is not bridged into MCU-mode rooms".to_string(),
                                             ));
-                                        } else if gateway_room {
+                                        } else if gateway_room && !bridge_ok {
+                                            // Same old code/message when the bridge is
+                                            // switched off (`VKS_HYBRID_BRIDGE=0`); a new
+                                            // `bridge_unavailable` code only when hybrid is
+                                            // enabled but its caps are missing (no Opus).
+                                            let (code, message) = if bridge_caps.hybrid_enabled {
+                                                (
+                                                    "bridge_unavailable",
+                                                    format!(
+                                                        "Hybrid bridge unavailable ({}); the room has SIP/H.323 participants",
+                                                        crate::bridge::bridge_unavailable_reason(
+                                                            bridge_caps,
+                                                            crate::bridge::BridgeSide::BrowserJoining,
+                                                            true,
+                                                            true,
+                                                        )
+                                                    ),
+                                                )
+                                            } else {
+                                                (
+                                                    "webrtc_gateway_room_unsupported",
+                                                    "Real WebRTC in a room with SIP/H.323 participants is not supported yet"
+                                                        .to_string(),
+                                                )
+                                            };
                                             warn!(
                                                 room = %membership.room_id,
                                                 participant = %pid,
-                                                "WebRTC: real browser transport is not bridged to SIP/H.323 in this room"
+                                                %code,
+                                                "WebRTC: browser join rejected for this room shape"
                                             );
-                                            webrtc_failure = Some((
-                                                "webrtc_gateway_room_unsupported",
-                                                "Real WebRTC in a room with SIP/H.323 participants is not supported yet".to_string(),
-                                            ));
+                                            webrtc_failure = Some((code, message));
                                         } else {
                                             // Release the admission lock before the
                                             // async re-negotiation: holding a std
@@ -902,20 +962,28 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                     // switch cannot leave a half-bridged room.
                                                     let still_ok = {
                                                         let _guard = crate::webrtc_runtime::admission();
-                                                        let gateway_now =
-                                                            state.room_hub.list_participants(&membership.room_id).iter().any(
-                                                                |participant| {
-                                                                    participant.participant_id.contains("@sip-gateway")
-                                                                        || participant.participant_id.contains("@h323-gateway")
-                                                                },
-                                                            );
+                                                        let gateway_now = crate::bridge::gateway_presence(
+                                                            &state,
+                                                            membership.room_id,
+                                                        )
+                                                        .any();
                                                         let mode_now = state
                                                             .mode
                                                             .lock()
                                                             .ok()
                                                             .map(|mode| mode.effective_mode(&membership.room_id))
                                                             .unwrap_or(vks_core::RoomMode::Sfu);
-                                                        !gateway_now && mode_now != vks_core::RoomMode::Mcu
+                                                        // The predicate runs again with "this peer is
+                                                        // present" (it just registered): a mixed room
+                                                        // stays valid whichever side arrived second.
+                                                        let bridged_now = crate::bridge::bridge_allowed(
+                                                            crate::bridge::caps(),
+                                                            crate::bridge::BridgeSide::BrowserJoining,
+                                                            true,
+                                                            gateway_now,
+                                                        );
+                                                        bridged_now
+                                                            || (mode_now != vks_core::RoomMode::Mcu && !gateway_now)
                                                     };
                                                     if !still_ok {
                                                         crate::webrtc_runtime::remove(membership.room_id, pid);
@@ -1090,6 +1158,19 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                 let payload_bytes = Envelope::new(added_msg).encode();
                                                 state.room_hub.broadcast(&m.room_id, Some(&m.participant_id), payload_bytes.into());
                                             }
+                                            // T12: the browser transport is live and
+                                            // registered as an MCU publisher, so start the
+                                            // per-room audio bridge when the other side
+                                            // (SIP/H.323) is present. Idempotent: the gateway
+                                            // landing path calls the same function.
+                                            if let Some(registry) = crate::webrtc_runtime::existing_registry() {
+                                                crate::bridge::ensure_room_bridge(
+                                                    &state,
+                                                    &ctx.mcu_engine,
+                                                    &registry,
+                                                    m.room_id,
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -1226,14 +1307,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                             &snapshot.mode,
                                                         )
                                                     });
-                                                // Per-room mode override must win over the
-                                                // process-wide config snapshotted into the handler.
-                                                let mode = state
-                                                    .mode
-                                                    .lock()
-                                                    .ok()
-                                                    .map(|mode| mode.effective_mode(&rid))
-                                                    .unwrap_or(vks_core::RoomMode::Sfu);
+                                                // T12/B: same derivation as ServerHello and the
+                                                // admission guard — a bridged mixed room is MCU.
+                                                let mode = crate::bridge::browser_join_room_mode(&state, rid);
                                                 res.room_mode = match mode {
                                                     vks_core::RoomMode::Mcu => vks_proto::media::RoomMode::Mcu as i32,
                                                     vks_core::RoomMode::Sfu => vks_proto::media::RoomMode::Sfu as i32,

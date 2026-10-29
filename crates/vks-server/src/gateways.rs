@@ -21,7 +21,7 @@ use vks_signaling::Envelope;
 #[path = "gateway_aac.rs"]
 mod aac;
 #[path = "gateway_audio.rs"]
-mod audio;
+pub(crate) mod audio;
 #[path = "gateway_video.rs"]
 mod video;
 
@@ -30,6 +30,33 @@ mod video;
 /// callers never offer a codec whose bridge cannot start.
 pub async fn video_bridge_availability() -> (bool, bool) {
     (video::codec_available().await, video::codec_available_for(video::GatewayVideoCodec::H265).await)
+}
+
+/// T12: error returned when a SIP/H.323 participant tries to land in a room
+/// that has a real WebRTC peer but the hybrid bridge cannot be used.
+///
+/// `legacy` is the pre-T12 message of the call site: with
+/// `VKS_HYBRID_BRIDGE=0` the error stays **byte-identical** (no operator-facing
+/// change on the rollback switch). With the bridge enabled but its caps missing
+/// (no Opus codec) the error names the reason so the failure is diagnosable
+/// instead of looking like an unsupported feature.
+fn gateway_room_conflict(room: RoomId, legacy: &str, side: &str) -> Error {
+    let caps = crate::bridge::caps();
+    if caps.hybrid_enabled {
+        let reason =
+            crate::bridge::bridge_unavailable_reason(caps, crate::bridge::BridgeSide::GatewayLanding, true, false);
+        tracing::warn!(
+            %room,
+            side,
+            reason,
+            "gateway: room has a browser peer and the hybrid bridge is unavailable; call rejected"
+        );
+        Error::Conflict(format!(
+            "room has a real WebRTC participant; hybrid bridge unavailable ({reason}); {side} call rejected"
+        ))
+    } else {
+        Error::Conflict(legacy.to_string())
+    }
 }
 
 /// Находит `call_string.sip|h323` сохранённого адреса по URI. Вынесено из
@@ -782,8 +809,15 @@ impl GatewayManager {
         room_id: &RoomId,
         sdp_offer: &[SipCodec],
     ) -> Result<SipCall, Error> {
-        if crate::webrtc_runtime::room_has_peer(*room_id) {
-            return Err(Error::Conflict("room has a real WebRTC participant; SIP bridge is not supported".into()));
+        // T12: an asymmetric predicate, not a blanket fail-closed guard. A SIP
+        // call may land in a browser room when the hybrid bridge is available;
+        // a browser-only shape with the bridge off keeps the old Conflict.
+        if crate::webrtc_runtime::room_has_peer(*room_id) && !crate::bridge::gateway_bridge_available(*room_id) {
+            return Err(gateway_room_conflict(
+                *room_id,
+                "room has a real WebRTC participant; SIP bridge is not supported",
+                "SIP",
+            ));
         }
         let active_call = {
             let mut sip = self.sip.lock().map_err(|_| Error::Conflict("SIP lock poisoned".into()))?;
@@ -855,8 +889,12 @@ impl GatewayManager {
         room_id: &RoomId,
         h323_offer: &[H323Codec],
     ) -> Result<H323Call, Error> {
-        if crate::webrtc_runtime::room_has_peer(*room_id) {
-            return Err(Error::Conflict("room has a real WebRTC participant; H.323 bridge is not supported".into()));
+        if crate::webrtc_runtime::room_has_peer(*room_id) && !crate::bridge::gateway_bridge_available(*room_id) {
+            return Err(gateway_room_conflict(
+                *room_id,
+                "room has a real WebRTC participant; H.323 bridge is not supported",
+                "H.323",
+            ));
         }
         let active_call = {
             let mut h323 = self.h323.lock().map_err(|_| Error::Conflict("H323 lock poisoned".into()))?;
@@ -1274,19 +1312,26 @@ pub fn land_gateway_participant_in_room(
     // Serialise with browser offer admission and mode eviction: check and
     // registration must be one atomic decision.
     let _admission = crate::webrtc_runtime::admission();
-    // The real WebRTC path has no SIP/H.323 plaintext<->SRTP bridge. Enforce
-    // the same-room guard when the gateway joins, not only at browser offer
-    // time, otherwise the room silently becomes half-bridged.
-    if crate::webrtc_runtime::room_has_peer(*room_id) {
+    // T12: a gateway may land in a browser room when the hybrid bridge is
+    // available; with the bridge off (or without Opus) the old fail-closed
+    // rejection stays, so a room can never be silently half-bridged.
+    if crate::webrtc_runtime::room_has_peer(*room_id) && !crate::bridge::gateway_bridge_available(*room_id) {
         tracing::error!(
             room = %room_id,
             participant = %participant_id,
-            "gateway participant rejected: room has a real WebRTC peer (no SRTP bridge)"
+            "gateway participant rejected: room has a real WebRTC peer and the hybrid bridge is unavailable"
         );
         return false;
     }
     bridge_gateway_participant_media(mcu_engine, room_id, participant_id, has_video);
     announce_gateway_participant(state, room_id, participant_id, display_name, has_video);
+    // The admission guard must be released before starting the bridge: the
+    // bridge task is a long-lived per-room clock and must not be spawned (nor
+    // may its first tick wait) while the process admission lock is held.
+    drop(_admission);
+    if let (Some(mcu), Some(registry)) = (mcu_engine, crate::webrtc_runtime::existing_registry()) {
+        crate::bridge::ensure_room_bridge(state, mcu, &registry, *room_id);
+    }
     true
 }
 
@@ -1367,9 +1412,21 @@ impl GatewayManager {
         if !is_sip && !is_h323 {
             return Err(format!("Unsupported outbound protocol scheme: {uri}"));
         }
-        // A real WebRTC room has no plaintext<->SRTP bridge: refuse before
-        // dialing/announcing instead of answering the phone into silence.
-        if crate::webrtc_runtime::room_has_peer(room_id) {
+        // T12: an outbound dial into a browser room is allowed while the
+        // hybrid bridge is available; with the bridge off the old message stays.
+        if crate::webrtc_runtime::room_has_peer(room_id) && !crate::bridge::gateway_bridge_available(room_id) {
+            let caps = crate::bridge::caps();
+            if caps.hybrid_enabled {
+                return Err(format!(
+                    "room has a real WebRTC participant; hybrid bridge unavailable ({})",
+                    crate::bridge::bridge_unavailable_reason(
+                        caps,
+                        crate::bridge::BridgeSide::GatewayLanding,
+                        true,
+                        false
+                    )
+                ));
+            }
             return Err("room has a real WebRTC participant; SIP/H.323 bridge is not supported".into());
         }
         self.ensure_bridgeable_codecs(room_id, trimmed).await?;
@@ -1628,14 +1685,20 @@ impl GatewayManager {
         let state = self.state.read().ok().and_then(|value| value.as_ref().and_then(|weak| weak.upgrade()));
         {
             let _admission = crate::webrtc_runtime::admission();
-            if crate::webrtc_runtime::room_has_peer(room_id) {
+            if crate::webrtc_runtime::room_has_peer(room_id) && !crate::bridge::gateway_bridge_available(room_id) {
                 return Err("room gained a real WebRTC participant during outbound dial".into());
             }
             // Announce under the admission lock and before the (awaiting)
             // media bridge: a concurrent browser offer then sees the gateway
-            // and is rejected instead of creating a half-bridged room.
+            // and bridges to it instead of creating a half-bridged room.
             if let Some(state) = &state {
                 announce_gateway_participant(state, &room_id, &pid_str, &effective_name, has_video);
+            }
+        }
+        // T12: start the room bridge only after the admission lock is released.
+        if let Some(state) = &state {
+            if let Some(registry) = crate::webrtc_runtime::existing_registry() {
+                crate::bridge::ensure_room_bridge(state, &mcu, &registry, room_id);
             }
         }
         if state.is_some() {
@@ -2797,7 +2860,11 @@ async fn serve_sip_uas_on(
                         "",
                     ),
                 );
-                if room_id.is_some_and(crate::webrtc_runtime::room_has_peer) {
+                // T12: "Busy" only when the room cannot be bridged. A browser
+                // room with the hybrid bridge available accepts the inbound call.
+                if room_id.is_some_and(|room| {
+                    crate::webrtc_runtime::room_has_peer(room) && !crate::bridge::gateway_bridge_available(room)
+                }) {
                     sip_send(
                         &socket,
                         peer,
@@ -3684,8 +3751,12 @@ async fn serve_h323_uas_session(
                     }
                     None
                 };
-                if crate::webrtc_runtime::room_has_peer(pending_call.room_id) {
-                    tracing::warn!(room = %pending_call.room_id, "inbound H.323 call rejected: real WebRTC peer present");
+                // T12: accept the inbound H.323 call when the room is bridgeable;
+                // the old hangup stays when the bridge is off (or Opus is missing).
+                if crate::webrtc_runtime::room_has_peer(pending_call.room_id)
+                    && !crate::bridge::gateway_bridge_available(pending_call.room_id)
+                {
+                    tracing::warn!(room = %pending_call.room_id, "inbound H.323 call rejected: real WebRTC peer present and hybrid bridge unavailable");
                     handle.hangup(call_id).await;
                     continue;
                 }

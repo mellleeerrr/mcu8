@@ -3,7 +3,13 @@
 
 use std::sync::atomic::Ordering::Relaxed;
 
-pub(super) fn media_clock_ms() -> u64 {
+/// Process-wide monotonic 20 ms-tick clock (milliseconds).
+///
+/// One clock for the gateway RTP loop, the video ticker and the hybrid bridge:
+/// `McuEngine::tick_audio_at`/`tick_video_*` reject a tick that is less than
+/// one tick after the previous one, so two epochs would starve a room after a
+/// bridge restart (elapsed time would jump backwards).
+pub(crate) fn media_clock_ms() -> u64 {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     EPOCH.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
 }
@@ -393,7 +399,12 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 }
                 let mcu_input = if frame_samples == vks_gateway_sip::opus::FRAME_SAMPLES { &input } else { &upsampled };
                 session.mcu_engine.set_audio_slice(session.room_id, session.participant_id_val, mcu_input);
-                session.mcu_engine.tick_audio_at(session.room_id, media_clock_ms());
+                // T12: exactly one 20 ms clock per room. While the hybrid bridge
+                // is active it owns the tick (it mixes browser PCM and gateway
+                // PCM once); the gateway loop then only reads the mix-minus.
+                if !crate::bridge::bridge_owns_tick(session.room_id) {
+                    session.mcu_engine.tick_audio_at(session.room_id, media_clock_ms());
+                }
                 let mut packet = [0; 12 + vks_gateway_sip::opus::MAX_PAYLOAD];
                 vks_gateway_sip::write_rtp_header(&mut packet[..12], session.audio_payload_type, sequence, timestamp, ssrc, false);
                 let volume = session.controls.volume_rx.load(Relaxed);

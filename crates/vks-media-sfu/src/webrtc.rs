@@ -39,6 +39,18 @@ pub const MAX_AUDIO_MIDS: usize = 8;
 /// 500-m-line offer (which still fits the 64 KiB SDP cap) is cheap state churn.
 pub const MAX_VIDEO_MIDS: usize = 8;
 
+/// Reserved source id for the server-side mixed-room bridge egress (T12).
+///
+/// The bridge audio stream is a source like any publisher — it needs its own
+/// egress mid and RTP clock domain (one mid never carries two clock domains,
+/// T11b) — but it is not a room participant. A fixed UUID makes the id stable
+/// across bridge restarts (the same mid/clock domain keeps being reused) while
+/// staying outside the UUIDv4 space real participants are drawn from.
+pub fn bridge_source() -> ParticipantId {
+    static SOURCE: OnceLock<ParticipantId> = OnceLock::new();
+    *SOURCE.get_or_init(|| ParticipantId::from_uuid(uuid::Uuid::from_u128(0x6272_6964_6765_4000_8000_0000_0000_0001)))
+}
+
 /// Direction of one negotiated m-line from the SFU's point of view.
 ///
 /// Taken from the SDP answer and refreshed from str0m's `MediaAdded` /
@@ -617,6 +629,17 @@ impl WebRtcPeer {
         self.mids.mid_for_source(from, audio)
     }
 
+    /// Reserved `ParticipantId` that owns the server-side bridge egress stream
+    /// (T12: mixed room browser↔SIP/H.323 audio) on every peer.
+    ///
+    /// It is a fixed, non-random UUID: the bridge stream is a *source* like any
+    /// publisher (it needs its own egress mid and RTP clock domain, T11b), but
+    /// it never appears in the room roster. Never collide it with a real
+    /// participant — real ids are UUIDv4/v5 from `ParticipantId::new`.
+    pub fn bridge_egress_mid(&mut self, audio: bool) -> Option<Mid> {
+        self.mids.ensure_source(bridge_source(), audio)
+    }
+
     /// Allocates a publisher's egress mid ahead of its first frame, so mids are
     /// assigned in room registration order rather than packet arrival order.
     ///
@@ -640,7 +663,9 @@ impl WebRtcPeer {
         self.mids.source_for_mid(mid)
     }
 
-    fn is_audio_mid(&self, mid: Mid) -> Option<bool> {
+    /// Kind of a negotiated mid (`Some(true)` = audio), used to feed the
+    /// mixed-room media tap the frame kind without parsing codecs (T12).
+    pub(crate) fn is_audio_mid(&self, mid: Mid) -> Option<bool> {
         self.mids.sections().iter().find(|section| section.mid == mid).map(|section| section.audio)
     }
 
