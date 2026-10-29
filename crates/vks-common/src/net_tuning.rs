@@ -283,7 +283,6 @@ mod tests {
         // проверяют compile-time assert рядом с константами.
         assert_ne!(DEFAULT_GATEWAY_RCVBUF_BYTES, DEFAULT_MEDIA_RCVBUF_BYTES);
         assert_eq!(DEFAULT_WEBRTC_RCVBUF_BYTES, 1024 * 1024);
-
     }
 
     #[test]
