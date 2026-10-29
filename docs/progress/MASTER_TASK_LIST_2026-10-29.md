@@ -63,10 +63,10 @@
 |---|---|
 | 07:33 | T01 done: live перезапущен на HEAD, дыры закрыты, БД забэкаплена |
 | 07:44 | T03a done: all-features зелёный, CI-гейты ужесточены, флейк-маржи timing-тестов |
-| 16:16 | T16 done: RX IP+SSRC, H.235 fail-closed, UII, честный active_calls, golden+ADR-0034; сайдкар оставлен до паритета |
 | 07:46 | T03c done: −1080 строк мёртвого кода/зависимостей; transparency/ffi/qoe/slo удалены, ratelimit оставлен для T02 |
 | 07:49 | T05 done: RFC 4733 E-бит (200 мс), метрики потерь DTMF, negative-control |
 | 07:56 | T04a в работе: PT98 убран из Full, RX Main/High при TX baseline, cpresent обязателен (in/out), лицензионный профиль `VKS_CODEC_LICENSE_ACCEPTED`, G.726-32 PT2, honest matrix |
 | 08:15 | T04a закрыт (`14834a8`): аудио по identity (name+clock), renumbered PT96 G722 больше не убивает мост; PT2 G726-32; тесты 154 SIP / 145 server |
 | 08:20 | T02 реализован (`eb514e2`): Argon2id m=19456/t=2/p=1, PBKDF2 legacy + ленивый rehash без generation, 4 хеша + очередь 128 → 429, API bucket 200/50, sync-ldap 501, ADR-0033 |
 | 08:26 | T03b закрыт (`9a394ec`): doc-links gate блокирующий, oxideav/phantom-deps к факту |
+| 16:16 | T16 done: RX IP+SSRC, H.235 fail-closed, UII, честный active_calls, golden+ADR-0034; сайдкар оставлен до паритета |

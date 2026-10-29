@@ -348,7 +348,9 @@ impl H323UacClient {
                 debug!(diagnostic = %String::from_utf8_lossy(&retained), "H.323 sidecar stderr");
             }
         });
-        let (commands, receive_commands) = mpsc::channel(1);
+        // Room DTMF can arrive faster than the sidecar consumes stdin; a
+        // one-slot queue would reject the second digit of every sequence.
+        let (commands, receive_commands) = mpsc::channel(32);
         let (disconnect_tx, disconnect_rx) = watch::channel(None);
         let closed = Arc::new(AtomicBool::new(false));
         let control = Arc::new(SessionControl { commands, closed: closed.clone(), disconnected: disconnect_rx });
@@ -563,6 +565,9 @@ impl Supervisor {
                         }
                         Some("disconnected") => {
                             break classify_dial_reason(event.get("reason").and_then(Value::as_str).unwrap_or("remote disconnected").to_string());
+                        }
+                        Some("security_denied") => {
+                            break classify_dial_reason("remote_release:securityDenied".into());
                         }
                         Some("ringing" | "negotiating" | "channel" | "capabilities" | "video_unavailable" | "wire") => {}
                         _ => { break "unknown sidecar event".into(); }
@@ -785,6 +790,27 @@ mod tests {
         session.hangup().await.expect("graceful shutdown");
         assert!(session.is_closed());
         assert_eq!(session.subscribe_disconnect().borrow().as_deref(), Some("local_hangup"));
+    }
+
+    #[tokio::test]
+    async fn security_denied_event_fails_the_dial_closed() {
+        let result = H323UacClient::new("127.0.0.1")
+            .dial_command(
+                "h323:127.0.0.1",
+                41000,
+                None,
+                Duration::from_secs(2),
+                H323VideoProfile::default(),
+                python("import json,sys\njson.loads(sys.stdin.readline())\nprint('{\"event\":\"security_denied\"}',flush=True)\n"),
+            )
+            .await;
+        let error = match result {
+            Ok(_) => panic!("encrypted call must not connect"),
+            Err(error) => error,
+        };
+        let error = format!("{error}");
+        assert!(error.contains("remote_release:securityDenied"), "{error}");
+        assert!(vks_common::is_terminal_failure(&error), "security denial is a terminal failure: {error}");
     }
 
     #[tokio::test]

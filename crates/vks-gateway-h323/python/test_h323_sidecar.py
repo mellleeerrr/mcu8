@@ -53,12 +53,15 @@ class ContractTests(unittest.TestCase):
     def test_h235_security_capability_is_fail_closed(self):
         caps = {'encryption': ('default', 0), 'authenticaton': ('default', 0), 'integrity': ('default', 0)}
         call = self.call()
-        with contextlib.redirect_stdout(io.StringIO()):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
             call.on_signal(self.setup_packet({'h245SecurityCapability': [('tls', caps)]}))
         self.assertTrue(call.security_denied)
         self.assertEqual(call.reason, 'security_denied')
         self.assertTrue(call.stopping)
         self.assertFalse(call.signal_connected, 'a denied call never reaches H.245')
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertIn('security_denied', [event['event'] for event in events])
 
     def test_h235_tokens_are_fail_closed(self):
         call = self.call()
