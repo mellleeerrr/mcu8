@@ -107,9 +107,9 @@ pub struct WebRtcPeer {
     mids: Vec<Mid>,
     /// Parallel to `mids`; true for `m=audio`.
     mid_audio: Vec<bool>,
-    /// Mids in the order of the first accepted offer: a re-offer must keep
-    /// the same m-line order (str0m rejects changes before mutating anything,
-    /// and we classify that as a rejected re-offer rather than a dead call).
+    /// Mids in the order of the first accepted offer: a re-offer must keep the
+    /// same m-line order (str0m rejects structural changes; the SDP body is not
+    /// applied, but its ICE credentials may already be — see `accept_reoffer`).
     remote_mids: Vec<String>,
     /// Remote DTLS fingerprint from the accepted offer. A re-offer from a
     /// recreated PeerConnection has a new fingerprint that str0m silently
@@ -221,9 +221,11 @@ impl WebRtcPeer {
         let offer = SdpOffer::from_sdp_string(offer_sdp)
             .map_err(|e| WebRtcError::InvalidOffer(format!("re-offer SDP is not valid: {e}")))?;
         // str0m's `accept_offer` validates the new SDP against the existing
-        // remote description and fails before mutating it (verified: answer and
-        // a subsequent valid re-offer still work). Such rejections must keep the
-        // live session alive, exactly like our own `validate_offer` errors.
+        // remote description and rejects it with an error (verified: answer and
+        // a subsequent valid re-offer still work). The DTLS session and media
+        // keep running, but str0m runs `add_ice_details` before that
+        // validation, so the server ufrag may already have rotated; such
+        // rejections must still keep the live call alive.
         let answer = self
             .rtc
             .sdp_api()

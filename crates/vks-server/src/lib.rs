@@ -1412,9 +1412,39 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
     cleanup_active_membership(&mut current_membership, &ctx.sfu_engine, &ctx.mcu_engine, &state, 1).await;
 }
 
+/// Kinds published now that were not published before, de-duplicated: a
+/// re-offer of the same tracks announces nothing, a genuinely added kind is
+/// announced exactly once.
+fn new_track_kinds(
+    previous: &[vks_core::MediaKind],
+    tracks: &[vks_core::ports::media_engine::MediaTrack],
+) -> Vec<vks_core::MediaKind> {
+    let mut kinds = Vec::new();
+    for track in tracks {
+        if !previous.contains(&track.media_kind) && !kinds.contains(&track.media_kind) {
+            kinds.push(track.media_kind);
+        }
+    }
+    kinds
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_track_kinds_announces_only_unseen_kinds_once() {
+        use vks_core::ports::media_engine::MediaTrack;
+        use vks_core::MediaKind;
+        let audio = MediaTrack::new(vks_core::ParticipantId::new(), vks_core::TrackKind::Audio);
+        let video = MediaTrack::new(vks_core::ParticipantId::new(), vks_core::TrackKind::Video);
+        assert!(new_track_kinds(&[], &[]).is_empty());
+        // A re-offer of the same kind announces nothing; a genuinely new kind
+        // appears exactly once even if the re-offer lists it twice.
+        assert!(new_track_kinds(&[MediaKind::Audio], &[audio.clone()]).is_empty());
+        assert_eq!(new_track_kinds(&[MediaKind::Audio], &[audio.clone(), video.clone()]), vec![MediaKind::Video]);
+        assert_eq!(new_track_kinds(&[], &[audio, video]), vec![MediaKind::Audio, MediaKind::Video]);
+    }
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use tower::ServiceExt;

@@ -694,8 +694,10 @@ async fn run_peer(
                             Err(WebRtcError::InvalidOffer(message)) => {
                                 // The offered SDP is not something this peer can
                                 // renegotiate (e.g. getDisplayMedia adds a second
-                                // video m-line, or a data channel). The live
-                                // session is untouched: reject this re-offer only.
+                                // video m-line, or a data channel). The live call
+                                // keeps flowing (peer/socket/DTLS/media), though
+                                // str0m may already have applied the offer's ICE
+                                // credentials: reject this re-offer only.
                                 let _ = reply.send(Err(message.clone()));
                                 tracing::warn!(%message, ?participant, "WebRTC re-offer rejected; keeping live session");
                                 continue;
