@@ -334,6 +334,7 @@ class InboundCall:
         self.local_msd_number = int.from_bytes(os.urandom(3), "big")
         self.started = time.monotonic()
         self.audio_ready_at = None
+        self.security_denied = False
 
     def send_signal(self, message_type, body_name, params):
         body = encode(asn.H323_MESSAGES.H323_UserInformation, {
@@ -349,12 +350,26 @@ class InboundCall:
         body = encode(asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, value)
         self.control.sendall(tpkt(body))
 
+    def send_dtmf(self, digit):
+        """Send one room DTMF digit as H.245 UserInputIndication.signal.
+
+        H.245 signalType is a one-symbol IA5String; sending the raw RFC 4733
+        event number as a hex byte would corrupt or reject the PER value.
+        """
+        if not isinstance(digit, int) or not 0 <= digit <= 15:
+            raise ProtocolError("DTMF digit outside H.245 event range")
+        symbol = "0123456789*#ABCD"[digit]
+        self.send_control(("indication", ("userInput", ("signal", {"signalType": symbol}))))
+
     def send_release(self):
         try:
-            self.send_signal(0x5A, "releaseComplete", {
+            params = {
                 "protocolIdentifier": (0, 0, 8, 2250, 0, 4),
                 "callIdentifier": {"guid": self.call_id.bytes},
-            })
+            }
+            if self.security_denied:
+                params["reason"] = ("securityDenied", 0)
+            self.send_signal(0x5A, "releaseComplete", params)
         except Exception:
             pass
 
@@ -399,6 +414,11 @@ class InboundCall:
     def on_open(self, params):
         number = params["forwardLogicalChannelNumber"]
         forward = params["forwardLogicalChannelParameters"]
+        if audio.h245_encryption_requested(params):
+            self.security_denied = True
+            self.reason, self.closed = "security_denied", True
+            self.reject_open(number, "securityDenied")
+            return
         kind, pt = codec_kind(forward["dataType"])
         mux = forward.get("multiplexParameters")
         if kind is None or not mux or mux[0] != "h2250LogicalChannelParameters":
@@ -737,6 +757,11 @@ class InboundCall:
                         self.reason, self.closed = "parent_shutdown", True
                     elif command.get("command") == "hangup":
                         self.reason, self.closed = "local_hangup", True
+                    elif command.get("command") == "dtmf":
+                        try:
+                            self.send_dtmf(command.get("digit"))
+                        except ProtocolError:
+                            pass
                 else:
                     self.frames(sock)
                 if self.closed:
@@ -762,7 +787,7 @@ class InboundCall:
         emit("disconnected", call_id=str(self.call_id), reason=self.reason, was_connected=self.connected)
 
 
-def release_complete(conn, raw_ref, call_id, cause=21):
+def release_complete(conn, raw_ref, call_id, cause=21, reason=None):
     """ReleaseComplete for a call rejected before InboundCall exists."""
     try:
         body = encode(asn.H323_MESSAGES.H323_UserInformation, {
@@ -770,6 +795,7 @@ def release_complete(conn, raw_ref, call_id, cause=21):
                 "h323-message-body": ("releaseComplete", {
                     "protocolIdentifier": (0, 0, 8, 2250, 0, 4),
                     "callIdentifier": {"guid": call_id},
+                    **({"reason": (reason, 0)} if reason else {}),
                 }),
                 "h245Tunneling": False,
             }
@@ -852,6 +878,10 @@ def read_setup(conn):
             name, params = information["h323-uu-pdu"]["h323-message-body"]
             if name != "setup":
                 continue
+            if audio.h225_security_requested(params):
+                release_complete(conn, raw_ref, params.get("callIdentifier", {}).get("guid") or b"\0" * 16, 21,
+                                 reason="securityDenied")
+                raise ProtocolError("security_denied: peer requested H.235/H.245 encryption")
             guid = params.get("callIdentifier", {}).get("guid")
             conference = params.get("conferenceID") or guid
             if not guid or len(guid) != 16:

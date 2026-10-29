@@ -29,6 +29,27 @@ def q931_setup(alias: str, called_number: str = "123456") -> bytes:
     return b"\x08\x02\x12\x34\x05\x04\x03\x88\x90\xa5" + called + b"\x7e" + (len(body) + 1).to_bytes(2, "big") + b"\x05" + body
 
 
+def q931_setup_with_security(extra: dict) -> bytes:
+    body = listener.encode(asn.H323_MESSAGES.H323_UserInformation, {
+        "h323-uu-pdu": {
+            "h323-message-body": ("setup", {
+                "protocolIdentifier": (0, 0, 8, 2250, 0, 4),
+                "sourceInfo": {"terminal": {}, "mc": False, "undefinedNode": False},
+                "sourceAddress": [("h323-ID", "Polycom")],
+                "destinationAddress": [("h323-ID", "room")],
+                "activeMC": False, "conferenceID": bytes(range(16)),
+                "conferenceGoal": ("create", 0), "callType": ("pointToPoint", 0),
+                "callIdentifier": {"guid": bytes(range(16))},
+                "mediaWaitForConnect": False, "canOverlapSend": False,
+                "multipleCalls": False, "maintainConnection": False,
+                **extra,
+            }),
+            "h245Tunneling": False,
+        }
+    })
+    return b"\x08\x02\x12\x34\x05\x04\x03\x88\x90\xa5" + b"\x7e" + (len(body) + 1).to_bytes(2, "big") + b"\x05" + body
+
+
 class InboundContractTests(unittest.TestCase):
     def test_setup_keeps_raw_call_reference_and_full_h323_alias(self):
         ref, raw, message, information, cause, called = listener.parse_q931(q931_setup("4d313d01-8300-450c-ab08-28c8a00f9f25"))
@@ -298,6 +319,81 @@ class InboundContractTests(unittest.TestCase):
         self.assertEqual(listener.h245_ip_address("192.168.1.93", 1234)[0], "ipAddress")
         self.assertEqual(listener.h245_ip_address("192.168.1.93", 1234)[1]["port"], 1234)
         self.assertEqual(listener.h245_address("192.168.1.93", 1234)[0], "unicastAddress")
+
+    def test_h235_security_setup_is_rejected_and_released(self):
+        import socket
+        caps = {"encryption": ("default", 0), "authenticaton": ("default", 0), "integrity": ("default", 0)}
+        payload = q931_setup_with_security({"h245SecurityCapability": [("tls", caps)]})
+        _, _, _, information, _, _ = listener.parse_q931(payload)
+        _, params = information["h323-uu-pdu"]["h323-message-body"]
+        self.assertTrue(audio.h225_security_requested(params), "TLS-only terminal must fail closed")
+        left, right = socket.socketpair()
+        try:
+            right.sendall(b"\x03\x00" + (len(payload) + 4).to_bytes(2, "big") + payload)
+            with self.assertRaises(listener.ProtocolError):
+                listener.read_setup(left)
+            right.settimeout(0.5)
+            release = right.recv(65535)
+        finally:
+            left.close()
+            right.close()
+        self.assertTrue(release.startswith(b"\x03\x00"), "a ReleaseComplete must be sent")
+        self.assertEqual(release[8:9], b"\x5a")
+        release_payload = release[4:]
+        _, _, _, released, _, _ = listener.parse_q931(release_payload)
+        name, params = released["h323-uu-pdu"]["h323-message-body"]
+        self.assertEqual((name, params["reason"]), ("releaseComplete", ("securityDenied", 0)))
+
+    def test_h235_tokens_are_fail_closed(self):
+        payload = q931_setup_with_security({"tokens": [{"tokenOID": (0, 0, 8, 235, 0, 0, 1)}]})
+        _, _, _, information, _, _ = listener.parse_q931(payload)
+        _, params = information["h323-uu-pdu"]["h323-message-body"]
+        self.assertTrue(audio.h225_security_requested(params), "H.235 token means encrypted media")
+
+    def test_cleartext_security_capability_is_accepted(self):
+        payload = q931_setup_with_security({"h245SecurityCapability": [("noSecurity", 0)]})
+        _, _, _, information, _, _ = listener.parse_q931(payload)
+        _, params = information["h323-uu-pdu"]["h323-message-body"]
+        self.assertFalse(audio.h225_security_requested(params))
+
+    def test_encrypted_olc_is_rejected_with_security_denied(self):
+        call = object.__new__(listener.InboundCall)
+        call.security_denied = False
+        call.reason = "local_hangup"
+        call.closed = False
+        call.rejected = []
+        call.reject_open = lambda number, cause: call.rejected.append((number, cause))
+        params = {
+            "forwardLogicalChannelNumber": 1,
+            "forwardLogicalChannelParameters": {
+                "dataType": ("audioData", ("g711Ulaw64k", 20)),
+                "multiplexParameters": ("h2250LogicalChannelParameters", {"sessionID": 1}),
+            },
+            "encryptionSync": {"synchFlag": 96, "h235Key": b"key"},
+        }
+        call.on_open(params)
+        self.assertTrue(call.security_denied)
+        self.assertEqual(call.reason, "security_denied")
+        self.assertTrue(call.closed)
+        self.assertEqual(call.rejected, [(1, "securityDenied")])
+
+    def test_uii_send_uses_single_ia5_symbol_not_hex_event_code(self):
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+
+            def sendall(self, value):
+                self.sent.append(value)
+
+        call = object.__new__(listener.InboundCall)
+        call.control = FakeSocket()
+        for digit, symbol in ((5, "5"), (10, "*"), (11, "#"), (15, "D")):
+            call.send_dtmf(digit)
+            decoded = listener.decode(
+                asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage,
+                call.control.sent[-1][4:],
+            )
+            self.assertEqual(decoded, ("indication", ("userInput", ("signal", {"signalType": symbol}))))
 
 
 if __name__ == "__main__":

@@ -299,6 +299,17 @@ fn dtmf_event_character(digit: u8) -> Option<char> {
     }
 }
 
+/// RFC 4733 §3.2 digit -> event code, used for H.245 UII forwarding.
+fn dtmf_character_event(character: char) -> Option<u8> {
+    match character {
+        '0'..='9' => Some(character as u8 - b'0'),
+        '*' => Some(10),
+        '#' => Some(11),
+        'A'..='D' => Some(character as u8 - b'A' + 12),
+        _ => None,
+    }
+}
+
 /// Relays RFC 4733 digits from an inbound SIP terminal to the other gateway
 /// legs of the same room (the existing per-leg `dtmf_sender` regenerates its own
 /// event sequence). Browsers have no DTMF signaling channel yet (P2), so their
@@ -734,11 +745,22 @@ impl GatewayManager {
 
     /// Статус доступности H.323-шлюза для `ui_system_status`.
     pub fn h323_status(&self) -> serde_json::Value {
-        let h323 = self.h323.lock().unwrap();
         let listener = self.h323_uas_active.load(std::sync::atomic::Ordering::SeqCst);
-        let active_calls = h323.active_calls_count();
-        drop(h323);
-        self.gateway_status("h323", listener, active_calls as u64, "h323:vks@local")
+        let mock_calls = self.h323.lock().map_or(0, |h323| h323.active_calls_count());
+        // The mock H323Gateway registry never sees sidecar calls. Count the
+        // real gateway registry too, otherwise the UI reports zero while a
+        // terminal is connected (T16 honesty requirement).
+        let registry_calls = self.registry.lock().map_or(0, |registry| {
+            registry
+                .by_participant
+                .values()
+                .filter(|session| {
+                    session.active_h323.as_ref().is_some_and(|call| !call.is_closed())
+                        || session.inbound_h323.as_ref().is_some_and(|call| !call.uas.is_closed())
+                })
+                .count()
+        });
+        self.gateway_status("h323", listener, (mock_calls + registry_calls) as u64, "h323:vks@local")
     }
 
     /// Ссылка на внутренний экземпляр SIP-шлюза.
@@ -2130,14 +2152,38 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
     }
 
     fn send_dtmf(&self, participant_id: &str, sequence: &str) -> Result<(), String> {
-        let controls = {
+        let (controls, active_h323, inbound_h323) = {
             let reg = self.registry.lock().map_err(|_| "Registry lock poisoned".to_string())?;
             let sess = reg
                 .by_participant
                 .get(participant_id)
                 .ok_or_else(|| format!("Participant {participant_id} not found"))?;
-            sess.controls.clone()
+            (sess.controls.clone(), sess.active_h323.clone(), sess.inbound_h323.clone())
         };
+        // H.323 carries DTMF as H.245 UserInputIndication, not RFC 4733.
+        if active_h323.is_some() || inbound_h323.is_some() {
+            let digits: Vec<u8> = sequence.chars().filter_map(dtmf_character_event).collect();
+            if digits.is_empty() {
+                return Err("DTMF sequence contains no H.245 signal symbols".into());
+            }
+            if let Some(session) = active_h323 {
+                for digit in digits {
+                    session.send_dtmf(digit).map_err(|error| format!("H.323 DTMF: {error}"))?;
+                }
+                return Ok(());
+            }
+            if let Some(inbound) = inbound_h323 {
+                let runtime = tokio::runtime::Handle::try_current()
+                    .map_err(|_| "H.323 inbound DTMF requires an async runtime".to_string())?;
+                let handle = inbound.uas;
+                runtime.spawn(async move {
+                    for digit in digits {
+                        let _ = handle.send(serde_json::json!({"command": "dtmf", "digit": digit})).await;
+                    }
+                });
+                return Ok(());
+            }
+        }
         if controls.dtmf_payload_type.load(std::sync::atomic::Ordering::Relaxed) > 127 {
             return Err("The terminal did not negotiate RTP telephone-event".into());
         }
@@ -6487,6 +6533,21 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(manager.registry.lock().unwrap().by_participant.is_empty(), "BYE must remove registry state");
         listener.abort();
+    }
+
+    #[test]
+    fn h323_status_counts_connected_calls_in_the_mock_registry() {
+        let manager = GatewayManager::new();
+        assert_eq!(manager.h323_status()["active_calls"], 0);
+        {
+            let mut h323 = manager.h323().lock().unwrap();
+            h323.on_setup("status-call", "terminal", &[vks_gateway_h323::H323Codec::new("PCMU")]).unwrap();
+            h323.proceeding("status-call").unwrap();
+            h323.connect("status-call").unwrap();
+        }
+        // The sidecar registry is empty in this unit test; the honest status
+        // must still include the gateway call the mock actually tracks.
+        assert_eq!(manager.h323_status()["active_calls"], 1);
     }
 
     #[test]

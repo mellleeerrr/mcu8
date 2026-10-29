@@ -43,9 +43,17 @@ pub(crate) fn failure(message: impl std::fmt::Display) -> Error {
 }
 
 struct SessionControl {
-    commands: mpsc::Sender<()>,
+    commands: mpsc::Sender<SessionCommand>,
     closed: Arc<AtomicBool>,
     disconnected: watch::Receiver<Option<String>>,
+}
+
+/// Control-plane commands forwarded to the sidecar over stdin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionCommand {
+    Hangup,
+    /// RFC 4733 event code 0..=15; encoded as one H.245 UII IA5 symbol.
+    Dtmf(u8),
 }
 
 impl Drop for SessionControl {
@@ -53,7 +61,7 @@ impl Drop for SessionControl {
         // Last session owner leaves: request protocol shutdown. If the queue
         // already contains a hangup, that request is sufficient. The process
         // owner enforces a two-second grace and then kills/reaps the helper.
-        let _ = self.commands.try_send(());
+        let _ = self.commands.try_send(SessionCommand::Hangup);
     }
 }
 
@@ -94,7 +102,7 @@ impl ActiveH323Session {
             return Ok(());
         }
         let mut disconnected = self.subscribe_disconnect();
-        let _ = self.control.commands.try_send(());
+        let _ = self.control.commands.try_send(SessionCommand::Hangup);
         timeout(SHUTDOWN_GRACE + Duration::from_secs(2), async {
             loop {
                 if disconnected.borrow().is_some() || self.is_closed() {
@@ -105,6 +113,23 @@ impl ActiveH323Session {
         })
         .await
         .map_err(|_| failure("sidecar shutdown deadline exceeded"))?
+    }
+
+    /// Forward one DTMF digit to the peer as an H.245 UserInputIndication.
+    ///
+    /// The sidecar encodes the single IA5 symbol (``0-9*#ABCD``); this never
+    /// goes through RTP telephone-event, which H.323 terminals do not require.
+    pub fn send_dtmf(&self, digit: u8) -> CallResult<()> {
+        if digit > 15 {
+            return Err(failure("DTMF digit outside H.245 event range"));
+        }
+        if self.is_closed() {
+            return Err(failure("H.323 session is closed"));
+        }
+        self.control
+            .commands
+            .try_send(SessionCommand::Dtmf(digit))
+            .map_err(|_| failure("sidecar command queue is full or closed"))
     }
 }
 
@@ -483,7 +508,7 @@ struct Supervisor {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<tokio::process::ChildStdout>,
-    commands: mpsc::Receiver<()>,
+    commands: mpsc::Receiver<SessionCommand>,
     disconnect: watch::Sender<Option<String>>,
     closed: Arc<AtomicBool>,
     result: Option<oneshot::Sender<Result<ConnectedMedia, String>>>,
@@ -543,9 +568,17 @@ impl Supervisor {
                         _ => { break "unknown sidecar event".into(); }
                     }
                 }
-                _ = self.commands.recv(), if closing_deadline.is_none() => {
-                    let _ = timeout(Duration::from_millis(500), self.stdin.write_all(b"{\"command\":\"hangup\"}\n")).await;
-                    closing_deadline = Some(Instant::now() + SHUTDOWN_GRACE);
+                command = self.commands.recv(), if closing_deadline.is_none() => {
+                    match command {
+                        Some(SessionCommand::Dtmf(digit)) => {
+                            let line = format!("{{\"command\":\"dtmf\",\"digit\":{digit}}}\n");
+                            let _ = timeout(Duration::from_millis(500), self.stdin.write_all(line.as_bytes())).await;
+                        }
+                        Some(SessionCommand::Hangup) | None => {
+                            let _ = timeout(Duration::from_millis(500), self.stdin.write_all(b"{\"command\":\"hangup\"}\n")).await;
+                            closing_deadline = Some(Instant::now() + SHUTDOWN_GRACE);
+                        }
+                    }
                 }
                 _ = tokio::time::sleep_until(deadline) => {
                     break if established { "sidecar shutdown timed out" } else { "H.323 media negotiation timed out" }.into();
@@ -752,6 +785,35 @@ mod tests {
         session.hangup().await.expect("graceful shutdown");
         assert!(session.is_closed());
         assert_eq!(session.subscribe_disconnect().borrow().as_deref(), Some("local_hangup"));
+    }
+
+    #[tokio::test]
+    async fn dtmf_is_forwarded_as_sidecar_command() {
+        let code = format!(
+            "{CONNECTED}c=json.loads(sys.stdin.readline())\nassert c['command']=='dtmf' and c['digit']==11, c\nprint(json.dumps(dict(event='disconnected',reason='local_hangup')),flush=True)\n"
+        );
+        let session = H323UacClient::new("127.0.0.1")
+            .dial_command(
+                "h323:127.0.0.1",
+                41000,
+                None,
+                Duration::from_secs(2),
+                H323VideoProfile::default(),
+                python(&code),
+            )
+            .await
+            .expect("connected");
+        session.send_dtmf(11).expect("queue DTMF");
+        let mut notice = session.subscribe_disconnect();
+        timeout(Duration::from_secs(3), async {
+            while notice.borrow().is_none() {
+                notice.changed().await.expect("supervisor notice");
+            }
+        })
+        .await
+        .expect("the fake sidecar must observe the DTMF command");
+        assert!(session.send_dtmf(0).is_err(), "a closed session cannot send DTMF");
+        assert!(session.send_dtmf(16).is_err(), "out-of-range digit is rejected");
     }
 
     #[tokio::test]

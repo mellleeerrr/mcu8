@@ -271,6 +271,7 @@ class Call:
         self.received_requests = 0
         self.request_window = time.monotonic()
         self.remote_tcs_seen = False
+        self.security_denied = False
 
     def wire(self, direction, protocol, data, **fields):
         if self.config.trace:
@@ -282,6 +283,19 @@ class Call:
         body = encode(asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, value)
         self.control.sendall(tpkt(body))
         self.wire("sent", "h245", body, name=value[1][0])
+
+    def send_dtmf(self, digit):
+        """Send one room DTMF digit as H.245 UserInputIndication.signal.
+
+        The wire value is one IA5 character (``0123456789*#ABCD``), never a
+        hexadecimal event code: the H.245 ``signalType`` is a single-symbol
+        IA5String, so encoding the RFC 4733 code directly would either fail
+        PER validation or be decoded as the wrong key (T16 UII fix).
+        """
+        if not isinstance(digit, int) or not 0 <= digit <= 15:
+            raise ProtocolError("DTMF digit outside H.245 event range")
+        symbol = "0123456789*#ABCD"[digit]
+        self.send_control(("indication", ("userInput", ("signal", {"signalType": symbol}))))
 
     def send_setup(self):
         c = self.config
@@ -351,6 +365,14 @@ class Call:
         identifier = params.get("callIdentifier", {}).get("guid")
         if identifier is not None and identifier != uuid.UUID(self.config.call_id).bytes:
             raise ProtocolError("Mismatched H.225 call identifier")
+        if audio.h225_security_requested(params):
+            # Fail closed: no H.235/H.245 encryption exists in the bridge, and
+            # pretending the call is protected would be a security downgrade.
+            self.security_denied = True
+            self.reason = "security_denied"
+            self.stopping = True
+            emit("security_denied", call_id=self.config.call_id, peer_ip=self.config.target_ip)
+            return
         if message == 1:
             emit("ringing", call_id=self.config.call_id)
         if message != 7:
@@ -408,6 +430,15 @@ class Call:
     def on_open(self, params):
         number = params["forwardLogicalChannelNumber"]
         fw = params["forwardLogicalChannelParameters"]
+        if audio.h245_encryption_requested(params):
+            # Encrypted media cannot be decoded by this bridge. Reject only the
+            # channel and end the call with a security reason, never accept a
+            # key we cannot honour.
+            self.security_denied = True
+            self.reason = "security_denied"
+            self.stopping = True
+            self.reject_open(number, "securityDenied", None)
+            return
         kind, pt = codec_kind(fw["dataType"])
         mux = fw.get("multiplexParameters")
         if (
@@ -659,6 +690,8 @@ class Call:
             value = json.loads(line)
             if value.get("command") == "hangup":
                 self.reason, self.stopping = "local_hangup", True
+            elif value.get("command") == "dtmf":
+                self.send_dtmf(value.get("digit"))
             else:
                 raise ProtocolError("Unsupported sidecar command")
 
@@ -675,6 +708,8 @@ class Call:
             try:
                 self.signal.settimeout(.5)
                 params = {"protocolIdentifier": (0, 0, 8, 2250, 0, 4), "callIdentifier": {"guid": uuid.UUID(self.config.call_id).bytes}}
+                if self.security_denied:
+                    params["reason"] = ("securityDenied", 0)
                 encoded = encode(asn.H323_MESSAGES.H323_UserInformation, {"h323-uu-pdu": {"h323-message-body": ("releaseComplete", params), "h245Tunneling": False}})
                 packet = b"\x08\x02" + self.config.call_ref.to_bytes(2, "big") + b"\x5a\x08\x02\x80\x90\x7e" + (len(encoded) + 1).to_bytes(2, "big") + b"\x05" + encoded
                 self.signal.sendall(tpkt(packet))

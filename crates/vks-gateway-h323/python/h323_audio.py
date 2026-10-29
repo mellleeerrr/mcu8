@@ -16,6 +16,35 @@ AUDIO_CODECS = {
 AUDIO_PREFERENCE = ("G722", "G711U", "G711A", "G723")
 
 
+def h225_security_requested(params):
+    """True if H.225 Setup/Connect asks for anything but cleartext H.245.
+
+    Setup carries ``h245SecurityCapability`` (a list of supported modes) while
+    Connect carries ``h245SecurityMode`` (the selected mode). The gateway has
+    no H.235/H.245 encryption implementation, so a peer that does not offer
+    ``noSecurity`` or that sends H.235 tokens must be rejected instead of
+    silently falling back to plaintext (fail-closed, T16).
+    """
+    if not isinstance(params, dict):
+        return False
+    capabilities = params.get("h245SecurityCapability")
+    if capabilities:
+        modes = {mode[0] if isinstance(mode, (tuple, list)) and mode else mode for mode in capabilities}
+        if "noSecurity" not in modes:
+            return True
+    mode = params.get("h245SecurityMode")
+    if mode is not None and not (
+        isinstance(mode, (tuple, list)) and mode and mode[0] == "noSecurity"
+    ):
+        return True
+    return bool(params.get("tokens")) or bool(params.get("cryptoTokens"))
+
+
+def h245_encryption_requested(params):
+    """True if an H.245 OLC/OLC-Ack carries an H.235 EncryptionSync."""
+    return isinstance(params, dict) and bool(params.get("encryptionSync"))
+
+
 def release_reason_token(information, cause=None):
     """Stable terminal token for a Q.931 RELEASE COMPLETE.
 

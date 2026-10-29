@@ -30,6 +30,92 @@ class ContractTests(unittest.TestCase):
             'call_id': '00010203-0405-0607-0809-0a0b0c0d0e0f', 'call_ref': 0x3157,
         }))
 
+    def setup_packet(self, extra):
+        body = h.encode(h.asn.H323_MESSAGES.H323_UserInformation, {
+            'h323-uu-pdu': {
+                'h323-message-body': ('setup', {
+                    'protocolIdentifier': (0, 0, 8, 2250, 0, 4),
+                    'sourceInfo': {'terminal': {}, 'mc': False, 'undefinedNode': False},
+                    'sourceAddress': [('h323-ID', 'Polycom')],
+                    'destinationAddress': [('h323-ID', 'room')],
+                    'activeMC': False, 'conferenceID': bytes(range(16)),
+                    'conferenceGoal': ('create', 0), 'callType': ('pointToPoint', 0),
+                    'callIdentifier': {'guid': bytes(range(16))},
+                    'mediaWaitForConnect': False, 'canOverlapSend': False,
+                    'multipleCalls': False, 'maintainConnection': False,
+                    **extra,
+                }),
+                'h245Tunneling': False,
+            }
+        })
+        return b'\x08\x02\x31\x57\x05\x7e' + (len(body) + 1).to_bytes(2, 'big') + b'\x05' + body
+
+    def test_h235_security_capability_is_fail_closed(self):
+        caps = {'encryption': ('default', 0), 'authenticaton': ('default', 0), 'integrity': ('default', 0)}
+        call = self.call()
+        with contextlib.redirect_stdout(io.StringIO()):
+            call.on_signal(self.setup_packet({'h245SecurityCapability': [('tls', caps)]}))
+        self.assertTrue(call.security_denied)
+        self.assertEqual(call.reason, 'security_denied')
+        self.assertTrue(call.stopping)
+        self.assertFalse(call.signal_connected, 'a denied call never reaches H.245')
+
+    def test_h235_tokens_are_fail_closed(self):
+        call = self.call()
+        with contextlib.redirect_stdout(io.StringIO()):
+            call.on_signal(self.setup_packet({'tokens': [{'tokenOID': (0, 0, 8, 235, 0, 0, 1)}]}))
+        self.assertTrue(call.security_denied)
+        self.assertEqual(call.reason, 'security_denied')
+
+    def test_cleartext_security_capability_is_not_denied(self):
+        call = self.call()
+        with contextlib.redirect_stdout(io.StringIO()):
+            call.on_signal(self.setup_packet({'h245SecurityCapability': [('noSecurity', 0)]}))
+        self.assertFalse(call.security_denied)
+        self.assertEqual(call.reason, 'local_hangup')
+
+    def test_encrypted_olc_is_rejected_with_security_denied(self):
+        call = self.call()
+        call.control = FakeSocket()
+        params = {
+            'forwardLogicalChannelNumber': 1,
+            'forwardLogicalChannelParameters': {
+                'dataType': ('audioData', ('g711Ulaw64k', 20)),
+                'multiplexParameters': ('h2250LogicalChannelParameters', {'sessionID': 1}),
+            },
+            'encryptionSync': {'synchFlag': 96, 'h235Key': b'key'},
+        }
+        with contextlib.redirect_stdout(io.StringIO()):
+            call.on_open(params)
+        self.assertTrue(call.security_denied)
+        self.assertEqual(call.reason, 'security_denied')
+        self.assertTrue(call.stopping)
+        reject = h.decode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, call.control.sent[-1][4:])
+        self.assertEqual(reject[1][0], 'openLogicalChannelReject')
+        self.assertEqual(reject[1][1]['cause'][0], 'securityDenied')
+
+    def test_security_release_reason_survives_q931(self):
+        encoded = h.encode(h.asn.H323_MESSAGES.H323_UserInformation, {
+            'h323-uu-pdu': {'h323-message-body': ('releaseComplete', {
+                'protocolIdentifier': (0, 0, 8, 2250, 0, 4),
+                'callIdentifier': {'guid': bytes(range(16))},
+                'reason': ('securityDenied', 0),
+            }), 'h245Tunneling': False}
+        })
+        packet = b'\x08\x02\x31\x57\x5a\x08\x02\x80\x90\x7e' + (len(encoded) + 1).to_bytes(2, 'big') + b'\x05' + encoded
+        _, _, information, _ = h.parse_q931(packet)
+        self.assertEqual(audio.release_reason_token(information, 0), 'remote_release:securityDenied:cause=0')
+
+    def test_uii_send_uses_single_ia5_symbol_not_hex_event_code(self):
+        call = self.call()
+        call.control = FakeSocket()
+        for digit, symbol in ((0, '0'), (5, '5'), (10, '*'), (11, '#'), (15, 'D')):
+            call.send_dtmf(digit)
+            decoded = h.decode(h.asn.MULTIMEDIA_SYSTEM_CONTROL.MultimediaSystemControlMessage, call.control.sent[-1][4:])
+            self.assertEqual(decoded, ('indication', ('userInput', ('signal', {'signalType': symbol}))))
+        with self.assertRaises(h.ProtocolError):
+            call.send_dtmf(16)
+
     def test_independent_polycom_connect_decodes_true_h245_address(self):
         ref, kind, value, cause = h.parse_q931(CONNECT)
         self.assertEqual((ref, kind, cause), (0x3157, 7, None))
