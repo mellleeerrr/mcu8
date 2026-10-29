@@ -978,6 +978,13 @@ fn audio_sample_rate_for_codec(codec: &str) -> u32 {
     vks_common::codec_spec::lookup(codec).map_or(8_000, |spec| spec.sample_rate)
 }
 
+/// RTP timestamp clock for media details, derived from the SSOT instead of a
+/// case-sensitive name match. Opus is advertised as `opus` on the wire, so the
+/// old `match codec { "OPUS" => 48000 }` branch was dead and reported 8000.
+fn audio_clock_rate_for_codec(codec: &str) -> u32 {
+    vks_common::codec_spec::lookup(codec).map_or(8_000, |spec| spec.rtp_clock)
+}
+
 /// AAC-LATM needs two FFmpeg workers (encode + decode) before a call may be
 /// answered. The pool is bounded; a busy host must refuse with 488/503 rather
 /// than answer 200 OK and leave the participant with dead audio.
@@ -1549,7 +1556,7 @@ impl GatewayManager {
         let media_details = serde_json::json!({
             "audio_codec": audio_codec,
             "audio_payload_type": audio_payload_type,
-            "audio_clock_rate": match audio_codec { "OPUS" => 48000, "MP4A-LATM" => 90000, _ => 8000 },
+            "audio_clock_rate": audio_clock_rate_for_codec(audio_codec),
             "audio_sample_rate": audio_sample_rate_for_codec(audio_codec),
             "audio_tx_payload_type": audio_payload_type, "audio_rx_payload_type": audio_payload_type,
             "remote_audio_address": std::net::SocketAddr::new(remote_audio_ip, remote_audio_port).to_string(),
@@ -2943,11 +2950,7 @@ async fn serve_sip_uas_on(
                         "audio_rx_payload_type": media.audio_payload_type,
                         "audio_tx_payload_type": media.audio_payload_type,
                         "audio_clock_rate": media.audio_clock_rate,
-                        "audio_sample_rate": match media.audio_codec {
-                            "G722" => 16_000,
-                            "OPUS" | "MP4A-LATM" => 48_000,
-                            _ => 8_000,
-                        },
+                        "audio_sample_rate": audio_sample_rate_for_codec(media.audio_codec),
                         "video_codec": answer_video_port.and(media.video_codec),
                         "video_payload_type": answer_video_port.and(media.video_payload_type),
                         "video_clock_rate": answer_video_port.map(|_| 90000u32),
@@ -3991,6 +3994,26 @@ mod media_runtime_tests {
         for pt in [15, 107, 108, 109, 110, 111] {
             assert!(!h323.contains(&pt), "H.323 must not bridge PT{pt}");
         }
+    }
+
+    #[test]
+    fn media_details_clock_and_rate_are_derived_from_the_ssot() {
+        use vks_common::codec_spec::{spec, CodecId};
+        for id in [CodecId::Opus, CodecId::AacLatm, CodecId::Pcmu, CodecId::G722] {
+            let name = spec(id).name;
+            assert_eq!(audio_clock_rate_for_codec(name), spec(id).rtp_clock, "{name} RTP clock");
+            assert_eq!(audio_sample_rate_for_codec(name), spec(id).sample_rate, "{name} sample rate");
+        }
+        // Opus is spelled `opus` in the SDP offer/answer; the old
+        // case-sensitive `"OPUS"` match reported 8000 Hz in media details.
+        assert_eq!(audio_clock_rate_for_codec("opus"), 48_000);
+        assert_eq!(audio_clock_rate_for_codec("OPUS"), 48_000);
+        assert_eq!(audio_sample_rate_for_codec("opus"), 48_000);
+        assert_eq!(audio_clock_rate_for_codec("MP4A-LATM"), 90_000);
+        // G.722: RTP timestamp clock stays 8 kHz, the mixer runs at 16 kHz.
+        assert_eq!(audio_clock_rate_for_codec("G722"), 8_000);
+        assert_eq!(audio_sample_rate_for_codec("G722"), 16_000);
+        assert_eq!(audio_clock_rate_for_codec("not-a-codec"), 8_000);
     }
 
     #[test]

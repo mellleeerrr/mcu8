@@ -1163,6 +1163,137 @@ m=video 5006 RTP/AVP 96\r\n";
     }
 
     #[test]
+    fn native_disposition_matches_offer_gate_and_public_matrix() {
+        // P1-2 meta-invariant: a codec the SSOT calls natively bridgeable must
+        // be offered exactly once, be enabled past the probe gates, be present
+        // in the public native slice and carry no public reason. Conversely,
+        // every non-Native disposition must stay out of the offer and the
+        // public matrix. A mutation such as `H263.sip = Native` fails here on
+        // the missing VIDEO_OFFER row and on the stale matrix row.
+        use vks_common::codec_capabilities::{
+            audio_unavailable_reason, is_native_audio, is_supported_audio_variant, video_unavailable_reason,
+            PUBLIC_NATIVE_AUDIO, PUBLIC_NATIVE_VIDEO,
+        };
+        use vks_common::codec_spec::CodecKind;
+        let matrix = codec_spec::render_markdown_matrix();
+        for spec in codec_spec::CODECS {
+            let row = matrix
+                .lines()
+                .find(|line| line.starts_with(&format!("| {} |", spec.name)))
+                .unwrap_or_else(|| panic!("{} has no generated matrix row", spec.name));
+            let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+            assert_eq!(cells.len(), 8, "{} matrix row shape: {row}", spec.name);
+            assert_eq!(cells[1], spec.name, "matrix row name: {row}");
+            assert_eq!(cells[3], spec.sip.label(), "{} SIP cell: {row}", spec.name);
+            assert_eq!(cells[4], spec.h323.label(), "{} H.323 cell: {row}", spec.name);
+            assert_eq!(cells[5], spec.webrtc.label(), "{} WebRTC cell: {row}", spec.name);
+            let expected_reason = match (spec.sip, spec.reason) {
+                (Disposition::Native | Disposition::Worker, _) => "—",
+                (_, Some(reason)) => reason.as_id(),
+                (_, None) => "no_implementation",
+            };
+            assert_eq!(cells[6], expected_reason, "{} reason cell: {row}", spec.name);
+
+            match spec.kind {
+                CodecKind::Audio => {
+                    let visible_native = AUDIO_OFFER
+                        .iter()
+                        .filter(|codec| codec.spec == spec.id && audio_row_visible(codec, false))
+                        .count();
+                    let visible_with_gate = AUDIO_OFFER
+                        .iter()
+                        .filter(|codec| codec.spec == spec.id && audio_row_visible(codec, true))
+                        .count();
+                    match spec.sip {
+                        Disposition::Native => {
+                            assert_eq!(visible_native, 1, "{} Native must have exactly one sent row", spec.name);
+                            assert_eq!(visible_with_gate, 1, "{} lost its row behind the worker gate", spec.name);
+                            assert!(is_native_audio(spec.name), "{} admin native audio", spec.name);
+                            assert!(
+                                is_supported_audio_variant(spec.name, spec.bitrate),
+                                "{} Native is not negotiable",
+                                spec.name
+                            );
+                            assert!(PUBLIC_NATIVE_AUDIO.contains(&spec.name), "{} missing from /net/status", spec.name);
+                            assert!(
+                                audio_unavailable_reason(spec.name, spec.bitrate).is_none(),
+                                "{} Native carries a public reason",
+                                spec.name
+                            );
+                        }
+                        Disposition::Worker => {
+                            assert_eq!(visible_native, 0, "{} worker row leaked without the gate", spec.name);
+                            assert_eq!(visible_with_gate, 1, "{} worker row missing behind a green gate", spec.name);
+                            assert!(!PUBLIC_NATIVE_AUDIO.contains(&spec.name), "{} is not native", spec.name);
+                            assert!(
+                                audio_unavailable_reason(spec.name, spec.bitrate).is_some(),
+                                "{} worker is on without license/probe in tests",
+                                spec.name
+                            );
+                        }
+                        Disposition::WebRtc | Disposition::RxOnly | Disposition::Unsupported(_) => {
+                            assert_eq!(visible_native, 0, "{} unsupported but offered", spec.name);
+                            assert_eq!(
+                                visible_with_gate, 0,
+                                "{} unsupported but offered with the worker gate",
+                                spec.name
+                            );
+                            assert!(!PUBLIC_NATIVE_AUDIO.contains(&spec.name), "{} unsupported but public", spec.name);
+                            assert!(!is_supported_audio_variant(spec.name, spec.bitrate), "{}", spec.name);
+                        }
+                    }
+                }
+                CodecKind::Video => {
+                    let rows = VIDEO_OFFER.iter().filter(|codec| codec.spec == spec.id).count();
+                    match spec.sip {
+                        Disposition::Native => {
+                            assert_eq!(rows, 1, "{} Native must have exactly one VIDEO_OFFER row", spec.name);
+                            assert!(
+                                offer_video_enabled(spec.id, true, true),
+                                "{} Native is gated out with both probes green",
+                                spec.name
+                            );
+                            assert!(
+                                !offer_video_enabled(spec.id, false, false),
+                                "{} Native must fail closed without a probe",
+                                spec.name
+                            );
+                            assert!(PUBLIC_NATIVE_VIDEO.contains(&spec.name), "{} missing from /net/status", spec.name);
+                            assert!(
+                                video_unavailable_reason(spec.name).is_none(),
+                                "{} Native carries a public reason",
+                                spec.name
+                            );
+                        }
+                        Disposition::WebRtc | Disposition::RxOnly | Disposition::Unsupported(_) => {
+                            assert_eq!(rows, 0, "{} is not Native but has a VIDEO_OFFER row", spec.name);
+                            assert!(
+                                !offer_video_enabled(spec.id, true, true),
+                                "{} is not Native but the video gate opens",
+                                spec.name
+                            );
+                            assert!(!PUBLIC_NATIVE_VIDEO.contains(&spec.name), "{} is not native", spec.name);
+                            assert!(
+                                video_unavailable_reason(spec.name).is_some(),
+                                "{} is not Native but has no public reason",
+                                spec.name
+                            );
+                        }
+                        Disposition::Worker => panic!("{} is video with a Worker disposition", spec.name),
+                    }
+                }
+                CodecKind::Dtmf => {
+                    // telephone-event rides the audio m-line but is never a
+                    // selectable media codec: no caps, no native lists.
+                    assert!(!PUBLIC_NATIVE_AUDIO.contains(&spec.name));
+                    assert!(!PUBLIC_NATIVE_VIDEO.contains(&spec.name));
+                    assert_eq!(cells[2], "dtmf", "{} matrix kind: {row}", spec.name);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn sip_offer_has_no_duplicate_payload_types() {
         let mut audio = BTreeSet::new();
         for codec in AUDIO_OFFER {
@@ -1840,7 +1971,9 @@ fn negotiate_media_detailed_with(
         ip,
         audio_port: remote_audio.port,
         audio_payload_type: wire_payload,
-        audio_codec: codec.name,
+        // Canonical SSOT name (`OPUS`, not the lower-case SDP spelling) so
+        // media details/clock derivation never depend on the offer spelling.
+        audio_codec: codec_spec::spec(codec.spec).name,
         dtmf_payload_type,
         video_ip: video.as_ref().map(|value| value.0.clone()),
         video_port: video.as_ref().map(|value| value.1),
@@ -1986,6 +2119,25 @@ a=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\n";
             let media = negotiate_media(&offer, &answer).expect("native codec must be accepted");
             assert_eq!(media.audio_payload_type, payload);
             assert_eq!(media.audio_codec.to_ascii_uppercase(), name.to_ascii_uppercase());
+        }
+    }
+
+    #[test]
+    fn negotiated_media_audio_codec_is_the_canonical_ssot_name() {
+        // P2-3: `NegotiatedMedia.audio_codec` promises the canonical name, but
+        // the Opus row is spelled `opus` on the wire. A lower-case result made
+        // the server's `"OPUS"` clock branch dead (8000 instead of 48000 Hz).
+        let offer = build_offer(CodecProfile::Native, "192.168.1.93", 41000, None);
+        // Peer renumbers the dynamic payload; identity is name+clock.
+        let answer = "v=0\r\nc=IN IP4 192.168.1.132\r\nm=audio 3230 RTP/AVP 96\r\n\
+a=rtpmap:96 opus/48000/2\r\na=fmtp:96 useinbandfec=1;stereo=0;sprop-stereo=0\r\n";
+        let media = negotiate_media(&offer, answer).expect("Opus must negotiate by name+clock");
+        assert_eq!(media.audio_codec, "OPUS");
+        assert_eq!(media.audio_codec, codec_spec::spec(CodecId::Opus).name);
+        assert_eq!(codec_spec::spec(CodecId::Opus).rtp_clock, 48_000);
+        // The other native spellings are already canonical; keep them stable.
+        for (name, expected) in [("G722", "G722"), ("PCMU", "PCMU"), ("G726-32", "G726-32")] {
+            assert_eq!(codec_spec::lookup(name).expect("spec").name, expected);
         }
     }
 

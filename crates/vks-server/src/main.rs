@@ -41,6 +41,21 @@ fn config_exit(err: impl std::fmt::Display) -> ! {
     std::process::exit(78);
 }
 
+/// Transport-local payload map of the SFU answer.
+///
+/// Payload numbers and wire spellings are transport details (the SSOT
+/// deliberately has no RTP PT field / case-sensitive names), but the codec
+/// identities and clocks must be exactly the SSOT WebRTC answer slice.
+/// `production_rtp_maps_match_the_ssot_webrtc_answer_slice` enforces that, so
+/// adding a codec here without adding it to the SSOT (review B mutation M9)
+/// fails a product test.
+fn production_rtp_maps() -> Vec<RtpMap> {
+    vec![
+        RtpMap { payload: 111, codec: "opus".into(), clock: 48_000, channels: 2 },
+        RtpMap { payload: 96, codec: "vp8".into(), clock: 90_000, channels: 0 },
+    ]
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Инициализация трейсинга
@@ -378,10 +393,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "sha-256 FF:00:11",
         candidate_addr.clone(),
         candidate_port,
-        vec![
-            RtpMap { payload: 111, codec: "opus".into(), clock: 48000, channels: 2 },
-            RtpMap { payload: 96, codec: "vp8".into(), clock: 90000, channels: 0 },
-        ],
+        production_rtp_maps(),
     )
     .with_ice_servers(ice_servers)
     .with_room_mode(proto_room_mode)
@@ -569,10 +581,7 @@ mod production_codec_caps_tests {
             "sha-256 FF:00:11",
             "127.0.0.1",
             0,
-            vec![
-                RtpMap { payload: 111, codec: "opus".into(), clock: 48000, channels: 2 },
-                RtpMap { payload: 96, codec: "vp8".into(), clock: 90000, channels: 0 },
-            ],
+            production_rtp_maps(),
         )
         .with_room_mode(room_mode as i32)
         .with_dtls_srtp(dtls_srtp)
@@ -617,17 +626,47 @@ mod production_codec_caps_tests {
     }
 
     #[test]
+    fn production_rtp_maps_match_the_ssot_webrtc_answer_slice() {
+        // Review B mutation M9: extra H265/G722 RtpMap rows used to pass every
+        // product test while the SFU answer and SSOT caps disagreed. Validate
+        // the production builder instead of trusting the literals.
+        use vks_common::codec_spec::{self, CodecKind, Disposition};
+        let maps = production_rtp_maps();
+        let answer: Vec<&codec_spec::CodecSpec> = codec_spec::webrtc_answer_specs().collect();
+        assert_eq!(maps.len(), answer.len(), "one RtpMap row per SSOT WebRTC answer codec");
+        let mut seen = std::collections::BTreeSet::new();
+        for map in &maps {
+            let spec = codec_spec::lookup(&map.codec)
+                .unwrap_or_else(|| panic!("production RtpMap codec {:?} is not in the SSOT", map.codec));
+            assert_eq!(codec_spec::normalize(&map.codec), codec_spec::normalize(spec.name), "canonical wire name");
+            assert_eq!(spec.webrtc, Disposition::WebRtc, "{} is not implemented on WebRTC", map.codec);
+            assert!(spec.webrtc_negotiable, "{} is not in the str0m answer slice", map.codec);
+            assert!(
+                answer.iter().any(|answer_spec| answer_spec.id == spec.id),
+                "{} is not in webrtc_answer_specs()",
+                map.codec
+            );
+            assert_eq!(map.clock, spec.rtp_clock, "{} RTP clock drifted from the SSOT", map.codec);
+            assert_ne!(spec.kind, CodecKind::Dtmf, "telephone-event is not a RoomCaps codec");
+            assert!(seen.insert(spec.id), "duplicate {} in the production RtpMap", map.codec);
+        }
+        // PTs are transport-local, but must still be unique.
+        let payloads: std::collections::BTreeSet<u32> = maps.iter().map(|map| map.payload).collect();
+        assert_eq!(payloads.len(), maps.len(), "duplicate RTP payload type in the production answer");
+    }
+
+    #[test]
     fn production_main_does_not_overwrite_the_ssot_caps() {
         // P1 regression guard: the binary itself must not build codec literals
-        // or overwrite `HandlerConfig::caps` (which is SSOT-derived).
+        // or overwrite `HandlerConfig::caps` (which is SSOT-derived). Scan only
+        // the production part of the file; this test's own assertions and other
+        // test helpers legitimately mention codec fields.
         let source = include_str!("main.rs");
-        // Split the needles so this test's own source does not match them.
-        let with_caps = [".with_caps", "("].concat();
-        let video_literal = ["video_codecs: ", "vec!["].concat();
-        let audio_literal = ["audio_codecs: ", "vec!["].concat();
-        assert!(!source.contains(&with_caps), "main must not overwrite SSOT RoomCaps");
-        assert!(!source.contains(&video_literal), "main must not build video codec literals");
-        assert!(!source.contains(&audio_literal), "main must not build audio codec literals");
-        assert!(source.contains(".with_dtls_srtp(vks_server::webrtc_runtime::enabled())"));
+        let production = source.split("\n#[cfg(test)]").next().unwrap_or(source);
+        assert!(!production.contains(".with_caps("), "main must not overwrite SSOT RoomCaps");
+        assert!(!production.contains("video_codecs:"), "main must not build video codec literals");
+        assert!(!production.contains("audio_codecs:"), "main must not build audio codec literals");
+        assert!(!production.contains("RoomCaps {"), "main must not construct RoomCaps literals");
+        assert!(production.contains(".with_dtls_srtp(vks_server::webrtc_runtime::enabled())"));
     }
 }
