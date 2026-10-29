@@ -44,14 +44,6 @@ fn forbid(auth: &AuthContext) -> Option<Response> {
     None
 }
 
-/// Recording control is `ManageRecording` (Moderator+), not Operator-only.
-fn forbid_recording(auth: &AuthContext) -> Option<Response> {
-    if !vks_core::Permissions::has(auth.role, vks_core::Permission::ManageRecording) {
-        return Some(error_json(403, "Forbidden: Moderator role required"));
-    }
-    None
-}
-
 fn unsupported(what: &str) -> Response {
     error_json(501, &format!("{what} is not supported by this MCU build (read-only mode): the change was not applied"))
         .into_response()
@@ -712,8 +704,13 @@ pub async fn session_videorecords_list(
     Query(query): Query<PageQuery>,
 ) -> Response {
     super::track("sessions/{id}/videorecords");
-    if let Some(response) = forbid_recording(&auth) {
+    if let Some(response) = forbid(&auth) {
         return response;
+    }
+    if let Some(scope) = auth.room_scope.as_deref() {
+        if !scope.eq_ignore_ascii_case(&session_id) {
+            return error_json(403, "Forbidden: token room scope mismatch");
+        }
     }
     let records =
         collect_records(&state).await.into_iter().filter(|record| record.room_id.to_string() == session_id).collect();
@@ -762,7 +759,7 @@ pub async fn videorecords_start(
     body: Option<Json<Value>>,
 ) -> Response {
     super::track("sessions/{id}/videorecords");
-    if let Some(response) = forbid_recording(&auth) {
+    if let Err(response) = super::sessions::check_permission(&auth, Some(&session_id)) {
         return response;
     }
     let settings = body.map(|Json(value)| value).unwrap_or(Value::Null);
@@ -813,7 +810,7 @@ pub async fn videorecords_stop(
     Path((session_id, connection_id)): Path<(String, String)>,
 ) -> Response {
     super::track("sessions/{id}/videorecords/{id}");
-    if let Some(response) = forbid_recording(&auth) {
+    if let Err(response) = super::sessions::check_permission(&auth, Some(&session_id)) {
         return response;
     }
     let Some(room_id) = parse_room_id(&session_id) else {

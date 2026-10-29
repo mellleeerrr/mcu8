@@ -666,6 +666,41 @@ async fn recording_control_is_moderator_plus_and_unknown_session_is_404() {
 }
 
 #[tokio::test]
+async fn recording_control_honours_the_token_room_scope() {
+    let (state, issuer) = test_state();
+    state.mode.lock().unwrap().global_mode = vks_core::RoomMode::Mcu;
+    let room = crate::rooms::Rooms::create_async(&state, "rec-scope".to_string()).await.expect("room");
+    state.set_recording(std::sync::Arc::new(FakeRecording::new(1)));
+    let server = app(state.clone());
+    let moderator = Users::create(&state, "t24-scope-moderator".to_string(), Role::Moderator);
+    let foreign_scope = uuid::Uuid::new_v4().to_string();
+    let scoped = issuer.issue(&moderator.id.to_string(), Some(&foreign_scope)).expect("token");
+
+    let start =
+        send(&server, request("POST", &format!("/api/v3/sessions/{}/videorecords", room.id), Some(&scoped), json!({})))
+            .await;
+    assert_eq!(start.status(), StatusCode::FORBIDDEN, "room-scoped token must not record a foreign room");
+    let list = send(
+        &server,
+        request("GET", &format!("/api/v3/sessions/{}/videorecords", room.id), Some(&scoped), serde_json::Value::Null),
+    )
+    .await;
+    assert_eq!(list.status(), StatusCode::FORBIDDEN, "read must honour the same scope");
+    let stop = send(
+        &server,
+        request(
+            "DELETE",
+            &format!("/api/v3/sessions/{}/videorecords/{}", room.id, uuid::Uuid::new_v4()),
+            Some(&scoped),
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(stop.status(), StatusCode::FORBIDDEN);
+    assert_eq!(state.records.lock().unwrap().len(), 0, "no row is created by a rejected request");
+}
+
+#[tokio::test]
 async fn estimated_time_is_derived_from_the_bitrate_model_not_a_constant() {
     let (state, _issuer) = test_state();
     let server = app(state);

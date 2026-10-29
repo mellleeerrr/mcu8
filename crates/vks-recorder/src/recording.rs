@@ -56,6 +56,9 @@ pub enum RecordingError {
     /// [`RecordingState::Idle`] (остановка записи, которая не начиналась).
     #[error("recording is not started")]
     NotStarted,
+    /// Не удалось сохранить метаданные записи в Storage.
+    #[error("recording metadata persistence failed: {0}")]
+    Storage(String),
 }
 
 /// Состояние записи.

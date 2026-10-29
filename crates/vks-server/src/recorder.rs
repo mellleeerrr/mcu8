@@ -76,7 +76,10 @@ impl RecordingControl for RecorderControl {
                     for mut entry in records.into_iter().filter(|entry| entry.duration_sec == 0) {
                         let now_ms = vks_admin::state::now_unix_ms();
                         entry.duration_sec = (((now_ms.saturating_sub(entry.created_ms)) / 1000).max(1)) as u32;
-                        let _ = storage.upsert_record(&entry).await;
+                        storage
+                            .upsert_record(&entry)
+                            .await
+                            .map_err(|error| format!("recording metadata persistence failed: {error}"))?;
                         state.records.lock().unwrap().insert(entry.id.clone(), entry);
                     }
                 }
@@ -285,7 +288,9 @@ impl RecorderManager {
             id: meta.id.to_string(),
             room_id: *room_id,
             created_ms: meta.started_at_ms,
-            duration_sec: (meta.duration_ms / 1000) as u32,
+            // A finished recording must never look ACTIVE (duration 0 is the
+            // active marker): sub-second recordings round up to 1 s.
+            duration_sec: ((meta.duration_ms / 1000) as u32).max(1),
             size_bytes: meta.size_bytes,
             bitrate_kbps: profile.bitrate_kbps(),
             width: profile.width,
@@ -341,7 +346,8 @@ impl RecorderManager {
     ) -> Result<RecordingMeta, RecordingError> {
         let (meta, entry_opt) = self.stop_recording_internal(state, room_id, false)?;
         if let (Some(ref storage), Some(entry)) = (&state.storage, entry_opt) {
-            let _ = storage.upsert_record(&entry).await;
+            // DELETE must not return 200 while the DB row still looks ACTIVE.
+            storage.upsert_record(&entry).await.map_err(|error| RecordingError::Storage(error.to_string()))?;
         }
         Ok(meta)
     }
