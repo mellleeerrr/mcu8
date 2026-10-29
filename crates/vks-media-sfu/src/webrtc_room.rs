@@ -5,8 +5,10 @@
 //! awaits [`WebRtcRoomRegistry::accept_offer`]: a re-offer is forwarded to the
 //! peer's task (same str0m session, no new socket/DTLS), a brand-new offer is
 //! registered under the process-wide admission lock re-validated after the
-//! await. A re-offer the peer cannot negotiate is rejected without touching the
-//! live session. Media then flows through SRTP, is depayloaded to frames, and
+//! await. A re-offer the peer cannot negotiate is rejected and the live call
+//! keeps flowing (peer, socket, DTLS and media survive), but str0m may have
+//! already applied the offer's ICE credentials before rejecting the SDP body,
+//! so the next accepted re-offer can observe a rotated server ufrag. Media then flows through SRTP, is depayloaded to frames, and
 //! is re-encrypted separately for every receiving browser.
 //!
 //! This is intentionally a small SFU fanout, not the legacy plaintext
