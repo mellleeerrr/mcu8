@@ -4105,6 +4105,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "http-body",
+ "libc",
  "prometheus",
  "serde",
  "serde_json",

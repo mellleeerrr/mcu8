@@ -698,6 +698,66 @@ pub async fn quick_session(
     Json(json!({ "session": session_json(&state, &room, connections_limit(&state), false, &[]) })).into_response()
 }
 
+pub async fn stop_session_internal(state: &SharedState, room: &RoomRecord, user: &str, reason: &str, client_ip: Option<&str>) {
+    let was_stopped =
+        state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
+    if was_stopped {
+        return;
+    }
+    state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").insert(room.id);
+    super::call_strings::cancel_pending_calls(state, &room.id);
+    let stopped_participants: Vec<String> = state
+        .room_hub
+        .list_participants(&room.id)
+        .into_iter()
+        .map(|participant| participant.participant_id)
+        .collect();
+    super::history::record_stopped(state, room, user, reason).await;
+    for participant in &stopped_participants {
+        Rooms::kick_participant(state, &room.id, participant);
+    }
+    state.api_v3.scheduled_calls.lock().expect("scheduled_calls poisoned").remove(&room.id);
+    state
+        .api_v3
+        .in_flight_calls
+        .lock()
+        .expect("in_flight_calls poisoned")
+        .retain(|(room_id, _), _| *room_id != room.id);
+    state
+        .api_v3
+        .call_attempts
+        .lock()
+        .expect("call_attempts poisoned")
+        .retain(|(room_id, _), _| *room_id != room.id);
+    if let Ok(mut settings) = state.api_v3.abonent_settings.lock() {
+        for participant in &stopped_participants {
+            settings.remove(participant);
+        }
+    }
+    if let Ok(mut processing) = state.api_v3.abonent_processing.lock() {
+        for participant in &stopped_participants {
+            processing.remove(participant);
+        }
+    }
+    let _ = Rooms::update_async(state, &room.id, None, None, Some(0), Some(0)).await;
+    state.notify_admin(
+        &format!("session:{}:abonents", room.id),
+        json!({"action":"stopped","room_id":room.id.to_string(),"count":0}),
+    );
+    state.notify_admin(
+        "sessions:stopped",
+        json!({"id":room.id.to_string(),"session":{"id":room.id.to_string()}}),
+    );
+    state.notify_admin("sessions", json!({ "action": "stopped", "id": room.id.to_string() }));
+    audit_room(
+        state,
+        user,
+        "session.stopped",
+        &room.id.to_string(),
+        client_ip.or(Some("127.0.0.1")),
+    );
+}
+
 /// `DELETE /api/v3/sessions/{id}` (или `/ui/sessions/{id}`) — завершение сессии БЕЗ удаления конференции.
 pub async fn stop_session(
     State(state): State<SharedState>,
@@ -711,71 +771,92 @@ pub async fn stop_session(
     }
     match find_room(&state, &id) {
         Some(room) => {
-            // Останавливать можно только живую сессию: create_conference и
-            // boot-reconcile заранее помечают комнату stopped, поэтому DELETE
-            // /sessions на никогда не запускавшейся конференции — идемпотентный
-            // 204 без фантомной записи в истории (симметрично delete-пути).
             let was_stopped =
                 state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").contains(&room.id);
             if was_stopped {
                 return StatusCode::NO_CONTENT.into_response();
             }
-            state.api_v3.stopped_sessions.lock().expect("stopped_sessions poisoned").insert(room.id);
-            super::call_strings::cancel_pending_calls(&state, &room.id);
-            let stopped_participants: Vec<String> = state
-                .room_hub
-                .list_participants(&room.id)
-                .into_iter()
-                .map(|participant| participant.participant_id)
-                .collect();
-            // T2.2: снимок истории ДО очистки attempts/участников.
-            super::history::record_stopped(&state, &room, &auth.subject, "Manual").await;
-            for participant in &stopped_participants {
-                Rooms::kick_participant(&state, &room.id, participant);
-            }
-            state.api_v3.scheduled_calls.lock().expect("scheduled_calls poisoned").remove(&room.id);
-            state
-                .api_v3
-                .in_flight_calls
-                .lock()
-                .expect("in_flight_calls poisoned")
-                .retain(|(room_id, _), _| *room_id != room.id);
-            state
-                .api_v3
-                .call_attempts
-                .lock()
-                .expect("call_attempts poisoned")
-                .retain(|(room_id, _), _| *room_id != room.id);
-            if let Ok(mut settings) = state.api_v3.abonent_settings.lock() {
-                for participant in &stopped_participants {
-                    settings.remove(participant);
-                }
-            }
-            if let Ok(mut processing) = state.api_v3.abonent_processing.lock() {
-                for participant in &stopped_participants {
-                    processing.remove(participant);
-                }
-            }
-            let _ = Rooms::update_async(&state, &room.id, None, None, Some(0), Some(0)).await;
-            state.notify_admin(
-                &format!("session:{}:abonents", room.id),
-                json!({"action":"stopped","room_id":room.id.to_string(),"count":0}),
-            );
-            state.notify_admin(
-                "sessions:stopped",
-                json!({"id":room.id.to_string(),"session":{"id":room.id.to_string()}}),
-            );
-            state.notify_admin("sessions", json!({ "action": "stopped", "id": room.id.to_string() }));
-            audit_room(
-                &state,
-                &auth.subject,
-                "session.stopped",
-                &room.id.to_string(),
-                client_ip.as_ref().map(|c| c.0 .0.as_str()),
-            );
+            stop_session_internal(&state, &room, &auth.subject, "Manual", client_ip.as_ref().map(|c| c.0.0.as_str())).await;
             StatusCode::NO_CONTENT.into_response()
         }
         None => error_json(404, "Session not found"),
+    }
+}
+
+/// Фоновый процесс авто-завершения сессий по правилам `stop_rules`:
+/// - `empty` (сек): если в сессию никто не зашёл в течение N секунд.
+/// - `quit_all` (сек): если все участники покинули сессию, и в течение N секунд никто не вернулся.
+pub async fn run_session_reaper(state: SharedState) {
+    let mut session_empty_since: std::collections::HashMap<vks_core::RoomId, std::time::Instant> = std::collections::HashMap::new();
+    let mut session_quit_all_since: std::collections::HashMap<vks_core::RoomId, std::time::Instant> = std::collections::HashMap::new();
+    let mut session_ever_had_participants: std::collections::HashSet<vks_core::RoomId> = std::collections::HashSet::new();
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+    loop {
+        interval.tick().await;
+
+        let active_rooms = {
+            let stopped = match state.api_v3.stopped_sessions.lock() {
+                Ok(guard) => guard.clone(),
+                Err(_) => continue,
+            };
+            let (rooms, _) = select_rooms(&state, &SessionsQuery::default());
+            rooms.into_iter().filter(|r| !stopped.contains(&r.id)).collect::<Vec<_>>()
+        };
+
+        let active_ids: std::collections::HashSet<vks_core::RoomId> = active_rooms.iter().map(|r| r.id).collect();
+        session_empty_since.retain(|id, _| active_ids.contains(id));
+        session_quit_all_since.retain(|id, _| active_ids.contains(id));
+        session_ever_had_participants.retain(|id| active_ids.contains(id));
+
+        for room in active_rooms {
+            let participants = state.room_hub.list_participants(&room.id);
+            let user_count = participants.iter().filter(|p| !p.is_recorder).count();
+
+            let stored_settings = state
+                .api_v3
+                .conference_settings
+                .lock()
+                .ok()
+                .and_then(|m| m.get(&room.id).cloned())
+                .unwrap_or_else(|| json!({}));
+            let defaults = conference_payload_defaults();
+            let empty_limit = stored_settings
+                .get("stop_rules")
+                .and_then(|sr| sr.get("empty"))
+                .or_else(|| defaults.get("stop_rules").and_then(|sr| sr.get("empty")))
+                .and_then(Value::as_u64);
+            let quit_all_limit = stored_settings
+                .get("stop_rules")
+                .and_then(|sr| sr.get("quit_all"))
+                .or_else(|| defaults.get("stop_rules").and_then(|sr| sr.get("quit_all")))
+                .and_then(Value::as_u64);
+
+            if user_count > 0 {
+                session_ever_had_participants.insert(room.id);
+                session_empty_since.remove(&room.id);
+                session_quit_all_since.remove(&room.id);
+            } else {
+                let ever_had = session_ever_had_participants.contains(&room.id);
+                if !ever_had {
+                    if let Some(limit_secs) = empty_limit {
+                        let empty_since = *session_empty_since.entry(room.id).or_insert_with(std::time::Instant::now);
+                        if empty_since.elapsed().as_secs() >= limit_secs {
+                            tracing::info!(room = %room.id, limit_secs, "reaping empty session past timeout");
+                            stop_session_internal(&state, &room, "System", "EmptyTimeout", Some("127.0.0.1")).await;
+                        }
+                    }
+                } else {
+                    if let Some(limit_secs) = quit_all_limit {
+                        let quit_since = *session_quit_all_since.entry(room.id).or_insert_with(std::time::Instant::now);
+                        if quit_since.elapsed().as_secs() >= limit_secs {
+                            tracing::info!(room = %room.id, limit_secs, "reaping quit_all session past timeout");
+                            stop_session_internal(&state, &room, "System", "QuitAllTimeout", Some("127.0.0.1")).await;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1172,7 +1253,7 @@ fn abonent_details(
             "noise_suppressor_switch": "DEFAULT",
             "auto_gain_control": false,
             "noise_suppressor": false,
-            "power": 0,
+            "power": -999,
             "rx": media(audio_rx, volume_rx),
             "tx": media(audio_tx, volume_tx)
         },
@@ -1220,6 +1301,9 @@ pub fn participant_to_abonent_json_with_settings(
         volume_tx,
     );
 
+    let hide_display_name = media_opt.map(|m| m.hide_display_name).unwrap_or(false);
+    let slot_render_type = media_opt.and_then(|m| m.slot_render_type.as_deref()).unwrap_or("DEFAULT");
+
     json!({
         "id": p.participant_id,
         "abonent_id": p.participant_id,
@@ -1237,7 +1321,7 @@ pub fn participant_to_abonent_json_with_settings(
         "connected_at": p.connected_at,
         "details": details,
         "payload": {
-            "slot_render_type": "DEFAULT",
+            "slot_render_type": slot_render_type,
             "auto_call": false,
             "audio_rx_enabled": audio_rx_enabled,
             "audio_tx_enabled": audio_tx_enabled,
@@ -1246,7 +1330,9 @@ pub fn participant_to_abonent_json_with_settings(
             "video_rx_enabled": video_rx_enabled,
             "video_tx_enabled": video_tx_enabled,
             "crown": "EQUAL",
-            "hide_display_name": false
+            "hide_display_name": hide_display_name,
+            "noise_suppression": "DEFAULT",
+            "auto_gain_control": "DEFAULT"
         }
     })
 }
@@ -1358,7 +1444,7 @@ fn attach_gateway_statistics(
         }
         return;
     };
-    for media in ["audio", "video"] {
+    for media in ["audio", "video", "content"] {
         for direction in ["rx", "tx"] {
             if let Some(codec) = stats.get(format!("{media}_codec")) {
                 value["details"][media][direction]["codec"] = codec.clone();
@@ -1502,10 +1588,19 @@ fn attach_call_contact(value: &mut Value, record: &super::call_strings::CallStri
     value["protocol"] = json!(record.uri.split(':').next().unwrap_or("sip"));
     let mut payload = super::call_strings::default_contact_payload(Some(&record.payload));
     if has_media_settings {
-        for field in
-            ["audio_rx_enabled", "audio_tx_enabled", "video_rx_enabled", "video_tx_enabled", "volume_rx", "volume_tx"]
-        {
-            payload[field] = value["payload"][field].clone();
+        for field in [
+            "audio_rx_enabled",
+            "audio_tx_enabled",
+            "video_rx_enabled",
+            "video_tx_enabled",
+            "volume_rx",
+            "volume_tx",
+            "hide_display_name",
+            "slot_render_type",
+        ] {
+            if !value["payload"][field].is_null() {
+                payload[field] = value["payload"][field].clone();
+            }
         }
     }
     value["payload"] = payload;
@@ -1634,6 +1729,10 @@ pub struct SwitchAbonentSettingsRequest {
     pub noise_suppression: Option<String>,
     #[serde(default)]
     pub auto_gain_control: Option<String>,
+    #[serde(default)]
+    pub hide_display_name: Option<bool>,
+    #[serde(default, alias = "slot_render_type")]
+    pub render_type: Option<String>,
 }
 
 /// PNM's slider uses signed tenths of a dB; the bridge accepts linear percent.
@@ -1653,12 +1752,45 @@ pub async fn switch_abonent_settings(
     if auth.role < Role::Operator {
         return error_json(403, "Forbidden: Operator role required");
     }
-    let connection_id = sanitize_id(&connection_id).to_string();
-    let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(&connection_id) else {
+    let unescaped_id = super::previews::decode_percent(&connection_id);
+    let clean_id = sanitize_id(&unescaped_id).to_string();
+    let Some((room_id, snapshot)) = state
+        .room_hub
+        .find_participant_room(&connection_id)
+        .or_else(|| state.room_hub.find_participant_room(&unescaped_id))
+        .or_else(|| state.room_hub.find_participant_room(&clean_id))
+    else {
         return error_json(404, "Abonent not found");
     };
     if let Err(resp) = check_permission(&auth, Some(&room_id.to_string())) {
         return resp;
+    }
+    let participant_id = snapshot.participant_id.clone();
+
+    if setting_type == "hide_display_name" {
+        let hide = body.hide_display_name.unwrap_or(true);
+        if let Ok(mut settings_map) = state.api_v3.abonent_settings.lock() {
+            let entry = settings_map.entry(participant_id.clone()).or_default();
+            entry.hide_display_name = hide;
+            if clean_id != participant_id {
+                settings_map.entry(clean_id.clone()).or_default().hide_display_name = hide;
+            }
+        }
+        if let Some(dialer) = state.outbound_dialer() {
+            dialer.set_participant_name_visibility(room_id, &participant_id, !hide);
+        }
+        return Json(json!({ "status": "ok", "hide_display_name": hide })).into_response();
+    }
+    if matches!(setting_type.as_str(), "render_type" | "slot_render_type") {
+        let render = body.render_type.unwrap_or_else(|| "DEFAULT".to_string());
+        if let Ok(mut settings_map) = state.api_v3.abonent_settings.lock() {
+            let entry = settings_map.entry(participant_id.clone()).or_default();
+            entry.slot_render_type = Some(render.clone());
+            if clean_id != participant_id {
+                settings_map.entry(clean_id.clone()).or_default().slot_render_type = Some(render.clone());
+            }
+        }
+        return Json(json!({ "status": "ok", "render_type": render })).into_response();
     }
 
     if matches!(setting_type.as_str(), "noise_suppression" | "auto_gain_control") {
@@ -1674,8 +1806,10 @@ pub async fn switch_abonent_settings(
         // Fail-soft: saving DSP filter intent in abonent_processing, effective is false
         // until denoiser / AGC is wired into the active media mixer runtime.
         let mut processing = state.api_v3.abonent_processing.lock().expect("abonent_processing poisoned");
-        let saved = processing.entry(connection_id.clone()).or_insert_with(|| json!({}));
-        saved[&setting_type] = json!(requested);
+        processing.entry(participant_id.clone()).or_insert_with(|| json!({}))[&setting_type] = json!(requested);
+        if clean_id != participant_id {
+            processing.entry(clean_id.clone()).or_insert_with(|| json!({}))[&setting_type] = json!(requested);
+        }
         return Json(json!({"status":"ok","mode":requested,"effective":false})).into_response();
     }
     if body.volume.is_some_and(|volume| !(-400..=200).contains(&volume)) {
@@ -1720,24 +1854,32 @@ pub async fn switch_abonent_settings(
 
     // Сохраняем актуальные настройки абонента для ростера
     if let Ok(mut settings_map) = state.api_v3.abonent_settings.lock() {
-        let entry = settings_map.entry(connection_id.clone()).or_default();
-        if let Some(m) = audio_tx_muted {
-            entry.audio_tx_muted = m;
+        let update_entry = |entry: &mut super::AbonentMediaState| {
+            if let Some(m) = audio_tx_muted {
+                entry.audio_tx_muted = m;
+            }
+            if let Some(m) = audio_rx_muted {
+                entry.audio_rx_muted = m;
+            }
+            if let Some(m) = video_tx_muted {
+                entry.video_tx_muted = m;
+            }
+            if let Some(m) = video_rx_muted {
+                entry.video_rx_muted = m;
+            }
+            if let Some(v) = vol_tx {
+                entry.volume_tx = v;
+            }
+            if let Some(v) = vol_rx {
+                entry.volume_rx = v;
+            }
+        };
+        update_entry(settings_map.entry(participant_id.clone()).or_default());
+        if clean_id != participant_id {
+            update_entry(settings_map.entry(clean_id.clone()).or_default());
         }
-        if let Some(m) = audio_rx_muted {
-            entry.audio_rx_muted = m;
-        }
-        if let Some(m) = video_tx_muted {
-            entry.video_tx_muted = m;
-        }
-        if let Some(m) = video_rx_muted {
-            entry.video_rx_muted = m;
-        }
-        if let Some(v) = vol_tx {
-            entry.volume_tx = v;
-        }
-        if let Some(v) = vol_rx {
-            entry.volume_rx = v;
+        if connection_id != participant_id && connection_id != clean_id {
+            update_entry(settings_map.entry(connection_id.clone()).or_default());
         }
     }
 
@@ -1847,8 +1989,10 @@ pub async fn remove_session_abonent(
     if auth.role < Role::Operator {
         return error_json(403, "Forbidden: insufficient permissions");
     }
-    let clean_session = sanitize_id(&session_id);
-    let clean_abonent = sanitize_id(&abonent_id);
+    let unescaped_session = super::previews::decode_percent(&session_id);
+    let clean_session = sanitize_id(&unescaped_session);
+    let unescaped_abonent = super::previews::decode_percent(&abonent_id);
+    let clean_abonent = sanitize_id(&unescaped_abonent);
     if let Err(resp) = check_permission(&auth, Some(clean_session)) {
         return resp;
     }
@@ -1859,6 +2003,7 @@ pub async fn remove_session_abonent(
     let target_snapshot = state
         .room_hub
         .find_participant_room(&abonent_id)
+        .or_else(|| state.room_hub.find_participant_room(&unescaped_abonent))
         .or_else(|| state.room_hub.find_participant_room(clean_abonent))
         .filter(|(rid, _)| *rid == room.id);
 
@@ -1893,9 +2038,13 @@ pub async fn edit_abonent(
     Json(body): Json<EditAbonentRequest>,
 ) -> Response {
     track("abonents/{id}");
-    let clean_id = sanitize_id(&connection_id);
-    let Some((room_id, snapshot)) =
-        state.room_hub.find_participant_room(&connection_id).or_else(|| state.room_hub.find_participant_room(clean_id))
+    let unescaped_id = super::previews::decode_percent(&connection_id);
+    let clean_id = sanitize_id(&unescaped_id);
+    let Some((room_id, snapshot)) = state
+        .room_hub
+        .find_participant_room(&connection_id)
+        .or_else(|| state.room_hub.find_participant_room(&unescaped_id))
+        .or_else(|| state.room_hub.find_participant_room(clean_id))
     else {
         return error_json(404, "Abonent not found");
     };
@@ -1905,6 +2054,9 @@ pub async fn edit_abonent(
 
     if let Some(ref name) = body.display_name {
         state.room_hub.update_participant_media(&room_id, &snapshot.participant_id, None, None, Some(name.clone()));
+        if let Some(dialer) = state.outbound_dialer() {
+            dialer.rename_participant(room_id, &snapshot.participant_id, name);
+        }
         audit_room(
             &state,
             &auth.subject,
@@ -2015,11 +2167,43 @@ pub async fn list_abonents(State(state): State<SharedState>, Extension(auth): Ex
     .into_response()
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct PreviewsQuery {
+    pub connection_ids: Option<String>,
+}
+
 /// `GET /api/v3/abonents/previews` → список превью потоков (PNM UI).
-pub async fn abonents_previews() -> Response {
+pub async fn abonents_previews(State(state): State<SharedState>, Query(query): Query<PreviewsQuery>) -> Response {
     track("abonents/previews");
+    let target_ids: Option<std::collections::HashSet<String>> = query
+        .connection_ids
+        .as_ref()
+        .map(|raw| raw.split(',').map(|s| sanitize_id(s.trim()).to_string()).filter(|s| !s.is_empty()).collect());
+
+    let mut previews = Vec::new();
+    let rooms: Vec<RoomId> = state.rooms.lock().map(|r| r.keys().copied().collect()).unwrap_or_default();
+
+    for rid in rooms {
+        for p in state.room_hub.list_participants(&rid) {
+            let conn_id = p.participant_id.to_string();
+            let clean_id = sanitize_id(&conn_id);
+            if let Some(ref filter) = target_ids {
+                if !filter.contains(&conn_id) && !filter.contains(clean_id) {
+                    continue;
+                }
+            }
+            // Никаких фальшивых аватаров: при отсутствии кадра честно возвращаем null
+            let src: Option<String> = None;
+            previews.push(json!({
+                "id": conn_id,
+                "src": src,
+                "presentation": null
+            }));
+        }
+    }
+
     Json(json!({
-        "previews": []
+        "previews": previews
     }))
     .into_response()
 }
@@ -2256,8 +2440,14 @@ pub async fn send_abonent_fecc(
         return error_json(400, "Missing FECC command");
     }
 
-    let id = sanitize_id(&id);
-    let Some((room_id, _snapshot)) = state.room_hub.find_participant_room(id) else {
+    let unescaped_id = super::previews::decode_percent(&id);
+    let clean_id = sanitize_id(&unescaped_id);
+    let Some((room_id, snapshot)) = state
+        .room_hub
+        .find_participant_room(&id)
+        .or_else(|| state.room_hub.find_participant_room(&unescaped_id))
+        .or_else(|| state.room_hub.find_participant_room(clean_id))
+    else {
         return error_json(404, "Abonent not found");
     };
     if let Err(resp) = check_permission(&auth, Some(&room_id.to_string())) {
@@ -2265,7 +2455,7 @@ pub async fn send_abonent_fecc(
     }
 
     if let Some(dialer) = state.outbound_dialer() {
-        if let Err(e) = dialer.send_fecc(id, &cmd) {
+        if let Err(e) = dialer.send_fecc(&snapshot.participant_id, &cmd) {
             let err_lower = e.to_lowercase();
             if err_lower.contains("not negotiated")
                 || err_lower.contains("not supported")

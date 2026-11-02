@@ -208,6 +208,16 @@ pub trait OutboundDialer: Send + Sync {
     fn send_fecc(&self, _participant_id: &str, _command: &str) -> Result<(), String> {
         Ok(())
     }
+
+    /// Динамически переименовывает участника в видеокомпозиторе MCU.
+    fn rename_participant(&self, _room_id: RoomId, _participant_id: &str, _display_name: &str) -> bool {
+        false
+    }
+
+    /// Управляет видимостью имени участника в видеокомпозиторе MCU.
+    fn set_participant_name_visibility(&self, _room_id: RoomId, _participant_id: &str, _visible: bool) -> bool {
+        false
+    }
 }
 
 /// Состояние админ-сервера (in-memory stores + mode).

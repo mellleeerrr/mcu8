@@ -77,10 +77,71 @@ async fn attach_webtransport(app: axum::Router, handler_config: HandlerConfig, s
         Ok(None) => return app,
         Err(error) => config_exit(format!("WebTransport configuration rejected: {error}")),
     };
-    // Same JWT policy as `/ws`: verification happens before `accept()`, so an
-    // unauthenticated UDP peer never gets a WebTransport session object.
-    let verifier: WtTokenVerifier = Arc::new(move |token: &str| state.verify_token(token).is_some());
-    let server = match WtServer::bind(config, handler_config, Some(verifier)).await {
+    // Pre-accept authentication uses the same verifier as `/ws`; deleted users
+    // are rejected here rather than only after a session has been accepted.
+    let verify_state = Arc::clone(&state);
+    let verifier: WtTokenVerifier = Arc::new(move |token: &str| {
+        let Some(verified) = verify_state.verify_token(token) else {
+            return false;
+        };
+        let deleted = verify_state
+            .users
+            .lock()
+            .map(|users| {
+                users
+                    .values()
+                    .find(|u| u.id.to_string() == verified.user_id || u.username == verified.user_id)
+                    .map(|u| u.deleted)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        !deleted
+    });
+
+    // Enforce that WT cannot bypass WS-level authorization on every message.
+    // `/wt` remains pure signaling; the trusted role and room scope checks are
+    // carried into serve_stream as an authorizer rather than duplicated protocol
+    // handlers.
+    let auth_state = Arc::clone(&state);
+    let authorizer: vks_signaling::webtransport::WtMessageAuthorizer = Arc::new(move |token, envelope, handler| {
+        let payload = envelope.payload();
+        if !matches!(
+            payload,
+            Some(vks_proto::signaling::signaling_message::Payload::SdpOffer(_))
+                | Some(vks_proto::signaling::signaling_message::Payload::JoinRoom(_))
+                | Some(vks_proto::signaling::signaling_message::Payload::ClientHello(_))
+        ) {
+            return true;
+        }
+        let Some(token) = token else {
+            return false;
+        };
+        let Some(verified) = auth_state.verify_token(token) else {
+            return false;
+        };
+        let role = vks_admin::users::Users::resolve_role(&auth_state, &verified.user_id)
+            .unwrap_or(vks_core::Role::Participant);
+        if matches!(payload, Some(vks_proto::signaling::signaling_message::Payload::SdpOffer(_)))
+            && role == vks_core::Role::Viewer
+        {
+            return false;
+        }
+        if let Some(vks_proto::signaling::signaling_message::Payload::JoinRoom(join)) = payload {
+            if let Some(target) = verified.room_id.as_deref() {
+                if !join.room_id.eq_ignore_ascii_case(target) {
+                    return false;
+                }
+            }
+        }
+        if let Some(vks_proto::signaling::signaling_message::Payload::ClientHello(hello)) = payload {
+            if let Some(room) = vks_server::resolve_room_ref(&auth_state, &hello.room_id) {
+                handler.set_room_mode(vks_server::bridge::browser_join_room_mode(&auth_state, room) as i32);
+            }
+        }
+        true
+    });
+
+    let server = match WtServer::bind(config, handler_config, Some(verifier), Some(authorizer)).await {
         Ok(server) => server,
         Err(error) => config_exit(format!("WebTransport startup rejected: {error}")),
     };
@@ -550,6 +611,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         server = %config.server_name,
         "SIP UAS, H.323 gateway, recorder and cluster managers initialized"
     );
+
+    let reaper_state = admin_state.clone();
+    tokio::spawn(async move {
+        vks_admin::api_v3::sessions::run_session_reaper(reaper_state).await;
+    });
 
     // 10. Сборка маршрутов (единая точка — vks_server::build_app_with_services)
     #[cfg(feature = "webtransport")]

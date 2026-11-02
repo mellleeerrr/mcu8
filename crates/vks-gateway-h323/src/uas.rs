@@ -282,6 +282,12 @@ fn resolve_listener_helper() -> CallResult<PathBuf> {
     if cfg!(debug_assertions) {
         if let Some(dir) = current_dir.as_deref() {
             candidates.push(dir.join("crates/vks-gateway-h323/python/h323_listener.py"));
+            if let Some(parent) = dir.parent() {
+                candidates.push(parent.join("crates/vks-gateway-h323/python/h323_listener.py"));
+                if let Some(grandparent) = parent.parent() {
+                    candidates.push(grandparent.join("crates/vks-gateway-h323/python/h323_listener.py"));
+                }
+            }
         }
     }
     candidates.push(manifest_dir.join("python/h323_listener.py"));

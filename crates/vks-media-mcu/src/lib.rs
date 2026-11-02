@@ -51,7 +51,10 @@ pub use codec_worker::{
     WorkerPool,
 };
 pub use compositor::{Compositor, CANVAS_SIZE};
-pub use engine::{group_bitrate_kbps, EventSink, LayoutSnapshot, McuEngine, RoomEvent, GROUP_BITRATE_CEILING_PCT};
+pub use engine::{
+    bucket_visible_windows, group_bitrate_kbps, EventSink, LayoutSnapshot, McuEngine, RoomEvent,
+    GROUP_BITRATE_CEILING_PCT,
+};
 pub use farm::{
     AccessUnit, EncoderFarm, EncoderKey, EncoderSpec, FarmCodec, FarmError, FarmTap, GroupStat, GroupViewer, ViewerRtp,
 };

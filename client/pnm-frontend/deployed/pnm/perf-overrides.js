@@ -452,8 +452,12 @@
     }
 
     if (sameOrigin(url) && method === 'GET' && SESSION_PREVIEWS_GET_RE.test(url)) {
-      synth(xhr, 204, '', 'cache-control: public, max-age=1\r\n');
-      return;
+      try {
+        return nativeSend.apply(xhr, arguments);
+      } catch (e) {
+        synth(xhr, 204, '', 'cache-control: public, max-age=1\r\n');
+        return;
+      }
     }
 
     if (sameOrigin(url) && method === 'DELETE' && SESSION_PREVIEWS_RE.test(url)) {

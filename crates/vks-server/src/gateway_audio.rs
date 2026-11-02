@@ -584,6 +584,8 @@ pub(super) fn encode_sample(payload_type: u8, value: f32) -> u8 {
 pub(super) struct RtpSource {
     target: std::net::SocketAddr,
     payload_type: u8,
+    alt_payload_type: Option<u8>,
+    allow_dynamic: bool,
     /// RFC 4733 telephone-event PT; accepted in addition to the audio PT and
     /// never fed to the codec decoder.
     dtmf_payload_type: Option<u8>,
@@ -625,6 +627,8 @@ impl RtpSource {
         Self {
             target,
             payload_type,
+            alt_payload_type: None,
+            allow_dynamic: false,
             dtmf_payload_type: None,
             ssrc: None,
             sequence: None,
@@ -633,6 +637,18 @@ impl RtpSource {
             allow_empty: false,
             reordered: false,
         }
+    }
+
+    /// Разрешает альтернативный номер payload type (например, удаленный PT при
+    /// асимметричном согласовании динамических кодеков TrueConf/Polycom).
+    pub(super) fn accept_alternate_payload_type(&mut self, payload_type: Option<u8>) {
+        self.alt_payload_type = payload_type;
+    }
+
+    /// Разрешает любые динамические payload type (96..=127) на выделенном сокете
+    /// видеопотока.
+    pub(super) fn accept_dynamic_payloads(&mut self) {
+        self.allow_dynamic = true;
     }
 
     /// Видео-вход: разрешить переупорядоченные последовательности (jitter
@@ -685,12 +701,16 @@ impl RtpSource {
         let (pt, seq, ts, ssrc, offset) = vks_gateway_sip::parse_rtp_header(packet)?;
         // G.711 PCMU/PCMA may be sent with either static PT after SDP answer:
         // cross-vendor MCUs (TrueConf) commonly answer PCMU but transmit PCMA.
-        // Video/dynamic PTs still require exact match.
+        // Video/dynamic PTs still require exact match unless alternate or dynamic is allowed.
         let g711_interchange = matches!(pt, 0 | 8) && matches!(self.payload_type, 0 | 8);
         // RFC 4733 events share the RTP session but use their own PT; they are
         // routed to the DTMF parser instead of the codec (RFC 4733 §2.5).
         let is_dtmf = self.dtmf_payload_type == Some(pt);
-        if !is_dtmf && pt != self.payload_type && !g711_interchange {
+        let pt_matches = pt == self.payload_type
+            || self.alt_payload_type == Some(pt)
+            || (self.allow_dynamic && (96..=127).contains(&pt))
+            || g711_interchange;
+        if !is_dtmf && !pt_matches {
             return None;
         }
         let padding = if packet[0] & 0x20 != 0 {

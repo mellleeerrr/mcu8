@@ -753,7 +753,7 @@ m=audio {audio_port} RTP/AVP {}\r\n",
             sdp.push_str(&format!("m=video {vport} RTP/AVP {}\r\n", payload_list(&video)));
             sdp.push_str(&format!("b=AS:{}\r\n", video_profile.bitrate_kbps));
             push_video_attrs(&mut sdp, &video, video_profile);
-            sdp.push_str(&format!("a=sendrecv\r\na=rtcp:{}\r\n", vport + 1));
+            sdp.push_str(&format!("a=sendrecv\r\na=rtcp:{}\r\na=content:main\r\n", vport + 1));
         }
     }
 
@@ -1990,11 +1990,13 @@ fn negotiate_media_detailed_with(
     let dtmf_payload_type = telephone_event(local_audio).and_then(|_| telephone_event(remote_audio));
     let mut video = None;
     if let (Some(local_video), Some(remote_video)) = (usable_media(&local, "video"), usable_media(&remote, "video")) {
-        // Prefer an answer payload that we actually offered (RFC 3264 §6.1);
-        // keep one decodable unoffered candidate as a fallback for terminals
-        // that renumber dynamic PTs. The fallback must never override a
-        // conformant choice: Polycom answers list High before Baseline.
-        let mut fallback = None;
+        // Offerer's codec preference order (RFC 3264 §6.1) is given by
+        // `local_video.payloads`. For each decodable codec, prefer an exact
+        // offered payload type match (symmetric PT), falling back to renumbered
+        // dynamic PTs in answer order. A lower-priority offered codec (e.g. H.265)
+        // must never preempt a higher-priority one (H.264) just because the peer
+        // listed it first in its answer (TrueConf lists 116 HEVC before 104 H264).
+        let mut best: Option<((String, u16, u8, u8, NegotiatedVideoCodec), usize, bool)> = None;
         for transmit_payload in &remote_video.payloads {
             let Some(codec) = video_identity(remote_video, *transmit_payload) else {
                 continue;
@@ -2006,16 +2008,34 @@ fn negotiate_media_detailed_with(
             let Some(video_ip) = remote_video.ip.clone().or(remote.ip.clone()) else {
                 continue;
             };
+            let Some(codec_prio) = local_video
+                .payloads
+                .iter()
+                .position(|p| video_identity(local_video, *p) == Some(codec))
+            else {
+                continue;
+            };
+            let is_exact_offered_pt = local_video.payloads.contains(transmit_payload)
+                && video_identity(local_video, *transmit_payload) == Some(codec);
             let candidate = (video_ip, remote_video.port, *transmit_payload, receive_payload, codec);
-            if local_video.payloads.contains(transmit_payload) {
-                video = Some(candidate);
-                break;
+
+            let is_better = match &best {
+                None => true,
+                Some((_, best_prio, best_exact)) => {
+                    if codec_prio < *best_prio {
+                        true
+                    } else if codec_prio == *best_prio {
+                        !*best_exact && is_exact_offered_pt
+                    } else {
+                        false
+                    }
+                }
+            };
+            if is_better {
+                best = Some((candidate, codec_prio, is_exact_offered_pt));
             }
-            fallback.get_or_insert(candidate);
         }
-        if video.is_none() {
-            video = fallback;
-        }
+        video = best.map(|(c, _, _)| c);
     }
     Ok(NegotiatedMedia {
         ip,
@@ -2374,6 +2394,24 @@ a=rtpmap:97 H264/90000\r\na=fmtp:97 packetization-mode=1;profile-level-id=42801e
         assert_eq!(media.video_payload_type, Some(97));
         assert_eq!(media.local_video_payload_type, Some(97));
         assert_eq!(media.video_codec, Some("H264"));
+    }
+
+    #[test]
+    fn trueconf_answer_with_h265_and_h264_selects_preferred_h264() {
+        // TrueConf answers list H265 (PT116) before H264 (PT104/105).
+        // Since MCU offers H264 (PT97) before H265 (PT99), H264 must be negotiated.
+        let offer = build_plain_sdp("127.0.0.1", 41000, Some(41002));
+        let answer = "v=0\r\no=- 1 1 IN IP4 192.168.1.95\r\ns=-\r\nc=IN IP4 192.168.1.95\r\nt=0 0\r\n\
+m=audio 50024 RTP/AVP 9 0\r\na=rtpmap:9 G722/8000\r\na=rtpmap:0 PCMU/8000\r\n\
+m=video 50026 RTP/AVP 122 116 99 98 100 104 103 105 112 102 101 34 31\r\n\
+a=rtpmap:116 H265/90000\r\na=fmtp:116 level-id=120\r\n\
+a=rtpmap:99 H264/90000\r\na=fmtp:99 profile-level-id=640028\r\n\
+a=rtpmap:104 H264/90000\r\na=fmtp:104 profile-level-id=640028;packetization-mode=1\r\n\
+a=rtpmap:105 H264/90000\r\na=fmtp:105 profile-level-id=420028;packetization-mode=1\r\n";
+        let media = negotiate_media(&offer, answer).expect("G722 + H264");
+        assert_eq!(media.video_codec, Some("H264"));
+        assert_eq!(media.video_payload_type, Some(104));
+        assert_eq!(media.local_video_payload_type, Some(97));
     }
 
     #[test]

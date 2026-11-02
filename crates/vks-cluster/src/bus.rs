@@ -213,7 +213,7 @@ impl Bus {
 
     /// Все темы, у которых есть очередь (включая пустые), отсортированно.
     ///
-    /// Нужен graceful shutdown'у: [`crate::shutdown`] обходит темы и дренирует
+    /// Нужен graceful shutdown'у: `crate::shutdown` обходит темы и дренирует
     /// их, не зная заранее, какие `vks.cluster.*` использовались.
     pub fn topics(&self) -> Vec<String> {
         let st = self.state.lock().unwrap();

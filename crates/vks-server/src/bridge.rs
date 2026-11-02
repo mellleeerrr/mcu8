@@ -1,7 +1,7 @@
 //! Mixed room (P5): browser WebRTC ↔ SIP/H.323 gateway audio bridge (T12).
 //!
 //! This module is the **single** place that decides whether a mixed room is
-//! allowed ([`bridge_available`]) and the single place that turns SRTP frames
+//! allowed ([`bridge_available_with`]) and the single place that turns SRTP frames
 //! into MCU PCM and back. Before T12 the mixed room was rejected by 16
 //! independent fail-closed `room_has_peer` guards; the predicate here is
 //! asymmetric on purpose:

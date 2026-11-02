@@ -167,6 +167,48 @@ impl RoomLimits {
 }
 
 /// One browser in one room.
+#[derive(Debug, Default)]
+pub struct PeerCounters {
+    pub audio_rx_packets: AtomicU64,
+    pub audio_rx_bytes: AtomicU64,
+    pub video_rx_packets: AtomicU64,
+    pub video_rx_bytes: AtomicU64,
+    pub audio_tx_packets: AtomicU64,
+    pub audio_tx_bytes: AtomicU64,
+    pub video_tx_packets: AtomicU64,
+    pub video_tx_bytes: AtomicU64,
+    pub bwe_bps: AtomicU64,
+}
+
+impl PeerCounters {
+    pub fn snapshot(&self) -> PeerStatsSnapshot {
+        PeerStatsSnapshot {
+            audio_rx_packets: self.audio_rx_packets.load(Ordering::Relaxed),
+            audio_rx_bytes: self.audio_rx_bytes.load(Ordering::Relaxed),
+            video_rx_packets: self.video_rx_packets.load(Ordering::Relaxed),
+            video_rx_bytes: self.video_rx_bytes.load(Ordering::Relaxed),
+            audio_tx_packets: self.audio_tx_packets.load(Ordering::Relaxed),
+            audio_tx_bytes: self.audio_tx_bytes.load(Ordering::Relaxed),
+            video_tx_packets: self.video_tx_packets.load(Ordering::Relaxed),
+            video_tx_bytes: self.video_tx_bytes.load(Ordering::Relaxed),
+            bwe_bps: self.bwe_bps.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PeerStatsSnapshot {
+    pub audio_rx_packets: u64,
+    pub audio_rx_bytes: u64,
+    pub video_rx_packets: u64,
+    pub video_rx_bytes: u64,
+    pub audio_tx_packets: u64,
+    pub audio_tx_bytes: u64,
+    pub video_tx_packets: u64,
+    pub video_tx_bytes: u64,
+    pub bwe_bps: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct PeerHandle {
     pub participant: ParticipantId,
@@ -175,6 +217,7 @@ pub struct PeerHandle {
     video: Arc<AtomicBool>,
     /// Operator/client cap for BWE, 0 = unlimited.
     max_bitrate_bps: Arc<AtomicU64>,
+    pub counters: Arc<PeerCounters>,
     /// Publishers whose next forwarded video frame must be an IDR (T11b gate is
     /// per publisher: one stalled source must not gate the others, and a second
     /// publisher must never start on delta frames).
@@ -249,6 +292,9 @@ enum PeerCommand {
     /// A publisher left: retire its egress mids, never reuse them.
     DropSource {
         from: ParticipantId,
+        /// Generation of the publisher that departed. Survivors drop a later,
+        /// deferred command once a newer publisher has re-announced itself.
+        generation: u64,
     },
     Write {
         from: ParticipantId,
@@ -302,6 +348,7 @@ pub struct WebRtcRoomRegistry {
     /// ordering and across re-offers.
     subscriptions: Mutex<HashMap<(RoomId, ParticipantId), (bool, bool)>>,
     bitrate_caps: Mutex<HashMap<(RoomId, ParticipantId), u64>>,
+    publication_generations: Mutex<HashMap<ParticipantId, u64>>,
     /// PLI coalescing keyed by `(room, publisher, audio)`: with N publishers a
     /// single stalled subscriber must not produce N×PLI per second.
     last_keyframe_request: Mutex<HashMap<(RoomId, ParticipantId, bool), Instant>>,
@@ -365,6 +412,7 @@ impl WebRtcRoomRegistry {
             port_range,
             subscriptions: Mutex::new(HashMap::new()),
             bitrate_caps: Mutex::new(HashMap::new()),
+            publication_generations: Mutex::new(HashMap::new()),
             last_keyframe_request: Mutex::new(HashMap::new()),
             taps: Mutex::new(HashMap::new()),
             peer_total: AtomicUsize::new(0),
@@ -549,12 +597,14 @@ impl WebRtcRoomRegistry {
         );
         let (tx, rx) = mpsc::channel(PEER_COMMAND_QUEUE);
         let max_bitrate_bps = Arc::new(AtomicU64::new(max_bitrate_bps));
+        let counters = Arc::new(PeerCounters::default());
         let handle = PeerHandle {
             participant,
             tx,
             audio: Arc::new(AtomicBool::new(audio)),
             video: Arc::new(AtomicBool::new(video)),
             max_bitrate_bps: Arc::clone(&max_bitrate_bps),
+            counters: Arc::clone(&counters),
             // Empty ready set = every publisher must start on an IDR; a video
             // subscription that was off is re-armed the same way.
             video_ready: Arc::new(Mutex::new(HashSet::new())),
@@ -580,6 +630,10 @@ impl WebRtcRoomRegistry {
             if is_new {
                 self.peer_total.fetch_add(1, Ordering::Relaxed);
             }
+            self.publication_generations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(participant, generation);
             WEBRTC_PEERS.set(rooms.values().map(HashMap::len).sum::<usize>() as i64);
             WEBRTC_OFFERS.with_label_values(&["accepted"]).inc();
         }
@@ -639,6 +693,7 @@ impl WebRtcRoomRegistry {
         // The task owns the same gate set as its handle, so `DropSource` can
         // close it without a registry round-trip (P2-1).
         let video_ready = Arc::clone(&handle.video_ready);
+        let counters = Arc::clone(&handle.counters);
         self.runtime.spawn(run_peer(
             registry,
             room,
@@ -649,6 +704,7 @@ impl WebRtcRoomRegistry {
             rx,
             video_ready,
             max_bitrate_bps,
+            counters,
         ));
         Ok(AcceptedPeer { answer_sdp, rtp_maps, handle, reoffered: false })
     }
@@ -685,14 +741,16 @@ impl WebRtcRoomRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|(key_room, publisher, _), _| !(*key_room == room && *publisher == participant));
-        let (removed, _survivors) = {
+        let (removed, dropped_generation, _survivors) = {
             let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut survivors = Vec::new();
             let mut removed = false;
+            let mut dropped_generation = None;
             if let Some(peers) = rooms.get_mut(&room) {
-                if peers.remove(&participant).is_some() {
+                if let Some(handle) = peers.remove(&participant) {
                     self.peer_total.fetch_sub(1, Ordering::Relaxed);
                     removed = true;
+                    dropped_generation = Some(handle.generation);
                 }
                 survivors = peers.values().cloned().collect();
                 if peers.is_empty() {
@@ -703,14 +761,53 @@ impl WebRtcRoomRegistry {
                 // begin registration until this DropSource is queued, so it
                 // can never overtake the older task-exit below (P3-3).
                 if removed {
-                    for survivor in &survivors {
-                        survivor.forget_video(participant);
-                        let _ = survivor.tx.try_send(PeerCommand::DropSource { from: participant });
+                    if let Some(generation) = dropped_generation {
+                        self.publication_generations
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(participant, generation);
+                        for survivor in &survivors {
+                            survivor.forget_video(participant);
+                            let command = PeerCommand::DropSource { from: participant, generation };
+                            if survivor.tx.try_send(command).is_err() {
+                                let tx = survivor.tx.clone();
+                                tokio::spawn(async move {
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_millis(50),
+                                        tx.send(PeerCommand::DropSource { from: participant, generation }),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(())) => {}
+                                        Ok(Err(error)) => tracing::warn!(
+                                            ?participant,
+                                            ?generation,
+                                            ?error,
+                                            "webrtc: deferred DropSource could not be delivered"
+                                        ),
+                                        Err(_) => tracing::warn!(
+                                            ?participant,
+                                            ?generation,
+                                            "webrtc: deferred DropSource queue was full for 50ms"
+                                        ),
+                                    }
+                                });
+                                tracing::warn!(
+                                    ?participant,
+                                    ?generation,
+                                    "webrtc: subscriber queue full, bounded deferred DropSource delivery"
+                                );
+                            }
+                        }
                     }
                 }
             }
-            (removed, survivors)
+            (removed, dropped_generation, survivors)
         };
+        let _ = dropped_generation;
+        if !removed {
+            return;
+        }
         if !removed {
             return;
         }
@@ -731,18 +828,18 @@ impl WebRtcRoomRegistry {
     /// must be cleared, and the per-publisher keyframe gate must be closed so a
     /// reconnect with the same `ParticipantId` waits for a fresh IDR (P2-1).
     fn remove_generation(&self, room: RoomId, participant: ParticipantId, generation: u64) {
-        // Symmetry with `remove`: task-exit must not leave subscription or
-        // bitrate bookkeeping for a dead participant (P3-4).
-        self.subscriptions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(room, participant));
-        self.bitrate_caps.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(room, participant));
         let (removed, _survivors) = {
             let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut removed = false;
             let mut survivors = Vec::new();
             if let Some(peers) = rooms.get_mut(&room) {
                 if peers.get(&participant).is_some_and(|handle| handle.generation == generation) {
-                    peers.remove(&participant);
+                    let handle = peers.remove(&participant).unwrap();
                     self.peer_total.fetch_sub(1, Ordering::Relaxed);
+                    self.publication_generations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(participant, handle.generation);
                     removed = true;
                 }
                 survivors = peers.values().cloned().collect();
@@ -750,7 +847,16 @@ impl WebRtcRoomRegistry {
                     rooms.remove(&room);
                 }
                 // Broadcast under the room lock as in `remove` (P3-3).
+                // P3-4 cleanup follows the generation check.
                 if removed {
+                    self.subscriptions
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&(room, participant));
+                    self.bitrate_caps
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&(room, participant));
                     WEBRTC_PEERS.set(rooms.values().map(HashMap::len).sum::<usize>() as i64);
                     self.last_keyframe_request
                         .lock()
@@ -758,13 +864,50 @@ impl WebRtcRoomRegistry {
                         .retain(|(key_room, publisher, _), _| !(*key_room == room && *publisher == participant));
                     for survivor in &survivors {
                         survivor.forget_video(participant);
-                        let _ = survivor.tx.try_send(PeerCommand::DropSource { from: participant });
+                        let command = PeerCommand::DropSource { from: participant, generation };
+                        if survivor.tx.try_send(command).is_err() {
+                            let tx = survivor.tx.clone();
+                            tokio::spawn(async move {
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_millis(50),
+                                    tx.send(PeerCommand::DropSource { from: participant, generation }),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(error)) => tracing::warn!(
+                                        ?participant,
+                                        ?generation,
+                                        ?error,
+                                        "webrtc: deferred DropSource could not be delivered"
+                                    ),
+                                    Err(_) => tracing::warn!(
+                                        ?participant,
+                                        ?generation,
+                                        "webrtc: deferred DropSource queue was full for 50ms"
+                                    ),
+                                }
+                            });
+                            tracing::warn!(
+                                ?participant,
+                                ?generation,
+                                "webrtc: subscriber queue full, bounded deferred DropSource delivery"
+                            );
+                        }
                     }
                 }
             }
             (removed, survivors)
         };
         if !removed {}
+    }
+
+    pub fn publication_generation(&self, participant: ParticipantId) -> Option<u64> {
+        self.publication_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&participant)
+            .copied()
     }
 
     /// Number of registered browser peers in a room (tests/observability).
@@ -939,6 +1082,12 @@ impl WebRtcRoomRegistry {
             .is_some_and(|peers| peers.contains_key(&participant))
     }
 
+    /// Telemetry snapshot for WebRTC participant.
+    pub fn peer_stats(&self, participant: &ParticipantId) -> Option<PeerStatsSnapshot> {
+        let rooms = self.rooms.lock().ok()?;
+        rooms.values().find_map(|peers| peers.get(participant).map(|h| h.counters.snapshot()))
+    }
+
     /// Asks a publisher's browser for a keyframe, coalesced per
     /// `(room, publisher, audio)`: N subscribers dropping the same source
     /// produce at most one PLI per window instead of N.
@@ -1063,6 +1212,7 @@ async fn run_peer(
     // per-publisher gate when it retires a source.
     video_ready: Arc<Mutex<HashSet<ParticipantId>>>,
     max_bitrate_bps: Arc<AtomicU64>,
+    counters: Arc<PeerCounters>,
 ) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     let created_at = Instant::now();
@@ -1112,7 +1262,7 @@ async fn run_peer(
                         break;
                     }
                 };
-                if !dispatch(&registry, room, participant, &socket, &mut peer, &max_bitrate_bps, actions).await {
+                if !dispatch(&registry, room, participant, &socket, &mut peer, &max_bitrate_bps, &counters, actions).await {
                     break;
                 }
             }
@@ -1122,8 +1272,11 @@ async fn run_peer(
                 let actions = match command {
                     PeerCommand::EnsureSource { from, audio } => {
                         if peer.ensure_source(from, audio) {
+                            no_egress_mid.remove(&(from, audio));
                             WEBRTC_SOURCES.with_label_values(&["allocated"]).inc();
                             tracing::debug!(?participant, ?from, audio, "webrtc egress mid allocated");
+                        } else if peer.mid_for_source(from, audio).is_some() {
+                            no_egress_mid.remove(&(from, audio));
                         } else if no_egress_mid.insert((from, audio)) {
                             // Policy (T11b D4): a legacy 1+1 browser has one
                             // egress mid per kind, so with 3+ publishers one is
@@ -1141,7 +1294,23 @@ async fn run_peer(
                         }
                         continue;
                     }
-                    PeerCommand::DropSource { from } => {
+                    PeerCommand::DropSource { from, generation } => {
+                        // A late deferred DropSource must not retire the mids of
+                        // a brand-new publisher that re-announced itself with
+                        // another generation (P4).
+                        if let Some(current_generation) =
+                            registry.publication_generation(from).as_ref().cloned()
+                        {
+                            if current_generation != generation {
+                                tracing::debug!(
+                                    ?from,
+                                    ?generation,
+                                    ?current_generation,
+                                    "webrtc: dropping stale publisher generation; deferred DropSource does not apply"
+                                );
+                                continue;
+                            }
+                        }
                         peer.retire_source(from);
                         // Close this subscriber's keyframe gate for the retired
                         // publisher: a reconnect with the same ParticipantId
@@ -1156,8 +1325,20 @@ async fn run_peer(
                         continue;
                     }
                     PeerCommand::Write { from, audio, params, wallclock, rtp_time, data } => {
+                        let allocated_before = peer.allocated();
                         match peer.mid_for_source(from, audio) {
-                            Some(mid) => match peer.write_media_matched(mid, params, wallclock, rtp_time, data) {
+                            Some(mid) => {
+                                if peer.allocated() > allocated_before {
+                                    WEBRTC_SOURCES.with_label_values(&["allocated"]).inc();
+                                }
+                                if audio {
+                                    counters.audio_tx_packets.fetch_add(1, Ordering::Relaxed);
+                                    counters.audio_tx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
+                                } else {
+                                    counters.video_tx_packets.fetch_add(1, Ordering::Relaxed);
+                                    counters.video_tx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
+                                }
+                                match peer.write_media_matched(mid, params, wallclock, rtp_time, data) {
                                 Ok(actions) => Ok(actions),
                                 Err(WebRtcError::UnknownMid) => {
                                     // A rejected m-line (port 0) or a mid whose
@@ -1167,6 +1348,7 @@ async fn run_peer(
                                     continue;
                                 }
                                 Err(error) => Err(error),
+                            }
                             },
                             None => {
                                 WEBRTC_FRAMES_DROPPED.with_label_values(&["no_egress_mid"]).inc();
@@ -1201,14 +1383,23 @@ async fn run_peer(
                             continue;
                         };
                         match peer.payload_type_for_codec(mid, codec) {
-                            Some(pt) => match peer.write_media(mid, pt, wallclock, rtp_time, data) {
-                                Ok(actions) => Ok(actions),
-                                Err(WebRtcError::UnknownMid) => {
-                                    WEBRTC_FRAMES_DROPPED.with_label_values(&["bridge_no_mid"]).inc();
-                                    continue;
+                            Some(pt) => {
+                                if audio {
+                                    counters.audio_tx_packets.fetch_add(1, Ordering::Relaxed);
+                                    counters.audio_tx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
+                                } else {
+                                    counters.video_tx_packets.fetch_add(1, Ordering::Relaxed);
+                                    counters.video_tx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
                                 }
-                                Err(error) => Err(error),
-                            },
+                                match peer.write_media(mid, pt, wallclock, rtp_time, data) {
+                                    Ok(actions) => Ok(actions),
+                                    Err(WebRtcError::UnknownMid) => {
+                                        WEBRTC_FRAMES_DROPPED.with_label_values(&["bridge_no_mid"]).inc();
+                                        continue;
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            }
                             None => {
                                 WEBRTC_FRAMES_DROPPED.with_label_values(&["bridge_codec_not_negotiated"]).inc();
                                 continue;
@@ -1299,7 +1490,7 @@ async fn run_peer(
                         break;
                     }
                 };
-                if !dispatch(&registry, room, participant, &socket, &mut peer, &max_bitrate_bps, actions).await {
+                if !dispatch(&registry, room, participant, &socket, &mut peer, &max_bitrate_bps, &counters, actions).await {
                     break;
                 }
             }
@@ -1311,7 +1502,7 @@ async fn run_peer(
                         break;
                     }
                 };
-                if !dispatch(&registry, room, participant, &socket, &mut peer, &max_bitrate_bps, actions).await {
+                if !dispatch(&registry, room, participant, &socket, &mut peer, &max_bitrate_bps, &counters, actions).await {
                     break;
                 }
             }
@@ -1322,6 +1513,7 @@ async fn run_peer(
     tracing::debug!(?participant, "webrtc peer task stopped");
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     registry: &Arc<WebRtcRoomRegistry>,
     room: RoomId,
@@ -1329,6 +1521,7 @@ async fn dispatch(
     socket: &UdpSocket,
     peer: &mut WebRtcPeer,
     max_bitrate_bps: &AtomicU64,
+    counters: &PeerCounters,
     mut actions: Vec<WebRtcAction>,
 ) -> bool {
     // Apply local-only actions before fanout. BWE must actually steer the
@@ -1340,6 +1533,7 @@ async fn dispatch(
                 let cap = max_bitrate_bps.load(Ordering::Relaxed);
                 let applied = if cap == 0 { *bps } else { (*bps).min(cap) };
                 peer.set_desired_bitrate(applied);
+                counters.bwe_bps.store(applied, Ordering::Relaxed);
             }
             WebRtcAction::Connected => {
                 tracing::info!(?participant, "WebRTC peer connected (ICE+DTLS+SRTP)");
@@ -1366,6 +1560,13 @@ async fn dispatch(
                 // T12: the mixed-room tap sees every depayloaded frame. It only
                 // enqueues, so SFU fanout below is never delayed by the bridge.
                 let audio = peer.is_audio_mid(data.mid).unwrap_or(false);
+                if audio {
+                    counters.audio_rx_packets.fetch_add(1, Ordering::Relaxed);
+                    counters.audio_rx_bytes.fetch_add(data.data.len() as u64, Ordering::Relaxed);
+                } else {
+                    counters.video_rx_packets.fetch_add(1, Ordering::Relaxed);
+                    counters.video_rx_bytes.fetch_add(data.data.len() as u64, Ordering::Relaxed);
+                }
                 registry.tap_media(room, participant, audio, &data);
                 registry.forward(room, participant, *data).await;
             }
@@ -1454,6 +1655,7 @@ mod tests {
                 audio: Arc::new(AtomicBool::new(true)),
                 video: Arc::new(AtomicBool::new(true)),
                 max_bitrate_bps: Arc::new(AtomicU64::new(0)),
+                counters: Arc::new(PeerCounters::default()),
                 video_ready: Arc::new(Mutex::new(HashSet::new())),
                 publishes_audio: true,
                 publishes_video: true,
@@ -1596,7 +1798,7 @@ mod tests {
         registry.remove(room, publisher);
         for rx in [&mut first_rx, &mut second_rx] {
             match rx.try_recv() {
-                Ok(PeerCommand::DropSource { from }) => assert_eq!(from, publisher),
+                Ok(PeerCommand::DropSource { from, .. }) => assert_eq!(from, publisher),
                 _ => panic!("every survivor must be told to retire the departed publisher"),
             }
         }
@@ -1853,7 +2055,7 @@ mod tests {
             "a stale PLI window must not suppress the returning publisher's first keyframe"
         );
         match survivor_rx.try_recv() {
-            Ok(PeerCommand::DropSource { from }) => assert_eq!(from, publisher),
+            Ok(PeerCommand::DropSource { from, .. }) => assert_eq!(from, publisher),
             _ => panic!("survivors must be told to retire the dead publisher's source"),
         }
     }
@@ -1886,8 +2088,9 @@ mod tests {
             rx,
             video_ready,
             Arc::new(AtomicU64::new(0)),
+            Arc::clone(&handle.counters),
         ));
-        handle.tx.try_send(PeerCommand::DropSource { from: publisher }).expect("queue DropSource");
+        handle.tx.try_send(PeerCommand::DropSource { from: publisher, generation: 1 }).expect("queue DropSource");
         let mut closed = false;
         for _ in 0..200 {
             if !handle.admits_video(publisher, false) {

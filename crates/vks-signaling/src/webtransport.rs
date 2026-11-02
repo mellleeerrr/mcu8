@@ -59,6 +59,10 @@ pub const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(15);
 /// Pre-accept token check, supplied by the composition root. Returning `false`
 /// rejects the WebTransport session with HTTP/3 403 **before** `accept()`.
 pub type WtTokenVerifier = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+/// Per-envelope authorization hook for server-owned WT sessions. It may run
+/// before the protobuf payload is handed to `SignalingHandler` and may mutate
+/// the shared handler (for example, `set_room_mode` on `ClientHello`).
+pub type WtMessageAuthorizer = Arc<dyn Fn(Option<&str>, &Envelope, &mut SignalingHandler) -> bool + Send + Sync>;
 
 /// WebTransport configuration/limits. Constructed from the environment, or
 /// directly by tests/deploy tooling.
@@ -332,6 +336,7 @@ pub struct WtServer {
     cert_sha256_hex: String,
     local_addr: SocketAddr,
     verifier: Option<WtTokenVerifier>,
+    message_authorizer: Option<WtMessageAuthorizer>,
 }
 
 impl WtServer {
@@ -341,6 +346,7 @@ impl WtServer {
         config: WtConfig,
         handler_config: HandlerConfig,
         verifier: Option<WtTokenVerifier>,
+        message_authorizer: Option<WtMessageAuthorizer>,
     ) -> Result<Self, WtError> {
         config.validate()?;
         let identity = WtIdentity::load_pemfiles(&config.cert_path, &config.key_path).await?;
@@ -357,7 +363,7 @@ impl WtServer {
         let endpoint = Endpoint::server(builder.build()).map_err(|error| WtError::Bind(error.to_string()))?;
         let local_addr = endpoint.local_addr().map_err(|error| WtError::Bind(error.to_string()))?;
 
-        Ok(Self { endpoint, handler_config, config, cert_sha256_hex, local_addr, verifier })
+        Ok(Self { endpoint, handler_config, config, cert_sha256_hex, local_addr, verifier, message_authorizer })
     }
 
     /// Actual bound UDP address (useful when configured with port `0`).
@@ -378,7 +384,8 @@ impl WtServer {
     /// Accepts connections until the endpoint is closed. Each connection gets
     /// its own [`SignalingHandler`]; streams on one connection share it.
     pub async fn run(self) {
-        let Self { endpoint, handler_config, config, cert_sha256_hex: _, local_addr: _, verifier } = self;
+        let Self { endpoint, handler_config, config, cert_sha256_hex: _, local_addr: _, verifier, message_authorizer } =
+            self;
         loop {
             let incoming = endpoint.accept().await;
             if endpoint.open_connections() > config.max_connections {
@@ -394,8 +401,9 @@ impl WtServer {
             let handler_config = handler_config.clone();
             let config = config.clone();
             let verifier = verifier.clone();
+            let message_authorizer = message_authorizer.clone();
             tokio::spawn(async move {
-                handle_incoming(incoming, handler_config, config, verifier).await;
+                handle_incoming(incoming, handler_config, config, verifier, message_authorizer).await;
             });
         }
     }
@@ -406,6 +414,7 @@ async fn handle_incoming(
     handler_config: HandlerConfig,
     config: WtConfig,
     verifier: Option<WtTokenVerifier>,
+    message_authorizer: Option<WtMessageAuthorizer>,
 ) {
     let remote = incoming.remote_address();
     let request = match tokio::time::timeout(config.handshake_timeout, incoming).await {
@@ -437,6 +446,8 @@ async fn handle_incoming(
         }
     }
 
+    let request_token = session_token(&request).map(str::to_owned);
+
     let connection = match tokio::time::timeout(config.handshake_timeout, request.accept()).await {
         Ok(Ok(connection)) => connection,
         Ok(Err(error)) => {
@@ -451,13 +462,17 @@ async fn handle_incoming(
     tracing::info!(%remote, "WebTransport session established on /wt");
 
     let handler = Arc::new(Mutex::new(SignalingHandler::new(handler_config)));
+    let request_token = request_token.map(Arc::new);
+    let authorizer = message_authorizer.clone();
     loop {
         match connection.accept_bi().await {
             Ok((send, recv)) => {
                 let handler = Arc::clone(&handler);
                 let max_frame_bytes = config.max_frame_bytes;
+                let token = request_token.clone();
+                let authorizer = authorizer.clone();
                 tokio::spawn(async move {
-                    serve_stream(send, recv, handler, max_frame_bytes).await;
+                    serve_stream(send, recv, handler, max_frame_bytes, token, authorizer).await;
                 });
             }
             Err(error) => {
@@ -487,6 +502,8 @@ async fn serve_stream(
     mut recv: RecvStream,
     handler: Arc<Mutex<SignalingHandler>>,
     max_frame_bytes: usize,
+    token: Option<Arc<String>>,
+    authorizer: Option<WtMessageAuthorizer>,
 ) {
     loop {
         let frame = match read_frame(&mut recv, max_frame_bytes).await {
@@ -508,7 +525,18 @@ async fn serve_stream(
                 break;
             }
         };
-        let replies = handler.lock().await.handle(envelope);
+        let mut guard = handler.lock().await;
+        let allowed = if let Some(authorizer) = authorizer.as_ref() {
+            authorizer(token.as_deref().map(String::as_str), &envelope, &mut guard)
+        } else {
+            true
+        };
+        let replies = if allowed {
+            guard.handle(envelope)
+        } else {
+            vec![Envelope::error_reply(envelope.msg_id(), "forbidden", "message rejected by session policy", false)]
+        };
+        drop(guard);
         for reply in replies {
             if let Err(error) = write_frame(&mut send, &reply.encode()).await {
                 tracing::debug!(%error, "WebTransport reply write failed");

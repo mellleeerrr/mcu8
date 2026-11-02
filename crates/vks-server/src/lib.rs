@@ -584,7 +584,7 @@ pub fn parse_participant_id(pid_str: &str) -> vks_core::ParticipantId {
 /// `ClientHello` time, when only the client-supplied room reference exists.
 /// An unknown reference returns `None` and the handler keeps its default mode;
 /// the authoritative answer follows in `JoinRoomResult`.
-fn resolve_room_ref(state: &AppState, reference: &str) -> Option<vks_core::RoomId> {
+pub fn resolve_room_ref(state: &AppState, reference: &str) -> Option<vks_core::RoomId> {
     let reference = reference.trim();
     if reference.is_empty() {
         return None;

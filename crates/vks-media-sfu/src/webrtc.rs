@@ -655,9 +655,12 @@ impl WebRtcPeer {
         self.mids.ensure_source(from, audio).is_some() && !already_mapped
     }
 
-    /// Retires a publisher's egress mids (publisher left the room). They are
-    /// never reassigned: a new publisher would restart an RTP clock domain on a
-    /// mid the subscriber's decoder already tracks.
+    /// Number of egress mids currently mapped, used by the command loop to
+    /// detect a newly allocated mid without a public `mids` mut binding.
+    pub fn allocated(&self) -> usize {
+        self.mids.allocated()
+    }
+
     pub fn retire_source(&mut self, from: ParticipantId) {
         self.mids.retire_source(from);
     }

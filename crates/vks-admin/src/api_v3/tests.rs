@@ -3474,6 +3474,23 @@ async fn test_abonent_info_popup_synchronization() {
     .await;
     assert_eq!(del_prev.status(), StatusCode::NO_CONTENT);
 
+    // ERVC keyframe stream delivery for Yw canvas player
+    let get_keyframe = send(
+        &app,
+        request("GET", &format!("/api/v3/sessions/{session_id}/previews/{stream_id}?key=1"), Some(&admin), json!({})),
+    )
+    .await;
+    assert_eq!(get_keyframe.status(), StatusCode::OK);
+    assert_eq!(get_keyframe.headers().get("content-type").unwrap(), "application/octet-stream");
+    let keyframe_body = axum::body::to_bytes(get_keyframe.into_body(), usize::MAX).await.unwrap();
+    assert!(keyframe_body.len() >= 5);
+    assert_eq!(keyframe_body[0], 0x9D);
+    assert_eq!(keyframe_body[1], 0x56);
+    // Format version 1, Intra frame type 1
+    assert_eq!(keyframe_body[2], 2); // chunk type 2 (Frame Info)
+    assert_eq!(keyframe_body[5], 1); // format version
+    assert_eq!(keyframe_body[6], 1); // intra frame
+
     // 2. Fail-soft audio processing (auto_gain_control & noise_suppression)
     let room = crate::RoomRecord::new(room_id, "sync-room", None);
     state.rooms.lock().unwrap().insert(room_id, room);
@@ -3563,4 +3580,276 @@ async fn test_abonent_info_popup_synchronization() {
     let fecc_braces_body = json_body(fecc_braces).await;
     assert_eq!(fecc_braces_body["status"], "not_supported");
     assert_eq!(fecc_braces_body["fecc"], false);
+}
+
+#[tokio::test]
+async fn test_parallel_canvas_video_preview_ervc_delivery() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let admin = login_token(&app, "admin", "s3cret").await;
+    let room_id = RoomId::new();
+    let session_id = room_id.to_string();
+
+    // 1. POST layout preview (common conference layout parallel preview stream via ERVC player)
+    let post_layout = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/sessions/{session_id}/previews/common"),
+            Some(&admin),
+            json!({
+                "preview_type": "common",
+                "payload": {
+                    "preview": { "resolution": { "width": 480, "height": 270, "fps_limit": 1 } }
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(post_layout.status(), StatusCode::OK);
+    let post_layout_body = json_body(post_layout).await;
+    let layout_stream_id = post_layout_body["preview_stream_id"].as_str().expect("preview_stream_id").to_string();
+    assert_eq!(post_layout_body["call_string_id"], "common");
+    assert_eq!(post_layout_body["preview"]["preview_stream_id"], layout_stream_id);
+    assert_eq!(post_layout_body["preview"]["call_string_id"], "common");
+
+    // 2. GET layout preview keyframe (Yw initial poll with ?key=1)
+    let get_layout_key = send(
+        &app,
+        request(
+            "GET",
+            &format!("/api/v3/sessions/{session_id}/previews/{layout_stream_id}?key=1"),
+            Some(&admin),
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(get_layout_key.status(), StatusCode::OK);
+    assert_eq!(get_layout_key.headers().get("content-type").unwrap(), "application/octet-stream");
+    let layout_bytes = axum::body::to_bytes(get_layout_key.into_body(), usize::MAX).await.unwrap();
+    assert!(layout_bytes.len() > 100);
+    // Magic bytes 0x9D, 0x56
+    assert_eq!(layout_bytes[0], 0x9D);
+    assert_eq!(layout_bytes[1], 0x56);
+    // Chunk 2 (Frame Info): type 2, length 4, format_version 1, intra frame 1, frame_id 0, planes 3 | ec_type 1 (0x31)
+    assert_eq!(layout_bytes[2], 2);
+    assert_eq!(layout_bytes[5], 1);
+    assert_eq!(layout_bytes[6], 1);
+    assert_eq!(layout_bytes[8], 0x31);
+
+    // 3. Immediate poll without ?key=1 within 1000ms delivers 204 No Content
+    let get_layout_poll = send(
+        &app,
+        request("GET", &format!("/api/v3/sessions/{session_id}/previews/{layout_stream_id}"), Some(&admin), json!({})),
+    )
+    .await;
+    assert_eq!(get_layout_poll.status(), StatusCode::NO_CONTENT);
+    assert_eq!(get_layout_poll.headers().get("cache-control").unwrap(), "public, max-age=1");
+
+    // 4. Clean up preview stream via DELETE
+    let del_layout = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/v3/sessions/{session_id}/previews/{layout_stream_id}"),
+            Some(&admin),
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(del_layout.status(), StatusCode::NO_CONTENT);
+
+    // 5. Abonent thumbnail preview test: GET /api/v3/abonents/previews filtered by connection_ids
+    let prev_resp =
+        send(&app, request("GET", "/api/v3/abonents/previews?connection_ids=non-existent-id", Some(&admin), json!({})))
+            .await;
+    assert_eq!(prev_resp.status(), StatusCode::OK);
+    let prev_json = json_body(prev_resp).await;
+    assert!(prev_json["previews"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_abonent_settings_modal_tabs_and_ervc_parity() {
+    let (state, _) = test_state();
+    let app = app(state.clone());
+    let admin = login_token(&app, "admin", "s3cret").await;
+
+    // 1. Create conference and session
+    let create_resp = send(
+        &app,
+        request(
+            "POST",
+            "/api/v3/conferences",
+            Some(&admin),
+            json!({ "topic": "Modal Tabs Parity Conf", "auto_call": false }),
+        ),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::OK);
+    let conf_id = json_body(create_resp).await["conference"]["id"].as_str().unwrap().to_string();
+
+    let start_resp =
+        send(&app, request("POST", "/api/v3/sessions", Some(&admin), json!({ "conference_id": conf_id }))).await;
+    assert_eq!(start_resp.status(), StatusCode::OK);
+    let room_id = RoomId::from_uuid(uuid::Uuid::parse_str(&conf_id).unwrap());
+
+    // 2. Register participant
+    let pid = "terminal-special@vks.local".to_string();
+    state.room_hub.register_participant(
+        &room_id,
+        crate::hub::ParticipantSnapshot {
+            participant_id: pid.clone(),
+            display_name: "Special Terminal".to_string(),
+            is_recorder: false,
+            is_speaking: false,
+            track_ids: vec!["audio".into(), "video".into()],
+            is_audio_muted: false,
+            is_video_muted: false,
+            connected_at: 1000,
+        },
+    );
+
+    // 3. Tab "Настройки": toggle hide_display_name
+    let hide_resp = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/abonents/{pid}/hide_display_name"),
+            Some(&admin),
+            json!({ "hide_display_name": true }),
+        ),
+    )
+    .await;
+    assert_eq!(hide_resp.status(), StatusCode::OK);
+    let hide_body = json_body(hide_resp).await;
+    assert_eq!(hide_body["status"], "ok");
+    assert_eq!(hide_body["hide_display_name"], true);
+
+    // 4. Tab "Настройки": set slot_render_type to SCALE
+    let render_resp = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/abonents/{pid}/render_type"),
+            Some(&admin),
+            json!({ "render_type": "SCALE" }),
+        ),
+    )
+    .await;
+    assert_eq!(render_resp.status(), StatusCode::OK);
+    let render_body = json_body(render_resp).await;
+    assert_eq!(render_body["status"], "ok");
+    assert_eq!(render_body["render_type"], "SCALE");
+
+    // 5. Tab "Настройки": adjust volume within -400..+200
+    let vol_resp = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/abonents/{pid}/volume"),
+            Some(&admin),
+            json!({ "volume": -150, "outgoing": false }),
+        ),
+    )
+    .await;
+    assert_eq!(vol_resp.status(), StatusCode::OK);
+
+    // 6. Verify GET /api/v3/sessions/{id}/abonents returns updated settings in participant payload
+    let sess_resp =
+        send(&app, request("GET", &format!("/api/v3/sessions/{conf_id}/abonents"), Some(&admin), json!({}))).await;
+    assert_eq!(sess_resp.status(), StatusCode::OK);
+    let sess_body = json_body(sess_resp).await;
+    let participants = sess_body["abonents"].as_array().expect("abonents");
+    let participant = participants.iter().find(|p| p["id"] == pid).expect("found participant");
+    assert_eq!(participant["payload"]["hide_display_name"], true);
+    assert_eq!(participant["payload"]["slot_render_type"], "SCALE");
+    assert_eq!(participant["payload"]["volume_rx"], -150);
+    assert_eq!(participant["details"]["audio"]["power"], -999);
+
+    // Also verify GET /api/v3/abonents (roster)
+    let global_resp = send(&app, request("GET", "/api/v3/abonents", Some(&admin), json!({}))).await;
+    assert_eq!(global_resp.status(), StatusCode::OK);
+    let global_body = json_body(global_resp).await;
+    let ab_list = global_body["abonents"].as_array().expect("abonents list");
+    let ab_item = ab_list.iter().find(|a| a["id"] == pid).expect("found abonent");
+    assert_eq!(ab_item["payload"]["hide_display_name"], true);
+    assert_eq!(ab_item["payload"]["slot_render_type"], "SCALE");
+    assert_eq!(ab_item["payload"]["volume_rx"], -150);
+
+    // 7. Verify percent-encoded ID handling (e.g. terminal-special%40vks.local)
+    let encoded_pid = "terminal-special%40vks.local";
+    let hide_resp_enc = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/v3/abonents/{encoded_pid}/hide_display_name"),
+            Some(&admin),
+            json!({ "hide_display_name": false }),
+        ),
+    )
+    .await;
+    assert_eq!(hide_resp_enc.status(), StatusCode::OK);
+    let hide_enc_body = json_body(hide_resp_enc).await;
+    assert_eq!(hide_enc_body["hide_display_name"], false);
+
+    // 8. Test multi-block ERVC bitstream generation for high-res (480x270, Y plane = 129,600 bytes > 64KB)
+    let ervc_bytes = super::previews::generate_ervc_frame(480, 270, 0);
+    assert!(ervc_bytes.len() > 130000, "ERVC frame with 480x270 must exceed 130,000 bytes");
+    assert_eq!(ervc_bytes[0], 0x9D);
+    assert_eq!(ervc_bytes[1], 0x56);
+    // Parse chunks and ensure no chunk length exceeds 65535
+    let mut offset = 2;
+    let mut chunk5_count = 0;
+    while offset < ervc_bytes.len() {
+        let chunk_type = ervc_bytes[offset];
+        offset += 1;
+        if chunk_type == 1 {
+            // End of Frame
+            let len = u16::from_be_bytes([ervc_bytes[offset], ervc_bytes[offset + 1]]);
+            assert_eq!(len, 0);
+            break;
+        }
+        let len = u16::from_be_bytes([ervc_bytes[offset], ervc_bytes[offset + 1]]) as usize;
+        offset += 2;
+        assert!(len <= 65535);
+        if chunk_type == 5 {
+            chunk5_count += 1;
+        }
+        offset += len;
+    }
+    // For 129,600 byte Y plane alone, at least two Chunk 5s are emitted, plus at least one each for U and V
+    assert!(chunk5_count >= 4, "Must emit multiple Chunk 5s across multi-block planes");
+
+    // 9. Stale stream pruning test
+    {
+        let mut streams = state.api_v3.preview_streams.lock().unwrap();
+        let old_time = 1000;
+        for i in 0..70 {
+            streams.insert(
+                format!("old-stream-{i}"),
+                super::previews::PreviewStreamRecord {
+                    stream_id: format!("old-stream-{i}"),
+                    session_id: conf_id.clone(),
+                    target: "all".to_string(),
+                    preview_type: "common".to_string(),
+                    width: 320,
+                    height: 180,
+                    created_at: std::time::Instant::now(),
+                    last_frame_time: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(old_time)),
+                    frame_counter: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                },
+            );
+        }
+        assert!(streams.len() >= 70);
+    }
+    // Now trigger start_preview which executes prune_stale_streams
+    let trigger_prune =
+        send(&app, request("POST", &format!("/api/v3/sessions/{conf_id}/previews/common"), Some(&admin), json!({})))
+            .await;
+    assert_eq!(trigger_prune.status(), StatusCode::OK);
+    {
+        let streams = state.api_v3.preview_streams.lock().unwrap();
+        // Since old streams had last_frame_time = 1000 and current time is >> 60,000, all 70 stale streams must be pruned!
+        assert!(streams.len() <= 5, "Stale streams must be pruned, actual len: {}", streams.len());
+    }
 }

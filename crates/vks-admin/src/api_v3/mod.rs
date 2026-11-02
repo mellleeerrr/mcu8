@@ -86,6 +86,8 @@ pub struct ApiV3State {
     pub history_exports: std::sync::Mutex<export_store::ExportStore>,
     /// Сгенерированные ZIP-экспорты журнала событий (`/static/log_events/{filename}`).
     pub log_exports: std::sync::Mutex<export_store::ExportStore>,
+    /// Активные preview-сессии (ERVC parallel preview streams).
+    pub preview_streams: std::sync::Mutex<std::collections::HashMap<String, previews::PreviewStreamRecord>>,
     /// Глобальный token-bucket на все `/api/v3/*` запросы: 200 burst, 50/s
     /// refill (BACKEND_RULES §1.4 / CLUSTERING). Инициализируется лениво, чтобы
     /// `ApiV3State: Default` не тянул конфигурацию в конструктор.
@@ -96,7 +98,7 @@ pub struct ApiV3State {
     pub global_ratelimit: std::sync::Mutex<Option<vks_common::ratelimit::RateLimiter>>,
 }
 
-/// Состояние медиа-настроек абонента (громкость, mute).
+/// Состояние медиа-настроек абонента (громкость, mute, отображение имени, режим слота).
 #[derive(Debug, Clone, Default)]
 pub struct AbonentMediaState {
     pub audio_rx_muted: bool,
@@ -105,6 +107,8 @@ pub struct AbonentMediaState {
     pub video_tx_muted: bool,
     pub volume_rx: i32,
     pub volume_tx: i32,
+    pub hide_display_name: bool,
+    pub slot_render_type: Option<String>,
 }
 
 /// Нормализует опечатку вендорного фронтенда PNM (`}/contacts` -> `/contacts`) до роутинга.

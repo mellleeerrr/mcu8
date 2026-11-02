@@ -265,6 +265,8 @@ fn apply_call_controls(state: &SharedState, dialer: &dyn crate::state::OutboundD
             video_tx_muted,
             volume_rx: payload["volume_rx"].as_i64().unwrap_or(0) as i32,
             volume_tx: payload["volume_tx"].as_i64().unwrap_or(0) as i32,
+            hide_display_name: payload["hide_display_name"].as_bool().unwrap_or(false),
+            slot_render_type: payload["slot_render_type"].as_str().map(|s| s.to_string()),
         },
     );
     // Bridge names use the terminal perspective, so NativeAPI directions swap.
@@ -492,7 +494,8 @@ pub async fn create_conference_call_string(
     Json(body): Json<CallStringItem>,
 ) -> Response {
     track("ui/conferences/{id}/call_strings");
-    let clean_id = sanitize_id(&id);
+    let unescaped_id = super::previews::decode_percent(&id);
+    let clean_id = sanitize_id(&unescaped_id);
     if let Err(resp) = check_permission(&auth, Some(clean_id)) {
         return resp;
     }
@@ -558,7 +561,8 @@ pub async fn invite_conference_call_strings(
     Json(body): Json<InviteCallStringsRequest>,
 ) -> Response {
     track("conferences/{id}/invite/call_string/list");
-    let clean_id = sanitize_id(&id);
+    let unescaped_id = super::previews::decode_percent(&id);
+    let clean_id = sanitize_id(&unescaped_id);
     if let Err(resp) = check_permission(&auth, Some(clean_id)) {
         return resp;
     }
@@ -624,7 +628,8 @@ pub async fn create_session_call_string(
     Json(body): Json<CallStringItem>,
 ) -> Response {
     track("ui/sessions/{id}/call_strings");
-    let clean_id = sanitize_id(&id);
+    let unescaped_id = super::previews::decode_percent(&id);
+    let clean_id = sanitize_id(&unescaped_id);
     if let Err(resp) = check_permission(&auth, Some(clean_id)) {
         return resp;
     }
@@ -683,7 +688,8 @@ pub async fn create_session_call_string_standby(
     Json(body): Json<CallStringItem>,
 ) -> Response {
     track("ui/sessions/{id}/call_strings/without_call");
-    let clean_id = sanitize_id(&id);
+    let unescaped_id = super::previews::decode_percent(&id);
+    let clean_id = sanitize_id(&unescaped_id);
     if let Err(resp) = check_permission(&auth, Some(clean_id)) {
         return resp;
     }
@@ -755,7 +761,8 @@ pub async fn invite_session_call_strings_list(
     Json(body): Json<InviteCallStringsRequest>,
 ) -> Response {
     track("sessions/{id}/invite/call_strings/list");
-    let clean_id = sanitize_id(&id);
+    let unescaped_id = super::previews::decode_percent(&id);
+    let clean_id = sanitize_id(&unescaped_id);
     if let Err(resp) = check_permission(&auth, Some(clean_id)) {
         return resp;
     }

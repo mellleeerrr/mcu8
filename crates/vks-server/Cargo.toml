@@ -44,6 +44,7 @@ thiserror.workspace = true
 uuid.workspace = true
 bytes.workspace = true
 http-body.workspace = true
+libc.workspace = true
 # Статика фронтенда PNM (ADR-0027) и CSP-хэши inline-скриптов.
 tower-http.workspace = true
 sha2.workspace = true

@@ -3,7 +3,7 @@
 //! Пишет валидный ISO/IEC 14496-12 (ISOBMFF/MP4) файл с H.264 sample entry
 //! `avc1` + `AVCDecoderConfigurationRecord` (`avcC`) и length-prefixed NALU
 //! (4 байта) в `mdat` — по ISO/IEC 14496-15. Annex-B, который отдаёт
-//! [`AccessUnit`](vks_media_mcu::farm::AccessUnit), конвертируется на входе;
+//! `AccessUnit`, конвертируется на входе;
 //! SPS/PPS снимаются со start code и попадают в `avcC` как есть (emulation
 //! prevention bytes не трогаются).
 //!
@@ -13,7 +13,7 @@
 //!
 //! Допущение: B-кадров нет (`ctts` не пишется). Production-профиль
 //! zero-latency (`ffmpeg -tune zerolatency` в gateway_video) выдаёт только
-//! I/P-кадры, и [`AccessUnit`](vks_media_mcu::farm::AccessUnit) несёт один PTS
+//! I/P-кадры, и `AccessUnit` несёт один PTS
 //! без DTS. Если в группу придёт энкодер с B-кадрами, writer обязан получить
 //! DTS/ctts — иначе порядок сэмплов и `stts` будут неверными (T09b P2-3,
 //! зафиксировано как допущение, а не скрытый дефект).

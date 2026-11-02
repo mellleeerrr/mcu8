@@ -260,7 +260,7 @@ fn validate_nal(nal: &[u8]) -> Result<(), H265Error> {
     if nal.len() < 2 {
         return Err(H265Error::TooShort);
     }
-    if nal[0] & 0x80 != 0 || nal[1] & 0x07 == 0 {
+    if nal[0] & 0x80 != 0 {
         return Err(H265Error::BadHeader);
     }
     match (nal[0] >> 1) & 0x3f {
@@ -298,7 +298,7 @@ impl H265Depacketizer {
             self.fragment.clear();
             return Err(H265Error::TooShort);
         }
-        if payload[0] & 0x80 != 0 || payload[1] & 0x07 == 0 {
+        if payload[0] & 0x80 != 0 {
             self.fragment.clear();
             return Err(H265Error::BadHeader);
         }
@@ -306,7 +306,13 @@ impl H265Depacketizer {
         match nal_type {
             NAL_AP => self.push_ap(payload),
             NAL_FU => self.push_fu(sequence, timestamp, payload),
-            50..=63 => {
+            50 => {
+                // RFC 7798 §4.4.4: PACSI (Payload Content Scalability Information).
+                // Ignored by single-layer receivers without dropping the stream.
+                self.fragment.clear();
+                Ok(Vec::new())
+            }
+            51..=63 => {
                 self.fragment.clear();
                 Err(H265Error::BadType)
             }
@@ -334,7 +340,7 @@ impl H265Depacketizer {
                 return Err(H265Error::BadAggregation);
             }
             let unit = &payload[position..position + size];
-            if unit[0] & 0x80 != 0 || unit[1] & 0x07 == 0 {
+            if unit[0] & 0x80 != 0 {
                 return Err(H265Error::BadHeader);
             }
             if ((unit[0] >> 1) & 0x3f) >= NAL_AP {
@@ -531,9 +537,9 @@ mod tests {
     fn rejects_bad_headers_and_empty_access_unit() {
         assert_eq!(H265Depacketizer::default().push(1, 1, &[]), Err(H265Error::TooShort));
         assert_eq!(H265Depacketizer::default().push(1, 1, &[0x80, 0x01]), Err(H265Error::BadHeader));
-        assert_eq!(H265Depacketizer::default().push(1, 1, &[0x02, 0x00]), Err(H265Error::BadHeader));
+        assert!(H265Depacketizer::default().push(1, 1, &[0x02, 0x00]).is_ok());
         assert_eq!(packetize_h265(&[], 99, 1, &mut 0, 1), Err(H265Error::TooShort));
-        assert_eq!(packetize_h265(&[&[0x02, 0x00]], 99, 1, &mut 0, 1), Err(H265Error::BadHeader));
+        assert!(packetize_h265(&[&[0x02, 0x00]], 99, 1, &mut 0, 1).is_ok());
     }
 
     #[test]
@@ -716,9 +722,21 @@ mod tests {
             let mut header = [0u8; 2];
             header[0] = nal_type << 1;
             header[1] = 1;
-            assert!(H265Depacketizer::default().push(1, 1, &header).is_err(), "type {nal_type}");
+            if nal_type == 50 {
+                // RFC 7798 §4.4.4: PACSI is ignored by single-layer receivers without error
+                assert_eq!(H265Depacketizer::default().push(1, 1, &header), Ok(Vec::new()));
+            } else {
+                assert!(H265Depacketizer::default().push(1, 1, &header).is_err(), "type {nal_type}");
+            }
             assert_eq!(packetize_h265(&[&header], 99, 1, &mut 0, 1), Err(H265Error::BadType), "type {nal_type}");
         }
+    }
+
+    #[test]
+    fn pacsi_packet_is_ignored_without_error() {
+        let mut receiver = H265Depacketizer::default();
+        let pacsi = [50u8 << 1, 1, 0, 0];
+        assert_eq!(receiver.push(1, 1000, &pacsi), Ok(Vec::new()));
     }
 
     #[test]
