@@ -34,24 +34,30 @@ pub struct OpusCodec {
 impl OpusCodec {
     #[must_use]
     pub fn new() -> Option<Self> {
-        let mut encoder = OpusEncoder::new(48_000, CHANNELS, Application::Audio).ok()?;
+        let mut encoder = OpusEncoder::new(48_000, CHANNELS, Application::Voip).ok()?;
         encoder.bitrate_bps = 64_000;
-        encoder.complexity = 5;
+        encoder.complexity = 6;
         encoder.use_inband_fec = true;
+        encoder.use_dtx = true;
         encoder.packet_loss_perc = 10;
         let decoder = OpusDecoder::new(48_000, CHANNELS).ok()?;
         Some(Self { encoder, decoder })
+    }
+
+    /// Encodes one 960-sample mono frame directly into `out`. Returns the number of bytes written.
+    pub fn encode_into(&mut self, pcm: &[f32], out: &mut [u8]) -> Option<usize> {
+        if pcm.len() < FRAME_SAMPLES || out.len() < MAX_PAYLOAD {
+            return None;
+        }
+        self.encoder.encode(&pcm[..FRAME_SAMPLES], FRAME_SAMPLES, out).ok()
     }
 
     /// Encodes one 960-sample mono frame.  Returns `None` on a codec error
     /// (never a truncated packet: the caller drops the frame instead).
     #[must_use]
     pub fn encode(&mut self, pcm: &[f32]) -> Option<Vec<u8>> {
-        if pcm.len() < FRAME_SAMPLES {
-            return None;
-        }
         let mut packet = vec![0u8; MAX_PAYLOAD];
-        let len = self.encoder.encode(&pcm[..FRAME_SAMPLES], FRAME_SAMPLES, &mut packet).ok()?;
+        let len = self.encode_into(pcm, &mut packet)?;
         packet.truncate(len);
         Some(packet)
     }
@@ -71,24 +77,29 @@ impl OpusCodec {
         (produced == FRAME_SAMPLES).then_some(pcm)
     }
 
+    /// Decodes one Opus packet directly into `out`. Returns the number of samples decoded.
+    pub fn decode_into(&mut self, payload: &[u8], out: &mut [f32]) -> Option<usize> {
+        if payload.len() > MAX_PAYLOAD || out.len() < MAX_FRAME_SAMPLES {
+            return None;
+        }
+        if payload.is_empty() {
+            let produced = self.decoder.decode(&[], FRAME_SAMPLES, out).ok()?;
+            return (produced == FRAME_SAMPLES).then_some(produced);
+        }
+        let produced = self.decoder.decode(payload, MAX_FRAME_SAMPLES, out).ok()?;
+        if !is_legal_frame_len(produced) {
+            return None;
+        }
+        Some(produced)
+    }
+
     /// Decodes one Opus packet of any RFC 7587 duration (2.5–120 ms).  An
     /// empty payload is not a valid Opus packet; it is accepted defensively as
     /// a PLC indication for a lost frame and produces one 20 ms PLC frame.
     #[must_use]
     pub fn decode(&mut self, payload: &[u8]) -> Option<Vec<f32>> {
-        if payload.len() > MAX_PAYLOAD {
-            return None;
-        }
-        if payload.is_empty() {
-            let mut pcm = vec![0.0f32; FRAME_SAMPLES];
-            let produced = self.decoder.decode(&[], FRAME_SAMPLES, &mut pcm).ok()?;
-            return (produced == FRAME_SAMPLES).then_some(pcm);
-        }
         let mut pcm = vec![0.0f32; MAX_FRAME_SAMPLES];
-        let produced = self.decoder.decode(payload, MAX_FRAME_SAMPLES, &mut pcm).ok()?;
-        if !is_legal_frame_len(produced) {
-            return None;
-        }
+        let produced = self.decode_into(payload, &mut pcm)?;
         pcm.truncate(produced);
         Some(pcm)
     }

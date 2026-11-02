@@ -14,8 +14,31 @@
 //!
 //! No `unsafe`.
 
+/// Piecewise-rational soft-knee limiter for integer PCM (preventing harsh clipping
+/// distortion and arithmetic overflow without transcendental math).
+#[inline(always)]
+pub fn soft_limit_sample(x: i32) -> i16 {
+    const K: i32 = 24576; // -2.5 dBFS knee
+    const H: i32 = 8191; // Headroom to 32767
+    let abs_x = x.saturating_abs();
+    if abs_x <= K {
+        x as i16
+    } else {
+        let delta = (abs_x - K) as i64;
+        let h = H as i64;
+        let sat = K + ((delta * h) / (delta + h)) as i32;
+        if x < 0 {
+            (-sat) as i16
+        } else {
+            sat as i16
+        }
+    }
+}
+
 /// Sample rate of the mixed audio (Hz) — 48 kHz per DEVELOPMENT_PLAN.
 pub const SAMPLE_RATE_HZ: u32 = 48_000;
+/// Standard 20 ms audio frame samples at 48 kHz.
+pub const FRAME_SAMPLES_20MS: usize = 960;
 
 /// Audio mixer.
 #[derive(Debug, Clone, Copy, Default)]
@@ -40,6 +63,74 @@ impl AudioMixer {
         }
     }
 
+    /// In-place mix into a caller-provided slice. Zero heap allocation.
+    pub fn mix_into(&self, inputs: &[&[f32]], out: &mut [f32]) {
+        out.fill(0.0);
+        let n_active = inputs.iter().filter(|b| !b.is_empty()).count();
+        if n_active == 0 {
+            return;
+        }
+        for buf in inputs {
+            for (i, s) in buf.iter().take(out.len()).enumerate() {
+                out[i] += Self::sanitize_sample(*s);
+            }
+        }
+        let full_gain = 1.0f32 / (n_active as f32).sqrt();
+        for sample in out.iter_mut() {
+            *sample = Self::soft_clip(*sample * full_gain);
+        }
+    }
+
+    /// Single-pass calculation of both room mix and per-participant mix-minus into
+    /// pre-allocated slices without any heap allocation.
+    ///
+    /// - `full_out`: Output slice for the room mix.
+    /// - `minus_outs`: Mutable slices for each participant's mix-minus.
+    pub fn mix_and_mix_minus_into(
+        &self,
+        inputs: &[&[f32]],
+        full_out: &mut [f32],
+        minus_outs: &mut [&mut [f32]],
+    ) {
+        debug_assert_eq!(inputs.len(), minus_outs.len(), "minus_outs slice count must match inputs count");
+        let output_len = full_out.len();
+        full_out.fill(0.0);
+        let n_active = inputs.iter().filter(|b| !b.is_empty()).count();
+
+        // 1. Single accumulation pass directly into full_out (unscaled sum S[i])
+        for buf in inputs {
+            for (i, s) in buf.iter().take(output_len).enumerate() {
+                full_out[i] += Self::sanitize_sample(*s);
+            }
+        }
+
+        // 2. Per-participant mix-minus pass (reading S[i] from full_out BEFORE full_gain/soft_clip)
+        for (k, own_buf) in inputs.iter().enumerate() {
+            let out = &mut minus_outs[k];
+            let own_non_empty = !own_buf.is_empty();
+            let other_count = if own_non_empty { n_active.saturating_sub(1) } else { n_active };
+
+            if other_count == 0 {
+                out.fill(0.0);
+                continue;
+            }
+
+            let gain = 1.0f32 / (other_count as f32).sqrt();
+            let len = output_len.min(out.len());
+            for i in 0..len {
+                let own_sample = if i < own_buf.len() { Self::sanitize_sample(own_buf[i]) } else { 0.0 };
+                let sample_minus = full_out[i] - own_sample;
+                out[i] = Self::soft_clip(sample_minus * gain);
+            }
+        }
+
+        // 3. Final in-place scaling & soft-clipping of global room mix
+        let full_gain = if n_active == 0 { 0.0 } else { 1.0f32 / (n_active as f32).sqrt() };
+        for sample in full_out.iter_mut() {
+            *sample = Self::soft_clip(*sample * full_gain);
+        }
+    }
+
     /// Mixes N input buffers into a single output buffer.
     ///
     /// - `inputs`: one slice per participant (f32 PCM, 48 kHz, mono).
@@ -49,12 +140,10 @@ impl AudioMixer {
     ///
     /// Gain = `1/√N` where `N` is the count of non-empty inputs; with zero
     /// non-empty inputs the output is all zeros.
-    /// Mixes N input buffers into a single output buffer.
-    ///
-    /// - `inputs`: one slice per participant (f32 PCM, 48 kHz, mono).
-    /// - `output_len`: number of samples of the result.
     pub fn mix(&self, inputs: &[&[f32]], output_len: usize) -> Vec<f32> {
-        self.mix_and_mix_minus(inputs, output_len).0
+        let mut out = vec![0.0f32; output_len];
+        self.mix_into(inputs, &mut out);
+        out
     }
 
     /// Mix-minus (N-1): produces N output buffers, where `output[k]` contains the mix of
@@ -68,47 +157,11 @@ impl AudioMixer {
     ///
     /// Returns `(full_mix, per_participant_minus)`.
     pub fn mix_and_mix_minus(&self, inputs: &[&[f32]], output_len: usize) -> (Vec<f32>, Vec<Vec<f32>>) {
-        let n_active = inputs.iter().filter(|b| !b.is_empty()).count();
-
-        // 1. Single accumulation pass for global sum S[0..output_len] with NaN/Inf sanitization.
-        let mut sum = vec![0.0f32; output_len];
-        for buf in inputs {
-            for (i, s) in buf.iter().take(output_len).enumerate() {
-                sum[i] += Self::sanitize_sample(*s);
-            }
-        }
-
-        // 2. Global room mix (for recording / monitoring / passive listeners)
-        let full_gain = if n_active == 0 { 0.0 } else { 1.0 / (n_active as f32).sqrt() };
         let mut full_mix = vec![0.0f32; output_len];
-        for i in 0..output_len {
-            full_mix[i] = Self::soft_clip(sum[i] * full_gain);
-        }
-
-        // 3. Per-participant mix-minus (subtract own signal from global sum)
-        let minus_mixes: Vec<Vec<f32>> = inputs
-            .iter()
-            .map(|own_buf| {
-                let own_non_empty = !own_buf.is_empty();
-                let other_count = if own_non_empty { n_active.saturating_sub(1) } else { n_active };
-
-                if other_count == 0 {
-                    return vec![0.0f32; output_len];
-                }
-
-                let gain = 1.0f32 / (other_count as f32).sqrt();
-                let mut out = vec![0.0f32; output_len];
-                for i in 0..output_len {
-                    let own_sample = if i < own_buf.len() { Self::sanitize_sample(own_buf[i]) } else { 0.0 };
-                    let sample_minus = sum[i] - own_sample;
-                    let mixed = sample_minus * gain;
-                    out[i] = Self::soft_clip(mixed);
-                }
-                out
-            })
-            .collect();
-
-        (full_mix, minus_mixes)
+        let mut minus_vecs: Vec<Vec<f32>> = (0..inputs.len()).map(|_| vec![0.0f32; output_len]).collect();
+        let mut minus_slices: Vec<&mut [f32]> = minus_vecs.iter_mut().map(|v| v.as_mut_slice()).collect();
+        self.mix_and_mix_minus_into(inputs, &mut full_mix, &mut minus_slices);
+        (full_mix, minus_vecs)
     }
 }
 
@@ -224,5 +277,33 @@ mod tests {
         let separate_minus = AudioMixer.mix_minus(&[&a, &b], 2);
         assert_eq!(full, separate_full);
         assert_eq!(minus, separate_minus);
+    }
+
+    #[test]
+    fn soft_limit_sample_behavior() {
+        // Below knee (24576): linear 1:1
+        assert_eq!(soft_limit_sample(0), 0);
+        assert_eq!(soft_limit_sample(10000), 10000);
+        assert_eq!(soft_limit_sample(-10000), -10000);
+        assert_eq!(soft_limit_sample(24576), 24576);
+        assert_eq!(soft_limit_sample(-24576), -24576);
+
+        // Above knee: smooth rational saturation without overflow (asymptote is 24576 + 8191 = 32767)
+        assert!(soft_limit_sample(30000) > 24576);
+        assert!(soft_limit_sample(100000) >= 31500);
+        assert!(soft_limit_sample(-100000) <= -31500);
+        assert!(soft_limit_sample(i32::MIN) <= -32000);
+        assert!(soft_limit_sample(i32::MAX) >= 32000);
+    }
+
+    #[test]
+    fn mix_into_stack_buffer() {
+        let a = [0.5f32; 960];
+        let b = [0.25f32; 960];
+        let mut out = [0.0f32; 960];
+        AudioMixer.mix_into(&[&a, &b], &mut out);
+        let expected = 0.75f32 / 2.0f32.sqrt();
+        assert!((out[0] - expected).abs() < 1e-6);
+        assert!((out[959] - expected).abs() < 1e-6);
     }
 }

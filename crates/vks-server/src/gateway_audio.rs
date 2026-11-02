@@ -541,30 +541,8 @@ pub(super) fn rtcp_sender_report(ssrc: u32, timestamp: u32, packets: u64, bytes:
     report
 }
 
-pub(super) fn decode_sample(payload_type: u8, byte: u8) -> f32 {
-    if payload_type == 8 {
-        let value = byte ^ 0x55;
-        let segment = (value >> 4) & 7;
-        let mut sample = i32::from(value & 15) << 4;
-        sample += if segment == 0 { 8 } else { 0x108 };
-        if segment > 1 {
-            sample <<= segment - 1;
-        }
-        if value & 0x80 == 0 {
-            sample = -sample;
-        }
-        sample as f32 / 32768.0
-    } else {
-        vks_gateway_sip::ulaw_to_f32(byte)
-    }
-}
-
-pub(super) fn encode_sample(payload_type: u8, value: f32) -> u8 {
-    let sample = (value.clamp(-1.0, 1.0) * 32767.0) as i16;
-    if payload_type != 8 {
-        return vks_gateway_sip::rtp_bridge::linear_to_ulaw(sample);
-    }
-    let mut magnitude = i32::from(sample) >> 3;
+const fn linear_to_alaw_sample(sample: i16) -> u8 {
+    let mut magnitude = (sample as i32) >> 3;
     let mask = if magnitude >= 0 {
         0xd5
     } else {
@@ -572,12 +550,131 @@ pub(super) fn encode_sample(payload_type: u8, value: f32) -> u8 {
         0x55
     };
     let limits = [0x1f, 0x3f, 0x7f, 0xff, 0x1ff, 0x3ff, 0x7ff, 0xfff];
-    let segment = limits.iter().position(|limit| magnitude <= *limit).unwrap_or(8);
+    let mut segment = 8;
+    let mut i = 0;
+    while i < 8 {
+        if magnitude <= limits[i] {
+            segment = i;
+            break;
+        }
+        i += 1;
+    }
     if segment >= 8 {
         return 0x7f ^ mask;
     }
     let mantissa = if segment < 2 { (magnitude >> 1) & 15 } else { (magnitude >> segment) & 15 };
     (((segment as u8) << 4) | mantissa as u8) ^ mask
+}
+
+const fn alaw_to_f32_sample(byte: u8) -> f32 {
+    let value = byte ^ 0x55;
+    let segment = (value >> 4) & 7;
+    let mut sample = ((value & 15) as i32) << 4;
+    sample += if segment == 0 { 8 } else { 0x108 };
+    if segment > 1 {
+        sample <<= segment - 1;
+    }
+    if value & 0x80 == 0 {
+        sample = -sample;
+    }
+    sample as f32 / 32768.0
+}
+
+const fn linear_to_ulaw_sample(sample: i16) -> u8 {
+    let sign = ((sample >> 8) as u8) & 0x80;
+    let s32 = sample as i32;
+    let mut abs = if s32 < 0 { -s32 } else { s32 };
+    if abs > 32635 {
+        abs = 32635;
+    }
+    abs += 0x84;
+
+    let mut exponent = 7;
+    let mut mask = 0x4000;
+    while (abs & mask) == 0 && exponent > 0 {
+        exponent -= 1;
+        mask >>= 1;
+    }
+    let mantissa = (abs >> (exponent + 3)) & 0x0F;
+    let byte = sign | ((exponent as u8) << 4) | (mantissa as u8);
+    !byte
+}
+
+const fn ulaw_to_f32_sample(byte: u8) -> f32 {
+    let byte = !byte;
+    let sign = (byte & 0x80) != 0;
+    let exponent = ((byte >> 4) & 0x07) as i32;
+    let mantissa = (byte & 0x0F) as i32;
+
+    let mut sample = ((mantissa << 3) + 0x84) << exponent;
+    sample -= 0x84;
+    let i_sample = if sign { -sample } else { sample };
+    (i_sample as f32) / 32768.0
+}
+
+const fn generate_alaw_lut() -> [u8; 65536] {
+    let mut table = [0u8; 65536];
+    let mut i = 0;
+    while i < 65536 {
+        table[i] = linear_to_alaw_sample(i as u16 as i16);
+        i += 1;
+    }
+    table
+}
+
+const fn generate_ulaw_lut() -> [u8; 65536] {
+    let mut table = [0u8; 65536];
+    let mut i = 0;
+    while i < 65536 {
+        table[i] = linear_to_ulaw_sample(i as u16 as i16);
+        i += 1;
+    }
+    table
+}
+
+const fn generate_alaw_to_f32_lut() -> [f32; 256] {
+    let mut table = [0.0f32; 256];
+    let mut i = 0;
+    while i < 256 {
+        table[i] = alaw_to_f32_sample(i as u8);
+        i += 1;
+    }
+    table
+}
+
+const fn generate_ulaw_to_f32_lut() -> [f32; 256] {
+    let mut table = [0.0f32; 256];
+    let mut i = 0;
+    while i < 256 {
+        table[i] = ulaw_to_f32_sample(i as u8);
+        i += 1;
+    }
+    table
+}
+
+pub static I16_TO_ALAW: [u8; 65536] = generate_alaw_lut();
+pub static I16_TO_ULAW: [u8; 65536] = generate_ulaw_lut();
+pub static ALAW_TO_F32: [f32; 256] = generate_alaw_to_f32_lut();
+pub static ULAW_TO_F32: [f32; 256] = generate_ulaw_to_f32_lut();
+
+#[inline(always)]
+pub(super) fn decode_sample(payload_type: u8, byte: u8) -> f32 {
+    if payload_type == 8 {
+        ALAW_TO_F32[byte as usize]
+    } else {
+        ULAW_TO_F32[byte as usize]
+    }
+}
+
+#[inline(always)]
+pub(super) fn encode_sample(payload_type: u8, value: f32) -> u8 {
+    let sample = (value.clamp(-1.0, 1.0) * 32767.0) as i16;
+    let idx = sample as u16 as usize;
+    if payload_type == 8 {
+        I16_TO_ALAW[idx]
+    } else {
+        I16_TO_ULAW[idx]
+    }
 }
 
 /// Pins the negotiated RTP endpoint, payload type, SSRC and receive sequence.

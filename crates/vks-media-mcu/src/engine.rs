@@ -543,19 +543,13 @@ impl RoomState {
         let (full_mix, minus_mixes) = AudioMixer.mix_and_mix_minus(&slices, target_len);
         self.mixed_audio = full_mix;
 
-        // Mix-minus for each participant with audio
+        // Mix-minus for each participant with audio.
+        // Room subscribers and passive listeners who didn't publish audio in this tick
+        // are served directly from self.mixed_audio in participant_audio/copy_participant_audio,
+        // avoiding O(N) heap allocations and cloning on every 20 ms tick.
         self.participant_audio.clear();
         for ((pid, _), buf) in audio_inputs.iter().zip(minus_mixes.into_iter()) {
             self.participant_audio.insert(*pid, buf);
-        }
-
-        // For room subscribers and publishers who didn't publish audio in this tick (e.g. muted/listeners),
-        // supply the room's mixed audio so they hear other participants.
-        for sub in &self.subscribers {
-            self.participant_audio.entry(*sub).or_insert_with(|| self.mixed_audio.clone());
-        }
-        for pub_id in self.publisher_tracks.keys() {
-            self.participant_audio.entry(*pub_id).or_insert_with(|| self.mixed_audio.clone());
         }
 
         // Per-participant VAD and active speaker detection
