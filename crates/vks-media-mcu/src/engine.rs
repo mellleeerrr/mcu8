@@ -99,6 +99,10 @@ struct RoomState {
     /// «Важный» участник (Codian §2.2): принудительно в главном окне, важнее
     /// активного спикера. Ставится администратором, снимается `None`.
     important: Option<ParticipantId>,
+    /// Participant display name labels for compositor placeholder badges.
+    participant_labels: BTreeMap<ParticipantId, String>,
+    /// Participant label visibility (default true).
+    participant_label_visibility: BTreeMap<ParticipantId, bool>,
 }
 
 impl RoomState {
@@ -120,11 +124,12 @@ impl RoomState {
             frames: BTreeMap::new(),
             self_view: false,
             canvas: CANVAS_SIZE,
-            composite: Arc::new(Frame::new(
-                CANVAS_SIZE.0,
-                CANVAS_SIZE.1,
-                vec![0u8; CANVAS_SIZE.0 as usize * CANVAS_SIZE.1 as usize],
-            )),
+            composite: Arc::new({
+                let pixels = CANVAS_SIZE.0 as usize * CANVAS_SIZE.1 as usize;
+                let mut data = vec![128u8; pixels * 3 / 2];
+                Compositor::fill_studio_black(&mut data, pixels);
+                Frame::new(CANVAS_SIZE.0, CANVAS_SIZE.1, data)
+            }),
             mixed_audio: Vec::new(),
             participant_audio: BTreeMap::new(),
             vads: BTreeMap::new(),
@@ -132,12 +137,29 @@ impl RoomState {
             speaking_changes: Vec::new(),
             active_speaker: None,
             important: None,
+            participant_labels: BTreeMap::new(),
+            participant_label_visibility: BTreeMap::new(),
         }
     }
 
     /// The current (crossfaded) slot rects for the current layout.
     fn slot_rects(&self) -> SlotRects {
         self.bridge.current(self.elapsed_ms)
+    }
+
+    /// Slot id -> participant label mapping for compositor name badges.
+    fn slot_labels(&self) -> BTreeMap<u32, String> {
+        let mut labels = BTreeMap::new();
+        if let Some(ref layout) = self.layout {
+            for (pid, slot) in &layout.assignments {
+                if self.participant_label_visibility.get(pid).copied().unwrap_or(true) {
+                    if let Some(label) = self.participant_labels.get(pid) {
+                        labels.insert(*slot, label.clone());
+                    }
+                }
+            }
+        }
+        labels
     }
 
     /// Видео-участники в порядке прихода (S12) — тот же порядок, что в
@@ -193,8 +215,23 @@ impl RoomState {
     fn scaled_slot_rects(&self) -> SlotRects {
         let rects = self.slot_rects();
         let (cw, ch) = self.canvas;
+        let is_even_canvas = cw.is_multiple_of(2) && ch.is_multiple_of(2);
         if (cw, ch) == CANVAS_SIZE {
-            return rects;
+            if !is_even_canvas {
+                return rects;
+            }
+            return rects
+                .into_iter()
+                .map(|(key, rect)| {
+                    let x0 = (rect.x & !1).min(cw.saturating_sub(2));
+                    let y0 = (rect.y & !1).min(ch.saturating_sub(2));
+                    let x1 = ((rect.x.saturating_add(rect.w) + 1) & !1).min(cw);
+                    let y1 = ((rect.y.saturating_add(rect.h) + 1) & !1).min(ch);
+                    let w = x1.saturating_sub(x0).max(2);
+                    let h = y1.saturating_sub(y0).max(2);
+                    (key, PixelRect::new(x0, y0, w, h).with_z(rect.z))
+                })
+                .collect();
         }
         let scale = |value: u32, source: u32, target: u32| -> u32 {
             ((u64::from(value) * u64::from(target) + u64::from(source) / 2) / u64::from(source)) as u32
@@ -202,13 +239,23 @@ impl RoomState {
         rects
             .into_iter()
             .map(|(key, rect)| {
-                let x0 = scale(rect.x, CANVAS_SIZE.0, cw);
-                let y0 = scale(rect.y, CANVAS_SIZE.1, ch);
-                let x1 = scale(rect.x.saturating_add(rect.w), CANVAS_SIZE.0, cw).min(cw);
-                let y1 = scale(rect.y.saturating_add(rect.h), CANVAS_SIZE.1, ch).min(ch);
-                let w = x1.saturating_sub(x0).clamp(1, cw);
-                let h = y1.saturating_sub(y0).clamp(1, ch);
-                (key, PixelRect::new(x0.min(cw.saturating_sub(1)), y0.min(ch.saturating_sub(1)), w, h).with_z(rect.z))
+                let raw_x0 = scale(rect.x, CANVAS_SIZE.0, cw);
+                let raw_y0 = scale(rect.y, CANVAS_SIZE.1, ch);
+                let raw_x1 = scale(rect.x.saturating_add(rect.w), CANVAS_SIZE.0, cw).min(cw);
+                let raw_y1 = scale(rect.y.saturating_add(rect.h), CANVAS_SIZE.1, ch).min(ch);
+                if is_even_canvas {
+                    let x0 = (raw_x0 & !1).min(cw.saturating_sub(2));
+                    let y0 = (raw_y0 & !1).min(ch.saturating_sub(2));
+                    let x1 = ((raw_x1 + 1) & !1).min(cw);
+                    let y1 = ((raw_y1 + 1) & !1).min(ch);
+                    let w = x1.saturating_sub(x0).clamp(2, cw.saturating_sub(x0));
+                    let h = y1.saturating_sub(y0).clamp(2, ch.saturating_sub(y0));
+                    (key, PixelRect::new(x0, y0, w, h).with_z(rect.z))
+                } else {
+                    let w = raw_x1.saturating_sub(raw_x0).clamp(1, cw);
+                    let h = raw_y1.saturating_sub(raw_y0).clamp(1, ch);
+                    (key, PixelRect::new(raw_x0.min(cw.saturating_sub(1)), raw_y0.min(ch.saturating_sub(1)), w, h).with_z(rect.z))
+                }
             })
             .collect()
     }
@@ -238,11 +285,33 @@ impl RoomState {
             layout.version = desc.version;
             let mut cells = desc.geometry.clone();
             cells.sort_by_key(|cell| cell.slot);
+
+            // Детектируем базис координат: если вся геометрия вписывается в 1280x720
+            // и при этом достигает краев 720p (максимальный x+w > 960 или y+h > 540),
+            // значит геометрия пришла в базисе 720p (Codian / Admin UI calculate).
+            let max_w = cells.iter().map(|c| c.x.saturating_add(c.width)).max().unwrap_or(0);
+            let max_h = cells.iter().map(|c| c.y.saturating_add(c.height)).max().unwrap_or(0);
+            let is_720p_basis = max_w <= 1280 && max_h <= 720 && (max_w > 960 || max_h > 540);
+
+            let scale_coord = |val: u32, src: u32, dst: u32| -> u32 {
+                ((u64::from(val) * u64::from(dst) + u64::from(src) / 2) / u64::from(src)) as u32
+            };
+
             for cell in &cells {
-                let x = cell.x.min(canvas.width.saturating_sub(1));
-                let y = cell.y.min(canvas.height.saturating_sub(1));
-                let width = cell.width.max(1).min(canvas.width.saturating_sub(x));
-                let height = cell.height.max(1).min(canvas.height.saturating_sub(y));
+                let (cx, cy, cw, ch) = if is_720p_basis {
+                    let x0 = scale_coord(cell.x, 1280, CANVAS_SIZE.0);
+                    let y0 = scale_coord(cell.y, 720, CANVAS_SIZE.1);
+                    let x1 = scale_coord(cell.x.saturating_add(cell.width), 1280, CANVAS_SIZE.0).min(CANVAS_SIZE.0);
+                    let y1 = scale_coord(cell.y.saturating_add(cell.height), 720, CANVAS_SIZE.1).min(CANVAS_SIZE.1);
+                    (x0, y0, x1.saturating_sub(x0).max(1), y1.saturating_sub(y0).max(1))
+                } else {
+                    (cell.x, cell.y, cell.width, cell.height)
+                };
+
+                let x = cx.min(canvas.width.saturating_sub(1));
+                let y = cy.min(canvas.height.saturating_sub(1));
+                let width = cw.max(1).min(canvas.width.saturating_sub(x));
+                let height = ch.max(1).min(canvas.height.saturating_sub(y));
                 let pid = slot_to_pid.get(&cell.slot).copied();
                 layout.slots.push(vks_layout::Slot::with_attributes(
                     cell.slot,
@@ -317,22 +386,12 @@ impl RoomState {
 
     /// Recomputes the composite + mixed audio + per-participant mix-minus + VAD from the current
     /// frames and participant audio (deterministic logical step of 33ms).
+    #[allow(dead_code)]
     fn tick(&mut self, frames: &BTreeMap<u32, Arc<Frame>>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
         self.elapsed_ms += 33;
         self.process_media(frames, audio_inputs);
     }
 
-    /// Advances the pipeline at a specific monotonic timestamp `now_ms`.
-    /// Audio runs on a 20ms cadence, and video applies ~30 fps frame-dropping backpressure.
-    fn tick_at(
-        &mut self,
-        now_ms: u64,
-        frames: &BTreeMap<u32, Arc<Frame>>,
-        audio_inputs: &[(ParticipantId, Vec<f32>)],
-    ) -> bool {
-        let (_ran, _events, _seating) = self.tick_audio_at(now_ms, audio_inputs);
-        self.tick_video_at(now_ms, frames)
-    }
 
     /// Advances the audio processing pass at a specific monotonic timestamp `now_ms` (20 ms cadence).
     fn tick_audio_at(
@@ -354,30 +413,12 @@ impl RoomState {
         (true, events, seating)
     }
 
-    /// Advances the video compositing pass at a specific monotonic timestamp `now_ms` (33 ms budget).
-    fn tick_video_at(&mut self, now_ms: u64, frames: &BTreeMap<u32, Arc<Frame>>) -> bool {
-        if let Some(last) = self.last_render_ms {
-            if now_ms < last + 30 {
-                self.stats.frames_dropped += 1;
-                return false;
-            }
-        }
-        self.last_render_ms = Some(now_ms);
-        let applied_at = *self.layout_applied_at_ms.get_or_insert(now_ms);
-        self.elapsed_ms = now_ms.saturating_sub(applied_at);
-        let started = vks_common::metrics::mcu_tick_metrics_enabled().then(std::time::Instant::now);
-        self.process_video(frames);
-        if let Some(started) = started {
-            vks_common::metrics::observe_mcu_tick(vks_common::metrics::McuTickPhase::Video, started.elapsed());
-        }
-        true
-    }
-
     fn process_video(&mut self, frames: &BTreeMap<u32, Arc<Frame>>) {
         let t0 = std::time::Instant::now();
         let rects = self.scaled_slot_rects();
+        let labels = self.slot_labels();
         let (width, height) = self.canvas;
-        self.composite = Arc::new(Compositor.compose_sized(width, height, frames, &rects));
+        self.composite = Arc::new(Compositor.compose_sized_with_labels(width, height, frames, &rects, &labels));
         // Кадры сохраняются для персональной сборки (самопросмотр): сам композит
         // уже собран, а личная дельта нужна отдельно.
         self.frames.clone_from(frames);
@@ -555,6 +596,7 @@ impl RoomState {
         (events, seating)
     }
 
+    #[allow(dead_code)]
     fn process_media(&mut self, frames: &BTreeMap<u32, Arc<Frame>>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
         self.process_video(frames);
         let (_events, _seating) = self.process_audio(audio_inputs);
@@ -607,18 +649,34 @@ impl std::fmt::Debug for SinkSlot {
 pub const GROUP_BITRATE_CEILING_PCT: u32 = 125;
 
 /// `P1`: битрейт группы по числу видимых окон композита.
+/// Табличное квантование (корзины) числа окон для стабилизации битрейта энкодера
+/// и предотвращения перезапусков FFmpeg при каждом входе/выходе участника.
+#[must_use]
+pub fn bucket_visible_windows(visible: usize) -> usize {
+    match visible {
+        0 | 1 => 1,
+        2 => 2,
+        3..=6 => 6,
+        7..=12 => 12,
+        13..=25 => 20,
+        _ => 25,
+    }
+}
+
+/// Вычисляет целевой групповой битрейт на основе базового и квантованного числа окон.
 ///
 /// Правило (утверждено Lead'ом):
-/// `bitrate = clamp(base × (1 + 0.02 × (visible − 1)), base, 1.25 × base)`,
+/// `bitrate = clamp(base × (1 + 0.02 × (bucketed − 1)), base, 1.25 × base)`,
 /// `visible = 0` → `base`. Пустые/одно окно не поднимают битрейт: общий
 /// энкодер на 20 окон требует больше полосы (BENCHMARK §10: +8.6 %), но не
 /// больше 25 % сверх базового — иначе группа «съедает» полосу зрителей.
 #[must_use]
 pub fn group_bitrate_kbps(base_kbps: u32, visible_windows: usize) -> u32 {
-    if visible_windows <= 1 {
+    let bucketed = bucket_visible_windows(visible_windows);
+    if bucketed <= 1 {
         return base_kbps;
     }
-    let extra_pct = 2u64 * (visible_windows as u64 - 1);
+    let extra_pct = 2u64 * (bucketed as u64 - 1);
     let scaled = (u64::from(base_kbps) * (100 + extra_pct) / 100) as u32;
     let ceiling = u64::from(base_kbps) * u64::from(GROUP_BITRATE_CEILING_PCT) / 100;
     let ceiling = u32::try_from(ceiling).unwrap_or(u32::MAX);
@@ -649,11 +707,11 @@ type AudioSource = Arc<Mutex<BTreeMap<RoomId, BTreeMap<ParticipantId, Vec<f32>>>
 ///   take `rooms → frames → audio`.
 ///
 /// The room event sink is invoked only after all engine locks are released
-/// (see [`McuEngine::emit`]): a sink may take roster/room-hub locks that are not
+/// (see the private `emit` sink dispatch): a sink may take roster/room-hub locks that are not
 /// part of this order.
 #[derive(Debug, Default)]
 pub struct McuEngine {
-    rooms: Arc<Mutex<BTreeMap<RoomId, RoomState>>>,
+    rooms: Arc<std::sync::RwLock<BTreeMap<RoomId, Arc<Mutex<RoomState>>>>>,
     /// `P1`: авторитетный канал числа видимых окон на комнату (один на комнату,
     /// пишет только движок через [`McuEngine::refresh_visible_windows`], сессии
     /// лишь читают). Устраняет thrash от per-session писателей.
@@ -824,6 +882,22 @@ impl McuEngine {
         Self::default()
     }
 
+    fn room_arc(&self, room: RoomId) -> Option<Arc<Mutex<RoomState>>> {
+        self.rooms.read().unwrap().get(&room).cloned()
+    }
+
+    fn with_room<R>(&self, room: RoomId, f: impl FnOnce(&RoomState) -> R) -> Option<R> {
+        let arc = self.room_arc(room)?;
+        let g = arc.lock().unwrap();
+        Some(f(&g))
+    }
+
+    fn with_room_mut<R>(&self, room: RoomId, f: impl FnOnce(&mut RoomState) -> R) -> Option<R> {
+        let arc = self.room_arc(room)?;
+        let mut g = arc.lock().unwrap();
+        Some(f(&mut g))
+    }
+
     /// Переносит кадры на новые номера слотов после смены раскладки.
     ///
     /// Кадр принадлежит участнику, а не позиции в сетке: без переноса после
@@ -888,36 +962,42 @@ impl McuEngine {
     /// Advances the room's pipeline (30 fps tick) and returns the composite
     /// frame. Deterministic for a given input sequence.
     pub fn tick(&self, room: RoomId) -> Option<Arc<Frame>> {
-        let mut g = self.rooms.lock().unwrap();
-        let state = g.get_mut(&room)?;
+        let arc = self.room_arc(room)?;
         let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
         let audio_map = self.audio.lock().unwrap().get(&room).cloned().unwrap_or_default();
-        let audio_inputs: Vec<(ParticipantId, Vec<f32>)> = state
-            .publisher_tracks
-            .keys()
-            .filter_map(|pid| audio_map.get(pid).cloned().map(|samples| (*pid, samples)))
-            .collect();
-        state.tick(&frames, &audio_inputs);
-        Some(state.composite.clone())
+        let snapshot = {
+            let mut state = arc.lock().unwrap();
+            let audio_inputs: Vec<(ParticipantId, Vec<f32>)> = state
+                .publisher_tracks
+                .keys()
+                .filter_map(|pid| audio_map.get(pid).cloned().map(|samples| (*pid, samples)))
+                .collect();
+            state.elapsed_ms += 33;
+            state.process_audio(&audio_inputs);
+            let rects = state.scaled_slot_rects();
+            let labels = state.slot_labels();
+            let (width, height) = state.canvas;
+            (width, height, rects, labels)
+        };
+        let (width, height, rects, labels) = snapshot;
+        let t0 = std::time::Instant::now();
+        let composite = Arc::new(Compositor.compose_sized_with_labels(width, height, &frames, &rects, &labels));
+        let duration_us = t0.elapsed().as_micros() as u64;
+        {
+            let mut state = arc.lock().unwrap();
+            state.composite = composite.clone();
+            state.frames = frames;
+            state.stats.last_duration_us = duration_us;
+            state.stats.frames_rendered += 1;
+        }
+        Some(composite)
     }
 
     /// Advances the room's pipeline at a specific monotonic timestamp `now_ms`.
     /// Returns Some(Frame) if rendered, or None if dropped by backpressure.
     pub fn tick_at(&self, room: RoomId, now_ms: u64) -> Option<Arc<Frame>> {
-        let mut g = self.rooms.lock().unwrap();
-        let state = g.get_mut(&room)?;
-        let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
-        let audio_map = self.audio.lock().unwrap().get(&room).cloned().unwrap_or_default();
-        let audio_inputs: Vec<(ParticipantId, Vec<f32>)> = state
-            .publisher_tracks
-            .keys()
-            .filter_map(|pid| audio_map.get(pid).cloned().map(|samples| (*pid, samples)))
-            .collect();
-        if state.tick_at(now_ms, &frames, &audio_inputs) {
-            Some(state.composite.clone())
-        } else {
-            None
-        }
+        self.tick_audio_at_impl(room, now_ms);
+        self.tick_video_at(room, now_ms)
     }
 
     /// Advances only the audio pipeline at a specific monotonic timestamp `now_ms` (20 ms cadence).
@@ -941,11 +1021,11 @@ impl McuEngine {
 
     fn tick_audio_at_impl(&self, room: RoomId, now_ms: u64) -> bool {
         let (ran, events, seating) = {
-            let mut g = self.rooms.lock().unwrap();
-            let state = match g.get_mut(&room) {
+            let arc = match self.room_arc(room) {
                 Some(s) => s,
                 None => return false,
             };
+            let mut state = arc.lock().unwrap();
             let audio_map = self.audio.lock().unwrap().get(&room).cloned().unwrap_or_default();
             let audio_inputs: Vec<(ParticipantId, Vec<f32>)> = state
                 .publisher_tracks
@@ -1044,10 +1124,11 @@ impl McuEngine {
     /// Возвращает `true`, если раскладка перестроилась.
     pub fn set_important_participant(&self, room: RoomId, participant: Option<ParticipantId>) -> bool {
         let changed = {
-            let mut g = self.rooms.lock().unwrap();
-            let Some(state) = g.get_mut(&room) else {
-                return false;
+            let arc = match self.room_arc(room) {
+                Some(a) => a,
+                None => return false,
             };
+            let mut state = arc.lock().unwrap();
             state.important = participant;
             state.refresh_seating()
         };
@@ -1061,21 +1142,46 @@ impl McuEngine {
 
     /// «Важный» участник комнаты (`None` — не назначен).
     pub fn important_participant(&self, room: RoomId) -> Option<ParticipantId> {
-        self.rooms.lock().unwrap().get(&room).and_then(|state| state.important)
+        self.with_room(room, |state| state.important).flatten()
     }
 
     /// Advances only the video pipeline at a specific monotonic timestamp `now_ms` (33 ms budget).
     /// Returns Some(Frame) if rendered, or None if dropped by frame-dropping backpressure.
     pub fn tick_video_at(&self, room: RoomId, now_ms: u64) -> Option<Arc<Frame>> {
-        let mut g = self.rooms.lock().unwrap();
-        let state = g.get_mut(&room)?;
-        let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
-        let rendered = state.tick_video_at(now_ms, &frames);
-        if rendered {
-            Some(state.composite.clone())
-        } else {
-            None
+        let arc = self.room_arc(room)?;
+        let snapshot = {
+            let mut state = arc.lock().unwrap();
+            if let Some(last) = state.last_render_ms {
+                if now_ms < last + 30 {
+                    state.stats.frames_dropped += 1;
+                    return None;
+                }
+            }
+            state.last_render_ms = Some(now_ms);
+            let applied_at = *state.layout_applied_at_ms.get_or_insert(now_ms);
+            state.elapsed_ms = now_ms.saturating_sub(applied_at);
+            let rects = state.scaled_slot_rects();
+            let labels = state.slot_labels();
+            let (width, height) = state.canvas;
+            let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
+            (width, height, rects, frames, labels)
+        };
+        let (width, height, rects, frames, labels) = snapshot;
+        let started = vks_common::metrics::mcu_tick_metrics_enabled().then(std::time::Instant::now);
+        let t0 = std::time::Instant::now();
+        let composite = Arc::new(Compositor.compose_sized_with_labels(width, height, &frames, &rects, &labels));
+        let duration_us = t0.elapsed().as_micros() as u64;
+        if let Some(started) = started {
+            vks_common::metrics::observe_mcu_tick(vks_common::metrics::McuTickPhase::Video, started.elapsed());
         }
+        {
+            let mut state = arc.lock().unwrap();
+            state.composite = composite.clone();
+            state.frames = frames;
+            state.stats.last_duration_us = duration_us;
+            state.stats.frames_rendered += 1;
+        }
+        Some(composite)
     }
 
     /// Кадровый тик + кадр для конкретного зрителя.
@@ -1100,51 +1206,51 @@ impl McuEngine {
     /// в спецификации Codian §2 («собственный видеопоток смотрящего не
     /// учитывается в сетке, самопросмотр — низший приоритет»).
     pub fn frame_for_viewer(&self, room: RoomId, viewer: ParticipantId) -> Option<Arc<Frame>> {
-        let g = self.rooms.lock().unwrap();
-        let state = g.get(&room)?;
-        let base = state.composite.clone();
-        if !state.self_view {
-            return Some(base);
-        }
-        let rects = state.scaled_slot_rects();
-        // Ячейка зрителя в общей сетке.
-        // Идентификаторы участников в раскладке и в ядре — разные типы с одним
-        // UUID, поэтому сравниваем по нему.
-        let viewer_uuid = viewer.as_uuid().as_u128();
-        let own_slot = state
-            .current_layout
-            .slots
-            .iter()
-            .find(|slot| slot.participant_id.map(|pid| pid.as_u128()) == Some(viewer_uuid))
-            .map(|s| s.id.as_u32());
-        let Some(own_slot) = own_slot else { return Some(base) };
-        // Ячейка самопросмотра — низший приоритет: последняя по (z, id).
-        let Some(self_slot) = state
-            .current_layout
-            .slots
-            .iter()
-            .max_by_key(|slot| (slot.z_index, slot.id.as_u32()))
-            .map(|slot| slot.id.as_u32())
-        else {
-            return Some(base);
+        let arc = self.room_arc(room)?;
+        let snapshot = {
+            let state = arc.lock().unwrap();
+            let base = state.composite.clone();
+            if !state.self_view {
+                return Some(base);
+            }
+            let rects = state.scaled_slot_rects();
+            let viewer_uuid = viewer.as_uuid().as_u128();
+            let own_slot = state
+                .current_layout
+                .slots
+                .iter()
+                .find(|slot| slot.participant_id.map(|pid| pid.as_u128()) == Some(viewer_uuid))
+                .map(|s| s.id.as_u32());
+            let Some(own_slot) = own_slot else { return Some(base) };
+            let Some(self_slot) = state
+                .current_layout
+                .slots
+                .iter()
+                .max_by_key(|slot| (slot.z_index, slot.id.as_u32()))
+                .map(|slot| slot.id.as_u32())
+            else {
+                return Some(base);
+            };
+            if self_slot == own_slot {
+                return Some(base);
+            }
+            let Some(own_rect) = rects.get(&own_slot).copied() else { return Some(base) };
+            let Some(self_rect) = rects.get(&self_slot).copied() else { return Some(base) };
+            let camera = state.frames.get(&own_slot).cloned();
+            (base, own_rect, self_rect, camera)
         };
-        if self_slot == own_slot {
-            // Зритель уже стоит в ячейке низшего приоритета — дельта пуста.
-            return Some(base);
-        }
-        let Some(own_rect) = rects.get(&own_slot) else { return Some(base) };
-        let Some(self_rect) = rects.get(&self_slot) else { return Some(base) };
+        let (base, own_rect, self_rect, camera) = snapshot;
         let mut canvas = Frame::new(base.width, base.height, base.data.clone());
-        Compositor::clear(&mut canvas, own_rect);
-        if let Some(camera) = state.frames.get(&own_slot) {
-            Compositor::blit(&mut canvas, camera, self_rect);
+        Compositor::clear(&mut canvas, &own_rect);
+        if let Some(camera) = camera {
+            Compositor::blit(&mut canvas, &camera, &self_rect);
         }
         Some(Arc::new(canvas))
     }
 
     /// Размер холста комнаты (`O1`), если комната существует.
     pub fn composite_size(&self, room: RoomId) -> Option<(u32, u32)> {
-        self.rooms.lock().unwrap().get(&room).map(|state| state.canvas)
+        self.with_room(room, |state| state.canvas)
     }
 
     /// `O1`: выставляет холст комнаты явно (тест/админка).
@@ -1157,15 +1263,12 @@ impl McuEngine {
         if width == 0 || height == 0 {
             return false;
         }
-        let changed = {
-            let mut rooms = self.rooms.lock().unwrap();
-            let Some(state) = rooms.get_mut(&room) else {
-                return false;
-            };
+        let changed = self.with_room_mut(room, |state| {
             let changed = state.canvas != (width, height);
             Self::resize_canvas(state, width, height);
             changed
-        };
+        });
+        let Some(changed) = changed else { return false };
         if changed {
             self.farm.invalidate_room(room);
         }
@@ -1183,22 +1286,23 @@ impl McuEngine {
         if width == 0 || height == 0 {
             return false;
         }
-        let mut rooms = self.rooms.lock().unwrap();
-        let Some(state) = rooms.get_mut(&room) else {
-            return false;
-        };
-        // Признак «комната уже отдавала кадры»: счётчик рендеров, а не
-        // `last_render_ms` — синхронный `tick()` (тесты/инпут) его не ставит.
-        if state.stats.frames_rendered > 0 {
-            return false;
+        let res = self.with_room_mut(room, |state| {
+            if state.stats.frames_rendered > 0 {
+                return None;
+            }
+            let changed = state.canvas != (width, height);
+            Self::resize_canvas(state, width, height);
+            Some(changed)
+        });
+        match res {
+            Some(Some(changed)) => {
+                if changed {
+                    self.farm.invalidate_room(room);
+                }
+                true
+            }
+            _ => false,
         }
-        let changed = state.canvas != (width, height);
-        Self::resize_canvas(state, width, height);
-        drop(rooms);
-        if changed {
-            self.farm.invalidate_room(room);
-        }
-        true
     }
 
     /// Заменяет холст комнаты и её текущий композит чёрным кадром размера
@@ -1211,7 +1315,7 @@ impl McuEngine {
         let pixels = width as usize * height as usize;
         let data = if width.is_multiple_of(2) && height.is_multiple_of(2) {
             let mut data = vec![128u8; pixels * 3 / 2];
-            data[..pixels].fill(16);
+            Compositor::fill_studio_black(&mut data, pixels);
             data
         } else {
             vec![0u8; pixels]
@@ -1227,7 +1331,7 @@ impl McuEngine {
     /// Включён ли самопросмотр в комнате: ферма и self-view несовместимы
     /// (разным зрителям нужен разный кадр), такой зритель идёт старым путём.
     pub fn self_view(&self, room: RoomId) -> bool {
-        self.rooms.lock().unwrap().get(&room).is_some_and(|state| state.self_view)
+        self.with_room(room, |state| state.self_view).unwrap_or(false)
     }
 
     /// `O7`: подписка зрителя на групповой энкодер.
@@ -1267,22 +1371,20 @@ impl McuEngine {
     /// По умолчанию выключен: общий кадр не меняется, поведение комнаты
     /// остаётся прежним до явного включения.
     pub fn set_self_view(&self, room: RoomId, enabled: bool) {
-        let mut g = self.rooms.lock().unwrap();
-        if let Some(state) = g.get_mut(&room) {
+        self.with_room_mut(room, |state| {
             state.self_view = enabled;
-        }
+        });
     }
 
     /// Returns the rendering and backpressure stats of a room (M3.6).
     pub fn stats(&self, room: RoomId) -> Option<McuRenderStats> {
-        let g = self.rooms.lock().unwrap();
-        g.get(&room).map(|s| s.stats)
+        self.with_room(room, |s| s.stats)
     }
 
     /// Applied layout descriptor (test/inspector), including staged pending
     /// layouts for rooms that do not exist yet.
     pub fn layout_descriptor(&self, room: RoomId) -> Option<LayoutDescriptor> {
-        if let Some(layout) = self.rooms.lock().unwrap().get(&room).and_then(|state| state.layout.clone()) {
+        if let Some(layout) = self.with_room(room, |state| state.layout.clone()).flatten() {
             return Some(layout);
         }
         self.pending_layouts.lock().unwrap().get(&room).cloned()
@@ -1305,13 +1407,15 @@ impl McuEngine {
     /// `current_layout` + `layout_descriptor`, оба значения читаются под одним
     /// локом и не могут разъехаться по версии.
     pub fn layout_snapshot(&self, room: RoomId) -> Option<LayoutSnapshot> {
-        if let Some(state) = self.rooms.lock().unwrap().get(&room) {
+        if let Some(snapshot) = self.with_room(room, |state| {
             let (preset, mode) = state
                 .layout
                 .as_ref()
                 .map(|descriptor| (descriptor.preset.clone(), descriptor.mode.clone()))
                 .unwrap_or_default();
-            return Some(LayoutSnapshot { layout: state.current_layout.clone(), preset, mode });
+            LayoutSnapshot { layout: state.current_layout.clone(), preset, mode }
+        }) {
+            return Some(snapshot);
         }
         let pending = self.pending_layouts.lock().unwrap().get(&room).cloned()?;
         Some(LayoutSnapshot {
@@ -1323,7 +1427,7 @@ impl McuEngine {
 
     /// The current crossfaded slot rects of a room (test/inspector).
     pub fn slot_rects(&self, room: RoomId) -> Option<SlotRects> {
-        self.rooms.lock().unwrap().get(&room).map(|s| s.slot_rects())
+        self.with_room(room, |s| s.slot_rects())
     }
 
     /// `P1`: число **занятых** ячеек композита — окно, в которое посажен
@@ -1339,12 +1443,9 @@ impl McuEngine {
     /// `0` — видеопубликаторов в комнате нет (или комнаты нет).
     #[must_use]
     pub fn visible_windows(&self, room: RoomId) -> usize {
-        let rooms = self.rooms.lock().unwrap();
-        let Some(state) = rooms.get(&room) else { return 0 };
-        // Эффективная раскладка композитора: ячейка видима, если в ней есть
-        // участник. `current_layout` — ровно то, что применяет `LayoutBridge`
-        // (descriptor.geometry для авто-сетки пуст, поэтому считаем по Layout).
-        state.current_layout.slots.iter().filter(|slot| slot.participant_id.is_some()).count()
+        self.with_room(room, |state| {
+            state.current_layout.slots.iter().filter(|slot| slot.participant_id.is_some()).count()
+        }).unwrap_or(0)
     }
 
     /// `P1`: подписка на авторитетное число видимых окон комнаты.
@@ -1396,43 +1497,41 @@ impl McuEngine {
 
     /// Returns the personal N-1 mix-minus audio for a participant in the room.
     pub fn participant_audio(&self, room: RoomId, pid: ParticipantId) -> Option<Vec<f32>> {
-        let g = self.rooms.lock().unwrap();
-        let state = g.get(&room)?;
-        state.participant_audio.get(&pid).cloned().or_else(|| {
-            if state.subscribers.contains(&pid) || state.publisher_tracks.contains_key(&pid) {
-                Some(state.mixed_audio.clone())
-            } else {
-                None
-            }
+        self.with_room(room, |state| {
+            state.participant_audio.get(&pid).cloned().or_else(|| {
+                if state.subscribers.contains(&pid) || state.publisher_tracks.contains_key(&pid) {
+                    Some(state.mixed_audio.clone())
+                } else {
+                    None
+                }
+            })
         })
+        .flatten()
     }
 
     /// Copies the personal N-1 mix-minus audio into a mutable slice without heap allocation.
     pub fn copy_participant_audio(&self, room: RoomId, pid: ParticipantId, out: &mut [f32]) -> bool {
-        let g = self.rooms.lock().unwrap();
-        let state = match g.get(&room) {
-            Some(s) => s,
-            None => return false,
-        };
-        if let Some(src) = state.participant_audio.get(&pid) {
-            let n = src.len().min(out.len());
-            out[..n].copy_from_slice(&src[..n]);
-            true
-        } else if (state.subscribers.contains(&pid) || state.publisher_tracks.contains_key(&pid))
-            && !state.mixed_audio.is_empty()
-        {
-            let n = state.mixed_audio.len().min(out.len());
-            out[..n].copy_from_slice(&state.mixed_audio[..n]);
-            true
-        } else {
-            false
-        }
+        self.with_room(room, |state| {
+            if let Some(src) = state.participant_audio.get(&pid) {
+                let n = src.len().min(out.len());
+                out[..n].copy_from_slice(&src[..n]);
+                true
+            } else if (state.subscribers.contains(&pid) || state.publisher_tracks.contains_key(&pid))
+                && !state.mixed_audio.is_empty()
+            {
+                let n = state.mixed_audio.len().min(out.len());
+                out[..n].copy_from_slice(&state.mixed_audio[..n]);
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
     }
 
     /// Returns the global room audio mix (for recording / monitoring).
     pub fn mixed_audio(&self, room: RoomId) -> Option<Vec<f32>> {
-        let g = self.rooms.lock().unwrap();
-        g.get(&room).map(|s| s.mixed_audio.clone())
+        self.with_room(room, |s| s.mixed_audio.clone())
     }
 
     /// Returns the active speaker determined by per-participant VAD.
@@ -1442,17 +1541,16 @@ impl McuEngine {
     /// ростер + рассылает `SpeakingStateChanged`: без этого состояние
     /// «говорит» не покидало бы движок.
     pub fn take_speaking_changes(&self, room: RoomId) -> Vec<(ParticipantId, bool)> {
-        let mut g = self.rooms.lock().unwrap();
-        g.get_mut(&room).map(|state| std::mem::take(&mut state.speaking_changes)).unwrap_or_default()
+        self.with_room_mut(room, |state| std::mem::take(&mut state.speaking_changes)).unwrap_or_default()
     }
 
     pub fn active_speaker(&self, room: RoomId) -> Option<ParticipantId> {
-        self.rooms.lock().unwrap().get(&room).and_then(|s| s.active_speaker)
+        self.with_room(room, |s| s.active_speaker).flatten()
     }
 
     /// Returns whether the given participant is currently speaking.
     pub fn is_speaking(&self, room: RoomId, pid: ParticipantId) -> bool {
-        self.rooms.lock().unwrap().get(&room).and_then(|s| s.speaking_states.get(&pid).copied()).unwrap_or(false)
+        self.with_room(room, |s| s.speaking_states.get(&pid).copied()).flatten().unwrap_or(false)
     }
 
     /// Ensures a room exists in the MCU engine.
@@ -1461,8 +1559,11 @@ impl McuEngine {
         if let Some(layout) = pending.as_mut() {
             sanitize_assignments(layout);
         }
-        let mut g = self.rooms.lock().unwrap();
-        let state = g.entry(room).or_insert_with(|| RoomState::new(RoomCaps::default()));
+        let arc = {
+            let mut g = self.rooms.write().unwrap();
+            g.entry(room).or_insert_with(|| Arc::new(Mutex::new(RoomState::new(RoomCaps::default())))).clone()
+        };
+        let mut state = arc.lock().unwrap();
         // Pending применяется только к пустой комнате: более новая раскладка
         // не должна откатываться stale-значением.
         if state.layout.is_none() {
@@ -1477,8 +1578,11 @@ impl McuEngine {
         // Pending забираем до блокировки rooms, чтобы не было инверсии порядка
         // с apply_layout (rooms → pending).
         let pending = self.pending_layouts.lock().unwrap().remove(&room);
-        let mut g = self.rooms.lock().unwrap();
-        let state = g.entry(room).or_insert_with(|| RoomState::new(RoomCaps::default()));
+        let arc = {
+            let mut g = self.rooms.write().unwrap();
+            g.entry(room).or_insert_with(|| Arc::new(Mutex::new(RoomState::new(RoomCaps::default())))).clone()
+        };
+        let mut state = arc.lock().unwrap();
         state.subscribers.insert(pid);
         // Pending применяем и к audio-only bridge: SIP/H.323 может прийти без
         // видео (или видео деградировало), но выбранная до дозвона раскладка
@@ -1488,7 +1592,7 @@ impl McuEngine {
                 state.adopt_layout(layout);
             }
         }
-        Self::register_publisher(state, pid, tracks);
+        Self::register_publisher(&mut state, pid, tracks);
     }
 
     /// Registers a video publisher and seats it in a free layout slot **without**
@@ -1499,14 +1603,17 @@ impl McuEngine {
     /// раскладки, иначе `set_participant_frame` молча выбросит его кадры.
     pub fn seat_publisher(&self, room: RoomId, pid: ParticipantId, tracks: Vec<MediaTrack>) {
         let pending = self.pending_layouts.lock().unwrap().remove(&room);
-        let mut g = self.rooms.lock().unwrap();
-        let state = g.entry(room).or_insert_with(|| RoomState::new(RoomCaps::default()));
+        let arc = {
+            let mut g = self.rooms.write().unwrap();
+            g.entry(room).or_insert_with(|| Arc::new(Mutex::new(RoomState::new(RoomCaps::default())))).clone()
+        };
+        let mut state = arc.lock().unwrap();
         if state.layout.is_none() {
             if let Some(layout) = pending {
                 state.adopt_layout(layout);
             }
         }
-        Self::register_publisher(state, pid, tracks);
+        Self::register_publisher(&mut state, pid, tracks);
     }
 
     /// Регистрирует паблишера и сажает его в свободный слот раскладки.
@@ -1534,83 +1641,95 @@ impl McuEngine {
 
     /// Writes a decoded frame only into the slot belonging to this publisher.
     pub fn set_participant_frame(&self, room: RoomId, pid: ParticipantId, frame: Frame) -> bool {
-        let rooms = self.rooms.lock().unwrap();
-        let Some(state) = rooms.get(&room) else {
+        let slot = self
+            .with_room(room, |state| state.layout.as_ref().and_then(|layout| layout.assignments.get(&pid).copied()))
+            .flatten();
+        let Some(slot) = slot else {
             return false;
         };
-        let Some(slot) = state.layout.as_ref().and_then(|layout| layout.assignments.get(&pid)) else {
-            return false;
-        };
-        self.frames.lock().unwrap().entry(room).or_default().insert(*slot, Arc::new(frame));
+        self.frames.lock().unwrap().entry(room).or_default().insert(slot, Arc::new(frame));
         true
     }
 
     /// Removes the participant's decoded pixels immediately when reception is muted.
     pub fn clear_participant_frame(&self, room: RoomId, pid: ParticipantId) {
-        let mut rooms = self.rooms.lock().unwrap();
-        let Some(state) = rooms.get_mut(&room) else {
-            return;
-        };
-        if let Some(slot) = state.layout.as_ref().and_then(|layout| layout.assignments.get(&pid)) {
-            self.frames.lock().unwrap().entry(room).or_default().remove(slot);
+        let slot = self
+            .with_room(room, |state| state.layout.as_ref().and_then(|layout| layout.assignments.get(&pid).copied()))
+            .flatten();
+        if let Some(slot) = slot {
+            self.frames.lock().unwrap().entry(room).or_default().remove(&slot);
             let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
-            state.process_video(&frames);
+            self.with_room_mut(room, |state| state.process_video(&frames));
         }
     }
 
     /// Current composed pixels, shared by subscribers when a render is throttled.
     pub fn composite_frame(&self, room: RoomId) -> Option<Arc<Frame>> {
-        self.rooms.lock().unwrap().get(&room).map(|state| state.composite.clone())
+        self.with_room(room, |state| state.composite.clone())
+    }
+
+    /// Sets a participant's display name label for the room's compositor layout.
+    pub fn set_participant_label(&self, room: RoomId, pid: ParticipantId, label: String) {
+        self.with_room_mut(room, |state| {
+            state.participant_labels.insert(pid, label);
+        });
+    }
+
+    /// Sets visibility of a participant's display name label in the room's compositor layout.
+    pub fn set_participant_label_visibility(&self, room: RoomId, pid: ParticipantId, visible: bool) {
+        self.with_room_mut(room, |state| {
+            state.participant_label_visibility.insert(pid, visible);
+        });
     }
 
     /// Synchronously removes a bridged participant from the MCU room, purging layout and audio.
     pub fn unbridge_participant(&self, room: RoomId, pid: ParticipantId) {
-        let mut g = self.rooms.lock().unwrap();
-        if let Some(state) = g.get_mut(&room) {
-            state.subscribers.remove(&pid);
-            state.publisher_tracks.remove(&pid);
-            state.join_order.retain(|known| *known != pid);
-            state.vads.remove(&pid);
-            state.speaking_states.remove(&pid);
-            if state.active_speaker == Some(pid) {
-                state.active_speaker = None;
-            }
-            state.participant_audio.remove(&pid);
-
-            let removed_slot = state.layout.as_mut().and_then(|desc| desc.assignments.remove(&pid));
-            if let Some(slot_id) = removed_slot {
-                self.frames.lock().unwrap().entry(room).or_default().remove(&slot_id);
-            }
-
-            let vpid = vks_layout::ParticipantId::new(pid.as_uuid().as_u128());
-            for slot in &mut state.current_layout.slots {
-                if slot.participant_id == Some(vpid) {
-                    slot.participant_id = None;
-                    self.frames.lock().unwrap().entry(room).or_default().remove(&slot.id.as_u32());
-                }
-            }
-
-            if let Some(desc) = &state.layout {
-                let new_layout = RoomState::layout_from_descriptor(desc);
-                state.bridge.apply(&new_layout);
-                state.current_layout = new_layout;
-            }
-
-            let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
-            state.process_video(&frames);
-            // T12 lock order: frames before audio (same inversion as
-            // `remove_publisher`).
-            self.audio.lock().unwrap().entry(room).or_default().remove(&pid);
+        let arc = match self.room_arc(room) {
+            Some(a) => a,
+            None => return,
+        };
+        let mut state = arc.lock().unwrap();
+        state.subscribers.remove(&pid);
+        state.publisher_tracks.remove(&pid);
+        state.join_order.retain(|known| *known != pid);
+        state.vads.remove(&pid);
+        state.speaking_states.remove(&pid);
+        state.participant_labels.remove(&pid);
+        state.participant_label_visibility.remove(&pid);
+        if state.active_speaker == Some(pid) {
+            state.active_speaker = None;
         }
+        state.participant_audio.remove(&pid);
+
+        let removed_slot = state.layout.as_mut().and_then(|desc| desc.assignments.remove(&pid));
+        if let Some(slot_id) = removed_slot {
+            self.frames.lock().unwrap().entry(room).or_default().remove(&slot_id);
+        }
+
+        let vpid = vks_layout::ParticipantId::new(pid.as_uuid().as_u128());
+        for slot in &mut state.current_layout.slots {
+            if slot.participant_id == Some(vpid) {
+                slot.participant_id = None;
+                self.frames.lock().unwrap().entry(room).or_default().remove(&slot.id.as_u32());
+            }
+        }
+
+        if let Some(desc) = &state.layout {
+            let new_layout = RoomState::layout_from_descriptor(desc);
+            state.bridge.apply(&new_layout);
+            state.current_layout = new_layout;
+        }
+
+        let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
+        state.process_video(&frames);
+        // T12 lock order: frames before audio (same inversion as
+        // `remove_publisher`).
+        self.audio.lock().unwrap().entry(room).or_default().remove(&pid);
     }
 
     /// Returns whether the participant is registered in the MCU room.
     pub fn has_participant(&self, room: RoomId, pid: ParticipantId) -> bool {
-        self.rooms
-            .lock()
-            .unwrap()
-            .get(&room)
-            .map(|s| s.subscribers.contains(&pid) || s.publisher_tracks.contains_key(&pid))
+        self.with_room(room, |s| s.subscribers.contains(&pid) || s.publisher_tracks.contains_key(&pid))
             .unwrap_or(false)
     }
 }
@@ -1622,35 +1741,39 @@ impl MediaEngine for McuEngine {
     }
 
     async fn create_room(&self, cfg: RoomMediaCfg) -> Result<RoomMediaHandle, MediaEngineError> {
-        let mut g = self.rooms.lock().unwrap();
+        let mut pending = self.pending_layouts.lock().unwrap();
+        let mut g = self.rooms.write().unwrap();
         if g.contains_key(&cfg.room_id) {
             return Err(MediaEngineError::RoomAlreadyExists(cfg.room_id));
         }
         let mut state = RoomState::new(cfg.caps);
-        // Сохранённая до моста раскладка не должна теряться: adopt pending
-        // здесь, иначе первый зритель увидит пустую сетку, пока не придёт
-        // следующий apply_layout. Порядок локов rooms → pending (как у
-        // destroy_room/apply_layout).
-        if let Some(layout) = self.pending_layouts.lock().unwrap().remove(&cfg.room_id) {
+        // Adopt a layout saved by apply_layout before the first viewer arrives.
+        // Lock order: pending_layouts -> rooms, matching apply_layout.
+        if let Some(layout) = pending.remove(&cfg.room_id) {
             state.adopt_layout(layout);
         }
-        g.insert(cfg.room_id, state);
+        g.insert(cfg.room_id, Arc::new(Mutex::new(state)));
         Ok(RoomMediaHandle { room: cfg.room_id, mode: RoomMode::Mcu })
     }
 
     async fn destroy_room(&self, room: RoomId) -> Result<(), MediaEngineError> {
+        // Retain the canonical `pending_layouts -> rooms` temporal order even
+        // though the critical sections are disjoint; the pending layout is only
+        // an eventual layout transition and never depends on room state.
+        let mut pending = self.pending_layouts.lock().unwrap();
+        pending.remove(&room);
+        drop(pending);
         let removed = {
-            let mut g = self.rooms.lock().unwrap();
+            let mut g = self.rooms.write().unwrap();
             g.remove(&room).is_some()
         };
-        // Не держим rooms при взятии pending: единый порядок локов
-        // (rooms → pending) во всех путях.
-        self.pending_layouts.lock().unwrap().remove(&room);
         if !removed {
             return Err(MediaEngineError::RoomNotFound(room));
         }
         self.frames.lock().unwrap().remove(&room);
         self.audio.lock().unwrap().remove(&room);
+        self.visible.lock().unwrap().remove(&room);
+        self.bridge_tick_rooms.lock().unwrap().remove(&room);
         Ok(())
     }
 
@@ -1658,8 +1781,8 @@ impl MediaEngine for McuEngine {
         // The MCU engine is mode-fixed: it always serves RoomMode::Mcu.
         // An in-place SFU↔MCU switch is coordinated by the core (ADR-0026);
         // here we report the mode this engine serves.
-        let g = self.rooms.lock().unwrap();
-        if g.contains_key(&room) {
+        let exists = self.rooms.read().unwrap().contains_key(&room);
+        if exists {
             Ok(RoomMode::Mcu)
         } else {
             Err(MediaEngineError::RoomNotFound(room))
@@ -1672,18 +1795,19 @@ impl MediaEngine for McuEngine {
         publisher: ParticipantId,
         tracks: Vec<MediaTrack>,
     ) -> Result<PublisherHandle, MediaEngineError> {
-        let mut g = self.rooms.lock().unwrap();
-        let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
-        state.publisher_tracks.insert(publisher, tracks);
-        if !state.join_order.contains(&publisher) {
-            state.join_order.push(publisher);
-        }
+        self.with_room_mut(room, |state| {
+            state.publisher_tracks.insert(publisher, tracks);
+            if !state.join_order.contains(&publisher) {
+                state.join_order.push(publisher);
+            }
+        })
+        .ok_or(MediaEngineError::RoomNotFound(room))?;
         Ok(PublisherHandle { room, publisher })
     }
 
     async fn remove_publisher(&self, room: RoomId, publisher: ParticipantId) -> Result<(), MediaEngineError> {
-        let mut g = self.rooms.lock().unwrap();
-        let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
+        let arc = self.room_arc(room).ok_or(MediaEngineError::RoomNotFound(room))?;
+        let mut state = arc.lock().unwrap();
         state.publisher_tracks.remove(&publisher);
         state.join_order.retain(|known| *known != publisher);
         state.vads.remove(&publisher);
@@ -1729,17 +1853,19 @@ impl MediaEngine for McuEngine {
         subscriber: ParticipantId,
         _req: SubscribeRequest,
     ) -> Result<SubscriberHandle, MediaEngineError> {
-        let mut g = self.rooms.lock().unwrap();
-        let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
-        state.subscribers.insert(subscriber);
+        self.with_room_mut(room, |state| {
+            state.subscribers.insert(subscriber);
+        })
+        .ok_or(MediaEngineError::RoomNotFound(room))?;
         Ok(SubscriberHandle { room, subscriber })
     }
 
     async fn remove_subscriber(&self, room: RoomId, subscriber: ParticipantId) -> Result<(), MediaEngineError> {
-        let mut g = self.rooms.lock().unwrap();
-        let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
-        state.subscribers.remove(&subscriber);
-        state.participant_audio.remove(&subscriber);
+        self.with_room_mut(room, |state| {
+            state.subscribers.remove(&subscriber);
+            state.participant_audio.remove(&subscriber);
+        })
+        .ok_or(MediaEngineError::RoomNotFound(room))?;
         Ok(())
     }
 
@@ -1750,8 +1876,8 @@ impl MediaEngine for McuEngine {
         // `ensure_room`/`bridge_participant`/`seat_publisher` → a concurrent
         // gateway landing and layout apply could deadlock (P0-3).
         let mut pending = self.pending_layouts.lock().unwrap();
-        let mut g = self.rooms.lock().unwrap();
-        let Some(state) = g.get_mut(&room) else {
+        let arc = self.room_arc(room);
+        let Some(arc) = arc else {
             // SFU-сессия без шлюза не должна аллоцировать MCU-композит.
             pending.insert(room, layout);
             return Ok(());
@@ -1760,6 +1886,7 @@ impl MediaEngine for McuEngine {
         // раскладку на следующем bridge.
         pending.remove(&room);
         drop(pending);
+        let mut state = arc.lock().unwrap();
         // Уже забридженные видео-паблишеры не должны потерять ячейку: раскладка
         // может прийти вообще без привязок («Очистить все видеоокна» → все окна
         // AUTO, auto-пресет, возврат к «Общей» после удаления ручной). Иначе
@@ -1804,22 +1931,21 @@ impl MediaEngine for McuEngine {
     }
 
     async fn set_room_capabilities(&self, room: RoomId, caps: RoomCaps) -> Result<(), MediaEngineError> {
-        let mut g = self.rooms.lock().unwrap();
-        let state = g.get_mut(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
-        state.caps = caps;
+        self.with_room_mut(room, |state| {
+            state.caps = caps;
+        })
+        .ok_or(MediaEngineError::RoomNotFound(room))?;
         Ok(())
     }
 
     async fn list_publishers(&self, room: RoomId) -> Result<Vec<ParticipantId>, MediaEngineError> {
-        let g = self.rooms.lock().unwrap();
-        let state = g.get(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
-        Ok(state.publisher_tracks.keys().copied().collect())
+        self.with_room(room, |state| state.publisher_tracks.keys().copied().collect())
+            .ok_or(MediaEngineError::RoomNotFound(room))
     }
 
     async fn list_subscribers(&self, room: RoomId) -> Result<Vec<ParticipantId>, MediaEngineError> {
-        let g = self.rooms.lock().unwrap();
-        let state = g.get(&room).ok_or(MediaEngineError::RoomNotFound(room))?;
-        Ok(state.subscribers.iter().copied().collect())
+        self.with_room(room, |state| state.subscribers.iter().copied().collect())
+            .ok_or(MediaEngineError::RoomNotFound(room))
     }
 }
 
@@ -3434,5 +3560,46 @@ mod tests {
         // Idempotent release.
         e.set_bridge_tick_owner(rid, false);
         assert!(!e.bridge_owns_tick(rid));
+    }
+
+    #[tokio::test]
+    async fn layout_720p_basis_does_not_shrink_to_853x480_on_720p_canvas() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        let p = p(1);
+        e.create_room(cfg(rid)).await.unwrap();
+        e.bridge_participant(rid, p, vec![vks_core::track::Track::new(p, vks_core::track::TrackKind::Video)]);
+        // Resize canvas to 720p (Codian MCU / SIP resolution)
+        e.ensure_composite_size(rid, 1280, 720);
+
+        let mut assignments = BTreeMap::new();
+        assignments.insert(p, 0);
+        let desc = LayoutDescriptor {
+            version: 1,
+            layout_id: "custom".into(),
+            assignments,
+            geometry: vec![vks_core::ports::media_engine::LayoutSlot {
+                slot: 0,
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 720,
+                z_order: 0,
+            }],
+            ..Default::default()
+        };
+        e.apply_layout(rid, desc).await.unwrap();
+        for _ in 0..12 {
+            e.tick(rid);
+        }
+
+        // Check scaled rects
+        let rects = e.with_room(rid, |s| s.scaled_slot_rects()).unwrap();
+        let slot0 = rects.get(&0).expect("slot 0 must exist");
+        assert_eq!(
+            (slot0.x, slot0.y, slot0.w, slot0.h),
+            (0, 0, 1280, 720),
+            "720p geometry on 720p canvas must be 1:1 (1280x720), not shrunk to 853x480"
+        );
     }
 }

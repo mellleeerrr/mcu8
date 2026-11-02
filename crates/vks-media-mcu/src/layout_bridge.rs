@@ -72,8 +72,11 @@ fn lerp(a: u32, b: u32, t: f64) -> u32 {
 }
 
 fn lerp_rect(from: &PixelRect, to: &PixelRect, t: f64) -> PixelRect {
-    PixelRect::new(lerp(from.x, to.x, t), lerp(from.y, to.y, t), lerp(from.w, to.w, t), lerp(from.h, to.h, t))
-        .with_z(to.z)
+    let x = lerp(from.x, to.x, t) & !1;
+    let y = lerp(from.y, to.y, t) & !1;
+    let w = (lerp(from.w, to.w, t) & !1).max(2);
+    let h = (lerp(from.h, to.h, t) & !1).max(2);
+    PixelRect::new(x, y, w, h).with_z(to.z)
 }
 
 /// Layout bridge: produces per-slot pixel rects for the compositor.

@@ -57,14 +57,15 @@ impl Compositor {
             return Frame::new(width, height, Vec::new());
         }
         let pixels = width as usize * height as usize;
+        let is_even_canvas = width.is_multiple_of(2) && height.is_multiple_of(2);
         let yuv_canvas =
-            frames.values().any(|frame| frame.is_yuv420p()) && width.is_multiple_of(2) && height.is_multiple_of(2);
+            is_even_canvas && (frames.is_empty() || frames.values().any(|frame| frame.is_yuv420p()));
         // Build the canvas in one allocation: a YUV canvas starts at limited
         // range (16/128), a grayscale one at black. `filled` + `resize` used to
         // touch and copy the 3 MB buffer twice per tick.
         let mut canvas = if yuv_canvas {
             let mut data = vec![128u8; pixels * 3 / 2];
-            data[..pixels].fill(16);
+            Self::fill_studio_black(&mut data, pixels);
             Frame::new(width, height, data)
         } else {
             Frame::new(width, height, vec![0u8; pixels])
@@ -79,6 +80,224 @@ impl Compositor {
         for (key, rect) in ordered {
             if let Some(frame) = frames.get(key) {
                 Self::blit(&mut canvas, frame, rect);
+            }
+        }
+        canvas
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn blend_50_avx2(row: &mut [u8], target_val: u8) {
+        use std::arch::x86_64::*;
+        let target_vec = _mm256_set1_epi8(target_val as i8);
+        let mut i = 0;
+        let len = row.len();
+        while i + 32 <= len {
+            let ptr = row.as_mut_ptr().add(i);
+            let v = _mm256_loadu_si256(ptr as *const __m256i);
+            let blended = _mm256_avg_epu8(v, target_vec);
+            _mm256_storeu_si256(ptr as *mut __m256i, blended);
+            i += 32;
+        }
+        while i < len {
+            *row.get_unchecked_mut(i) = ((*row.get_unchecked(i) as u16 + target_val as u16 + 1) / 2) as u8;
+            i += 1;
+        }
+    }
+
+    fn blend_50(row: &mut [u8], target_val: u8) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    Self::blend_50_avx2(row, target_val);
+                }
+                return;
+            }
+        }
+        for p in row {
+            *p = ((*p as u16 + target_val as u16 + 1) / 2) as u8;
+        }
+    }
+
+    /// Отрисовка полупрозрачной OSD-плашки с именем участника внизу слота.
+    /// Работает поверх активного видеокадра или чистого фона конференции (без заглушек).
+    pub fn render_video_name_badge(canvas: &mut Frame, rect: &PixelRect, label: &str) {
+        if label.trim().is_empty() {
+            return;
+        }
+        let (cw, ch) = (canvas.width as usize, canvas.height as usize);
+        if cw == 0 || ch == 0 {
+            return;
+        }
+        let right = (rect.x.saturating_add(rect.w) as usize).min(cw);
+        let bottom = (rect.y.saturating_add(rect.h) as usize).min(ch);
+        let rx = (rect.x as usize).min(cw);
+        let ry = (rect.y as usize).min(ch);
+        let rw = right.saturating_sub(rx);
+        let rh = bottom.saturating_sub(ry);
+        if rw < 8 || rh < 8 {
+            return;
+        }
+
+        let is_yuv = canvas.is_yuv420p();
+        let bar_h = (rh / 10).clamp(16, 40);
+        let bar_y = ry + rh.saturating_sub(bar_h);
+        let bar_bottom = ry + rh;
+
+        // 1. Векторный 50% альфа-блендинг строки Y с темным фоном (Y=16)
+        for cy in bar_y..bar_bottom {
+            let row_start = cy * cw + rx;
+            let row_end = row_start + rw;
+            if let Some(row_slice) = canvas.data.get_mut(row_start..row_end) {
+                Self::blend_50(row_slice, 16);
+            }
+        }
+
+        // 2. Блендинг U и V плоскостей к нейтральному уровню 128 (для YUV420p)
+        if is_yuv {
+            let u_plane = cw * ch;
+            let v_plane = cw * ch + cw * ch / 4;
+            let uv_cw = cw / 2;
+            let uv_rx = rx / 2;
+            let uv_rw = (rw / 2).max(1);
+            let uv_bar_y = bar_y / 2;
+            let uv_bar_bottom = (bar_bottom / 2).min(ch / 2);
+
+            for row_y in uv_bar_y..uv_bar_bottom {
+                let u_row = u_plane + row_y * uv_cw + uv_rx;
+                let v_row = v_plane + row_y * uv_cw + uv_rx;
+                if let Some(slice_u) = canvas.data.get_mut(u_row..u_row + uv_rw) {
+                    Self::blend_50(slice_u, 128);
+                }
+                if let Some(slice_v) = canvas.data.get_mut(v_row..v_row + uv_rw) {
+                    Self::blend_50(slice_v, 128);
+                }
+            }
+        }
+
+        // 3. Рендеринг текста имени (с масштабированием и поддержкой кириллицы)
+        let scale = (bar_h / 14).clamp(1, 3);
+        let font_h = 7 * scale;
+        let text_y = bar_y + bar_h.saturating_sub(font_h) / 2;
+        let char_w = 6 * scale;
+        let max_chars = rw.saturating_sub(scale * 4) / char_w;
+        if max_chars == 0 {
+            return;
+        }
+
+        let char_count = label.chars().count();
+        let display_text: String = if char_count > max_chars && max_chars > 2 {
+            let mut s: String = label.chars().take(max_chars - 2).collect();
+            s.push_str("..");
+            s
+        } else {
+            label.chars().take(max_chars).collect()
+        };
+
+        let text_w = display_text.chars().count() * char_w;
+        let start_x = rx + rw.saturating_sub(text_w) / 2;
+
+        for (i, c) in display_text.chars().enumerate() {
+            let glyph = Self::font_glyph_5x7(c);
+            let char_x = start_x + i * char_w;
+            for col in 0..5 {
+                let col_bits = glyph[col];
+                for row in 0..7 {
+                    if (col_bits >> row) & 1 == 1 {
+                        for sy in 0..scale {
+                            let py = text_y + row * scale + sy;
+                            if py >= ch {
+                                break;
+                            }
+                            for sx in 0..scale {
+                                let px = char_x + col * scale + sx;
+                                if px >= right || px >= cw {
+                                    break;
+                                }
+                                let y_idx = py * cw + px;
+                                if let Some(p) = canvas.data.get_mut(y_idx) {
+                                    *p = 235; // Bright white Y
+                                }
+                                if is_yuv {
+                                    let uv_cw = cw / 2;
+                                    let u_idx = cw * ch + (py / 2) * uv_cw + (px / 2);
+                                    let v_idx = cw * ch + (cw * ch / 4) + (py / 2) * uv_cw + (px / 2);
+                                    if let Some(up) = canvas.data.get_mut(u_idx) {
+                                        *up = 128;
+                                    }
+                                    if let Some(vp) = canvas.data.get_mut(v_idx) {
+                                        *vp = 128;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn font_glyph_5x7(c: char) -> [u8; 5] {
+        let code = c as u32;
+        if (32..=126).contains(&code) {
+            return FONT_5X7[(code - 32) as usize];
+        }
+        let upper = c.to_uppercase().next().unwrap_or(c);
+        match upper {
+            'А' => FONT_5X7[('A' as u32 - 32) as usize],
+            'Б' => [0x7f, 0x49, 0x49, 0x49, 0x71],
+            'В' => FONT_5X7[('B' as u32 - 32) as usize],
+            'Г' => [0x7f, 0x01, 0x01, 0x01, 0x01],
+            'Д' => [0x60, 0x3f, 0x21, 0x3f, 0x60],
+            'Е' | 'Ё' => FONT_5X7[('E' as u32 - 32) as usize],
+            'Ж' => [0x49, 0x2a, 0x7f, 0x2a, 0x49],
+            'З' => [0x22, 0x41, 0x49, 0x49, 0x36],
+            'И' => [0x7f, 0x10, 0x08, 0x04, 0x7f],
+            'Й' => [0x7f, 0x10, 0x09, 0x04, 0x7f],
+            'К' => FONT_5X7[('K' as u32 - 32) as usize],
+            'Л' => [0x60, 0x1f, 0x01, 0x01, 0x7f],
+            'М' => FONT_5X7[('M' as u32 - 32) as usize],
+            'Н' => FONT_5X7[('H' as u32 - 32) as usize],
+            'О' => FONT_5X7[('O' as u32 - 32) as usize],
+            'П' => [0x7f, 0x01, 0x01, 0x01, 0x7f],
+            'Р' => FONT_5X7[('P' as u32 - 32) as usize],
+            'С' => FONT_5X7[('C' as u32 - 32) as usize],
+            'Т' => FONT_5X7[('T' as u32 - 32) as usize],
+            'У' => [0x07, 0x08, 0x70, 0x08, 0x07],
+            'Ф' => [0x1c, 0x22, 0x7f, 0x22, 0x1c],
+            'Х' => FONT_5X7[('X' as u32 - 32) as usize],
+            'Ц' => [0x7f, 0x40, 0x40, 0x7f, 0xc0],
+            'Ч' => [0x0f, 0x08, 0x08, 0x08, 0x7f],
+            'Ш' => [0x7f, 0x40, 0x7f, 0x40, 0x7f],
+            'Щ' => [0x7f, 0x40, 0x7f, 0x40, 0xff],
+            'Ъ' => [0x01, 0x7f, 0x48, 0x48, 0x30],
+            'Ы' => [0x7f, 0x48, 0x48, 0x30, 0x7f],
+            'Ь' => [0x7f, 0x48, 0x48, 0x48, 0x30],
+            'Э' => [0x22, 0x41, 0x49, 0x49, 0x3e],
+            'Ю' => [0x7f, 0x08, 0x3e, 0x41, 0x3e],
+            'Я' => [0x46, 0x29, 0x19, 0x09, 0x7f],
+            _ => [0x02, 0x01, 0x51, 0x09, 0x06], // '?'
+        }
+    }
+
+    /// Композитинг с отрисовкой OSD-плашек имен для всех назначенных участников.
+    pub fn compose_sized_with_labels(
+        &self,
+        width: u32,
+        height: u32,
+        frames: &BTreeMap<u32, Arc<Frame>>,
+        rects: &BTreeMap<u32, PixelRect>,
+        labels: &BTreeMap<u32, String>,
+    ) -> Frame {
+        let mut canvas = self.compose_sized(width, height, frames, rects);
+        let mut ordered: Vec<(&u32, &PixelRect)> = rects.iter().collect();
+        ordered.sort_unstable_by_key(|(key, rect)| (rect.z, **key));
+        for (key, rect) in ordered {
+            if let Some(label) = labels.get(key) {
+                if !label.trim().is_empty() {
+                    Self::render_video_name_badge(&mut canvas, rect, label.trim());
+                }
             }
         }
         canvas
@@ -108,13 +327,24 @@ impl Compositor {
         // Uniform (letterbox) fit, matching the room layout convention, in integer math:
         // width-limited when rw/fw <= rh/fh, else height-limited. The free axis is
         // rounded half-up exactly like the former `f64::round`.
-        let (dw, dh) = if rw * fh <= rh * fw {
+        let (mut dw, mut dh) = if rw * fh <= rh * fw {
             (rw, ((fh * rw + fw / 2) / fw).max(1))
         } else {
             (((fw * rh + fh / 2) / fh).max(1), rh)
         };
-        let ox = rx + rw.saturating_sub(dw) / 2;
-        let oy = ry + rh.saturating_sub(dh) / 2;
+
+        let is_yuv_canvas = canvas.data.len() == cw * ch * 3 / 2;
+        if is_yuv_canvas {
+            dw = (dw & !1).max(2).min(rw);
+            dh = (dh & !1).max(2).min(rh);
+        }
+
+        let mut ox = rx + rw.saturating_sub(dw) / 2;
+        let mut oy = ry + rh.saturating_sub(dh) / 2;
+        if is_yuv_canvas {
+            ox = (ox & !1).min(cw.saturating_sub(dw));
+            oy = (oy & !1).min(ch.saturating_sub(dh));
+        }
         let step_x = fw / dw;
         let rem_x = fw % dw;
         for dy in 0..dh {
@@ -177,9 +407,25 @@ impl Compositor {
         debug_assert_eq!(destination.len(), dw);
         if step_x == 1 && rem_x == 0 {
             if let Some(source) = source.get(..dw) {
+                #[cfg(target_arch = "x86_64")]
+                if is_x86_feature_detected!("avx2") && dw >= 32 {
+                    unsafe {
+                        Self::copy_row_avx2(destination, source);
+                    }
+                    return;
+                }
                 destination.copy_from_slice(source);
             }
             return;
+        }
+        if rem_x == 0 && step_x == 2 {
+            #[cfg(target_arch = "x86_64")]
+            if is_x86_feature_detected!("avx2") && dw >= 16 && source.len() >= dw * 2 {
+                unsafe {
+                    Self::downsample_2x_avx2(destination, source, dw);
+                }
+                return;
+            }
         }
         if rem_x == 0 && step_x > 1 {
             if let Some(source) = source.get(..dw.saturating_mul(step_x)) {
@@ -227,9 +473,18 @@ impl Compositor {
             return;
         }
         let luma = if canvas.is_yuv420p() { 16 } else { 0 };
+        #[cfg(target_arch = "x86_64")]
+        let use_avx2 = is_x86_feature_detected!("avx2") && rw >= 32;
         for row in ry..ry + rh {
             let offset = row * cw + rx;
             if let Some(line) = canvas.data.get_mut(offset..offset + rw) {
+                #[cfg(target_arch = "x86_64")]
+                if use_avx2 {
+                    unsafe {
+                        Self::fill_row_avx2(line, luma);
+                    }
+                    continue;
+                }
                 line.fill(luma);
             }
         }
@@ -239,19 +494,193 @@ impl Compositor {
             let chroma_bottom = (bottom / 2).min(ch / 2);
             let chroma_rx = rx / 2;
             let chroma_ry = ry / 2;
+            let chroma_rw = chroma_right.saturating_sub(chroma_rx);
+            #[cfg(target_arch = "x86_64")]
+            let use_avx2_chroma = is_x86_feature_detected!("avx2") && chroma_rw >= 32;
             for plane in 0..2 {
                 let plane_offset = cw * ch + plane * (cw * ch / 4);
                 for row in chroma_ry..chroma_bottom {
                     let offset = plane_offset + row * (cw / 2) + chroma_rx;
-                    let width = chroma_right.saturating_sub(chroma_rx);
-                    if let Some(line) = canvas.data.get_mut(offset..offset + width) {
+                    if let Some(line) = canvas.data.get_mut(offset..offset + chroma_rw) {
+                        #[cfg(target_arch = "x86_64")]
+                        if use_avx2_chroma {
+                            unsafe {
+                                Self::fill_row_avx2(line, 128);
+                            }
+                            continue;
+                        }
                         line.fill(128);
                     }
                 }
             }
         }
     }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn copy_row_avx2(dst: &mut [u8], src: &[u8]) {
+        use std::arch::x86_64::*;
+        let len = dst.len().min(src.len());
+        let mut i = 0;
+        while i + 32 <= len {
+            let chunk = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
+            _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut __m256i, chunk);
+            i += 32;
+        }
+        if i < len {
+            std::ptr::copy_nonoverlapping(src.as_ptr().add(i), dst.as_mut_ptr().add(i), len - i);
+        }
+    }
+
+    pub(crate) fn fill_studio_black(data: &mut [u8], pixels: usize) {
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") && pixels >= 32 {
+            unsafe {
+                Self::fill_row_avx2(&mut data[..pixels], 16);
+            }
+            return;
+        }
+        data[..pixels].fill(16);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    pub(crate) unsafe fn fill_row_avx2(dst: &mut [u8], value: u8) {
+        use std::arch::x86_64::*;
+        let fill = _mm256_set1_epi8(value as i8);
+        let len = dst.len();
+        let mut i = 0;
+        while i + 32 <= len {
+            _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut __m256i, fill);
+            i += 32;
+        }
+        if i < len {
+            dst[i..].fill(value);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn downsample_2x_avx2(dst: &mut [u8], src: &[u8], count: usize) {
+        use std::arch::x86_64::*;
+        let shuffle_mask = _mm256_setr_epi8(
+            0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1,
+            0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1,
+        );
+        let mut i = 0;
+        while i + 16 <= count && (i * 2 + 32) <= src.len() {
+            let v = _mm256_loadu_si256(src.as_ptr().add(i * 2) as *const __m256i);
+            let shuffled = _mm256_shuffle_epi8(v, shuffle_mask);
+            let lo = _mm256_castsi256_si128(shuffled);
+            let hi = _mm256_extracti128_si256(shuffled, 1);
+            let packed = _mm_unpacklo_epi64(lo, hi);
+            _mm_storeu_si128(dst.as_mut_ptr().add(i) as *mut __m128i, packed);
+            i += 16;
+        }
+        while i < count && i * 2 < src.len() {
+            *dst.get_unchecked_mut(i) = *src.get_unchecked(i * 2);
+            i += 1;
+        }
+    }
 }
+
+pub const FONT_5X7: [[u8; 5]; 95] = [
+    [0x00, 0x00, 0x00, 0x00, 0x00],
+    [0x00, 0x00, 0x5f, 0x00, 0x00],
+    [0x00, 0x07, 0x00, 0x07, 0x00],
+    [0x14, 0x7f, 0x14, 0x7f, 0x14],
+    [0x24, 0x2a, 0x7f, 0x2a, 0x12],
+    [0x23, 0x13, 0x08, 0x64, 0x62],
+    [0x36, 0x49, 0x55, 0x22, 0x50],
+    [0x00, 0x05, 0x03, 0x00, 0x00],
+    [0x00, 0x1c, 0x22, 0x41, 0x00],
+    [0x00, 0x41, 0x22, 0x1c, 0x00],
+    [0x08, 0x2a, 0x1c, 0x2a, 0x08],
+    [0x08, 0x08, 0x3e, 0x08, 0x08],
+    [0x00, 0x50, 0x30, 0x00, 0x00],
+    [0x08, 0x08, 0x08, 0x08, 0x08],
+    [0x00, 0x60, 0x60, 0x00, 0x00],
+    [0x20, 0x10, 0x08, 0x04, 0x02],
+    [0x3e, 0x51, 0x49, 0x45, 0x3e],
+    [0x00, 0x42, 0x7f, 0x40, 0x00],
+    [0x42, 0x61, 0x51, 0x49, 0x46],
+    [0x21, 0x41, 0x45, 0x4b, 0x31],
+    [0x18, 0x14, 0x12, 0x7f, 0x10],
+    [0x27, 0x45, 0x45, 0x45, 0x39],
+    [0x3c, 0x4a, 0x49, 0x49, 0x30],
+    [0x01, 0x71, 0x09, 0x05, 0x03],
+    [0x36, 0x49, 0x49, 0x49, 0x36],
+    [0x06, 0x49, 0x49, 0x29, 0x1e],
+    [0x00, 0x36, 0x36, 0x00, 0x00],
+    [0x00, 0x56, 0x36, 0x00, 0x00],
+    [0x00, 0x08, 0x14, 0x22, 0x41],
+    [0x14, 0x14, 0x14, 0x14, 0x14],
+    [0x41, 0x22, 0x14, 0x08, 0x00],
+    [0x02, 0x01, 0x51, 0x09, 0x06],
+    [0x32, 0x49, 0x79, 0x41, 0x3e],
+    [0x7e, 0x11, 0x11, 0x11, 0x7e],
+    [0x7f, 0x49, 0x49, 0x49, 0x36],
+    [0x3e, 0x41, 0x41, 0x41, 0x22],
+    [0x7f, 0x41, 0x41, 0x22, 0x1c],
+    [0x7f, 0x49, 0x49, 0x49, 0x41],
+    [0x7f, 0x09, 0x09, 0x01, 0x01],
+    [0x3e, 0x41, 0x41, 0x51, 0x32],
+    [0x7f, 0x08, 0x08, 0x08, 0x7f],
+    [0x00, 0x41, 0x7f, 0x41, 0x00],
+    [0x20, 0x40, 0x41, 0x3f, 0x01],
+    [0x7f, 0x08, 0x14, 0x22, 0x41],
+    [0x7f, 0x40, 0x40, 0x40, 0x40],
+    [0x7f, 0x02, 0x04, 0x02, 0x7f],
+    [0x7f, 0x04, 0x08, 0x10, 0x7f],
+    [0x3e, 0x41, 0x41, 0x41, 0x3e],
+    [0x7f, 0x09, 0x09, 0x09, 0x06],
+    [0x3e, 0x41, 0x51, 0x21, 0x5e],
+    [0x7f, 0x09, 0x19, 0x29, 0x46],
+    [0x46, 0x49, 0x49, 0x49, 0x31],
+    [0x01, 0x01, 0x7f, 0x01, 0x01],
+    [0x3f, 0x40, 0x40, 0x40, 0x3f],
+    [0x1f, 0x20, 0x40, 0x20, 0x1f],
+    [0x7f, 0x20, 0x18, 0x20, 0x7f],
+    [0x63, 0x14, 0x08, 0x14, 0x63],
+    [0x03, 0x04, 0x78, 0x04, 0x03],
+    [0x61, 0x51, 0x49, 0x45, 0x43],
+    [0x00, 0x7f, 0x41, 0x41, 0x00],
+    [0x02, 0x04, 0x08, 0x10, 0x20],
+    [0x00, 0x41, 0x41, 0x7f, 0x00],
+    [0x04, 0x02, 0x01, 0x02, 0x04],
+    [0x40, 0x40, 0x40, 0x40, 0x40],
+    [0x00, 0x01, 0x02, 0x04, 0x00],
+    [0x20, 0x54, 0x54, 0x54, 0x78],
+    [0x7f, 0x48, 0x44, 0x44, 0x38],
+    [0x38, 0x44, 0x44, 0x44, 0x20],
+    [0x38, 0x44, 0x44, 0x48, 0x7f],
+    [0x38, 0x54, 0x54, 0x54, 0x18],
+    [0x08, 0x7e, 0x09, 0x01, 0x02],
+    [0x08, 0x14, 0x54, 0x54, 0x3c],
+    [0x7f, 0x08, 0x04, 0x04, 0x78],
+    [0x00, 0x44, 0x7d, 0x40, 0x00],
+    [0x20, 0x40, 0x44, 0x3d, 0x00],
+    [0x00, 0x7f, 0x10, 0x28, 0x44],
+    [0x00, 0x41, 0x7f, 0x40, 0x00],
+    [0x7c, 0x04, 0x18, 0x04, 0x78],
+    [0x7c, 0x08, 0x04, 0x04, 0x78],
+    [0x38, 0x44, 0x44, 0x44, 0x38],
+    [0x7c, 0x14, 0x14, 0x14, 0x08],
+    [0x08, 0x14, 0x14, 0x18, 0x7c],
+    [0x7c, 0x08, 0x04, 0x04, 0x08],
+    [0x48, 0x54, 0x54, 0x54, 0x20],
+    [0x04, 0x3f, 0x44, 0x40, 0x20],
+    [0x3c, 0x40, 0x40, 0x20, 0x7c],
+    [0x1c, 0x20, 0x40, 0x20, 0x1c],
+    [0x3c, 0x40, 0x30, 0x40, 0x3c],
+    [0x44, 0x28, 0x10, 0x28, 0x44],
+    [0x0c, 0x50, 0x50, 0x50, 0x3c],
+    [0x44, 0x64, 0x54, 0x4c, 0x44],
+    [0x00, 0x08, 0x36, 0x41, 0x00],
+    [0x00, 0x00, 0x7f, 0x00, 0x00],
+    [0x00, 0x41, 0x36, 0x08, 0x00],
+    [0x08, 0x08, 0x2a, 0x1c, 0x08],
+];
 
 #[cfg(test)]
 mod tests {
@@ -459,7 +888,10 @@ mod tests {
     #[test]
     fn zero_frames_black_canvas() {
         let out = Compositor.compose(&BTreeMap::new(), &BTreeMap::new());
-        assert_eq!(out.data, vec![0u8; CANVAS_WIDTH as usize * CANVAS_HEIGHT as usize], "no frames → black canvas");
+        let pixels = CANVAS_WIDTH as usize * CANVAS_HEIGHT as usize;
+        let mut expected = vec![128u8; pixels * 3 / 2];
+        expected[..pixels].fill(16);
+        assert_eq!(out.data, expected, "no frames → studio black YUV420p canvas");
     }
 
     #[test]
@@ -525,5 +957,39 @@ mod tests {
         assert_eq!(out.data[900], 0, "right letterbox bar");
         assert_eq!(out.data[400], 5, "image center");
         assert_eq!(out.data[539 * 1920 + 400], 5, "image bottom edge");
+    }
+
+    #[test]
+    fn compose_sized_with_labels_renders_placeholder_and_text() {
+        let frames = BTreeMap::new();
+        let rects = BTreeMap::from([(0u32, PixelRect::new(0, 0, 960, 540))]);
+        let labels = BTreeMap::from([(0u32, "TrueConf Client".to_string())]);
+        let out = Compositor.compose_sized_with_labels(960, 540, &frames, &rects, &labels);
+        assert_eq!((out.width, out.height), (960, 540));
+        let has_avatar = out.data.iter().any(|&p| p == 140);
+        let has_text = out.data.iter().any(|&p| p == 235);
+        assert!(!has_avatar, "placeholder silhouette must NOT be rendered");
+        assert!(has_text, "name badge text rendered");
+    }
+
+    #[test]
+    fn compose_sized_with_labels_renders_cyrillic_text() {
+        let frames = BTreeMap::new();
+        let rects = BTreeMap::from([(0u32, PixelRect::new(0, 0, 960, 540))]);
+        let labels = BTreeMap::from([(0u32, "Поликом Конференция".to_string())]);
+        let out = Compositor.compose_sized_with_labels(960, 540, &frames, &rects, &labels);
+        let has_text = out.data.iter().any(|&p| p == 235);
+        assert!(has_text, "cyrillic text badge rendered");
+    }
+
+    #[test]
+    fn compose_sized_with_labels_overlays_badge_on_active_video() {
+        let frame = Arc::new(Frame::filled(960, 540, 100));
+        let frames = BTreeMap::from([(0u32, frame)]);
+        let rects = BTreeMap::from([(0u32, PixelRect::new(0, 0, 960, 540))]);
+        let labels = BTreeMap::from([(0u32, "Active Video".to_string())]);
+        let out = Compositor.compose_sized_with_labels(960, 540, &frames, &rects, &labels);
+        let has_text = out.data.iter().any(|&p| p == 235);
+        assert!(has_text, "name badge text rendered over active video");
     }
 }
