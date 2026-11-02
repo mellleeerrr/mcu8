@@ -103,6 +103,8 @@ struct RoomState {
     participant_labels: BTreeMap<ParticipantId, String>,
     /// Participant label visibility (default true).
     participant_label_visibility: BTreeMap<ParticipantId, bool>,
+    /// Pre-allocated scratch frame buffer for zero-alloc compositing.
+    scratch_frame: Option<Frame>,
 }
 
 impl RoomState {
@@ -130,6 +132,7 @@ impl RoomState {
                 Compositor::fill_studio_black(&mut data, pixels);
                 Frame::new(CANVAS_SIZE.0, CANVAS_SIZE.1, data)
             }),
+            scratch_frame: None,
             mixed_audio: Vec::new(),
             participant_audio: BTreeMap::new(),
             vads: BTreeMap::new(),
@@ -418,9 +421,26 @@ impl RoomState {
         let rects = self.scaled_slot_rects();
         let labels = self.slot_labels();
         let (width, height) = self.canvas;
-        self.composite = Arc::new(Compositor.compose_sized_with_labels(width, height, frames, &rects, &labels));
-        // Кадры сохраняются для персональной сборки (самопросмотр): сам композит
-        // уже собран, а личная дельта нужна отдельно.
+
+        if let Some(exclusive) = Arc::get_mut(&mut self.composite) {
+            if exclusive.width == width && exclusive.height == height {
+                Compositor.compose_sized_with_labels_into(exclusive, frames, &rects, &labels);
+                self.frames.clone_from(frames);
+                self.stats.last_duration_us = t0.elapsed().as_micros() as u64;
+                self.stats.frames_rendered += 1;
+                return;
+            }
+        }
+
+        let mut target_frame = self
+            .scratch_frame
+            .take()
+            .unwrap_or_else(|| Frame::new(width, height, Vec::new()));
+        target_frame.width = width;
+        target_frame.height = height;
+        Compositor.compose_sized_with_labels_into(&mut target_frame, frames, &rects, &labels);
+
+        self.composite = Arc::new(target_frame);
         self.frames.clone_from(frames);
         self.stats.last_duration_us = t0.elapsed().as_micros() as u64;
         self.stats.frames_rendered += 1;

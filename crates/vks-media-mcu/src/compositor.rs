@@ -53,36 +53,54 @@ impl Compositor {
         frames: &BTreeMap<u32, Arc<Frame>>,
         rects: &BTreeMap<u32, PixelRect>,
     ) -> Frame {
+        let mut canvas = Frame::new(width, height, Vec::new());
+        self.compose_sized_into(&mut canvas, frames, rects);
+        canvas
+    }
+
+    /// Рендерит композит в существующий `canvas`, избегая аллокации нового буфера.
+    pub fn compose_sized_into(
+        &self,
+        canvas: &mut Frame,
+        frames: &BTreeMap<u32, Arc<Frame>>,
+        rects: &BTreeMap<u32, PixelRect>,
+    ) {
+        let (width, height) = (canvas.width, canvas.height);
         if width == 0 || height == 0 {
-            return Frame::new(width, height, Vec::new());
+            canvas.data.clear();
+            return;
         }
         let pixels = width as usize * height as usize;
         let is_even_canvas = width.is_multiple_of(2) && height.is_multiple_of(2);
         let yuv_canvas =
             is_even_canvas && (frames.is_empty() || frames.values().any(|frame| frame.is_yuv420p()));
-        // Build the canvas in one allocation: a YUV canvas starts at limited
-        // range (16/128), a grayscale one at black. `filled` + `resize` used to
-        // touch and copy the 3 MB buffer twice per tick.
-        let mut canvas = if yuv_canvas {
-            let mut data = vec![128u8; pixels * 3 / 2];
-            Self::fill_studio_black(&mut data, pixels);
-            Frame::new(width, height, data)
+        let required_len = if yuv_canvas { pixels * 3 / 2 } else { pixels };
+        if canvas.data.len() != required_len {
+            canvas.data.resize(required_len, 0);
+        }
+        if yuv_canvas {
+            Self::fill_studio_black(&mut canvas.data, pixels);
         } else {
-            Frame::new(width, height, vec![0u8; pixels])
-        };
+            #[cfg(target_arch = "x86_64")]
+            if is_x86_feature_detected!("avx2") && pixels >= 32 {
+                unsafe {
+                    Self::fill_row_avx2(&mut canvas.data[..pixels], 0);
+                }
+            } else {
+                canvas.data[..pixels].fill(0);
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            canvas.data[..pixels].fill(0);
+        }
         // Overlap/PiP: z_index задаёт порядок отрисовки, ключ — стабильный
         // tie-break. BTreeMap сам по себе сортировал только по slot id.
-        // Сортировка ключей — небольшая Vec-аллокация на вызов; сам канвас
-        // (3 МБ для YUV) выделяется один раз за вызов — его переиспользование
-        // требует per-room scratch-буфера и вынесено в отдельный срез S20.
         let mut ordered: Vec<(&u32, &PixelRect)> = rects.iter().collect();
         ordered.sort_unstable_by_key(|(key, rect)| (rect.z, **key));
         for (key, rect) in ordered {
             if let Some(frame) = frames.get(key) {
-                Self::blit(&mut canvas, frame, rect);
+                Self::blit(canvas, frame, rect);
             }
         }
-        canvas
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -281,6 +299,26 @@ impl Compositor {
         }
     }
 
+    /// Рендерит композит с OSD-плашками в существующий `canvas`.
+    pub fn compose_sized_with_labels_into(
+        &self,
+        canvas: &mut Frame,
+        frames: &BTreeMap<u32, Arc<Frame>>,
+        rects: &BTreeMap<u32, PixelRect>,
+        labels: &BTreeMap<u32, String>,
+    ) {
+        self.compose_sized_into(canvas, frames, rects);
+        let mut ordered: Vec<(&u32, &PixelRect)> = rects.iter().collect();
+        ordered.sort_unstable_by_key(|(key, rect)| (rect.z, **key));
+        for (key, rect) in ordered {
+            if let Some(label) = labels.get(key) {
+                if !label.trim().is_empty() {
+                    Self::render_video_name_badge(canvas, rect, label.trim());
+                }
+            }
+        }
+    }
+
     /// Композитинг с отрисовкой OSD-плашек имен для всех назначенных участников.
     pub fn compose_sized_with_labels(
         &self,
@@ -290,16 +328,8 @@ impl Compositor {
         rects: &BTreeMap<u32, PixelRect>,
         labels: &BTreeMap<u32, String>,
     ) -> Frame {
-        let mut canvas = self.compose_sized(width, height, frames, rects);
-        let mut ordered: Vec<(&u32, &PixelRect)> = rects.iter().collect();
-        ordered.sort_unstable_by_key(|(key, rect)| (rect.z, **key));
-        for (key, rect) in ordered {
-            if let Some(label) = labels.get(key) {
-                if !label.trim().is_empty() {
-                    Self::render_video_name_badge(&mut canvas, rect, label.trim());
-                }
-            }
-        }
+        let mut canvas = Frame::new(width, height, Vec::new());
+        self.compose_sized_with_labels_into(&mut canvas, frames, rects, labels);
         canvas
     }
 
@@ -348,7 +378,7 @@ impl Compositor {
         let step_x = fw / dw;
         let rem_x = fw % dw;
         for dy in 0..dh {
-            let fy = dy * fh / dh;
+            let fy = if fh == dh { dy } else { dy * fh / dh };
             let Some(source) = frame.data.get(fy * fw..fy * fw + fw) else { continue };
             let destination_row = (oy + dy) * cw;
             let Some(destination) = canvas.data.get_mut(destination_row + ox..destination_row + ox + dw) else {
@@ -375,7 +405,7 @@ impl Compositor {
                 let source_offset = source_pixels + plane * (source_pixels / 4);
                 let destination_offset = cw * ch + plane * (cw * ch / 4);
                 for dy in 0..chroma_dh {
-                    let source_y = dy * chroma_height / chroma_dh.max(1);
+                    let source_y = if chroma_height == chroma_dh { dy } else { dy * chroma_height / chroma_dh.max(1) };
                     let row = oy / 2 + dy;
                     let Some(destination) = canvas.data.get_mut(
                         destination_offset + row * (cw / 2) + ox / 2
@@ -537,10 +567,16 @@ impl Compositor {
         if is_x86_feature_detected!("avx2") && pixels >= 32 {
             unsafe {
                 Self::fill_row_avx2(&mut data[..pixels], 16);
+                if data.len() >= pixels * 3 / 2 {
+                    Self::fill_row_avx2(&mut data[pixels..pixels * 3 / 2], 128);
+                }
             }
             return;
         }
         data[..pixels].fill(16);
+        if data.len() >= pixels * 3 / 2 {
+            data[pixels..pixels * 3 / 2].fill(128);
+        }
     }
 
     #[cfg(target_arch = "x86_64")]
