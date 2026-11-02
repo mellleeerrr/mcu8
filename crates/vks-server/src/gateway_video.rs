@@ -589,22 +589,19 @@ fn farm_spec_for(profile: &VideoProfile, visible_windows: usize) -> vks_media_mc
     // `P1`: общий энкодер на N окон требует больше полосы (BENCHMARK §10:
     // +8.6 %), но не больше +25 % — кламп внутри `group_bitrate_kbps`.
     let group_bitrate = vks_media_mcu::group_bitrate_kbps(profile.bitrate_kbps, visible_windows);
-    vks_media_mcu::farm::EncoderSpec {
-        codec: match profile.codec {
-            GatewayVideoCodec::H264 => vks_media_mcu::farm::FarmCodec::H264,
-            GatewayVideoCodec::H265 => vks_media_mcu::farm::FarmCodec::H265,
-        },
-        width: profile.width,
-        height: profile.height,
-        fps: profile.fps,
-        bitrate_kbps: group_bitrate,
-        maxrate_kbps: group_bitrate,
-        bufsize_kbps: group_bitrate.saturating_mul(2),
-        profile: profile.profile.clone(),
-        level: profile.level.clone(),
-        keyint: (profile.fps / 2).max(1),
-        encoder_params: profile.codec.encoder_params().to_string(),
-    }
+    let codec = match profile.codec {
+        GatewayVideoCodec::H264 => vks_media_mcu::farm::FarmCodec::H264,
+        GatewayVideoCodec::H265 => vks_media_mcu::farm::FarmCodec::H265,
+    };
+    vks_media_mcu::farm::EncoderSpec::canonical(
+        codec,
+        profile.width,
+        profile.height,
+        profile.fps,
+        group_bitrate,
+        &profile.profile,
+        &profile.level,
+    )
 }
 
 /// Dispatches H.264/H.265 RTP payload parsing behind one call site.
@@ -710,13 +707,13 @@ pub(super) async fn spawn_video_media_bridge(
     let mut decoder_stdin = decoder.stdin.take().expect("decoder stdin");
     let mut decoder_stdout = decoder.stdout.take().expect("decoder stdout");
     if let Some(ref stdin) = encoder_stdin {
-        vks_media_mcu::farm::tune_pipe_capacity(stdin);
+        vks_media_mcu::farm::tune_pipe_capacity(stdin, true);
     }
     if let Some(ref stdout) = encoder_stdout {
-        vks_media_mcu::farm::tune_pipe_capacity(stdout);
+        vks_media_mcu::farm::tune_pipe_capacity(stdout, false);
     }
-    vks_media_mcu::farm::tune_pipe_capacity(&decoder_stdin);
-    vks_media_mcu::farm::tune_pipe_capacity(&decoder_stdout);
+    vks_media_mcu::farm::tune_pipe_capacity(&decoder_stdin, false);
+    vks_media_mcu::farm::tune_pipe_capacity(&decoder_stdout, true);
     let (frames_tx, mut frames_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
     let (access_tx, mut access_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
     let rtp_socket = Arc::new(session.rtp_socket);

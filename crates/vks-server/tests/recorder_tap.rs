@@ -41,19 +41,7 @@ fn encoder_spec() -> EncoderSpec {
 
 /// Второй `EncoderSpec` на том же холсте — другой ключ группы (re-key).
 fn encoder_spec_with_bitrate(bitrate_kbps: u32) -> EncoderSpec {
-    EncoderSpec {
-        codec: FarmCodec::H264,
-        width: 640,
-        height: 360,
-        fps: 30,
-        bitrate_kbps,
-        maxrate_kbps: bitrate_kbps,
-        bufsize_kbps: 2048,
-        profile: "baseline".into(),
-        level: "3.1".into(),
-        keyint: 15,
-        encoder_params: "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=0:weightp=0:8x8dct=0:ref=1:rc-lookahead=0:slice-max-size=1180".into(),
-    }
+    EncoderSpec::canonical(FarmCodec::H264, 640, 360, 30, bitrate_kbps, "baseline", "3.1")
 }
 
 fn gray_frame() -> Arc<Frame> {

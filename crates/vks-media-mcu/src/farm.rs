@@ -96,6 +96,18 @@ impl FarmCodec {
         }
     }
 
+    /// Канонические параметры энкодера по умолчанию.
+    pub const fn default_params(self) -> &'static str {
+        match self {
+            Self::H264 => {
+                "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=0:weightp=0:8x8dct=0:ref=1:rc-lookahead=0:slice-max-size=1180"
+            }
+            Self::H265 => {
+                "log-level=error:bframes=0:rc-lookahead=0:scenecut=0:frame-threads=1:pools=1:aud=1:repeat-headers=1"
+            }
+        }
+    }
+
     /// Является ли NAL IDR-кадром (ключевым).
     fn is_idr_nal(self, nal: &[u8]) -> bool {
         let Some((_, start)) = find_start_code(nal, 0) else { return false };
@@ -150,6 +162,33 @@ pub struct EncoderSpec {
 }
 
 impl EncoderSpec {
+    /// Единый канонический конструктор профиля группы фермы.
+    pub fn canonical(
+        codec: FarmCodec,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_kbps: u32,
+        profile: impl Into<String>,
+        level: impl Into<String>,
+    ) -> Self {
+        let fps = fps.clamp(1, 60);
+        let bitrate_kbps = bitrate_kbps.max(64);
+        Self {
+            codec,
+            width: (width.max(160) / 2) * 2,
+            height: (height.max(120) / 2) * 2,
+            fps,
+            bitrate_kbps,
+            maxrate_kbps: bitrate_kbps,
+            bufsize_kbps: bitrate_kbps.saturating_mul(2),
+            profile: profile.into().trim().to_lowercase(),
+            level: level.into().trim().to_string(),
+            keyint: (fps / 2).max(1),
+            encoder_params: codec.default_params().to_string(),
+        }
+    }
+
     /// Длительность кадра группы.
     pub fn frame_interval(&self) -> Duration {
         Duration::from_micros(1_000_000 / u64::from(self.fps.max(1)))
@@ -699,7 +738,7 @@ impl EncoderFarm {
         group.cancel.store(true, Ordering::Relaxed);
         group.notify.notify_waiters();
         let room = group.key.room;
-        let pid = group.pid.load(Ordering::Relaxed);
+        let pid = group.pid.swap(0, Ordering::AcqRel);
         // `retire` = группа уничтожается: child не должен пережить её ни на
         // миллисекунду. Бьём группу процессов сразу (актор потом повторит).
         kill_process_group(pid);
@@ -818,9 +857,14 @@ impl Drop for GroupViewer {
 /// **Читатель** (отдельный таск): stdout → Annex-B → access units → broadcast.
 ///
 #[cfg(target_os = "linux")]
-pub fn tune_pipe_capacity<F: std::os::unix::io::AsRawFd>(file: &F) {
+pub fn tune_pipe_capacity<F: std::os::unix::io::AsRawFd>(file: &F, is_raw_video: bool) {
     let fd = file.as_raw_fd();
-    for &cap in &[1024 * 1024, 512 * 1024, 256 * 1024, 64 * 1024] {
+    let ladder: &[i32] = if is_raw_video {
+        &[4 * 1024 * 1024, 2 * 1024 * 1024, 1024 * 1024, 512 * 1024, 256 * 1024, 64 * 1024]
+    } else {
+        &[256 * 1024, 128 * 1024, 64 * 1024]
+    };
+    for &cap in ladder {
         let ret = unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, cap) };
         if ret > 0 {
             break;
@@ -828,7 +872,7 @@ pub fn tune_pipe_capacity<F: std::os::unix::io::AsRawFd>(file: &F) {
     }
 }
 #[cfg(not(target_os = "linux"))]
-pub fn tune_pipe_capacity<F>(_file: &F) {}
+pub fn tune_pipe_capacity<F>(_file: &F, _is_raw_video: bool) {}
 
 /// Разделение принципиально: если читать stdout в том же цикле, что писать
 /// stdin, возникает клинч — границей AU служит AUD **следующего** кадра, а его
@@ -847,10 +891,10 @@ async fn run_group(
     let mut stdin = child.stdin.take();
     let stdout = child.stdout.take();
     if let Some(ref p) = stdin {
-        tune_pipe_capacity(p);
+        tune_pipe_capacity(p, true);
     }
     if let Some(ref p) = stdout {
-        tune_pipe_capacity(p);
+        tune_pipe_capacity(p, false);
     }
     let reader = tokio::spawn(read_access_units(group.clone(), stdout, spec.clone(), cancel.clone()));
     // Кадров записано / AU отправлено — для диагностики «энкодер не голодает?».
@@ -1088,6 +1132,19 @@ fn spawn_ffmpeg(spec: &EncoderSpec, input: (u32, u32)) -> io::Result<Child> {
     command.process_group(0);
     // Паника актора/дроп Child без `kill_child` не должны оставлять ffmpeg.
     command.kill_on_drop(true);
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            let parent = libc::getppid();
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
     command.spawn()
 }
 
@@ -1124,7 +1181,7 @@ impl Drop for FarmInner {
         for group in groups {
             group.cancel.store(true, Ordering::Relaxed);
             group.notify.notify_waiters();
-            kill_process_group(group.pid.load(Ordering::Relaxed));
+            kill_process_group(group.pid.swap(0, Ordering::AcqRel));
         }
     }
 }
@@ -1208,19 +1265,7 @@ mod tests {
     }
 
     fn spec(fps: u32) -> EncoderSpec {
-        EncoderSpec {
-            codec: FarmCodec::H264,
-            width: 640,
-            height: 360,
-            fps,
-            bitrate_kbps: 800,
-            maxrate_kbps: 800,
-            bufsize_kbps: 1600,
-            profile: "baseline".into(),
-            level: "3.1".into(),
-            keyint: (fps / 2).max(1),
-            encoder_params: "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=0:weightp=0:8x8dct=0:ref=1:rc-lookahead=0:slice-max-size=1180".into(),
-        }
+        EncoderSpec::canonical(FarmCodec::H264, 640, 360, fps, 800, "baseline", "3.1")
     }
 
     /// Fake-фабрика без FFmpeg: актор пишет кадры в stdin `cat`, а `cat`
@@ -1631,7 +1676,7 @@ mod tests {
         let farm = farm_with_test_spawner(8);
         let room = room();
 
-        let h265 = EncoderSpec { codec: FarmCodec::H265, ..spec(30) };
+        let h265 = EncoderSpec::canonical(FarmCodec::H265, 640, 360, 30, 800, "baseline", "3.1");
         let h265_key = h265.key(room, 0);
         let viewer = farm.acquire(h265_key.clone(), (640, 360)).await.expect("acquire h265");
         assert!(farm.subscribe(room, FarmCodec::H264).is_none(), "H.265 group is not an H.264 tap");
