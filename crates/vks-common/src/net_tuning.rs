@@ -20,11 +20,11 @@
 //! | переменная | роль | дефолт |
 //! |---|---|---|
 //! | `VKS_UDP_RCVBUF_BYTES` | `media_loop` | 4 MiB |
-//! | `VKS_UDP_SNDBUF_BYTES` | `media_loop` | 1 MiB |
+//! | `VKS_UDP_SNDBUF_BYTES` | `media_loop` | 2 MiB |
 //! | `VKS_WEBRTC_UDP_RCVBUF_BYTES` | `webrtc_peer` | 1 MiB |
 //! | `VKS_WEBRTC_UDP_SNDBUF_BYTES` | `webrtc_peer` | 512 KiB |
 //! | `VKS_GATEWAY_UDP_RCVBUF_BYTES` | `gateway_rtp` | 512 KiB |
-//! | `VKS_GATEWAY_UDP_SNDBUF_BYTES` | `gateway_rtp` | 512 KiB |
+//! | `VKS_GATEWAY_UDP_SNDBUF_BYTES` | `gateway_rtp` | 1024 KiB |
 //!
 //! `0` (или пустое значение после trim) — не трогать буфер, оставить дефолт
 //! ядра; невалидное число — WARN и дефолт (это производительный тюнинг, а не
@@ -55,8 +55,8 @@ pub const ENV_GATEWAY_SNDBUF: &str = "VKS_GATEWAY_UDP_SNDBUF_BYTES";
 /// 4 MiB на единственный общий медиа-луп: в него мультиплексируется весь
 /// входной RTP/STUN/DTLS комнаты.
 pub const DEFAULT_MEDIA_RCVBUF_BYTES: usize = 4 * 1024 * 1024;
-/// 1 MiB на отправку: исходящий поток ограничен pacer'ом, больше не нужно.
-pub const DEFAULT_MEDIA_SNDBUF_BYTES: usize = 1024 * 1024;
+/// 2 MiB на отправку: исходящий поток ограничен pacer'ом.
+pub const DEFAULT_MEDIA_SNDBUF_BYTES: usize = 2 * 1024 * 1024;
 /// 1 MiB на per-peer WebRTC-сокет: при 256 пирах это ~256 MiB лимита,
 /// а не 1 GiB как с медиа-дефолтом 4 MiB. Буфер выделяется по мере надобности.
 const _: () = assert!(DEFAULT_WEBRTC_RCVBUF_BYTES > DEFAULT_GATEWAY_RCVBUF_BYTES);
@@ -66,8 +66,8 @@ pub const DEFAULT_WEBRTC_RCVBUF_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_WEBRTC_SNDBUF_BYTES: usize = 512 * 1024;
 /// 512 KiB на per-call RTP-сокет: при 20 звонках это ~20 MiB лимита, а не 160.
 pub const DEFAULT_GATEWAY_RCVBUF_BYTES: usize = 512 * 1024;
-/// 512 KiB на отправку per-call RTP/RTCP.
-pub const DEFAULT_GATEWAY_SNDBUF_BYTES: usize = 512 * 1024;
+/// 1024 KiB (1 MiB) на отправку per-call RTP/RTCP.
+pub const DEFAULT_GATEWAY_SNDBUF_BYTES: usize = 1024 * 1024;
 
 // Per-call sockets выставляются чаще, чем один media loop: их дефолты обязаны
 // быть меньше. Compile-time проверка, чтобы правка констант не проскочила.

@@ -425,9 +425,10 @@ fn drain_errors(child: &mut Child, kind: &'static str) -> tokio::task::JoinHandl
 }
 
 fn is_access_unit_delimiter(codec: GatewayVideoCodec, nal: &[u8]) -> bool {
+    let raw = strip_start_code(nal);
     match codec {
-        GatewayVideoCodec::H264 => nal.first().is_some_and(|header| header & 31 == 9),
-        GatewayVideoCodec::H265 => nal_type(nal) == Some(35),
+        GatewayVideoCodec::H264 => raw.first().is_some_and(|header| header & 31 == 9),
+        GatewayVideoCodec::H265 => nal_type(raw) == Some(35),
     }
 }
 
@@ -447,9 +448,19 @@ fn packetize_access_unit(
     timestamp: u32,
 ) -> Result<Vec<Vec<u8>>, ()> {
     match codec {
-        GatewayVideoCodec::H264 => Ok(packetize_h264(units, payload_type, ssrc, sequence, timestamp)),
+        GatewayVideoCodec::H264 => {
+            let packets = packetize_h264(units, payload_type, ssrc, sequence, timestamp);
+            if packets.is_empty() {
+                Err(())
+            } else {
+                Ok(packets)
+            }
+        }
         GatewayVideoCodec::H265 => {
-            let nals: Vec<&[u8]> = units.iter().map(|unit| strip_start_code(unit)).collect();
+            let nals: Vec<&[u8]> = units.iter().map(|unit| strip_start_code(unit)).filter(|u| !u.is_empty()).collect();
+            if nals.is_empty() {
+                return Err(());
+            }
             packetize_h265(&nals, payload_type, ssrc, sequence, timestamp).map_err(|_| ())
         }
     }
@@ -541,8 +552,11 @@ async fn send_access_unit(
     let mut successful = false;
     let mut sent_packets: u64 = 0;
     let mut sent_bytes: u64 = 0;
-    for packet in packets {
-        if let Ok(sent) = socket.send_to(&packet, target).await {
+    for (idx, packet) in packets.iter().enumerate() {
+        if idx > 0 && idx % 4 == 0 {
+            tokio::task::yield_now().await;
+        }
+        if let Ok(sent) = socket.send_to(packet, target).await {
             stats.video_tx_packets.fetch_add(1, Relaxed);
             stats.video_tx_bytes.fetch_add(sent as u64, Relaxed);
             sent_packets += 1;
@@ -1362,12 +1376,22 @@ fn find_start_code(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
     })
 }
 
-fn packetize_h264(units: &[Vec<u8>], payload_type: u8, ssrc: u32, sequence: &mut u16, timestamp: u32) -> Vec<Vec<u8>> {
+fn packetize_h264<T: AsRef<[u8]>>(
+    units: &[T],
+    payload_type: u8,
+    ssrc: u32,
+    sequence: &mut u16,
+    timestamp: u32,
+) -> Vec<Vec<u8>> {
+    let clean_nals: Vec<&[u8]> = units
+        .iter()
+        .map(|u| strip_start_code(u.as_ref()))
+        .filter(|u| !u.is_empty() && (u[0] & 0x1f) != 0 && (u[0] & 0x80) == 0)
+        .collect();
     let mut packets = Vec::new();
-    for (index, nal) in units.iter().enumerate() {
-        if nal.is_empty() {
-            continue;
-        }
+    let nals_count = clean_nals.len();
+    for (index, nal) in clean_nals.iter().enumerate() {
+        let is_last_nal = index + 1 == nals_count;
         if nal.len() <= 1188 {
             let mut packet = vec![0; 12];
             vks_gateway_sip::write_rtp_header(
@@ -1376,15 +1400,16 @@ fn packetize_h264(units: &[Vec<u8>], payload_type: u8, ssrc: u32, sequence: &mut
                 *sequence,
                 timestamp,
                 ssrc,
-                index + 1 == units.len(),
+                is_last_nal,
             );
             *sequence = sequence.wrapping_add(1);
             packet.extend_from_slice(nal);
             packets.push(packet);
         } else {
             let chunks: Vec<&[u8]> = nal[1..].chunks(1186).collect();
+            let chunks_count = chunks.len();
             for (part, chunk) in chunks.iter().enumerate() {
-                let last = part + 1 == chunks.len();
+                let is_last_chunk = part + 1 == chunks_count;
                 let mut packet = vec![0; 12];
                 vks_gateway_sip::write_rtp_header(
                     &mut packet,
@@ -1392,7 +1417,7 @@ fn packetize_h264(units: &[Vec<u8>], payload_type: u8, ssrc: u32, sequence: &mut
                     *sequence,
                     timestamp,
                     ssrc,
-                    last && index + 1 == units.len(),
+                    is_last_nal && is_last_chunk,
                 );
                 *sequence = sequence.wrapping_add(1);
                 packet.push((nal[0] & 0xe0) | 28);
@@ -1400,7 +1425,7 @@ fn packetize_h264(units: &[Vec<u8>], payload_type: u8, ssrc: u32, sequence: &mut
                     (nal[0] & 31)
                         | if part == 0 {
                             0x80
-                        } else if last {
+                        } else if is_last_chunk {
                             0x40
                         } else {
                             0
@@ -1410,6 +1435,10 @@ fn packetize_h264(units: &[Vec<u8>], payload_type: u8, ssrc: u32, sequence: &mut
                 packets.push(packet);
             }
         }
+    }
+    // RFC 6184 §5.1: post-condition guarantee — exactly the last emitted packet of AU has M=1
+    if let Some(last) = packets.last_mut() {
+        last[1] |= 0x80;
     }
     packets
 }
@@ -2924,5 +2953,85 @@ mod tests {
         assert!(sender_stats.video_tx_packets.load(Ordering::Relaxed) > 0);
         let frame = receiver_engine.tick_video_at(room, u64::MAX / 2).expect("decoded H265 frame");
         assert!(frame.is_yuv420p());
+    }
+
+    #[test]
+    fn packetize_h264_strips_start_codes_and_sets_marker_bit_correctly() {
+        let mut seq = 100u16;
+        let ts = 90000u32;
+        let ssrc = 0x12345678;
+        let pt = 96u8;
+
+        // 1. Single NAL with 4-byte start code + 3-byte start code + empty tail NAL
+        let nal1 = vec![0, 0, 0, 1, 0x67, 0x42, 0xe0, 0x1f]; // SPS
+        let nal2 = vec![0, 0, 1, 0x68, 0xce, 0x3c, 0x80]; // PPS
+        let nal3_empty = vec![];
+        let nals = vec![nal1, nal2, nal3_empty];
+
+        let packets = packetize_h264(&nals, pt, ssrc, &mut seq, ts);
+        assert_eq!(packets.len(), 2);
+
+        // First packet: SPS without start code, Marker = 0
+        assert_eq!(&packets[0][12..], &[0x67, 0x42, 0xe0, 0x1f]);
+        assert_eq!(packets[0][1] & 0x80, 0, "first NAL must not have marker bit");
+
+        // Second packet: PPS without start code, Marker = 1 (even though 3rd NAL was empty)
+        assert_eq!(&packets[1][12..], &[0x68, 0xce, 0x3c, 0x80]);
+        assert_eq!(packets[1][1] & 0x80, 0x80, "last actual NAL must have marker bit M=1");
+    }
+
+    #[test]
+    fn packetize_h264_fu_a_fragmentation_and_marker() {
+        let mut seq = 1u16;
+        let ts = 1000u32;
+        let ssrc = 0xabcdef;
+        let pt = 96u8;
+
+        // Large IDR frame (2500 bytes > 1188)
+        let mut large_nal = vec![0, 0, 0, 1];
+        large_nal.push(0x65); // NAL type 5 (IDR), NRI = 3 (0x60)
+        large_nal.resize(2504, 0xaa);
+
+        let packets = packetize_h264(&[large_nal], pt, ssrc, &mut seq, ts);
+        assert!(packets.len() >= 2);
+
+        // First FU-A chunk: NRI=3, FU type=28, Start bit=1, End bit=0, Marker=0
+        assert_eq!(packets[0][12], 0x60 | 28);
+        assert_eq!(packets[0][13], 0x80 | 5);
+        assert_eq!(packets[0][1] & 0x80, 0);
+
+        // Last FU-A chunk: NRI=3, FU type=28, Start bit=0, End bit=1, Marker=1
+        let last = packets.last().unwrap();
+        assert_eq!(last[12], 0x60 | 28);
+        assert_eq!(last[13], 0x40 | 5);
+        assert_eq!(last[1] & 0x80, 0x80, "final FU-A chunk must have marker bit M=1");
+    }
+
+    #[test]
+    fn packetize_h264_filters_bare_start_codes_and_invalid_nal_headers() {
+        let mut seq = 1u16;
+        let ts = 1000u32;
+        let ssrc = 0xabcdef;
+        let pt = 96u8;
+
+        // Bare 3-byte and 4-byte start codes, zero padding, and invalid forbidden_zero_bit
+        let bare4 = vec![0, 0, 0, 1];
+        let bare3 = vec![0, 0, 1];
+        let zeros = vec![0, 0, 0, 0];
+        let nal_type0 = vec![0, 0, 0, 1, 0x00]; // type 0 invalid
+        let invalid_fbit = vec![0, 0, 0, 1, 0x85, 0x12]; // forbidden_zero_bit=1
+        let valid_slice = vec![0, 0, 0, 1, 0x25, 0x88]; // type 5, NRI=1, valid
+
+        let packets = packetize_h264(
+            &[bare4, bare3, zeros, nal_type0, invalid_fbit, valid_slice],
+            pt,
+            ssrc,
+            &mut seq,
+            ts,
+        );
+
+        assert_eq!(packets.len(), 1, "only valid slice should produce an RTP packet");
+        assert_eq!(&packets[0][12..], &[0x25, 0x88]);
+        assert_eq!(packets[0][1] & 0x80, 0x80, "single valid packet must have Marker bit M=1");
     }
 }
