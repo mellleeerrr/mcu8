@@ -310,15 +310,23 @@ impl Rfc3550Jitter {
             Err(poisoned) => poisoned.into_inner(),
         };
         if let (Some(last_ts), Some(last_arrival)) = (state.last_rtp_ts, state.last_arrival) {
-            let elapsed = arrival.saturating_duration_since(last_arrival);
-            let arrival_delta = elapsed.as_secs_f64() * (clock_rate as f64);
-            let ts_delta = (rtp_ts.wrapping_sub(last_ts) as i32) as f64;
-            let d = (arrival_delta - ts_delta).abs();
-            // J = J + (|D| - J) / 16.0
-            state.jitter += (d - state.jitter) / 16.0;
+            // RFC 3550 Appendix A.8: The jitter calculation MUST be based on
+            // packets with different timestamps. Multi-packet video frames share
+            // the same RTP timestamp; updating with ts_delta=0 corrupts jitter.
+            if rtp_ts != last_ts {
+                let elapsed = arrival.saturating_duration_since(last_arrival);
+                let arrival_delta = elapsed.as_secs_f64() * (clock_rate as f64);
+                let ts_delta = (rtp_ts.wrapping_sub(last_ts) as i32) as f64;
+                let d = (arrival_delta - ts_delta).abs();
+                // J = J + (|D| - J) / 16.0
+                state.jitter += (d - state.jitter) / 16.0;
+                state.last_rtp_ts = Some(rtp_ts);
+                state.last_arrival = Some(arrival);
+            }
+        } else {
+            state.last_rtp_ts = Some(rtp_ts);
+            state.last_arrival = Some(arrival);
         }
-        state.last_rtp_ts = Some(rtp_ts);
-        state.last_arrival = Some(arrival);
         if clock_rate > 0 {
             (state.jitter / (clock_rate as f64 / 1000.0)).round() as u64
         } else {
@@ -1415,6 +1423,7 @@ pub fn bridge_gateway_participant_media(
     mcu_engine: Option<&Arc<vks_media_mcu::McuEngine>>,
     room_id: &RoomId,
     participant_id: &str,
+    display_name: Option<&str>,
     has_video: bool,
 ) {
     let Some(mcu) = mcu_engine else {
@@ -1426,6 +1435,11 @@ pub fn bridge_gateway_participant_media(
         mcu_tracks.push(vks_core::track::Track::new(pid_val, vks_core::track::TrackKind::Video));
     }
     mcu.bridge_participant(*room_id, pid_val, mcu_tracks);
+    if let Some(name) = display_name {
+        if !name.trim().is_empty() {
+            mcu.set_participant_label(*room_id, pid_val, name.trim().to_string());
+        }
+    }
 }
 
 /// Публикует участника шлюза в RoomHub и уведомляет админку.
@@ -1504,7 +1518,7 @@ pub fn land_gateway_participant_in_room(
         );
         return false;
     }
-    bridge_gateway_participant_media(mcu_engine, room_id, participant_id, has_video);
+    bridge_gateway_participant_media(mcu_engine, room_id, participant_id, Some(display_name), has_video);
     announce_gateway_participant(state, room_id, participant_id, display_name, has_video);
     // The admission guard must be released before starting the bridge: the
     // bridge task is a long-lived per-room clock and must not be spawned (nor
@@ -1864,6 +1878,26 @@ impl GatewayManager {
             );
         }
         setup.registered = Some((self.clone(), pid_str.clone()));
+        if let Some(active_sip) = setup.sip.as_ref() {
+            let active_sip = active_sip.clone();
+            let forward_controls = controls.keyframe_requests.clone();
+            let mcu_engine = self.mcu_engine.clone();
+            let cancel = cancel_flag.clone();
+            tokio::spawn(async move {
+                let mut last = 0u64;
+                while !cancel.load(std::sync::atomic::Ordering::Relaxed) && !active_sip.is_ended() {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    let cur = active_sip.keyframe_requests.load(std::sync::atomic::Ordering::Relaxed);
+                    if cur > last {
+                        forward_controls.fetch_add(cur - last, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(ref mcu) = mcu_engine {
+                            mcu.request_video_keyframe(room_id);
+                        }
+                        last = cur;
+                    }
+                }
+            });
+        }
         let state = self.state.read().ok().and_then(|value| value.as_ref().and_then(|weak| weak.upgrade()));
         {
             let _admission = crate::webrtc_runtime::admission();
@@ -1884,13 +1918,14 @@ impl GatewayManager {
             }
         }
         if state.is_some() {
-            bridge_gateway_participant_media(Some(&mcu), &room_id, &pid_str, has_video);
+            bridge_gateway_participant_media(Some(&mcu), &room_id, &pid_str, Some(&effective_name), has_video);
         } else {
             let mut tracks = vec![vks_core::track::Track::new(participant, vks_core::track::TrackKind::Audio)];
             if has_video {
                 tracks.push(vks_core::track::Track::new(participant, vks_core::track::TrackKind::Video));
             }
             mcu.bridge_participant(room_id, participant, tracks);
+            mcu.set_participant_label(room_id, participant, effective_name.clone());
         }
         spawn_rtp_media_bridge(RtpBridgeSession {
             room_id,
@@ -2447,6 +2482,24 @@ impl vks_admin::state::OutboundDialer for GatewayManager {
             return Err(format!("FECC is not negotiated for this gateway participant (command {command})"));
         }
         Ok(())
+    }
+
+    fn rename_participant(&self, room_id: RoomId, participant_id: &str, display_name: &str) -> bool {
+        let Some(ref mcu) = self.mcu_engine else {
+            return false;
+        };
+        let pid_val = crate::parse_participant_id(participant_id);
+        mcu.set_participant_label(room_id, pid_val, display_name.trim().to_string());
+        true
+    }
+
+    fn set_participant_name_visibility(&self, room_id: RoomId, participant_id: &str, visible: bool) -> bool {
+        let Some(ref mcu) = self.mcu_engine else {
+            return false;
+        };
+        let pid_val = crate::parse_participant_id(participant_id);
+        mcu.set_participant_label_visibility(room_id, pid_val, visible);
+        true
     }
 }
 
@@ -3451,11 +3504,56 @@ async fn serve_sip_uas_on(
                 }
             }
             "OPTIONS" => {
-                let mut response =
+                let response =
                     vks_gateway_sip::build_response(200, "OK", &request, &advertised_ip, local_port, None, "");
-                response =
-                    response.replace("Content-Length:", "Allow: INVITE, ACK, BYE, CANCEL, OPTIONS\r\nContent-Length:");
                 sip_send(&socket, peer, &response);
+            }
+            "INFO" => {
+                let key = sip_dialog_key(&request);
+                let (valid, room_id, controls) = {
+                    let guard = calls.lock().expect("inbound calls poisoned");
+                    if let Some(call) = guard.get(&key) {
+                        let to_matches = request.to_tag.as_deref() == Some(call.to_tag.as_str());
+                        (to_matches, Some(call.room_id), Some(call.controls.clone()))
+                    } else {
+                        (false, None, None)
+                    }
+                };
+                if valid {
+                    let response =
+                        vks_gateway_sip::build_response(200, "OK", &request, &advertised_ip, local_port, None, "");
+                    sip_send(&socket, peer, &response);
+                    let is_fast_update = request.body.to_ascii_lowercase().contains("picture_fast_update")
+                        || request.body.to_ascii_lowercase().contains("media_control")
+                        || request.body.trim().is_empty();
+                    if is_fast_update {
+                        if let (Some(rid), Some(ctrl)) = (room_id, controls) {
+                            ctrl.keyframe_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if let Some(ref mcu) = manager.mcu_engine {
+                                mcu.request_video_keyframe(rid);
+                            }
+                            tracing::info!(
+                                call_id = %request.call_id,
+                                room = %rid,
+                                "SIP INFO picture_fast_update acknowledged (200 OK) and keyframe dispatched"
+                            );
+                        }
+                    }
+                } else {
+                    sip_send(
+                        &socket,
+                        peer,
+                        &vks_gateway_sip::build_response(
+                            481,
+                            "Call/Transaction Does Not Exist",
+                            &request,
+                            &advertised_ip,
+                            local_port,
+                            None,
+                            "",
+                        ),
+                    );
+                }
             }
             _ => {
                 sip_send(
@@ -4135,11 +4233,12 @@ async fn serve_h323_uas_session(
                     registry.by_participant.get(&call.participant_id).map(|session| session.controls.clone())
                 });
                 if let Some(controls) = controls {
-                    // Same counter as RTCP PLI/FIR: the encoder owner turns it
-                    // into a keyframe request (IDR itself is P4b).
                     controls.keyframe_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(ref mcu) = manager.mcu_engine {
+                        mcu.request_video_keyframe(call.room_id);
+                    }
                 }
-                info!(%call_id, "H.245 videoFastUpdatePicture received; keyframe request counted");
+                info!(%call_id, "H.245 videoFastUpdatePicture received; keyframe request dispatched to MCU engine");
             }
             Some("channel_closed") => {
                 let Some(call_id) = event.get("call_id").and_then(serde_json::Value::as_str) else { continue };
@@ -6776,6 +6875,35 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             manager.registry.lock().unwrap().by_participant.len(),
             1,
             "CANCEL after 200 must not end the dialog"
+        );
+        let body = "<media_control>\r\n  <picture_fast_update/>\r\n</media_control>";
+        let info = format!(
+            "INFO sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:40000;branch=z9hG4bKi\r\nFrom: \"T\" <sip:t@127.0.0.1>;tag=ft\r\nTo: <sip:{}@127.0.0.1>;tag={}\r\nCall-ID: cid-test\r\nCSeq: 2 INFO\r\nContent-Type: application/media_control+xml\r\nContent-Length: {}\r\n\r\n{}",
+            room.id, room.id, to_tag, body.len(), body
+        );
+        client.send(info.as_bytes()).await.unwrap();
+        let mut info_ok = false;
+        let mut allow_has_info = false;
+        for _ in 0..10 {
+            let mut buf = [0u8; 8192];
+            let Ok(Ok(len)) = tokio::time::timeout(std::time::Duration::from_secs(1), client.recv(&mut buf)).await
+            else {
+                break;
+            };
+            let text = String::from_utf8_lossy(&buf[..len]);
+            if text.starts_with("SIP/2.0 200") && text.contains("CSeq: 2 INFO") {
+                info_ok = true;
+                allow_has_info = text.contains("Allow:") && text.contains("INFO");
+                assert_eq!(text.matches("Allow:").count(), 1, "There must be exactly one Allow header, no duplicates");
+                break;
+            }
+        }
+        assert!(info_ok, "INFO with picture_fast_update must receive 200 OK with CSeq: 2 INFO");
+        assert!(allow_has_info, "200 OK must advertise INFO in Allow header");
+        assert_eq!(
+            manager.registry.lock().unwrap().by_participant.len(),
+            1,
+            "INFO must keep the dialog alive"
         );
         let bye = format!(
             "BYE sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:40000;branch=z9hG4bKb\r\nFrom: \"T\" <sip:t@127.0.0.1>;tag=ft\r\nTo: <sip:{}@127.0.0.1>;tag={}\r\nCall-ID: cid-test\r\nCSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n",

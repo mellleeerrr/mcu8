@@ -455,6 +455,12 @@ fn resolve_helper_from(
     if cfg!(debug_assertions) {
         if let Some(dir) = current_dir {
             candidates.push(dir.join("crates/vks-gateway-h323/python/h323_sidecar.py"));
+            if let Some(parent) = dir.parent() {
+                candidates.push(parent.join("crates/vks-gateway-h323/python/h323_sidecar.py"));
+                if let Some(grandparent) = parent.parent() {
+                    candidates.push(grandparent.join("crates/vks-gateway-h323/python/h323_sidecar.py"));
+                }
+            }
             candidates.push(dir.join("python/h323_sidecar.py"));
         }
     }
@@ -569,7 +575,7 @@ impl Supervisor {
                         Some("security_denied") => {
                             break classify_dial_reason("remote_release:securityDenied".into());
                         }
-                        Some("ringing" | "negotiating" | "channel" | "capabilities" | "video_unavailable" | "wire") => {}
+                        Some("ringing" | "negotiating" | "channel" | "capabilities" | "video_unavailable" | "wire" | "video_fast_update") => {}
                         _ => { break "unknown sidecar event".into(); }
                     }
                 }

@@ -51,9 +51,12 @@ pub struct ActiveSipSession {
     /// Negotiated video codec name ("H264"/"H265"), when video is bridged.
     pub remote_video_codec: Option<&'static str>,
     pub remote_dtmf_payload_type: Option<u8>,
+    /// Local offer SDP sent in the initial INVITE.
+    pub local_offer_sdp: String,
     /// Raw `200 OK` SDP body, kept verbatim for diagnostics and live-call evidence.
     pub answer_sdp: String,
     pub socket: Arc<UdpSocket>,
+    pub keyframe_requests: Arc<std::sync::atomic::AtomicU64>,
     ended: Arc<AtomicBool>,
 }
 impl ActiveSipSession {
@@ -304,8 +307,10 @@ impl SipUacClient {
                         remote_video_ip: media.video_ip,
                         remote_video_codec: media.video_codec,
                         remote_dtmf_payload_type: media.dtmf_payload_type,
+                        local_offer_sdp: sdp_offer.to_string(),
                         answer_sdp: response.body.to_string(),
                         socket: c.socket.clone(),
+                        keyframe_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                         ended: Arc::new(AtomicBool::new(false)),
                     };
                     Self::monitor_dialog(session.clone(), ack);
@@ -368,8 +373,7 @@ impl SipUacClient {
                 }
                 let method = text.split_whitespace().next().unwrap_or("");
                 let (code, reason) = match method {
-                    "BYE" | "OPTIONS" => (200, "OK"),
-                    "INVITE" => (488, "Not Acceptable Here"),
+                    "BYE" | "OPTIONS" | "INVITE" | "INFO" => (200, "OK"),
                     _ => (501, "Not Implemented"),
                 };
                 let mut reply = format!("SIP/2.0 {code} {reason}\r\n");
@@ -383,8 +387,29 @@ impl SipUacClient {
                         reply.push_str(&format!("{name}: {}\r\n", value.trim()));
                     }
                 }
-                reply.push_str("Content-Length: 0\r\n\r\n");
+                if method == "OPTIONS" || method == "INFO" {
+                    reply.push_str("Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, INFO\r\n");
+                }
+                if method == "INVITE" && !session.local_offer_sdp.is_empty() {
+                    reply.push_str(&format!(
+                        "Contact: <sip:mcu@{}:{}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+                        session.local_ip,
+                        session.local_sip_port,
+                        session.local_offer_sdp.len(),
+                        session.local_offer_sdp
+                    ));
+                } else {
+                    reply.push_str("Content-Length: 0\r\n\r\n");
+                }
                 let _ = session.socket.send_to(reply.as_bytes(), source).await;
+                if method == "INFO" {
+                    let is_keyframe = text.to_ascii_lowercase().contains("picture_fast_update")
+                        || text.to_ascii_lowercase().contains("media_control");
+                    if is_keyframe {
+                        session.keyframe_requests.fetch_add(1, Ordering::Relaxed);
+                        info!(call_id=%session.call_id, "SIP INFO picture_fast_update received in UAC dialog");
+                    }
+                }
                 if method == "BYE" {
                     session.ended.store(true, Ordering::Release);
                     info!(call_id=%session.call_id,"Remote SIP BYE received and acknowledged");
@@ -426,6 +451,53 @@ mod tests {
         assert_eq!(session.local_video_payload_type, Some(96));
         assert_eq!(session.remote_video_ip.as_deref(), Some("192.168.1.132"));
         assert_eq!(session.remote_dtmf_payload_type, Some(119));
+        session.hangup().await.unwrap();
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_info_picture_fast_update_increments_keyframe_requests() {
+        let terminal = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = terminal.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let mut buf = [0; 4096];
+            let (size, source) = terminal.recv_from(&mut buf).await.unwrap();
+            let invite = String::from_utf8_lossy(&buf[..size]);
+            let id = invite.lines().find_map(|l| l.strip_prefix("Call-ID: ")).unwrap().to_string();
+            let local_from = invite.lines().find_map(|l| l.strip_prefix("From: ")).unwrap().to_string();
+            let sdp = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 45000 RTP/AVP 0\r\n";
+            let answer = format!("SIP/2.0 200 OK\r\nFrom: {local_from}\r\nTo: <sip:terminal>;tag=remote-info\r\nCall-ID: {id}\r\nCSeq: 1 INVITE\r\nContact: <sip:terminal@{addr}>\r\nContent-Length: {}\r\n\r\n{sdp}", sdp.len());
+            terminal.send_to(answer.as_bytes(), source).await.unwrap();
+            let (size, _) = terminal.recv_from(&mut buf).await.unwrap();
+            assert!(buf[..size].starts_with(b"ACK "));
+
+            // Send SIP INFO with picture_fast_update
+            let body = "<?xml version=\"1.0\" encoding=\"utf-8\" ?>\r\n<media_control>\r\n  <vc_primitive>\r\n    <to_encoder>\r\n      <picture_fast_update/>\r\n    </to_encoder>\r\n  </vc_primitive>\r\n</media_control>";
+            let info = format!("INFO sip:vks@{source} SIP/2.0\r\nVia: SIP/2.0/UDP {addr};branch=z9hG4bKinfo\r\nFrom: <sip:terminal>;tag=remote-info\r\nTo: {local_from}\r\nCall-ID: {id}\r\nCSeq: 2 INFO\r\nContent-Type: application/media_control+xml\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            terminal.send_to(info.as_bytes(), source).await.unwrap();
+
+            let (size, _) =
+                tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut buf)).await.unwrap().unwrap();
+            let reply = String::from_utf8_lossy(&buf[..size]);
+            assert!(reply.starts_with("SIP/2.0 200 OK"));
+            assert!(reply.contains("CSeq: 2 INFO"));
+        });
+        let session = SipUacClient::new("127.0.0.1")
+            .dial(
+                &format!("sip:{addr}"),
+                "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 0\r\n",
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+
+        for _ in 0..20 {
+            if session.keyframe_requests.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(session.keyframe_requests.load(Ordering::Relaxed), 1);
         session.hangup().await.unwrap();
         peer.await.unwrap();
     }
@@ -705,5 +777,73 @@ Content-Length: 0\r\n\r\n"
         let (c4, a4) = SipUacClient::parse_target_addr("sip:room101@192.168.1.132:5080;transport=udp").unwrap();
         assert_eq!(c4, "room101@192.168.1.132:5080");
         assert_eq!(a4.to_string(), "192.168.1.132:5080");
+    }
+
+    #[tokio::test]
+    async fn test_uac_in_dialog_reinvite_returns_local_offer_sdp() {
+        let mock_server = UdpSocket::bind("127.0.0.1:0").await.expect("bind mock");
+        let server_addr = mock_server.local_addr().expect("server addr");
+        let client = SipUacClient::new("127.0.0.1");
+
+        let peer = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            let (len, client_addr) = mock_server.recv_from(&mut buf).await.expect("recv invite");
+            let req = String::from_utf8_lossy(&buf[..len]);
+            let call_id = req.lines().find_map(|l| l.strip_prefix("Call-ID: ")).unwrap().to_string();
+            let from = req.lines().find_map(|l| l.strip_prefix("From: ")).unwrap().to_string();
+            let from_tag = from.split("tag=").nth(1).unwrap().to_string();
+
+            let sdp = "v=0\r\nc=IN IP4 192.168.1.95\r\nm=audio 50000 RTP/AVP 0\r\n";
+            let ok_200 = format!(
+                "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 127.0.0.1;branch=z9hG4bKtest\r\n\
+From: {from}\r\n\
+To: <sip:peer>;tag=term-tag-reinvite\r\n\
+Call-ID: {call_id}\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:term@127.0.0.1:{}>\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n\
+{sdp}",
+                server_addr.port(),
+                sdp.len()
+            );
+            mock_server.send_to(ok_200.as_bytes(), client_addr).await.expect("send 200 ok");
+
+            let (len_ack, _) = mock_server.recv_from(&mut buf).await.expect("recv ack");
+            let ack_str = String::from_utf8_lossy(&buf[..len_ack]);
+            assert!(ack_str.starts_with("ACK"));
+
+            // Remote sends in-dialog re-INVITE (e.g. starting presentation)
+            let reinvite = format!(
+                "INVITE sip:mcu@127.0.0.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:{};branch=z9hG4bKreinvite1\r\n\
+From: <sip:peer>;tag=term-tag-reinvite\r\n\
+To: <sip:vks@127.0.0.1>;tag={from_tag}\r\n\
+Call-ID: {call_id}\r\n\
+CSeq: 2 INVITE\r\n\
+Contact: <sip:term@127.0.0.1:{}>\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n\
+{sdp}",
+                server_addr.port(),
+                server_addr.port(),
+                sdp.len()
+            );
+            mock_server.send_to(reinvite.as_bytes(), client_addr).await.expect("send reinvite");
+
+            let (len_resp, _) = mock_server.recv_from(&mut buf).await.expect("recv reinvite response");
+            let resp_str = String::from_utf8_lossy(&buf[..len_resp]);
+            assert!(resp_str.starts_with("SIP/2.0 200 OK"), "must respond 200 OK to re-INVITE");
+            assert!(resp_str.contains("m=audio 41000"), "must respond with local offer SDP, not peer SDP");
+            assert!(!resp_str.contains("192.168.1.95"), "must not reflect peer IP");
+        });
+
+        let target_uri = format!("sip:{}", server_addr);
+        let sdp_offer = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 41000 RTP/AVP 0\r\n";
+        let session = client.dial(&target_uri, sdp_offer, Duration::from_secs(3)).await.expect("dial successful");
+
+        peer.await.expect("peer task finished");
+        session.hangup().await.expect("hangup successful");
     }
 }

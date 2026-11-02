@@ -111,6 +111,7 @@ To: <sip:{target_addr}>\r\n\
 Call-ID: {call_id}\r\n\
 CSeq: 1 INVITE\r\n\
 Contact: <sip:vks@{local_ip}:{local_port};transport=udp>\r\n\
+Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, INFO\r\n\
 Content-Type: application/sdp\r\n\
 Content-Length: {sdp_len}\r\n\
 \r\n\
@@ -253,6 +254,7 @@ v=0\r\no=term 1 1 IN\r\n";
         let invite = build_invite("192.168.1.132", "192.168.1.93", 5062, "cid-1", "ftag-1", "b-1", "v=0\r\n");
         assert!(invite.starts_with("INVITE sip:192.168.1.132 SIP/2.0\r\n"));
         assert!(invite.contains("Via: SIP/2.0/UDP 192.168.1.93:5062;branch=z9hG4bKb-1;rport\r\n"));
+        assert!(invite.contains("Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, INFO\r\n"));
         assert!(invite.contains("CSeq: 1 INVITE\r\n"));
         assert!(invite.contains("Content-Length: 5\r\n"));
 

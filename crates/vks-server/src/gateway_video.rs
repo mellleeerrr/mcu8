@@ -1071,6 +1071,25 @@ pub(super) async fn spawn_video_media_bridge(
         })
     };
     session.stats.video_codec_running.store(true, Relaxed);
+    // Startup IDR Burst: trigger 3 keyframe bursts at t = 0, 500, 1000 ms to kickstart
+    // IDR emission for the new participant on the MCU room side, aborted cleanly on session cancel.
+    let burst_cancelled = session.cancelled.clone();
+    let burst_engine = session.engine.clone();
+    let burst_controls = session.controls.keyframe_requests.clone();
+    let burst_room = session.room_id;
+    tokio::spawn(async move {
+        for delay_ms in [0, 500, 500] {
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            if burst_cancelled.load(Relaxed) {
+                break;
+            }
+            burst_controls.fetch_add(1, Relaxed);
+            burst_engine.request_video_keyframe(burst_room);
+            tracing::debug!(room = %burst_room, delay_ms, "Startup IDR burst dispatched to MCU room engine");
+        }
+    });
     Ok(tokio::spawn(async move {
         let _lease = lease;
         let mut source = super::audio::RtpSource::new(session.remote_target, session.receive_payload_type);
@@ -1089,6 +1108,7 @@ pub(super) async fn spawn_video_media_bridge(
         let mut interval = tokio::time::interval(Duration::from_millis(20));
         let mut last_rtcp = std::time::Instant::now() - Duration::from_secs(5);
         let mut last_keyframe_request = std::time::Instant::now() - Duration::from_secs(5);
+        let mut startup_pli_sent: usize = 0;
         while !session.cancelled.load(Relaxed) && !worker_failed.load(Relaxed) {
             tokio::select! {
                 _ = interval.tick() => {
@@ -1098,7 +1118,9 @@ pub(super) async fn spawn_video_media_bridge(
                                 let destination = std::net::SocketAddr::new(session.remote_target.ip(), port);
                                 let report = sender_report(ssrc, last_timestamp.load(Relaxed), &session.stats);
                                 let _ = socket.send_to(&report, destination).await;
-                                if let Some(remote_ssrc) = source.ssrc() {
+                                if startup_pli_sent < 3 {
+                                    startup_pli_sent += 1;
+                                    let remote_ssrc = source.ssrc().unwrap_or(0);
                                     let mut pli = vec![0x81, 206, 0, 2];
                                     pli.extend_from_slice(&ssrc.to_be_bytes());
                                     pli.extend_from_slice(&remote_ssrc.to_be_bytes());

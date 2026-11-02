@@ -374,6 +374,9 @@ pub fn build_response(
             local_port
         ));
     }
+    if status == 200 && (request.method == "INVITE" || request.method == "OPTIONS" || request.method == "INFO") {
+        response.push_str("Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, INFO\r\n");
+    }
     if !body.is_empty() {
         response.push_str("Content-Type: application/sdp\r\n");
     }
