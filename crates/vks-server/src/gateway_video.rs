@@ -37,13 +37,31 @@ impl GatewayVideoCodec {
     }
 
     /// x265 parameter string (H.264 uses x264's own options).
-    const fn encoder_params(self) -> &'static str {
+    #[allow(dead_code)]
+    pub(super) const fn encoder_params(self) -> &'static str {
         match self {
             Self::H264 => {
-                "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=0:weightp=0:8x8dct=0:ref=1:rc-lookahead=0:slice-max-size=1180"
+                "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=0:weightp=0:8x8dct=0:ref=1:rc-lookahead=0:slice-max-size=1180:deblock=0,0"
             }
             Self::H265 => {
-                "log-level=error:bframes=0:rc-lookahead=0:scenecut=0:frame-threads=1:pools=1:aud=1:repeat-headers=1"
+                "log-level=error:bframes=0:rc-lookahead=0:scenecut=0:sao=0:wpp=1:frame-threads=1:pools=1:aud=1:repeat-headers=1"
+            }
+        }
+    }
+
+    fn encoder_params_for(self, profile: &str, width: u32, fps: u32) -> &'static str {
+        match self {
+            Self::H264 => {
+                if profile.eq_ignore_ascii_case("high") {
+                    "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=1:8x8dct=1:aq-mode=2:ref=2:rc-lookahead=0:slice-max-size=1180"
+                } else if fps <= 15 && width >= 1920 {
+                    "repeat-headers=1:aud=1:scenecut=0:bframes=0:aq-mode=3:slice-max-size=1180:rc-lookahead=0"
+                } else {
+                    "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=0:weightp=0:8x8dct=0:ref=1:rc-lookahead=0:slice-max-size=1180:deblock=0,0"
+                }
+            }
+            Self::H265 => {
+                "log-level=error:bframes=0:rc-lookahead=0:scenecut=0:sao=0:wpp=1:frame-threads=1:pools=1:aud=1:repeat-headers=1"
             }
         }
     }
@@ -310,15 +328,15 @@ fn spawn_codec(encoder: bool, profile: &VideoProfile) -> Result<Child, String> {
         let size = format!("{}x{}", profile.width, profile.height);
         let fps = profile.fps.to_string();
         let bitrate = format!("{}k", profile.bitrate_kbps);
-        let buffer = format!("{}k", profile.bitrate_kbps.saturating_mul(2));
-        // IDR каждые 500 мс (keyint=15 при 30 fps). Форс-IDR по PLI/FIR невозможен
-        // без рестарта child-процесса (у ffmpeg CLI нет runtime-хука), поэтому
-        // быстрое восстановление после потери обеспечивается keyint=15.
-        let keyint = ((profile.fps / 2).max(1)).to_string();
+        let maxrate = format!("{}k", (profile.bitrate_kbps * 115) / 100);
+        let buffer = format!("{}k", (profile.bitrate_kbps / 2).max(64));
+        let keyint = ((profile.fps * 2).clamp(15, 60)).to_string();
+        let keyint_min = ((profile.fps / 2).max(1)).to_string();
         let (codec, params_flag) = match profile.codec {
             GatewayVideoCodec::H264 => ("libx264", "-x264-params"),
             GatewayVideoCodec::H265 => ("libx265", "-x265-params"),
         };
+        let params = profile.codec.encoder_params_for(&profile.profile, profile.width, profile.fps);
         command.args([
             "-f",
             "rawvideo",
@@ -350,15 +368,15 @@ fn spawn_codec(encoder: bool, profile: &VideoProfile) -> Result<Child, String> {
             "-b:v",
             bitrate.as_str(),
             "-maxrate",
-            bitrate.as_str(),
+            maxrate.as_str(),
             "-bufsize",
             buffer.as_str(),
             "-g",
             keyint.as_str(),
             "-keyint_min",
-            keyint.as_str(),
+            keyint_min.as_str(),
             params_flag,
-            profile.codec.encoder_params(),
+            params,
             "-flush_packets",
             "1",
             "-f",
@@ -1455,9 +1473,14 @@ fn packetize_h264<T: AsRef<[u8]>>(
             }
         }
     }
-    // RFC 6184 §5.1: post-condition guarantee — exactly the last emitted packet of AU has M=1
-    if let Some(last) = packets.last_mut() {
-        last[1] |= 0x80;
+    // RFC 6184 §5.1: post-condition guarantee — exactly the last emitted packet of AU has M=1, all earlier M=0
+    let total = packets.len();
+    for (i, p) in packets.iter_mut().enumerate() {
+        if i + 1 == total {
+            p[1] |= 0x80;
+        } else {
+            p[1] &= 0x7f;
+        }
     }
     packets
 }
@@ -1857,16 +1880,16 @@ mod tests {
         let profile = VideoProfile { bitrate_kbps: 2048, ..profile_of(1280, 720) };
         let single = farm_spec_for(&profile, 1);
         assert_eq!(single.bitrate_kbps, 2048, "N=1 → base");
-        assert_eq!(single.maxrate_kbps, 2048, "maxrate сохраняется");
-        assert_eq!(single.bufsize_kbps, 4096, "bufsize = 2 × bitrate");
+        assert_eq!(single.maxrate_kbps, 2355, "maxrate = 1.15 × bitrate");
+        assert_eq!(single.bufsize_kbps, 1024, "bufsize = 0.5 × bitrate");
         let empty = farm_spec_for(&profile, 0);
         assert_eq!(empty.bitrate_kbps, 2048, "visible=0 → base");
         let crowded = farm_spec_for(&profile, 20);
         assert!(crowded.bitrate_kbps >= 2048, "не ниже base");
         assert!(crowded.bitrate_kbps <= 2560, "не выше 1.25 × base");
         assert_eq!(crowded.bitrate_kbps, 2560, "20 окон → кламп 1.25 × base");
-        assert_eq!(crowded.maxrate_kbps, crowded.bitrate_kbps, "maxrate масштабируется тем же коэффициентом");
-        assert_eq!(crowded.bufsize_kbps, crowded.bitrate_kbps * 2, "bufsize масштабируется");
+        assert_eq!(crowded.maxrate_kbps, 2944, "maxrate масштабируется тем же коэффициентом");
+        assert_eq!(crowded.bufsize_kbps, 1280, "bufsize масштабируется");
         let room = vks_core::RoomId::new();
         assert_ne!(
             farm_spec_for(&profile, 1).key(room, 0),

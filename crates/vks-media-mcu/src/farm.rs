@@ -100,10 +100,28 @@ impl FarmCodec {
     pub const fn default_params(self) -> &'static str {
         match self {
             Self::H264 => {
-                "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=0:weightp=0:8x8dct=0:ref=1:rc-lookahead=0:slice-max-size=1180"
+                "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=0:weightp=0:8x8dct=0:ref=1:rc-lookahead=0:slice-max-size=1180:deblock=0,0"
             }
             Self::H265 => {
-                "log-level=error:bframes=0:rc-lookahead=0:scenecut=0:frame-threads=1:pools=1:aud=1:repeat-headers=1"
+                "log-level=error:bframes=0:rc-lookahead=0:scenecut=0:sao=0:wpp=1:frame-threads=1:pools=1:aud=1:repeat-headers=1"
+            }
+        }
+    }
+
+    /// Параметры энкодера для конкретного профиля / контента.
+    pub fn params_for_profile(self, profile: &str, width: u32, _height: u32, fps: u32) -> &'static str {
+        match self {
+            Self::H264 => {
+                if profile.eq_ignore_ascii_case("high") {
+                    "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=1:8x8dct=1:aq-mode=2:ref=2:rc-lookahead=0:slice-max-size=1180"
+                } else if fps <= 15 && width >= 1920 {
+                    "repeat-headers=1:aud=1:scenecut=0:bframes=0:aq-mode=3:slice-max-size=1180:rc-lookahead=0"
+                } else {
+                    "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=0:weightp=0:8x8dct=0:ref=1:rc-lookahead=0:slice-max-size=1180:deblock=0,0"
+                }
+            }
+            Self::H265 => {
+                "log-level=error:bframes=0:rc-lookahead=0:scenecut=0:sao=0:wpp=1:frame-threads=1:pools=1:aud=1:repeat-headers=1"
             }
         }
     }
@@ -174,18 +192,23 @@ impl EncoderSpec {
     ) -> Self {
         let fps = fps.clamp(1, 60);
         let bitrate_kbps = bitrate_kbps.max(64);
+        let profile_str = profile.into().trim().to_lowercase();
+        let level_str = level.into().trim().to_string();
+        let width = (width.max(160) / 2) * 2;
+        let height = (height.max(120) / 2) * 2;
+        let encoder_params = codec.params_for_profile(&profile_str, width, height, fps).to_string();
         Self {
             codec,
-            width: (width.max(160) / 2) * 2,
-            height: (height.max(120) / 2) * 2,
+            width,
+            height,
             fps,
             bitrate_kbps,
-            maxrate_kbps: bitrate_kbps,
-            bufsize_kbps: bitrate_kbps.saturating_mul(2),
-            profile: profile.into().trim().to_lowercase(),
-            level: level.into().trim().to_string(),
-            keyint: (fps / 2).max(1),
-            encoder_params: codec.default_params().to_string(),
+            maxrate_kbps: (bitrate_kbps * 115) / 100,
+            bufsize_kbps: (bitrate_kbps / 2).max(64),
+            profile: profile_str,
+            level: level_str,
+            keyint: (fps * 2).clamp(15, 60),
+            encoder_params,
         }
     }
 
@@ -1110,6 +1133,7 @@ fn spawn_ffmpeg(spec: &EncoderSpec, input: (u32, u32)) -> io::Result<Child> {
     if spec.codec == FarmCodec::H264 {
         command.args(["-profile:v", spec.profile.as_str(), "-level:v", spec.level.as_str()]);
     }
+    let keyint_min = (spec.fps / 2).max(1);
     command.args([
         "-b:v",
         &format!("{}k", spec.bitrate_kbps),
@@ -1120,7 +1144,7 @@ fn spawn_ffmpeg(spec: &EncoderSpec, input: (u32, u32)) -> io::Result<Child> {
         "-g",
         &spec.keyint.to_string(),
         "-keyint_min",
-        &spec.keyint.to_string(),
+        &keyint_min.to_string(),
         spec.codec.params_flag(),
         spec.encoder_params.as_str(),
     ]);
@@ -1707,5 +1731,36 @@ mod tests {
         assert_eq!(second.parameter_sets.len(), 1, "новый зритель получает SPS/PPS сразу");
         drop(second);
         drop(first);
+    }
+
+    #[test]
+    fn canonical_spec_profile_matrix_smart_gop_and_vbv() {
+        // Baseline (e.g. Polycom RealPresence Desktop)
+        let baseline = EncoderSpec::canonical(FarmCodec::H264, 1280, 720, 30, 2048, "baseline", "3.1");
+        assert_eq!(baseline.maxrate_kbps, 2355); // (2048 * 115) / 100
+        assert_eq!(baseline.bufsize_kbps, 1024); // 2048 / 2
+        assert_eq!(baseline.keyint, 60); // 30 * 2
+        assert!(baseline.encoder_params.contains("slice-max-size=1180"));
+        assert!(baseline.encoder_params.contains("deblock=0,0"));
+        assert!(baseline.encoder_params.contains("cabac=0"));
+
+        // High Profile (WebRTC)
+        let high = EncoderSpec::canonical(FarmCodec::H264, 1280, 720, 30, 2048, "high", "4.1");
+        assert!(high.encoder_params.contains("cabac=1"));
+        assert!(high.encoder_params.contains("8x8dct=1"));
+        assert!(high.encoder_params.contains("aq-mode=2"));
+        assert!(high.encoder_params.contains("slice-max-size=1180"));
+
+        // Content / Presentation Slide profile (1080p @ 15fps)
+        let slide = EncoderSpec::canonical(FarmCodec::H264, 1920, 1080, 15, 1024, "baseline", "4.0");
+        assert_eq!(slide.keyint, 30); // 15 * 2
+        assert!(slide.encoder_params.contains("aq-mode=3"));
+        assert!(slide.encoder_params.contains("slice-max-size=1180"));
+
+        // H.265 profile
+        let h265 = EncoderSpec::canonical(FarmCodec::H265, 1920, 1080, 30, 1500, "main", "4.1");
+        assert!(h265.encoder_params.contains("sao=0:wpp=1"));
+        assert_eq!(h265.maxrate_kbps, 1725);
+        assert_eq!(h265.bufsize_kbps, 750);
     }
 }
