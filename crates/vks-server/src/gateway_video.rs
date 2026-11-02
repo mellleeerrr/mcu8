@@ -39,7 +39,9 @@ impl GatewayVideoCodec {
     /// x265 parameter string (H.264 uses x264's own options).
     const fn encoder_params(self) -> &'static str {
         match self {
-            Self::H264 => "repeat-headers=1:aud=1:scenecut=0",
+            Self::H264 => {
+                "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=0:weightp=0:8x8dct=0:ref=1:rc-lookahead=0:slice-max-size=1180"
+            }
             Self::H265 => {
                 "log-level=error:bframes=0:rc-lookahead=0:scenecut=0:frame-threads=1:pools=1:aud=1:repeat-headers=1"
             }
@@ -303,17 +305,16 @@ pub(super) async fn codec_available_for(codec: GatewayVideoCodec) -> bool {
 
 fn spawn_codec(encoder: bool, profile: &VideoProfile) -> Result<Child, String> {
     let mut command = Command::new("ffmpeg");
-    command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1", "-filter_threads", "1"]);
+    command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "2", "-filter_threads", "2"]);
     if encoder {
         let size = format!("{}x{}", profile.width, profile.height);
         let fps = profile.fps.to_string();
         let bitrate = format!("{}k", profile.bitrate_kbps);
         let buffer = format!("{}k", profile.bitrate_kbps.saturating_mul(2));
-        // IDR раз в секунду. Форс-IDR по PLI/FIR невозможен без рестарта
-        // child-процесса (у ffmpeg CLI нет runtime-хука), поэтому худшее
-        // восстановление после потери — 1 с: осознанное ограничение, форс-IDR
-        // вынесен в P4b вместе с групповым энкодером (O7).
-        let keyint = profile.fps.to_string();
+        // IDR каждые 500 мс (keyint=15 при 30 fps). Форс-IDR по PLI/FIR невозможен
+        // без рестарта child-процесса (у ffmpeg CLI нет runtime-хука), поэтому
+        // быстрое восстановление после потери обеспечивается keyint=15.
+        let keyint = ((profile.fps / 2).max(1)).to_string();
         let (codec, params_flag) = match profile.codec {
             GatewayVideoCodec::H264 => ("libx264", "-x264-params"),
             GatewayVideoCodec::H265 => ("libx265", "-x265-params"),
@@ -333,7 +334,7 @@ fn spawn_codec(encoder: bool, profile: &VideoProfile) -> Result<Child, String> {
             "-c:v",
             codec,
             "-threads",
-            "1",
+            "2",
             "-preset",
             "ultrafast",
             "-tune",
@@ -384,7 +385,7 @@ fn spawn_codec(encoder: bool, profile: &VideoProfile) -> Result<Child, String> {
             "-vf",
             scale.as_str(),
             "-threads",
-            "1",
+            "2",
             "-pix_fmt",
             "yuv420p",
             "-fps_mode",
@@ -454,6 +455,22 @@ fn packetize_access_unit(
     }
 }
 
+fn is_idr_nal(codec: GatewayVideoCodec, nal: &[u8]) -> bool {
+    let raw = strip_start_code(nal);
+    match codec {
+        GatewayVideoCodec::H264 => raw.first().is_some_and(|h| h & 0x1f == 5),
+        GatewayVideoCodec::H265 => matches!(nal_type(raw), Some(19 | 20)),
+    }
+}
+
+fn is_sps_nal(codec: GatewayVideoCodec, nal: &[u8]) -> bool {
+    let raw = strip_start_code(nal);
+    match codec {
+        GatewayVideoCodec::H264 => raw.first().is_some_and(|h| h & 0x1f == 7),
+        GatewayVideoCodec::H265 => nal_type(raw) == Some(33),
+    }
+}
+
 /// `O7`: отправляет один access unit зрителю — per-viewer RTP-обвязка
 /// (свой SSRC/seq/ts), одинаковый битстрим группы.
 #[allow(clippy::too_many_arguments)]
@@ -468,8 +485,52 @@ async fn send_access_unit(
     timestamp: u32,
     stats: &GatewayMediaStats,
     viewer: Option<&vks_media_mcu::GroupViewer>,
+    extra_params: &[Arc<[u8]>],
 ) -> bool {
-    let packets = match packetize_access_unit(codec, nals, payload_type, ssrc, sequence, timestamp) {
+    let is_idr = nals.iter().any(|nal| is_idr_nal(codec, nal));
+    let has_sps = nals.iter().any(|nal| is_sps_nal(codec, nal));
+    let prepared_storage: Vec<Vec<u8>>;
+    let nals_ref: &[Vec<u8>] = if is_idr && !has_sps {
+        let param_source = if !extra_params.is_empty() {
+            extra_params
+        } else if let Some(viewer) = viewer {
+            viewer.parameter_sets.as_slice()
+        } else {
+            &[]
+        };
+        if !param_source.is_empty() {
+            let mut prep = Vec::with_capacity(nals.len() + param_source.len());
+            let mut inserted = false;
+            for nal in nals {
+                if !inserted && is_idr_nal(codec, nal) {
+                    for set in param_source {
+                        let clean = strip_start_code(set.as_ref());
+                        if !clean.is_empty() {
+                            prep.push(clean.to_vec());
+                        }
+                    }
+                    inserted = true;
+                }
+                prep.push(nal.clone());
+            }
+            if !inserted {
+                for set in param_source {
+                    let clean = strip_start_code(set.as_ref());
+                    if !clean.is_empty() {
+                        prep.push(clean.to_vec());
+                    }
+                }
+            }
+            prepared_storage = prep;
+            &prepared_storage
+        } else {
+            nals
+        }
+    } else {
+        nals
+    };
+
+    let packets = match packetize_access_unit(codec, nals_ref, payload_type, ssrc, sequence, timestamp) {
         Ok(packets) => packets,
         Err(()) => {
             stats.dropped_video_frames.fetch_add(1, Relaxed);
@@ -527,7 +588,7 @@ fn farm_spec_for(profile: &VideoProfile, visible_windows: usize) -> vks_media_mc
         bufsize_kbps: group_bitrate.saturating_mul(2),
         profile: profile.profile.clone(),
         level: profile.level.clone(),
-        keyint: profile.fps.max(1),
+        keyint: (profile.fps / 2).max(1),
         encoder_params: profile.codec.encoder_params().to_string(),
     }
 }
@@ -550,7 +611,9 @@ impl VideoDepacketizer {
         match self {
             Self::H264(depacketizer) => depacketizer.push(packet),
             Self::H265(depacketizer) => {
-                depacketizer.push(packet.sequence, packet.timestamp, packet.payload).map_err(|_| ())
+                depacketizer
+                    .push(packet.sequence, packet.timestamp, packet.payload)
+                    .map_err(|_| ())
             }
         }
     }
@@ -632,8 +695,16 @@ pub(super) async fn spawn_video_media_bridge(
     let encoder_stdout = encoder.as_mut().and_then(|child| child.stdout.take());
     let mut decoder_stdin = decoder.stdin.take().expect("decoder stdin");
     let mut decoder_stdout = decoder.stdout.take().expect("decoder stdout");
-    let (frames_tx, mut frames_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
-    let (access_tx, mut access_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+    if let Some(ref stdin) = encoder_stdin {
+        vks_media_mcu::farm::tune_pipe_capacity(stdin);
+    }
+    if let Some(ref stdout) = encoder_stdout {
+        vks_media_mcu::farm::tune_pipe_capacity(stdout);
+    }
+    vks_media_mcu::farm::tune_pipe_capacity(&decoder_stdin);
+    vks_media_mcu::farm::tune_pipe_capacity(&decoder_stdout);
+    let (frames_tx, mut frames_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+    let (access_tx, mut access_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
     let rtp_socket = Arc::new(session.rtp_socket);
     let worker_failed = Arc::new(AtomicBool::new(false));
     let ssrc = (uuid::Uuid::new_v4().as_u128() as u32).max(1);
@@ -718,17 +789,27 @@ pub(super) async fn spawn_video_media_bridge(
             let epoch = std::time::Instant::now();
             let mut sequence = 1u16;
             let mut seen_keyframe = false;
+            let mut pending_viewer: Option<vks_media_mcu::GroupViewer> = None;
+            let mut pending_delta_count = 0usize;
             // `P1`: смена числа видимых окон — новый ключ группы (битрейт
             // масштабируется коэффициентом), а не пересоздание на каждом кадре.
             enum FarmEvent {
-                AccessUnit(Result<Arc<vks_media_mcu::AccessUnit>, tokio::sync::broadcast::error::RecvError>),
+                PendingAu(Result<Arc<vks_media_mcu::AccessUnit>, tokio::sync::broadcast::error::RecvError>),
+                CurrentAu(Result<Arc<vks_media_mcu::AccessUnit>, tokio::sync::broadcast::error::RecvError>),
                 VisibleWindows,
             }
             loop {
-                let event = {
-                    let receiver = &mut viewer.rx;
+                let event = if let Some(ref mut pv) = pending_viewer {
                     tokio::select! {
-                        access_unit = receiver.recv() => FarmEvent::AccessUnit(access_unit),
+                        biased;
+                        access_unit = pv.rx.recv() => FarmEvent::PendingAu(access_unit),
+                        access_unit = viewer.rx.recv() => FarmEvent::CurrentAu(access_unit),
+                        _ = visible_rx.changed() => FarmEvent::VisibleWindows,
+                    }
+                } else {
+                    tokio::select! {
+                        biased;
+                        access_unit = viewer.rx.recv() => FarmEvent::CurrentAu(access_unit),
                         _ = visible_rx.changed() => FarmEvent::VisibleWindows,
                     }
                 };
@@ -736,7 +817,11 @@ pub(super) async fn spawn_video_media_bridge(
                     FarmEvent::VisibleWindows => {
                         let visible = *visible_rx.borrow();
                         let desired = farm_spec_for(&farm_profile, visible);
-                        if desired.bitrate_kbps != viewer.key.spec.bitrate_kbps {
+                        let current_bitrate = pending_viewer
+                            .as_ref()
+                            .map(|pv| pv.key.spec.bitrate_kbps)
+                            .unwrap_or(viewer.key.spec.bitrate_kbps);
+                        if desired.bitrate_kbps != current_bitrate {
                             match farm_engine.acquire_video_viewer(room, &desired).await {
                                 Ok(new_viewer) => {
                                     tracing::debug!(
@@ -744,10 +829,10 @@ pub(super) async fn spawn_video_media_bridge(
                                         visible,
                                         old_bitrate = viewer.key.spec.bitrate_kbps,
                                         new_bitrate = desired.bitrate_kbps,
-                                        "encoder group re-keyed on visible windows change"
+                                        "encoder group re-keyed on visible windows change (make-before-break)"
                                     );
-                                    viewer = new_viewer;
-                                    seen_keyframe = false;
+                                    pending_viewer = Some(new_viewer);
+                                    pending_delta_count = 0;
                                 }
                                 Err(error) => tracing::warn!(
                                     participant = %owner,
@@ -758,15 +843,47 @@ pub(super) async fn spawn_video_media_bridge(
                         }
                         continue;
                     }
-                    FarmEvent::AccessUnit(Ok(access_unit)) => access_unit,
-                    FarmEvent::AccessUnit(Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped))) => {
-                        // Зритель отстал от группы: считаем потерю кадров на нём,
-                        // энкодер при этом не тормозим (спека §B.7).
+                    FarmEvent::PendingAu(Ok(access_unit)) => {
+                        if access_unit.is_idr() || pending_delta_count >= 60 {
+                            // Make-before-break cutover: atomically swap viewer on first keyframe or fallback threshold
+                            viewer = pending_viewer.take().unwrap();
+                            seen_keyframe = access_unit.is_idr();
+                            pending_delta_count = 0;
+                            access_unit
+                        } else {
+                            pending_delta_count += 1;
+                            if let Some(ref pv) = pending_viewer {
+                                pv.note_dropped(1);
+                            }
+                            continue;
+                        }
+                    }
+                    FarmEvent::PendingAu(Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped))) => {
+                        stats.dropped_video_frames.fetch_add(dropped, Relaxed);
+                        if let Some(ref pv) = pending_viewer {
+                            pv.note_dropped(dropped);
+                        }
+                        continue;
+                    }
+                    FarmEvent::PendingAu(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                        pending_viewer = None;
+                        pending_delta_count = 0;
+                        continue;
+                    }
+                    FarmEvent::CurrentAu(Ok(access_unit)) => access_unit,
+                    FarmEvent::CurrentAu(Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped))) => {
                         stats.dropped_video_frames.fetch_add(dropped, Relaxed);
                         viewer.note_dropped(dropped);
                         continue;
                     }
-                    FarmEvent::AccessUnit(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                    FarmEvent::CurrentAu(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                        if let Some(pv) = pending_viewer.take() {
+                            tracing::info!(participant = %owner, "current encoder closed during handover; promoting pending encoder");
+                            viewer = pv;
+                            seen_keyframe = false;
+                            pending_delta_count = 0;
+                            continue;
+                        }
                         tracing::info!(participant = %owner, "encoder group closed; ending video egress");
                         break;
                     }
@@ -804,6 +921,7 @@ pub(super) async fn spawn_video_media_bridge(
                     timestamp,
                     &stats,
                     Some(&viewer),
+                    access_unit.parameter_sets(),
                 )
                 .await
                 {
@@ -844,6 +962,7 @@ pub(super) async fn spawn_video_media_bridge(
                                 timestamp,
                                 &stats,
                                 None,
+                                &[],
                             )
                             .await
                         {
@@ -931,7 +1050,7 @@ pub(super) async fn spawn_video_media_bridge(
                     tracing::debug!(
                         participant = %render_viewer,
                         requested,
-                        "keyframe request consumed; IDR deferred to the group encoder (keyint=30)"
+                        "keyframe request consumed; IDR deferred to the group encoder (keyint=15)"
                     );
                 }
             }
@@ -944,14 +1063,18 @@ pub(super) async fn spawn_video_media_bridge(
         // `P0-ingest`: видео-вход принимает переупорядоченные seq (джиттер
         // bot→MCU); раскладывает их `VideoReorderBuffer` ниже.
         source.accept_reordered();
+        source.accept_alternate_payload_type(Some(session.payload_type));
+        source.accept_dynamic_payloads();
         let input_codec = session.profile.codec;
         let mut depacketizer = VideoDepacketizer::new(input_codec);
         let mut reorder = VideoReorderBuffer::default();
         let mut pending_access = Vec::new();
         let mut last_access_ts = None;
         let mut receive = [0u8; 65536];
+        let mut rtcp_receive = [0u8; 2048];
         let mut interval = tokio::time::interval(Duration::from_millis(20));
         let mut last_rtcp = std::time::Instant::now() - Duration::from_secs(5);
+        let mut last_keyframe_request = std::time::Instant::now() - Duration::from_secs(5);
         while !session.cancelled.load(Relaxed) && !worker_failed.load(Relaxed) {
             tokio::select! {
                 _ = interval.tick() => {
@@ -984,16 +1107,53 @@ pub(super) async fn spawn_video_media_bridge(
                             &session.stats,
                         );
                     }
+                    session.stats.video_rx_lost_packets.store(reorder.gaps + reorder.late, Relaxed);
                     let encoder_dead = encoder
                         .as_mut()
                         .is_some_and(|child| child.try_wait().ok().flatten().is_some());
                     if encoder_dead || decoder.try_wait().ok().flatten().is_some() { break; }
                 }
+                rtcp_res = async {
+                    if let Some(socket) = &session.rtcp_socket {
+                        socket.recv_from(&mut rtcp_receive).await.ok()
+                    } else {
+                        futures_util::future::pending().await
+                    }
+                } => {
+                    if let Some((count, _addr)) = rtcp_res {
+                        let feedbacks = vks_gateway_sip::rtcp::parse_feedback(&rtcp_receive[..count]);
+                        if !feedbacks.is_empty() {
+                            let now = std::time::Instant::now();
+                            if now.duration_since(last_keyframe_request) >= Duration::from_secs(1) {
+                                last_keyframe_request = now;
+                                tracing::debug!(room = %session.room_id, "RTCP PLI/FIR feedback received; requesting keyframe");
+                                session.engine.request_video_keyframe(session.room_id);
+                                session.controls.keyframe_requests.fetch_add(1, Relaxed);
+                            }
+                        }
+                    }
+                }
                 received = rtp_socket.recv_from(&mut receive) => {
                     let Ok((count, address)) = received else { break; };
+                    if vks_gateway_sip::rtcp::is_rtcp(&receive[..count]) {
+                        let feedbacks = vks_gateway_sip::rtcp::parse_feedback(&receive[..count]);
+                        if !feedbacks.is_empty() {
+                            let now = std::time::Instant::now();
+                            if now.duration_since(last_keyframe_request) >= Duration::from_secs(1) {
+                                last_keyframe_request = now;
+                                tracing::debug!(room = %session.room_id, "rtcp-mux PLI/FIR feedback received; requesting keyframe");
+                                session.engine.request_video_keyframe(session.room_id);
+                                session.controls.keyframe_requests.fetch_add(1, Relaxed);
+                            }
+                        }
+                        continue;
+                    }
                     let Some(packet) = source.accept(address, &receive[..count]) else {
                         session.stats.rejected_packets.fetch_add(1, Relaxed); continue;
                     };
+                    let now = std::time::Instant::now();
+                    let jitter = session.stats.jitter_calc.update(packet.timestamp, now, 90_000);
+                    session.stats.video_rx_jitter_ms.store(jitter, Relaxed);
                     session.stats.video_rx_packets.fetch_add(1, Relaxed);
                     session.stats.video_rx_bytes.fetch_add(count as u64, Relaxed);
                     if session.controls.video_tx_muted.load(Relaxed) { continue; }
@@ -1004,8 +1164,9 @@ pub(super) async fn spawn_video_media_bridge(
                         timestamp: packet.timestamp,
                         marker: packet.marker,
                         payload: packet.payload.to_vec(),
-                        arrived: std::time::Instant::now(),
+                        arrived: now,
                     });
+                    session.stats.video_rx_lost_packets.store(reorder.gaps + reorder.late, Relaxed);
                     for ordered in ready {
                         ingest_video_packet(
                             ordered,

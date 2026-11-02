@@ -1939,8 +1939,8 @@ async fn test_farm_metrics_and_api_v3_snapshot_reflect_encoder_group_lifecycle()
         bufsize_kbps: 2048,
         profile: "baseline".into(),
         level: "3.1".into(),
-        keyint: 30,
-        encoder_params: "repeat-headers=1:aud=1:scenecut=0".into(),
+        keyint: 15,
+        encoder_params: "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=0:weightp=0:8x8dct=0:ref=1:rc-lookahead=0:slice-max-size=1180".into(),
     };
     let viewer = engine.acquire_video_viewer(room, &spec).await.expect("farm encoder must start");
     assert_eq!(viewer.rtp_snapshot(), (0, 0, 0), "новый зритель без RTP");
@@ -2139,8 +2139,8 @@ async fn recording_control_persists_immediately_and_reuses_the_room_slot_after_r
         bufsize_kbps: 2048,
         profile: "baseline".into(),
         level: "3.1".into(),
-        keyint: 30,
-        encoder_params: "repeat-headers=1:aud=1:scenecut=0".into(),
+        keyint: 15,
+        encoder_params: "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=0:weightp=0:8x8dct=0:ref=1:rc-lookahead=0:slice-max-size=1180".into(),
     };
     let viewer = engine.acquire_video_viewer(room_id, &spec).await.expect("farm encoder must start");
 

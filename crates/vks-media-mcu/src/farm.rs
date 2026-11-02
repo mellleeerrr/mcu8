@@ -521,7 +521,7 @@ impl EncoderFarm {
             }
         }
         let (input_tx, input_rx) = mpsc::channel::<Arc<Frame>>(1);
-        let (tx, _) = broadcast::channel::<Arc<AccessUnit>>(8);
+        let (tx, _) = broadcast::channel::<Arc<AccessUnit>>(4);
         let cancel = Arc::new(AtomicBool::new(false));
         let notify = Arc::new(tokio::sync::Notify::new());
         let spec = key.spec.clone();
@@ -817,6 +817,19 @@ impl Drop for GroupViewer {
 /// **Писатель** (этот таск): кадры из [`mpsc`] → stdin child'а.
 /// **Читатель** (отдельный таск): stdout → Annex-B → access units → broadcast.
 ///
+#[cfg(target_os = "linux")]
+pub fn tune_pipe_capacity<F: std::os::unix::io::AsRawFd>(file: &F) {
+    let fd = file.as_raw_fd();
+    for &cap in &[1024 * 1024, 512 * 1024, 256 * 1024, 64 * 1024] {
+        let ret = unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, cap) };
+        if ret > 0 {
+            break;
+        }
+    }
+}
+#[cfg(not(target_os = "linux"))]
+pub fn tune_pipe_capacity<F>(_file: &F) {}
+
 /// Разделение принципиально: если читать stdout в том же цикле, что писать
 /// stdin, возникает клинч — границей AU служит AUD **следующего** кадра, а его
 /// нельзя закодировать, пока писатель не отдал следующий кадр, но писатель
@@ -833,6 +846,12 @@ async fn run_group(
 ) {
     let mut stdin = child.stdin.take();
     let stdout = child.stdout.take();
+    if let Some(ref p) = stdin {
+        tune_pipe_capacity(p);
+    }
+    if let Some(ref p) = stdout {
+        tune_pipe_capacity(p);
+    }
     let reader = tokio::spawn(read_access_units(group.clone(), stdout, spec.clone(), cancel.clone()));
     // Кадров записано / AU отправлено — для диагностики «энкодер не голодает?».
     let mut frames_written: u64 = 0;
@@ -877,7 +896,9 @@ async fn run_group(
         if tokio::time::timeout(io_timeout, pipe.write_all(&frame.data)).await.map_or(true, |result| result.is_err()) {
             // Энкодер не принимает кадры: группа закрывается, зрители получают
             // `Closed` (gateway логирует и завершает видео-мост).
-            tracing::warn!(room = %group.key.room, "encoder group failed: stdin closed");
+            if !cancel.load(Ordering::Relaxed) && !group.cancel.load(Ordering::Relaxed) {
+                tracing::warn!(room = %group.key.room, "encoder group failed: stdin closed");
+            }
             group.cancel.store(true, Ordering::Relaxed);
             break;
         }
@@ -1012,7 +1033,7 @@ fn default_spawner() -> Spawner {
 
 fn spawn_ffmpeg(spec: &EncoderSpec, input: (u32, u32)) -> io::Result<Child> {
     let mut command = Command::new(std::env::var_os("VKS_FFMPEG_BIN").unwrap_or_else(|| "ffmpeg".into()));
-    command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1", "-filter_threads", "1"]);
+    command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "2", "-filter_threads", "2"]);
     command.args([
         "-f",
         "rawvideo",
@@ -1034,7 +1055,7 @@ fn spawn_ffmpeg(spec: &EncoderSpec, input: (u32, u32)) -> io::Result<Child> {
         "-c:v",
         spec.codec.encoder(),
         "-threads",
-        "1",
+        "2",
         "-preset",
         "ultrafast",
         "-tune",
@@ -1197,8 +1218,8 @@ mod tests {
             bufsize_kbps: 1600,
             profile: "baseline".into(),
             level: "3.1".into(),
-            keyint: fps,
-            encoder_params: "repeat-headers=1:aud=1:scenecut=0".into(),
+            keyint: (fps / 2).max(1),
+            encoder_params: "repeat-headers=1:aud=1:scenecut=0:bframes=0:cabac=0:weightp=0:8x8dct=0:ref=1:rc-lookahead=0:slice-max-size=1180".into(),
         }
     }
 
