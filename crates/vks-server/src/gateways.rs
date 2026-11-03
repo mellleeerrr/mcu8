@@ -11,7 +11,7 @@ use vks_admin::hub::ParticipantSnapshot;
 use vks_admin::rooms::Rooms;
 use vks_admin::state::{AppState, OutboundDialer as _};
 use vks_common::Error;
-use vks_core::RoomId;
+use vks_core::{ParticipantId, RoomId};
 use vks_gateway_h323::{H323Call, H323Codec, H323Gateway};
 use vks_gateway_sip::{SipCall, SipCodec, SipDialError, SipGateway};
 use vks_proto::signaling::signaling_message::Payload;
@@ -2521,6 +2521,13 @@ fn inbound_media_dead(
 /// Дожидается остановки media-задач после cancel, чтобы порты/кодеки
 /// освободились до снятия participant и ответа BYE.
 async fn wait_inbound_bridges(call: &mut InboundUasCall) {
+    if let Some(cancel) = call.presentation_cancel.take() {
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(task) = call.presentation_task.take() {
+        task.abort();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
+    }
     if let Some(task) = call.audio_task.take() {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
     }
@@ -2545,6 +2552,14 @@ struct InboundUasCall {
     answered_at: std::time::Instant,
     audio_task: Option<tokio::task::JoinHandle<()>>,
     video_task: Option<tokio::task::JoinHandle<()>>,
+    presentation_task: Option<tokio::task::JoinHandle<()>>,
+    presentation_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    presentation_pid: Option<ParticipantId>,
+    presentation_port: Option<u16>,
+    audio_port: u16,
+    video_port: Option<u16>,
+    session_id: u64,
+    display_name: String,
 }
 
 fn sip_from_display_name(from: &str) -> String {
@@ -2559,6 +2574,38 @@ fn sip_from_display_name(from: &str) -> String {
     }
     let user = quoted.split("sip:").nth(1).and_then(|rest| rest.split(['@', '>', ';']).next()).unwrap_or("SIP");
     vks_common::sanitize_label_or(user, "SIP")
+}
+
+/// Водопад разрешения отображаемого имени (RFC 3261 / RFC 3325 / RFC 4796):
+/// 1. P-Asserted-Identity
+/// 2. Remote-Party-ID
+/// 3. From header
+/// 4. Contact header
+/// 5. URI user part
+fn resolve_waterfall_display_name(request: &vks_gateway_sip::UasRequest) -> String {
+    if let Some(ref pai) = request.p_asserted_identity {
+        let name = sip_from_display_name(pai);
+        if name != "SIP" && !name.is_empty() {
+            return name;
+        }
+    }
+    if let Some(ref rpi) = request.remote_party_id {
+        let name = sip_from_display_name(rpi);
+        if name != "SIP" && !name.is_empty() {
+            return name;
+        }
+    }
+    let from_name = sip_from_display_name(&request.from);
+    if from_name != "SIP" && !from_name.is_empty() {
+        return from_name;
+    }
+    if let Some(ref contact) = request.contact {
+        let name = sip_from_display_name(contact);
+        if name != "SIP" && !name.is_empty() {
+            return name;
+        }
+    }
+    from_name
 }
 
 fn sip_dialog_key(request: &vks_gateway_sip::UasRequest) -> String {
@@ -2644,6 +2691,11 @@ async fn stop_inbound_calls(
         if let Some(state) =
             manager.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
         {
+            if let Some(mcu) = manager.mcu_engine.as_ref() {
+                if let Some(pres_pid) = call.presentation_pid.take() {
+                    mcu.unbridge_participant(call.room_id, pres_pid);
+                }
+            }
             terminate_gateway_participant_in_room(
                 &state,
                 manager.mcu_engine.as_ref(),
@@ -2864,20 +2916,154 @@ async fn serve_sip_uas_on(
                     .map(|call| (call.to_tag.clone(), call.sdp.clone(), call.invite_cseq));
                 if let Some((to_tag, sdp, invite_cseq)) = existing {
                     if request.cseq > invite_cseq {
-                        // re-INVITE/hold: 501, а не кэш старого 200/SDP.
-                        sip_send(
-                            &socket,
-                            peer,
-                            &vks_gateway_sip::build_response(
-                                501,
-                                "Not Implemented",
-                                &request,
-                                &advertised_ip,
-                                local_port,
-                                Some(&to_tag),
-                                "",
-                            ),
+                        // In-dialog re-INVITE (e.g. TrueConf dual-stream presentation start/stop or SDP renegotiation)
+                        let Some(media) = vks_gateway_sip::negotiate(&request.body) else {
+                            sip_send(
+                                &socket,
+                                peer,
+                                &vks_gateway_sip::build_response(
+                                    488,
+                                    "Not Acceptable Here",
+                                    &request,
+                                    &advertised_ip,
+                                    local_port,
+                                    Some(&to_tag),
+                                    "",
+                                ),
+                            );
+                            continue;
+                        };
+
+                        let Some(mcu) = manager.mcu_engine.clone() else {
+                            sip_send(
+                                &socket,
+                                peer,
+                                &vks_gateway_sip::build_response(
+                                    503,
+                                    "Service Unavailable",
+                                    &request,
+                                    &advertised_ip,
+                                    local_port,
+                                    Some(&to_tag),
+                                    "",
+                                ),
+                            );
+                            continue;
+                        };
+
+                        let (room_id, participant_id, display_name, session_id, audio_port, video_port, pres_task_exists, stats) = {
+                            let guard = calls.lock().expect("inbound calls poisoned");
+                            let Some(call) = guard.get(&key) else { continue; };
+                            (
+                                call.room_id,
+                                call.participant_id.clone(),
+                                call.display_name.clone(),
+                                call.session_id,
+                                call.audio_port,
+                                call.video_port,
+                                call.presentation_task.is_some(),
+                                call.stats.clone(),
+                            )
+                        };
+
+                        let mut new_pres_task = None;
+                        let mut new_pres_cancel = None;
+                        let mut new_pres_pid = None;
+                        let mut new_pres_port = None;
+
+                        if media.presentation_offered && media.presentation_active && !pres_task_exists {
+                            if let Some(pres_pair) = manager.port_pool.allocate_pair("0.0.0.0").await {
+                                let pres_port = pres_pair.rtp_port;
+                                let main_part = crate::parse_participant_id(&participant_id);
+                                let mut pres_bytes = *main_part.as_uuid().as_bytes();
+                                pres_bytes[0] ^= 0x50;
+                                let pres_pid = ParticipantId::from_uuid(uuid::Uuid::from_bytes(pres_bytes));
+
+                                mcu.bridge_participant(
+                                    room_id,
+                                    pres_pid,
+                                    vec![vks_core::track::Track::new(pres_pid, vks_core::track::TrackKind::Screen)],
+                                );
+                                mcu.set_participant_label(room_id, pres_pid, format!("{} (Screen)", display_name));
+                                mcu.set_participant_label_visibility(room_id, pres_pid, true);
+
+                                let pres_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                let remote_ip = media
+                                    .remote_presentation_ip
+                                    .as_deref()
+                                    .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+                                    .unwrap_or(peer.ip());
+                                let remote_port = media.remote_presentation_port.unwrap_or(50004);
+                                let pres_session = video::PresentationBridgeSession {
+                                    room_id,
+                                    presentation_pid: pres_pid,
+                                    rtp_socket: pres_pair.rtp_socket,
+                                    remote_target: std::net::SocketAddr::new(remote_ip, remote_port),
+                                    payload_type: media.presentation_payload_type.unwrap_or(96),
+                                    port_pool: manager.port_pool.clone(),
+                                    engine: mcu.clone(),
+                                    cancelled: pres_cancel.clone(),
+                                    stats: stats.clone(),
+                                };
+                                if let Ok(handle) = video::spawn_presentation_bridge(pres_session).await {
+                                    new_pres_task = Some(handle);
+                                    new_pres_cancel = Some(pres_cancel);
+                                    new_pres_pid = Some(pres_pid);
+                                    new_pres_port = Some(pres_port);
+                                }
+                            }
+                        }
+
+                        let effective_pres_port = {
+                            let mut guard = calls.lock().expect("inbound calls poisoned");
+                            let Some(call) = guard.get_mut(&key) else { continue; };
+                            call.invite_cseq = request.cseq;
+
+                            if let Some(task) = new_pres_task {
+                                call.presentation_task = Some(task);
+                                call.presentation_cancel = new_pres_cancel;
+                                call.presentation_pid = new_pres_pid;
+                                call.presentation_port = new_pres_port;
+                            } else if !media.presentation_active {
+                                if let Some(cancel) = call.presentation_cancel.take() {
+                                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                if let Some(task) = call.presentation_task.take() {
+                                    task.abort();
+                                }
+                                if let Some(pres_pid) = call.presentation_pid.take() {
+                                    mcu.unbridge_participant(call.room_id, pres_pid);
+                                }
+                                call.presentation_port = None;
+                            }
+                            call.presentation_port
+                        };
+
+                        let answer_sdp = vks_gateway_sip::build_answer_with_presentation(
+                            &advertised_ip,
+                            session_id,
+                            audio_port,
+                            video_port,
+                            effective_pres_port,
+                            &media,
                         );
+                        {
+                            let mut guard = calls.lock().expect("inbound calls poisoned");
+                            if let Some(call) = guard.get_mut(&key) {
+                                call.sdp = answer_sdp.clone();
+                            }
+                        }
+
+                        let response = vks_gateway_sip::build_response(
+                            200,
+                            "OK",
+                            &request,
+                            &advertised_ip,
+                            local_port,
+                            Some(&to_tag),
+                            &answer_sdp,
+                        );
+                        sip_send(&socket, peer, &response);
                         continue;
                     }
                     // Retransmission (same dialog): rebuild with this request's
@@ -3075,12 +3261,21 @@ async fn serve_sip_uas_on(
                 let mut video_lease =
                     video_pair.as_ref().map(|pair| RtpPortLease::new(manager.port_pool.clone(), pair.rtp_port));
                 let has_video = video_pair.is_some();
+
+                let pres_pair = if media.presentation_offered && media.presentation_active {
+                    manager.port_pool.allocate_pair("0.0.0.0").await
+                } else {
+                    None
+                };
+                let answer_pres_port = pres_pair.as_ref().map(|pair| pair.rtp_port);
+
                 let session_id = uuid::Uuid::new_v4().as_u128() as u64;
-                let sdp = vks_gateway_sip::build_answer(
+                let sdp = vks_gateway_sip::build_answer_with_presentation(
                     &advertised_ip,
                     session_id,
                     audio_pair.rtp_port,
                     video_pair.as_ref().map(|pair| pair.rtp_port),
+                    answer_pres_port,
                     &media,
                 );
                 sip_send(
@@ -3134,7 +3329,7 @@ async fn serve_sip_uas_on(
                 if let Some(room_id) = room_id {
                     let participant_id = format!("sip-{}-in@sip-gateway", uuid::Uuid::new_v4());
                     let participant = crate::parse_participant_id(&participant_id);
-                    let display_name = sip_from_display_name(&request.from);
+                    let display_name = resolve_waterfall_display_name(&request);
                     let stats = Arc::new(GatewayMediaStats::default());
                     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3240,7 +3435,7 @@ async fn serve_sip_uas_on(
                                 payload_type: payload,
                                 receive_payload_type: payload,
                                 port_pool: manager.port_pool.clone(),
-                                engine: mcu,
+                                engine: mcu.clone(),
                                 controls: controls.clone(),
                                 cancelled: cancel.clone(),
                                 stats: stats.clone(),
@@ -3293,6 +3488,51 @@ async fn serve_sip_uas_on(
                                     }
                                 }
                             }));
+                        }
+                    }
+                    let mut presentation_task = None;
+                    let mut presentation_cancel = None;
+                    let mut presentation_pid = None;
+                    let mut presentation_port = None;
+
+                    if let Some(pres_pair) = pres_pair {
+                        let pres_port = pres_pair.rtp_port;
+                        let main_uuid = participant.as_uuid();
+                        let mut pres_bytes = *main_uuid.as_bytes();
+                        pres_bytes[0] ^= 0x50;
+                        let p_pid = ParticipantId::from_uuid(uuid::Uuid::from_bytes(pres_bytes));
+
+                        mcu.bridge_participant(
+                            room_id,
+                            p_pid,
+                            vec![vks_core::track::Track::new(p_pid, vks_core::track::TrackKind::Screen)],
+                        );
+                        mcu.set_participant_label(room_id, p_pid, format!("{} (Screen)", display_name));
+                        mcu.set_participant_label_visibility(room_id, p_pid, true);
+
+                        let p_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let remote_ip = media
+                            .remote_presentation_ip
+                            .as_deref()
+                            .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+                            .unwrap_or(peer.ip());
+                        let remote_port = media.remote_presentation_port.unwrap_or(50004);
+                        let pres_session = video::PresentationBridgeSession {
+                            room_id,
+                            presentation_pid: p_pid,
+                            rtp_socket: pres_pair.rtp_socket,
+                            remote_target: std::net::SocketAddr::new(remote_ip, remote_port),
+                            payload_type: media.presentation_payload_type.unwrap_or(96),
+                            port_pool: manager.port_pool.clone(),
+                            engine: mcu.clone(),
+                            cancelled: p_cancel.clone(),
+                            stats: stats.clone(),
+                        };
+                        if let Ok(handle) = video::spawn_presentation_bridge(pres_session).await {
+                            presentation_task = Some(handle);
+                            presentation_cancel = Some(p_cancel);
+                            presentation_pid = Some(p_pid);
+                            presentation_port = Some(pres_port);
                         }
                     }
                     let media_details = serde_json::json!({
@@ -3362,6 +3602,14 @@ async fn serve_sip_uas_on(
                             answered_at: std::time::Instant::now(),
                             audio_task: Some(audio_task),
                             video_task,
+                            presentation_task,
+                            presentation_cancel,
+                            presentation_pid,
+                            presentation_port,
+                            audio_port: audio_pair.rtp_port,
+                            video_port: answer_video_port,
+                            session_id,
+                            display_name: display_name.clone(),
                         },
                     );
                     tokio::spawn(async move {
@@ -3396,6 +3644,11 @@ async fn serve_sip_uas_on(
                                 .ok()
                                 .and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
                             {
+                                if let Some(mcu) = manager_cleanup.mcu_engine.as_ref() {
+                                    if let Some(pres_pid) = call.presentation_pid.take() {
+                                        mcu.unbridge_participant(call.room_id, pres_pid);
+                                    }
+                                }
                                 terminate_gateway_participant_in_room(
                                     &state,
                                     manager_cleanup.mcu_engine.as_ref(),
@@ -3459,6 +3712,11 @@ async fn serve_sip_uas_on(
                     if let Some(state) =
                         manager.state.read().ok().and_then(|guard| guard.as_ref().and_then(std::sync::Weak::upgrade))
                     {
+                        if let Some(mcu) = manager.mcu_engine.as_ref() {
+                            if let Some(pres_pid) = call.presentation_pid.take() {
+                                mcu.unbridge_participant(call.room_id, pres_pid);
+                            }
+                        }
                         terminate_gateway_participant_in_room(
                             &state,
                             manager.mcu_engine.as_ref(),
@@ -4364,6 +4622,7 @@ mod media_runtime_tests {
             remote_video_port: Some(4002),
             remote_video_ip: None,
             video_offered: true,
+            ..Default::default()
         };
         let profile = inbound_video_profile(&media);
         assert_eq!(profile.level, "3.0");
@@ -6684,7 +6943,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
     }
 
     #[tokio::test]
-    async fn inbound_sip_uas_reinvite_gets_501_and_shutdown_sends_bye() {
+    async fn inbound_sip_uas_reinvite_accepts_sdp_and_shutdown_sends_bye() {
         use vks_admin::state::AppState;
         let state = Arc::new(AppState::new());
         let room = Rooms::create(&state, "uas-reinvite");
@@ -6750,12 +7009,12 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
                 .expect("reinvite response timeout")
                 .unwrap();
             let text = String::from_utf8_lossy(&buf[..len]).into_owned();
-            if text.starts_with("SIP/2.0 501") {
+            if text.starts_with("SIP/2.0 200") {
                 reinvite_status = text;
                 break;
             }
         }
-        assert!(reinvite_status.starts_with("SIP/2.0 501"), "re-INVITE must be rejected with 501");
+        assert!(reinvite_status.starts_with("SIP/2.0 200"), "re-INVITE must be accepted with 200 OK");
         manager.shutdown_sip_uas().await;
         let mut bye_text = String::new();
         for _ in 0..6 {
@@ -6772,6 +7031,115 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         }
         assert!(bye_text.starts_with("BYE "), "graceful shutdown must send BYE to active inbound dialog");
         assert!(manager.registry.lock().unwrap().by_participant.is_empty(), "shutdown must clear registry");
+        let _ = listener.await;
+    }
+
+    #[tokio::test]
+    async fn inbound_sip_uas_dual_stream_presentation_lifecycle() {
+        use vks_admin::state::AppState;
+        let state = Arc::new(AppState::new());
+        let room = Rooms::create(&state, "uas-presentation");
+        let mcu = Arc::new(vks_media_mcu::McuEngine::new());
+        let manager = Arc::new(GatewayManager::new().with_mcu(mcu.clone()).with_candidate_ip("127.0.0.1"));
+        manager.bind_state(Arc::downgrade(&state));
+        let server = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let server_port = server.local_addr().unwrap().port();
+        let listener = tokio::spawn(serve_sip_uas_on(
+            manager.clone(),
+            server,
+            "127.0.0.1".into(),
+            std::time::Duration::from_secs(15),
+        ));
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(("127.0.0.1", server_port)).await.unwrap();
+        let client_port = client.local_addr().unwrap().port();
+
+        // 1. Initial INVITE with audio + video and PAI
+        let sdp = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\nm=video 40002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n";
+        let invite = format!(
+            "INVITE sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:{client_port};branch=z9hG4bKp1\r\nP-Asserted-Identity: \"TrueConf User\" <sip:trueconf@127.0.0.1>\r\nFrom: \"TrueConf\" <sip:tc@127.0.0.1>;tag=ptag\r\nTo: <sip:{}@127.0.0.1>\r\nCall-ID: cid-pres\r\nCSeq: 1 INVITE\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+            room.id, room.id, sdp.len(), sdp
+        );
+        client.send(invite.as_bytes()).await.unwrap();
+
+        let mut to_tag = String::new();
+        for _ in 0..6 {
+            let mut buf = [0u8; 8192];
+            let len = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            let text = String::from_utf8_lossy(&buf[..len]).into_owned();
+            if text.starts_with("SIP/2.0 200") {
+                to_tag = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("To:"))
+                    .and_then(|line| line.split(";tag=").nth(1))
+                    .map(|tag| tag.trim().to_string())
+                    .expect("To tag");
+                break;
+            }
+        }
+        let ack = format!(
+            "ACK sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:{client_port};branch=z9hG4bKp2\r\nFrom: \"TrueConf\" <sip:tc@127.0.0.1>;tag=ptag\r\nTo: <sip:{}@127.0.0.1>;tag={to_tag}\r\nCall-ID: cid-pres\r\nCSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n",
+            room.id, room.id
+        );
+        client.send(ack.as_bytes()).await.unwrap();
+
+        // 2. Mid-call re-INVITE starting screen presentation (RFC 4796 + BFCP)
+        let sdp_pres = "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\nm=video 40002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\na=content:main\r\nm=video 40004 RTP/AVP 97\r\na=rtpmap:97 H264/90000\r\na=fmtp:97 packetization-mode=1;profile-level-id=42e01f\r\na=content:slides\r\na=sendrecv\r\nm=application 40006 UDP/BFCP *\r\n";
+        let reinvite = format!(
+            "INVITE sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:{client_port};branch=z9hG4bKp3\r\nFrom: \"TrueConf\" <sip:tc@127.0.0.1>;tag=ptag\r\nTo: <sip:{}@127.0.0.1>;tag={to_tag}\r\nCall-ID: cid-pres\r\nCSeq: 2 INVITE\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+            room.id, room.id, sdp_pres.len(), sdp_pres
+        );
+        client.send(reinvite.as_bytes()).await.unwrap();
+
+        let mut reinvite_200 = String::new();
+        for _ in 0..6 {
+            let mut buf = [0u8; 8192];
+            let len = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            let text = String::from_utf8_lossy(&buf[..len]).into_owned();
+            if text.starts_with("SIP/2.0 200") {
+                reinvite_200 = text;
+                break;
+            }
+        }
+        assert!(reinvite_200.starts_with("SIP/2.0 200"), "re-INVITE with presentation must be answered with 200 OK");
+        assert!(reinvite_200.contains("a=content:slides"), "Answer must contain a=content:slides");
+        assert!(reinvite_200.contains("m=application 0 UDP/BFCP 0"), "Answer must reject BFCP with port 0");
+
+        // Verify MCU layout switched to FocusLayout with presentation in slot 0
+        let snap = mcu.layout_snapshot(room.id).unwrap();
+        assert_eq!(snap.layout.kind, vks_layout::LayoutKind::Focus);
+
+        // 3. Stop presentation with re-INVITE (slides port 0)
+        let sdp_stop = sdp_pres.replace("m=video 40004 RTP/AVP 97", "m=video 0 RTP/AVP 97");
+        let stop_reinvite = format!(
+            "INVITE sip:{}@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:{client_port};branch=z9hG4bKp4\r\nFrom: \"TrueConf\" <sip:tc@127.0.0.1>;tag=ptag\r\nTo: <sip:{}@127.0.0.1>;tag={to_tag}\r\nCall-ID: cid-pres\r\nCSeq: 3 INVITE\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+            room.id, room.id, sdp_stop.len(), sdp_stop
+        );
+        client.send(stop_reinvite.as_bytes()).await.unwrap();
+
+        let mut stop_200 = String::new();
+        for _ in 0..6 {
+            let mut buf = [0u8; 8192];
+            let len = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            let text = String::from_utf8_lossy(&buf[..len]).into_owned();
+            if text.starts_with("SIP/2.0 200") {
+                stop_200 = text;
+                break;
+            }
+        }
+        assert!(stop_200.starts_with("SIP/2.0 200"));
+        assert!(stop_200.contains("m=video 0 RTP/AVP 0"));
+
+        manager.shutdown_sip_uas().await;
         let _ = listener.await;
     }
 

@@ -27,14 +27,17 @@ Environment=VKS_SIP_UAS_ENABLED=1
 # Firewall/NAT must open this UDP range; empty = ephemeral ports.
 Environment=VKS_WEBRTC_PORT_MIN=43000
 Environment=VKS_WEBRTC_PORT_MAX=43100
+# Memory allocator hygiene: background purging of dirty pages
+Environment=MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000
 ExecStart=%h/mcu/target/release/vks-server --config %h/mcu/configs/default.toml
 Restart=on-failure
 RestartSec=2
 # exit 78 (EX_CONFIG) — ошибка конфигурации: перезапуск не поможет, не зацикливаемся.
 RestartPreventExitStatus=78
-KillMode=mixed
+KillMode=control-group
 KillSignal=SIGTERM
-TimeoutStopSec=30
+SendSIGKILL=yes
+TimeoutStopSec=10
 LimitNOFILE=65536
 StandardOutput=append:%h/mcu/vks_server.log
 StandardError=append:%h/mcu/vks_server.log

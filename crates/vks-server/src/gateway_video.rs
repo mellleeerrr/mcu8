@@ -1255,6 +1255,152 @@ pub(super) async fn spawn_video_media_bridge(
     }))
 }
 
+pub(super) struct PresentationBridgeSession {
+    pub room_id: vks_core::RoomId,
+    pub presentation_pid: vks_core::ParticipantId,
+    pub rtp_socket: tokio::net::UdpSocket,
+    pub remote_target: std::net::SocketAddr,
+    pub payload_type: u8,
+    pub port_pool: Arc<vks_gateway_sip::RtpPortPool>,
+    pub engine: Arc<vks_media_mcu::McuEngine>,
+    pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    pub stats: Arc<GatewayMediaStats>,
+}
+
+pub(super) async fn spawn_presentation_bridge(
+    session: PresentationBridgeSession,
+) -> Result<tokio::task::JoinHandle<()>, String> {
+    let local_port = session.rtp_socket.local_addr().map_err(|error| error.to_string())?.port();
+    let lease = super::RtpPortLease::new(session.port_pool.clone(), local_port);
+    if !codec_available_for(GatewayVideoCodec::H264).await {
+        return Err("FFmpeg H264 decoder is unavailable; presentation video was not started".into());
+    }
+
+    let profile = VideoProfile {
+        codec: GatewayVideoCodec::H264,
+        width: 1280,
+        height: 720,
+        fps: 30,
+        bitrate_kbps: 2048,
+        profile: "baseline".into(),
+        level: "3.1".into(),
+    };
+
+    let mut decoder = spawn_codec(false, &profile)?;
+    let decoder_errors = drain_errors(&mut decoder, "H264-presentation");
+    let mut decoder_stdin = decoder.stdin.take().expect("decoder stdin");
+    let mut decoder_stdout = decoder.stdout.take().expect("decoder stdout");
+    vks_media_mcu::farm::tune_pipe_capacity(&decoder_stdin, false);
+    vks_media_mcu::farm::tune_pipe_capacity(&decoder_stdout, true);
+
+    let (access_tx, mut access_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+    let decoder_input = tokio::spawn(async move {
+        while let Some(access_unit) = access_rx.recv().await {
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(1), decoder_stdin.write_all(&access_unit)).await,
+                Ok(Ok(()))
+            ) {
+                break;
+            }
+        }
+    });
+
+    let frame_bytes = profile.frame_bytes();
+    let width = profile.width;
+    let height = profile.height;
+    let room = session.room_id;
+    let pid = session.presentation_pid;
+    let engine = session.engine.clone();
+    let stats = session.stats.clone();
+    let decoder_output = tokio::spawn(async move {
+        loop {
+            let mut bytes = vec![0; frame_bytes];
+            if decoder_stdout.read_exact(&mut bytes).await.is_err() {
+                break;
+            }
+            if engine.set_participant_frame(room, pid, vks_media_mcu::frame::Frame::new(width, height, bytes)) {
+                stats.decoded_video_frames.fetch_add(1, Relaxed);
+            }
+        }
+    });
+
+    let rtp_socket = Arc::new(session.rtp_socket);
+    let task = tokio::spawn(async move {
+        let _lease = lease;
+        let mut source = super::audio::RtpSource::new(session.remote_target, session.payload_type);
+        source.accept_reordered();
+        source.accept_dynamic_payloads();
+        let mut depacketizer = VideoDepacketizer::new(GatewayVideoCodec::H264);
+        let mut reorder = VideoReorderBuffer::default();
+        let mut pending_access = Vec::new();
+        let mut last_access_ts = None;
+        let mut receive = [0u8; 65536];
+        let mut interval = tokio::time::interval(Duration::from_millis(20));
+
+        while !session.cancelled.load(Relaxed) {
+            tokio::select! {
+                _ = interval.tick() => {
+                    for ordered in reorder.flush(std::time::Instant::now()) {
+                        ingest_video_packet(
+                            ordered,
+                            GatewayVideoCodec::H264,
+                            &mut depacketizer,
+                            &mut pending_access,
+                            &mut last_access_ts,
+                            &access_tx,
+                            &session.stats,
+                        );
+                    }
+                    if decoder.try_wait().ok().flatten().is_some() { break; }
+                }
+                received = rtp_socket.recv_from(&mut receive) => {
+                    let Ok((count, address)) = received else { break; };
+                    if vks_gateway_sip::rtcp::is_rtcp(&receive[..count]) {
+                        continue;
+                    }
+                    let Some(packet) = source.accept(address, &receive[..count]) else {
+                        session.stats.rejected_packets.fetch_add(1, Relaxed);
+                        continue;
+                    };
+                    let now = std::time::Instant::now();
+                    session.stats.video_rx_packets.fetch_add(1, Relaxed);
+                    session.stats.video_rx_bytes.fetch_add(count as u64, Relaxed);
+                    let ready = reorder.push(BufferedRtp {
+                        sequence: packet.sequence,
+                        timestamp: packet.timestamp,
+                        marker: packet.marker,
+                        payload: packet.payload.to_vec(),
+                        arrived: now,
+                    });
+                    for ordered in ready {
+                        ingest_video_packet(
+                            ordered,
+                            GatewayVideoCodec::H264,
+                            &mut depacketizer,
+                            &mut pending_access,
+                            &mut last_access_ts,
+                            &access_tx,
+                            &session.stats,
+                        );
+                    }
+                }
+            }
+        }
+        for task in [decoder_input, decoder_output, decoder_errors] {
+            task.abort();
+            let _ = task.await;
+        }
+        let _ = decoder.kill().await;
+        let _ = decoder.wait().await;
+        tracing::info!(
+            participant = %session.presentation_pid,
+            room = %session.room_id,
+            "presentation video bridge stopped"
+        );
+    });
+    Ok(task)
+}
+
 /// Масштабирует кадр холста в I420 выходного профиля.
 ///
 /// `O3`: строчные срезы + инкрементальный сэмплер Брезенхема вместо

@@ -48,4 +48,4 @@ pub use rtp_bridge::{
 };
 pub use sip_message::{build_ack, build_bye, build_cancel, build_invite, SipResponse};
 pub use uac::{ActiveSipSession, SipDialError, SipUacClient};
-pub use uas::{build_answer, build_response, negotiate, InboundMedia, UasRequest};
+pub use uas::{build_answer, build_answer_with_presentation, build_response, negotiate, InboundMedia, SdpMediaKind, UasRequest};

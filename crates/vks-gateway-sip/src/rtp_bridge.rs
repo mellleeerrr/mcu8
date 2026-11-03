@@ -2477,6 +2477,7 @@ a=rtpmap:113 MP4A-LATM/90000\r\na=fmtp:113 profile-level-id=1;object=2;cpresent=
             remote_video_port: None,
             remote_video_ip: None,
             video_offered: false,
+            ..Default::default()
         };
         let answer_sdp = crate::uas::build_answer("127.0.0.1", 1, 41000, None, &inbound);
         assert!(answer_sdp.contains("a=rtpmap:113 MP4A-LATM/90000"), "{answer_sdp}");

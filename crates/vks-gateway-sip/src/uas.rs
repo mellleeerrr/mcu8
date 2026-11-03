@@ -23,11 +23,24 @@ pub struct UasRequest {
     pub via: String,
     pub contact: Option<String>,
     pub require: Option<String>,
+    pub p_asserted_identity: Option<String>,
+    pub remote_party_id: Option<String>,
     pub body: String,
 }
 
+/// Category of an SDP `m=` line for maintaining exact offer/answer stream order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SdpMediaKind {
+    #[default]
+    Audio,
+    VideoMain,
+    VideoSlides,
+    ApplicationBfcp,
+    Other,
+}
+
 /// Выбранные параметры входящего вызова.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InboundMedia {
     pub audio_payload_type: u8,
     /// Canonical codec name (`PCMU`, `PCMA`, `G722`, `G726-16`…), independent
@@ -67,6 +80,16 @@ pub struct InboundMedia {
     /// В оффере была секция video (даже с портом 0): answer обязан
     /// сохранить число m-line.
     pub video_offered: bool,
+    /// Dual-stream presentation (RFC 4796 `a=content:slides`).
+    pub presentation_offered: bool,
+    pub presentation_payload_type: Option<u8>,
+    pub remote_presentation_port: Option<u16>,
+    pub remote_presentation_ip: Option<String>,
+    pub presentation_active: bool,
+    /// BFCP floor control (RFC 4583 `m=application ... UDP/BFCP`).
+    pub bfcp_offered: bool,
+    /// Exact sequence of m-lines in the offer for RFC 3264 §6 answer construction.
+    pub m_line_order: Vec<SdpMediaKind>,
 }
 
 impl UasRequest {
@@ -97,6 +120,8 @@ impl UasRequest {
             via: String::new(),
             contact: None,
             require: None,
+            p_asserted_identity: None,
+            remote_party_id: None,
             body: body.to_string(),
         };
         let mut content_length = None;
@@ -116,6 +141,8 @@ impl UasRequest {
                 "via" | "v" if request.via.is_empty() => request.via = value.to_string(),
                 "contact" | "m" => request.contact = Some(value.to_string()),
                 "require" => request.require = Some(value.to_string()),
+                "p-asserted-identity" => request.p_asserted_identity = Some(value.to_string()),
+                "remote-party-id" => request.remote_party_id = Some(value.to_string()),
                 "content-length" | "l" => content_length = value.parse::<usize>().ok(),
                 _ => {}
             }
@@ -212,7 +239,51 @@ fn negotiate_with(offer: &str, aac_available: bool) -> Option<InboundMedia> {
     let (audio_payload_type, bridge_audio) = audio_payload_order(audio)
         .into_iter()
         .find_map(|payload| bridgeable_audio(audio, payload, aac_available).map(|codec| (payload, codec)))?;
-    let video_section = media_section(offer, "video");
+
+    let sections = parse_media_sections(offer);
+    let mut m_line_order = Vec::with_capacity(sections.len());
+    let mut main_video_section: Option<&str> = None;
+    let mut slides_video_section: Option<&str> = None;
+    let mut bfcp_offered = false;
+
+    for section in &sections {
+        let first_line = section.lines().next().unwrap_or("");
+        if first_line.starts_with("m=audio ") {
+            m_line_order.push(SdpMediaKind::Audio);
+        } else if first_line.starts_with("m=video ") {
+            let is_slides = section.lines().any(|l| {
+                let trimmed = l.trim();
+                trimmed.eq_ignore_ascii_case("a=content:slides")
+                    || trimmed.eq_ignore_ascii_case("a=content:presentation")
+            });
+            if is_slides {
+                m_line_order.push(SdpMediaKind::VideoSlides);
+                if slides_video_section.is_none() {
+                    slides_video_section = Some(section);
+                }
+            } else if main_video_section.is_none() {
+                m_line_order.push(SdpMediaKind::VideoMain);
+                main_video_section = Some(section);
+            } else {
+                // Вторая video-секция без явного a=content:main трактуется как slides/presentation
+                m_line_order.push(SdpMediaKind::VideoSlides);
+                if slides_video_section.is_none() {
+                    slides_video_section = Some(section);
+                }
+            }
+        } else if first_line.starts_with("m=application ") {
+            if section.to_ascii_uppercase().contains("BFCP") {
+                m_line_order.push(SdpMediaKind::ApplicationBfcp);
+                bfcp_offered = true;
+            } else {
+                m_line_order.push(SdpMediaKind::Other);
+            }
+        } else {
+            m_line_order.push(SdpMediaKind::Other);
+        }
+    }
+
+    let video_section = main_video_section.or_else(|| media_section(offer, "video"));
     let video_offered = video_section.is_some();
     // RFC 4585 §3: AVPF feedback is only meaningful when the m-line itself was
     // offered as RTP/AVPF; a plain RTP/AVP section keeps working unchanged.
@@ -233,6 +304,24 @@ fn negotiate_with(offer: &str, aac_available: bool) -> Option<InboundMedia> {
         (Some(section), Some(payload)) if video_avpf => offered_feedback(section, payload),
         _ => (false, false),
     };
+
+    // Парсинг презентационного потока (RFC 4796 `a=content:slides`)
+    let (presentation_offered, presentation_payload_type, remote_presentation_port, remote_presentation_ip, presentation_active) =
+        if let Some(slides) = slides_video_section {
+            let port = media_port(slides).unwrap_or(0);
+            let active = port > 0;
+            let ip = Some(section_ip(slides, &session_ip));
+            let codec = select_video(
+                slides,
+                vks_common::codec_capabilities::video_codec_available("H264"),
+                vks_common::codec_capabilities::video_codec_available("H265"),
+            );
+            let pt = codec.map(|c| c.payload);
+            (true, pt, if active { Some(port) } else { None }, ip, active)
+        } else {
+            (false, None, None, None, false)
+        };
+
     let dtmf_payload_type = telephone_event_payload(audio, bridge_audio.clock);
     let remote_video_port = video.and_then(media_port);
     let audio_ip = section_ip(audio, &session_ip);
@@ -260,7 +349,146 @@ fn negotiate_with(offer: &str, aac_available: bool) -> Option<InboundMedia> {
         remote_video_port,
         remote_video_ip: video_ip,
         video_offered,
+        presentation_offered,
+        presentation_payload_type,
+        remote_presentation_port,
+        remote_presentation_ip,
+        presentation_active,
+        bfcp_offered,
+        m_line_order,
     })
+}
+
+/// Разбивает SDP на срезы отдельных медиа-секций (`m=...`).
+fn parse_media_sections(sdp: &str) -> Vec<&str> {
+    let mut sections = Vec::new();
+    let mut search_from = 0;
+    while let Some(rel) = sdp[search_from..].find("m=") {
+        let abs = search_from + rel;
+        if abs == 0 || sdp.as_bytes().get(abs - 1) == Some(&b'\n') {
+            let next_m = sdp[abs + 2..]
+                .find("\nm=")
+                .map(|o| abs + 2 + o + 1)
+                .unwrap_or(sdp.len());
+            sections.push(&sdp[abs..next_m]);
+            search_from = next_m;
+        } else {
+            search_from = abs + 2;
+        }
+    }
+    sections
+}
+
+/// SDP-ответ с локальными RTP/RTCP-портами, выбранными кодеками и опциональным
+/// презентационным потоком (dual-stream presentation по RFC 4796).
+pub fn build_answer_with_presentation(
+    local_ip: &str,
+    session_id: u64,
+    audio_port: u16,
+    video_port: Option<u16>,
+    presentation_port: Option<u16>,
+    media: &InboundMedia,
+) -> String {
+    let mut sdp = format!(
+        "v=0\r\no=- {session_id} {session_id} IN IP4 {local_ip}\r\ns=VKS MCU\r\nc=IN IP4 {local_ip}\r\nt=0 0\r\n"
+    );
+
+    let format_audio_mline = |sdp: &mut String| {
+        let mut audio_formats = media.audio_payload_type.to_string();
+        if let Some(dtmf) = media.dtmf_payload_type {
+            audio_formats.push(' ');
+            audio_formats.push_str(&dtmf.to_string());
+        }
+        sdp.push_str(&format!("m=audio {audio_port} RTP/AVP {audio_formats}\r\n"));
+        let wire_name = if media.audio_codec == "OPUS" { "opus" } else { media.audio_codec };
+        let channels = if media.audio_channels > 1 { format!("/{}", media.audio_channels) } else { String::new() };
+        sdp.push_str(&format!(
+            "a=rtpmap:{} {}/{}{}\r\n",
+            media.audio_payload_type, wire_name, media.audio_clock_rate, channels
+        ));
+        if let Some(fmtp) = media.audio_fmtp {
+            sdp.push_str(&format!("a=fmtp:{} {fmtp}\r\n", media.audio_payload_type));
+        }
+        if media.audio_ptime_ms > 0 {
+            sdp.push_str(&format!("a=ptime:{}\r\n", media.audio_ptime_ms));
+        }
+        if media.audio_codec == "G723" {
+            sdp.push_str("a=maxptime:30\r\n");
+        }
+        sdp.push_str(&format!("a=rtcp:{}\r\n", audio_port.saturating_add(1)));
+        if let Some(dtmf) = media.dtmf_payload_type {
+            sdp.push_str(&format!("a=rtpmap:{dtmf} telephone-event/{}\r\na=fmtp:{dtmf} 0-15\r\n", media.audio_clock_rate));
+        }
+    };
+
+    let format_video_main = |sdp: &mut String| {
+        if let (Some(port), Some(payload)) = (video_port, media.video_payload_type) {
+            let (name, fmtp) = match (media.video_codec, media.video_fmtp.as_deref()) {
+                (Some("H265"), Some(fmtp)) => ("H265", fmtp.to_string()),
+                (Some("H265"), None) => ("H265", "profile-id=1".to_string()),
+                (_, Some(fmtp)) => ("H264", fmtp.to_string()),
+                _ => ("H264", "packetization-mode=1;profile-level-id=42c01f".to_string()),
+            };
+            let proto = if media.video_avpf { "RTP/AVPF" } else { "RTP/AVP" };
+            sdp.push_str(&format!(
+                "m=video {port} {proto} {payload}\r\na=rtpmap:{payload} {name}/90000\r\na=fmtp:{payload} {fmtp}\r\na=content:main\r\na=rtcp:{}\r\n",
+                port.saturating_add(1)
+            ));
+            if media.video_avpf && media.video_fb_pli {
+                sdp.push_str(&format!("a=rtcp-fb:{payload} nack pli\r\n"));
+            }
+            if media.video_avpf && media.video_fb_fir {
+                sdp.push_str(&format!("a=rtcp-fb:{payload} ccm fir\r\n"));
+            }
+        } else {
+            sdp.push_str("m=video 0 RTP/AVP 0\r\n");
+        }
+    };
+
+    let format_video_slides = |sdp: &mut String| {
+        if let (Some(port), Some(payload)) = (presentation_port, media.presentation_payload_type) {
+            if media.presentation_active {
+                sdp.push_str(&format!(
+                    "m=video {port} RTP/AVP {payload}\r\na=rtpmap:{payload} H264/90000\r\na=fmtp:{payload} packetization-mode=1;profile-level-id=42e01f\r\na=content:slides\r\na=recvonly\r\na=rtcp:{}\r\n",
+                    port.saturating_add(1)
+                ));
+            } else {
+                sdp.push_str("m=video 0 RTP/AVP 0\r\n");
+            }
+        } else {
+            sdp.push_str("m=video 0 RTP/AVP 0\r\n");
+        }
+    };
+
+    if media.m_line_order.is_empty() {
+        format_audio_mline(&mut sdp);
+        if media.video_offered {
+            format_video_main(&mut sdp);
+        }
+        if media.presentation_offered {
+            format_video_slides(&mut sdp);
+        }
+    } else {
+        for kind in &media.m_line_order {
+            match kind {
+                SdpMediaKind::Audio => format_audio_mline(&mut sdp),
+                SdpMediaKind::VideoMain => {
+                    if media.video_offered {
+                        format_video_main(&mut sdp);
+                    } else {
+                        sdp.push_str("m=video 0 RTP/AVP 0\r\n");
+                    }
+                }
+                SdpMediaKind::VideoSlides => format_video_slides(&mut sdp),
+                SdpMediaKind::ApplicationBfcp | SdpMediaKind::Other => {
+                    // RFC 4583 §5: Отклоняем BFCP / неизвестные медиа-секции портом 0 с сохранением m-line
+                    sdp.push_str("m=application 0 UDP/BFCP 0\r\n");
+                }
+            }
+        }
+    }
+
+    sdp
 }
 
 /// SDP-ответ с локальными RTP/RTCP-портами и выбранными кодеками.
@@ -271,71 +499,7 @@ pub fn build_answer(
     video_port: Option<u16>,
     media: &InboundMedia,
 ) -> String {
-    // Answer formats must be a subset of the offer (RFC 3264 §6.1): the
-    // telephone-event PT is appended only when the peer offered it.
-    let mut audio_formats = media.audio_payload_type.to_string();
-    if let Some(dtmf) = media.dtmf_payload_type {
-        audio_formats.push(' ');
-        audio_formats.push_str(&dtmf.to_string());
-    }
-    let mut sdp = format!(
-        "v=0\r\no=- {session_id} {session_id} IN IP4 {local_ip}\r\ns=VKS MCU\r\nc=IN IP4 {local_ip}\r\nt=0 0\r\nm=audio {audio_port} RTP/AVP {audio_formats}\r\n"
-    );
-    let wire_name = if media.audio_codec == "OPUS" { "opus" } else { media.audio_codec };
-    let channels = if media.audio_channels > 1 { format!("/{}", media.audio_channels) } else { String::new() };
-    sdp.push_str(&format!(
-        "a=rtpmap:{} {}/{}{}\r\n",
-        media.audio_payload_type, wire_name, media.audio_clock_rate, channels
-    ));
-    if let Some(fmtp) = media.audio_fmtp {
-        sdp.push_str(&format!("a=fmtp:{} {fmtp}\r\n", media.audio_payload_type));
-    }
-    // MP4A-LATM is 1024 samples (21.33 ms) per frame; a ptime of 20 would
-    // promise packets the encoder cannot produce. 0 means "omit".
-    if media.audio_ptime_ms > 0 {
-        sdp.push_str(&format!("a=ptime:{}\r\n", media.audio_ptime_ms));
-    }
-    if media.audio_codec == "G723" {
-        // G.723.1 can pack multiple 30 ms frames; the bridge decodes one.
-        sdp.push_str("a=maxptime:30\r\n");
-    }
-    // RFC 3605: name the RTCP port explicitly instead of relying on the
-    // implicit "+1" convention; the gateway binds the odd port of the pair.
-    sdp.push_str(&format!("a=rtcp:{}\r\n", audio_port.saturating_add(1)));
-    if let Some(dtmf) = media.dtmf_payload_type {
-        // RFC 4733 §2.5: events 0-15 are the DTMF digits; the payload carries
-        // one event at a time, so no redundancy parameters are advertised.
-        sdp.push_str(&format!("a=rtpmap:{dtmf} telephone-event/{}\r\na=fmtp:{dtmf} 0-15\r\n", media.audio_clock_rate));
-    }
-    if media.video_offered {
-        if let (Some(port), Some(payload)) = (video_port, media.video_payload_type) {
-            let (name, fmtp) = match (media.video_codec, media.video_fmtp.as_deref()) {
-                (Some("H265"), Some(fmtp)) => ("H265", fmtp.to_string()),
-                (Some("H265"), None) => ("H265", "profile-id=1".to_string()),
-                (_, Some(fmtp)) => ("H264", fmtp.to_string()),
-                _ => ("H264", "packetization-mode=1;profile-level-id=42c01f".to_string()),
-            };
-            // RFC 4585 §3: AVPF is only used when the offer itself was AVPF;
-            // the feedback types echoed back are limited to the offered ones
-            // (§4.2: an answer must not enable unsupported feedback).
-            let proto = if media.video_avpf { "RTP/AVPF" } else { "RTP/AVP" };
-            sdp.push_str(&format!(
-                "m=video {port} {proto} {payload}\r\na=rtpmap:{payload} {name}/90000\r\na=fmtp:{payload} {fmtp}\r\na=rtcp:{}\r\n",
-                port.saturating_add(1)
-            ));
-            if media.video_avpf && media.video_fb_pli {
-                sdp.push_str(&format!("a=rtcp-fb:{payload} nack pli\r\n"));
-            }
-            if media.video_avpf && media.video_fb_fir {
-                sdp.push_str(&format!("a=rtcp-fb:{payload} ccm fir\r\n"));
-            }
-        } else {
-            // Оффер содержал video, но совместимого H.264/H.265 нет: сохраняем
-            // число m-line и явно отключаем поток (RFC 3264 §6).
-            sdp.push_str("m=video 0 RTP/AVP 0\r\n");
-        }
-    }
-    sdp
+    build_answer_with_presentation(local_ip, session_id, audio_port, video_port, None, media)
 }
 
 /// Собирает SIP-ответ. `to_tag` обязателен для 200 OK (диалог).
@@ -1368,5 +1532,65 @@ a=rtpmap:113 MP4A-LATM/90000\r\n";
             let fmtp = format!("{base}a=fmtp:113 object=2;cpresent={weird}\r\n");
             assert!(negotiate_with(&fmtp, true).is_none(), "non-canonical cpresent={weird} must be refused");
         }
+    }
+
+    #[test]
+    fn dual_stream_presentation_negotiates_and_orders_m_lines() {
+        let offer = "v=0\r\no=- 100 100 IN IP4 192.168.1.50\r\ns=-\r\nc=IN IP4 192.168.1.50\r\nt=0 0\r\n\
+m=audio 50000 RTP/AVP 0 8 101\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:8 PCMA/8000\r\n\
+a=rtpmap:101 telephone-event/8000\r\n\
+m=video 50002 RTP/AVP 96\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n\
+a=content:main\r\n\
+m=video 50004 RTP/AVP 97\r\n\
+a=rtpmap:97 H264/90000\r\n\
+a=fmtp:97 packetization-mode=1;profile-level-id=42e01f\r\n\
+a=content:slides\r\n\
+a=sendrecv\r\n\
+m=application 50006 UDP/BFCP *\r\n";
+
+        let media = negotiate(offer).expect("Offer with dual-stream must be negotiated");
+        assert_eq!(media.audio_payload_type, 0);
+        assert_eq!(media.video_payload_type, Some(96));
+        assert!(media.presentation_offered);
+        assert!(media.presentation_active);
+        assert_eq!(media.remote_presentation_port, Some(50004));
+        assert_eq!(media.presentation_payload_type, Some(97));
+        assert!(media.bfcp_offered);
+        assert_eq!(
+            media.m_line_order,
+            vec![
+                SdpMediaKind::Audio,
+                SdpMediaKind::VideoMain,
+                SdpMediaKind::VideoSlides,
+                SdpMediaKind::ApplicationBfcp,
+            ]
+        );
+
+        let answer = build_answer_with_presentation("192.168.1.1", 100, 40000, Some(40002), Some(40004), &media);
+        let m_lines: Vec<&str> = answer.lines().filter(|l| l.starts_with("m=")).collect();
+        assert_eq!(m_lines.len(), 4, "Must preserve exactly 4 m-lines per RFC 3264 §6");
+        assert!(m_lines[0].starts_with("m=audio 40000"));
+        assert!(m_lines[1].starts_with("m=video 40002"));
+        assert!(m_lines[2].starts_with("m=video 40004"));
+        assert!(m_lines[3].starts_with("m=application 0 UDP/BFCP 0"));
+        assert!(answer.contains("a=content:main"));
+        assert!(answer.contains("a=content:slides"));
+        assert!(answer.contains("a=recvonly"));
+
+        // Stopping presentation (slides port 0 in re-INVITE)
+        let offer_stop = offer.replace("m=video 50004 RTP/AVP 97", "m=video 0 RTP/AVP 97");
+        let media_stop = negotiate(&offer_stop).expect("Re-INVITE with port 0 must parse");
+        assert!(media_stop.presentation_offered);
+        assert!(!media_stop.presentation_active);
+        assert_eq!(media_stop.remote_presentation_port, None);
+
+        let answer_stop = build_answer_with_presentation("192.168.1.1", 101, 40000, Some(40002), None, &media_stop);
+        let m_lines_stop: Vec<&str> = answer_stop.lines().filter(|l| l.starts_with("m=")).collect();
+        assert_eq!(m_lines_stop.len(), 4);
+        assert!(m_lines_stop[2].starts_with("m=video 0 RTP/AVP 0"));
     }
 }

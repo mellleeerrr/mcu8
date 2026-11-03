@@ -16,6 +16,8 @@ EnvironmentFile=/etc/vks/vks.env
 # не нуждается в доступе к /etc/vks.
 LoadCredential=server.toml:/etc/vks/server.toml
 Environment=PYTHONDONTWRITEBYTECODE=1
+# Memory allocator hygiene: background purging of dirty pages
+Environment=MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000
 # Real WebRTC is the only media plane and its env switch is mandatory.
 Environment=VKS_WEBRTC_TRANSPORT=1
 # Set the public candidate and an open UDP range.
@@ -26,9 +28,10 @@ ExecStart=/opt/vks/bin/vks-server --config %d/server.toml
 Restart=on-failure
 RestartSec=3
 RestartPreventExitStatus=78
-KillMode=mixed
+KillMode=control-group
 KillSignal=SIGTERM
-TimeoutStopSec=30
+SendSIGKILL=yes
+TimeoutStopSec=10
 LimitNOFILE=65536
 UMask=0077
 

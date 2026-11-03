@@ -182,19 +182,52 @@ impl RoomState {
         bridged
     }
 
+    /// Участник с треком презентации/экрана (`TrackKind::Screen`).
+    fn screen_participant(&self) -> Option<ParticipantId> {
+        for pid in &self.join_order {
+            if let Some(tracks) = self.publisher_tracks.get(pid) {
+                if has_screen_track(tracks) {
+                    return Some(*pid);
+                }
+            }
+        }
+        for (pid, tracks) in &self.publisher_tracks {
+            if has_screen_track(tracks) {
+                return Some(*pid);
+            }
+        }
+        None
+    }
+
     /// Сажает видео-участника в слот; при нехватке окон авто-расширяет
-    /// раскладку равной сеткой (функциональный блокер 20+).
+    /// раскладку равной сеткой или фокусной раскладкой для презентации (RFC 4796).
     ///
     /// `true` — раскладку (geometry/назначения/версию) нужно применить заново.
     fn seat_video_or_expand(&mut self, pid: ParticipantId) -> bool {
-        let descriptor = self.layout.get_or_insert_with(|| LayoutDescriptor {
-            layout_id: "grid".into(),
-            version: 0,
-            assignments: BTreeMap::new(),
-            geometry: Vec::new(),
-            mode: "auto".into(),
-            ..Default::default()
-        });
+        let screen = self.screen_participant();
+        let is_screen = self.publisher_tracks.get(&pid).is_some_and(|t| has_screen_track(t));
+        let mut bridged = self.video_participants_in_join_order();
+        if !bridged.contains(&pid) {
+            bridged.push(pid);
+        }
+        if self.layout.is_none() {
+            self.layout = Some(LayoutDescriptor {
+                layout_id: if screen.is_some() || is_screen { "focus".into() } else { "grid".into() },
+                version: 0,
+                assignments: BTreeMap::new(),
+                geometry: Vec::new(),
+                mode: "auto".into(),
+                ..Default::default()
+            });
+        }
+        let descriptor = self.layout.as_mut().expect("layout initialized");
+
+        // Если пришла презентация или она активна, но раскладка ещё не focus (или экран не в слоте 0),
+        // принудительно перестраиваем в FocusLayout
+        if is_screen || (screen.is_some() && descriptor.layout_id != "focus") {
+            return regrid_for_video(descriptor, &bridged, screen.or(Some(pid)));
+        }
+
         if descriptor.assignments.contains_key(&pid) {
             return false;
         }
@@ -202,12 +235,7 @@ impl RoomState {
             descriptor.version = descriptor.version.saturating_add(1);
             return true;
         }
-        let mut bridged = self.video_participants_in_join_order();
-        if !bridged.contains(&pid) {
-            bridged.push(pid);
-        }
-        let descriptor = self.layout.as_mut().expect("layout created above");
-        regrid_for_video(descriptor, &bridged)
+        regrid_for_video(descriptor, &bridged, screen)
     }
 
     /// Rects раскладки (пространство 1920×1080) → пространство холста комнаты.
@@ -284,7 +312,7 @@ impl RoomState {
         // `overlap`, `pip`): compositor рисует участника ровно в присланном
         // прямоугольнике. Без неё — прежняя авто-сетка (legacy/SFU).
         if !desc.geometry.is_empty() {
-            let mut layout = Layout::new(LayoutKind::Custom);
+            let mut layout = Layout::new(kind);
             layout.version = desc.version;
             let mut cells = desc.geometry.clone();
             cells.sort_by_key(|cell| cell.slot);
@@ -316,13 +344,14 @@ impl RoomState {
                 let width = cw.max(1).min(canvas.width.saturating_sub(x));
                 let height = ch.max(1).min(canvas.height.saturating_sub(y));
                 let pid = slot_to_pid.get(&cell.slot).copied();
+                let is_focus = kind == LayoutKind::Focus && cell.slot == 0;
                 layout.slots.push(vks_layout::Slot::with_attributes(
                     cell.slot,
                     pid,
                     vks_layout::Rect::new(x, y, width, height),
                     cell.z_order as i32,
                     false,
-                    false,
+                    is_focus,
                 ));
             }
             // Назначения вне geometry отбрасываются sanitize_assignments до
@@ -467,8 +496,14 @@ impl RoomState {
             .filter_map(|slot| slot.participant_id)
             .map(|pid| ParticipantId::from_uuid(uuid::Uuid::from_u128(pid.as_u128())))
             .collect();
-        // Порядок: «важный»/спикер, затем недавность речи, затем порядок прихода.
+        // Порядок: презентация (экран) всегда на первом месте (слот 0),
+        // затем «важный»/спикер, затем недавность речи, затем порядок прихода.
         let mut order: Vec<ParticipantId> = Vec::new();
+        if let Some(spid) = self.screen_participant() {
+            if shown.contains(&spid) {
+                order.push(spid);
+            }
+        }
         let focus = self.important.or(self.active_speaker);
         for pid in focus.iter().chain(self.recent_speakers.iter()).chain(self.join_order.iter()) {
             if shown.contains(pid) && !order.contains(pid) {
@@ -761,6 +796,10 @@ fn layout_has_video(tracks: &[MediaTrack]) -> bool {
         .any(|track| matches!(track.kind, vks_core::track::TrackKind::Video | vks_core::track::TrackKind::Screen))
 }
 
+fn has_screen_track(tracks: &[MediaTrack]) -> bool {
+    tracks.iter().any(|track| track.kind == vks_core::track::TrackKind::Screen)
+}
+
 /// Свободный слот: только из geometry (T03), иначе legacy-скан u32.
 fn free_layout_slot(layout: &LayoutDescriptor) -> Option<u32> {
     let used: std::collections::BTreeSet<u32> = layout.assignments.values().copied().collect();
@@ -807,13 +846,22 @@ fn sanitize_assignments(layout: &mut LayoutDescriptor) {
 /// назначения — по порядку прихода (S12). Сохранять rect'ы первых N окон
 /// нельзя: они от пресета другого размера, и новые окна перекрывали бы их.
 /// `preset` очищается, чтобы прежний пресет не «возвращал» малое число окон.
-fn regrid_for_video(layout: &mut LayoutDescriptor, bridged: &[ParticipantId]) -> bool {
+fn regrid_for_video(
+    layout: &mut LayoutDescriptor,
+    bridged: &[ParticipantId],
+    screen_pid: Option<ParticipantId>,
+) -> bool {
     if bridged.is_empty() {
         return false;
     }
     let previous_windows = layout.geometry.len();
     let canvas = Canvas::new(CANVAS_SIZE.0, CANVAS_SIZE.1);
-    let rects = GridLayout::compute(&canvas, bridged.len());
+    let is_presentation = screen_pid.is_some_and(|spid| bridged.contains(&spid));
+    let rects = if is_presentation {
+        vks_layout::FocusLayout::slot_rects(&canvas, bridged.len() as u32)
+    } else {
+        GridLayout::compute(&canvas, bridged.len())
+    };
     if rects.len() < bridged.len() {
         return false;
     }
@@ -829,14 +877,31 @@ fn regrid_for_video(layout: &mut LayoutDescriptor, bridged: &[ParticipantId]) ->
             z_order: 0,
         })
         .collect();
-    layout.assignments = bridged.iter().enumerate().map(|(index, pid)| (*pid, index as u32)).collect();
+
+    layout.assignments.clear();
+    if is_presentation {
+        let spid = screen_pid.unwrap();
+        layout.assignments.insert(spid, 0);
+        let mut slot_idx = 1u32;
+        for pid in bridged {
+            if *pid != spid {
+                layout.assignments.insert(*pid, slot_idx);
+                slot_idx += 1;
+            }
+        }
+        layout.layout_id = "focus".into();
+    } else {
+        layout.assignments = bridged.iter().enumerate().map(|(index, pid)| (*pid, index as u32)).collect();
+        layout.layout_id = "grid".into();
+    }
     layout.preset = String::new();
     layout.mode = "auto".into();
     layout.version = layout.version.saturating_add(1);
     tracing::info!(
         participants = bridged.len(),
         previous_windows,
-        "layout auto-expanded to an equal grid: geometry windows < video participants"
+        is_presentation,
+        "layout auto-expanded: geometry windows < video participants"
     );
     true
 }
@@ -1728,7 +1793,12 @@ impl McuEngine {
             }
         }
 
-        if let Some(desc) = &state.layout {
+        let screen = state.screen_participant();
+        let bridged = state.video_participants_in_join_order();
+        if let Some(desc) = state.layout.as_mut() {
+            if screen.is_none() && desc.layout_id == "focus" && desc.mode == "auto" {
+                regrid_for_video(desc, &bridged, None);
+            }
             let new_layout = RoomState::layout_from_descriptor(desc);
             state.bridge.apply(&new_layout);
             state.current_layout = new_layout;
@@ -1848,7 +1918,12 @@ impl MediaEngine for McuEngine {
             }
         }
 
-        if let Some(desc) = &state.layout {
+        let screen = state.screen_participant();
+        let bridged = state.video_participants_in_join_order();
+        if let Some(desc) = state.layout.as_mut() {
+            if screen.is_none() && desc.layout_id == "focus" && desc.mode == "auto" {
+                regrid_for_video(desc, &bridged, None);
+            }
             let new_layout = RoomState::layout_from_descriptor(desc);
             state.bridge.apply(&new_layout);
             state.current_layout = new_layout;
@@ -1930,7 +2005,7 @@ impl MediaEngine for McuEngine {
             // Окон в присланной geometry меньше, чем видео-участников:
             // расширяем раскладку равной сеткой, иначе часть людей не попадает
             // в композит (функциональный блокер 20+, `preset_default_13`).
-            regrid_for_video(&mut layout, &bridged);
+            regrid_for_video(&mut layout, &bridged, state.screen_participant());
         }
         // Версия монотонна: даже auto/default без смены назначений должна
         // перестроить композитор. Repair больше не бампает отдельно, поэтому
@@ -1991,6 +2066,49 @@ mod tests {
     #[tokio::test]
     async fn mode_is_mcu() {
         assert_eq!(McuEngine::new().mode(), RoomMode::Mcu);
+    }
+
+    #[tokio::test]
+    async fn screen_sharing_auto_focus_and_voice_activation_pinning() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let camera1 = p(1);
+        let camera2 = p(2);
+        let screen = p(3);
+
+        // 1. Two camera participants join: grid layout
+        e.bridge_participant(rid, camera1, vec![Track::new(camera1, TrackKind::Video), Track::new(camera1, TrackKind::Audio)]);
+        e.bridge_participant(rid, camera2, vec![Track::new(camera2, TrackKind::Video), Track::new(camera2, TrackKind::Audio)]);
+        let snap1 = e.layout_snapshot(rid).unwrap();
+        assert_eq!(snap1.layout.kind, LayoutKind::Grid);
+
+        // 2. Screen sharing participant joins with TrackKind::Screen: auto switches to Focus layout
+        e.bridge_participant(rid, screen, vec![Track::new(screen, TrackKind::Screen)]);
+        let snap2 = e.layout_snapshot(rid).unwrap();
+        assert_eq!(snap2.layout.kind, LayoutKind::Focus);
+
+        // Slot 0 must be assigned to the screen
+        let v_screen = vks_layout::ParticipantId::new(screen.as_uuid().as_u128());
+        let slot0 = snap2.layout.slots.iter().find(|s| s.id.as_u32() == 0).unwrap();
+        assert_eq!(slot0.participant_id, Some(v_screen));
+
+        // 3. Voice activation: camera1 speaks loudly
+        e.with_room_mut(rid, |state| {
+            state.active_speaker = Some(camera1);
+            state.note_recent_speaker(camera1);
+            state.refresh_seating();
+        });
+
+        // Slot 0 MUST STILL be the screen!
+        let snap3 = e.layout_snapshot(rid).unwrap();
+        let slot0_after_vad = snap3.layout.slots.iter().find(|s| s.id.as_u32() == 0).unwrap();
+        assert_eq!(slot0_after_vad.participant_id, Some(v_screen));
+
+        // 4. Screen unbridges: layout automatically transitions back to Grid
+        e.unbridge_participant(rid, screen);
+        let snap4 = e.layout_snapshot(rid).unwrap();
+        assert_eq!(snap4.layout.kind, LayoutKind::Grid);
     }
 
     #[tokio::test]
