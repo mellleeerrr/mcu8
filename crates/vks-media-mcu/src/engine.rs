@@ -780,6 +780,8 @@ pub struct McuEngine {
     farm: EncoderFarm,
     /// Единый тактовый домен медиа-движка (WallClock или виртуальный для тестов).
     clock: vks_common::clock::MediaClock,
+    /// Иерархический бюджет системных процессов FFmpeg (входящие декодеры, ферма, воркеры).
+    budget: vks_common::process::ProcessBudget,
     /// Accepted audio ticks (T12): lets the mixed-room bridge prove that the
     /// gateway RTP loop and the bridge clock do not double-tick the same room.
     audio_ticks: std::sync::atomic::AtomicU64,
@@ -974,6 +976,19 @@ impl McuEngine {
     /// Returns a reference to the engine's media clock.
     pub fn clock(&self) -> &vks_common::clock::MediaClock {
         &self.clock
+    }
+
+    /// Creates an MCU engine with a specific process budget.
+    pub fn with_budget(budget: vks_common::process::ProcessBudget) -> Self {
+        Self {
+            budget,
+            ..Self::default()
+        }
+    }
+
+    /// Returns a reference to the engine's process budget.
+    pub fn budget(&self) -> &vks_common::process::ProcessBudget {
+        &self.budget
     }
 
     fn room_arc(&self, room: RoomId) -> Option<Arc<Mutex<RoomState>>> {

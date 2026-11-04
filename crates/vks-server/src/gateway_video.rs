@@ -659,6 +659,16 @@ pub(super) async fn spawn_video_media_bridge(
             session.profile.codec.name()
         ));
     }
+    let decoder_permit = session
+        .engine
+        .budget()
+        .try_acquire_decoder()
+        .ok_or_else(|| {
+            format!(
+                "inbound video decoder budget exhausted (limit {}); fallback to audio-only",
+                session.engine.budget().max_decoders()
+            )
+        })?;
     // `O1`: холст комнаты = выходной профиль (первая сессия задаёт; после
     // первого рендера размер не меняется). Обязательно ДО `acquire` фермы:
     // смена холста инвалидирует группы (`farm.invalidate_room`), и группа,
@@ -1130,6 +1140,7 @@ pub(super) async fn spawn_video_media_bridge(
     });
     Ok(tokio::spawn(async move {
         let _lease = lease;
+        let _permit = decoder_permit;
         let mut source = super::audio::RtpSource::new(session.remote_target, session.receive_payload_type);
         // `P0-ingest`: видео-вход принимает переупорядоченные seq (джиттер
         // bot→MCU); раскладывает их `VideoReorderBuffer` ниже.
@@ -1304,6 +1315,16 @@ pub(super) async fn spawn_presentation_bridge(
     if !codec_available_for(GatewayVideoCodec::H264).await {
         return Err("FFmpeg H264 decoder is unavailable; presentation video was not started".into());
     }
+    let decoder_permit = session
+        .engine
+        .budget()
+        .try_acquire_decoder()
+        .ok_or_else(|| {
+            format!(
+                "inbound presentation decoder budget exhausted (limit {})",
+                session.engine.budget().max_decoders()
+            )
+        })?;
 
     let profile = VideoProfile {
         codec: GatewayVideoCodec::H264,
@@ -1356,6 +1377,7 @@ pub(super) async fn spawn_presentation_bridge(
     let rtp_socket = Arc::new(session.rtp_socket);
     let task = tokio::spawn(async move {
         let _lease = lease;
+        let _permit = decoder_permit;
         let mut source = super::audio::RtpSource::new(session.remote_target, session.payload_type);
         source.accept_reordered();
         source.accept_dynamic_payloads();
@@ -3250,5 +3272,52 @@ mod tests {
         assert_eq!(packets.len(), 1, "only valid slice should produce an RTP packet");
         assert_eq!(&packets[0][12..], &[0x25, 0x88]);
         assert_eq!(packets[0][1] & 0x80, 0x80, "single valid packet must have Marker bit M=1");
+    }
+
+    #[tokio::test]
+    async fn decoder_budget_exhaustion_rejects_and_recovers_after_drop() {
+        let budget = vks_common::process::ProcessBudget::new(1, 10, 10);
+        let engine = Arc::new(vks_media_mcu::McuEngine::with_budget(budget.clone()));
+        let room_id = vks_core::RoomId::new();
+        let participant_id = vks_core::ParticipantId::new();
+
+        let port_pool = Arc::new(vks_gateway_sip::RtpPortPool::new(45000, 45100));
+        let rtp_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let session = VideoBridgeSession {
+            room_id,
+            participant_id,
+            rtp_socket,
+            rtcp_socket: None,
+            remote_target: "127.0.0.1:5000".parse().unwrap(),
+            payload_type: 96,
+            receive_payload_type: 96,
+            port_pool: port_pool.clone(),
+            engine: engine.clone(),
+            controls: GatewayMediaControls::default(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            stats: Arc::new(GatewayMediaStats::default()),
+            profile: VideoProfile {
+                codec: GatewayVideoCodec::H264,
+                width: 640,
+                height: 360,
+                fps: 30,
+                bitrate_kbps: 800,
+                profile: "baseline".into(),
+                level: "3.1".into(),
+            },
+        };
+
+        // Acquire the single permit to simulate quota exhaustion
+        let held = budget.try_acquire_decoder().unwrap();
+        assert_eq!(budget.available_decoders(), 0);
+
+        let res = spawn_video_media_bridge(session).await;
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err();
+        assert!(err_msg.contains("decoder budget exhausted"), "Error was: {err_msg}");
+
+        drop(held);
+        assert_eq!(budget.available_decoders(), 1);
     }
 }
