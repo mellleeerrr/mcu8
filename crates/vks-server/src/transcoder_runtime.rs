@@ -43,7 +43,6 @@ pub async fn init() -> Result<(), String> {
             info!(
                 binary = %ffmpeg.display(),
                 version = %capabilities.version,
-                aac_decode = capabilities.has_audio_decoder(AudioCodec::Aac),
                 aac_latm_decode = capabilities.has_audio_decoder(AudioCodec::AacLatm),
                 g729_decode = capabilities.has_audio_decoder(AudioCodec::G729),
                 h261 = capabilities.has_video_decoder(VideoCodec::H261),
@@ -79,7 +78,6 @@ fn publish_support(capabilities: &FfmpegCapabilities) {
     // (the SIP gateway bridge uses `ffmpeg -encoders/-decoders`), not by the
     // worker `VideoCodec` enum. The label set must stay a subset of `codec_spec`.
     for (codec, decode, encode) in [
-        ("aac", capabilities.has_audio_decoder(AudioCodec::Aac), capabilities.has_audio_encoder(AudioCodec::Aac)),
         (
             "aac_latm",
             capabilities.has_audio_decoder(AudioCodec::AacLatm),
@@ -136,7 +134,7 @@ mod tests {
     fn worker_metric_labels_are_subset_of_specs() {
         // Every `/metrics CODEC_WORKER_SUPPORTED{codec=...}` label must resolve
         // through the SSOT (T15): a label the matrix does not know is a lie.
-        for label in ["aac", "aac_latm", "g729", "h261", "h263", "h263p", "h265"] {
+        for label in ["aac_latm", "g729", "h261", "h263", "h263p", "h265"] {
             assert!(vks_common::codec_spec::lookup(label).is_some(), "metric label {label} is not in CODECS");
         }
     }

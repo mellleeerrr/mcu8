@@ -576,27 +576,6 @@ impl FfmpegWorker {
             _ => return Err(WorkerError::InvalidConfig("read_encoded_audio on non-encoder worker".into())),
         };
         match mode {
-            AudioCodec::Aac => {
-                // ADTS: 7-byte header, 13-bit frame length at bits 30..43.
-                let mut header = [0u8; 7];
-                self.read_exact_into(&mut header).await?;
-                if header[0] != 0xff || (header[1] & 0xf0) != 0xf0 {
-                    return Err(
-                        self.poison(WorkerError::Codec(format!("bad ADTS sync {:02x}{:02x}", header[0], header[1])))
-                    );
-                }
-                let length = (usize::from(header[3] & 0x03) << 11)
-                    | (usize::from(header[4]) << 3)
-                    | (usize::from(header[5]) >> 5);
-                if !(7..=8192).contains(&length) {
-                    return Err(self.poison(WorkerError::Codec(format!("invalid ADTS length {length}"))));
-                }
-                let mut frame = vec![0u8; length];
-                frame[..7].copy_from_slice(&header);
-                self.read_exact_into(&mut frame[7..]).await?;
-                self.stats.frames_out.fetch_add(1, Ordering::Relaxed);
-                Ok(frame)
-            }
             AudioCodec::AacLatm => {
                 // LOAS: 3-byte header, 13-bit payload length, sync 0x56e.
                 let mut header = [0u8; 3];
@@ -1240,78 +1219,34 @@ mod tests {
         }
         let caps = FfmpegCapabilities::probe(&ffmpeg_bin()).await.expect("probe");
         assert!(caps.version.contains("ffmpeg"), "{}", caps.version);
-        assert!(caps.has_audio_decoder(AudioCodec::Aac));
         assert!(caps.has_audio_decoder(AudioCodec::G729));
         assert!(caps.has_audio_decoder(AudioCodec::AacLatm), "LATM uses the aac_latm decoder");
-        assert!(caps.has_audio_encoder(AudioCodec::Aac));
+        assert!(caps.has_audio_encoder(AudioCodec::AacLatm));
         assert!(!caps.has_audio_encoder(AudioCodec::G729));
         assert!(caps.has_video_decoder(VideoCodec::H261));
         assert!(caps.has_video_encoder(VideoCodec::H263));
     }
 
     #[tokio::test]
-    async fn aac_audio_roundtrip_preserves_signal() {
-        if !ffmpeg_available() {
-            return;
-        }
-        let slot = SlotConfig::default_720p();
-        let config = WorkerConfig::default();
-        let pcm = pcm_sine(5);
-        let mut encoder =
-            FfmpegWorker::spawn(WorkerMode::AudioEncode(AudioCodec::Aac), slot, config.clone()).await.expect("encoder");
-        for frame in pcm.chunks_exact(super::super::AUDIO_FRAME_SAMPLES) {
-            encoder.write_audio(frame).await.expect("write pcm");
-        }
-        // Streaming encoder must produce the first ADTS frame without EOF.
-        let first = encoder.read_encoded_audio().await.expect("streaming ADTS frame");
-        assert_eq!(&first[..2], &[0xff, 0xf1]);
-        encoder.finish_input().await;
-        let encoded = encoder.read_to_end(1 << 20).await.expect("remaining bytes");
-        assert!(encoded.len() > 100, "AAC stream tail too short: {}", encoded.len());
-        encoder.wait().await.ok();
-
-        let mut decoder =
-            FfmpegWorker::spawn(WorkerMode::AudioDecode(AudioCodec::Aac), slot, config).await.expect("decoder");
-        // ADTS output can be written as one blob, then decoded to EOF.
-        decoder.write_encoded(&first).await.expect("write adts header frame");
-        decoder.write_encoded(&encoded).await.expect("write adts tail");
-        decoder.finish_input().await;
-        let decoded = decoder.read_to_end(1 << 24).await.expect("decoded pcm");
-        assert!(decoded.len() >= super::super::AUDIO_FRAME_BYTES, "decoded {} bytes", decoded.len());
-        let energy: f64 = decoded
-            .chunks_exact(2)
-            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]) as f64)
-            .map(|sample| sample * sample)
-            .sum();
-        assert!(energy > 1.0e8, "AAC roundtrip is silent: {energy}");
-    }
-
-    #[tokio::test]
-    async fn aac_encoded_frames_are_self_delimiting() {
+    async fn aac_latm_encoded_frames_are_self_delimiting() {
         if !ffmpeg_available() {
             return;
         }
         let slot = SlotConfig::default_720p();
         let config = WorkerConfig::default();
         let pcm = pcm_sine(40);
-        for codec in [AudioCodec::Aac, AudioCodec::AacLatm] {
-            let mut encoder =
-                FfmpegWorker::spawn(WorkerMode::AudioEncode(codec), slot, config.clone()).await.expect("encoder");
-            for frame in pcm.chunks_exact(super::super::AUDIO_FRAME_SAMPLES).take(20) {
-                encoder.write_audio(frame).await.expect("pcm");
-            }
-            for _ in 0..5 {
-                let frame = encoder.read_encoded_audio().await.expect("encoded frame");
-                match codec {
-                    AudioCodec::Aac => assert_eq!(&frame[..2], &[0xff, 0xf1]),
-                    AudioCodec::AacLatm => assert_eq!(&frame[..2], &[0x56, 0xe0]),
-                    AudioCodec::G729 => unreachable!(),
-                }
-                assert!(frame.len() > 7, "{codec:?} frame too short");
-            }
-            encoder.finish_input().await;
-            encoder.wait().await.ok();
+        let mut encoder =
+            FfmpegWorker::spawn(WorkerMode::AudioEncode(AudioCodec::AacLatm), slot, config.clone()).await.expect("encoder");
+        for frame in pcm.chunks_exact(super::super::AUDIO_FRAME_SAMPLES).take(20) {
+            encoder.write_audio(frame).await.expect("pcm");
         }
+        for _ in 0..5 {
+            let frame = encoder.read_encoded_audio().await.expect("encoded frame");
+            assert_eq!(&frame[..2], &[0x56, 0xe0]);
+            assert!(frame.len() > 7, "AacLatm frame too short");
+        }
+        encoder.finish_input().await;
+        encoder.wait().await.ok();
     }
 
     #[tokio::test]
@@ -1528,7 +1463,7 @@ mod tests {
         assert!(matches!(video_decoder.read_encoded_audio().await, Err(WorkerError::InvalidConfig(_))));
 
         let mut audio_encoder =
-            FfmpegWorker::spawn(WorkerMode::AudioEncode(AudioCodec::Aac), audio, WorkerConfig::default())
+            FfmpegWorker::spawn(WorkerMode::AudioEncode(AudioCodec::AacLatm), audio, WorkerConfig::default())
                 .await
                 .expect("audio encoder");
         assert!(matches!(audio_encoder.read_video().await, Err(WorkerError::InvalidConfig(_))));
@@ -1536,7 +1471,7 @@ mod tests {
         assert!(matches!(audio_encoder.write_video(&[0]).await, Err(WorkerError::InvalidConfig(_))));
 
         let mut audio_decoder =
-            FfmpegWorker::spawn(WorkerMode::AudioDecode(AudioCodec::Aac), audio, WorkerConfig::default())
+            FfmpegWorker::spawn(WorkerMode::AudioDecode(AudioCodec::AacLatm), audio, WorkerConfig::default())
                 .await
                 .expect("audio decoder");
         assert!(matches!(audio_decoder.write_video(&[0]).await, Err(WorkerError::InvalidConfig(_))));
@@ -1801,7 +1736,7 @@ mod tests {
         let capabilities = FfmpegCapabilities::probe(std::path::Path::new(&ffmpeg_bin())).await.expect("probe");
         assert!(capabilities.has_muxer("latm"), "FFmpeg must expose the latm muxer");
         assert!(capabilities.has_demuxer("loas"), "FFmpeg must expose the loas demuxer");
-        assert!(capabilities.has_audio_encoder(AudioCodec::Aac));
+        assert!(capabilities.has_audio_encoder(AudioCodec::AacLatm));
         assert!(capabilities.has_audio_decoder(AudioCodec::AacLatm));
         assert!(capabilities.has_audio_latm_bridge());
     }

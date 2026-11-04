@@ -59,6 +59,31 @@ impl CodecId {
     pub const fn is_g726(self) -> bool {
         matches!(self, Self::G726_16 | Self::G726_24 | Self::G726_32 | Self::G726_40)
     }
+
+    /// Resolves standard static RTP payload types (RFC 3551).
+    #[must_use]
+    pub const fn from_static_rtp_pt(pt: u8) -> Option<Self> {
+        by_static_rtp_pt(pt)
+    }
+}
+
+/// Returns the canonical [`CodecId`] for standard static RTP payload types (RFC 3551).
+///
+/// Enables transparent interoperability with legacy PBX hardware (Cisco, Avaya, Asterisk)
+/// that offers static payload types without explicit `a=rtpmap` attributes.
+#[must_use]
+pub const fn by_static_rtp_pt(pt: u8) -> Option<CodecId> {
+    match pt {
+        0 => Some(CodecId::Pcmu),
+        4 => Some(CodecId::G723),
+        8 => Some(CodecId::Pcma),
+        9 => Some(CodecId::G722),
+        15 => Some(CodecId::G728),
+        18 => Some(CodecId::G729),
+        31 => Some(CodecId::H261),
+        34 => Some(CodecId::H263),
+        _ => None,
+    }
 }
 
 /// Media class of a codec.
@@ -2278,5 +2303,22 @@ const CODECS2: &[&str] = &["OPUS", "VP8"];
                 "{file}: production marker {marker:?} is not scanned (review C P2-1)"
             );
         }
+    }
+
+    #[test]
+    fn static_rtp_pt_mapping_matches_rfc3551() {
+        assert_eq!(by_static_rtp_pt(0), Some(CodecId::Pcmu));
+        assert_eq!(by_static_rtp_pt(4), Some(CodecId::G723));
+        assert_eq!(by_static_rtp_pt(8), Some(CodecId::Pcma));
+        assert_eq!(by_static_rtp_pt(9), Some(CodecId::G722));
+        assert_eq!(by_static_rtp_pt(15), Some(CodecId::G728));
+        assert_eq!(by_static_rtp_pt(18), Some(CodecId::G729));
+        assert_eq!(by_static_rtp_pt(31), Some(CodecId::H261));
+        assert_eq!(by_static_rtp_pt(34), Some(CodecId::H263));
+
+        // Unassigned or dynamic PTs must return None
+        assert_eq!(by_static_rtp_pt(96), None);
+        assert_eq!(by_static_rtp_pt(111), None);
+        assert_eq!(by_static_rtp_pt(2), None);
     }
 }

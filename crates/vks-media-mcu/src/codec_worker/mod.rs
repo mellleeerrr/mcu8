@@ -33,8 +33,6 @@ pub const MAX_VIDEO_HEIGHT: u16 = 2160;
 /// Audio codecs that can be bridged through an isolated FFmpeg worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AudioCodec {
-    /// MPEG-4 AAC in ADTS framing (`aac`/`adts` in FFmpeg).
-    Aac,
     /// MPEG-4 AAC in LATM/LOAS framing (`MP4A-LATM` on the SIP side).
     AacLatm,
     /// ITU-T G.729: FFmpeg can decode raw G.729 but does not encode it.
@@ -47,7 +45,6 @@ impl AudioCodec {
     #[must_use]
     pub const fn decoder_name(self) -> &'static str {
         match self {
-            Self::Aac => "aac",
             Self::AacLatm => "aac_latm",
             Self::G729 => "g729",
         }
@@ -57,7 +54,6 @@ impl AudioCodec {
     #[must_use]
     pub const fn ffmpeg_name(self) -> &'static str {
         match self {
-            Self::Aac => "aac",
             Self::AacLatm => "loas",
             Self::G729 => "g729",
         }
@@ -67,7 +63,6 @@ impl AudioCodec {
     #[must_use]
     pub const fn ffmpeg_container(self) -> &'static str {
         match self {
-            Self::Aac => "adts",
             Self::AacLatm => "latm",
             Self::G729 => "g729",
         }
@@ -77,10 +72,29 @@ impl AudioCodec {
     #[must_use]
     pub const fn ffmpeg_encoder(self) -> Option<&'static str> {
         match self {
-            // The native FFmpeg `aac` encoder is always available.
-            Self::Aac | Self::AacLatm => Some("aac"),
-            // No G.729 encoder in FFmpeg; the worker is decode-only.
+            Self::AacLatm => Some("aac"),
             Self::G729 => None,
+        }
+    }
+}
+
+impl TryFrom<vks_common::codec_spec::CodecId> for AudioCodec {
+    type Error = ();
+
+    fn try_from(id: vks_common::codec_spec::CodecId) -> Result<Self, Self::Error> {
+        match id {
+            vks_common::codec_spec::CodecId::AacLatm => Ok(Self::AacLatm),
+            vks_common::codec_spec::CodecId::G729 => Ok(Self::G729),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<AudioCodec> for vks_common::codec_spec::CodecId {
+    fn from(codec: AudioCodec) -> Self {
+        match codec {
+            AudioCodec::AacLatm => Self::AacLatm,
+            AudioCodec::G729 => Self::G729,
         }
     }
 }
@@ -175,6 +189,31 @@ impl VideoCodec {
     /// extracts the elementary stream back out of the RIFF container.
     pub const fn needs_avi_container(self) -> bool {
         matches!(self, Self::H263Plus)
+    }
+}
+
+impl TryFrom<vks_common::codec_spec::CodecId> for VideoCodec {
+    type Error = ();
+
+    fn try_from(id: vks_common::codec_spec::CodecId) -> Result<Self, Self::Error> {
+        match id {
+            vks_common::codec_spec::CodecId::H261 => Ok(Self::H261),
+            vks_common::codec_spec::CodecId::H263 => Ok(Self::H263),
+            vks_common::codec_spec::CodecId::H263Plus => Ok(Self::H263Plus),
+            vks_common::codec_spec::CodecId::H265 => Ok(Self::H265),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<VideoCodec> for vks_common::codec_spec::CodecId {
+    fn from(codec: VideoCodec) -> Self {
+        match codec {
+            VideoCodec::H261 => Self::H261,
+            VideoCodec::H263 => Self::H263,
+            VideoCodec::H263Plus => Self::H263Plus,
+            VideoCodec::H265 => Self::H265,
+        }
     }
 }
 
