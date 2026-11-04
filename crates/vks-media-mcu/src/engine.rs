@@ -28,7 +28,13 @@ use crate::compositor::{Compositor, CANVAS_SIZE};
 use crate::farm::{EncoderFarm, EncoderSpec, FarmError, GroupStat, GroupViewer};
 use crate::frame::Frame;
 use crate::layout_bridge::{LayoutBridge, PixelRect, SlotRects};
-use crate::vad::Vad;
+use crate::vad::{Vad, VadConfig};
+
+/// Default maximum rendered participant slots on the MCU composite canvas (25 = 5x5 grid).
+pub const DEFAULT_MAX_CANVAS_SLOTS: usize = 25;
+
+/// Dwell time (ms) for dominant speaker slot 0 lock against rapid flapping.
+pub const ACTIVE_SPEAKER_DWELL_MS: u64 = crate::vad::DEFAULT_SLOT_DWELL_MS;
 
 /// MCU media rendering and backpressure statistics (M3.6).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -117,6 +123,12 @@ struct RoomState {
     audio_active_pids: Vec<ParticipantId>,
     /// Recycled audio buffers (capacity 960) to avoid reallocating on participant churn.
     audio_buffer_pool: Vec<Vec<f32>>,
+    /// Timestamp (ms) until which slot 0 / dominant speaker position is locked against eviction.
+    active_speaker_dwell_until_ms: u64,
+    /// Maximum number of participant slots to render in composite canvas (default: 25).
+    max_canvas_slots: usize,
+    /// Configuration for participant VAD detectors.
+    vad_config: VadConfig,
 }
 
 impl RoomState {
@@ -155,6 +167,9 @@ impl RoomState {
             important: None,
             participant_labels: BTreeMap::new(),
             participant_label_visibility: BTreeMap::new(),
+            active_speaker_dwell_until_ms: 0,
+            max_canvas_slots: DEFAULT_MAX_CANVAS_SLOTS,
+            vad_config: VadConfig::default(),
         }
     }
 
@@ -212,6 +227,32 @@ impl RoomState {
         None
     }
 
+    /// Ranks bridged video participants according to priority:
+    /// [screen_share] -> [important] -> [active_speaker] -> [recent_speakers] -> [join_order].
+    fn rank_video_participants(&self, bridged: &[ParticipantId]) -> Vec<ParticipantId> {
+        let mut ranked = Vec::with_capacity(bridged.len());
+        let mut seen = std::collections::BTreeSet::new();
+
+        for pid in self
+            .screen_participant()
+            .into_iter()
+            .chain(self.important)
+            .chain(self.active_speaker)
+            .chain(self.recent_speakers.iter().copied())
+            .chain(self.join_order.iter().copied())
+        {
+            if bridged.contains(&pid) && seen.insert(pid) {
+                ranked.push(pid);
+            }
+        }
+        for &pid in bridged {
+            if seen.insert(pid) {
+                ranked.push(pid);
+            }
+        }
+        ranked
+    }
+
     /// Сажает видео-участника в слот; при нехватке окон авто-расширяет
     /// раскладку равной сеткой или фокусной раскладкой для презентации (RFC 4796).
     ///
@@ -233,22 +274,24 @@ impl RoomState {
                 ..Default::default()
             });
         }
+        let max_slots = self.max_canvas_slots;
+        let ranked = self.rank_video_participants(&bridged);
         let descriptor = self.layout.as_mut().expect("layout initialized");
 
         // Если пришла презентация или она активна, но раскладка ещё не focus (или экран не в слоте 0),
         // принудительно перестраиваем в FocusLayout
         if is_screen || (screen.is_some() && descriptor.layout_id != "focus") {
-            return regrid_for_video(descriptor, &bridged, screen.or(Some(pid)));
+            return regrid_for_video(descriptor, &ranked, screen.or(Some(pid)), max_slots);
         }
 
         if descriptor.assignments.contains_key(&pid) {
             return false;
         }
-        if seat_participant(descriptor, pid) {
+        if descriptor.assignments.len() < max_slots && seat_participant(descriptor, pid) {
             descriptor.version = descriptor.version.saturating_add(1);
             return true;
         }
-        regrid_for_video(descriptor, &bridged, screen)
+        regrid_for_video(descriptor, &ranked, screen, max_slots)
     }
 
     /// Rects раскладки (пространство 1920×1080) → пространство холста комнаты.
@@ -421,7 +464,7 @@ impl RoomState {
     /// elapsed/applied_at.
     fn adopt_layout(&mut self, layout: LayoutDescriptor) -> vks_layout::Layout {
         let new_layout = Self::layout_from_descriptor(&layout);
-        self.bridge.apply(&new_layout);
+        self.bridge.apply_at(&new_layout, self.elapsed_ms);
         self.current_layout = new_layout.clone();
         self.layout = Some(layout);
         self.layout_applied_at_ms = None;
@@ -540,7 +583,10 @@ impl RoomState {
         }
         let mut moved: Vec<(u32, Arc<Frame>)> = Vec::new();
         for (pid, old_slot) in old_assignments {
-            let Some(new_slot) = new_slots.get(pid) else { continue };
+            let Some(new_slot) = new_slots.get(pid) else {
+                frames.remove(old_slot);
+                continue;
+            };
             if *new_slot == *old_slot {
                 continue;
             }
@@ -555,75 +601,120 @@ impl RoomState {
 
     /// Пересадка по Codian §2.2 (S12, ADR-0029 фаза 3): главное окно —
     /// «Важному» участнику или активному спикеру, мелкие ячейки — по убыванию
-    /// недавности речи.
-    ///
-    /// Жильцы только меняются местами: никто не пропадает из раскладки. Равная
-    /// сетка и статичный макет PNM не трогаются (Codian §2.1: 52 макета
-    /// фиксированы по геометрии). Пересчёт идёт по событию смены спикера, а не
-    /// на каждом тике: если размещение уже верное, функция возвращает `None`.
+    /// недавности речи. В переполненных сетках (>max_canvas_slots) активные
+    /// участники вытесняют молчащих (Active Grid Eviction).
     fn refresh_seating(&mut self) -> Option<RoomEvent> {
-        if !matches!(self.current_layout.kind, LayoutKind::Focus | LayoutKind::Speaker) {
+        let is_focus = matches!(self.current_layout.kind, LayoutKind::Focus | LayoutKind::Speaker);
+        let could_be_overcrowded =
+            self.current_layout.kind == LayoutKind::Grid && self.publisher_tracks.len() > self.max_canvas_slots;
+
+        if !is_focus && !could_be_overcrowded {
             return None;
         }
-        let main = vks_layout::main_window(&self.current_layout)?;
-        // Показываем только тех, кто уже в раскладке: остальные — без видео.
-        let shown: BTreeSet<ParticipantId> = self
-            .current_layout
-            .slots
-            .iter()
-            .filter_map(|slot| slot.participant_id)
-            .map(|pid| ParticipantId::from_uuid(uuid::Uuid::from_u128(pid.as_u128())))
-            .collect();
-        // Порядок: презентация (экран) всегда на первом месте (слот 0),
-        // затем «важный»/спикер, затем недавность речи, затем порядок прихода.
-        let mut order: Vec<ParticipantId> = Vec::new();
-        if let Some(spid) = self.screen_participant() {
-            if shown.contains(&spid) {
-                order.push(spid);
-            }
-        }
-        let focus = self.important.or(self.active_speaker);
-        for pid in focus.iter().chain(self.recent_speakers.iter()).chain(self.join_order.iter()) {
-            if shown.contains(pid) && !order.contains(pid) {
-                order.push(*pid);
-            }
-        }
-        // Главное окно первым, остальные — по возрастанию номера слота.
-        let mut slots: Vec<vks_layout::SlotId> = self.current_layout.slots.iter().map(|slot| slot.id).collect();
-        slots.sort_by_key(|slot| (*slot != main, slot.as_u32()));
-        // `skip(1)`: первый участник уже занял главное окно.
-        let mut rest = order.iter().skip(1);
-        let desired: BTreeMap<vks_layout::SlotId, Option<ParticipantId>> = slots
-            .iter()
-            .map(|slot| {
-                let want = if *slot == main { order.first().copied() } else { rest.next().copied() };
-                (*slot, want)
-            })
-            .collect();
-        let current = |slot: &vks_layout::Slot| {
-            slot.participant_id.map(|pid| ParticipantId::from_uuid(uuid::Uuid::from_u128(pid.as_u128())))
-        };
-        if self.current_layout.slots.iter().all(|slot| desired.get(&slot.id).copied().flatten() == current(slot)) {
+
+        let bridged = self.video_participants_in_join_order();
+        let is_overcrowded_grid =
+            self.current_layout.kind == LayoutKind::Grid && bridged.len() > self.max_canvas_slots;
+
+        if !is_focus && !is_overcrowded_grid {
             return None;
         }
-        let old_assignments: BTreeMap<ParticipantId, u32> = self
-            .current_layout
-            .slots
-            .iter()
-            .filter_map(|slot| current(slot).map(|pid| (pid, slot.id.as_u32())))
-            .collect();
-        for slot in &mut self.current_layout.slots {
-            slot.participant_id = desired
-                .get(&slot.id)
-                .copied()
-                .flatten()
-                .map(|pid| vks_layout::ParticipantId::new(pid.as_uuid().as_u128()));
+
+        let ranked = self.rank_video_participants(&bridged);
+
+        if is_focus {
+            let main = vks_layout::main_window(&self.current_layout)?;
+            let slot_count = self.current_layout.slots.len();
+            let mut order: Vec<ParticipantId> = Vec::with_capacity(slot_count);
+
+            for pid in &ranked {
+                if !order.contains(pid) {
+                    order.push(*pid);
+                    if order.len() >= slot_count {
+                        break;
+                    }
+                }
+            }
+
+            // Главное окно первым, остальные — по возрастанию номера слота.
+            let mut slots: Vec<vks_layout::SlotId> = self.current_layout.slots.iter().map(|slot| slot.id).collect();
+            slots.sort_by_key(|slot| (*slot != main, slot.as_u32()));
+            // `skip(1)`: первый участник уже занял главное окно.
+            let mut rest = order.iter().skip(1);
+            let desired: BTreeMap<vks_layout::SlotId, Option<ParticipantId>> = slots
+                .iter()
+                .map(|slot| {
+                    let want = if *slot == main { order.first().copied() } else { rest.next().copied() };
+                    (*slot, want)
+                })
+                .collect();
+            let current = |slot: &vks_layout::Slot| {
+                slot.participant_id.map(|pid| ParticipantId::from_uuid(uuid::Uuid::from_u128(pid.as_u128())))
+            };
+            if self.current_layout.slots.iter().all(|slot| desired.get(&slot.id).copied().flatten() == current(slot)) {
+                return None;
+            }
+            let old_assignments: BTreeMap<ParticipantId, u32> = self
+                .current_layout
+                .slots
+                .iter()
+                .filter_map(|slot| current(slot).map(|pid| (pid, slot.id.as_u32())))
+                .collect();
+            for slot in &mut self.current_layout.slots {
+                slot.participant_id = desired
+                    .get(&slot.id)
+                    .copied()
+                    .flatten()
+                    .map(|pid| vks_layout::ParticipantId::new(pid.as_uuid().as_u128()));
+            }
+            self.current_layout.bump_version();
+            self.sync_descriptor_assignments();
+            Self::rekey_frames_in(&mut self.frames, &old_assignments, &self.current_layout);
+            let event = RoomEvent::LayoutChanged { version: self.current_layout.version };
+            Some(event)
+        } else {
+            // Overcrowded grid layout: top max_canvas_slots participants are displayed
+            let slot_count = self.current_layout.slots.len().min(self.max_canvas_slots);
+            let top_k: Vec<ParticipantId> = ranked.into_iter().take(slot_count).collect();
+
+            let current_pids: Vec<Option<ParticipantId>> = self
+                .current_layout
+                .slots
+                .iter()
+                .map(|slot| slot.participant_id.map(|pid| ParticipantId::from_uuid(uuid::Uuid::from_u128(pid.as_u128()))))
+                .collect();
+
+            let desired_pids: Vec<Option<ParticipantId>> = (0..self.current_layout.slots.len())
+                .map(|i| top_k.get(i).copied())
+                .collect();
+
+            if current_pids == desired_pids {
+                return None;
+            }
+
+            let old_assignments: BTreeMap<ParticipantId, u32> = self
+                .current_layout
+                .slots
+                .iter()
+                .filter_map(|slot| {
+                    slot.participant_id
+                        .map(|pid| (ParticipantId::from_uuid(uuid::Uuid::from_u128(pid.as_u128())), slot.id.as_u32()))
+                })
+                .collect();
+
+            for (idx, slot) in self.current_layout.slots.iter_mut().enumerate() {
+                slot.participant_id = desired_pids
+                    .get(idx)
+                    .copied()
+                    .flatten()
+                    .map(|pid| vks_layout::ParticipantId::new(pid.as_uuid().as_u128()));
+            }
+            self.current_layout.bump_version();
+            self.sync_descriptor_assignments();
+            Self::rekey_frames_in(&mut self.frames, &old_assignments, &self.current_layout);
+            let event = RoomEvent::LayoutChanged { version: self.current_layout.version };
+            Some(event)
         }
-        self.current_layout.bump_version();
-        self.sync_descriptor_assignments();
-        Self::rekey_frames_in(&mut self.frames, &old_assignments, &self.current_layout);
-        let event = RoomEvent::LayoutChanged { version: self.current_layout.version };
-        Some(event)
     }
 
     /// Отмечает участника как недавнего спикера (MRU, ограниченный 16 записями).
@@ -738,7 +829,7 @@ impl RoomState {
         for i in 0..self.audio_active_pids.len() {
             let pid = self.audio_active_pids[i];
             let buf = &self.input_audio[&pid];
-            let vad = self.vads.entry(pid).or_insert_with(|| Vad::new(crate::vad::VadConfig::default()));
+            let vad = self.vads.entry(pid).or_insert_with(|| Vad::new(self.vad_config));
             let mut frame = [0.0f32; 960];
             let mut sum_sq = 0.0f32;
             for (j, v) in buf.iter().take(960).enumerate() {
@@ -774,13 +865,25 @@ impl RoomState {
             }
         }
 
-        // Active speaker with silence hysteresis (keep previous speaker if nobody is currently active)
+        let prev_active_speaker = self.active_speaker;
+        // Active speaker with silence hysteresis and Tier 3 slot dwell lock
         if let Some(spk) = current_speaker {
-            self.active_speaker = Some(spk);
+            if self.active_speaker != Some(spk) {
+                let now = self.last_audio_ms.unwrap_or(self.elapsed_ms);
+                let dwell_ms = self.vad_config.slot_dwell_ms.unwrap_or(0);
+                if now >= self.active_speaker_dwell_until_ms || self.active_speaker.is_none() {
+                    self.active_speaker = Some(spk);
+                    self.active_speaker_dwell_until_ms = now.saturating_add(dwell_ms);
+                }
+            }
         }
 
-        if let Some(event) = self.refresh_seating() {
-            events.push(event);
+        let speaker_transition = self.active_speaker != prev_active_speaker
+            || events.iter().any(|e| matches!(e, RoomEvent::Speaking { .. }));
+        if speaker_transition {
+            if let Some(event) = self.refresh_seating() {
+                events.push(event);
+            }
         }
         events
     }
@@ -797,6 +900,7 @@ impl RoomState {
         self.participant_label_visibility.remove(&pid);
         if self.active_speaker == Some(pid) {
             self.active_speaker = None;
+            self.active_speaker_dwell_until_ms = 0;
         }
         if self.important == Some(pid) {
             self.important = None;
@@ -823,13 +927,17 @@ impl RoomState {
 
         let screen = self.screen_participant();
         let bridged = self.video_participants_in_join_order();
+        let max_slots = self.max_canvas_slots;
+        let ranked = self.rank_video_participants(&bridged);
         if let Some(desc) = self.layout.as_mut() {
             if screen.is_none() && desc.layout_id == "focus" && desc.mode == "auto" {
-                regrid_for_video(desc, &bridged, None);
+                regrid_for_video(desc, &ranked, None, max_slots);
             }
             let new_layout = Self::layout_from_descriptor(desc);
-            self.bridge.apply(&new_layout);
+            self.bridge.apply_at(&new_layout, self.elapsed_ms);
             self.current_layout = new_layout;
+            self.layout_applied_at_ms = None;
+            self.elapsed_ms = 0;
         }
 
         self.process_video();
@@ -1010,19 +1118,22 @@ fn regrid_for_video(
     layout: &mut LayoutDescriptor,
     bridged: &[ParticipantId],
     screen_pid: Option<ParticipantId>,
+    max_slots: usize,
 ) -> bool {
     if bridged.is_empty() {
         return false;
     }
+    let effective_count = bridged.len().min(max_slots).max(1);
+    let active_bridged = &bridged[..effective_count];
     let previous_windows = layout.geometry.len();
     let canvas = Canvas::new(CANVAS_SIZE.0, CANVAS_SIZE.1);
-    let is_presentation = screen_pid.is_some_and(|spid| bridged.contains(&spid));
+    let is_presentation = screen_pid.is_some_and(|spid| active_bridged.contains(&spid));
     let rects = if is_presentation {
-        vks_layout::FocusLayout::slot_rects(&canvas, bridged.len() as u32)
+        vks_layout::FocusLayout::slot_rects(&canvas, effective_count as u32)
     } else {
-        GridLayout::compute(&canvas, bridged.len())
+        GridLayout::compute(&canvas, effective_count)
     };
-    if rects.len() < bridged.len() {
+    if rects.len() < effective_count {
         return false;
     }
     layout.geometry = rects
@@ -1043,7 +1154,7 @@ fn regrid_for_video(
         let spid = screen_pid.unwrap();
         layout.assignments.insert(spid, 0);
         let mut slot_idx = 1u32;
-        for pid in bridged {
+        for pid in active_bridged {
             if *pid != spid {
                 layout.assignments.insert(*pid, slot_idx);
                 slot_idx += 1;
@@ -1051,7 +1162,7 @@ fn regrid_for_video(
         }
         layout.layout_id = "focus".into();
     } else {
-        layout.assignments = bridged.iter().enumerate().map(|(index, pid)| (*pid, index as u32)).collect();
+        layout.assignments = active_bridged.iter().enumerate().map(|(index, pid)| (*pid, index as u32)).collect();
         layout.layout_id = "grid".into();
     }
     layout.preset = String::new();
@@ -1059,9 +1170,10 @@ fn regrid_for_video(
     layout.version = layout.version.saturating_add(1);
     tracing::info!(
         participants = bridged.len(),
+        rendered_slots = effective_count,
         previous_windows,
         is_presentation,
-        "layout auto-expanded: geometry windows < video participants"
+        "layout auto-expanded/evicted: geometry windows updated"
     );
     true
 }
@@ -1843,6 +1955,38 @@ impl McuEngine {
         self.with_room(room, |s| s.active_speaker).flatten()
     }
 
+    /// Returns the dwell lock expiration timestamp (ms) for the dominant speaker.
+    pub fn active_speaker_dwell_until_ms(&self, room: RoomId) -> Option<u64> {
+        self.with_room(room, |s| s.active_speaker_dwell_until_ms)
+    }
+
+    /// Sets the maximum number of participant slots to render in composite canvas (default: 25).
+    pub fn set_room_max_canvas_slots(&self, room: RoomId, slots: usize) {
+        self.with_room_mut(room, |state| {
+            state.max_canvas_slots = slots.max(1);
+        });
+    }
+
+    /// Returns the configured maximum canvas slots for the room.
+    pub fn room_max_canvas_slots(&self, room: RoomId) -> Option<usize> {
+        self.with_room(room, |s| s.max_canvas_slots)
+    }
+
+    /// Sets custom VAD configuration for the room and updates existing participant VADs.
+    pub fn set_room_vad_config(&self, room: RoomId, config: VadConfig) {
+        self.with_room_mut(room, |state| {
+            state.vad_config = config;
+            for vad in state.vads.values_mut() {
+                *vad = Vad::new(config);
+            }
+        });
+    }
+
+    /// Returns the current VAD configuration for the room.
+    pub fn room_vad_config(&self, room: RoomId) -> Option<VadConfig> {
+        self.with_room(room, |s| s.vad_config)
+    }
+
     /// Returns whether the given participant is currently speaking.
     pub fn is_speaking(&self, room: RoomId, pid: ParticipantId) -> bool {
         self.with_room(room, |s| s.speaking_states.get(&pid).copied()).flatten().unwrap_or(false)
@@ -1927,7 +2071,7 @@ impl McuEngine {
         if state.seat_video_or_expand(pid) {
             let descriptor = state.layout.as_ref().expect("layout set by seat_video_or_expand");
             let layout = RoomState::layout_from_descriptor(descriptor);
-            state.bridge.apply(&layout);
+            state.bridge.apply_at(&layout, state.elapsed_ms);
             state.current_layout = layout;
             state.layout_applied_at_ms = None;
             state.elapsed_ms = 0;
@@ -2140,16 +2284,25 @@ impl MediaEngine for McuEngine {
         }
         let version_floor = state.layout.as_ref().map_or(0, |old| old.version.saturating_add(1));
         let mut unseated = false;
-        for &pid in &bridged {
-            if !layout.assignments.contains_key(&pid) && !seat_participant(&mut layout, pid) {
-                unseated = true;
+        let max_slots = state.max_canvas_slots;
+        if layout.assignments.len() > max_slots {
+            unseated = true;
+        } else {
+            for &pid in &bridged {
+                if layout.assignments.len() >= max_slots {
+                    unseated = true;
+                    break;
+                }
+                if !layout.assignments.contains_key(&pid) && !seat_participant(&mut layout, pid) {
+                    unseated = true;
+                }
             }
         }
         if unseated {
             // Окон в присланной geometry меньше, чем видео-участников:
-            // расширяем раскладку равной сеткой, иначе часть людей не попадает
-            // в композит (функциональный блокер 20+, `preset_default_13`).
-            regrid_for_video(&mut layout, &bridged, state.screen_participant());
+            // расширяем раскладку равной сеткой (с учётом потолка max_canvas_slots)
+            let ranked = state.rank_video_participants(&bridged);
+            regrid_for_video(&mut layout, &ranked, state.screen_participant(), max_slots);
         }
         // Версия монотонна: даже auto/default без смены назначений должна
         // перестроить композитор. Repair больше не бампает отдельно, поэтому
@@ -4074,5 +4227,101 @@ mod tests {
             let p3_ptr = state.participant_audio.get(&p3).unwrap().as_ptr();
             assert_eq!(p3_ptr, recycled_p1_ptr, "recycled buffer reused for p3");
         }
+    }
+
+    #[tokio::test]
+    async fn three_tier_vad_slot_dwell_lock_prevents_rapid_flapping() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        let (a, b) = (p(1), p(2));
+        e.create_room(cfg(rid)).await.unwrap();
+        e.set_room_vad_config(rid, VadConfig::three_tier());
+
+        e.add_publisher(rid, a, vec![video_track(a)]).await.unwrap();
+        e.add_publisher(rid, b, vec![video_track(b)]).await.unwrap();
+        apply_focus_layout(&e, rid, "focus", &[(a, 0), (b, 1)]).await;
+
+        // Square wave vocal speech (period 16: ZCR in [0.05, 0.35])
+        let speech: Vec<f32> = (0..960).map(|i| if i % 16 < 8 { 0.7f32 } else { -0.7f32 }).collect();
+
+        // Feed A speech for 800 ms (40 frames of 20 ms) to pass Tier 2 promotion barrier
+        e.set_audio(rid, a, speech.clone());
+        for step in 0..40 {
+            e.tick_audio_at(rid, 100 + step * 20);
+        }
+        assert_eq!(e.active_speaker(rid), Some(a), "A is promoted after 800 ms speech");
+        assert_eq!(slot_of(&e, rid, a), Some(0), "A occupies slot 0");
+        let dwell_until = e.active_speaker_dwell_until_ms(rid).expect("dwell set");
+        assert!(dwell_until >= 100 + 39 * 20 + 3000, "3000 ms dwell lock engaged");
+
+        // Now B speaks immediately for 1000 ms (50 frames) while A's dwell lock is active
+        e.set_audio(rid, a, vec![0.0f32; 960]);
+        e.set_audio(rid, b, speech.clone());
+        for step in 40..90 {
+            e.tick_audio_at(rid, 100 + step * 20);
+        }
+        // Even though B is speaking and passed 800 ms promotion barrier, A remains protected in slot 0!
+        assert_eq!(slot_of(&e, rid, a), Some(0), "A protected in slot 0 by 3000 ms dwell lock");
+        assert_eq!(slot_of(&e, rid, b), Some(1), "B remains in slot 1");
+
+        // Fast-forward past the 3000 ms dwell lock (timestamp > dwell_until)
+        let expired_ts = dwell_until + 20;
+        e.tick_audio_at(rid, expired_ts);
+
+        // Now that 3000 ms dwell expired, B displaces A to take slot 0
+        assert_eq!(e.active_speaker(rid), Some(b), "B displaces A after dwell expires");
+        assert_eq!(slot_of(&e, rid, b), Some(0), "B seated in slot 0");
+        assert_eq!(slot_of(&e, rid, a), Some(1), "A seated in slot 1");
+    }
+
+    #[tokio::test]
+    async fn large_room_active_grid_eviction_and_reseating() {
+        let e = McuEngine::new();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        // Limit room to max 16 canvas slots
+        e.set_room_max_canvas_slots(rid, 16);
+        assert_eq!(e.room_max_canvas_slots(rid), Some(16));
+
+        // Add 20 publishers
+        let participants: Vec<ParticipantId> = (1..=20).map(p).collect();
+        for &pid in &participants {
+            e.add_publisher(rid, pid, vec![video_track(pid)]).await.unwrap();
+        }
+
+        let desc = LayoutDescriptor {
+            layout_id: "grid".into(),
+            version: 1,
+            assignments: BTreeMap::new(),
+            geometry: Vec::new(),
+            preset: String::new(),
+            mode: "auto".into(),
+        };
+        e.apply_layout(rid, desc).await.unwrap();
+
+        let snapshot = e.layout_snapshot(rid).expect("snapshot");
+        // Must clamp to max 16 rendered slots, evicting the other 4
+        assert_eq!(snapshot.layout.slots.len(), 16, "canvas clamped to 16 slots");
+        assert_eq!(snapshot.layout.slots.iter().filter(|s| s.participant_id.is_some()).count(), 16);
+
+        // Participants 1..=16 are seated; 17..=20 are evicted
+        for &pid in &participants[0..16] {
+            assert!(e.set_participant_frame(rid, pid, yuv_frame(320, 180, 50)), "seated participant frame accepted");
+        }
+        for &pid in &participants[16..20] {
+            assert!(!e.set_participant_frame(rid, pid, yuv_frame(320, 180, 50)), "evicted participant frame dropped");
+        }
+
+        // Now evicted participant 18 starts speaking
+        let speech: Vec<f32> = (0..960).map(|i| if i % 16 < 8 { 0.8f32 } else { -0.8f32 }).collect();
+        e.set_audio(rid, participants[17], speech);
+        for step in 0..30 {
+            e.tick_audio_at(rid, 100 + step * 20);
+        }
+
+        // Participant 18 is now active speaker and promoted to the canvas, evicting the quietest participant
+        assert_eq!(e.active_speaker(rid), Some(participants[17]));
+        assert!(slot_of(&e, rid, participants[17]).is_some(), "newly speaking participant 18 promoted to canvas slot");
+        assert!(e.set_participant_frame(rid, participants[17], yuv_frame(320, 180, 60)), "promoted participant frame now accepted");
     }
 }

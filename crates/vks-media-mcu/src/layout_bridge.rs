@@ -107,11 +107,24 @@ impl LayoutBridge {
         Self { crossfade_ms, previous: BTreeMap::new(), current: BTreeMap::new() }
     }
 
-    /// Applies a new layout, starting a crossfade from the previous
-    /// layout's rects.
-    pub fn apply(&mut self, layout: &Layout) {
-        self.previous = self.current.clone();
+    /// Applies a new layout at a given `elapsed_ms` since the last layout change.
+    ///
+    /// If an animation is currently in progress (`elapsed_ms < crossfade_ms` and `!self.previous.is_empty()`),
+    /// the interpolated positions at `elapsed_ms` are captured as the new `previous`,
+    /// guaranteeing smooth, continuous transitions without visual jumping.
+    pub fn apply_at(&mut self, layout: &Layout, elapsed_ms: u64) {
+        if elapsed_ms < self.crossfade_ms && !self.previous.is_empty() {
+            self.previous = self.current(elapsed_ms);
+        } else {
+            self.previous = self.current.clone();
+        }
         self.current = Self::rects_of(layout);
+    }
+
+    /// Applies a new layout, starting a crossfade from the previous
+    /// layout's rects (assuming prior animation has completed).
+    pub fn apply(&mut self, layout: &Layout) {
+        self.apply_at(layout, self.crossfade_ms);
     }
 
     /// The rects of a layout, keyed by slot id.
@@ -273,5 +286,28 @@ mod tests {
         assert_eq!(bridge.current(50).get(&0).unwrap().w, 1440);
         // t=100 → snap.
         assert_eq!(bridge.current(100).get(&0).unwrap().w, 1920);
+    }
+
+    #[test]
+    fn interrupted_crossfade_lerps_from_intermediate_position() {
+        let mut bridge = LayoutBridge::with_crossfade_ms(300);
+        bridge.apply(&layout_v1()); // slot 0 w=960
+        bridge.apply(&layout_v2()); // slot 0 w=1920
+
+        // At t=150 (halfway), slot 0 width is 1440
+        let mid_rect = bridge.current(150);
+        assert_eq!(mid_rect.get(&0).unwrap().w, 1440);
+
+        // A new layout arrives mid-flight at t=150 switching back to layout_v1 (target w=960)
+        bridge.apply_at(&layout_v1(), 150);
+
+        // Immediately at t=0 of the new crossfade, slot 0 MUST start at 1440 (not snap to 1920 or 960)
+        assert_eq!(bridge.current(0).get(&0).unwrap().w, 1440);
+
+        // At t=150 of the new crossfade, halfway between 1440 and 960: (1440 + 960) / 2 = 1200
+        assert_eq!(bridge.current(150).get(&0).unwrap().w, 1200);
+
+        // At t=300, reaches target 960
+        assert_eq!(bridge.current(300).get(&0).unwrap().w, 960);
     }
 }

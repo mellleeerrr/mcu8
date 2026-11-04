@@ -14,6 +14,9 @@ pub const FRAME_MS: u64 = 20;
 
 /// Debounce window in milliseconds (500 ms).
 pub const DEBOUNCE_MS: u64 = 500;
+pub const DEFAULT_PROMOTION_MS: u64 = 800;
+pub const DEFAULT_HANGOVER_MS: u64 = 1500;
+pub const DEFAULT_SLOT_DWELL_MS: u64 = 3000;
 
 /// VAD configuration.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -24,14 +27,49 @@ pub struct VadConfig {
     /// Zero-crossing-rate threshold above which a frame is considered
     /// tonal/speech-like.
     pub zcr_threshold: f32,
+    /// Optional upper bound for zero-crossing rate: frequencies above this
+    /// (e.g. hiss / high-frequency white noise) are rejected as non-speech.
+    pub zcr_max: Option<f32>,
     /// Debounce window (ms) the candidate state must be sustained before
-    /// the VAD state changes.
+    /// the VAD state changes (fallback if promotion_ms or hangover_ms is None).
     pub debounce_ms: u64,
+    /// Minimum continuous speech duration (ms) required to promote state from Inactive to Active.
+    pub promotion_ms: Option<u64>,
+    /// Minimum continuous silence duration (ms) required to decay state from Active to Inactive.
+    pub hangover_ms: Option<u64>,
+    /// Minimum slot dwell duration (ms) for dominant speaker slot 0 lock against rapid flapping.
+    pub slot_dwell_ms: Option<u64>,
 }
 
 impl Default for VadConfig {
     fn default() -> Self {
-        Self { rms_threshold: 0.01, zcr_threshold: 0.0, debounce_ms: DEBOUNCE_MS }
+        Self {
+            rms_threshold: 0.01,
+            zcr_threshold: 0.0,
+            zcr_max: None,
+            debounce_ms: DEBOUNCE_MS,
+            promotion_ms: None,
+            hangover_ms: None,
+            slot_dwell_ms: None,
+        }
+    }
+}
+
+impl VadConfig {
+    /// 3-Tier VAD configuration per Next-Gen MCU Roadmap:
+    /// - Tier 1: Energy Gate (RMS > -26 dBFS (~0.0501187) and ZCR in [0.05, 0.35]).
+    /// - Tier 2: Promotion barrier (800 ms speech) and hangover hold (1500 ms grace).
+    /// - Tier 3: Slot dwell lock (3000 ms lock on dominant speaker position).
+    pub fn three_tier() -> Self {
+        Self {
+            rms_threshold: 0.0501187,
+            zcr_threshold: 0.05,
+            zcr_max: Some(0.35),
+            debounce_ms: DEBOUNCE_MS,
+            promotion_ms: Some(DEFAULT_PROMOTION_MS),
+            hangover_ms: Some(DEFAULT_HANGOVER_MS),
+            slot_dwell_ms: Some(DEFAULT_SLOT_DWELL_MS),
+        }
     }
 }
 
@@ -89,7 +127,12 @@ impl Vad {
     /// disagrees with the committed state it becomes the *pending* state;
     /// after `debounce_ms` of sustained pending state it is committed.
     pub fn feed_frame(&mut self, frame: &[f32]) -> VadState {
-        let loud = Self::frame_is_loud(frame, self.config.rms_threshold, self.config.zcr_threshold);
+        let loud = Self::frame_is_speech(
+            frame,
+            self.config.rms_threshold,
+            self.config.zcr_threshold,
+            self.config.zcr_max,
+        );
         let candidate = if loud { VadState::Active } else { VadState::Inactive };
 
         if candidate != self.state {
@@ -101,7 +144,11 @@ impl Vad {
             } else {
                 self.pending_ms += FRAME_MS;
             }
-            if self.pending_ms >= self.config.debounce_ms {
+            let required_ms = match candidate {
+                VadState::Active => self.config.promotion_ms.unwrap_or(self.config.debounce_ms),
+                VadState::Inactive => self.config.hangover_ms.unwrap_or(self.config.debounce_ms),
+            };
+            if self.pending_ms >= required_ms {
                 self.state = candidate;
                 self.pending = None;
                 self.pending_ms = 0;
@@ -118,6 +165,16 @@ impl Vad {
     /// True when the frame is "loud": RMS above threshold AND zero-crossing
     /// rate above threshold.
     pub fn frame_is_loud(frame: &[f32], rms_threshold: f32, zcr_threshold: f32) -> bool {
+        Self::frame_is_speech(frame, rms_threshold, zcr_threshold, None)
+    }
+
+    /// True when the frame qualifies as speech under RMS and zero-crossing rate bounds.
+    pub fn frame_is_speech(
+        frame: &[f32],
+        rms_threshold: f32,
+        zcr_threshold: f32,
+        zcr_max: Option<f32>,
+    ) -> bool {
         if frame.is_empty() {
             return false;
         }
@@ -134,10 +191,11 @@ impl Vad {
         }
         let rms = (sum_sq / frame.len() as f32).sqrt();
         let zcr = crossings as f32 / frame.len() as f32;
-        // «Громкий» = RMS выше порога И ZCR не ниже порога. ZCR — фильтр
-        // от чистого DC (zcr=0): DC «громкий» по RMS, но не речь; при
-        // zcr_threshold=0 DC проходит, при >0 — нет.
-        rms > rms_threshold && zcr >= zcr_threshold
+        let zcr_upper_ok = match zcr_max {
+            Some(max) => zcr <= max,
+            None => true,
+        };
+        rms > rms_threshold && zcr >= zcr_threshold && zcr_upper_ok
     }
 }
 
@@ -209,7 +267,12 @@ mod tests {
 
     #[test]
     fn zcr_gate_rejects_dc() {
-        let cfg = VadConfig { rms_threshold: 0.01, zcr_threshold: 0.1, debounce_ms: DEBOUNCE_MS };
+        let cfg = VadConfig {
+            rms_threshold: 0.01,
+            zcr_threshold: 0.1,
+            debounce_ms: DEBOUNCE_MS,
+            ..VadConfig::default()
+        };
         let mut vad = Vad::new(cfg);
         let dc = dc_frame();
         // 25 sustained "loud-by-RMS-only" frames — still Inactive (ZCR gate).
@@ -239,5 +302,48 @@ mod tests {
             assert_eq!(vad.feed_frame(&loud_frame()), VadState::Inactive);
         }
         assert_eq!(vad.feed_frame(&loud_frame()), VadState::Active);
+    }
+
+    #[test]
+    fn zcr_max_rejects_high_frequency_hiss() {
+        // High frequency white noise / alternating every sample (ZCR = ~1.0)
+        let hiss: Vec<f32> = (0..FRAME_SAMPLES).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        // With zcr_max = 0.35, hiss is rejected despite high RMS
+        assert!(Vad::frame_is_loud(&hiss, 0.01, 0.01)); // standard accepts it
+        assert!(!Vad::frame_is_speech(&hiss, 0.01, 0.01, Some(0.35))); // bounded rejects it
+    }
+
+    #[test]
+    fn three_tier_vad_promotion_and_hangover() {
+        let cfg = VadConfig::three_tier();
+        assert_eq!(cfg.promotion_ms, Some(800));
+        assert_eq!(cfg.hangover_ms, Some(1500));
+        let mut vad = Vad::new(cfg);
+
+        // Vocal speech frame (square wave with period 16: ZCR = 1/8 = 0.125, in [0.05, 0.35])
+        let speech = loud_frame();
+
+        // 800 ms promotion barrier = 40 frames of 20 ms
+        for frame_idx in 0..39 {
+            assert_eq!(
+                vad.feed_frame(&speech),
+                VadState::Inactive,
+                "frame {frame_idx} must not promote before 800 ms"
+            );
+        }
+        // 40th frame (800 ms) promotes to Active
+        assert_eq!(vad.feed_frame(&speech), VadState::Active);
+
+        // 1500 ms hangover decay = 75 frames of 20 ms
+        let silent = silent_frame();
+        for frame_idx in 0..74 {
+            assert_eq!(
+                vad.feed_frame(&silent),
+                VadState::Active,
+                "frame {frame_idx} must stay Active during 1500 ms hangover grace period"
+            );
+        }
+        // 75th frame (1500 ms) decays to Inactive
+        assert_eq!(vad.feed_frame(&silent), VadState::Inactive);
     }
 }
