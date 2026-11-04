@@ -19,6 +19,8 @@ pub mod metrics;
 #[cfg(unix)]
 pub mod net_tuning;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod ffmpeg_cmd;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod process;
 pub mod ratelimit;
 pub mod text;
@@ -28,6 +30,8 @@ pub mod uri;
 // Удобные переэкспорты (часто используемые).
 pub use config::Config;
 pub use error::{is_terminal_failure, strip_terminal_failure, terminal_failure, Error, ErrorCode, HttpStatus};
+#[cfg(not(target_arch = "wasm32"))]
+pub use ffmpeg_cmd::FfmpegCmdBuilder;
 pub use ratelimit::{RateLimiter, ADMIN_PER_MIN, WS_FRAME_MAX_BYTES};
 pub use text::{sanitize_label, sanitize_label_or, LABEL_MAX_CHARS};
 pub use uri::canonical_uri;

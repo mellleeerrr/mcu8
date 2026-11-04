@@ -40,6 +40,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
+#[cfg(test)]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -1130,60 +1131,28 @@ fn default_spawner() -> Spawner {
 }
 
 fn spawn_ffmpeg(spec: &EncoderSpec, input: (u32, u32)) -> io::Result<Child> {
-    let mut command = vks_common::process::safe_ffmpeg_command();
-    command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "2", "-filter_threads", "2"]);
-    command.args([
-        "-f",
-        "rawvideo",
-        "-pixel_format",
-        "yuv420p",
-        "-video_size",
-        &format!("{}x{}", input.0, input.1),
-        "-framerate",
-        &spec.fps.to_string(),
-        "-i",
-        "pipe:0",
-        "-an",
-    ]);
+    let mut builder = vks_common::FfmpegCmdBuilder::new()
+        .raw_video_input(input.0, input.1, spec.fps);
     if (input.0, input.1) != (spec.width, spec.height) {
         // Egress-resize уезжает в энкодер: в parent его больше нет (спека §B.4 п.3).
-        command.args(["-vf", &format!("scale={}:{}", spec.width, spec.height)]);
+        builder = builder.scale(spec.width, spec.height);
     }
-    command.args([
-        "-c:v",
-        spec.codec.encoder(),
-        "-threads",
-        "2",
-        "-preset",
-        "ultrafast",
-        "-tune",
-        "zerolatency",
-        "-pix_fmt",
-        "yuv420p",
-    ]);
+    builder = builder
+        .video_codec(spec.codec.encoder())
+        .realtime_video_preset("ultrafast", "zerolatency");
     if spec.codec == FarmCodec::H264 {
-        command.args(["-profile:v", spec.profile.as_str(), "-level:v", spec.level.as_str()]);
+        builder = builder.args(["-profile:v", spec.profile.as_str(), "-level:v", spec.level.as_str()]);
     }
     let keyint_min = (spec.fps / 2).max(1);
-    command.args([
-        "-b:v",
-        &format!("{}k", spec.bitrate_kbps),
-        "-maxrate",
-        &format!("{}k", spec.maxrate_kbps),
-        "-bufsize",
-        &format!("{}k", spec.bufsize_kbps),
-        "-g",
-        &spec.keyint.to_string(),
-        "-keyint_min",
-        &keyint_min.to_string(),
-        spec.codec.params_flag(),
-        spec.encoder_params.as_str(),
-    ]);
-    // `-flush_packets 1`: без него FFmpeg копит выход в буфере и группа
-    // отдаёт первый AU с задержкой в несколько кадров.
-    command.args(["-flush_packets", "1", "-f", spec.codec.muxer(), "pipe:1"]);
-    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-    command.spawn()
+    builder
+        .video_bitrate_kbps(spec.bitrate_kbps, spec.maxrate_kbps, spec.bufsize_kbps)
+        .gop(spec.keyint)
+        .keyint_min(keyint_min)
+        .args([spec.codec.params_flag(), spec.encoder_params.as_str()])
+        .output_pipe(spec.codec.muxer())
+        .piped_io()
+        .build()
+        .spawn()
 }
 
 /// Убивает группу процессов по PGID (child спавнится с `process_group(0)`,

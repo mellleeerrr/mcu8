@@ -924,9 +924,52 @@ async fn spawn_child(
     config: &WorkerConfig,
     last_stderr: Arc<Mutex<String>>,
 ) -> Result<(Child, ChildStdin), WorkerError> {
-    let args = ffmpeg_args(mode, slot);
-    let mut command = command(&config.ffmpeg_path);
-    command.args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).current_dir("/");
+    let mut builder = vks_common::FfmpegCmdBuilder::with_bin(&config.ffmpeg_path)
+        .rt_probe_limits();
+    match mode {
+        WorkerMode::AudioDecode(codec) => {
+            builder = builder
+                .input_pipe(codec.ffmpeg_name())
+                .raw_audio_output(48000, 1);
+        }
+        WorkerMode::AudioEncode(codec) => {
+            let encoder = codec.ffmpeg_encoder().unwrap_or("aac");
+            // Native AAC only; G.729 encode is rejected before spawn.
+            builder = builder
+                .raw_audio_input(48000, 1)
+                .audio_codec(encoder)
+                .audio_bitrate_bps(slot.audio_bitrate_bps)
+                .output_pipe(codec.ffmpeg_container());
+        }
+        WorkerMode::VideoDecode(codec) => {
+            builder = builder
+                .input_pipe(codec.ffmpeg_name())
+                .scale(u32::from(slot.width), u32::from(slot.height))
+                .raw_video_output();
+        }
+        WorkerMode::VideoEncode(codec) => {
+            builder = builder
+                .raw_video_input(u32::from(slot.width), u32::from(slot.height), u32::from(slot.fps))
+                .video_codec(codec.ffmpeg_encoder())
+                .video_bitrate_bps(slot.bitrate_bps)
+                .gop(u32::from(slot.fps));
+            if codec == VideoCodec::H265 {
+                // Real-time: no B-frames/lookahead, otherwise the first frame
+                // is 5+ frames late and encode/decode 1-in/1-out desyncs.
+                builder = builder
+                    .realtime_video_preset("ultrafast", "zerolatency")
+                    .args([
+                        "-x265-params",
+                        "log-level=error:bframes=0:rc-lookahead=0:scenecut=0:frame-threads=1:pools=1:aud=1:repeat-headers=1",
+                    ]);
+            }
+            builder = builder.output_pipe(ffmpeg_muxer(codec));
+        }
+    }
+    let mut command = builder
+        .piped_all_io()
+        .build();
+    command.current_dir("/");
     let mut child = command.spawn().map_err(WorkerError::Spawn)?;
     let stdin = child.stdin.take().ok_or_else(|| WorkerError::Spawn(std::io::Error::other("worker stdin missing")))?;
 
@@ -960,100 +1003,6 @@ async fn spawn_child(
         return Err(WorkerError::Unavailable(format!("ffmpeg exited at startup ({status}): {stderr}")));
     }
     Ok((child, stdin))
-}
-
-fn ffmpeg_args(mode: WorkerMode, slot: SlotConfig) -> Vec<String> {
-    // `-fflags nobuffer`/`-flags low_delay` make FFmpeg drop every frame for
-    // some decoders (observed for raw H.261 and AAC), so the worker stays
-    // with default buffering and relies on small raw-frame reads instead.
-    // `-probesize 32 -analyzeduration 0` are essential for real-time pipes:
-    // without them FFmpeg buffers roughly 1.6 KiB..5 s of input before the
-    // first output frame, which adds hundreds of milliseconds of latency.
-    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-probesize", "32", "-analyzeduration", "0"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-    match mode {
-        WorkerMode::AudioDecode(codec) => {
-            args.extend(["-f", codec.ffmpeg_name(), "-i", "pipe:0"].map(str::to_string));
-            args.extend(
-                ["-f", "s16le", "-acodec", "pcm_s16le", "-ar", "48000", "-ac", "1", "pipe:1"].map(str::to_string),
-            );
-        }
-        WorkerMode::AudioEncode(codec) => {
-            let encoder = codec.ffmpeg_encoder().unwrap_or("aac");
-            // Native AAC only; G.729 encode is rejected before spawn.
-            args.extend(["-f", "s16le", "-ar", "48000", "-ac", "1", "-i", "pipe:0"].map(str::to_string));
-            args.extend(
-                [
-                    "-c:a",
-                    encoder,
-                    "-b:a",
-                    &slot.audio_bitrate_bps.to_string(),
-                    "-f",
-                    codec.ffmpeg_container(),
-                    "pipe:1",
-                ]
-                .map(str::to_string),
-            );
-        }
-        WorkerMode::VideoDecode(codec) => {
-            args.extend(["-f", codec.ffmpeg_name(), "-i", "pipe:0"].map(str::to_string));
-            args.extend(
-                [
-                    "-vf",
-                    &format!("scale={}:{}", slot.width, slot.height),
-                    "-fps_mode",
-                    "passthrough",
-                    "-f",
-                    "rawvideo",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "pipe:1",
-                ]
-                .map(str::to_string),
-            );
-        }
-        WorkerMode::VideoEncode(codec) => {
-            args.extend(
-                [
-                    "-f",
-                    "rawvideo",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-s",
-                    &format!("{}x{}", slot.width, slot.height),
-                    "-r",
-                    &slot.fps.to_string(),
-                    "-i",
-                    "pipe:0",
-                ]
-                .map(str::to_string),
-            );
-            let encoder = codec.ffmpeg_encoder();
-            args.extend(
-                ["-c:v", encoder, "-b:v", &slot.bitrate_bps.to_string(), "-g", &slot.fps.to_string()]
-                    .map(str::to_string),
-            );
-            if codec == VideoCodec::H265 {
-                // Real-time: no B-frames/lookahead, otherwise the first frame
-                // is 5+ frames late and encode/decode 1-in/1-out desyncs.
-                args.extend(
-                    [
-                        "-preset",
-                        "ultrafast",
-                        "-tune",
-                        "zerolatency",
-                        "-x265-params",
-                        "log-level=error:bframes=0:rc-lookahead=0:scenecut=0:frame-threads=1:pools=1:aud=1:repeat-headers=1",
-                    ]
-                    .map(str::to_string),
-                );
-            }
-            args.extend(["-f", ffmpeg_muxer(codec), "pipe:1"].map(str::to_string));
-        }
-    }
-    args
 }
 
 /// FFmpeg muxer for the encoded elementary stream.

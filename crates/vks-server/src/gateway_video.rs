@@ -322,104 +322,46 @@ pub(super) async fn codec_available_for(codec: GatewayVideoCodec) -> bool {
 }
 
 fn spawn_codec(encoder: bool, profile: &VideoProfile) -> Result<Child, String> {
-    let mut command = vks_common::process::safe_ffmpeg_command();
-    command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "2", "-filter_threads", "2"]);
-    if encoder {
-        let size = format!("{}x{}", profile.width, profile.height);
-        let fps = profile.fps.to_string();
-        let bitrate = format!("{}k", profile.bitrate_kbps);
-        let maxrate = format!("{}k", (profile.bitrate_kbps * 115) / 100);
-        let buffer = format!("{}k", (profile.bitrate_kbps / 2).max(64));
-        let keyint = ((profile.fps * 2).clamp(15, 60)).to_string();
-        let keyint_min = ((profile.fps / 2).max(1)).to_string();
+    let mut command = if encoder {
+        let maxrate = (profile.bitrate_kbps * 115) / 100;
+        let buffer = (profile.bitrate_kbps / 2).max(64);
+        let keyint = (profile.fps * 2).clamp(15, 60);
+        let keyint_min = (profile.fps / 2).max(1);
         let (codec, params_flag) = match profile.codec {
             GatewayVideoCodec::H264 => ("libx264", "-x264-params"),
             GatewayVideoCodec::H265 => ("libx265", "-x265-params"),
         };
         let params = profile.codec.encoder_params_for(&profile.profile, profile.width, profile.fps);
-        command.args([
-            "-f",
-            "rawvideo",
-            "-pixel_format",
-            "yuv420p",
-            "-video_size",
-            size.as_str(),
-            "-framerate",
-            fps.as_str(),
-            "-i",
-            "pipe:0",
-            "-an",
-            "-c:v",
-            codec,
-            "-threads",
-            "2",
-            "-preset",
-            "ultrafast",
-            "-tune",
-            "zerolatency",
-            "-pix_fmt",
-            "yuv420p",
-        ]);
+
+        let mut builder = vks_common::FfmpegCmdBuilder::new()
+            .raw_video_input(profile.width, profile.height, profile.fps)
+            .video_codec(codec)
+            .realtime_video_preset("ultrafast", "zerolatency");
         if profile.codec == GatewayVideoCodec::H264 {
             // x265 has no baseline; keep the H.264 profile/level contract only there.
-            command.args(["-profile:v", profile.profile.as_str(), "-level:v", profile.level.as_str()]);
+            builder = builder.args(["-profile:v", profile.profile.as_str(), "-level:v", profile.level.as_str()]);
         }
-        command.args([
-            "-b:v",
-            bitrate.as_str(),
-            "-maxrate",
-            maxrate.as_str(),
-            "-bufsize",
-            buffer.as_str(),
-            "-g",
-            keyint.as_str(),
-            "-keyint_min",
-            keyint_min.as_str(),
-            params_flag,
-            params,
-            "-flush_packets",
-            "1",
-            "-f",
-            profile.codec.demuxer(),
-            "pipe:1",
-        ]);
+        builder
+            .video_bitrate_kbps(profile.bitrate_kbps, maxrate, buffer)
+            .gop(keyint)
+            .keyint_min(keyint_min)
+            .args([params_flag, params])
+            .output_pipe(profile.codec.demuxer())
+            .piped_all_io()
+            .build()
     } else {
-        let scale = format!("scale={}:{}", profile.width, profile.height);
         // Both decoders are fed live RTP; low_delay avoids buffering a frame
         // inside FFmpeg. H.261/AAC are not routed through this path.
-        command.args(["-flags", "low_delay"]);
-        command.args([
-            "-probesize",
-            "32",
-            "-analyzeduration",
-            "0",
-            "-max_pixels",
-            "2073600",
-            "-f",
-            profile.codec.demuxer(),
-            "-i",
-            "pipe:0",
-            "-an",
-            "-vf",
-            scale.as_str(),
-            "-threads",
-            "2",
-            "-pix_fmt",
-            "yuv420p",
-            "-fps_mode",
-            "passthrough",
-            "-flush_packets",
-            "1",
-            "-f",
-            "rawvideo",
-            "pipe:1",
-        ]);
-    }
-    command
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
+        vks_common::FfmpegCmdBuilder::new()
+            .low_delay(true)
+            .rt_probe_limits()
+            .args(["-max_pixels", "2073600"])
+            .input_pipe(profile.codec.demuxer())
+            .scale(profile.width, profile.height)
+            .raw_video_output()
+            .piped_all_io()
+            .build()
+    };
     command.spawn().map_err(|error| {
         format!("Cannot start FFmpeg {} {}: {error}", profile.codec.name(), if encoder { "encoder" } else { "decoder" })
     })
