@@ -702,17 +702,10 @@ impl RoomState {
                 let mut input_ptrs: [&[f32]; MAX_STACK] = [&[]; MAX_STACK];
                 let mut minus_ptrs: [&mut [f32]; MAX_STACK] = std::array::from_fn(|_| &mut [][..]);
 
-                for (i, pid) in self.audio_active_pids.iter().enumerate() {
-                    input_ptrs[i] = self.input_audio[pid].as_slice();
-                }
-
-                let mut idx = 0;
-                for (pid, buf) in self.participant_audio.iter_mut() {
-                    debug_assert_eq!(*pid, self.audio_active_pids[idx], "participant PID mismatch at index {}", idx);
+                for (idx, (pid, buf)) in self.participant_audio.iter_mut().enumerate() {
+                    input_ptrs[idx] = self.input_audio[pid].as_slice();
                     minus_ptrs[idx] = buf.as_mut_slice();
-                    idx += 1;
                 }
-                debug_assert_eq!(idx, n);
 
                 AudioMixer.mix_and_mix_minus_into(
                     &input_ptrs[..n],
@@ -720,11 +713,8 @@ impl RoomState {
                     &mut minus_ptrs[..n],
                 );
             } else {
-                for (idx, (pid, _)) in self.participant_audio.iter().enumerate() {
-                    debug_assert_eq!(*pid, self.audio_active_pids[idx], "participant PID mismatch at index {}", idx);
-                }
-                let inputs: Vec<&[f32]> = self.audio_active_pids
-                    .iter()
+                let inputs: Vec<&[f32]> = self.participant_audio
+                    .keys()
                     .map(|pid| self.input_audio[pid].as_slice())
                     .collect();
                 let mut minus_outs: Vec<&mut [f32]> = self.participant_audio
