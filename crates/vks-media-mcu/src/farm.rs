@@ -335,6 +335,11 @@ pub const FARM_GROUP_LEAK_BUDGET_BYTES: u64 = 1024 * 1024;
 pub const FARM_GROUP_RETENTION_BUDGET_BYTES: u64 = 12 * 1024 * 1024;
 /// Group count used by the T09a release soak (66 sequential start/stops).
 pub const FARM_SOAK_GROUPS: u64 = 66;
+/// Ёмкость кольцевого broadcast-канала закодированных access units группы (AU).
+///
+/// 8 слотов обеспечивают буфер ~267 мс при 30 fps (133 мс при 60 fps), поглощая
+/// кратковременный джиттер планировщика и сокета без выпадения в `Lagged`.
+pub const ACCESS_UNIT_CHANNEL_CAPACITY: usize = 8;
 
 /// Total leak/retention budget for `groups` soak cycles (allocation-free
 /// arithmetic so the CI gate is deterministic across allocators).
@@ -600,7 +605,7 @@ impl EncoderFarm {
             }
         }
         let (input_tx, input_rx) = mpsc::channel::<Arc<Frame>>(1);
-        let (tx, _) = broadcast::channel::<Arc<AccessUnit>>(4);
+        let (tx, _) = broadcast::channel::<Arc<AccessUnit>>(ACCESS_UNIT_CHANNEL_CAPACITY);
         let input_dims = (input.0.max(2) & !1, input.1.max(2) & !1);
         let child = match (self.inner.spawner)(&key.spec, input_dims) {
             Ok(child) => child,
@@ -672,27 +677,25 @@ impl EncoderFarm {
     /// один. Возвращает число групп, принявших кадр.
     pub fn publish(&self, room: RoomId, frame: &Arc<Frame>) -> usize {
         let version = self.canvas_version(room);
-        let groups: Vec<Arc<Group>> = {
-            let groups = self.inner.groups.lock().unwrap();
-            groups
-                .values()
-                .filter(|group| group.key.room == room && group.key.canvas_version == version)
-                .cloned()
-                .collect()
-        };
+        let groups = self.inner.groups.lock().unwrap();
         let mut accepted = 0;
-        for group in groups {
+        let mut now = None;
+        for group in groups.values() {
+            if group.key.room != room || group.key.canvas_version != version {
+                continue;
+            }
             if group.cancel.load(Ordering::Relaxed) {
                 continue;
             }
-            let now_us = group.started.elapsed().as_micros() as u64;
-            let min_gap_us = (group.key.spec.frame_interval().as_micros() as u64) * 3 / 4;
+            let now_inst = *now.get_or_insert_with(Instant::now);
+            let now_us = (now_inst.saturating_duration_since(group.started).as_micros() as u64).max(1);
+            let min_gap_us = (group.key.spec.frame_interval().as_micros() as u64) / 2;
             let previous = group.last_publish_us.load(Ordering::Relaxed);
             if previous != 0 && now_us.saturating_sub(previous) < min_gap_us {
                 continue;
             }
             group.last_publish_us.store(now_us, Ordering::Relaxed);
-            match group.input.try_send(frame.clone()) {
+            match group.input.try_send(Arc::clone(frame)) {
                 Ok(()) => accepted += 1,
                 Err(_) => {
                     group.dropped_frames.fetch_add(1, Ordering::Relaxed);
@@ -708,13 +711,18 @@ impl EncoderFarm {
     /// `keyint = fps` даёт ≤1 с; рестарт child'а рвёт поток всем зрителям
     /// (спека §B.6). Форс-IDR — P4b вместе с control-каналом энкодера.
     pub fn request_keyframe(&self, room: RoomId) {
-        let groups: Vec<Arc<Group>> = {
-            let groups = self.inner.groups.lock().unwrap();
-            groups.values().filter(|group| group.key.room == room).cloned().collect()
-        };
-        for group in groups {
+        let groups = self.inner.groups.lock().unwrap();
+        let mut now = None;
+        for group in groups.values() {
+            if group.key.room != room {
+                continue;
+            }
+            if group.cancel.load(Ordering::Relaxed) {
+                continue;
+            }
             group.keyframe_requests_total.fetch_add(1, Ordering::Relaxed);
-            let now_ms = (group.started.elapsed().as_millis() as u64).max(1);
+            let now_inst = *now.get_or_insert_with(Instant::now);
+            let now_ms = (now_inst.saturating_duration_since(group.started).as_millis() as u64).max(1);
             let prev_ms = group.last_keyframe_request_ms.load(Ordering::Relaxed);
             if prev_ms == 0 || now_ms.saturating_sub(prev_ms) >= 250 {
                 group.last_keyframe_request_ms.store(now_ms, Ordering::Relaxed);
@@ -1563,7 +1571,7 @@ mod tests {
         let farm = farm_with_test_spawner(8);
         let room = room();
         let viewer = farm.acquire(spec(1).key(room, 0), (640, 360)).await.expect("acquire");
-        // fps=1 → min_interval 750 мс: второй кадр сразу — дедуп.
+        // fps=1 → min_interval 500 мс: второй кадр сразу — дедуп.
         assert_eq!(farm.publish(room, &fake_frame(1)), 1);
         assert_eq!(farm.publish(room, &fake_frame(2)), 0, "дубль в том же интервале отброшен");
         tokio::time::sleep(Duration::from_millis(900)).await;
