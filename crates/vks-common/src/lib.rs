@@ -17,6 +17,8 @@ pub mod layout_defaults;
 pub mod metrics;
 #[cfg(unix)]
 pub mod net_tuning;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod process;
 pub mod ratelimit;
 pub mod text;
 pub mod tracing;

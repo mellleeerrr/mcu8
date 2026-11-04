@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use vks_gateway_sip::h265::{nal_type, packetize_h265, strip_start_code, H265Depacketizer};
 
 /// Профиль кодирования шлюзового видео. Заменяет прежние жёсткие
@@ -296,7 +296,7 @@ pub(super) async fn codec_available_for(codec: GatewayVideoCodec) -> bool {
             let has = |flag: &'static str, needle: &'static str| async move {
                 match tokio::time::timeout(
                     Duration::from_secs(3),
-                    Command::new("ffmpeg").args(["-hide_banner", flag]).output(),
+                    vks_common::process::safe_ffmpeg_command().args(["-hide_banner", flag]).output(),
                 )
                 .await
                 {
@@ -322,7 +322,7 @@ pub(super) async fn codec_available_for(codec: GatewayVideoCodec) -> bool {
 }
 
 fn spawn_codec(encoder: bool, profile: &VideoProfile) -> Result<Child, String> {
-    let mut command = Command::new("ffmpeg");
+    let mut command = vks_common::process::safe_ffmpeg_command();
     command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "2", "-filter_threads", "2"]);
     if encoder {
         let size = format!("{}x{}", profile.width, profile.height);
@@ -1241,8 +1241,14 @@ pub(super) async fn spawn_video_media_bridge(
             let _ = task.await;
         }
         if let Some(encoder) = encoder.as_mut() {
+            if let Some(pid) = encoder.id() {
+                vks_common::process::kill_process_group(pid);
+            }
             let _ = encoder.kill().await;
             let _ = encoder.wait().await;
+        }
+        if let Some(pid) = decoder.id() {
+            vks_common::process::kill_process_group(pid);
         }
         let _ = decoder.kill().await;
         let _ = decoder.wait().await;

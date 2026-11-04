@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use super::WorkerError;
@@ -88,12 +88,12 @@ impl LatmEncoder {
     /// [`WorkerError::Spawn`] when the child cannot start or its pipes are
     /// missing (the binary was not probed).
     pub fn spawn(ffmpeg: PathBuf, bitrate_bps: u32) -> Result<Self, WorkerError> {
-        let mut child = Command::new(&ffmpeg)
+        let mut cmd = vks_common::process::safe_command(&ffmpeg);
+        let mut child = cmd
             .args(encoder_args(bitrate_bps))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
             .spawn()
             .map_err(WorkerError::Spawn)?;
         let mut stdin = child.stdin.take().ok_or_else(|| WorkerError::InvalidConfig("latm encoder stdin".into()))?;
@@ -275,12 +275,12 @@ impl LatmDecoder {
     /// [`WorkerError::Spawn`]/[`WorkerError::InvalidConfig`] when the child or
     /// one of its pipes cannot be started.
     pub fn spawn(ffmpeg: PathBuf) -> Result<Self, WorkerError> {
-        let mut child = Command::new(&ffmpeg)
+        let mut cmd = vks_common::process::safe_command(&ffmpeg);
+        let mut child = cmd
             .args(decoder_args())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
             .spawn()
             .map_err(WorkerError::Spawn)?;
         let mut stdin = child.stdin.take().ok_or_else(|| WorkerError::InvalidConfig("latm decoder stdin".into()))?;

@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 
 use std::sync::atomic::AtomicU32;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
@@ -1099,7 +1099,7 @@ fn default_spawner() -> Spawner {
 }
 
 fn spawn_ffmpeg(spec: &EncoderSpec, input: (u32, u32)) -> io::Result<Child> {
-    let mut command = Command::new(std::env::var_os("VKS_FFMPEG_BIN").unwrap_or_else(|| "ffmpeg".into()));
+    let mut command = vks_common::process::safe_ffmpeg_command();
     command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "2", "-filter_threads", "2"]);
     command.args([
         "-f",
@@ -1152,38 +1152,13 @@ fn spawn_ffmpeg(spec: &EncoderSpec, input: (u32, u32)) -> io::Result<Child> {
     // отдаёт первый AU с задержкой в несколько кадров.
     command.args(["-flush_packets", "1", "-f", spec.codec.muxer(), "pipe:1"]);
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-    // Своя группа процессов: kill(-pgid) по ADR-0028 не заденет MCU.
-    command.process_group(0);
-    // Паника актора/дроп Child без `kill_child` не должны оставлять ffmpeg.
-    command.kill_on_drop(true);
-    #[cfg(unix)]
-    unsafe {
-        command.pre_exec(|| {
-            let parent = libc::getppid();
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::getppid() != parent {
-                libc::_exit(1);
-            }
-            Ok(())
-        });
-    }
     command.spawn()
 }
 
 /// Убивает группу процессов по PGID (child спавнится с `process_group(0)`,
 /// поэтому его pid == pgid). ESRCH/EPERM игнорируются: группа могла умереть.
 fn kill_process_group(pid: u32) {
-    if pid == 0 {
-        return;
-    }
-    // SAFETY: `kill` с отрицательным pid — это `killpg`; ESRCH/EPERM
-    // игнорируются (группа могла уже умереть). Тот же приём, что в
-    // `codec_worker::ffmpeg` (единственный `unsafe` на процесс-группу).
-    unsafe {
-        libc::kill(-(pid as i32), libc::SIGKILL);
-    }
+    vks_common::process::kill_process_group(pid);
 }
 
 /// Убивает child и всю его группу процессов (ADR-0028), затем прибирает
@@ -1299,9 +1274,8 @@ mod tests {
     /// `vks-server` с реальным FFmpeg).
     fn fake_spawner() -> Spawner {
         Arc::new(|_spec: &EncoderSpec, _input: (u32, u32)| {
-            let mut command = Command::new("cat");
+            let mut command = vks_common::process::safe_command("cat");
             command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-            command.process_group(0);
             command.spawn()
         })
     }
@@ -1652,9 +1626,8 @@ mod tests {
     fn counting_spawner(counter: Arc<AtomicUsize>) -> Spawner {
         Arc::new(move |_spec: &EncoderSpec, _input: (u32, u32)| {
             counter.fetch_add(1, Ordering::SeqCst);
-            let mut command = Command::new("cat");
+            let mut command = vks_common::process::safe_command("cat");
             command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-            command.process_group(0);
             command.spawn()
         })
     }

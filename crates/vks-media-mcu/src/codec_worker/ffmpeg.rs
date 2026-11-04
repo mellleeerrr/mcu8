@@ -202,46 +202,14 @@ const IO_CHUNK_BYTES: usize = 8192;
 const STARTUP_SETTLE: Duration = Duration::from_millis(30);
 
 /// Среда дочернего FFmpeg: пусто, кроме локали, `PATH` и (если задан)
-/// `LD_LIBRARY_PATH` — последний нужен для ffmpeg из приватного префикса
-/// (`VKS_FFMPEG_BIN`), который грузит свои `.so` не из `ld.so.conf`.
-/// Остальное окружение сервера (JWT-секреты, креды БД) наружу не уходит.
-fn scrubbed_env(command: &mut Command) -> &mut Command {
-    command
-        .env_clear()
-        .env("LC_ALL", "C")
-        .env("LANG", "C")
-        .env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into()));
-    if let Some(loader) = std::env::var_os("LD_LIBRARY_PATH") {
-        command.env("LD_LIBRARY_PATH", loader);
-    }
-    command
-}
-
 fn command(ffmpeg: &std::path::Path) -> Command {
-    let mut command = Command::new(ffmpeg);
-    command.kill_on_drop(true);
-    scrubbed_env(&mut command);
-    #[cfg(unix)]
-    {
-        // Собственная группа процессов: таймаут и teardown убивают её целиком.
-        command.process_group(0);
-    }
-    command
+    vks_common::process::safe_command(ffmpeg)
 }
 
 /// Убивает всю группу процессов воркера (`kill(-pgid, SIGKILL)`).
-///
-/// Один syscall вместо порождения `/usr/bin/kill`: вызов неблокирующий, поэтому
-/// применим и в `Drop`, и в async-пути (PROJECT_RULES §1.2 — без блокирующих
-/// вызовов в сетевом/медиа-пути). Ошибка «группа уже мертва» игнорируется.
 #[cfg(unix)]
 fn kill_process_group(pid: u32) {
-    // SAFETY: `pid` — идентификатор дочернего процесса этого воркера; отрицательный
-    // pid в `kill()` означает «вся группа процессов». `ESRCH` (группа уже мертва)
-    // и `EPERM` игнорируются — вызывающая сторона всё равно делает `start_kill()`.
-    unsafe {
-        libc::kill(-(pid as i32), libc::SIGKILL);
-    }
+    vks_common::process::kill_process_group(pid);
 }
 
 #[cfg(not(unix))]
