@@ -3,17 +3,6 @@
 
 use std::sync::atomic::Ordering::Relaxed;
 
-/// Process-wide monotonic 20 ms-tick clock (milliseconds).
-///
-/// One clock for the gateway RTP loop, the video ticker and the hybrid bridge:
-/// `McuEngine::tick_audio_at`/`tick_video_*` reject a tick that is less than
-/// one tick after the previous one, so two epochs would starve a room after a
-/// bridge restart (elapsed time would jump backwards).
-pub(crate) fn media_clock_ms() -> u64 {
-    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    EPOCH.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
-}
-
 fn gain(sample: f32, volume: u32) -> f32 {
     let scaled = sample * volume.min(1000) as f32 / 100.0;
     if scaled.abs() > 1.0 {
@@ -267,8 +256,7 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
     let ssrc = (uuid::Uuid::new_v4().as_u128() as u32).max(1);
     let mut incoming = [0; 2048];
     let mut mixed = [0.0; 960];
-    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(20));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut ticker = vks_common::clock::AudioTicker::new_20ms();
     let mut last_rtcp = std::time::Instant::now();
     let mut recv_errors = 0u8;
     let mut rejected_logs = 0u8;
@@ -408,7 +396,7 @@ pub(super) async fn run_audio_bridge(mut session: super::RtpBridgeSession) {
                 // is active it owns the tick (it mixes browser PCM and gateway
                 // PCM once); the gateway loop then only reads the mix-minus.
                 if !crate::bridge::bridge_owns_tick(session.room_id) {
-                    session.mcu_engine.tick_audio_at(session.room_id, media_clock_ms());
+                    session.mcu_engine.tick_audio_at(session.room_id, session.mcu_engine.clock().now_ms());
                 }
                 let mut packet = [0; 12 + vks_gateway_sip::opus::MAX_PAYLOAD];
                 vks_gateway_sip::write_rtp_header(&mut packet[..12], session.audio_payload_type, sequence, timestamp, ssrc, false);

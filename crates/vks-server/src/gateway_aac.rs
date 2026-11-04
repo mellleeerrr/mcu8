@@ -294,7 +294,7 @@ pub(super) async fn run_aac_bridge(mut session: RtpBridgeSession) {
                     }
                 }
                 session.mcu_engine.set_audio_slice(session.room_id, session.participant_id_val, &input);
-                session.mcu_engine.tick_audio_at(session.room_id, super::audio::media_clock_ms());
+                session.mcu_engine.tick_audio_at(session.room_id, session.mcu_engine.clock().now_ms());
 
                 mixed.fill(0.0);
                 if !session.controls.audio_rx_muted.load(Relaxed)

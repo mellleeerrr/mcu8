@@ -778,6 +778,8 @@ pub struct McuEngine {
     /// `O7`: ферма энкодеров — один энкодер на группу (комната + профиль + холст).
     /// Живёт рядом с раскладкой: это свойство медиаядра, а не HTTP-слоя.
     farm: EncoderFarm,
+    /// Единый тактовый домен медиа-движка (WallClock или виртуальный для тестов).
+    clock: vks_common::clock::MediaClock,
     /// Accepted audio ticks (T12): lets the mixed-room bridge prove that the
     /// gateway RTP loop and the bridge clock do not double-tick the same room.
     audio_ticks: std::sync::atomic::AtomicU64,
@@ -956,9 +958,22 @@ impl VisibleWindows {
 }
 
 impl McuEngine {
-    /// Creates an empty MCU engine.
+    /// Creates an empty MCU engine with the default wall clock.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates an MCU engine with a specific media clock (e.g. virtual stepped clock for tests).
+    pub fn with_clock(clock: vks_common::clock::MediaClock) -> Self {
+        Self {
+            clock,
+            ..Self::default()
+        }
+    }
+
+    /// Returns a reference to the engine's media clock.
+    pub fn clock(&self) -> &vks_common::clock::MediaClock {
+        &self.clock
     }
 
     fn room_arc(&self, room: RoomId) -> Option<Arc<Mutex<RoomState>>> {
@@ -1069,6 +1084,7 @@ impl McuEngine {
             state.stats.last_duration_us = duration_us;
             state.stats.frames_rendered += 1;
         }
+        self.clock.advance(33);
         Some(composite)
     }
 
@@ -1260,6 +1276,7 @@ impl McuEngine {
             state.stats.last_duration_us = duration_us;
             state.stats.frames_rendered += 1;
         }
+        self.clock.advance(33);
         Some(composite)
     }
 
@@ -3733,5 +3750,22 @@ mod tests {
             (0, 0, 1280, 720),
             "720p geometry on 720p canvas must be 1:1 (1280x720), not shrunk to 853x480"
         );
+    }
+
+    #[tokio::test]
+    async fn engine_virtual_clock_advances_on_tick() {
+        let clock = vks_common::clock::MediaClock::virtual_clock(100, 33);
+        let e = McuEngine::with_clock(clock);
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+
+        assert_eq!(e.clock().now_ms(), 100);
+        assert!(e.clock().is_virtual());
+
+        e.tick(rid);
+        assert_eq!(e.clock().now_ms(), 133);
+
+        e.tick(rid);
+        assert_eq!(e.clock().now_ms(), 166);
     }
 }

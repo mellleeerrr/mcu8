@@ -53,7 +53,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::sync::mpsc;
 use vks_admin::state::AppState;
@@ -425,11 +425,7 @@ async fn run_bridge(
     let mut egress = OpusCodec::new();
     let mut rtp_ms: u64 = 0;
     let silence = [0.0f32; FRAME_SAMPLES];
-    let mut ticker = tokio::time::interval(Duration::from_millis(TICK_MS));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // The first tick of an interval fires immediately; consume it so the mixer
-    // starts on a real 20 ms boundary.
-    ticker.tick().await;
+    let mut ticker = vks_common::clock::AudioTicker::new_20ms();
 
     loop {
         tokio::select! {
@@ -470,7 +466,7 @@ async fn run_bridge(
                 // ONE tick per room: while this task owns the clock,
                 // `tick_audio_at` is a no-op for every other caller and this
                 // bridge-privileged entry point advances the mix exactly once.
-                mcu.tick_audio_at_bridge(room, crate::gateways::audio::media_clock_ms());
+                mcu.tick_audio_at_bridge(room, mcu.clock().now_ms());
                 // Gateway-only mix: browsers hear each other through the SFU
                 // fanout, so their PCM must never enter this stream.
                 let pcm = mcu.mix_participants_audio(room, &presence.gateways);

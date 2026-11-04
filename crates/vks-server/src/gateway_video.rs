@@ -1057,7 +1057,7 @@ pub(super) async fn spawn_video_media_bridge(
                 interval.tick().await;
                 let engine = render_engine.clone();
                 let publish = tokio::task::spawn_blocking(move || {
-                    let frame = engine.tick_video_for_viewer(room, super::audio::media_clock_ms(), render_viewer)?;
+                    let frame = engine.tick_video_for_viewer(room, engine.clock().now_ms(), render_viewer)?;
                     let published = engine.publish_video_frame(room, &frame);
                     // `P1`: тик дебаунса — движок сам публикует смену числа
                     // видимых окон, когда значение стабильно ≥500 мс.
@@ -1088,7 +1088,7 @@ pub(super) async fn spawn_video_media_bridge(
                     // сегодня это общий композит, но путь выбора кадра уже
                     // персональный — персональная дельта добавится без
                     // изменения egress'а.
-                    let frame = engine.tick_video_for_viewer(room, super::audio::media_clock_ms(), render_viewer)?;
+                    let frame = engine.tick_video_for_viewer(room, engine.clock().now_ms(), render_viewer)?;
                     Some(resize_i420(&frame, &render_profile))
                 })
                 .await;

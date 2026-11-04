@@ -8,6 +8,7 @@
 //! Дерево зависимостей (ARCHITECTURE.md §3): `vks-common` — standalone в фазе 0;
 //! в фазе 1 получит зависимость от `vks-core`.
 
+pub mod clock;
 pub mod codec_capabilities;
 pub mod codec_spec;
 pub mod config;
