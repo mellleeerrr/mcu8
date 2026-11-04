@@ -20,6 +20,6 @@ MemoryHigh=2G
 # Default weight is 100; 200 keeps the MCU ahead of background maintenance
 # under CPU contention without pinning a single core.
 CPUWeight=200
-# Default weight is 100; media + ffmpeg workers are latency-sensitive on disk.
-IOWeight=200
+# IO weight aligned with vks-mcu-prod.service (100).
+IOWeight=100
 TasksMax=8192
