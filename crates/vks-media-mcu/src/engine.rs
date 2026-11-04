@@ -105,6 +105,8 @@ struct RoomState {
     participant_label_visibility: BTreeMap<ParticipantId, bool>,
     /// Pre-allocated scratch frame buffer for zero-alloc compositing.
     scratch_frame: Option<Frame>,
+    /// Inbound 20 ms PCM audio samples per participant.
+    input_audio: BTreeMap<ParticipantId, Vec<f32>>,
 }
 
 impl RoomState {
@@ -133,6 +135,7 @@ impl RoomState {
                 Frame::new(CANVAS_SIZE.0, CANVAS_SIZE.1, data)
             }),
             scratch_frame: None,
+            input_audio: BTreeMap::new(),
             mixed_audio: Vec::new(),
             participant_audio: BTreeMap::new(),
             vads: BTreeMap::new(),
@@ -416,36 +419,23 @@ impl RoomState {
         new_layout
     }
 
-    /// Recomputes the composite + mixed audio + per-participant mix-minus + VAD from the current
-    /// frames and participant audio (deterministic logical step of 33ms).
-    #[allow(dead_code)]
-    fn tick(&mut self, frames: &BTreeMap<u32, Arc<Frame>>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
-        self.elapsed_ms += 33;
-        self.process_media(frames, audio_inputs);
-    }
-
-
     /// Advances the audio processing pass at a specific monotonic timestamp `now_ms` (20 ms cadence).
-    fn tick_audio_at(
-        &mut self,
-        now_ms: u64,
-        audio_inputs: &[(ParticipantId, Vec<f32>)],
-    ) -> (bool, Vec<RoomEvent>, Option<SeatingMove>) {
+    fn tick_audio_at(&mut self, now_ms: u64) -> (bool, Vec<RoomEvent>) {
         if let Some(last) = self.last_audio_ms {
             if now_ms < last + 18 {
-                return (false, Vec::new(), None);
+                return (false, Vec::new());
             }
         }
         self.last_audio_ms = Some(now_ms);
         let started = vks_common::metrics::mcu_tick_metrics_enabled().then(std::time::Instant::now);
-        let (events, seating) = self.process_audio(audio_inputs);
+        let events = self.process_audio();
         if let Some(started) = started {
             vks_common::metrics::observe_mcu_tick(vks_common::metrics::McuTickPhase::Audio, started.elapsed());
         }
-        (true, events, seating)
+        (true, events)
     }
 
-    fn process_video(&mut self, frames: &BTreeMap<u32, Arc<Frame>>) {
+    fn process_video(&mut self) {
         let t0 = std::time::Instant::now();
         let rects = self.scaled_slot_rects();
         let labels = self.slot_labels();
@@ -453,8 +443,7 @@ impl RoomState {
 
         if let Some(exclusive) = Arc::get_mut(&mut self.composite) {
             if exclusive.width == width && exclusive.height == height {
-                Compositor.compose_sized_with_labels_into(exclusive, frames, &rects, &labels);
-                self.frames.clone_from(frames);
+                Compositor.compose_sized_with_labels_into(exclusive, &self.frames, &rects, &labels);
                 self.stats.last_duration_us = t0.elapsed().as_micros() as u64;
                 self.stats.frames_rendered += 1;
                 return;
@@ -467,12 +456,45 @@ impl RoomState {
             .unwrap_or_else(|| Frame::new(width, height, Vec::new()));
         target_frame.width = width;
         target_frame.height = height;
-        Compositor.compose_sized_with_labels_into(&mut target_frame, frames, &rects, &labels);
+        Compositor.compose_sized_with_labels_into(&mut target_frame, &self.frames, &rects, &labels);
 
         self.composite = Arc::new(target_frame);
-        self.frames.clone_from(frames);
         self.stats.last_duration_us = t0.elapsed().as_micros() as u64;
         self.stats.frames_rendered += 1;
+    }
+
+    /// Переносит кадры на новые номера слотов после смены раскладки.
+    fn rekey_frames_in(
+        frames: &mut BTreeMap<u32, Arc<Frame>>,
+        old_assignments: &BTreeMap<ParticipantId, u32>,
+        new_layout: &vks_layout::Layout,
+    ) {
+        let new_slots: BTreeMap<ParticipantId, u32> = new_layout
+            .slots
+            .iter()
+            .filter_map(|slot| {
+                slot.participant_id.map(|pid| {
+                    let uuid = uuid::Uuid::from_u128(pid.as_u128());
+                    (ParticipantId::from_uuid(uuid), slot.id.as_u32())
+                })
+            })
+            .collect();
+        if new_slots.is_empty() {
+            return;
+        }
+        let mut moved: Vec<(u32, Arc<Frame>)> = Vec::new();
+        for (pid, old_slot) in old_assignments {
+            let Some(new_slot) = new_slots.get(pid) else { continue };
+            if *new_slot == *old_slot {
+                continue;
+            }
+            if let Some(frame) = frames.remove(old_slot) {
+                moved.push((*new_slot, frame));
+            }
+        }
+        for (slot, frame) in moved {
+            frames.insert(slot, frame);
+        }
     }
 
     /// Пересадка по Codian §2.2 (S12, ADR-0029 фаза 3): главное окно —
@@ -483,7 +505,7 @@ impl RoomState {
     /// сетка и статичный макет PNM не трогаются (Codian §2.1: 52 макета
     /// фиксированы по геометрии). Пересчёт идёт по событию смены спикера, а не
     /// на каждом тике: если размещение уже верное, функция возвращает `None`.
-    fn refresh_seating(&mut self) -> Option<(RoomEvent, SeatingMove)> {
+    fn refresh_seating(&mut self) -> Option<RoomEvent> {
         if !matches!(self.current_layout.kind, LayoutKind::Focus | LayoutKind::Speaker) {
             return None;
         }
@@ -543,9 +565,9 @@ impl RoomState {
         }
         self.current_layout.bump_version();
         self.sync_descriptor_assignments();
+        Self::rekey_frames_in(&mut self.frames, &old_assignments, &self.current_layout);
         let event = RoomEvent::LayoutChanged { version: self.current_layout.version };
-        let seating = SeatingMove { old_assignments, new_layout: self.current_layout.clone() };
-        Some((event, seating))
+        Some(event)
     }
 
     /// Отмечает участника как недавнего спикера (MRU, ограниченный 16 записями).
@@ -572,18 +594,24 @@ impl RoomState {
         descriptor.version = self.current_layout.version;
     }
 
-    fn process_audio(&mut self, audio_inputs: &[(ParticipantId, Vec<f32>)]) -> (Vec<RoomEvent>, Option<SeatingMove>) {
-        let slices: Vec<&[f32]> = audio_inputs.iter().map(|(_, v)| v.as_slice()).collect();
+    fn process_audio(&mut self) -> Vec<RoomEvent> {
+        let active_pids: Vec<ParticipantId> = self
+            .publisher_tracks
+            .keys()
+            .filter(|pid| self.input_audio.contains_key(pid))
+            .copied()
+            .collect();
+
+        let slices: Vec<&[f32]> = active_pids
+            .iter()
+            .map(|pid| self.input_audio[pid].as_slice())
+            .collect();
         let target_len = self.mixed_audio.len().max(960);
         let (full_mix, minus_mixes) = AudioMixer.mix_and_mix_minus(&slices, target_len);
         self.mixed_audio = full_mix;
 
-        // Mix-minus for each participant with audio.
-        // Room subscribers and passive listeners who didn't publish audio in this tick
-        // are served directly from self.mixed_audio in participant_audio/copy_participant_audio,
-        // avoiding O(N) heap allocations and cloning on every 20 ms tick.
         self.participant_audio.clear();
-        for ((pid, _), buf) in audio_inputs.iter().zip(minus_mixes.into_iter()) {
+        for (pid, buf) in active_pids.iter().zip(minus_mixes.into_iter()) {
             self.participant_audio.insert(*pid, buf);
         }
 
@@ -592,7 +620,8 @@ impl RoomState {
         let mut current_speaker = None;
         let mut events = Vec::new();
 
-        for (pid, buf) in audio_inputs {
+        for pid in &active_pids {
+            let buf = &self.input_audio[pid];
             let vad = self.vads.entry(*pid).or_insert_with(|| Vad::new(crate::vad::VadConfig::default()));
             let mut frame = [0.0f32; 960];
             let mut sum_sq = 0.0f32;
@@ -634,35 +663,57 @@ impl RoomState {
             self.active_speaker = Some(spk);
         }
 
-        // Codian §2.2: главное окно — активному спикеру или «Важному»
-        // участнику, мелкие ячейки — по недавности речи. Пересчёт — по событию
-        // смены спикера, а не пересборка на каждом тике: если размещение уже
-        // верное, `refresh_seating` ничего не меняет.
-        let seating = self.refresh_seating().map(|(event, seating)| {
+        if let Some(event) = self.refresh_seating() {
             events.push(event);
-            seating
-        });
-        (events, seating)
+        }
+        events
     }
 
-    #[allow(dead_code)]
-    fn process_media(&mut self, frames: &BTreeMap<u32, Arc<Frame>>, audio_inputs: &[(ParticipantId, Vec<f32>)]) {
-        self.process_video(frames);
-        let (_events, _seating) = self.process_audio(audio_inputs);
-    }
-}
+    fn remove_participant(&mut self, pid: ParticipantId) {
+        self.subscribers.remove(&pid);
+        self.publisher_tracks.remove(&pid);
+        self.join_order.retain(|known| *known != pid);
+        self.recent_speakers.retain(|known| *known != pid);
+        self.vads.remove(&pid);
+        self.speaking_states.remove(&pid);
+        self.speaking_changes.retain(|(known, _)| *known != pid);
+        self.participant_labels.remove(&pid);
+        self.participant_label_visibility.remove(&pid);
+        if self.active_speaker == Some(pid) {
+            self.active_speaker = None;
+        }
+        if self.important == Some(pid) {
+            self.important = None;
+        }
+        self.participant_audio.remove(&pid);
+        self.input_audio.remove(&pid);
 
-/// Пересадка участников внутри раскладки: что было и что стало.
-///
-/// Нужна, чтобы перенести декодированные кадры вместе с участниками
-/// ([`McuEngine::rekey_frames`]): кадр принадлежит участнику, а не номеру слота.
-/// Без переноса после голосовой пересадки в окне остаётся видео прежнего
-/// жильца — до следующего кадра этого участника, а если он выключил камеру,
-/// то навсегда.
-#[derive(Debug, Clone)]
-struct SeatingMove {
-    old_assignments: BTreeMap<ParticipantId, u32>,
-    new_layout: vks_layout::Layout,
+        let removed_slot = self.layout.as_mut().and_then(|desc| desc.assignments.remove(&pid));
+        if let Some(slot_id) = removed_slot {
+            self.frames.remove(&slot_id);
+        }
+
+        let vpid = vks_layout::ParticipantId::new(pid.as_uuid().as_u128());
+        for slot in &mut self.current_layout.slots {
+            if slot.participant_id == Some(vpid) {
+                slot.participant_id = None;
+                self.frames.remove(&slot.id.as_u32());
+            }
+        }
+
+        let screen = self.screen_participant();
+        let bridged = self.video_participants_in_join_order();
+        if let Some(desc) = self.layout.as_mut() {
+            if screen.is_none() && desc.layout_id == "focus" && desc.mode == "auto" {
+                regrid_for_video(desc, &bridged, None);
+            }
+            let new_layout = Self::layout_from_descriptor(desc);
+            self.bridge.apply(&new_layout);
+            self.current_layout = new_layout;
+        }
+
+        self.process_video();
+    }
 }
 
 /// Событие комнаты для внешнего потребителя (S12, ADR-0029 фаза 3).
@@ -732,28 +783,15 @@ pub fn group_bitrate_kbps(base_kbps: u32, visible_windows: usize) -> u32 {
     scaled.clamp(base_kbps, ceiling)
 }
 
-/// MCU engine (impl [`MediaEngine`]).
-/// Room → (slot → frame): pluggable mock frame source.
-type FrameSource = Arc<Mutex<BTreeMap<RoomId, BTreeMap<u32, Arc<Frame>>>>>;
-/// Room → (participant → 20 ms PCM frame): pluggable mock audio source.
-type AudioSource = Arc<Mutex<BTreeMap<RoomId, BTreeMap<ParticipantId, Vec<f32>>>>>;
-
-/// Canonical lock order for [`McuEngine`] (T12; fixes the P0 deadlock risk in
-/// `docs/audit/2026-10-29/pitfalls/T12.md` §P0-3):
+/// Canonical lock order for [`McuEngine`]:
 ///
 /// ```text
-/// bridge_tick_rooms → pending_layouts → rooms → frames → audio
+/// bridge_tick_rooms → pending_layouts → rooms → (per-room RoomState)
 /// ```
 ///
 /// `bridge_tick_rooms` is only ever taken alone (never while another engine lock
-/// is held) and `audio` is always the innermost lock, so every method takes
-/// locks **left to right**. Two inversions existed before
-/// T12 and are fixed here:
-/// - `apply_layout` took `rooms → pending_layouts`, while
-///   `ensure_room`/`bridge_participant`/`seat_publisher` take
-///   `pending_layouts → rooms`;
-/// - `remove_publisher` took `rooms → audio → frames`, while `tick`/`tick_at`
-///   take `rooms → frames → audio`.
+/// is held). `rooms` is taken read-only for per-room lookups.
+/// `video_tickers` is an isolated leaf lock.
 ///
 /// The room event sink is invoked only after all engine locks are released
 /// (see the private `emit` sink dispatch): a sink may take roster/room-hub locks that are not
@@ -765,10 +803,6 @@ pub struct McuEngine {
     /// пишет только движок через [`McuEngine::refresh_visible_windows`], сессии
     /// лишь читают). Устраняет thrash от per-session писателей.
     visible: Mutex<BTreeMap<RoomId, Arc<VisibleWindows>>>,
-    /// Pluggable frame source (mock by default).
-    frames: FrameSource,
-    /// Pluggable audio source (mock).
-    audio: AudioSource,
     /// Раскладка, пришедшая до создания MCU-комнаты (сессия стартует раньше
     /// первого шлюзового вызова). Применяется при создании комнаты/бридже,
     /// не аллоцируя 2 МБ композита для пустой SFU-сессии.
@@ -1007,95 +1041,50 @@ impl McuEngine {
         Some(f(&mut g))
     }
 
-    /// Переносит кадры на новые номера слотов после смены раскладки.
-    ///
-    /// Кадр принадлежит участнику, а не позиции в сетке: без переноса после
-    /// перестановки в окне остаётся видео прежнего участника (устаревший кадр).
-    /// Переносятся только кадры, у которых есть новый слот.
-    fn rekey_frames(
-        &self,
-        room: RoomId,
-        old_assignments: &BTreeMap<ParticipantId, u32>,
-        new_layout: &vks_layout::Layout,
-    ) {
-        // `vks_layout::ParticipantId` — тот же UUID, но в виде `u128`.
-        let new_slots: BTreeMap<ParticipantId, u32> = new_layout
-            .slots
-            .iter()
-            .filter_map(|slot| {
-                slot.participant_id.map(|pid| {
-                    let uuid = uuid::Uuid::from_u128(pid.as_u128());
-                    (ParticipantId::from_uuid(uuid), slot.id.as_u32())
-                })
-            })
-            .collect();
-        if new_slots.is_empty() {
-            return;
-        }
-        let mut guard = self.frames.lock().unwrap();
-        let Some(frames) = guard.get_mut(&room) else { return };
-        let mut moved: Vec<(u32, Arc<Frame>)> = Vec::new();
-        for (pid, old_slot) in old_assignments {
-            let Some(new_slot) = new_slots.get(pid) else { continue };
-            if *new_slot == *old_slot {
-                continue;
-            }
-            if let Some(frame) = frames.remove(old_slot) {
-                moved.push((*new_slot, frame));
-            }
-        }
-        for (slot, frame) in moved {
-            frames.insert(slot, frame);
-        }
-    }
-
     /// Injects a (mock) frame for a slot of a room (test helper).
     pub fn set_frame(&self, room: RoomId, slot: u32, frame: Frame) {
-        self.frames.lock().unwrap().entry(room).or_default().insert(slot, Arc::new(frame));
+        self.with_room_mut(room, |state| {
+            state.frames.insert(slot, Arc::new(frame));
+        });
     }
 
     /// Injects a (mock) audio frame for a participant (test helper).
     pub fn set_audio(&self, room: RoomId, pid: ParticipantId, samples: Vec<f32>) {
-        self.audio.lock().unwrap().entry(room).or_default().insert(pid, samples);
+        self.with_room_mut(room, |state| {
+            state.input_audio.insert(pid, samples);
+        });
     }
 
     /// Injects a PCM audio slice for a participant reusing existing buffer capacity (zero-allocation hot path).
     pub fn set_audio_slice(&self, room: RoomId, pid: ParticipantId, samples: &[f32]) {
-        let mut audio_guard = self.audio.lock().unwrap();
-        let map = audio_guard.entry(room).or_default();
-        let entry = map.entry(pid).or_insert_with(|| Vec::with_capacity(samples.len()));
-        entry.clear();
-        entry.extend_from_slice(samples);
+        self.with_room_mut(room, |state| {
+            let entry = state.input_audio.entry(pid).or_insert_with(|| Vec::with_capacity(samples.len()));
+            entry.clear();
+            entry.extend_from_slice(samples);
+        });
     }
 
     /// Advances the room's pipeline (30 fps tick) and returns the composite
     /// frame. Deterministic for a given input sequence.
     pub fn tick(&self, room: RoomId) -> Option<Arc<Frame>> {
         let arc = self.room_arc(room)?;
-        let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
-        let audio_map = self.audio.lock().unwrap().get(&room).cloned().unwrap_or_default();
         let snapshot = {
             let mut state = arc.lock().unwrap();
-            let audio_inputs: Vec<(ParticipantId, Vec<f32>)> = state
-                .publisher_tracks
-                .keys()
-                .filter_map(|pid| audio_map.get(pid).cloned().map(|samples| (*pid, samples)))
-                .collect();
             state.elapsed_ms += 33;
-            state.process_audio(&audio_inputs);
+            state.process_audio();
             let rects = state.scaled_slot_rects();
             let labels = state.slot_labels();
             let (width, height) = state.canvas;
-            (width, height, rects, labels)
+            let frames = state.frames.clone();
+            (width, height, rects, frames, labels)
         };
-        let (width, height, rects, labels) = snapshot;
+        let (width, height, rects, frames, labels) = snapshot;
         let t0 = std::time::Instant::now();
         let composite = Arc::new(Compositor.compose_sized_with_labels(width, height, &frames, &rects, &labels));
         let duration_us = t0.elapsed().as_micros() as u64;
         {
             let mut state = arc.lock().unwrap();
             state.composite = composite.clone();
-            state.frames = frames;
             state.stats.last_duration_us = duration_us;
             state.stats.frames_rendered += 1;
         }
@@ -1130,28 +1119,16 @@ impl McuEngine {
     }
 
     fn tick_audio_at_impl(&self, room: RoomId, now_ms: u64) -> bool {
-        let (ran, events, seating) = {
+        let (ran, events) = {
             let arc = match self.room_arc(room) {
                 Some(s) => s,
                 None => return false,
             };
             let mut state = arc.lock().unwrap();
-            let audio_map = self.audio.lock().unwrap().get(&room).cloned().unwrap_or_default();
-            let audio_inputs: Vec<(ParticipantId, Vec<f32>)> = state
-                .publisher_tracks
-                .keys()
-                .filter_map(|pid| audio_map.get(pid).cloned().map(|samples| (*pid, samples)))
-                .collect();
-            state.tick_audio_at(now_ms, &audio_inputs)
+            state.tick_audio_at(now_ms)
         };
         if ran {
             self.audio_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        // Кадр принадлежит участнику: после голосовой пересадки переносим
-        // пиксели в новые слоты, иначе в главном окне остаётся видео прежнего
-        // жильца (и навсегда, если тот выключил камеру).
-        if let Some(seating) = seating {
-            self.rekey_frames(room, &seating.old_assignments, &seating.new_layout);
         }
         self.emit(room, events);
         ran
@@ -1193,19 +1170,20 @@ impl McuEngine {
     /// double-deliver every browser voice and would echo the listener to
     /// itself). Gain/soft-clip are the same [`AudioMixer`] as the room mix.
     ///
-    /// Takes only the audio lock: it must stay safe to call on the bridge clock
-    /// while the room is being ticked.
+    /// Reads per-room input audio without global contention.
     pub fn mix_participants_audio(&self, room: RoomId, participants: &[ParticipantId]) -> Vec<f32> {
-        let audio_guard = self.audio.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(room_audio) = audio_guard.get(&room) else {
-            return vec![0.0; 960];
-        };
-        let slices: Vec<&[f32]> =
-            participants.iter().filter_map(|pid| room_audio.get(pid).map(Vec::as_slice)).collect();
-        if slices.is_empty() {
-            return vec![0.0; 960];
-        }
-        AudioMixer.mix(&slices, 960)
+        self.with_room(room, |state| {
+            let slices: Vec<&[f32]> = participants
+                .iter()
+                .filter_map(|pid| state.input_audio.get(pid).map(Vec::as_slice))
+                .collect();
+            if slices.is_empty() {
+                vec![0.0; 960]
+            } else {
+                AudioMixer.mix(&slices, 960)
+            }
+        })
+        .unwrap_or_else(|| vec![0.0; 960])
     }
 
     /// Ставит приёмник событий комнат (S12: `SpeakingStateChanged` и
@@ -1233,21 +1211,18 @@ impl McuEngine {
     ///
     /// Возвращает `true`, если раскладка перестроилась.
     pub fn set_important_participant(&self, room: RoomId, participant: Option<ParticipantId>) -> bool {
-        let changed = {
-            let arc = match self.room_arc(room) {
-                Some(a) => a,
-                None => return false,
-            };
-            let mut state = arc.lock().unwrap();
-            state.important = participant;
-            state.refresh_seating()
-        };
-        let Some((event, seating)) = changed else {
-            return false;
-        };
-        self.rekey_frames(room, &seating.old_assignments, &seating.new_layout);
-        self.emit(room, vec![event]);
-        true
+        let event = self
+            .with_room_mut(room, |state| {
+                state.important = participant;
+                state.refresh_seating()
+            })
+            .flatten();
+        if let Some(event) = event {
+            self.emit(room, vec![event]);
+            true
+        } else {
+            false
+        }
     }
 
     /// «Важный» участник комнаты (`None` — не назначен).
@@ -1273,7 +1248,7 @@ impl McuEngine {
             let rects = state.scaled_slot_rects();
             let labels = state.slot_labels();
             let (width, height) = state.canvas;
-            let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
+            let frames = state.frames.clone();
             (width, height, rects, frames, labels)
         };
         let (width, height, rects, frames, labels) = snapshot;
@@ -1287,7 +1262,6 @@ impl McuEngine {
         {
             let mut state = arc.lock().unwrap();
             state.composite = composite.clone();
-            state.frames = frames;
             state.stats.last_duration_us = duration_us;
             state.stats.frames_rendered += 1;
         }
@@ -1814,26 +1788,23 @@ impl McuEngine {
 
     /// Writes a decoded frame only into the slot belonging to this publisher.
     pub fn set_participant_frame(&self, room: RoomId, pid: ParticipantId, frame: Frame) -> bool {
-        let slot = self
-            .with_room(room, |state| state.layout.as_ref().and_then(|layout| layout.assignments.get(&pid).copied()))
-            .flatten();
-        let Some(slot) = slot else {
-            return false;
-        };
-        self.frames.lock().unwrap().entry(room).or_default().insert(slot, Arc::new(frame));
-        true
+        self.with_room_mut(room, |state| {
+            let slot = state.layout.as_ref()?.assignments.get(&pid).copied()?;
+            state.frames.insert(slot, Arc::new(frame));
+            Some(())
+        })
+        .flatten()
+        .is_some()
     }
 
     /// Removes the participant's decoded pixels immediately when reception is muted.
     pub fn clear_participant_frame(&self, room: RoomId, pid: ParticipantId) {
-        let slot = self
-            .with_room(room, |state| state.layout.as_ref().and_then(|layout| layout.assignments.get(&pid).copied()))
-            .flatten();
-        if let Some(slot) = slot {
-            self.frames.lock().unwrap().entry(room).or_default().remove(&slot);
-            let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
-            self.with_room_mut(room, |state| state.process_video(&frames));
-        }
+        self.with_room_mut(room, |state| {
+            if let Some(slot) = state.layout.as_ref().and_then(|l| l.assignments.get(&pid).copied()) {
+                state.frames.remove(&slot);
+                state.process_video();
+            }
+        });
     }
 
     /// Current composed pixels, shared by subscribers when a render is throttled.
@@ -1857,52 +1828,9 @@ impl McuEngine {
 
     /// Synchronously removes a bridged participant from the MCU room, purging layout and audio.
     pub fn unbridge_participant(&self, room: RoomId, pid: ParticipantId) {
-        let arc = match self.room_arc(room) {
-            Some(a) => a,
-            None => return,
-        };
-        let mut state = arc.lock().unwrap();
-        state.subscribers.remove(&pid);
-        state.publisher_tracks.remove(&pid);
-        state.join_order.retain(|known| *known != pid);
-        state.vads.remove(&pid);
-        state.speaking_states.remove(&pid);
-        state.participant_labels.remove(&pid);
-        state.participant_label_visibility.remove(&pid);
-        if state.active_speaker == Some(pid) {
-            state.active_speaker = None;
-        }
-        state.participant_audio.remove(&pid);
-
-        let removed_slot = state.layout.as_mut().and_then(|desc| desc.assignments.remove(&pid));
-        if let Some(slot_id) = removed_slot {
-            self.frames.lock().unwrap().entry(room).or_default().remove(&slot_id);
-        }
-
-        let vpid = vks_layout::ParticipantId::new(pid.as_uuid().as_u128());
-        for slot in &mut state.current_layout.slots {
-            if slot.participant_id == Some(vpid) {
-                slot.participant_id = None;
-                self.frames.lock().unwrap().entry(room).or_default().remove(&slot.id.as_u32());
-            }
-        }
-
-        let screen = state.screen_participant();
-        let bridged = state.video_participants_in_join_order();
-        if let Some(desc) = state.layout.as_mut() {
-            if screen.is_none() && desc.layout_id == "focus" && desc.mode == "auto" {
-                regrid_for_video(desc, &bridged, None);
-            }
-            let new_layout = RoomState::layout_from_descriptor(desc);
-            state.bridge.apply(&new_layout);
-            state.current_layout = new_layout;
-        }
-
-        let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
-        state.process_video(&frames);
-        // T12 lock order: frames before audio (same inversion as
-        // `remove_publisher`).
-        self.audio.lock().unwrap().entry(room).or_default().remove(&pid);
+        self.with_room_mut(room, |state| {
+            state.remove_participant(pid);
+        });
     }
 
     /// Returns whether the participant is registered in the MCU room.
@@ -1960,8 +1888,6 @@ impl MediaEngine for McuEngine {
             return Err(MediaEngineError::RoomNotFound(room));
         }
         self.stop_video_ticker(room);
-        self.frames.lock().unwrap().remove(&room);
-        self.audio.lock().unwrap().remove(&room);
         self.visible.lock().unwrap().remove(&room);
         self.bridge_tick_rooms.lock().unwrap().remove(&room);
         Ok(())
@@ -1998,47 +1924,7 @@ impl MediaEngine for McuEngine {
     async fn remove_publisher(&self, room: RoomId, publisher: ParticipantId) -> Result<(), MediaEngineError> {
         let arc = self.room_arc(room).ok_or(MediaEngineError::RoomNotFound(room))?;
         let mut state = arc.lock().unwrap();
-        state.publisher_tracks.remove(&publisher);
-        state.join_order.retain(|known| *known != publisher);
-        state.vads.remove(&publisher);
-        state.speaking_states.remove(&publisher);
-        if state.active_speaker == Some(publisher) {
-            state.active_speaker = None;
-        }
-        state.participant_audio.remove(&publisher);
-
-        // T12 lock order: rooms → frames → audio. `frames` is taken before
-        // `audio` (this used to be rooms → audio → frames, the exact inverse of
-        // `tick`/`tick_at`); the audio map is cleared last.
-        // M3.2: Eliminate ghost frames and clean up layout bindings
-        let removed_slot = state.layout.as_mut().and_then(|desc| desc.assignments.remove(&publisher));
-        if let Some(slot_id) = removed_slot {
-            self.frames.lock().unwrap().entry(room).or_default().remove(&slot_id);
-        }
-
-        let vpid = vks_layout::ParticipantId::new(publisher.as_uuid().as_u128());
-        for slot in &mut state.current_layout.slots {
-            if slot.participant_id == Some(vpid) {
-                slot.participant_id = None;
-                self.frames.lock().unwrap().entry(room).or_default().remove(&slot.id.as_u32());
-            }
-        }
-
-        let screen = state.screen_participant();
-        let bridged = state.video_participants_in_join_order();
-        if let Some(desc) = state.layout.as_mut() {
-            if screen.is_none() && desc.layout_id == "focus" && desc.mode == "auto" {
-                regrid_for_video(desc, &bridged, None);
-            }
-            let new_layout = RoomState::layout_from_descriptor(desc);
-            state.bridge.apply(&new_layout);
-            state.current_layout = new_layout;
-        }
-
-        // Re-compose composite frame immediately so departed publisher's video is purged
-        let frames = self.frames.lock().unwrap().get(&room).cloned().unwrap_or_default();
-        state.process_video(&frames);
-        self.audio.lock().unwrap().entry(room).or_default().remove(&publisher);
+        state.remove_participant(publisher);
         Ok(())
     }
 
@@ -2120,7 +2006,7 @@ impl MediaEngine for McuEngine {
         let old_assignments = state.layout.as_ref().map(|previous| previous.assignments.clone());
         let new_layout = state.adopt_layout(layout);
         if let Some(old_assignments) = old_assignments {
-            self.rekey_frames(room, &old_assignments, &new_layout);
+            RoomState::rekey_frames_in(&mut state.frames, &old_assignments, &new_layout);
         }
         Ok(())
     }
