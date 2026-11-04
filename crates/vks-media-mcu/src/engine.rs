@@ -103,8 +103,14 @@ struct RoomState {
     participant_labels: BTreeMap<ParticipantId, String>,
     /// Participant label visibility (default true).
     participant_label_visibility: BTreeMap<ParticipantId, bool>,
-    /// Pre-allocated scratch frame buffer for zero-alloc compositing.
+    /// Pre-allocated scratch frame buffer for zero-alloc compositing (back-buffer).
     scratch_frame: Option<Frame>,
+    /// Stale composite frames being read by encoder workers, reclaimed when released.
+    stale_composites: Vec<Arc<Frame>>,
+    /// Guard against overlapping video rendering passes for this room.
+    video_render_in_flight: bool,
+    /// Generation counter incremented on mutations to prevent stale render overwrite.
+    render_epoch: u64,
     /// Inbound 20 ms PCM audio samples per participant.
     input_audio: BTreeMap<ParticipantId, Vec<f32>>,
 }
@@ -128,13 +134,11 @@ impl RoomState {
             frames: BTreeMap::new(),
             self_view: false,
             canvas: CANVAS_SIZE,
-            composite: Arc::new({
-                let pixels = CANVAS_SIZE.0 as usize * CANVAS_SIZE.1 as usize;
-                let mut data = vec![128u8; pixels * 3 / 2];
-                Compositor::fill_studio_black(&mut data, pixels);
-                Frame::new(CANVAS_SIZE.0, CANVAS_SIZE.1, data)
-            }),
-            scratch_frame: None,
+            composite: Arc::new(Self::alloc_black_frame(CANVAS_SIZE.0, CANVAS_SIZE.1)),
+            scratch_frame: Some(Self::alloc_black_frame(CANVAS_SIZE.0, CANVAS_SIZE.1)),
+            stale_composites: Vec::with_capacity(3),
+            video_render_in_flight: false,
+            render_epoch: 0,
             input_audio: BTreeMap::new(),
             mixed_audio: Vec::new(),
             participant_audio: BTreeMap::new(),
@@ -435,30 +439,76 @@ impl RoomState {
         (true, events)
     }
 
+    /// Allocates a black frame with the given dimensions.
+    fn alloc_black_frame(width: u32, height: u32) -> Frame {
+        let pixels = width as usize * height as usize;
+        let data = if width.is_multiple_of(2) && height.is_multiple_of(2) {
+            let mut data = vec![128u8; pixels * 3 / 2];
+            Compositor::fill_studio_black(&mut data, pixels);
+            data
+        } else {
+            vec![0u8; pixels]
+        };
+        Frame::new(width, height, data)
+    }
+
+    /// Acquires a back-buffer for video composition without heap allocations.
+    fn take_back_buffer(&mut self) -> Frame {
+        let (width, height) = self.canvas;
+        if let Some(frame) = self.scratch_frame.take() {
+            if (frame.width, frame.height) == (width, height) {
+                return frame;
+            }
+        }
+        if let Some(pos) = self.stale_composites.iter().position(|a| Arc::strong_count(a) == 1) {
+            let arc = self.stale_composites.swap_remove(pos);
+            if let Ok(frame) = Arc::try_unwrap(arc) {
+                if (frame.width, frame.height) == (width, height) {
+                    return frame;
+                }
+            }
+        }
+        Self::alloc_black_frame(width, height)
+    }
+
+    /// Commits a rendered frame to `composite` and cycles the previous frame into the back-buffer pool.
+    fn commit_composite(&mut self, frame: Frame, epoch: u64) -> Arc<Frame> {
+        self.video_render_in_flight = false;
+        if (frame.width, frame.height) != self.canvas || epoch != self.render_epoch {
+            if self.scratch_frame.is_none() && (frame.width, frame.height) == self.canvas {
+                self.scratch_frame = Some(frame);
+            }
+            return self.composite.clone();
+        }
+        let new_composite = Arc::new(frame);
+        let old_composite = std::mem::replace(&mut self.composite, new_composite.clone());
+        match Arc::try_unwrap(old_composite) {
+            Ok(old_frame) => {
+                if (old_frame.width, old_frame.height) == self.canvas {
+                    self.scratch_frame = Some(old_frame);
+                }
+            }
+            Err(stale) => {
+                if self.stale_composites.len() >= 3 {
+                    self.stale_composites.remove(0);
+                }
+                self.stale_composites.push(stale);
+            }
+        }
+        new_composite
+    }
+
     fn process_video(&mut self) {
+        self.render_epoch = self.render_epoch.wrapping_add(1);
+        let epoch = self.render_epoch;
         let t0 = std::time::Instant::now();
         let rects = self.scaled_slot_rects();
         let labels = self.slot_labels();
-        let (width, height) = self.canvas;
 
-        if let Some(exclusive) = Arc::get_mut(&mut self.composite) {
-            if exclusive.width == width && exclusive.height == height {
-                Compositor.compose_sized_with_labels_into(exclusive, &self.frames, &rects, &labels);
-                self.stats.last_duration_us = t0.elapsed().as_micros() as u64;
-                self.stats.frames_rendered += 1;
-                return;
-            }
-        }
+        let mut target = self.take_back_buffer();
+        Compositor.compose_sized_with_labels_into(&mut target, &self.frames, &rects, &labels);
+        self.commit_composite(target, epoch);
 
-        let mut target_frame = self
-            .scratch_frame
-            .take()
-            .unwrap_or_else(|| Frame::new(width, height, Vec::new()));
-        target_frame.width = width;
-        target_frame.height = height;
-        Compositor.compose_sized_with_labels_into(&mut target_frame, &self.frames, &rects, &labels);
-
-        self.composite = Arc::new(target_frame);
         self.stats.last_duration_us = t0.elapsed().as_micros() as u64;
         self.stats.frames_rendered += 1;
     }
@@ -995,6 +1045,17 @@ impl VisibleWindows {
     }
 }
 
+struct RenderInFlightGuard<'a>(&'a std::sync::Arc<std::sync::Mutex<RoomState>>, bool);
+impl<'a> Drop for RenderInFlightGuard<'a> {
+    fn drop(&mut self) {
+        if self.1 {
+            if let Ok(mut state) = self.0.lock() {
+                state.video_render_in_flight = false;
+            }
+        }
+    }
+}
+
 impl McuEngine {
     /// Creates an empty MCU engine with the default wall clock.
     pub fn new() -> Self {
@@ -1070,24 +1131,32 @@ impl McuEngine {
         let arc = self.room_arc(room)?;
         let snapshot = {
             let mut state = arc.lock().unwrap();
+            if state.video_render_in_flight {
+                state.stats.frames_dropped += 1;
+                return None;
+            }
+            state.video_render_in_flight = true;
             state.elapsed_ms += 33;
             state.process_audio();
             let rects = state.scaled_slot_rects();
             let labels = state.slot_labels();
-            let (width, height) = state.canvas;
             let frames = state.frames.clone();
-            (width, height, rects, frames, labels)
+            let target = state.take_back_buffer();
+            let epoch = state.render_epoch;
+            (rects, frames, labels, target, epoch)
         };
-        let (width, height, rects, frames, labels) = snapshot;
+        let (rects, frames, labels, mut target, epoch) = snapshot;
+        let mut guard = RenderInFlightGuard(&arc, true);
         let t0 = std::time::Instant::now();
-        let composite = Arc::new(Compositor.compose_sized_with_labels(width, height, &frames, &rects, &labels));
+        Compositor.compose_sized_with_labels_into(&mut target, &frames, &rects, &labels);
         let duration_us = t0.elapsed().as_micros() as u64;
-        {
+        guard.1 = false;
+        let composite = {
             let mut state = arc.lock().unwrap();
-            state.composite = composite.clone();
             state.stats.last_duration_us = duration_us;
             state.stats.frames_rendered += 1;
-        }
+            state.commit_composite(target, epoch)
+        };
         self.clock.advance(33);
         Some(composite)
     }
@@ -1242,29 +1311,37 @@ impl McuEngine {
                     return None;
                 }
             }
+            if state.video_render_in_flight {
+                state.stats.frames_dropped += 1;
+                return None;
+            }
+            state.video_render_in_flight = true;
             state.last_render_ms = Some(now_ms);
             let applied_at = *state.layout_applied_at_ms.get_or_insert(now_ms);
             state.elapsed_ms = now_ms.saturating_sub(applied_at);
             let rects = state.scaled_slot_rects();
             let labels = state.slot_labels();
-            let (width, height) = state.canvas;
             let frames = state.frames.clone();
-            (width, height, rects, frames, labels)
+            let target = state.take_back_buffer();
+            let epoch = state.render_epoch;
+            (rects, frames, labels, target, epoch)
         };
-        let (width, height, rects, frames, labels) = snapshot;
+        let (rects, frames, labels, mut target, epoch) = snapshot;
+        let mut guard = RenderInFlightGuard(&arc, true);
         let started = vks_common::metrics::mcu_tick_metrics_enabled().then(std::time::Instant::now);
         let t0 = std::time::Instant::now();
-        let composite = Arc::new(Compositor.compose_sized_with_labels(width, height, &frames, &rects, &labels));
+        Compositor.compose_sized_with_labels_into(&mut target, &frames, &rects, &labels);
         let duration_us = t0.elapsed().as_micros() as u64;
+        guard.1 = false;
         if let Some(started) = started {
             vks_common::metrics::observe_mcu_tick(vks_common::metrics::McuTickPhase::Video, started.elapsed());
         }
-        {
+        let composite = {
             let mut state = arc.lock().unwrap();
-            state.composite = composite.clone();
             state.stats.last_duration_us = duration_us;
             state.stats.frames_rendered += 1;
-        }
+            state.commit_composite(target, epoch)
+        };
         self.clock.advance(33);
         Some(composite)
     }
@@ -1397,15 +1474,10 @@ impl McuEngine {
             return;
         }
         state.canvas = (width, height);
-        let pixels = width as usize * height as usize;
-        let data = if width.is_multiple_of(2) && height.is_multiple_of(2) {
-            let mut data = vec![128u8; pixels * 3 / 2];
-            Compositor::fill_studio_black(&mut data, pixels);
-            data
-        } else {
-            vec![0u8; pixels]
-        };
-        state.composite = Arc::new(Frame::new(width, height, data));
+        state.render_epoch = state.render_epoch.wrapping_add(1);
+        state.stale_composites.clear();
+        state.composite = Arc::new(RoomState::alloc_black_frame(width, height));
+        state.scratch_frame = Some(RoomState::alloc_black_frame(width, height));
     }
 
     /// `O7`: ферма энкодеров (диагностика/метрики/тесты).
@@ -3781,5 +3853,76 @@ mod tests {
 
         e.tick(rid);
         assert_eq!(e.clock().now_ms(), 166);
+    }
+
+    #[tokio::test]
+    async fn double_buffering_ping_pong_reuses_underlying_buffers() {
+        let e = McuEngine::default();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+
+        // Tick 0: renders into back buffer and commits it
+        let f0 = e.tick_video_at(rid, 0).expect("frame 0");
+        let ptr0 = f0.data.as_ptr();
+
+        // Tick 1 (33ms): renders into second buffer and commits it
+        let f1 = e.tick_video_at(rid, 33).expect("frame 1");
+        let ptr1 = f1.data.as_ptr();
+
+        // Buffers must be distinct (front and back double buffer)
+        assert_ne!(ptr0, ptr1, "front and back buffers must have different memory addresses");
+
+        // Release our strong reference to f0 so it can be reclaimed into scratch_frame
+        drop(f0);
+
+        // Tick 2 (66ms): must reuse the reclaimed f0 buffer without reallocating
+        let f2 = e.tick_video_at(rid, 66).expect("frame 2");
+        let ptr2 = f2.data.as_ptr();
+
+        assert_eq!(ptr0, ptr2, "tick 2 must reuse the original back buffer without memory allocations");
+
+        // Release our strong reference to f1 so it can be reclaimed into scratch_frame
+        drop(f1);
+
+        // Tick 3 (99ms): must reuse the reclaimed f1 buffer (completing the full 0 -> 1 -> 0 -> 1 cycle)
+        let f3 = e.tick_video_at(rid, 99).expect("frame 3");
+        let ptr3 = f3.data.as_ptr();
+
+        assert_eq!(ptr1, ptr3, "tick 3 must reuse the second buffer (ptr1) completing the symmetric cycle");
+    }
+
+    #[tokio::test]
+    async fn stale_render_epoch_does_not_overwrite_admin_cleared_composite() {
+        let e = McuEngine::default();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+
+        let pid = p(1);
+        let _pub = e.bridge_participant(rid, pid, vec![Track::new(pid, TrackKind::Video)]);
+        e.set_participant_frame(rid, pid, Frame::filled(320, 180, 200));
+
+        // Take snapshot with current epoch
+        let arc = e.room_arc(rid).unwrap();
+        let (target, epoch) = {
+            let mut state = arc.lock().unwrap();
+            let target = state.take_back_buffer();
+            let epoch = state.render_epoch;
+            (target, epoch)
+        };
+
+        // Admin clears frame before render completes (bumps render_epoch)
+        e.clear_participant_frame(rid, pid);
+        let admin_composite = e.composite_frame(rid).unwrap();
+
+        // Render finishes with stale epoch
+        {
+            let mut state = arc.lock().unwrap();
+            let committed = state.commit_composite(target, epoch);
+            assert_eq!(
+                std::sync::Arc::as_ptr(&committed),
+                std::sync::Arc::as_ptr(&admin_composite),
+                "stale render must not overwrite admin composite"
+            );
+        }
     }
 }
