@@ -9,6 +9,7 @@
 //! в фазе 1 получит зависимость от `vks-core`.
 
 pub mod annexb;
+pub mod audio;
 pub mod clock;
 pub mod codec_capabilities;
 pub mod codec_spec;

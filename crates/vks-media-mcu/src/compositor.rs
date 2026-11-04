@@ -433,7 +433,7 @@ impl Compositor {
     /// output samples come from each group of four input samples (`0, 1, 2`;
     /// `3` is skipped). Both fast paths are byte-identical to the fallback; the
     /// tests pin this against the floor formula.
-    fn scale_row(destination: &mut [u8], source: &[u8], dw: usize, step_x: usize, rem_x: usize) {
+    pub fn scale_row(destination: &mut [u8], source: &[u8], dw: usize, step_x: usize, rem_x: usize) {
         debug_assert_eq!(destination.len(), dw);
         if step_x == 1 && rem_x == 0 {
             if let Some(source) = source.get(..dw) {
@@ -478,7 +478,7 @@ impl Compositor {
         let mut fx = 0usize;
         let mut rem = 0usize;
         for pixel in destination {
-            *pixel = source[fx];
+            *pixel = source.get(fx).copied().unwrap_or(16);
             fx += step_x;
             rem += rem_x;
             if rem >= dw {

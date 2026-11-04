@@ -1453,7 +1453,9 @@ fn resize_i420(frame: &vks_media_mcu::frame::Frame, profile: &VideoProfile) -> V
             };
             let source_start = source_offset + source_y * source_stride;
             match frame.data.get(source_start..source_start + source_stride) {
-                Some(source_row) => sample_row_nearest(output_row, source_row, step_x, rem_x),
+                Some(source_row) => {
+                    vks_media_mcu::Compositor::scale_row(output_row, source_row, plane_width, step_x, rem_x);
+                }
                 // Как и раньше: отсутствующие сэмплы — ограниченный чёрный 16.
                 None => output_row.fill(16),
             }
@@ -1466,44 +1468,6 @@ fn resize_i420(frame: &vks_media_mcu::frame::Frame, profile: &VideoProfile) -> V
         }
     }
     output
-}
-
-/// Nearest-neighbour выборка строки: `destination[x] = source[floor(x*src_len/dst_len)]`
-/// при `src_len = step*dst_len + rem`.
-///
-/// Exact-integer downscale (`rem == 0`) берёт каждый `step`-й сэмпл, identity
-/// (`step == 1`) — чистый `copy_from_slice`; общий случай — инкрементальный
-/// Bresenham без деления в теле цикла.
-fn sample_row_nearest(destination: &mut [u8], source: &[u8], step: usize, rem: usize) {
-    let width = destination.len();
-    if width == 0 {
-        return;
-    }
-    if step == 1 && rem == 0 {
-        if let Some(head) = source.get(..width) {
-            destination.copy_from_slice(head);
-        }
-        return;
-    }
-    if rem == 0 && step > 1 {
-        // `step_by`, а не `chunks_exact`: (width-1)*step+1 может быть нечётным,
-        // и `chunks_exact` потерял бы последний сэмпл (это ловит тест на 2:1).
-        for (pixel, sample) in destination.iter_mut().zip(source.iter().step_by(step)) {
-            *pixel = *sample;
-        }
-        return;
-    }
-    let mut index = 0usize;
-    let mut acc = 0usize;
-    for pixel in destination.iter_mut() {
-        *pixel = source.get(index).copied().unwrap_or(16);
-        index += step;
-        acc += rem;
-        if acc >= width {
-            acc -= width;
-            index += 1;
-        }
-    }
 }
 
 #[derive(Default)]

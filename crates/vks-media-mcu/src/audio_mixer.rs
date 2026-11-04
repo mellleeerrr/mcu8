@@ -40,29 +40,13 @@ pub const SAMPLE_RATE_HZ: u32 = 48_000;
 /// Standard 20 ms audio frame samples at 48 kHz.
 pub const FRAME_SAMPLES_20MS: usize = 960;
 
+use vks_common::audio::{sanitize_sample, soft_clip};
+
 /// Audio mixer.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AudioMixer;
 
 impl AudioMixer {
-    #[inline]
-    fn sanitize_sample(s: f32) -> f32 {
-        if s.is_finite() {
-            s
-        } else {
-            0.0
-        }
-    }
-
-    #[inline]
-    fn soft_clip(mixed: f32) -> f32 {
-        if mixed.abs() <= 1.0 {
-            mixed
-        } else {
-            mixed.tanh()
-        }
-    }
-
     /// In-place mix into a caller-provided slice. Zero heap allocation.
     pub fn mix_into(&self, inputs: &[&[f32]], out: &mut [f32]) {
         out.fill(0.0);
@@ -72,12 +56,12 @@ impl AudioMixer {
         }
         for buf in inputs {
             for (i, s) in buf.iter().take(out.len()).enumerate() {
-                out[i] += Self::sanitize_sample(*s);
+                out[i] += sanitize_sample(*s);
             }
         }
         let full_gain = 1.0f32 / (n_active as f32).sqrt();
         for sample in out.iter_mut() {
-            *sample = Self::soft_clip(*sample * full_gain);
+            *sample = soft_clip(*sample * full_gain);
         }
     }
 
@@ -100,7 +84,7 @@ impl AudioMixer {
         // 1. Single accumulation pass directly into full_out (unscaled sum S[i])
         for buf in inputs {
             for (i, s) in buf.iter().take(output_len).enumerate() {
-                full_out[i] += Self::sanitize_sample(*s);
+                full_out[i] += sanitize_sample(*s);
             }
         }
 
@@ -118,16 +102,16 @@ impl AudioMixer {
             let gain = 1.0f32 / (other_count as f32).sqrt();
             let len = output_len.min(out.len());
             for i in 0..len {
-                let own_sample = if i < own_buf.len() { Self::sanitize_sample(own_buf[i]) } else { 0.0 };
+                let own_sample = if i < own_buf.len() { sanitize_sample(own_buf[i]) } else { 0.0 };
                 let sample_minus = full_out[i] - own_sample;
-                out[i] = Self::soft_clip(sample_minus * gain);
+                out[i] = soft_clip(sample_minus * gain);
             }
         }
 
         // 3. Final in-place scaling & soft-clipping of global room mix
         let full_gain = if n_active == 0 { 0.0 } else { 1.0f32 / (n_active as f32).sqrt() };
         for sample in full_out.iter_mut() {
-            *sample = Self::soft_clip(*sample * full_gain);
+            *sample = soft_clip(*sample * full_gain);
         }
     }
 

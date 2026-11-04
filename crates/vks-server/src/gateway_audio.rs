@@ -2,15 +2,7 @@
 //! RTP boundary.
 
 use std::sync::atomic::Ordering::Relaxed;
-
-fn gain(sample: f32, volume: u32) -> f32 {
-    let scaled = sample * volume.min(1000) as f32 / 100.0;
-    if scaled.abs() > 1.0 {
-        scaled.tanh()
-    } else {
-        scaled
-    }
-}
+use vks_common::audio::gain;
 
 /// Selected RTP audio codec and its PCM domain.  G.711/G.723.1/G.726/G.728 are
 /// 8 kHz, G.722 is 16 kHz, Opus is 48 kHz; all use a 20 ms MCU tick, while the

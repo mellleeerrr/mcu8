@@ -10,6 +10,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 
+use vks_common::audio::gain;
 use vks_gateway_sip::aac_latm::{add_loas, frames_due, LatmRtpClock, AAC_FRAME_SAMPLES, AAC_RTP_CLOCK};
 use vks_media_mcu::codec_worker::latm::{LatmDecoder, LatmEncoder, PushOutcome, LATM_TICK_SAMPLES};
 
@@ -20,15 +21,6 @@ const AAC_PAYLOAD_TYPE: u8 = 113;
 /// to truncate.
 const MAX_AAC_PAYLOAD: usize = 1200;
 const PCM_QUEUE_LIMIT: usize = LATM_TICK_SAMPLES * 8;
-
-fn gain(sample: f32, volume: u32) -> f32 {
-    let scaled = sample * volume.min(1000) as f32 / 100.0;
-    if scaled.abs() > 1.0 {
-        scaled.tanh()
-    } else {
-        scaled
-    }
-}
 
 fn ffmpeg_path() -> std::path::PathBuf {
     std::env::var_os("VKS_FFMPEG_BIN").map_or_else(|| std::path::PathBuf::from("ffmpeg"), std::path::PathBuf::from)
