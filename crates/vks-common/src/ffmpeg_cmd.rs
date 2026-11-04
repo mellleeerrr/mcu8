@@ -267,6 +267,11 @@ impl FfmpegCmdBuilder {
         self.command
     }
 
+    /// Spawns the configured command as a child process.
+    pub fn spawn(mut self) -> Result<tokio::process::Child, std::io::Error> {
+        self.command.spawn()
+    }
+
     /// Returns a list of argument strings currently configured on the command.
     #[must_use]
     pub fn args_vec(&self) -> Vec<String> {

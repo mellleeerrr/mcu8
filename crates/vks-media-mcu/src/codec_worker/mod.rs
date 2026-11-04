@@ -14,7 +14,6 @@
 //! silently degrading.
 
 pub mod ffmpeg;
-pub mod latm;
 
 pub use ffmpeg::{FfmpegCapabilities, FfmpegWorker, WorkerConfig, WorkerError, WorkerMode, WorkerPool, WorkerStats};
 
@@ -55,15 +54,6 @@ impl AudioCodec {
     pub const fn ffmpeg_name(self) -> &'static str {
         match self {
             Self::AacLatm => "loas",
-            Self::G729 => "g729",
-        }
-    }
-
-    /// FFmpeg output container for the encoder direction.
-    #[must_use]
-    pub const fn ffmpeg_container(self) -> &'static str {
-        match self {
-            Self::AacLatm => "latm",
             Self::G729 => "g729",
         }
     }

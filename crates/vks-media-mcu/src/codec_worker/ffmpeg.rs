@@ -40,8 +40,6 @@ impl Default for WorkerConfig {
 pub enum WorkerMode {
     /// Decode raw audio payload bytes (one or more frames concatenated).
     AudioDecode(AudioCodec),
-    /// Encode 48 kHz mono `s16le` PCM to the container used on the RTP side.
-    AudioEncode(AudioCodec),
     /// Decode raw video bitstream bytes to `yuv420p`.
     VideoDecode(VideoCodec),
     /// Encode `yuv420p` to the raw codec bitstream.
@@ -185,7 +183,6 @@ impl FfmpegCapabilities {
     pub fn supports(&self, mode: WorkerMode) -> bool {
         match mode {
             WorkerMode::AudioDecode(codec) => self.has_audio_decoder(codec),
-            WorkerMode::AudioEncode(codec) => self.has_audio_encoder(codec),
             WorkerMode::VideoDecode(codec) => self.has_video_decoder(codec),
             WorkerMode::VideoEncode(codec) => self.has_video_encoder(codec),
         }
@@ -365,10 +362,7 @@ impl FfmpegWorker {
         match mode {
             WorkerMode::VideoEncode(codec) => slot.validate_for(codec)?,
             WorkerMode::VideoDecode(codec) => slot.validate_decode(codec)?,
-            WorkerMode::AudioEncode(_) | WorkerMode::AudioDecode(_) => slot.validate_audio()?,
-        }
-        if matches!(mode, WorkerMode::AudioEncode(AudioCodec::G729)) {
-            return Err(WorkerError::Unavailable("FFmpeg has no G.729 encoder".into()));
+            WorkerMode::AudioDecode(_) => slot.validate_audio()?,
         }
         if let Some(capabilities) = capabilities {
             if !capabilities.supports(mode) {
@@ -428,13 +422,6 @@ impl FfmpegWorker {
         self.poisoned
     }
 
-    fn require_audio_encode(&self) -> Result<(), WorkerError> {
-        match self.mode {
-            WorkerMode::AudioEncode(_) => Ok(()),
-            other => Err(WorkerError::InvalidConfig(format!("write_audio requires AudioEncode, got {other:?}"))),
-        }
-    }
-
     fn require_audio_decode(&self) -> Result<(), WorkerError> {
         match self.mode {
             WorkerMode::AudioDecode(_) => Ok(()),
@@ -461,25 +448,6 @@ impl FfmpegWorker {
             WorkerMode::AudioDecode(_) | WorkerMode::VideoDecode(_) => Ok(()),
             other => Err(WorkerError::InvalidConfig(format!("write_encoded requires a decoder, got {other:?}"))),
         }
-    }
-
-    /// Writes one 20 ms mono PCM frame.
-    pub async fn write_audio(&mut self, pcm: &[i16]) -> Result<(), WorkerError> {
-        self.require_audio_encode()?;
-        if pcm.len() != super::AUDIO_FRAME_SAMPLES {
-            return Err(WorkerError::InvalidConfig(format!(
-                "audio frame must be {} samples, got {}",
-                super::AUDIO_FRAME_SAMPLES,
-                pcm.len()
-            )));
-        }
-        let mut bytes = Vec::with_capacity(pcm.len() * 2);
-        for sample in pcm {
-            bytes.extend_from_slice(&sample.to_le_bytes());
-        }
-        self.write_all(&bytes).await?;
-        self.stats.frames_in.fetch_add(1, Ordering::Relaxed);
-        Ok(())
     }
 
     /// Reads exactly `samples` mono `s16le` PCM samples.
@@ -563,39 +531,6 @@ impl FfmpegWorker {
                     return Err(self.poison(WorkerError::Timeout(self.config.io_timeout)));
                 }
             }
-        }
-    }
-
-    /// Reads exactly one encoded audio frame from an encoder worker.
-    ///
-    /// ADTS and LOAS/LATM are self-delimiting; this keeps RTP packetization
-    /// aligned with codec frames instead of guessing byte counts.
-    pub async fn read_encoded_audio(&mut self) -> Result<Vec<u8>, WorkerError> {
-        let mode = match self.mode {
-            WorkerMode::AudioEncode(codec) => codec,
-            _ => return Err(WorkerError::InvalidConfig("read_encoded_audio on non-encoder worker".into())),
-        };
-        match mode {
-            AudioCodec::AacLatm => {
-                // LOAS: 3-byte header, 13-bit payload length, sync 0x56e.
-                let mut header = [0u8; 3];
-                self.read_exact_into(&mut header).await?;
-                if header[0] != 0x56 || (header[1] & 0xe0) != 0xe0 {
-                    return Err(
-                        self.poison(WorkerError::Codec(format!("bad LOAS sync {:02x}{:02x}", header[0], header[1])))
-                    );
-                }
-                let length = (usize::from(header[1] & 0x1f) << 8) | usize::from(header[2]);
-                if length == 0 || length > 8192 {
-                    return Err(self.poison(WorkerError::Codec(format!("invalid LOAS length {length}"))));
-                }
-                let mut frame = vec![0u8; 3 + length];
-                frame[..3].copy_from_slice(&header);
-                self.read_exact_into(&mut frame[3..]).await?;
-                self.stats.frames_out.fetch_add(1, Ordering::Relaxed);
-                Ok(frame)
-            }
-            AudioCodec::G729 => Err(WorkerError::Unavailable("FFmpeg has no G.729 encoder".into())),
         }
     }
 
@@ -932,15 +867,6 @@ async fn spawn_child(
                 .input_pipe(codec.ffmpeg_name())
                 .raw_audio_output(48000, 1);
         }
-        WorkerMode::AudioEncode(codec) => {
-            let encoder = codec.ffmpeg_encoder().unwrap_or("aac");
-            // Native AAC only; G.729 encode is rejected before spawn.
-            builder = builder
-                .raw_audio_input(48000, 1)
-                .audio_codec(encoder)
-                .audio_bitrate_bps(slot.audio_bitrate_bps)
-                .output_pipe(codec.ffmpeg_container());
-        }
         WorkerMode::VideoDecode(codec) => {
             builder = builder
                 .input_pipe(codec.ffmpeg_name())
@@ -1123,18 +1049,6 @@ mod tests {
         std::process::Command::new(ffmpeg_bin()).arg("-version").output().is_ok_and(|out| out.status.success())
     }
 
-    fn pcm_sine(frames: usize) -> Vec<i16> {
-        let mut pcm = Vec::with_capacity(frames * super::super::AUDIO_FRAME_SAMPLES);
-        for frame in 0..frames {
-            for sample in 0..super::super::AUDIO_FRAME_SAMPLES {
-                let t = (frame * super::super::AUDIO_FRAME_SAMPLES + sample) as f32 / 48_000.0;
-                let value = (t * 440.0 * std::f32::consts::TAU).sin() * 12_000.0;
-                pcm.push(value as i16);
-            }
-        }
-        pcm
-    }
-
     fn yuv_gradient(width: u16, height: u16, frame: u8) -> Vec<u8> {
         let pixels = usize::from(width) * usize::from(height);
         let mut data = Vec::with_capacity(pixels * 3 / 2);
@@ -1159,56 +1073,6 @@ mod tests {
         assert!(!caps.has_audio_encoder(AudioCodec::G729));
         assert!(caps.has_video_decoder(VideoCodec::H261));
         assert!(caps.has_video_encoder(VideoCodec::H263));
-    }
-
-    #[tokio::test]
-    async fn aac_latm_encoded_frames_are_self_delimiting() {
-        if !ffmpeg_available() {
-            return;
-        }
-        let slot = SlotConfig::default_720p();
-        let config = WorkerConfig::default();
-        let pcm = pcm_sine(40);
-        let mut encoder =
-            FfmpegWorker::spawn(WorkerMode::AudioEncode(AudioCodec::AacLatm), slot, config.clone()).await.expect("encoder");
-        for frame in pcm.chunks_exact(super::super::AUDIO_FRAME_SAMPLES).take(20) {
-            encoder.write_audio(frame).await.expect("pcm");
-        }
-        for _ in 0..5 {
-            let frame = encoder.read_encoded_audio().await.expect("encoded frame");
-            assert_eq!(&frame[..2], &[0x56, 0xe0]);
-            assert!(frame.len() > 7, "AacLatm frame too short");
-        }
-        encoder.finish_input().await;
-        encoder.wait().await.ok();
-    }
-
-    #[tokio::test]
-    async fn latm_audio_roundtrip_produces_pcm() {
-        if !ffmpeg_available() {
-            return;
-        }
-        let slot = SlotConfig::default_720p();
-        let config = WorkerConfig::default();
-        let pcm = pcm_sine(30);
-        let mut encoder = FfmpegWorker::spawn(WorkerMode::AudioEncode(AudioCodec::AacLatm), slot, config.clone())
-            .await
-            .expect("encoder");
-        for frame in pcm.chunks_exact(super::super::AUDIO_FRAME_SAMPLES).take(20) {
-            encoder.write_audio(frame).await.expect("pcm");
-        }
-        let first = encoder.read_encoded_audio().await.expect("latm frame");
-        let second = encoder.read_encoded_audio().await.expect("latm frame");
-        encoder.finish_input().await;
-        encoder.wait().await.ok();
-
-        let mut decoder =
-            FfmpegWorker::spawn(WorkerMode::AudioDecode(AudioCodec::AacLatm), slot, config).await.expect("decoder");
-        decoder.write_encoded(&first).await.expect("latm");
-        decoder.write_encoded(&second).await.expect("latm");
-        decoder.finish_input().await;
-        let decoded = decoder.read_to_end(1 << 24).await.expect("pcm");
-        assert!(decoded.len() >= 1024 * 2, "LATM decoded {} bytes", decoded.len());
     }
 
     #[tokio::test]
@@ -1386,7 +1250,6 @@ mod tests {
                 .expect("video encoder");
         assert!(matches!(video_encoder.read_video().await, Err(WorkerError::InvalidConfig(_))));
         assert!(matches!(video_encoder.write_encoded(&[0]).await, Err(WorkerError::InvalidConfig(_))));
-        assert!(matches!(video_encoder.write_audio(&[0i16; 960]).await, Err(WorkerError::InvalidConfig(_))));
         assert!(matches!(video_encoder.read_audio_samples(960).await, Err(WorkerError::InvalidConfig(_))));
 
         let mut video_decoder =
@@ -1394,15 +1257,7 @@ mod tests {
                 .await
                 .expect("video decoder");
         assert!(matches!(video_decoder.write_video(&[0]).await, Err(WorkerError::InvalidConfig(_))));
-        assert!(matches!(video_decoder.read_encoded_audio().await, Err(WorkerError::InvalidConfig(_))));
-
-        let mut audio_encoder =
-            FfmpegWorker::spawn(WorkerMode::AudioEncode(AudioCodec::AacLatm), audio, WorkerConfig::default())
-                .await
-                .expect("audio encoder");
-        assert!(matches!(audio_encoder.read_video().await, Err(WorkerError::InvalidConfig(_))));
-        assert!(matches!(audio_encoder.read_encoded_video().await, Err(WorkerError::InvalidConfig(_))));
-        assert!(matches!(audio_encoder.write_video(&[0]).await, Err(WorkerError::InvalidConfig(_))));
+        assert!(matches!(video_decoder.read_audio_samples(960).await, Err(WorkerError::InvalidConfig(_))));
 
         let mut audio_decoder =
             FfmpegWorker::spawn(WorkerMode::AudioDecode(AudioCodec::AacLatm), audio, WorkerConfig::default())
@@ -1410,7 +1265,7 @@ mod tests {
                 .expect("audio decoder");
         assert!(matches!(audio_decoder.write_video(&[0]).await, Err(WorkerError::InvalidConfig(_))));
         assert!(matches!(audio_decoder.read_video().await, Err(WorkerError::InvalidConfig(_))));
-        assert!(matches!(audio_decoder.write_audio(&[0i16; 960]).await, Err(WorkerError::InvalidConfig(_))));
+        assert!(matches!(audio_decoder.read_encoded_video().await, Err(WorkerError::InvalidConfig(_))));
     }
 
     #[test]
