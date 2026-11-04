@@ -11,6 +11,129 @@ use tokio::process::Command;
 
 use crate::process::{safe_command, safe_ffmpeg_command};
 
+/// Video codec identifier for FFmpeg encoding commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoEncoderCodec {
+    H264,
+    H265,
+}
+
+impl From<bool> for VideoEncoderCodec {
+    fn from(is_h265: bool) -> Self {
+        if is_h265 {
+            Self::H265
+        } else {
+            Self::H264
+        }
+    }
+}
+
+/// Hardware acceleration backend for FFmpeg video pipelines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HwAccel {
+    /// Automatic detection based on host environment/devices.
+    #[default]
+    Auto,
+    /// NVIDIA NVENC hardware acceleration (`h264_nvenc`, `hevc_nvenc`).
+    Nvenc,
+    /// Intel/AMD Video Acceleration API (`h264_vaapi`, `hevc_vaapi`).
+    Vaapi,
+    /// Intel Quick Sync Video (`h264_qsv`, `hevc_qsv`).
+    QuickSync,
+    /// Pure software encoding (`libx264`, `libx265`).
+    Software,
+}
+
+impl HwAccel {
+    /// Alias for [`HwAccel::Software`] (no hardware acceleration) in idiomatic constant case.
+    pub const NONE: Self = Self::Software;
+
+    /// Alias for [`HwAccel::Software`] (no hardware acceleration).
+    #[allow(non_upper_case_globals)]
+    pub const None: Self = Self::Software;
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Nvenc => "nvenc",
+            Self::Vaapi => "vaapi",
+            Self::QuickSync => "qsv",
+            Self::Software => "software",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_hardware(self) -> bool {
+        matches!(self, Self::Nvenc | Self::Vaapi | Self::QuickSync)
+    }
+
+    /// Case-insensitive string parser with alias support.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("auto") {
+            Some(Self::Auto)
+        } else if s.eq_ignore_ascii_case("nvenc") || s.eq_ignore_ascii_case("cuda") || s.eq_ignore_ascii_case("nvidia")
+        {
+            Some(Self::Nvenc)
+        } else if s.eq_ignore_ascii_case("vaapi") || s.eq_ignore_ascii_case("va") {
+            Some(Self::Vaapi)
+        } else if s.eq_ignore_ascii_case("qsv") || s.eq_ignore_ascii_case("quicksync") {
+            Some(Self::QuickSync)
+        } else if s.eq_ignore_ascii_case("software")
+            || s.eq_ignore_ascii_case("sw")
+            || s.eq_ignore_ascii_case("none")
+            || s.eq_ignore_ascii_case("off")
+            || s.eq_ignore_ascii_case("0")
+        {
+            Some(Self::Software)
+        } else {
+            None
+        }
+    }
+
+    /// Reads `VKS_HWACCEL` env variable with fallback to `Auto`.
+    #[must_use]
+    pub fn from_env() -> Self {
+        std::env::var("VKS_HWACCEL").ok().and_then(|v| Self::parse(&v)).unwrap_or(Self::Auto)
+    }
+
+    /// Resolves `Auto` into a concrete backend by checking host device nodes (<1 µs, single stat).
+    #[must_use]
+    pub fn resolve(self) -> Self {
+        match self {
+            Self::Auto => {
+                if Path::new("/dev/nvidia0").exists() || Path::new("/dev/nvidiactl").exists() {
+                    Self::Nvenc
+                } else if Path::new("/dev/dri/renderD128").exists() {
+                    Self::Vaapi
+                } else {
+                    Self::Software
+                }
+            }
+            explicit => explicit,
+        }
+    }
+
+    /// Returns the FFmpeg video encoder name for the given codec.
+    #[must_use]
+    pub const fn encoder_name(self, codec: VideoEncoderCodec) -> &'static str {
+        match (self, codec) {
+            (Self::Nvenc, VideoEncoderCodec::H264) => "h264_nvenc",
+            (Self::Nvenc, VideoEncoderCodec::H265) => "hevc_nvenc",
+            (Self::Vaapi, VideoEncoderCodec::H264) => "h264_vaapi",
+            (Self::Vaapi, VideoEncoderCodec::H265) => "hevc_vaapi",
+            (Self::QuickSync, VideoEncoderCodec::H264) => "h264_qsv",
+            (Self::QuickSync, VideoEncoderCodec::H265) => "hevc_qsv",
+            (Self::Software | Self::Auto, VideoEncoderCodec::H264) => "libx264",
+            (Self::Software | Self::Auto, VideoEncoderCodec::H265) => "libx265",
+        }
+    }
+}
+
 /// Builder for constructing hardened, real-time FFmpeg commands.
 #[derive(Debug)]
 pub struct FfmpegCmdBuilder {
@@ -104,6 +227,106 @@ impl FfmpegCmdBuilder {
         self
     }
 
+    /// Selects video encoder based on hardware acceleration backend and codec.
+    #[must_use]
+    pub fn video_encoder(self, hw: HwAccel, codec: VideoEncoderCodec) -> Self {
+        self.video_codec(hw.encoder_name(codec))
+    }
+
+    /// Configures realtime presets and low-latency flags tailored to the selected backend.
+    #[must_use]
+    pub fn realtime_video_encoder_preset(mut self, hw: HwAccel, _codec: VideoEncoderCodec) -> Self {
+        match hw {
+            HwAccel::Software | HwAccel::Auto => {
+                self.command.args(["-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p"]);
+            }
+            HwAccel::Nvenc => {
+                self.command.args([
+                    "-preset",
+                    "p1",
+                    "-tune",
+                    "ull",
+                    "-zerolatency",
+                    "1",
+                    "-forced-idr",
+                    "1",
+                    "-aud",
+                    "1",
+                    "-pix_fmt",
+                    "yuv420p",
+                ]);
+            }
+            HwAccel::Vaapi => {
+                self.command.args(["-low_power", "1", "-aud", "1"]);
+            }
+            HwAccel::QuickSync => {
+                self.command.args(["-preset", "veryfast", "-forced_idr", "1", "-low_delay_brc", "1", "-aud", "1"]);
+            }
+        }
+        self
+    }
+
+    /// Sets H.264 profile and level, adapting `baseline` to `constrained_baseline` for VAAPI.
+    #[must_use]
+    pub fn video_encoder_profile(mut self, hw: HwAccel, codec: VideoEncoderCodec, profile: &str, level: &str) -> Self {
+        if codec == VideoEncoderCodec::H264 && !profile.is_empty() {
+            let actual_profile = if hw == HwAccel::Vaapi && profile.eq_ignore_ascii_case("baseline") {
+                "constrained_baseline"
+            } else {
+                profile
+            };
+            self.command.args(["-profile:v", actual_profile]);
+            if !level.is_empty() {
+                self.command.args(["-level:v", level]);
+            }
+        }
+        self
+    }
+
+    /// Appends software encoder params (`-x264-params` / `-x265-params`), safely skipping
+    /// them for hardware backends to prevent command line parsing failures.
+    #[must_use]
+    pub fn video_encoder_params(mut self, hw: HwAccel, codec: VideoEncoderCodec, params: &str) -> Self {
+        if matches!(hw, HwAccel::Software | HwAccel::Auto) && !params.is_empty() {
+            let flag = match codec {
+                VideoEncoderCodec::H264 => "-x264-params",
+                VideoEncoderCodec::H265 => "-x265-params",
+            };
+            self.command.args([flag, params]);
+        }
+        self
+    }
+
+    /// Specifies VA-API render device (e.g. `/dev/dri/renderD128`).
+    #[must_use]
+    pub fn vaapi_device(mut self, device: &str) -> Self {
+        if !device.is_empty() {
+            self.command.args(["-vaapi_device", device]);
+        }
+        self
+    }
+
+    /// High-level convenience method: configures the full real-time encoder pipeline.
+    #[must_use]
+    pub fn realtime_video_encoder(
+        mut self,
+        hw: HwAccel,
+        codec: VideoEncoderCodec,
+        profile_level: Option<(&str, &str)>,
+        encoder_params: Option<&str>,
+    ) -> Self {
+        let hw = hw.resolve();
+        self = self.video_encoder(hw, codec);
+        self = self.realtime_video_encoder_preset(hw, codec);
+        if let Some((profile, level)) = profile_level {
+            self = self.video_encoder_profile(hw, codec, profile, level);
+        }
+        if let Some(params) = encoder_params {
+            self = self.video_encoder_params(hw, codec, params);
+        }
+        self
+    }
+
     /// Configures video bitrate in kbps (`-b:v {bitrate}k -maxrate {maxrate}k -bufsize {bufsize}k`).
     #[must_use]
     pub fn video_bitrate_kbps(mut self, bitrate_kbps: u32, maxrate_kbps: u32, bufsize_kbps: u32) -> Self {
@@ -160,16 +383,7 @@ impl FfmpegCmdBuilder {
     pub fn raw_audio_input(mut self, sample_rate: u32, channels: u8) -> Self {
         let rate_str = sample_rate.to_string();
         let chan_str = channels.to_string();
-        self.command.args([
-            "-f",
-            "s16le",
-            "-ar",
-            &rate_str,
-            "-ac",
-            &chan_str,
-            "-i",
-            "pipe:0",
-        ]);
+        self.command.args(["-f", "s16le", "-ar", &rate_str, "-ac", &chan_str, "-i", "pipe:0"]);
         self
     }
 
@@ -244,20 +458,14 @@ impl FfmpegCmdBuilder {
     /// Configures piped stdin/stdout and null stderr.
     #[must_use]
     pub fn piped_io(mut self) -> Self {
-        self.command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+        self.command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         self
     }
 
     /// Configures piped stdin/stdout/stderr for error logging.
     #[must_use]
     pub fn piped_all_io(mut self) -> Self {
-        self.command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        self.command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         self
     }
 
@@ -275,25 +483,12 @@ impl FfmpegCmdBuilder {
     /// Returns a list of argument strings currently configured on the command.
     #[must_use]
     pub fn args_vec(&self) -> Vec<String> {
-        self.command
-            .as_std()
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect()
+        self.command.as_std().get_args().map(|s| s.to_string_lossy().to_string()).collect()
     }
 }
 
 fn init_base_args(command: &mut Command) {
-    command.args([
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-threads",
-        "2",
-        "-filter_threads",
-        "2",
-    ]);
+    command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "2", "-filter_threads", "2"]);
 }
 
 #[cfg(test)]
@@ -371,5 +566,180 @@ mod tests {
         let args = builder.args_vec();
         assert!(args.contains(&"-flush_packets".to_string()));
         assert!(args.contains(&"pcm_s16le".to_string()));
+    }
+
+    #[test]
+    fn hwaccel_parsing_and_aliases() {
+        assert_eq!(HwAccel::parse("auto"), Some(HwAccel::Auto));
+        assert_eq!(HwAccel::parse("NVENC"), Some(HwAccel::Nvenc));
+        assert_eq!(HwAccel::parse("cuda"), Some(HwAccel::Nvenc));
+        assert_eq!(HwAccel::parse("nvidia"), Some(HwAccel::Nvenc));
+        assert_eq!(HwAccel::parse("vaapi"), Some(HwAccel::Vaapi));
+        assert_eq!(HwAccel::parse("va"), Some(HwAccel::Vaapi));
+        assert_eq!(HwAccel::parse("qsv"), Some(HwAccel::QuickSync));
+        assert_eq!(HwAccel::parse("QuickSync"), Some(HwAccel::QuickSync));
+        assert_eq!(HwAccel::parse("software"), Some(HwAccel::Software));
+        assert_eq!(HwAccel::parse("none"), Some(HwAccel::Software));
+        assert_eq!(HwAccel::parse("0"), Some(HwAccel::Software));
+        assert_eq!(HwAccel::parse("unknown"), None);
+        assert_eq!(HwAccel::None, HwAccel::Software);
+        assert!(HwAccel::Nvenc.is_hardware());
+        assert!(HwAccel::Vaapi.is_hardware());
+        assert!(HwAccel::QuickSync.is_hardware());
+        assert!(!HwAccel::Software.is_hardware());
+
+        // Resolution idempotency for explicit variants
+        assert_eq!(HwAccel::Nvenc.resolve(), HwAccel::Nvenc);
+        assert_eq!(HwAccel::Vaapi.resolve(), HwAccel::Vaapi);
+        assert_eq!(HwAccel::QuickSync.resolve(), HwAccel::QuickSync);
+        assert_eq!(HwAccel::Software.resolve(), HwAccel::Software);
+
+        // Codec conversion
+        assert_eq!(VideoEncoderCodec::from(true), VideoEncoderCodec::H265);
+        assert_eq!(VideoEncoderCodec::from(false), VideoEncoderCodec::H264);
+
+        // Env parsing fallback
+        assert_eq!(HwAccel::from_env(), HwAccel::Auto);
+    }
+
+    #[test]
+    fn vaapi_device_configuration() {
+        let builder = FfmpegCmdBuilder::new().vaapi_device("/dev/dri/renderD128");
+        let args = builder.args_vec();
+        assert!(args.windows(2).any(|w| w[0] == "-vaapi_device" && w[1] == "/dev/dri/renderD128"));
+
+        // Empty device string is ignored
+        let empty_builder = FfmpegCmdBuilder::new().vaapi_device("");
+        assert!(!empty_builder.args_vec().contains(&"-vaapi_device".to_string()));
+    }
+
+    #[test]
+    fn builder_software_h264_args() {
+        let builder = FfmpegCmdBuilder::new().realtime_video_encoder(
+            HwAccel::Software,
+            VideoEncoderCodec::H264,
+            Some(("baseline", "3.1")),
+            Some("repeat-headers=1:aud=1"),
+        );
+        let args = builder.args_vec();
+
+        assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "libx264"));
+        assert!(args.windows(2).any(|w| w[0] == "-preset" && w[1] == "ultrafast"));
+        assert!(args.windows(2).any(|w| w[0] == "-tune" && w[1] == "zerolatency"));
+        assert!(args.windows(2).any(|w| w[0] == "-profile:v" && w[1] == "baseline"));
+        assert!(args.windows(2).any(|w| w[0] == "-level:v" && w[1] == "3.1"));
+        assert!(args.windows(2).any(|w| w[0] == "-x264-params" && w[1] == "repeat-headers=1:aud=1"));
+        assert!(!args.contains(&"-zerolatency".to_string()));
+        assert!(!args.contains(&"-low_power".to_string()));
+    }
+
+    #[test]
+    fn builder_software_h265_args() {
+        let builder = FfmpegCmdBuilder::new().realtime_video_encoder(
+            HwAccel::Software,
+            VideoEncoderCodec::H265,
+            None,
+            Some("pools=1:aud=1"),
+        );
+        let args = builder.args_vec();
+
+        assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "libx265"));
+        assert!(args.windows(2).any(|w| w[0] == "-preset" && w[1] == "ultrafast"));
+        assert!(args.windows(2).any(|w| w[0] == "-x265-params" && w[1] == "pools=1:aud=1"));
+        assert!(!args.contains(&"-x264-params".to_string()));
+    }
+
+    #[test]
+    fn builder_nvenc_flags_purge_incompatible_options() {
+        let builder = FfmpegCmdBuilder::new().realtime_video_encoder(
+            HwAccel::Nvenc,
+            VideoEncoderCodec::H264,
+            Some(("baseline", "3.1")),
+            Some("repeat-headers=1"),
+        );
+        let args = builder.args_vec();
+
+        assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "h264_nvenc"));
+        assert!(args.windows(2).any(|w| w[0] == "-preset" && w[1] == "p1"));
+        assert!(args.windows(2).any(|w| w[0] == "-tune" && w[1] == "ull"));
+        assert!(args.windows(2).any(|w| w[0] == "-zerolatency" && w[1] == "1"));
+        assert!(args.windows(2).any(|w| w[0] == "-forced-idr" && w[1] == "1"));
+        assert!(args.windows(2).any(|w| w[0] == "-aud" && w[1] == "1"));
+        assert!(args.windows(2).any(|w| w[0] == "-profile:v" && w[1] == "baseline"));
+
+        assert!(!args.contains(&"ultrafast".to_string()));
+        assert!(!args.contains(&"zerolatency".to_string()));
+        assert!(!args.contains(&"-x264-params".to_string()));
+        assert!(!args.contains(&"-x265-params".to_string()));
+    }
+
+    #[test]
+    fn builder_nvenc_hevc_flags() {
+        let builder = FfmpegCmdBuilder::new().realtime_video_encoder(
+            HwAccel::Nvenc,
+            VideoEncoderCodec::H265,
+            None,
+            Some("ignored"),
+        );
+        let args = builder.args_vec();
+
+        assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "hevc_nvenc"));
+        assert!(args.windows(2).any(|w| w[0] == "-preset" && w[1] == "p1"));
+        assert!(args.windows(2).any(|w| w[0] == "-tune" && w[1] == "ull"));
+        assert!(!args.contains(&"-x265-params".to_string()));
+    }
+
+    #[test]
+    fn builder_vaapi_adapts_baseline_and_omits_presets() {
+        let builder = FfmpegCmdBuilder::new().realtime_video_encoder(
+            HwAccel::Vaapi,
+            VideoEncoderCodec::H264,
+            Some(("baseline", "3.1")),
+            Some("repeat-headers=1"),
+        );
+        let args = builder.args_vec();
+
+        assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "h264_vaapi"));
+        assert!(args.windows(2).any(|w| w[0] == "-low_power" && w[1] == "1"));
+        assert!(args.windows(2).any(|w| w[0] == "-aud" && w[1] == "1"));
+        assert!(args.windows(2).any(|w| w[0] == "-profile:v" && w[1] == "constrained_baseline"));
+
+        assert!(!args.contains(&"-preset".to_string()));
+        assert!(!args.contains(&"-tune".to_string()));
+        assert!(!args.contains(&"-x264-params".to_string()));
+    }
+
+    #[test]
+    fn builder_vaapi_hevc_flags() {
+        let builder =
+            FfmpegCmdBuilder::new().realtime_video_encoder(HwAccel::Vaapi, VideoEncoderCodec::H265, None, None);
+        let args = builder.args_vec();
+
+        assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "hevc_vaapi"));
+        assert!(args.windows(2).any(|w| w[0] == "-low_power" && w[1] == "1"));
+        assert!(args.windows(2).any(|w| w[0] == "-aud" && w[1] == "1"));
+        assert!(!args.contains(&"-preset".to_string()));
+    }
+
+    #[test]
+    fn builder_quicksync_uses_veryfast_and_low_delay() {
+        let builder = FfmpegCmdBuilder::new().realtime_video_encoder(
+            HwAccel::QuickSync,
+            VideoEncoderCodec::H264,
+            Some(("baseline", "3.1")),
+            Some("ignored"),
+        );
+        let args = builder.args_vec();
+
+        assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "h264_qsv"));
+        assert!(args.windows(2).any(|w| w[0] == "-preset" && w[1] == "veryfast"));
+        assert!(args.windows(2).any(|w| w[0] == "-forced_idr" && w[1] == "1"));
+        assert!(args.windows(2).any(|w| w[0] == "-low_delay_brc" && w[1] == "1"));
+        assert!(args.windows(2).any(|w| w[0] == "-aud" && w[1] == "1"));
+        assert!(args.windows(2).any(|w| w[0] == "-profile:v" && w[1] == "baseline"));
+
+        assert!(!args.contains(&"ultrafast".to_string()));
+        assert!(!args.contains(&"-tune".to_string()));
+        assert!(!args.contains(&"-x264-params".to_string()));
     }
 }

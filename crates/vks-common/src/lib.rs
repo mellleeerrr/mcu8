@@ -15,13 +15,13 @@ pub mod codec_capabilities;
 pub mod codec_spec;
 pub mod config;
 pub mod error;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ffmpeg_cmd;
 pub mod ids;
 pub mod layout_defaults;
 pub mod metrics;
 #[cfg(unix)]
 pub mod net_tuning;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod ffmpeg_cmd;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod process;
 pub mod ratelimit;
@@ -33,7 +33,7 @@ pub mod uri;
 pub use config::Config;
 pub use error::{is_terminal_failure, strip_terminal_failure, terminal_failure, Error, ErrorCode, HttpStatus};
 #[cfg(not(target_arch = "wasm32"))]
-pub use ffmpeg_cmd::FfmpegCmdBuilder;
+pub use ffmpeg_cmd::{FfmpegCmdBuilder, HwAccel, VideoEncoderCodec};
 pub use ratelimit::{RateLimiter, ADMIN_PER_MIN, WS_FRAME_MAX_BYTES};
 pub use text::{sanitize_label, sanitize_label_or, LABEL_MAX_CHARS};
 pub use uri::canonical_uri;
