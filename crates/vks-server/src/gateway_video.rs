@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
-use vks_gateway_sip::h265::{nal_type, packetize_h265, strip_start_code, H265Depacketizer};
+use vks_common::annexb::strip_start_code;
+use vks_gateway_sip::h265::{packetize_h265, H265Depacketizer};
 
 /// Профиль кодирования шлюзового видео. Заменяет прежние жёсткие
 /// `640x360/15fps/256k/baseline/3.0`: оператор задаёт размер/битрейт/fps
@@ -385,10 +386,9 @@ fn drain_errors(child: &mut Child, kind: &'static str) -> tokio::task::JoinHandl
 }
 
 fn is_access_unit_delimiter(codec: GatewayVideoCodec, nal: &[u8]) -> bool {
-    let raw = strip_start_code(nal);
     match codec {
-        GatewayVideoCodec::H264 => raw.first().is_some_and(|header| header & 31 == 9),
-        GatewayVideoCodec::H265 => nal_type(raw) == Some(35),
+        GatewayVideoCodec::H264 => vks_common::annexb::is_aud_h264(nal),
+        GatewayVideoCodec::H265 => vks_common::annexb::is_aud_h265(nal),
     }
 }
 
@@ -417,7 +417,7 @@ fn packetize_access_unit(
             }
         }
         GatewayVideoCodec::H265 => {
-            let nals: Vec<&[u8]> = units.iter().map(|unit| strip_start_code(unit)).filter(|u| !u.is_empty()).collect();
+            let nals: Vec<&[u8]> = units.iter().map(|unit| vks_common::annexb::strip_start_code(unit)).filter(|u| !u.is_empty()).collect();
             if nals.is_empty() {
                 return Err(());
             }
@@ -427,18 +427,16 @@ fn packetize_access_unit(
 }
 
 fn is_idr_nal(codec: GatewayVideoCodec, nal: &[u8]) -> bool {
-    let raw = strip_start_code(nal);
     match codec {
-        GatewayVideoCodec::H264 => raw.first().is_some_and(|h| h & 0x1f == 5),
-        GatewayVideoCodec::H265 => matches!(nal_type(raw), Some(19 | 20)),
+        GatewayVideoCodec::H264 => vks_common::annexb::is_idr_h264(nal),
+        GatewayVideoCodec::H265 => matches!(vks_common::annexb::nal_type_h265(nal), Some(19 | 20)),
     }
 }
 
 fn is_sps_nal(codec: GatewayVideoCodec, nal: &[u8]) -> bool {
-    let raw = strip_start_code(nal);
     match codec {
-        GatewayVideoCodec::H264 => raw.first().is_some_and(|h| h & 0x1f == 7),
-        GatewayVideoCodec::H265 => nal_type(raw) == Some(33),
+        GatewayVideoCodec::H264 => vks_common::annexb::nal_type_h264(nal) == Some(7),
+        GatewayVideoCodec::H265 => vks_common::annexb::nal_type_h265(nal) == Some(33),
     }
 }
 
@@ -1510,46 +1508,13 @@ fn sample_row_nearest(destination: &mut [u8], source: &[u8], step: usize, rem: u
 
 #[derive(Default)]
 struct AnnexB {
-    buffer: Vec<u8>,
+    inner: vks_common::annexb::AnnexbSplitter,
 }
 
 impl AnnexB {
     fn push(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
-        self.buffer.extend_from_slice(bytes);
-        if self.buffer.len() > MAX_NAL_BYTES {
-            self.buffer.clear();
-            return Vec::new();
-        }
-        let mut units = Vec::new();
-        loop {
-            let Some((first, prefix)) = find_start_code(&self.buffer, 0) else {
-                break;
-            };
-            let Some((next, _)) = find_start_code(&self.buffer, first + prefix) else {
-                if first > 0 {
-                    self.buffer.drain(..first);
-                }
-                break;
-            };
-            if next > first + prefix {
-                units.push(self.buffer[first + prefix..next].to_vec());
-            }
-            self.buffer.drain(..next);
-        }
-        units
+        self.inner.push_rtp_units(bytes)
     }
-}
-
-fn find_start_code(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
-    (start..bytes.len().saturating_sub(2)).find_map(|position| {
-        if bytes.get(position..position + 4) == Some(&[0, 0, 0, 1][..]) {
-            Some((position, 4))
-        } else if bytes.get(position..position + 3) == Some(&[0, 0, 1][..]) {
-            Some((position, 3))
-        } else {
-            None
-        }
-    })
 }
 
 fn packetize_h264<T: AsRef<[u8]>>(

@@ -24,6 +24,7 @@
 //! [`AudioConfig`] и аудио-сэмплы (пустой/фиктивный `mp4a` не создаётся).
 
 use thiserror::Error;
+use vks_common::annexb::{strip_start_code, trim_trailing_zeros};
 
 /// Movie timescale (`mvhd`/`tkhd`): миллисекунды.
 pub const MOVIE_TIMESCALE: u32 = 1_000;
@@ -975,29 +976,10 @@ fn parse_length_prefixed(data: &[u8]) -> Option<Vec<&[u8]>> {
 /// Режет Annex-B на NAL без start code; хвостовые нули (trailing_zero_8bits)
 /// снимаются.
 fn annexb_nals(data: &[u8]) -> Vec<&[u8]> {
-    let Some((first_start, _)) = find_start_code(data, 0) else { return Vec::new() };
-    let mut nals = Vec::new();
-    let mut cursor = first_start;
-    while let Some((start, body)) = find_start_code(data, cursor) {
-        let _ = start;
-        match find_start_code(data, body) {
-            Some((next, _)) => {
-                let nal = trim_trailing_zeros(&data[body..next]);
-                if !nal.is_empty() {
-                    nals.push(nal);
-                }
-                cursor = next;
-            }
-            None => {
-                let nal = trim_trailing_zeros(&data[body..]);
-                if !nal.is_empty() {
-                    nals.push(nal);
-                }
-                break;
-            }
-        }
-    }
-    nals
+    vks_common::annexb::split_annexb(data, false)
+        .map(trim_trailing_zeros)
+        .filter(|nal| !nal.is_empty())
+        .collect()
 }
 
 fn parameter_sets_from_nals(nals: &[Vec<u8>]) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
@@ -1012,37 +994,6 @@ fn parameter_sets_from_nals(nals: &[Vec<u8>]) -> (Option<Vec<u8>>, Option<Vec<u8
         }
     }
     (sps, pps)
-}
-
-fn strip_start_code(nal: &[u8]) -> &[u8] {
-    match find_start_code(nal, 0) {
-        Some((0, body)) => &nal[body..],
-        _ => nal,
-    }
-}
-
-fn trim_trailing_zeros(mut nal: &[u8]) -> &[u8] {
-    while let Some((&0, rest)) = nal.split_last() {
-        nal = rest;
-    }
-    nal
-}
-
-/// Находит start code (`00 00 01` / `00 00 00 01`).
-fn find_start_code(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
-    let mut index = from;
-    while index + 3 <= bytes.len() {
-        if bytes[index] == 0 && bytes[index + 1] == 0 {
-            if bytes[index + 2] == 1 {
-                return Some((index, index + 3));
-            }
-            if index + 4 <= bytes.len() && bytes[index + 2] == 0 && bytes[index + 3] == 1 {
-                return Some((index, index + 4));
-            }
-        }
-        index += 1;
-    }
-    None
 }
 
 #[cfg(test)]

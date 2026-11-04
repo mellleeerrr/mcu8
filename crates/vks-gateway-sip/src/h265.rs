@@ -53,24 +53,20 @@ pub enum H265Error {
     TooLarge,
 }
 
+pub use vks_common::annexb::{is_parameter_set_h265 as is_parameter_set, strip_start_code};
+
 /// Returns the six-bit HEVC NAL type, or `None` for an empty payload (only the
 /// first header byte is needed).
 #[must_use]
 pub fn nal_type(nal: &[u8]) -> Option<u8> {
-    nal.first().map(|header| (header >> 1) & 0x3f)
+    vks_common::annexb::nal_type_h265(nal)
 }
 
 /// True for IRAP pictures (BLA 16-18, IDR 19-20, CRA 21) — the decoder can
 /// start here without earlier frames.
 #[must_use]
 pub fn is_irap(nal: &[u8]) -> bool {
-    matches!(nal_type(nal), Some(16..=21))
-}
-
-/// True for VPS/SPS/PPS — the parameter sets a late joiner needs in SDP.
-#[must_use]
-pub fn is_parameter_set(nal: &[u8]) -> bool {
-    matches!(nal_type(nal), Some(NAL_VPS | NAL_SPS | NAL_PPS))
+    vks_common::annexb::is_irap_h265(nal)
 }
 
 /// Splits an Annex-B byte stream into raw NALs (without start codes).
@@ -79,28 +75,7 @@ pub fn is_parameter_set(nal: &[u8]) -> bool {
 /// start code are ignored. Empty NALs are skipped.
 #[must_use]
 pub fn split_annexb(stream: &[u8]) -> Vec<&[u8]> {
-    let mut starts = Vec::new();
-    let mut index = 0;
-    while index + 3 <= stream.len() {
-        if stream[index..].starts_with(&[0, 0, 1]) {
-            starts.push((index, 3));
-            index += 3;
-        } else if stream[index..].starts_with(&[0, 0, 0, 1]) && index + 4 <= stream.len() {
-            starts.push((index, 4));
-            index += 4;
-        } else {
-            index += 1;
-        }
-    }
-    let mut nals = Vec::with_capacity(starts.len());
-    for (position, (start, prefix)) in starts.iter().enumerate() {
-        let body = start + prefix;
-        let end = starts.get(position + 1).map_or(stream.len(), |(next, _)| *next);
-        if end > body {
-            nals.push(&stream[body..end]);
-        }
-    }
-    nals
+    vks_common::annexb::split_annexb(stream, false).collect()
 }
 
 /// Incremental Annex-B splitter for streaming pipe reads.
@@ -111,9 +86,17 @@ pub fn split_annexb(stream: &[u8]) -> Vec<&[u8]> {
 ///
 /// PACI (type 50) and DONL/DOND (`sprop-max-don-diff > 0`) are deliberately
 /// unsupported: SDP must not advertise a non-zero `sprop-max-don-diff`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AnnexBSplitter {
-    buffer: Vec<u8>,
+    inner: vks_common::annexb::AnnexbSplitter,
+}
+
+impl Default for AnnexBSplitter {
+    fn default() -> Self {
+        Self {
+            inner: vks_common::annexb::AnnexbSplitter::with_max_size(H265_MAX_NAL_BYTES + 4),
+        }
+    }
 }
 
 impl AnnexBSplitter {
@@ -123,77 +106,16 @@ impl AnnexBSplitter {
     /// [`H265Error::TooLarge`] when a single in-progress NAL exceeds
     /// [`H265_MAX_NAL_BYTES`]; the buffer is cleared so the caller can resync.
     pub fn push(&mut self, data: &[u8]) -> Result<Vec<Vec<u8>>, H265Error> {
-        self.buffer.extend_from_slice(data);
-        if self.buffer.len() > H265_MAX_NAL_BYTES + 4 {
-            self.buffer.clear();
+        if self.inner.len() + data.len() > H265_MAX_NAL_BYTES + 4 {
+            self.inner.clear();
             return Err(H265Error::TooLarge);
         }
-        let mut units = Vec::new();
-        loop {
-            let Some((first, prefix)) = find_start_code(&self.buffer, 0) else {
-                // Keep the last three bytes: a 3-/4-byte start code may span reads.
-                let keep = self.buffer.len().saturating_sub(3);
-                self.buffer.drain(..keep);
-                return Ok(units);
-            };
-            if first > 0 {
-                self.buffer.drain(..first);
-            }
-            let body = prefix;
-            let Some((next, _)) = find_start_code(&self.buffer, body) else {
-                // Current NAL is not complete yet; keep its start code in buffer.
-                return Ok(units);
-            };
-            if next > body {
-                units.push(self.buffer[body..next].to_vec());
-            }
-            self.buffer.drain(..next);
-        }
+        Ok(self.inner.push_rtp_units(data))
     }
 
     /// Flushes the buffered trailing NAL at EOF (empty if none).
     pub fn finish(&mut self) -> Option<Vec<u8>> {
-        let (first, prefix) = find_start_code(&self.buffer, 0)?;
-        if first > 0 {
-            self.buffer.drain(..first);
-        }
-        let unit = self.buffer[prefix..].to_vec();
-        self.buffer.clear();
-        if unit.is_empty() {
-            None
-        } else {
-            Some(unit)
-        }
-    }
-}
-
-fn find_start_code(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
-    let mut index = start;
-    while index + 3 <= bytes.len() {
-        if bytes[index..].starts_with(&[0, 0, 1]) {
-            return Some((index, 3));
-        }
-        if index + 4 <= bytes.len() && bytes[index..].starts_with(&[0, 0, 0, 1]) {
-            return Some((index, 4));
-        }
-        index += 1;
-    }
-    None
-}
-
-/// Strips one leading 3- or 4-byte Annex-B start code, if present.
-///
-/// `FfmpegWorker::read_encoded_video` returns NALs *with* the start code, while
-/// [`packetize_h265`] expects the raw
-/// NAL beginning at its two-byte header.
-#[must_use]
-pub fn strip_start_code(nal: &[u8]) -> &[u8] {
-    if nal.starts_with(&[0, 0, 0, 1]) {
-        &nal[4..]
-    } else if nal.starts_with(&[0, 0, 1]) {
-        &nal[3..]
-    } else {
-        nal
+        self.inner.finish(false)
     }
 }
 

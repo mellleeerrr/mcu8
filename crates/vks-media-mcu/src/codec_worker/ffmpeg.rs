@@ -1083,46 +1083,31 @@ fn extract_avi_video_es(avi: &[u8]) -> Result<Vec<u8>, WorkerError> {
 /// Extracts one Annex-B NAL unit from `buffer`, keeping the next start code.
 fn take_annexb_nal(buffer: &mut Vec<u8>, eof: bool) -> Option<Vec<u8>> {
     loop {
-        let Some(start) = find_start_code(buffer, 0) else {
-            if eof {
-                buffer.clear();
-            }
-            return None;
-        };
-        // Keep the leading zero of a 4-byte start code (`00 00 00 01`):
-        // `find_start_code` reports it at index 1 because it matches the
-        // 3-byte sub-code first.
-        if start > 1 {
-            buffer.drain(..start);
+        let (first, body) = vks_common::annexb::find_start_code(buffer, 0)?;
+        if first > 0 {
+            buffer.drain(..first);
+            continue;
         }
-        let code_len = if buffer.len() >= 4 && buffer[..4] == [0, 0, 0, 1] { 4 } else { 3 };
-        match find_start_code(buffer, code_len) {
-            Some(3) => {
-                // Empty NAL: drop the current start code and look at the next.
-                buffer.drain(..3);
+        match vks_common::annexb::find_start_code(buffer, body) {
+            Some((next, _)) => {
+                if next == body {
+                    // Empty NAL between consecutive start codes: drop current prefix and continue
+                    buffer.drain(..body);
+                    continue;
+                }
+                return Some(buffer.drain(..next).collect());
             }
-            Some(next) => {
-                // A 4-byte start code `00 00 00 01` is found at the 3-byte
-                // sub-code; move the split one byte left so the previous NAL
-                // does not keep the leading zero of the next prefix.
-                let split = if next >= 1 && buffer[next - 1] == 0 { next - 1 } else { next };
-                return Some(buffer.drain(..split).collect());
-            }
-            None if eof && buffer.len() > 4 => return Some(std::mem::take(buffer)),
-            None if eof => {
-                buffer.clear();
+            None => {
+                if eof {
+                    if buffer.len() > body {
+                        return Some(std::mem::take(buffer));
+                    }
+                    buffer.clear();
+                }
                 return None;
             }
-            None => return None,
         }
     }
-}
-
-fn find_start_code(buffer: &[u8], from: usize) -> Option<usize> {
-    if buffer.len() < from + 3 {
-        return None;
-    }
-    buffer[from..].windows(3).position(|window| window == [0, 0, 1]).map(|index| index + from)
 }
 
 #[cfg(test)]

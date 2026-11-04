@@ -10,6 +10,7 @@ authors.workspace = true
 description = "VKS recorder: composite + multi-track recording"
 
 [dependencies]
+vks-common = { path = "../vks-common" }
 thiserror.workspace = true
 serde.workspace = true
 tracing.workspace = true

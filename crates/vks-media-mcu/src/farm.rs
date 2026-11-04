@@ -129,25 +129,17 @@ impl FarmCodec {
 
     /// Является ли NAL IDR-кадром (ключевым).
     fn is_idr_nal(self, nal: &[u8]) -> bool {
-        let Some((_, start)) = find_start_code(nal, 0) else { return false };
-        let Some(&header) = nal.get(start) else { return false };
         match self {
-            // H.264: nal_unit_type 5 = IDR.
-            Self::H264 => header & 0x1f == 5,
-            // H.265: nal_unit_type 16..=21 (BLA/IDR/CRA).
-            Self::H265 => (header >> 1) & 0x3f >= 16 && (header >> 1) & 0x3f <= 21,
+            Self::H264 => vks_common::annexb::is_idr_h264(nal),
+            Self::H265 => vks_common::annexb::is_irap_h265(nal),
         }
     }
 
     /// Является ли NAL параметрами потока (SPS/PPS/VPS).
     fn is_parameter_set(self, nal: &[u8]) -> bool {
-        let Some((_, start)) = find_start_code(nal, 0) else { return false };
-        let Some(&header) = nal.get(start) else { return false };
         match self {
-            // H.264: 7 = SPS, 8 = PPS.
-            Self::H264 => matches!(header & 0x1f, 7 | 8),
-            // H.265: 32 = VPS, 33 = SPS, 34 = PPS.
-            Self::H265 => (32..=34).contains(&((header >> 1) & 0x3f)),
+            Self::H264 => vks_common::annexb::is_parameter_set_h264(nal),
+            Self::H265 => vks_common::annexb::is_parameter_set_h265(nal),
         }
     }
 }
@@ -1112,11 +1104,9 @@ fn emit_access_unit(
 
 /// AUD (access-unit delimiter): H.264 — NAL type 9, H.265 — NAL type 35.
 fn is_aud(nal: &[u8], codec: FarmCodec) -> bool {
-    let Some((_, start)) = find_start_code(nal, 0) else { return false };
-    let Some(&header) = nal.get(start) else { return false };
     match codec {
-        FarmCodec::H264 => header & 0x1f == 9,
-        FarmCodec::H265 => (header >> 1) & 0x3f == 35,
+        FarmCodec::H264 => vks_common::annexb::is_aud_h264(nal),
+        FarmCodec::H265 => vks_common::annexb::is_aud_h265(nal),
     }
 }
 
@@ -1188,62 +1178,20 @@ impl Drop for FarmInner {
 /// Границы Annex-B: режет поток на NAL с start code.
 #[derive(Default)]
 struct AnnexB {
-    buffer: Vec<u8>,
+    inner: vks_common::annexb::AnnexbSplitter,
 }
 
 impl AnnexB {
     /// Отдаёт только завершённые NAL: последний NAL потока ждёт следующего
     /// start code (границей AU служит AUD, он приходит первым).
     fn push(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
-        self.buffer.extend_from_slice(bytes);
-        let mut units = Vec::new();
-        while let Some((first, body)) = find_start_code(&self.buffer, 0) {
-            if first > 0 {
-                // Мусор до первого start code игнорируем.
-                self.buffer.drain(..first);
-                continue;
-            }
-            let Some((next, _)) = find_start_code(&self.buffer, body) else { break };
-            units.push(self.buffer.drain(..next).collect());
-        }
-        units
+        self.inner.push_stream_units(bytes)
     }
 }
 
 /// Режет готовый буфер на NAL (последний — до конца буфера).
 fn split_nals(bytes: &[u8]) -> Vec<Vec<u8>> {
-    let mut units = Vec::new();
-    let mut cursor = 0;
-    while let Some((start, body)) = find_start_code(bytes, cursor) {
-        match find_start_code(bytes, body) {
-            Some((next, _)) => {
-                units.push(bytes[start..next].to_vec());
-                cursor = next;
-            }
-            None => {
-                units.push(bytes[start..].to_vec());
-                break;
-            }
-        }
-    }
-    units
-}
-
-/// Находит start code (`00 00 01` / `00 00 00 01`).
-fn find_start_code(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
-    let mut index = from;
-    while index + 3 <= bytes.len() {
-        if bytes[index] == 0 && bytes[index + 1] == 0 {
-            if bytes[index + 2] == 1 {
-                return Some((index, index + 3));
-            }
-            if index + 4 <= bytes.len() && bytes[index + 2] == 0 && bytes[index + 3] == 1 {
-                return Some((index, index + 4));
-            }
-        }
-        index += 1;
-    }
-    None
+    vks_common::annexb::split_nals(bytes, true)
 }
 
 fn group_limit_from_env() -> usize {
