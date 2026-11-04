@@ -601,11 +601,8 @@ impl EncoderFarm {
         }
         let (input_tx, input_rx) = mpsc::channel::<Arc<Frame>>(1);
         let (tx, _) = broadcast::channel::<Arc<AccessUnit>>(4);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let notify = Arc::new(tokio::sync::Notify::new());
-        let spec = key.spec.clone();
         let input_dims = (input.0.max(2) & !1, input.1.max(2) & !1);
-        let child = match (self.inner.spawner)(&spec, input_dims) {
+        let child = match (self.inner.spawner)(&key.spec, input_dims) {
             Ok(child) => child,
             Err(error) => return Err(FarmError::Spawn(error.to_string())),
         };
@@ -626,8 +623,8 @@ impl EncoderFarm {
             last_idr: Mutex::new(None),
             input: input_tx,
             tx,
-            cancel: cancel.clone(),
-            notify: notify.clone(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(tokio::sync::Notify::new()),
             keyframe_notify: Arc::new(tokio::sync::Notify::new()),
             pid: AtomicU32::new(child_pid),
             started: Instant::now(),
@@ -640,9 +637,6 @@ impl EncoderFarm {
             group.clone(),
             child,
             input_rx,
-            spec.clone(),
-            cancel,
-            notify,
             Arc::downgrade(&self.inner),
         ));
         *group.join.lock().unwrap() = Some(actor);
@@ -650,8 +644,8 @@ impl EncoderFarm {
             room = %key.room,
             width = input_dims.0,
             height = input_dims.1,
-            output = %format!("{}x{}", spec.width, spec.height),
-            fps = spec.fps,
+            output = %format!("{}x{}", key.spec.width, key.spec.height),
+            fps = key.spec.fps,
             groups = self.inner.groups.lock().unwrap().len(),
             "encoder group started"
         );
@@ -786,7 +780,7 @@ impl EncoderFarm {
     fn retire(&self, key: &EncoderKey) {
         let group = self.inner.groups.lock().unwrap().remove(key);
         let Some(group) = group else { return };
-        group.cancel.store(true, Ordering::Relaxed);
+        group.cancel.store(true, Ordering::Release);
         group.notify.notify_waiters();
         let room = group.key.room;
         let pid = group.pid.swap(0, Ordering::AcqRel);
@@ -940,9 +934,6 @@ async fn run_group(
     group: Arc<Group>,
     mut child: Child,
     mut input: mpsc::Receiver<Arc<Frame>>,
-    spec: EncoderSpec,
-    cancel: Arc<AtomicBool>,
-    notify: Arc<tokio::sync::Notify>,
     farm: Weak<FarmInner>,
 ) {
     let mut stdin = child.stdin.take();
@@ -953,22 +944,28 @@ async fn run_group(
     if let Some(ref p) = stdout {
         tune_pipe_capacity(p, false);
     }
-    let reader = tokio::spawn(read_access_units(group.clone(), stdout, spec.clone(), cancel.clone()));
+    let mut reader = tokio::spawn(read_access_units(group.clone(), stdout));
     // Кадров записано / AU отправлено — для диагностики «энкодер не голодает?».
     let mut frames_written: u64 = 0;
     let io_timeout = Duration::from_secs(2);
-    // Периодический тик: `notify_waiters()` не будит актора, если тот в этот
-    // момент не ждал (потерянный wakeup) — без тика актор висел на `input.recv()`
-    // вечно, а child (ffmpeg) оставался жить после ретира группы.
-    let mut cancel_tick = tokio::time::interval(Duration::from_millis(20));
+    // Периодический тик для страховки от сирот: в тестах 20 мс для скорости, в проде 1000 мс (без холостого спинлока).
+    let tick_interval = Duration::from_millis(if cfg!(test) { 20 } else { 1000 });
+    let mut cancel_tick = tokio::time::interval_at(tokio::time::Instant::now() + tick_interval, tick_interval);
     cancel_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    while !cancel.load(Ordering::Relaxed) {
+    while !group.cancel.load(Ordering::Acquire) {
+        let notified = group.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if group.cancel.load(Ordering::Acquire) {
+            break;
+        }
         let frame = tokio::select! {
+            biased;
+            () = &mut notified => break,
             frame = input.recv() => match frame {
                 Some(frame) => frame,
                 None => break,
             },
-            () = notify.notified() => break,
             () = group.keyframe_notify.notified() => {
                 tracing::debug!(room = %group.key.room, "keyframe notification handled in group actor");
                 continue;
@@ -994,17 +991,16 @@ async fn run_group(
                 continue;
             }
         };
-        if cancel.load(Ordering::Relaxed) {
+        if group.cancel.load(Ordering::Acquire) {
             break;
         }
         let Some(pipe) = stdin.as_mut() else { break };
         if tokio::time::timeout(io_timeout, pipe.write_all(&frame.data)).await.map_or(true, |result| result.is_err()) {
             // Энкодер не принимает кадры: группа закрывается, зрители получают
             // `Closed` (gateway логирует и завершает видео-мост).
-            if !cancel.load(Ordering::Relaxed) && !group.cancel.load(Ordering::Relaxed) {
+            if !group.cancel.swap(true, Ordering::Release) {
                 tracing::warn!(room = %group.key.room, "encoder group failed: stdin closed");
             }
-            group.cancel.store(true, Ordering::Relaxed);
             break;
         }
         frames_written += 1;
@@ -1013,7 +1009,7 @@ async fn run_group(
             tracing::debug!(
                 room = %group.key.room,
                 requested,
-                keyint = spec.keyint,
+                keyint = group.key.spec.keyint,
                 "group keyframe request consumed (IDR follows within keyint; force-IDR is P4b)"
             );
         }
@@ -1032,8 +1028,10 @@ async fn run_group(
             }
         }
     }
-    cancel.store(true, Ordering::Relaxed);
-    notify.notify_waiters();
+    drop(stdin);
+    let _ = tokio::time::timeout(Duration::from_millis(50), &mut reader).await;
+    group.cancel.store(true, Ordering::Release);
+    group.notify.notify_waiters();
     reader.abort();
     let _ = reader.await;
     // Останавливаем child и всю группу процессов (ADR-0028) и прибираем его.
@@ -1049,28 +1047,34 @@ async fn run_group(
 async fn read_access_units(
     group: Arc<Group>,
     stdout: Option<tokio::process::ChildStdout>,
-    spec: EncoderSpec,
-    cancel: Arc<AtomicBool>,
 ) {
     let Some(mut stdout) = stdout else { return };
     let started = Instant::now();
+    let codec = group.key.spec.codec;
     let mut splitter = AnnexB::default();
     let mut pending: Vec<u8> = Vec::new();
     let mut pending_sets: Vec<Arc<[u8]>> = Vec::new();
     let mut buffer = [0u8; 65536];
     loop {
+        let notified = group.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if group.cancel.load(Ordering::Acquire) {
+            break;
+        }
         let count = tokio::select! {
+            biased;
+            () = &mut notified => break,
             result = stdout.read(&mut buffer) => match result {
                 Ok(0) | Err(_) => break,
                 Ok(count) => count,
             },
-            () = wait_cancelled(&cancel) => break,
         };
         for nal in splitter.push(&buffer[..count]) {
-            if is_aud(&nal, spec.codec) && !pending.is_empty() {
-                emit_access_unit(&group, &spec, &mut pending, &mut pending_sets, started);
+            if is_aud(&nal, codec) && !pending.is_empty() {
+                emit_access_unit(&group, &mut pending, &mut pending_sets, started);
             }
-            if is_parameter_set(&nal, spec.codec) {
+            if is_parameter_set(&nal, codec) {
                 let set: Arc<[u8]> = Arc::from(nal.as_slice());
                 if !pending_sets.iter().any(|existing| existing.as_ref() == set.as_ref()) {
                     pending_sets.push(set);
@@ -1081,27 +1085,19 @@ async fn read_access_units(
     }
     // Хвост: энкодер остановлен, но последний кадр не получил AUD-терминатор.
     if !pending.is_empty() {
-        emit_access_unit(&group, &spec, &mut pending, &mut pending_sets, started);
-    }
-}
-
-/// Ждёт отмены группы (для `select!` в читателе).
-async fn wait_cancelled(cancel: &Arc<AtomicBool>) {
-    while !cancel.load(Ordering::Relaxed) {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        emit_access_unit(&group, &mut pending, &mut pending_sets, started);
     }
 }
 
 /// Собирает AU из накопленных NAL, обновляет кэш SPS/PPS и рассылает зрителям.
 fn emit_access_unit(
     group: &Group,
-    spec: &EncoderSpec,
     pending: &mut Vec<u8>,
     pending_sets: &mut Vec<Arc<[u8]>>,
     started: Instant,
 ) {
     let data: Arc<[u8]> = Arc::from(std::mem::take(pending).as_slice());
-    let is_idr = split_nals(&data).iter().any(|nal| spec.codec.is_idr_nal(nal));
+    let is_idr = split_nals(&data).iter().any(|nal| group.key.spec.codec.is_idr_nal(nal));
     let parameter_sets = std::mem::take(pending_sets);
     if !parameter_sets.is_empty() {
         *group.parameter_sets.lock().unwrap() = parameter_sets.clone();
@@ -1183,7 +1179,7 @@ impl Drop for FarmInner {
     fn drop(&mut self) {
         let groups: Vec<Arc<Group>> = self.groups.lock().unwrap().values().cloned().collect();
         for group in groups {
-            group.cancel.store(true, Ordering::Relaxed);
+            group.cancel.store(true, Ordering::Release);
             group.notify.notify_waiters();
             kill_process_group(group.pid.swap(0, Ordering::AcqRel));
         }
