@@ -385,6 +385,47 @@ fn drain_errors(child: &mut Child, kind: &'static str) -> tokio::task::JoinHandl
     })
 }
 
+/// RFC 3550-compliant 90 kHz video RTP clock with rational progression,
+/// drop compensation, and exact frame grid alignment.
+#[derive(Debug, Clone)]
+pub struct VideoRtpClock {
+    base_timestamp: u32,
+    fps: u64,
+    frame_ticks: u64,
+}
+
+impl VideoRtpClock {
+    #[inline]
+    pub fn new(base_timestamp: u32, fps: u32) -> Self {
+        Self {
+            base_timestamp,
+            fps: (fps as u64).max(1),
+            frame_ticks: 0,
+        }
+    }
+
+    /// Advances the clock by one frame and returns the RTP timestamp for this frame.
+    #[inline]
+    pub fn next_timestamp(&mut self) -> u32 {
+        let ts = self.current_timestamp();
+        self.frame_ticks += 1;
+        ts
+    }
+
+    /// Current timestamp without advancing.
+    #[inline]
+    pub fn current_timestamp(&self) -> u32 {
+        let offset = (self.frame_ticks * 90_000) / self.fps;
+        self.base_timestamp.wrapping_add(offset as u32)
+    }
+
+    /// Advances the clock by `dropped` frames to maintain real-time alignment across losses.
+    #[inline]
+    pub fn advance_dropped(&mut self, dropped: u64) {
+        self.frame_ticks += dropped;
+    }
+}
+
 fn is_access_unit_delimiter(codec: GatewayVideoCodec, nal: &[u8]) -> bool {
     match codec {
         GatewayVideoCodec::H264 => vks_common::annexb::is_aud_h264(nal),
@@ -754,6 +795,7 @@ pub(super) async fn spawn_video_media_bridge(
     let farm_mode = farm_viewer.is_some();
     let farm_engine = session.engine.clone();
     let farm_profile = session.profile.clone();
+    let base_timestamp = uuid::Uuid::new_v4().as_u128() as u32;
     let farm_output = farm_viewer.map(|mut viewer| {
         // Клоны для выходного таска: внешняя переменная `visible_rx` живёт до
         // конца функции (страховка от «переиспользования»), таск получает свою.
@@ -766,7 +808,7 @@ pub(super) async fn spawn_video_media_bridge(
         let timestamp_slot = outgoing_timestamp.clone();
         let owner = session.participant_id;
         tokio::spawn(async move {
-            let epoch = std::time::Instant::now();
+            let mut clock = VideoRtpClock::new(base_timestamp, farm_profile.fps);
             let mut sequence = 1u16;
             let mut seen_keyframe = false;
 
@@ -777,7 +819,7 @@ pub(super) async fn spawn_video_media_bridge(
                     let mut nals = splitter.push(au_ref.data());
                     nals.extend(splitter.push(&[0, 0, 0, 1][..]));
                     if !nals.is_empty() {
-                        let timestamp = (epoch.elapsed().as_micros() * 90 / 1000) as u32;
+                        let timestamp = clock.next_timestamp();
                         if send_access_unit(
                             output_codec,
                             &nals,
@@ -903,6 +945,8 @@ pub(super) async fn spawn_video_media_bridge(
                     FarmEvent::CurrentAu(Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped))) => {
                         stats.dropped_video_frames.fetch_add(dropped, Relaxed);
                         viewer.note_dropped(dropped);
+                        clock.advance_dropped(dropped);
+                        timestamp_slot.store(clock.current_timestamp(), Relaxed);
                         continue;
                     }
                     FarmEvent::CurrentAu(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
@@ -923,11 +967,15 @@ pub(super) async fn spawn_video_media_bridge(
                     if !access_unit.is_idr() {
                         // `P4a`: дельта до первого IDR — потеря на стороне зрителя.
                         viewer.note_dropped(1);
+                        clock.advance_dropped(1);
+                        timestamp_slot.store(clock.current_timestamp(), Relaxed);
                         continue;
                     }
                     seen_keyframe = true;
                 }
                 if controls.video_rx_muted.load(Relaxed) {
+                    clock.advance_dropped(1);
+                    timestamp_slot.store(clock.current_timestamp(), Relaxed);
                     continue;
                 }
                 dispatch_au!(&access_unit, &viewer);
@@ -941,7 +989,7 @@ pub(super) async fn spawn_video_media_bridge(
         let controls = outgoing_controls.clone();
         let timestamp_slot = outgoing_timestamp.clone();
         tokio::spawn(async move {
-            let epoch = std::time::Instant::now();
+            let mut clock = VideoRtpClock::new(base_timestamp, session.profile.fps);
             let mut splitter = AnnexB::default();
             let mut pending: Vec<Vec<u8>> = Vec::new();
             let mut sequence = 1u16;
@@ -952,9 +1000,12 @@ pub(super) async fn spawn_video_media_bridge(
                 }
                 for nal in splitter.push(&buffer[..count]) {
                     if is_access_unit_delimiter(output_codec, &nal) && !pending.is_empty() {
-                        let timestamp = (epoch.elapsed().as_micros() * 90 / 1000) as u32;
-                        if !controls.video_rx_muted.load(Relaxed)
-                            && send_access_unit(
+                        if controls.video_rx_muted.load(Relaxed) {
+                            clock.advance_dropped(1);
+                            timestamp_slot.store(clock.current_timestamp(), Relaxed);
+                        } else {
+                            let timestamp = clock.next_timestamp();
+                            if send_access_unit(
                                 output_codec,
                                 &pending,
                                 &socket,
@@ -968,15 +1019,18 @@ pub(super) async fn spawn_video_media_bridge(
                                 &[],
                             )
                             .await
-                        {
-                            stats.encoded_video_frames.fetch_add(1, Relaxed);
-                            timestamp_slot.store(timestamp, Relaxed);
+                            {
+                                stats.encoded_video_frames.fetch_add(1, Relaxed);
+                                timestamp_slot.store(timestamp, Relaxed);
+                            }
                         }
                         pending.clear();
                     }
                     if pending.len() >= 256 || pending.iter().map(Vec::len).sum::<usize>() + nal.len() > MAX_NAL_BYTES {
                         pending.clear();
                         stats.dropped_video_frames.fetch_add(1, Relaxed);
+                        clock.advance_dropped(1);
+                        timestamp_slot.store(clock.current_timestamp(), Relaxed);
                     }
                     pending.push(nal);
                 }
@@ -1083,8 +1137,10 @@ pub(super) async fn spawn_video_media_bridge(
                         if let Some(socket) = &session.rtcp_socket {
                             if let Some(port) = session.remote_target.port().checked_add(1) {
                                 let destination = std::net::SocketAddr::new(session.remote_target.ip(), port);
-                                let report = sender_report(ssrc, last_timestamp.load(Relaxed), &session.stats);
-                                let _ = socket.send_to(&report, destination).await;
+                                if session.stats.video_tx_packets.load(Relaxed) > 0 {
+                                    let report = sender_report(ssrc, last_timestamp.load(Relaxed), &session.stats);
+                                    let _ = socket.send_to(&report, destination).await;
+                                }
                                 if startup_pli_sent < 3 {
                                     startup_pli_sent += 1;
                                     let remote_ssrc = source.ssrc().unwrap_or(0);
@@ -3168,5 +3224,49 @@ mod tests {
 
         drop(held);
         assert_eq!(budget.available_decoders(), 1);
+    }
+
+    #[test]
+    fn video_rtp_clock_advances_by_nominal_step() {
+        let mut clock30 = VideoRtpClock::new(1000, 30);
+        assert_eq!(clock30.next_timestamp(), 1000);
+        assert_eq!(clock30.next_timestamp(), 4000);
+        assert_eq!(clock30.next_timestamp(), 7000);
+
+        let mut clock15 = VideoRtpClock::new(0, 15);
+        assert_eq!(clock15.next_timestamp(), 0);
+        assert_eq!(clock15.next_timestamp(), 6000);
+        assert_eq!(clock15.next_timestamp(), 12000);
+
+        let mut clock25 = VideoRtpClock::new(500, 25);
+        assert_eq!(clock25.next_timestamp(), 500);
+        assert_eq!(clock25.next_timestamp(), 4100);
+        assert_eq!(clock25.next_timestamp(), 7700);
+    }
+
+    #[test]
+    fn video_rtp_clock_handles_non_integer_fps_without_drift() {
+        let mut clock = VideoRtpClock::new(0, 33);
+        for _ in 0..33 {
+            clock.next_timestamp();
+        }
+        assert_eq!(clock.current_timestamp(), 90_000);
+    }
+
+    #[test]
+    fn video_rtp_clock_handles_dropped_frames() {
+        let mut clock = VideoRtpClock::new(0, 30);
+        assert_eq!(clock.next_timestamp(), 0);
+        assert_eq!(clock.next_timestamp(), 3000);
+        clock.advance_dropped(4);
+        assert_eq!(clock.next_timestamp(), 18000);
+    }
+
+    #[test]
+    fn video_rtp_clock_wraps_at_u32_boundary() {
+        let mut clock = VideoRtpClock::new(u32::MAX - 2999, 30);
+        assert_eq!(clock.next_timestamp(), u32::MAX - 2999);
+        assert_eq!(clock.next_timestamp(), 0);
+        assert_eq!(clock.next_timestamp(), 3000);
     }
 }

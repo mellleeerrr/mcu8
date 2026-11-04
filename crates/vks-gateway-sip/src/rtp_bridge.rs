@@ -1996,6 +1996,7 @@ fn negotiate_media_detailed_with(
         // dynamic PTs in answer order. A lower-priority offered codec (e.g. H.265)
         // must never preempt a higher-priority one (H.264) just because the peer
         // listed it first in its answer (TrueConf lists 116 HEVC before 104 H264).
+        #[allow(clippy::type_complexity)]
         let mut best: Option<((String, u16, u8, u8, NegotiatedVideoCodec), usize, bool)> = None;
         for transmit_payload in &remote_video.payloads {
             let Some(codec) = video_identity(remote_video, *transmit_payload) else {
