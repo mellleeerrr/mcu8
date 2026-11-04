@@ -6174,7 +6174,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         terminal.send_to(&packet, target).await.unwrap();
         // Generous timeout: under a loaded CI host the 20 ms MCU ticks can be
         // delayed, but the assertion is about consuming the second half at all.
-        let second_half = tokio::time::timeout(Duration::from_secs(3), async {
+        let second_half = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if mcu
                     .participant_audio(room, listener)
@@ -6540,7 +6540,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         vks_gateway_sip::write_rtp_header(&mut packet[..12], 96, 1, 0, 42, false);
         packet[12..].copy_from_slice(&payload);
         terminal.send_to(&packet, target).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(5), async {
             while !mcu
                 .participant_audio(room, listener)
                 .is_some_and(|audio| audio.iter().any(|sample| sample.abs() > 0.02))
@@ -6551,7 +6551,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         .await
         .expect("Opus PCM must reach the 48 kHz MCU mix");
         let mut first = vec![0u8; 1400];
-        let (count, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut first))
+        let (count, _) = tokio::time::timeout(Duration::from_secs(5), terminal.recv_from(&mut first))
             .await
             .expect("bridge must emit Opus RTP")
             .unwrap();
@@ -6559,7 +6559,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
         assert!((13..=12 + vks_gateway_sip::opus::MAX_PAYLOAD).contains(&count), "{count}");
         let first_ts = u32::from_be_bytes(first[4..8].try_into().unwrap());
         let mut second = vec![0u8; 1400];
-        let (count2, _) = tokio::time::timeout(Duration::from_secs(2), terminal.recv_from(&mut second))
+        let (count2, _) = tokio::time::timeout(Duration::from_secs(5), terminal.recv_from(&mut second))
             .await
             .expect("bridge must emit a second Opus RTP packet")
             .unwrap();

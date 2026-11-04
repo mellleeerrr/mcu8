@@ -792,6 +792,8 @@ pub struct McuEngine {
     /// [`McuEngine::tick_audio_at_bridge`]. Leaf lock: never taken while another
     /// engine lock is held.
     bridge_tick_rooms: Mutex<std::collections::BTreeSet<RoomId>>,
+    /// Dedicated 30 fps video tickers per active room.
+    video_tickers: Mutex<BTreeMap<RoomId, tokio::task::JoinHandle<()>>>,
 }
 
 fn layout_has_video(tracks: &[MediaTrack]) -> bool {
@@ -967,10 +969,9 @@ impl McuEngine {
 
     /// Creates an MCU engine with a specific media clock (e.g. virtual stepped clock for tests).
     pub fn with_clock(clock: vks_common::clock::MediaClock) -> Self {
-        Self {
-            clock,
-            ..Self::default()
-        }
+        let mut engine = Self::default();
+        engine.clock = clock;
+        engine
     }
 
     /// Returns a reference to the engine's media clock.
@@ -980,10 +981,9 @@ impl McuEngine {
 
     /// Creates an MCU engine with a specific process budget.
     pub fn with_budget(budget: vks_common::process::ProcessBudget) -> Self {
-        Self {
-            budget,
-            ..Self::default()
-        }
+        let mut engine = Self::default();
+        engine.budget = budget;
+        engine
     }
 
     /// Returns a reference to the engine's process budget.
@@ -1466,6 +1466,65 @@ impl McuEngine {
         self.farm.request_keyframe(room);
     }
 
+    /// Returns true if the room exists in the engine.
+    #[must_use]
+    pub fn has_room(&self, room: RoomId) -> bool {
+        self.rooms.read().unwrap().contains_key(&room)
+    }
+
+    /// Ensures that a dedicated 30 fps video ticker task is running for the given room.
+    ///
+    /// The ticker renders one composite frame per 33.3 ms and publishes it to the
+    /// `EncoderFarm`, completely replacing per-session render loops (eliminating the
+    /// "Thundering Herd" problem).
+    pub fn ensure_video_ticker(self: &Arc<Self>, room: RoomId) {
+        if !self.has_room(room) {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let mut tickers = self.video_tickers.lock().unwrap();
+        if let Some(existing) = tickers.get(&room) {
+            if !existing.is_finished() {
+                return;
+            }
+        }
+        let engine = Arc::downgrade(self);
+        let task = handle.spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_micros(33_333));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                let Some(engine) = engine.upgrade() else {
+                    break;
+                };
+                if !engine.has_room(room) {
+                    break;
+                }
+                if engine.farm.active_room_group_count(room) == 0 {
+                    continue;
+                }
+                let now_ms = engine.clock().now_ms();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Some(frame) = engine.tick_video_at(room, now_ms) {
+                        engine.publish_video_frame(room, &frame);
+                        engine.refresh_visible_windows(room);
+                    }
+                })
+                .await;
+            }
+        });
+        tickers.insert(room, task);
+    }
+
+    /// Stops the dedicated video ticker task for the given room, if running.
+    pub fn stop_video_ticker(&self, room: RoomId) {
+        if let Some(task) = self.video_tickers.lock().unwrap().remove(&room) {
+            task.abort();
+        }
+    }
+
     /// `O7`: диагностика групп (refcount/fps/keyframes/restarts).
     pub fn video_farm_stats(&self) -> Vec<GroupStat> {
         let mut stats = self.farm.snapshot();
@@ -1580,6 +1639,9 @@ impl McuEngine {
     /// и то же число и не могут «перетереть» канал разными значениями.
     /// `Some(n)` — канал обновлён, `None` — ещё рано/без изменений.
     pub fn refresh_visible_windows(&self, room: RoomId) -> Option<usize> {
+        if !self.has_room(room) {
+            return None;
+        }
         let visible = self.visible_windows(room);
         let state = {
             let mut map = self.visible.lock().unwrap();
@@ -1850,6 +1912,17 @@ impl McuEngine {
     }
 }
 
+impl Drop for McuEngine {
+    fn drop(&mut self) {
+        if let Ok(mut tickers) = self.video_tickers.lock() {
+            for task in tickers.values() {
+                task.abort();
+            }
+            tickers.clear();
+        }
+    }
+}
+
 #[async_trait]
 impl MediaEngine for McuEngine {
     fn mode(&self) -> RoomMode {
@@ -1886,6 +1959,7 @@ impl MediaEngine for McuEngine {
         if !removed {
             return Err(MediaEngineError::RoomNotFound(room));
         }
+        self.stop_video_ticker(room);
         self.frames.lock().unwrap().remove(&room);
         self.audio.lock().unwrap().remove(&room);
         self.visible.lock().unwrap().remove(&room);
@@ -3724,6 +3798,45 @@ mod tests {
         // Idempotent release.
         e.set_bridge_tick_owner(rid, false);
         assert!(!e.bridge_owns_tick(rid));
+    }
+
+    #[tokio::test]
+    async fn single_video_ticker_per_room_advances_cadence_and_is_idempotent() {
+        let e = Arc::new(McuEngine::new());
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+
+        // Calling ensure_video_ticker without active groups in the farm is an idle wait (no CPU waste)
+        e.ensure_video_ticker(rid);
+        e.ensure_video_ticker(rid); // Idempotent
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Without active groups with viewers in the farm, frames_rendered remains 0
+        assert_eq!(e.with_room(rid, |s| s.stats.frames_rendered).unwrap(), 0);
+
+        // Now acquire a viewer for the room; ticker detects active group and renders frames
+        let spec = EncoderSpec::canonical(crate::FarmCodec::H264, 640, 360, 30, 800, "baseline", "3.1");
+        let viewer = e.acquire_video_viewer(rid, &spec).await.unwrap();
+        assert_eq!(e.farm.active_room_group_count(rid), 1);
+
+        // Under parallel test runner load, wait up to 1 second for the ticker to render
+        let mut rendered = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if e.with_room(rid, |s| s.stats.frames_rendered).unwrap_or(0) > 0 {
+                rendered = true;
+                break;
+            }
+        }
+        assert!(rendered, "ticker rendered at least one frame once viewer connected");
+
+        drop(viewer);
+
+        // Stop ticker cleanly
+        e.stop_video_ticker(rid);
+        // Idempotent stop
+        e.stop_video_ticker(rid);
+        e.destroy_room(rid).await.unwrap();
     }
 
     #[tokio::test]

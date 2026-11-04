@@ -633,6 +633,7 @@ pub(super) async fn spawn_video_media_bridge(
     } else {
         match session.engine.acquire_video_viewer(session.room_id, &farm_spec).await {
             Ok(viewer) => {
+                session.engine.ensure_video_ticker(session.room_id);
                 tracing::debug!(
                     participant = %session.participant_id,
                     room = %session.room_id,
@@ -991,39 +992,16 @@ pub(super) async fn spawn_video_media_bridge(
     // запрос уходит группе (счётчик per-EncoderKey, спека §B.6): IDR придёт по
     // keyint ≤1 с, форс-IDR рестартом child'а — P4b (рвёт поток всем зрителям).
     // TODO(keyframe): force IDR by restarting the group encoder (P4b).
-    let render_keyframe_requests = session.controls.keyframe_requests.clone();
-    let render_engine = session.engine.clone();
-    let render_cancelled = session.cancelled.clone();
-    let render_stats = session.stats.clone();
-    let render_profile = session.profile.clone();
-    let render_viewer = session.participant_id;
     let render = if farm_mode {
-        // Один композит комнаты публикуется всем группам: N сессий зовут
-        // `publish`, но кодируется кадр один раз (дедуп внутри фермы).
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(frame_interval(&render_profile));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            while !render_cancelled.load(Relaxed) {
-                interval.tick().await;
-                let engine = render_engine.clone();
-                let publish = tokio::task::spawn_blocking(move || {
-                    let frame = engine.tick_video_for_viewer(room, engine.clock().now_ms(), render_viewer)?;
-                    let published = engine.publish_video_frame(room, &frame);
-                    // `P1`: тик дебаунса — движок сам публикует смену числа
-                    // видимых окон, когда значение стабильно ≥500 мс.
-                    engine.refresh_visible_windows(room);
-                    Some(published)
-                })
-                .await;
-                let _ = publish;
-                let requested = render_keyframe_requests.swap(0, Relaxed);
-                if requested > 0 {
-                    render_engine.request_video_keyframe(room);
-                }
-            }
-        })
+        None
     } else {
-        tokio::spawn(async move {
+        let render_keyframe_requests = session.controls.keyframe_requests.clone();
+        let render_engine = session.engine.clone();
+        let render_cancelled = session.cancelled.clone();
+        let render_stats = session.stats.clone();
+        let render_profile = session.profile.clone();
+        let render_viewer = session.participant_id;
+        Some(tokio::spawn(async move {
             // fps из профиля, а не жёсткие 15 fps: иначе SPS/поле обещают 30,
             // а в эфир уходит 15 кадров/с.
             let frame_interval = frame_interval(&render_profile);
@@ -1056,7 +1034,7 @@ pub(super) async fn spawn_video_media_bridge(
                     );
                 }
             }
-        })
+        }))
     };
     session.stats.video_codec_running.store(true, Relaxed);
     // Startup IDR Burst: trigger 3 keyframe bursts at t = 0, 500, 1000 ms to kickstart
@@ -1206,11 +1184,11 @@ pub(super) async fn spawn_video_media_bridge(
                 }
             }
         }
-        for task in [decoder_input, decoder_output, render, decoder_errors] {
+        for task in [decoder_input, decoder_output, decoder_errors] {
             task.abort();
             let _ = task.await;
         }
-        for task in [encoder_input, encoder_output, farm_output, encoder_errors].into_iter().flatten() {
+        for task in [encoder_input, encoder_output, farm_output, encoder_errors, render].into_iter().flatten() {
             task.abort();
             let _ = task.await;
         }

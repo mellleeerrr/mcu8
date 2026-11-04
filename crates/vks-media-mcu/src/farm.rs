@@ -537,6 +537,21 @@ impl EncoderFarm {
         self.active_group_count(room, FarmCodec::H264) > 0
     }
 
+    /// Число живых групп комнаты со зрителями (room + текущий canvas + live + `viewers > 0`).
+    pub fn active_room_group_count(&self, room: RoomId) -> usize {
+        let canvas_version = self.canvas_version(room);
+        let groups = self.inner.groups.lock().unwrap();
+        groups
+            .values()
+            .filter(|group| {
+                group.key.room == room
+                    && group.key.canvas_version == canvas_version
+                    && group_is_live(group)
+                    && group.refcount() > 1
+            })
+            .count()
+    }
+
     /// Идемпотентно берёт группу под ключ; `input` — размер кадра, который
     /// будут публиковать сессии (холст комнаты).
     ///
