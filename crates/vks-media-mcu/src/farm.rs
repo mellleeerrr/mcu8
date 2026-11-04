@@ -53,7 +53,7 @@ use tokio::task::JoinHandle;
 
 use crate::frame::Frame;
 use vks_common::{HwAccel, VideoEncoderCodec};
-use vks_core::RoomId;
+use vks_core::{ParticipantId, RoomId};
 
 /// Кодек выхода фермы. Видео-энкодер всегда один из двух (v1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -209,7 +209,7 @@ impl EncoderSpec {
             bufsize_kbps: (bitrate_kbps / 2).max(64),
             profile: profile_str,
             level: level_str,
-            keyint: (fps * 2).clamp(15, 60),
+            keyint: fps.clamp(15, 30),
             encoder_params,
         }
     }
@@ -386,6 +386,54 @@ pub struct GroupStat {
     pub viewer_dropped: u64,
 }
 
+/// Компактный трекер PLI/FIR запросов отдельного зрителя (zero heap allocations in hot path).
+#[derive(Debug, Clone, Copy)]
+pub struct ViewerPliTracker {
+    /// Кольцевой буфер меток времени последних до 5 разрешенных запросов.
+    timestamps: [Option<Instant>; Self::CAPACITY],
+    cursor: usize,
+    count: usize,
+}
+
+impl Default for ViewerPliTracker {
+    fn default() -> Self {
+        Self { timestamps: [None; Self::CAPACITY], cursor: 0, count: 0 }
+    }
+}
+
+impl ViewerPliTracker {
+    pub const WINDOW: Duration = Duration::from_secs(5);
+    pub const CAPACITY: usize = 5;
+
+    /// Проверяет, не превысил ли зритель лимит (>5 запросов за 5 сек).
+    /// Если запрос разрешен — записывает метку `now` и возвращает `true`.
+    /// Если лимит исчерпан — возвращает `false` (drop / penalty box).
+    pub fn record_and_check(&mut self, now: Instant) -> bool {
+        if self.count >= Self::CAPACITY {
+            if let Some(oldest) = self.timestamps[self.cursor] {
+                if now.saturating_duration_since(oldest) < Self::WINDOW {
+                    return false;
+                }
+            }
+        }
+        self.timestamps[self.cursor] = Some(now);
+        self.cursor = (self.cursor + 1) % Self::CAPACITY;
+        if self.count < Self::CAPACITY {
+            self.count += 1;
+        }
+        true
+    }
+
+    /// Проверяет, активен ли трекер за последние 10 секунд (для ленивой очистки).
+    pub fn is_active(&self, now: Instant) -> bool {
+        if self.count == 0 {
+            return false;
+        }
+        let latest_idx = (self.cursor + Self::CAPACITY - 1) % Self::CAPACITY;
+        self.timestamps[latest_idx].is_some_and(|ts| now.saturating_duration_since(ts) < Duration::from_secs(10))
+    }
+}
+
 /// Группа: энкодер + подписчики.
 struct Group {
     key: EncoderKey,
@@ -408,7 +456,7 @@ struct Group {
     parameter_sets: Mutex<Vec<Arc<[u8]>>>,
     /// Последний закодированный IDR: мгновенный реплей новому зрителю (избегает ожидания keyint в idle-комнате).
     last_idr: Mutex<Option<Arc<AccessUnit>>>,
-    /// Момент времени последнего разрешенного запроса keyframe (rate-limit 250 мс против PLI-шторма).
+    /// Момент времени последнего разрешенного запроса keyframe (rate-limit 1000 мс против PLI-шторма).
     last_keyframe_request_ms: AtomicU64,
     /// Канал кадров в актор (ёмкость 1: медленный энкодер не копит очередь).
     input: mpsc::Sender<Arc<Frame>>,
@@ -460,6 +508,7 @@ pub struct EncoderFarm {
 struct FarmInner {
     groups: Mutex<BTreeMap<EncoderKey, Arc<Group>>>,
     versions: Mutex<BTreeMap<RoomId, u64>>,
+    pli_trackers: Mutex<BTreeMap<(RoomId, ParticipantId), ViewerPliTracker>>,
     /// Сериализует медленный путь `acquire` (проверка → spawn child → вставка
     /// в мапу): иначе два-три render-таска сессий одновременно спавнят FFmpeg
     /// на один ключ; второй `insert` затирал первый, и осиротевший child с
@@ -484,6 +533,7 @@ impl EncoderFarm {
             inner: Arc::new(FarmInner {
                 groups: Mutex::new(BTreeMap::new()),
                 versions: Mutex::new(BTreeMap::new()),
+                pli_trackers: Mutex::new(BTreeMap::new()),
                 creation: tokio::sync::Mutex::new(()),
                 max_groups: max_groups.max(1),
                 spawner,
@@ -715,30 +765,73 @@ impl EncoderFarm {
     /// `keyint = fps` даёт ≤1 с; рестарт child'а рвёт поток всем зрителям
     /// (спека §B.6). Форс-IDR — P4b вместе с control-каналом энкодера.
     pub fn request_keyframe(&self, room: RoomId) {
-        let groups = self.inner.groups.lock().unwrap();
-        let mut now = None;
-        for group in groups.values() {
-            if group.key.room != room {
-                continue;
+        self.request_keyframe_for_viewer(room, None);
+    }
+
+    /// Просит IDR у групп комнаты от имени зрителя с проверкой penalty box
+    /// (>5 запросов за 5с) и групповым коалесцингом (1000 мс окно).
+    /// Возвращает `true`, если хотя бы одна живая группа инициировала запрос к энкодеру.
+    pub fn request_keyframe_for_viewer(&self, room: RoomId, viewer: Option<ParticipantId>) -> bool {
+        // 1. Учёт каждого поступившего на ферму запроса PLI/FIR на входе.
+        // Инвариант баланса Prometheus: received = forwarded_to_encoder + coalesced + dropped_penalty.
+        vks_common::metrics::MCU_FARM_PLI_RECEIVED_TOTAL.inc();
+
+        let now = Instant::now();
+
+        // 2. Per-viewer penalty box: проверяем изолированно без удержания lock на groups.
+        if let Some(pid) = viewer {
+            let allowed = {
+                let mut trackers = self.inner.pli_trackers.lock().unwrap();
+                if trackers.len() > 128 {
+                    trackers.retain(|_, t| t.is_active(now));
+                }
+                trackers.entry((room, pid)).or_default().record_and_check(now)
+            };
+            if !allowed {
+                vks_common::metrics::MCU_FARM_PLI_DROPPED_PENALTY_TOTAL.inc();
+                tracing::warn!(
+                    room = %room,
+                    viewer = %pid,
+                    "PLI/FIR dropped: viewer exceeded 5 requests in 5s (penalty box)"
+                );
+                return false;
             }
-            if group.cancel.load(Ordering::Relaxed) {
+        }
+
+        // 3. Групповой коалесцинг (1000 мс окно)
+        let groups = self.inner.groups.lock().unwrap();
+        let mut dispatched = false;
+        let mut coalesced = false;
+
+        for group in groups.values() {
+            if group.key.room != room || group.cancel.load(Ordering::Relaxed) {
                 continue;
             }
             group.keyframe_requests_total.fetch_add(1, Ordering::Relaxed);
-            let now_inst = *now.get_or_insert_with(Instant::now);
-            let now_ms = (now_inst.saturating_duration_since(group.started).as_millis() as u64).max(1);
+            let now_ms = (now.saturating_duration_since(group.started).as_millis() as u64).max(1);
             let prev_ms = group.last_keyframe_request_ms.load(Ordering::Relaxed);
-            if prev_ms == 0 || now_ms.saturating_sub(prev_ms) >= 250 {
+            if prev_ms == 0 || now_ms.saturating_sub(prev_ms) >= 1000 {
                 group.last_keyframe_request_ms.store(now_ms, Ordering::Relaxed);
                 group.keyframe_requests.fetch_add(1, Ordering::Relaxed);
                 group.keyframe_notify.notify_one();
+                dispatched = true;
+            } else {
+                coalesced = true;
             }
         }
+
+        if !dispatched && coalesced {
+            vks_common::metrics::MCU_FARM_PLI_COALESCED_TOTAL.inc();
+            tracing::debug!(room = %room, "PLI/FIR coalesced within 1000ms group window");
+        }
+
+        dispatched
     }
 
     /// Смена холста/раскладки: новые группы — с новой версией, старые
     /// закрываются (их зрители получат `Closed` и переподключатся путём вызова).
     pub fn invalidate_room(&self, room: RoomId) {
+        self.inner.pli_trackers.lock().unwrap().retain(|(r, _), _| *r != room);
         let version = {
             let mut versions = self.inner.versions.lock().unwrap();
             let entry = versions.entry(room).or_insert(0);
@@ -1826,7 +1919,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keyframe_requests_rate_limited_to_250ms() {
+    async fn keyframe_requests_rate_limited_and_coalesced_to_1000ms() {
         let farm = farm_with_test_spawner(8);
         let room = room();
         let key = spec(30).key(room, 0);
@@ -1836,6 +1929,7 @@ mod tests {
         farm.request_keyframe(room);
         let first_ts = group.last_keyframe_request_ms.load(Ordering::Relaxed);
         assert!(first_ts > 0, "first keyframe request recorded timestamp");
+        assert_eq!(group.keyframe_requests.load(Ordering::Relaxed), 1);
 
         for _ in 0..4 {
             farm.request_keyframe(room);
@@ -1843,6 +1937,41 @@ mod tests {
 
         assert_eq!(group.keyframe_requests_total.load(Ordering::Relaxed), 5);
         assert_eq!(group.last_keyframe_request_ms.load(Ordering::Relaxed), first_ts);
+        assert_eq!(group.keyframe_requests.load(Ordering::Relaxed), 1, "coalesced requests do not retrigger keyframe");
+
+        drop(viewer);
+    }
+
+    #[tokio::test]
+    async fn keyframe_requests_per_viewer_penalty_box() {
+        let farm = farm_with_test_spawner(8);
+        let room = room();
+        let key = spec(30).key(room, 0);
+        let viewer = farm.acquire(key.clone(), (640, 360)).await.expect("acquire");
+        let group = farm.inner.groups.lock().unwrap().get(&key).cloned().expect("group");
+
+        let spammer = ParticipantId::new();
+        // First request triggers keyframe
+        assert!(farm.request_keyframe_for_viewer(room, Some(spammer)));
+        // Next 4 requests within 5s are accepted by penalty box (but coalesced at group level)
+        for _ in 0..4 {
+            assert!(!farm.request_keyframe_for_viewer(room, Some(spammer)));
+        }
+        assert_eq!(group.keyframe_requests_total.load(Ordering::Relaxed), 5);
+
+        // 6th request within 5s trips penalty box
+        let dropped_before = vks_common::metrics::MCU_FARM_PLI_DROPPED_PENALTY_TOTAL.get();
+        assert!(!farm.request_keyframe_for_viewer(room, Some(spammer)));
+        let dropped_after = vks_common::metrics::MCU_FARM_PLI_DROPPED_PENALTY_TOTAL.get();
+        assert_eq!(dropped_after, dropped_before + 1, "penalty box counter incremented");
+        // Total accepted by group remains 5 (6th was dropped before counting)
+        assert_eq!(group.keyframe_requests_total.load(Ordering::Relaxed), 5);
+
+        // Another viewer is NOT penalized
+        let legit_viewer = ParticipantId::new();
+        // Legit viewer's request is accepted by penalty box, coalesced by group window
+        farm.request_keyframe_for_viewer(room, Some(legit_viewer));
+        assert_eq!(group.keyframe_requests_total.load(Ordering::Relaxed), 6);
 
         drop(viewer);
     }
@@ -1853,7 +1982,7 @@ mod tests {
         let baseline = EncoderSpec::canonical(FarmCodec::H264, 1280, 720, 30, 2048, "baseline", "3.1");
         assert_eq!(baseline.maxrate_kbps, 2355); // (2048 * 115) / 100
         assert_eq!(baseline.bufsize_kbps, 1024); // 2048 / 2
-        assert_eq!(baseline.keyint, 60); // 30 * 2
+        assert_eq!(baseline.keyint, 30); // 30 fps <= 1.0s short-GOP
         assert!(baseline.encoder_params.contains("slice-max-size=1180"));
         assert!(baseline.encoder_params.contains("deblock=0,0"));
         assert!(baseline.encoder_params.contains("cabac=0"));
@@ -1867,7 +1996,7 @@ mod tests {
 
         // Content / Presentation Slide profile (1080p @ 15fps)
         let slide = EncoderSpec::canonical(FarmCodec::H264, 1920, 1080, 15, 1024, "baseline", "4.0");
-        assert_eq!(slide.keyint, 30); // 15 * 2
+        assert_eq!(slide.keyint, 15); // 15 fps <= 1.0s short-GOP
         assert!(slide.encoder_params.contains("aq-mode=3"));
         assert!(slide.encoder_params.contains("slice-max-size=1180"));
 
@@ -1913,5 +2042,57 @@ mod tests {
         assert!(args.contains(&"libx264".to_string()));
         assert!(args.contains(&"-vf".to_string()));
         assert!(args.contains(&"scale=1280:720".to_string()));
+    }
+
+    #[tokio::test]
+    async fn twenty_concurrent_viewers_pli_and_instant_idr_replay() {
+        let farm = farm_with_test_spawner(8);
+        let room = room();
+        let key = spec(30).key(room, 0);
+
+        // First viewer connects and group spawns
+        let first = farm.acquire(key.clone(), (640, 360)).await.expect("acquire first");
+        let group = farm.inner.groups.lock().unwrap().get(&key).cloned().expect("group");
+
+        // Simulate encoder emitting an initial IDR
+        let fake_idr = Arc::new(AccessUnit {
+            data: Arc::from(&[0, 0, 0, 1, 0x65, 0xAA, 0xBB][..]),
+            is_idr: true,
+            pts_us: 1000,
+            parameter_sets: vec![],
+        });
+        *group.last_idr.lock().unwrap() = Some(fake_idr.clone());
+
+        // 19 more viewers connect concurrently — every one of them MUST receive initial IDR with 0ms wait
+        let mut viewers = Vec::new();
+        viewers.push(first);
+        for i in 1..20 {
+            let mut viewer = farm.acquire(key.clone(), (640, 360)).await.expect("acquire subsequent");
+            let initial = viewer.take_initial_idr().expect("instant initial IDR");
+            assert!(initial.is_idr(), "viewer {i} received IDR immediately");
+            assert_eq!(initial.data(), fake_idr.data(), "viewer {i} received correct IDR payload");
+            viewers.push(viewer);
+        }
+
+        // All 20 viewers simultaneously send PLI requests
+        let mut accepted_first = false;
+        for i in 0..20 {
+            let pid = ParticipantId::new();
+            let triggered = farm.request_keyframe_for_viewer(room, Some(pid));
+            if i == 0 {
+                assert!(triggered, "first viewer triggers group keyframe");
+                accepted_first = true;
+            } else {
+                assert!(!triggered, "subsequent viewer {i} within 1000ms is coalesced");
+            }
+        }
+        assert!(accepted_first);
+        assert_eq!(group.keyframe_requests.load(Ordering::Relaxed), 1, "exactly 1 keyframe dispatched to encoder");
+        assert_eq!(group.keyframe_requests_total.load(Ordering::Relaxed), 20, "all 20 PLIs recorded");
+
+        // Confirm group remains healthy and refcount == 21 (20 viewers + 1 encoder)
+        assert_eq!(group.refcount(), 21);
+
+        drop(viewers);
     }
 }

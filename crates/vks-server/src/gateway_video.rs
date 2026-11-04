@@ -326,7 +326,7 @@ fn spawn_codec(encoder: bool, profile: &VideoProfile) -> Result<Child, String> {
     let mut command = if encoder {
         let maxrate = (profile.bitrate_kbps * 115) / 100;
         let buffer = (profile.bitrate_kbps / 2).max(64);
-        let keyint = (profile.fps * 2).clamp(15, 60);
+        let keyint = profile.fps.clamp(15, 30);
         let keyint_min = (profile.fps / 2).max(1);
         let (codec, params_flag) = match profile.codec {
             GatewayVideoCodec::H264 => ("libx264", "-x264-params"),
@@ -1128,7 +1128,6 @@ pub(super) async fn spawn_video_media_bridge(
         let mut rtcp_receive = [0u8; 2048];
         let mut interval = tokio::time::interval(Duration::from_millis(20));
         let mut last_rtcp = std::time::Instant::now() - Duration::from_secs(5);
-        let mut last_keyframe_request = std::time::Instant::now() - Duration::from_secs(5);
         let mut startup_pli_sent: usize = 0;
         while !session.cancelled.load(Relaxed) && !worker_failed.load(Relaxed) {
             tokio::select! {
@@ -1182,13 +1181,9 @@ pub(super) async fn spawn_video_media_bridge(
                     if let Some((count, _addr)) = rtcp_res {
                         let feedbacks = vks_gateway_sip::rtcp::parse_feedback(&rtcp_receive[..count]);
                         if !feedbacks.is_empty() {
-                            let now = std::time::Instant::now();
-                            if now.duration_since(last_keyframe_request) >= Duration::from_secs(1) {
-                                last_keyframe_request = now;
-                                tracing::debug!(room = %session.room_id, "RTCP PLI/FIR feedback received; requesting keyframe");
-                                session.engine.request_video_keyframe(session.room_id);
-                                session.controls.keyframe_requests.fetch_add(1, Relaxed);
-                            }
+                            tracing::debug!(room = %session.room_id, participant = %session.participant_id, "RTCP PLI/FIR feedback received; requesting keyframe");
+                            session.engine.request_video_keyframe_for_viewer(session.room_id, session.participant_id);
+                            session.controls.keyframe_requests.fetch_add(1, Relaxed);
                         }
                     }
                 }
@@ -1197,13 +1192,9 @@ pub(super) async fn spawn_video_media_bridge(
                     if vks_gateway_sip::rtcp::is_rtcp(&receive[..count]) {
                         let feedbacks = vks_gateway_sip::rtcp::parse_feedback(&receive[..count]);
                         if !feedbacks.is_empty() {
-                            let now = std::time::Instant::now();
-                            if now.duration_since(last_keyframe_request) >= Duration::from_secs(1) {
-                                last_keyframe_request = now;
-                                tracing::debug!(room = %session.room_id, "rtcp-mux PLI/FIR feedback received; requesting keyframe");
-                                session.engine.request_video_keyframe(session.room_id);
-                                session.controls.keyframe_requests.fetch_add(1, Relaxed);
-                            }
+                            tracing::debug!(room = %session.room_id, participant = %session.participant_id, "rtcp-mux PLI/FIR feedback received; requesting keyframe");
+                            session.engine.request_video_keyframe_for_viewer(session.room_id, session.participant_id);
+                            session.controls.keyframe_requests.fetch_add(1, Relaxed);
                         }
                         continue;
                     }

@@ -1582,6 +1582,12 @@ impl McuEngine {
         self.farm.request_keyframe(room);
     }
 
+    /// PLI/FIR от конкретного зрителя с проверкой per-viewer penalty box (>5 req / 5s)
+    /// и групповым коалесцингом (1000 мс).
+    pub fn request_video_keyframe_for_viewer(&self, room: RoomId, viewer: ParticipantId) -> bool {
+        self.farm.request_keyframe_for_viewer(room, Some(viewer))
+    }
+
     /// Returns true if the room exists in the engine.
     #[must_use]
     pub fn has_room(&self, room: RoomId) -> bool {

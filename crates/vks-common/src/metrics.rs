@@ -11,8 +11,8 @@
 //! формате Prometheus для `/metrics`.
 
 use prometheus::{
-    register_histogram_vec, register_int_counter_vec, register_int_gauge_vec, Histogram, HistogramVec, IntCounterVec,
-    IntGaugeVec,
+    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge_vec, Histogram,
+    HistogramVec, IntCounter, IntCounterVec, IntGaugeVec,
 };
 use std::sync::LazyLock;
 
@@ -257,10 +257,40 @@ pub static FRONTEND_DENIED: LazyLock<IntCounterVec> = LazyLock::new(|| {
         .expect("vks_frontend_denied_total must register once")
 });
 
+/// Всего запросов PLI/FIR, принятых MCU Encoder Farm от подписчиков.
+pub static MCU_FARM_PLI_RECEIVED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "mcu_farm_pli_received_total",
+        "Total PLI/FIR keyframe requests received by the MCU encoder farm"
+    )
+    .expect("mcu_farm_pli_received_total must register once")
+});
+
+/// Запросы PLI/FIR, скоалесцированные фермой (поступили в пределах 1000 мс окна группы).
+pub static MCU_FARM_PLI_COALESCED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "mcu_farm_pli_coalesced_total",
+        "Total PLI/FIR requests coalesced within the 1000ms group window"
+    )
+    .expect("mcu_farm_pli_coalesced_total must register once")
+});
+
+/// Запросы PLI/FIR, сброшенные penalty box (>5 запросов от зрителя за 5 секунд).
+pub static MCU_FARM_PLI_DROPPED_PENALTY_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "mcu_farm_pli_dropped_penalty_total",
+        "Total PLI/FIR requests dropped by per-viewer penalty box (>5 in 5s)"
+    )
+    .expect("mcu_farm_pli_dropped_penalty_total must register once")
+});
+
 /// Однократная регистрация + заполнение build-info.
 pub fn init_default() {
     INIT.call_once(|| {
         BUILD_INFO.with_label_values(&[env!("CARGO_PKG_VERSION")]).set(1);
+        let _ = &*MCU_FARM_PLI_RECEIVED_TOTAL;
+        let _ = &*MCU_FARM_PLI_COALESCED_TOTAL;
+        let _ = &*MCU_FARM_PLI_DROPPED_PENALTY_TOTAL;
         // Materialise zero samples so /metrics shows the WebRTC subsystem even
         // before the first browser offer.
         WEBRTC_PEERS.set(0);
@@ -467,5 +497,20 @@ mod tests {
             let expected = format!("vks_errors_total{{code=\"{}\"}} 1", code.as_str());
             assert!(text.contains(&expected), "expected {expected} in encoded metrics");
         }
+    }
+
+    #[test]
+    fn mcu_farm_pli_counters_appear_in_encode() {
+        init_default();
+        MCU_FARM_PLI_RECEIVED_TOTAL.inc();
+        MCU_FARM_PLI_COALESCED_TOTAL.inc();
+        MCU_FARM_PLI_DROPPED_PENALTY_TOTAL.inc();
+        let text = encode();
+        assert!(text.contains("mcu_farm_pli_received_total"), "expected mcu_farm_pli_received_total in {text}");
+        assert!(text.contains("mcu_farm_pli_coalesced_total"), "expected mcu_farm_pli_coalesced_total in {text}");
+        assert!(
+            text.contains("mcu_farm_pli_dropped_penalty_total"),
+            "expected mcu_farm_pli_dropped_penalty_total in {text}"
+        );
     }
 }
