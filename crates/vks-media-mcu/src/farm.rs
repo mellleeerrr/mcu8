@@ -42,17 +42,17 @@ use std::collections::BTreeMap;
 use std::io;
 #[cfg(test)]
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-use std::sync::atomic::AtomicU32;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::frame::Frame;
+use vks_common::{HwAccel, VideoEncoderCodec};
 use vks_core::RoomId;
 
 /// Кодек выхода фермы. Видео-энкодер всегда один из двух (v1).
@@ -90,7 +90,7 @@ impl FarmCodec {
     }
 
     /// Параметр FFmpeg для тонкой настройки энкодера.
-    const fn params_flag(self) -> &'static str {
+    pub const fn params_flag(self) -> &'static str {
         match self {
             Self::H264 => "-x264-params",
             Self::H265 => "-x265-params",
@@ -140,6 +140,15 @@ impl FarmCodec {
         match self {
             Self::H264 => vks_common::annexb::is_parameter_set_h264(nal),
             Self::H265 => vks_common::annexb::is_parameter_set_h265(nal),
+        }
+    }
+}
+
+impl From<FarmCodec> for VideoEncoderCodec {
+    fn from(codec: FarmCodec) -> Self {
+        match codec {
+            FarmCodec::H264 => Self::H264,
+            FarmCodec::H265 => Self::H265,
         }
     }
 }
@@ -638,12 +647,7 @@ impl EncoderFarm {
         // Порядок важен: сначала мапа (actor-watchdog считает `Arc::strong_count`,
         // и «1» означает «группы нет ни в мапе, ни у зрителей»), потом актор.
         self.inner.groups.lock().unwrap().insert(key.clone(), group.clone());
-        let actor = tokio::spawn(run_group(
-            group.clone(),
-            child,
-            input_rx,
-            Arc::downgrade(&self.inner),
-        ));
+        let actor = tokio::spawn(run_group(group.clone(), child, input_rx, Arc::downgrade(&self.inner)));
         *group.join.lock().unwrap() = Some(actor);
         tracing::info!(
             room = %key.room,
@@ -938,12 +942,7 @@ pub fn tune_pipe_capacity<F>(_file: &F, _is_raw_video: bool) {}
 /// нельзя закодировать, пока писатель не отдал следующий кадр, но писатель
 /// заблокирован на чтении. На живом прогоне это давало 1 AU (IDR) и тишину:
 /// энкодер получал единицы кадров, зритель — один стартовый кадр.
-async fn run_group(
-    group: Arc<Group>,
-    mut child: Child,
-    mut input: mpsc::Receiver<Arc<Frame>>,
-    farm: Weak<FarmInner>,
-) {
+async fn run_group(group: Arc<Group>, mut child: Child, mut input: mpsc::Receiver<Arc<Frame>>, farm: Weak<FarmInner>) {
     let mut stdin = child.stdin.take();
     let stdout = child.stdout.take();
     if let Some(ref p) = stdin {
@@ -1008,6 +1007,14 @@ async fn run_group(
             // `Closed` (gateway логирует и завершает видео-мост).
             if !group.cancel.swap(true, Ordering::Release) {
                 tracing::warn!(room = %group.key.room, "encoder group failed: stdin closed");
+                if frames_written == 0 && active_hw_accel(group.key.spec.codec.into()).is_hardware() {
+                    tracing::error!(
+                        room = %group.key.room,
+                        codec = ?group.key.spec.codec,
+                        "hardware encoder died immediately; tripping circuit breaker to software"
+                    );
+                    trip_hw_fallback(group.key.spec.codec.into());
+                }
             }
             break;
         }
@@ -1052,10 +1059,7 @@ async fn run_group(
 /// Работает параллельно писателю — именно это даёт полный fps: AUD каждого
 /// следующего кадра приходит сразу после его кодирования, без ожидания
 /// писателя. Последний AU (без следующего AUD) флашится по EOF/остановке.
-async fn read_access_units(
-    group: Arc<Group>,
-    stdout: Option<tokio::process::ChildStdout>,
-) {
+async fn read_access_units(group: Arc<Group>, stdout: Option<tokio::process::ChildStdout>) {
     let Some(mut stdout) = stdout else { return };
     let started = Instant::now();
     let codec = group.key.spec.codec;
@@ -1098,12 +1102,7 @@ async fn read_access_units(
 }
 
 /// Собирает AU из накопленных NAL, обновляет кэш SPS/PPS и рассылает зрителям.
-fn emit_access_unit(
-    group: &Group,
-    pending: &mut Vec<u8>,
-    pending_sets: &mut Vec<Arc<[u8]>>,
-    started: Instant,
-) {
+fn emit_access_unit(group: &Group, pending: &mut Vec<u8>, pending_sets: &mut Vec<Arc<[u8]>>, started: Instant) {
     let data: Arc<[u8]> = Arc::from(std::mem::take(pending).as_slice());
     let is_idr = split_nals(&data).iter().any(|nal| group.key.spec.codec.is_idr_nal(nal));
     let parameter_sets = std::mem::take(pending_sets);
@@ -1133,35 +1132,159 @@ fn is_parameter_set(nal: &[u8], codec: FarmCodec) -> bool {
     codec.is_parameter_set(nal)
 }
 
+static PROBED_H264: OnceLock<HwAccel> = OnceLock::new();
+static PROBED_H265: OnceLock<HwAccel> = OnceLock::new();
+static HW_TRIPPED_H264: AtomicBool = AtomicBool::new(false);
+static HW_TRIPPED_H265: AtomicBool = AtomicBool::new(false);
+
+/// Returns the active hardware acceleration backend for the codec, taking the circuit breaker into account.
+pub fn active_hw_accel(codec: VideoEncoderCodec) -> HwAccel {
+    match codec {
+        VideoEncoderCodec::H264 => {
+            if HW_TRIPPED_H264.load(Ordering::Acquire) {
+                HwAccel::Software
+            } else {
+                *PROBED_H264.get_or_init(|| probe_l2_hardware(VideoEncoderCodec::H264))
+            }
+        }
+        VideoEncoderCodec::H265 => {
+            if HW_TRIPPED_H265.load(Ordering::Acquire) {
+                HwAccel::Software
+            } else {
+                *PROBED_H265.get_or_init(|| probe_l2_hardware(VideoEncoderCodec::H265))
+            }
+        }
+    }
+}
+
+/// Trips the hardware circuit breaker for a codec, forcing software encoding for future group spawns.
+pub fn trip_hw_fallback(codec: VideoEncoderCodec) {
+    match codec {
+        VideoEncoderCodec::H264 => HW_TRIPPED_H264.store(true, Ordering::Release),
+        VideoEncoderCodec::H265 => HW_TRIPPED_H265.store(true, Ordering::Release),
+    }
+}
+
+#[cfg(test)]
+pub fn reset_hw_fallback() {
+    HW_TRIPPED_H264.store(false, Ordering::Release);
+    HW_TRIPPED_H265.store(false, Ordering::Release);
+}
+
+fn probe_l2_hardware(codec: VideoEncoderCodec) -> HwAccel {
+    let hw = HwAccel::from_env().resolve();
+    if !hw.is_hardware() {
+        return HwAccel::Software;
+    }
+    let encoder = hw.encoder_name(codec);
+    let mut cmd = std::process::Command::new(vks_common::process::ffmpeg_bin_path());
+    cmd.env_clear()
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into()));
+    if let Some(loader) = std::env::var_os("LD_LIBRARY_PATH") {
+        cmd.env("LD_LIBRARY_PATH", loader);
+    }
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=s=64x64:r=1",
+        "-frames:v",
+        "1",
+        "-c:v",
+        encoder,
+        "-f",
+        "null",
+        "-",
+    ]);
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(_) => return HwAccel::Software,
+    };
+
+    let start = Instant::now();
+    let timeout = Duration::from_secs(2);
+    let mut status = None;
+    loop {
+        match child.try_wait() {
+            Ok(Some(s)) => {
+                status = Some(s);
+                break;
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::warn!(backend = %hw.as_str(), ?codec, "L2 probe timed out; falling back to software");
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+            Err(_) => break,
+        }
+    }
+
+    let ok = status.is_some_and(|status| status.success());
+
+    if ok {
+        tracing::info!(backend = %hw.as_str(), ?codec, "L2 hardware encoder probe succeeded");
+        hw
+    } else {
+        tracing::warn!(backend = %hw.as_str(), ?codec, "L2 hardware encoder probe failed; falling back to software");
+        HwAccel::Software
+    }
+}
+
 /// Фабрика по умолчанию: `tokio::process` + FFmpeg с теми же аргументами,
 /// что были в per-session пути (level/profile/keyint/maxrate/bufsize).
 fn default_spawner() -> Spawner {
     Arc::new(|spec: &EncoderSpec, input: (u32, u32)| spawn_ffmpeg(spec, input))
 }
 
-fn spawn_ffmpeg(spec: &EncoderSpec, input: (u32, u32)) -> io::Result<Child> {
-    let mut builder = vks_common::FfmpegCmdBuilder::new()
-        .raw_video_input(input.0, input.1, spec.fps);
+fn build_ffmpeg_cmd(spec: &EncoderSpec, input: (u32, u32), hw: HwAccel) -> tokio::process::Command {
+    let mut builder = vks_common::FfmpegCmdBuilder::new().raw_video_input(input.0, input.1, spec.fps);
     if (input.0, input.1) != (spec.width, spec.height) {
         // Egress-resize уезжает в энкодер: в parent его больше нет (спека §B.4 п.3).
         builder = builder.scale(spec.width, spec.height);
     }
-    builder = builder
-        .video_codec(spec.codec.encoder())
-        .realtime_video_preset("ultrafast", "zerolatency");
-    if spec.codec == FarmCodec::H264 {
-        builder = builder.args(["-profile:v", spec.profile.as_str(), "-level:v", spec.level.as_str()]);
-    }
+    let profile_level = (spec.codec == FarmCodec::H264).then_some((spec.profile.as_str(), spec.level.as_str()));
     let keyint_min = (spec.fps / 2).max(1);
     builder
+        .realtime_video_encoder(hw, spec.codec.into(), profile_level, Some(spec.encoder_params.as_str()))
         .video_bitrate_kbps(spec.bitrate_kbps, spec.maxrate_kbps, spec.bufsize_kbps)
         .gop(spec.keyint)
         .keyint_min(keyint_min)
-        .args([spec.codec.params_flag(), spec.encoder_params.as_str()])
         .output_pipe(spec.codec.muxer())
         .piped_io()
         .build()
-        .spawn()
+}
+
+fn spawn_ffmpeg(spec: &EncoderSpec, input: (u32, u32)) -> io::Result<Child> {
+    let codec: VideoEncoderCodec = spec.codec.into();
+    let hw = active_hw_accel(codec);
+    if hw.is_hardware() {
+        match build_ffmpeg_cmd(spec, input, hw).spawn() {
+            Ok(child) => Ok(child),
+            Err(err) => {
+                tracing::warn!(
+                    backend = %hw.as_str(),
+                    ?codec,
+                    error = %err,
+                    "hardware ffmpeg spawn failed; tripping circuit breaker and falling back to software"
+                );
+                trip_hw_fallback(codec);
+                build_ffmpeg_cmd(spec, input, HwAccel::Software).spawn()
+            }
+        }
+    } else {
+        build_ffmpeg_cmd(spec, input, HwAccel::Software).spawn()
+    }
 }
 
 /// Убивает группу процессов по PGID (child спавнится с `process_group(0)`,
@@ -1753,5 +1876,42 @@ mod tests {
         assert!(h265.encoder_params.contains("sao=0:wpp=1"));
         assert_eq!(h265.maxrate_kbps, 1725);
         assert_eq!(h265.bufsize_kbps, 750);
+    }
+
+    #[test]
+    fn farm_codec_into_video_encoder_codec() {
+        let h264: VideoEncoderCodec = FarmCodec::H264.into();
+        let h265: VideoEncoderCodec = FarmCodec::H265.into();
+        assert_eq!(h264, VideoEncoderCodec::H264);
+        assert_eq!(h265, VideoEncoderCodec::H265);
+    }
+
+    #[test]
+    fn circuit_breaker_fallback_behavior() {
+        reset_hw_fallback();
+        let current_h264 = active_hw_accel(VideoEncoderCodec::H264);
+        let current_h265 = active_hw_accel(VideoEncoderCodec::H265);
+        assert_eq!(current_h264, current_h264.resolve());
+        assert_eq!(current_h265, current_h265.resolve());
+
+        trip_hw_fallback(VideoEncoderCodec::H264);
+        assert_eq!(active_hw_accel(VideoEncoderCodec::H264), HwAccel::Software);
+
+        trip_hw_fallback(VideoEncoderCodec::H265);
+        assert_eq!(active_hw_accel(VideoEncoderCodec::H265), HwAccel::Software);
+        reset_hw_fallback();
+    }
+
+    #[test]
+    fn build_ffmpeg_cmd_produces_valid_args() {
+        let spec = EncoderSpec::canonical(FarmCodec::H264, 1280, 720, 30, 2048, "baseline", "3.1");
+        let cmd = build_ffmpeg_cmd(&spec, (1920, 1080), HwAccel::Software);
+        let program = cmd.as_std().get_program().to_string_lossy().to_string();
+        assert!(program.contains("ffmpeg"));
+        let args: Vec<String> = cmd.as_std().get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        assert!(args.contains(&"-c:v".to_string()));
+        assert!(args.contains(&"libx264".to_string()));
+        assert!(args.contains(&"-vf".to_string()));
+        assert!(args.contains(&"scale=1280:720".to_string()));
     }
 }
