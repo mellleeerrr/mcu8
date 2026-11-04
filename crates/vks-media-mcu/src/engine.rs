@@ -113,6 +113,10 @@ struct RoomState {
     render_epoch: u64,
     /// Inbound 20 ms PCM audio samples per participant.
     input_audio: BTreeMap<ParticipantId, Vec<f32>>,
+    /// Pre-allocated active participant IDs scratchpad to avoid heap allocation on 20 ms ticks.
+    audio_active_pids: Vec<ParticipantId>,
+    /// Recycled audio buffers (capacity 960) to avoid reallocating on participant churn.
+    audio_buffer_pool: Vec<Vec<f32>>,
 }
 
 impl RoomState {
@@ -140,8 +144,10 @@ impl RoomState {
             video_render_in_flight: false,
             render_epoch: 0,
             input_audio: BTreeMap::new(),
-            mixed_audio: Vec::new(),
+            mixed_audio: vec![0.0f32; crate::audio_mixer::FRAME_SAMPLES_20MS],
             participant_audio: BTreeMap::new(),
+            audio_active_pids: Vec::with_capacity(64),
+            audio_buffer_pool: Vec::new(),
             vads: BTreeMap::new(),
             speaking_states: BTreeMap::new(),
             speaking_changes: Vec::new(),
@@ -645,24 +651,93 @@ impl RoomState {
     }
 
     fn process_audio(&mut self) -> Vec<RoomEvent> {
-        let active_pids: Vec<ParticipantId> = self
-            .publisher_tracks
-            .keys()
-            .filter(|pid| self.input_audio.contains_key(pid))
-            .copied()
-            .collect();
+        self.audio_active_pids.clear();
+        self.audio_active_pids.extend(
+            self.publisher_tracks
+                .keys()
+                .filter(|pid| self.input_audio.contains_key(pid))
+                .copied(),
+        );
 
-        let slices: Vec<&[f32]> = active_pids
-            .iter()
-            .map(|pid| self.input_audio[pid].as_slice())
-            .collect();
-        let target_len = self.mixed_audio.len().max(960);
-        let (full_mix, minus_mixes) = AudioMixer.mix_and_mix_minus(&slices, target_len);
-        self.mixed_audio = full_mix;
+        let n = self.audio_active_pids.len();
 
-        self.participant_audio.clear();
-        for (pid, buf) in active_pids.iter().zip(minus_mixes.into_iter()) {
-            self.participant_audio.insert(*pid, buf);
+        if n == 0 {
+            self.mixed_audio.fill(0.0);
+            if !self.participant_audio.is_empty() {
+                for (_, buf) in std::mem::take(&mut self.participant_audio) {
+                    if self.audio_buffer_pool.len() < 64 {
+                        self.audio_buffer_pool.push(buf);
+                    }
+                }
+            }
+        } else {
+            for &pid in &self.audio_active_pids {
+                let pool = &mut self.audio_buffer_pool;
+                let buf = self.participant_audio.entry(pid).or_insert_with(|| {
+                    pool.pop().unwrap_or_else(|| vec![0.0f32; crate::audio_mixer::FRAME_SAMPLES_20MS])
+                });
+                if buf.len() != crate::audio_mixer::FRAME_SAMPLES_20MS {
+                    buf.resize(crate::audio_mixer::FRAME_SAMPLES_20MS, 0.0);
+                }
+            }
+
+            if self.participant_audio.len() > n {
+                let active = &self.audio_active_pids;
+                let pool = &mut self.audio_buffer_pool;
+                self.participant_audio.retain(|pid, buf| {
+                    let keep = active.binary_search(pid).is_ok();
+                    if !keep && pool.len() < 64 {
+                        pool.push(std::mem::take(buf));
+                    }
+                    keep
+                });
+            }
+
+            if self.mixed_audio.len() != crate::audio_mixer::FRAME_SAMPLES_20MS {
+                self.mixed_audio.resize(crate::audio_mixer::FRAME_SAMPLES_20MS, 0.0);
+            }
+
+            const MAX_STACK: usize = 64;
+            if n <= MAX_STACK {
+                let mut input_ptrs: [&[f32]; MAX_STACK] = [&[]; MAX_STACK];
+                let mut minus_ptrs: [&mut [f32]; MAX_STACK] = std::array::from_fn(|_| &mut [][..]);
+
+                for (i, pid) in self.audio_active_pids.iter().enumerate() {
+                    input_ptrs[i] = self.input_audio[pid].as_slice();
+                }
+
+                let mut idx = 0;
+                for (pid, buf) in self.participant_audio.iter_mut() {
+                    debug_assert_eq!(*pid, self.audio_active_pids[idx], "participant PID mismatch at index {}", idx);
+                    minus_ptrs[idx] = buf.as_mut_slice();
+                    idx += 1;
+                }
+                debug_assert_eq!(idx, n);
+
+                AudioMixer.mix_and_mix_minus_into(
+                    &input_ptrs[..n],
+                    self.mixed_audio.as_mut_slice(),
+                    &mut minus_ptrs[..n],
+                );
+            } else {
+                for (idx, (pid, _)) in self.participant_audio.iter().enumerate() {
+                    debug_assert_eq!(*pid, self.audio_active_pids[idx], "participant PID mismatch at index {}", idx);
+                }
+                let inputs: Vec<&[f32]> = self.audio_active_pids
+                    .iter()
+                    .map(|pid| self.input_audio[pid].as_slice())
+                    .collect();
+                let mut minus_outs: Vec<&mut [f32]> = self.participant_audio
+                    .values_mut()
+                    .map(|v| v.as_mut_slice())
+                    .collect();
+
+                AudioMixer.mix_and_mix_minus_into(
+                    &inputs,
+                    self.mixed_audio.as_mut_slice(),
+                    &mut minus_outs,
+                );
+            }
         }
 
         // Per-participant VAD and active speaker detection
@@ -670,14 +745,15 @@ impl RoomState {
         let mut current_speaker = None;
         let mut events = Vec::new();
 
-        for pid in &active_pids {
-            let buf = &self.input_audio[pid];
-            let vad = self.vads.entry(*pid).or_insert_with(|| Vad::new(crate::vad::VadConfig::default()));
+        for i in 0..self.audio_active_pids.len() {
+            let pid = self.audio_active_pids[i];
+            let buf = &self.input_audio[&pid];
+            let vad = self.vads.entry(pid).or_insert_with(|| Vad::new(crate::vad::VadConfig::default()));
             let mut frame = [0.0f32; 960];
             let mut sum_sq = 0.0f32;
-            for (i, v) in buf.iter().take(960).enumerate() {
+            for (j, v) in buf.iter().take(960).enumerate() {
                 if v.is_finite() {
-                    frame[i] = *v;
+                    frame[j] = *v;
                     sum_sq += v * v;
                 }
             }
@@ -688,23 +764,23 @@ impl RoomState {
             let level = (sum_sq / 960.0).sqrt().clamp(0.0, 1.0).mul_add(1000.0, 0.0) as u32;
             // Первое наблюдение — это начальное состояние, а не изменение:
             // в список попадают только смены «говорит/молчит».
-            if let Some(previous) = self.speaking_states.get(pid) {
+            if let Some(previous) = self.speaking_states.get(&pid) {
                 if *previous != is_speaking {
-                    self.speaking_states.insert(*pid, is_speaking);
-                    self.speaking_changes.push((*pid, is_speaking));
-                    events.push(RoomEvent::Speaking { participant: *pid, speaking: is_speaking, level });
+                    self.speaking_states.insert(pid, is_speaking);
+                    self.speaking_changes.push((pid, is_speaking));
+                    events.push(RoomEvent::Speaking { participant: pid, speaking: is_speaking, level });
                     if is_speaking {
                         // Codian §2.2: мелкие ячейки — по убыванию недавности речи.
-                        self.note_recent_speaker(*pid);
+                        self.note_recent_speaker(pid);
                     }
                 }
             } else {
-                self.speaking_states.insert(*pid, is_speaking);
+                self.speaking_states.insert(pid, is_speaking);
             }
 
             if is_speaking && sum_sq > highest_energy {
                 highest_energy = sum_sq;
-                current_speaker = Some(*pid);
+                current_speaker = Some(pid);
             }
         }
 
@@ -735,7 +811,11 @@ impl RoomState {
         if self.important == Some(pid) {
             self.important = None;
         }
-        self.participant_audio.remove(&pid);
+        if let Some(buf) = self.participant_audio.remove(&pid) {
+            if self.audio_buffer_pool.len() < 64 {
+                self.audio_buffer_pool.push(buf);
+            }
+        }
         self.input_audio.remove(&pid);
 
         let removed_slot = self.layout.as_mut().and_then(|desc| desc.assignments.remove(&pid));
@@ -2016,7 +2096,11 @@ impl MediaEngine for McuEngine {
     async fn remove_subscriber(&self, room: RoomId, subscriber: ParticipantId) -> Result<(), MediaEngineError> {
         self.with_room_mut(room, |state| {
             state.subscribers.remove(&subscriber);
-            state.participant_audio.remove(&subscriber);
+            if let Some(buf) = state.participant_audio.remove(&subscriber) {
+                if state.audio_buffer_pool.len() < 64 {
+                    state.audio_buffer_pool.push(buf);
+                }
+            }
         })
         .ok_or(MediaEngineError::RoomNotFound(room))?;
         Ok(())
@@ -3898,7 +3982,7 @@ mod tests {
         e.create_room(cfg(rid)).await.unwrap();
 
         let pid = p(1);
-        let _pub = e.bridge_participant(rid, pid, vec![Track::new(pid, TrackKind::Video)]);
+        e.bridge_participant(rid, pid, vec![Track::new(pid, TrackKind::Video)]);
         e.set_participant_frame(rid, pid, Frame::filled(320, 180, 200));
 
         // Take snapshot with current epoch
@@ -3923,6 +4007,76 @@ mod tests {
                 std::sync::Arc::as_ptr(&admin_composite),
                 "stale render must not overwrite admin composite"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn audio_mixing_reuses_buffers_without_reallocation() {
+        let e = McuEngine::default();
+        let rid = room_id();
+        e.create_room(cfg(rid)).await.unwrap();
+        let p1 = p(1);
+        let p2 = p(2);
+        e.bridge_participant(rid, p1, vec![Track::new(p1, TrackKind::Audio)]);
+        e.bridge_participant(rid, p2, vec![Track::new(p2, TrackKind::Audio)]);
+
+        let arc = e.room_arc(rid).unwrap();
+
+        let sample_buf = [0.1f32; 960];
+        e.set_audio_slice(rid, p1, &sample_buf);
+        e.set_audio_slice(rid, p2, &sample_buf);
+
+        {
+            let mut state = arc.lock().unwrap();
+            state.process_audio();
+        }
+
+        let (mix_ptr1, p1_ptr1, p2_ptr1) = {
+            let state = arc.lock().unwrap();
+            (
+                state.mixed_audio.as_ptr(),
+                state.participant_audio.get(&p1).unwrap().as_ptr(),
+                state.participant_audio.get(&p2).unwrap().as_ptr(),
+            )
+        };
+
+        e.set_audio_slice(rid, p1, &sample_buf);
+        e.set_audio_slice(rid, p2, &sample_buf);
+
+        {
+            let mut state = arc.lock().unwrap();
+            state.process_audio();
+        }
+
+        let (mix_ptr2, p1_ptr2, p2_ptr2) = {
+            let state = arc.lock().unwrap();
+            (
+                state.mixed_audio.as_ptr(),
+                state.participant_audio.get(&p1).unwrap().as_ptr(),
+                state.participant_audio.get(&p2).unwrap().as_ptr(),
+            )
+        };
+
+        assert_eq!(mix_ptr1, mix_ptr2, "mixed_audio buffer pointer must be stable across ticks");
+        assert_eq!(p1_ptr1, p1_ptr2, "p1 mix-minus buffer pointer must be stable across ticks");
+        assert_eq!(p2_ptr1, p2_ptr2, "p2 mix-minus buffer pointer must be stable across ticks");
+
+        let recycled_p1_ptr = p1_ptr1;
+        {
+            let mut state = arc.lock().unwrap();
+            state.remove_participant(p1);
+            assert_eq!(state.audio_buffer_pool.len(), 1, "p1 buffer returned to pool");
+        }
+
+        let p3 = p(3);
+        e.bridge_participant(rid, p3, vec![Track::new(p3, TrackKind::Audio)]);
+        e.set_audio_slice(rid, p3, &sample_buf);
+        {
+            let mut state = arc.lock().unwrap();
+            state.process_audio();
+            assert_eq!(state.audio_buffer_pool.len(), 0, "pool buffer consumed by p3");
+            let p3_ptr = state.participant_audio.get(&p3).unwrap().as_ptr();
+            assert_eq!(p3_ptr, recycled_p1_ptr, "recycled buffer reused for p3");
         }
     }
 }

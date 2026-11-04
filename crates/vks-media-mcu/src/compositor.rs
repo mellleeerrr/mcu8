@@ -118,7 +118,7 @@ impl Compositor {
             i += 32;
         }
         while i < len {
-            *row.get_unchecked_mut(i) = ((*row.get_unchecked(i) as u16 + target_val as u16 + 1) / 2) as u8;
+            *row.get_unchecked_mut(i) = ((*row.get_unchecked(i) as u16 + target_val as u16).div_ceil(2)) as u8;
             i += 1;
         }
     }
@@ -134,7 +134,7 @@ impl Compositor {
             }
         }
         for p in row {
-            *p = ((*p as u16 + target_val as u16 + 1) / 2) as u8;
+            *p = ((*p as u16 + target_val as u16).div_ceil(2)) as u8;
         }
     }
 
@@ -219,8 +219,7 @@ impl Compositor {
         for (i, c) in display_text.chars().enumerate() {
             let glyph = Self::font_glyph_5x7(c);
             let char_x = start_x + i * char_w;
-            for col in 0..5 {
-                let col_bits = glyph[col];
+            for (col, &col_bits) in glyph.iter().enumerate() {
                 for row in 0..7 {
                     if (col_bits >> row) & 1 == 1 {
                         for sy in 0..scale {
@@ -1002,8 +1001,8 @@ mod tests {
         let labels = BTreeMap::from([(0u32, "TrueConf Client".to_string())]);
         let out = Compositor.compose_sized_with_labels(960, 540, &frames, &rects, &labels);
         assert_eq!((out.width, out.height), (960, 540));
-        let has_avatar = out.data.iter().any(|&p| p == 140);
-        let has_text = out.data.iter().any(|&p| p == 235);
+        let has_avatar = out.data.contains(&140);
+        let has_text = out.data.contains(&235);
         assert!(!has_avatar, "placeholder silhouette must NOT be rendered");
         assert!(has_text, "name badge text rendered");
     }
@@ -1014,7 +1013,7 @@ mod tests {
         let rects = BTreeMap::from([(0u32, PixelRect::new(0, 0, 960, 540))]);
         let labels = BTreeMap::from([(0u32, "Поликом Конференция".to_string())]);
         let out = Compositor.compose_sized_with_labels(960, 540, &frames, &rects, &labels);
-        let has_text = out.data.iter().any(|&p| p == 235);
+        let has_text = out.data.contains(&235);
         assert!(has_text, "cyrillic text badge rendered");
     }
 
@@ -1025,7 +1024,7 @@ mod tests {
         let rects = BTreeMap::from([(0u32, PixelRect::new(0, 0, 960, 540))]);
         let labels = BTreeMap::from([(0u32, "Active Video".to_string())]);
         let out = Compositor.compose_sized_with_labels(960, 540, &frames, &rects, &labels);
-        let has_text = out.data.iter().any(|&p| p == 235);
+        let has_text = out.data.contains(&235);
         assert!(has_text, "name badge text rendered over active video");
     }
 }

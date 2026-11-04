@@ -106,6 +106,9 @@ impl AudioMixer {
                 let sample_minus = full_out[i] - own_sample;
                 out[i] = soft_clip(sample_minus * gain);
             }
+            if out.len() > len {
+                out[len..].fill(0.0);
+            }
         }
 
         // 3. Final in-place scaling & soft-clipping of global room mix
