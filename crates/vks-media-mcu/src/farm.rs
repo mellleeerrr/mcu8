@@ -399,11 +399,17 @@ struct Group {
     rtp: Arc<ViewerRtp>,
     /// Последние SPS/PPS: новому зрителю нужны до первого IDR (спека §B.6.4).
     parameter_sets: Mutex<Vec<Arc<[u8]>>>,
+    /// Последний закодированный IDR: мгновенный реплей новому зрителю (избегает ожидания keyint в idle-комнате).
+    last_idr: Mutex<Option<Arc<AccessUnit>>>,
+    /// Момент времени последнего разрешенного запроса keyframe (rate-limit 250 мс против PLI-шторма).
+    last_keyframe_request_ms: AtomicU64,
     /// Канал кадров в актор (ёмкость 1: медленный энкодер не копит очередь).
     input: mpsc::Sender<Arc<Frame>>,
     tx: broadcast::Sender<Arc<AccessUnit>>,
     cancel: Arc<AtomicBool>,
     notify: Arc<tokio::sync::Notify>,
+    /// Оповещение актора группы о запросе keyframe.
+    keyframe_notify: Arc<tokio::sync::Notify>,
     /// PID child'а (= PGID: спавн с `process_group(0)`). Нужен, чтобы убить
     /// группу процессов из retire/Drop даже если актор не успел это сделать.
     pid: AtomicU32,
@@ -429,6 +435,8 @@ pub struct FarmTap {
     pub rx: broadcast::Receiver<Arc<AccessUnit>>,
     /// SPS/PPS snapshot на момент подписки (может быть пустым до первого IDR).
     pub parameter_sets: Vec<Arc<[u8]>>,
+    /// Кэшированный IDR (если доступен на момент подписки).
+    pub initial_idr: Option<Arc<AccessUnit>>,
 }
 
 /// Жива ли группа: не отменена и её актор ещё не завершился.
@@ -509,8 +517,9 @@ impl EncoderFarm {
         let key = group.key.clone();
         let rx = group.tx.subscribe();
         let parameter_sets = group.parameter_sets.lock().unwrap().clone();
+        let initial_idr = group.last_idr.lock().unwrap().clone();
         drop(groups);
-        Some(FarmTap { key, rx, parameter_sets })
+        Some(FarmTap { key, rx, parameter_sets, initial_idr })
     }
 
     /// Число групп комнаты, к которым можно подписаться (room + codec +
@@ -599,16 +608,19 @@ impl EncoderFarm {
             last_publish_us: AtomicU64::new(0),
             keyframe_requests: AtomicU64::new(0),
             keyframe_requests_total: AtomicU64::new(0),
+            last_keyframe_request_ms: AtomicU64::new(0),
             frames: AtomicU64::new(0),
             keyframes: AtomicU64::new(0),
             dropped_frames: AtomicU64::new(0),
             restarts: AtomicU64::new(0),
             rtp: Arc::new(ViewerRtp::default()),
             parameter_sets: Mutex::new(Vec::new()),
+            last_idr: Mutex::new(None),
             input: input_tx,
             tx,
             cancel: cancel.clone(),
             notify: notify.clone(),
+            keyframe_notify: Arc::new(tokio::sync::Notify::new()),
             pid: AtomicU32::new(child_pid),
             started: Instant::now(),
             join: Mutex::new(None),
@@ -640,10 +652,12 @@ impl EncoderFarm {
 
     fn viewer(&self, key: EncoderKey, group: &Arc<Group>) -> GroupViewer {
         let parameter_sets = group.parameter_sets.lock().unwrap().clone();
+        let initial_idr = group.last_idr.lock().unwrap().clone();
         GroupViewer {
             key,
             rx: group.tx.subscribe(),
             parameter_sets,
+            initial_idr,
             farm: self.inner.clone(),
             group: group.clone(),
             released: false,
@@ -697,8 +711,14 @@ impl EncoderFarm {
             groups.values().filter(|group| group.key.room == room).cloned().collect()
         };
         for group in groups {
-            group.keyframe_requests.fetch_add(1, Ordering::Relaxed);
             group.keyframe_requests_total.fetch_add(1, Ordering::Relaxed);
+            let now_ms = (group.started.elapsed().as_millis() as u64).max(1);
+            let prev_ms = group.last_keyframe_request_ms.load(Ordering::Relaxed);
+            if prev_ms == 0 || now_ms.saturating_sub(prev_ms) >= 250 {
+                group.last_keyframe_request_ms.store(now_ms, Ordering::Relaxed);
+                group.keyframe_requests.fetch_add(1, Ordering::Relaxed);
+                group.keyframe_notify.notify_one();
+            }
         }
     }
 
@@ -811,12 +831,18 @@ pub struct GroupViewer {
     pub rx: broadcast::Receiver<Arc<AccessUnit>>,
     /// SPS/PPS на момент подключения: новому зрителю нужны до первого IDR.
     pub parameter_sets: Vec<Arc<[u8]>>,
+    /// Кэшированный IDR (если доступен на момент подписки): мгновенный реплей новому зрителю.
+    pub initial_idr: Option<Arc<AccessUnit>>,
     farm: Arc<FarmInner>,
     group: Arc<Group>,
     released: bool,
 }
 
 impl GroupViewer {
+    /// Забирает кэшированный IDR (если есть) для мгновенного реплея новому зрителю.
+    pub fn take_initial_idr(&mut self) -> Option<Arc<AccessUnit>> {
+        self.initial_idr.take()
+    }
     /// `P4a`: учитывает отправку AU этому зрителю (пакеты/байты RTP).
     pub fn note_rtp(&self, packets: u64, bytes: u64) {
         self.group.rtp.note_sent(packets, bytes);
@@ -935,6 +961,10 @@ async fn run_group(
                 None => break,
             },
             () = notify.notified() => break,
+            () = group.keyframe_notify.notified() => {
+                tracing::debug!(room = %group.key.room, "keyframe notification handled in group actor");
+                continue;
+            }
             _ = cancel_tick.tick() => {
                 // Страховка от сирот: если группы больше нет в мапе фермы
                 // (гонка insert/retire, будущий баг), актор обязан выйти и
@@ -1072,6 +1102,7 @@ fn emit_access_unit(
     group.frames.fetch_add(1, Ordering::Relaxed);
     if is_idr {
         group.keyframes.fetch_add(1, Ordering::Relaxed);
+        *group.last_idr.lock().unwrap() = Some(au.clone());
     }
     // `send` ошибается, только когда зрителей нет (кадры всё равно кодируются,
     // пока группа жива) — это не потеря, поэтому ошибку не считаем.
@@ -1704,6 +1735,57 @@ mod tests {
         assert_eq!(second.parameter_sets.len(), 1, "новый зритель получает SPS/PPS сразу");
         drop(second);
         drop(first);
+    }
+
+    #[tokio::test]
+    async fn idr_is_cached_and_replayed_to_late_viewers_and_taps() {
+        let farm = farm_with_test_spawner(8);
+        let room = room();
+        let key = spec(30).key(room, 0);
+        let first = farm.acquire(key.clone(), (640, 360)).await.expect("acquire");
+        let group = farm.inner.groups.lock().unwrap().get(&key).cloned().expect("group");
+
+        let fake_idr = Arc::new(AccessUnit {
+            data: Arc::from(&[0, 0, 0, 1, 0x65, 10, 20][..]),
+            is_idr: true,
+            pts_us: 1000,
+            parameter_sets: vec![],
+        });
+        *group.last_idr.lock().unwrap() = Some(fake_idr.clone());
+
+        let mut second = farm.acquire(key, (640, 360)).await.expect("acquire 2");
+        let initial = second.take_initial_idr().expect("initial IDR replayed");
+        assert!(initial.is_idr(), "initial AU is IDR");
+        assert_eq!(initial.data(), fake_idr.data());
+
+        let tap = farm.subscribe(room, FarmCodec::H264).expect("tap");
+        assert!(tap.initial_idr.is_some(), "tap gets initial IDR");
+
+        drop(tap);
+        drop(second);
+        drop(first);
+    }
+
+    #[tokio::test]
+    async fn keyframe_requests_rate_limited_to_250ms() {
+        let farm = farm_with_test_spawner(8);
+        let room = room();
+        let key = spec(30).key(room, 0);
+        let viewer = farm.acquire(key.clone(), (640, 360)).await.expect("acquire");
+        let group = farm.inner.groups.lock().unwrap().get(&key).cloned().expect("group");
+
+        farm.request_keyframe(room);
+        let first_ts = group.last_keyframe_request_ms.load(Ordering::Relaxed);
+        assert!(first_ts > 0, "first keyframe request recorded timestamp");
+
+        for _ in 0..4 {
+            farm.request_keyframe(room);
+        }
+
+        assert_eq!(group.keyframe_requests_total.load(Ordering::Relaxed), 5);
+        assert_eq!(group.last_keyframe_request_ms.load(Ordering::Relaxed), first_ts);
+
+        drop(viewer);
     }
 
     #[test]

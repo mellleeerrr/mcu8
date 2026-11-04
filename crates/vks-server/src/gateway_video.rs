@@ -818,6 +818,47 @@ pub(super) async fn spawn_video_media_bridge(
             let epoch = std::time::Instant::now();
             let mut sequence = 1u16;
             let mut seen_keyframe = false;
+
+            macro_rules! dispatch_au {
+                ($au:expr, $viewer:expr) => {{
+                    let au_ref = $au;
+                    let mut splitter = AnnexB::default();
+                    let mut nals = splitter.push(au_ref.data());
+                    nals.extend(splitter.push(&[0, 0, 0, 1][..]));
+                    if !nals.is_empty() {
+                        let timestamp = (epoch.elapsed().as_micros() * 90 / 1000) as u32;
+                        if send_access_unit(
+                            output_codec,
+                            &nals,
+                            &socket,
+                            target,
+                            payload_type,
+                            ssrc,
+                            &mut sequence,
+                            timestamp,
+                            &stats,
+                            Some($viewer),
+                            au_ref.parameter_sets(),
+                        )
+                        .await
+                        {
+                            stats.encoded_video_frames.fetch_add(1, Relaxed);
+                            timestamp_slot.store(timestamp, Relaxed);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }};
+            }
+
+            if let Some(initial_idr) = viewer.take_initial_idr() {
+                if dispatch_au!(&initial_idr, &viewer) {
+                    seen_keyframe = true;
+                }
+            }
             let mut pending_viewer: Option<vks_media_mcu::GroupViewer> = None;
             let mut pending_delta_count = 0usize;
             // `P1`: смена числа видимых окон — новый ключ группы (битрейт
@@ -852,7 +893,7 @@ pub(super) async fn spawn_video_media_bridge(
                             .unwrap_or(viewer.key.spec.bitrate_kbps);
                         if desired.bitrate_kbps != current_bitrate {
                             match farm_engine.acquire_video_viewer(room, &desired).await {
-                                Ok(new_viewer) => {
+                                Ok(mut new_viewer) => {
                                     tracing::debug!(
                                         participant = %owner,
                                         visible,
@@ -860,8 +901,16 @@ pub(super) async fn spawn_video_media_bridge(
                                         new_bitrate = desired.bitrate_kbps,
                                         "encoder group re-keyed on visible windows change (make-before-break)"
                                     );
-                                    pending_viewer = Some(new_viewer);
-                                    pending_delta_count = 0;
+                                    if let Some(initial_idr) = new_viewer.take_initial_idr() {
+                                        viewer = new_viewer;
+                                        pending_viewer = None;
+                                        pending_delta_count = 0;
+                                        seen_keyframe = true;
+                                        dispatch_au!(&initial_idr, &viewer);
+                                    } else {
+                                        pending_viewer = Some(new_viewer);
+                                        pending_delta_count = 0;
+                                    }
                                 }
                                 Err(error) => tracing::warn!(
                                     participant = %owner,
@@ -930,33 +979,7 @@ pub(super) async fn spawn_video_media_bridge(
                 if controls.video_rx_muted.load(Relaxed) {
                     continue;
                 }
-                // AU → NAL без start code (формат packetize_*), последний NAL
-                // выталкивается искусственным start code.
-                let mut splitter = AnnexB::default();
-                let mut nals = splitter.push(access_unit.data());
-                nals.extend(splitter.push(&[0, 0, 0, 1][..]));
-                if nals.is_empty() {
-                    continue;
-                }
-                let timestamp = (epoch.elapsed().as_micros() * 90 / 1000) as u32;
-                if send_access_unit(
-                    output_codec,
-                    &nals,
-                    &socket,
-                    target,
-                    payload_type,
-                    ssrc,
-                    &mut sequence,
-                    timestamp,
-                    &stats,
-                    Some(&viewer),
-                    access_unit.parameter_sets(),
-                )
-                .await
-                {
-                    stats.encoded_video_frames.fetch_add(1, Relaxed);
-                    timestamp_slot.store(timestamp, Relaxed);
-                }
+                dispatch_au!(&access_unit, &viewer);
             }
         })
     });
