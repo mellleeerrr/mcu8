@@ -182,3 +182,71 @@ The pilot `invert + hue-rotate` approach has been completely replaced with a nat
    - Fail-closed test suite: `cargo test -p vks-server --test config_failclosed` (exit code 78 passed).
    - Documentation and master tracker updated.
 
+
+## Telegram.org Design System Dark Theme & Final Clean Architecture (2026-10-26, Tasks D1–D5 & Finalization)
+
+### Architecture & Tokens
+- Fully native design system tokens declared on `html.theme-dark`:
+  - Canvas: `#0E1621` (Deep Midnight Blue)
+  - Surface: `#17212B` (Telegram Surface)
+  - Surface Card / Modals: `#242F3D` (Elevated Surface)
+  - Row Hover: `#202B36` (Noticeable Hover)
+  - Active / Selection: `#2B5278` (Telegram Active Bubble)
+  - Primary: `#0088CC` (Steel Blue)
+  - Accent / Links: `#2AABEE` (Light Blue)
+  - Content Icons: `#A5D5EE` (Cyan Accent)
+  - Text Primary: `#FFFFFF` (18.18:1 contrast on Canvas)
+  - Text Secondary: `#7F8B99` (WCAG AA 4.7:1 on Modals, 5.2:1 on Canvas)
+  - Borders: `#243342`, Dividers: `#0F1C26`
+
+### Sub-Tasks Executed & Completed
+1. **Task D1 (Header, Navigation & Stats)**:
+   - Header active navigation tab (`#0E1621` with `#FFFFFF` text/icon) vs inactive (`transparent` with `#7F8B99`).
+   - Server stats counters (`#FFFFFF`) with cyan icons (`#A5D5EE`).
+   - SVG rect white artifact neutralization (`fill: transparent !important`).
+   - Header profile menu (`#242F3D` card, `#F04343` danger logout).
+   - E2E Test: `tests/e2e/test_task_d1_header.js` (15/15 checks PASSED).
+
+2. **Task D2 (Classic Drawer Navigation)**:
+   - Dual-mode navigation: Large header vs compact sidebar drawer panel (`#17212B`).
+   - Scrim overlay (`rgba(0, 0, 0, 0.65)`).
+   - Language accordion dropdown and bottom logout button (`#F04343`).
+   - E2E Test: `tests/e2e/test_task_d2_drawer.js` (16/16 checks PASSED).
+
+3. **Task D3 (Forms, Floating Labels & Selects)**:
+   - MDC floating labels (`#7F8B99` resting/floated, `#2AABEE` focused).
+   - Outlined notched borders (`#243342` resting, `#2AABEE` focused, `#F04343` error).
+   - Select dropdown menus (`#242F3D` surface, cyan chevron `#A5D5EE`).
+   - Chrome/Safari autofill inset box shadow (`0 0 0 1000px var(--c-bg) inset`).
+   - E2E Test: `tests/e2e/test_task_d3_forms.js` (15/15 checks PASSED).
+
+4. **Task D4 (Conference Tabs, Layout Divider & Presentation Cards)**:
+   - Layout audio channels divider (`#0F1C26`).
+   - Presentation cards in "Запись и трансляция" (`#242F3D` resting, `#2B5278` active).
+   - Conference mode cards in "Основное" (`#17212B` resting, `#2B5278` active).
+   - Secondary text buttons ("Отмена") correctly muted (`#7F8B99`).
+   - E2E Test: `tests/e2e/test_task_d4_layouts_cards.js` (17/17 checks PASSED).
+
+5. **Task D5 (Directory, Modals & Admin Empty Frame)**:
+   - User detail cards & role chips (`#242F3D`).
+   - Add User modal dialog (`#242F3D` surface, `#FFFFFF` header, muted close icon).
+   - Empty calibration tile frame suppressed (`display: none !important`).
+   - History table & Date picker calendar grid.
+   - E2E Test: `tests/e2e/test_task_d5_directory_modals.js` (21/21 checks PASSED).
+
+6. **Adversarial & Multi-Cycle Challenge Suites**:
+   - `adversarial_visual_challenger.js`: 75/75 checks PASSED (7,267 DOM elements across 21 routes, 0 white-on-white, 0 dark-on-dark).
+   - `adversarial_forms_challenger.js`: 63/63 checks PASSED (Synthetic error outline focus collision, disabled button matrix, 3 bidirectional Dark↔Light cycles).
+   - `validate_dark_theme_defects.js`: 23/23 checks PASSED.
+   - `crawl_all_tabs.js`: 29 routes crawled, 384 buttons audited, 0 anomalies, 0 defects.
+
+7. **Final Minimization, Clean Architecture & Coverage Consolidation (Commit `b574c4e`)**:
+   - Eliminated duplicate notched outline error rule and dead `opacity: 0 !important`.
+   - Eliminated triple background declaration and 7 redundant subset selectors.
+   - Merged Section 18 into canonical Property-Grouped Sections (4, 5, 7).
+   - Full coverage added for dedicated Layout Configurator (`.base-layout-configurator-side-panel`, `.base-layout-configurator-content`, `.auto-layout-configurator-content`, `.dynamic-layout-configurator-content`, `.skeleton-layout`).
+   - Full coverage added for Event List Invoker Card (`.event-list-info__invoker-block` now `#242F3D`).
+   - Audio channel counters and receiver badges styled.
+   - 100% strict scoping to `html.theme-dark` with zero light theme leakage.
+   - All 214 files in `MANIFEST.sha256` verified and intact.
+   - Cargo security suites (`csp`, `config_failclosed`) 100% GREEN.
