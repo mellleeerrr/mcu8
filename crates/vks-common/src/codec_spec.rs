@@ -1587,6 +1587,7 @@ mod tests {
         "vks-gateway-h323/src/lib.rs",
         "vks-gateway-sip/src/rtp_bridge.rs",
         "vks-gateway-sip/src/uas.rs",
+        "vks-media-mcu/src/codec_worker/mod.rs",
         "vks-media-sfu/src/webrtc.rs",
         "vks-server/src/codec_policy.rs",
         "vks-server/src/gateway_aac.rs",
