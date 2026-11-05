@@ -32,7 +32,8 @@ pub use webrtc::{
 };
 #[cfg(feature = "str0m")]
 pub use webrtc_room::{
-    AcceptedPeer, PeerHandle, RoomLimits, WebRtcRoomRegistry, DEFAULT_MAX_PEERS, DEFAULT_MAX_PEERS_PER_ROOM,
+    AcceptedPeer, BridgeMediaFrame, PeerHandle, RoomLimits, WebRtcRoomRegistry, DEFAULT_MAX_PEERS,
+    DEFAULT_MAX_PEERS_PER_ROOM,
 };
 
 /// str0m (feature `str0m`, on by default) — re-export so tests and the server

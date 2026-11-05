@@ -223,6 +223,8 @@ fn build_registry(config: &HandlerConfig) -> Result<Arc<WebRtcRoomRegistry>, Str
             webrtc.bwe_initial_bps = bps.clamp(64_000, 50_000_000);
         }
     }
+    // Enable H264 globally if VKS_WEBRTC_H264 is set; otherwise enabled per-room for MCU composite egress.
+    webrtc.enable_h264 = std::env::var("VKS_WEBRTC_H264").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
     // Fail closed: if `preflight` was skipped (library embedder), an invalid
     // cap must still refuse the WebRTC plane rather than admit peers with a
     // silent default.
@@ -306,10 +308,24 @@ pub async fn accept_offer(
     participant: vks_core::ParticipantId,
     offer_sdp: &str,
 ) -> Result<AcceptedPeer, vks_media_sfu::WebRtcError> {
+    accept_offer_for_room(config, room, participant, offer_sdp, false).await
+}
+
+/// Accepts a browser offer for a room with explicit H.264 codec activation (e.g. MCU mode).
+pub async fn accept_offer_for_room(
+    config: &HandlerConfig,
+    room: vks_core::RoomId,
+    participant: vks_core::ParticipantId,
+    offer_sdp: &str,
+    enable_h264: bool,
+) -> Result<AcceptedPeer, vks_media_sfu::WebRtcError> {
     let registry = registry(config).map_err(|error| {
         tracing::error!(%error, "WebRTC: registry is unavailable; offer fails closed");
         vks_media_sfu::WebRtcError::Net(format!("WebRTC registry is unavailable: {error}"))
     })?;
+    if enable_h264 {
+        registry.set_room_h264(room, true);
+    }
     // Re-offer is negotiated on the existing str0m session (same ICE/DTLS and
     // socket); a stale/failed peer is only replaced by a fresh registration.
     registry.accept_offer(room, participant, offer_sdp).await

@@ -56,6 +56,9 @@ pub struct CreateConferenceRequest {
     /// Альтернативное имя (`name`).
     #[serde(default, alias = "name")]
     pub name: Option<String>,
+    /// Режим комнаты (sfu / mcu).
+    #[serde(default)]
+    pub mode: Option<vks_core::RoomMode>,
     /// PIN (в доменной модели пока не отражается — долг §4.5).
     #[serde(default)]
     pub pin: Option<String>,
@@ -964,6 +967,9 @@ pub async fn create_conference(
         Ok(r) => r,
         Err(e) => return error_json(500, &format!("Storage error: {e}")),
     };
+    if let Some(mode) = body.mode {
+        let _ = Rooms::update_async(&state, &record.id, None, Some(mode), None, None).await;
+    }
     // Раскладку/аудиоканал конференции создаёт сам UI после POST (он шлёт
     // `/ui/video_layouts` + link) — серверный сид дал бы дубль «Общей».
     let resources_guard = state.api_v3.resources.lock().await;

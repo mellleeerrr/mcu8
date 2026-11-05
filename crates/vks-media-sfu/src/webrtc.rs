@@ -376,6 +376,8 @@ pub struct WebRtcConfig {
     pub send_buffer_audio: usize,
     /// Bounded video send buffer packets.
     pub send_buffer_video: usize,
+    /// Enable H.264 video codec negotiation (MCU composite egress bridge, Phase 8).
+    pub enable_h264: bool,
 }
 
 impl Default for WebRtcConfig {
@@ -388,6 +390,7 @@ impl Default for WebRtcConfig {
             video_reorder_size: 30,
             send_buffer_audio: 100,
             send_buffer_video: 200,
+            enable_h264: false,
         }
     }
 }
@@ -499,6 +502,9 @@ impl WebRtcPeer {
         }
         if config.bwe {
             builder = builder.enable_bwe(Some(str0m::bwe::Bitrate::bps(config.bwe_initial_bps)));
+        }
+        if config.enable_h264 {
+            builder = builder.enable_h264(true);
         }
         if let Some(cert) = shared_dtls_cert() {
             builder = builder.set_dtls_cert(cert);

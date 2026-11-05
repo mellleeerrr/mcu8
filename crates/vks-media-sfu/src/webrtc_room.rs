@@ -336,6 +336,16 @@ pub trait MediaTap: Send + Sync {
     fn on_media(&self, room: RoomId, from: ParticipantId, audio: bool, data: &str0m::media::MediaData);
 }
 
+/// Frame produced by MCU/hybrid bridge for egress delivery to WebRTC peers.
+#[derive(Clone, Debug)]
+pub struct BridgeMediaFrame {
+    pub audio: bool,
+    pub codec: str0m::format::Codec,
+    pub wallclock: Instant,
+    pub rtp_time: MediaTime,
+    pub data: Arc<[u8]>,
+}
+
 /// Registry of real WebRTC peers, keyed by room and participant.
 pub struct WebRtcRoomRegistry {
     config: WebRtcConfig,
@@ -355,6 +365,8 @@ pub struct WebRtcRoomRegistry {
     /// Mixed-room media taps (T12): one per room, installed by the server-side
     /// bridge. Absent in SFU-only rooms, so the hot path is unchanged there.
     taps: Mutex<HashMap<RoomId, Arc<dyn MediaTap>>>,
+    /// Rooms where H.264 video codec negotiation is enabled (e.g. MCU composite egress, Phase 8).
+    h264_rooms: Mutex<HashSet<RoomId>>,
     /// Process-wide cap, separate from the per-room cap; prevents valid JWTs
     /// from exhausting FDs/UDP ports.
     peer_total: AtomicUsize,
@@ -415,10 +427,26 @@ impl WebRtcRoomRegistry {
             publication_generations: Mutex::new(HashMap::new()),
             last_keyframe_request: Mutex::new(HashMap::new()),
             taps: Mutex::new(HashMap::new()),
+            h264_rooms: Mutex::new(HashSet::new()),
             peer_total: AtomicUsize::new(0),
             max_peers: limits.max_peers,
             max_peers_per_room: limits.max_peers_per_room,
         })
+    }
+
+    /// Enables or disables H.264 video codec negotiation for a room (e.g. MCU mode composite egress).
+    pub fn set_room_h264(&self, room: RoomId, enabled: bool) {
+        let mut set = self.h264_rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if enabled {
+            set.insert(room);
+        } else {
+            set.remove(&room);
+        }
+    }
+
+    /// Whether H.264 video codec negotiation is enabled for this room.
+    pub fn room_has_h264(&self, room: RoomId) -> bool {
+        self.h264_rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&room)
     }
 
     /// Per-room peer cap actually in force.
@@ -556,7 +584,11 @@ impl WebRtcRoomRegistry {
         std_socket.set_nonblocking(true)?;
         let port = std_socket.local_addr()?.port();
         let local_addr = SocketAddr::new(self.advertise_ip, port);
-        let peer = match WebRtcPeer::accept_offer(offer_sdp, local_addr, &self.config) {
+        let mut config = self.config.clone();
+        if self.room_has_h264(room) {
+            config.enable_h264 = true;
+        }
+        let peer = match WebRtcPeer::accept_offer(offer_sdp, local_addr, &config) {
             Ok(peer) => peer,
             Err(error) => {
                 WEBRTC_OFFERS.with_label_values(&["rejected"]).inc();
@@ -755,6 +787,7 @@ impl WebRtcRoomRegistry {
                 survivors = peers.values().cloned().collect();
                 if peers.is_empty() {
                     rooms.remove(&room);
+                    self.h264_rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&room);
                 }
                 WEBRTC_PEERS.set(rooms.values().map(HashMap::len).sum::<usize>() as i64);
                 // Lock-held broadcast: a replacement generation cannot even
@@ -845,6 +878,7 @@ impl WebRtcRoomRegistry {
                 survivors = peers.values().cloned().collect();
                 if peers.is_empty() {
                     rooms.remove(&room);
+                    self.h264_rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&room);
                 }
                 // Broadcast under the room lock as in `remove` (P3-3).
                 // P3-4 cleanup follows the generation check.
@@ -988,29 +1022,24 @@ impl WebRtcRoomRegistry {
 
     /// Sends one bridge-produced frame to every real peer in the room.
     ///
-    /// Sync and bounded (`try_send`): the bridge clock must never await a slow
-    /// browser. Returns how many peers accepted the frame. The payload type is
-    /// resolved inside each peer task from the codec it negotiated, so a bridge
-    /// never hardcodes a PT and a peer that did not negotiate the codec simply
-    /// drops the frame.
-    pub fn write_bridge_media(
-        &self,
-        room: RoomId,
-        audio: bool,
-        codec: str0m::format::Codec,
-        wallclock: Instant,
-        rtp_time: MediaTime,
-        data: Arc<[u8]>,
-    ) -> usize {
-        let targets: Vec<PeerHandle> = {
-            let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            rooms.get(&room).map(|peers| peers.values().cloned().collect()).unwrap_or_default()
+    /// Sync, bounded (`try_send`), and zero-allocation: iterates peers directly under the
+    /// room lock without collecting an intermediate vector.
+    pub fn write_bridge_media(&self, room: RoomId, frame: &BridgeMediaFrame) -> usize {
+        let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(peers) = rooms.get(&room) else {
+            return 0;
         };
         let mut sent = 0usize;
-        for target in targets {
+        for target in peers.values() {
             if target
                 .tx
-                .try_send(PeerCommand::WriteBridge { audio, codec, wallclock, rtp_time, data: Arc::clone(&data) })
+                .try_send(PeerCommand::WriteBridge {
+                    audio: frame.audio,
+                    codec: frame.codec,
+                    wallclock: frame.wallclock,
+                    rtp_time: frame.rtp_time,
+                    data: Arc::clone(&frame.data),
+                })
                 .is_ok()
             {
                 sent += 1;
@@ -1019,6 +1048,45 @@ impl WebRtcRoomRegistry {
             }
         }
         sent
+    }
+
+    /// Sends one bridge-produced frame to a specific real peer in the room (e.g. mix-minus audio).
+    pub fn write_bridge_media_to(
+        &self,
+        room: RoomId,
+        target_pid: ParticipantId,
+        frame: BridgeMediaFrame,
+    ) -> bool {
+        let handle = {
+            let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            rooms.get(&room).and_then(|peers| peers.get(&target_pid).cloned())
+        };
+        if let Some(target) = handle {
+            if target
+                .tx
+                .try_send(PeerCommand::WriteBridge {
+                    audio: frame.audio,
+                    codec: frame.codec,
+                    wallclock: frame.wallclock,
+                    rtp_time: frame.rtp_time,
+                    data: frame.data,
+                })
+                .is_ok()
+            {
+                return true;
+            }
+            WEBRTC_FRAMES_DROPPED.with_label_values(&["bridge_queue_full"]).inc();
+        }
+        false
+    }
+
+    /// Fills `out` with participant ids of every real peer in the room without heap allocation.
+    pub fn fill_peer_participants(&self, room: RoomId, out: &mut Vec<ParticipantId>) {
+        out.clear();
+        let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(peers) = rooms.get(&room) {
+            out.extend(peers.keys().copied());
+        }
     }
 
     /// Participant ids of every real peer currently registered in the room.
@@ -2237,14 +2305,14 @@ mod tests {
         }
         let params = opus_params();
         assert_eq!(params.spec().codec, Codec::Opus, "the tap test uses the negotiated Opus PT");
-        let sent = registry.write_bridge_media(
-            room,
-            true,
-            Codec::Opus,
-            Instant::now(),
-            MediaTime::from_millis(0),
-            Arc::from(&[0x5au8; 40][..]),
-        );
+        let test_frame = BridgeMediaFrame {
+            audio: true,
+            codec: Codec::Opus,
+            wallclock: Instant::now(),
+            rtp_time: MediaTime::from_millis(0),
+            data: Arc::from(&[0x5au8; 40][..]),
+        };
+        let sent = registry.write_bridge_media(room, &test_frame);
         assert_eq!(sent, 2, "every peer in the room is a bridge target");
         for rx in [&mut rx_a, &mut rx_b] {
             match rx.try_recv().expect("bridge frame queued") {
@@ -2258,34 +2326,13 @@ mod tests {
         }
         // Queue is bounded at 8: the 9th frame is dropped, not awaited.
         for _ in 0..8 {
-            let _ = registry.write_bridge_media(
-                room,
-                true,
-                Codec::Opus,
-                Instant::now(),
-                MediaTime::from_millis(0),
-                Arc::from(&[0x5au8; 40][..]),
-            );
+            let _ = registry.write_bridge_media(room, &test_frame);
         }
-        let sent = registry.write_bridge_media(
-            room,
-            true,
-            Codec::Opus,
-            Instant::now(),
-            MediaTime::from_millis(0),
-            Arc::from(&[0x5au8; 40][..]),
-        );
+        let sent = registry.write_bridge_media(room, &test_frame);
         assert_eq!(sent, 0, "a full queue drops bridge frames instead of blocking");
         // Empty room: nothing to write.
         assert_eq!(
-            registry.write_bridge_media(
-                RoomId::new(),
-                true,
-                Codec::Opus,
-                Instant::now(),
-                MediaTime::from_millis(0),
-                Arc::from(&[0x5au8; 40][..]),
-            ),
+            registry.write_bridge_media(RoomId::new(), &test_frame),
             0
         );
     }

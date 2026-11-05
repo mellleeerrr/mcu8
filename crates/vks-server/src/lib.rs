@@ -903,12 +903,11 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                 "SDP offer has no ICE/DTLS material; the legacy plaintext answer plane was removed"
                                                     .to_string(),
                                             ));
-                                        } else if effective_room_mode == vks_core::RoomMode::Mcu && !bridge_ok {
-                                            // Byte-identical pre-T12 error: an MCU room
-                                            // without a bridgeable gateway shape stays closed.
+                                        } else if effective_room_mode == vks_core::RoomMode::Mcu && !bridge_caps.hybrid_enabled {
+                                            // Phase 8: MCU-mode rooms admit WebRTC browsers via the composite egress bridge.
                                             webrtc_failure = Some((
                                                 "webrtc_mcu_room_unsupported",
-                                                "Real WebRTC is not bridged into MCU-mode rooms".to_string(),
+                                                "Real WebRTC in MCU-mode rooms requires hybrid bridge enabled".to_string(),
                                             ));
                                         } else if gateway_room && !bridge_ok {
                                             // Same old code/message when the bridge is
@@ -947,11 +946,13 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                             // async re-negotiation: holding a std
                                             // MutexGuard across `.await` is not Send.
                                             drop(_admission);
-                                            match crate::webrtc_runtime::accept_offer(
+                                            let enable_h264 = effective_room_mode == vks_core::RoomMode::Mcu;
+                                            match crate::webrtc_runtime::accept_offer_for_room(
                                                 &handler_config,
                                                 membership.room_id,
                                                 pid,
                                                 &offer.sdp,
+                                                enable_h264,
                                             )
                                             .await
                                             {
@@ -982,8 +983,9 @@ async fn handle_ws_socket(socket: WebSocket, ctx: WsContext, verified: VerifiedJ
                                                             true,
                                                             gateway_now,
                                                         );
-                                                        bridged_now
-                                                            || (mode_now != vks_core::RoomMode::Mcu && !gateway_now)
+                                                        mode_now == vks_core::RoomMode::Mcu
+                                                            || bridged_now
+                                                            || !gateway_now
                                                     };
                                                     if !still_ok {
                                                         crate::webrtc_runtime::remove(membership.room_id, pid);

@@ -564,6 +564,71 @@ async function collectStats(page) {
       check(`${peer.name}: outbound audio+video`, outbound.includes('audio') && outbound.includes('video'), outbound.join(','));
     }
 
+    // -------------------------------------------------------------------------
+    // Phase 8 (Task 8.2): MCU composite egress and mix-minus audio verification
+    // -------------------------------------------------------------------------
+    {
+      const createdMcu = await api(token, 'POST', '/api/v3/conferences', {
+        display_name: 'WebRTC MCU ' + new Date().toISOString().slice(11, 19),
+        mode: 'mcu',
+      });
+      const mcuRoomId = createdMcu.conference && createdMcu.conference.id;
+      check('mcu room: created with RoomMode::Mcu', Boolean(mcuRoomId), String(mcuRoomId));
+
+      const mcuPeers = [];
+      for (const name of ['mcu-alice', 'mcu-bob', 'mcu-carol']) {
+        const page = await context.newPage();
+        page.on('pageerror', error => check(`pageerror ${name}`, false, String(error)));
+        await page.goto(BASE + '/pnm/authorization', { waitUntil: 'domcontentloaded' });
+        const signal = await new SignalPeer(token, mcuRoomId, name).connect();
+        await signal.hello();
+        await signal.join();
+        await signal.subscribe();
+        const offer = await createBrowserPeer(page, 1, 1);
+        const answer = await signal.offer(offer.sdp);
+        fs.writeFileSync(path.join(ART, `${name}-answer.sdp`), answer);
+        check(`${name}: answer includes H264 for composite egress`,
+          answer.toLowerCase().includes('h264/90000'), '');
+        await applyAnswer(page, answer);
+        let connected = false;
+        try {
+          await waitConnected(page);
+          connected = true;
+        } catch (error) {
+          check(`${name}: MCU ICE connected`, false, error.message);
+        }
+        mcuPeers.push({ name, page, signal, connected });
+      }
+
+      check('all MCU pages: ICE connected', mcuPeers.length === 3 && mcuPeers.every(p => p.connected),
+        mcuPeers.map(p => `${p.name}:${p.connected}`).join(','));
+
+      // Allow 4 seconds for MCU pipeline to composite and encode video frames
+      await new Promise(resolve => setTimeout(resolve, 4000));
+
+      for (const peer of mcuPeers) {
+        const stats = await collectStats(peer.page);
+        const transport = stats.transport[0] || {};
+        check(`${peer.name}: MCU DTLS connected`, transport.dtlsState === 'connected', JSON.stringify(transport));
+        const videoIns = stats.inbound.filter(s => s.kind === 'video' && s.bytesReceived > 0);
+        check(`${peer.name}: exactly 1 active video mid receiving the composite stream`,
+          videoIns.length === 1, JSON.stringify(videoIns.map(s => [s.mid, s.bytesReceived, s.framesDecoded])));
+        const compositeVideo = videoIns[0] || {};
+        check(`${peer.name}: composite video received data (bytes > 0)`,
+          (compositeVideo.bytesReceived || 0) > 0,
+          `framesDecoded=${compositeVideo.framesDecoded || 0}, bytes=${compositeVideo.bytesReceived || 0}`);
+        const audioIns = stats.inbound.filter(s => s.kind === 'audio' && s.bytesReceived > 0);
+        check(`${peer.name}: exactly 1 active audio mid receiving mix-minus stream`,
+          audioIns.length === 1, JSON.stringify(audioIns.map(s => [s.mid, s.bytesReceived])));
+      }
+
+      for (const peer of mcuPeers) {
+        peer.signal.close();
+        await peer.page.close().catch(() => {});
+      }
+      if (mcuRoomId) await api(token, 'DELETE', `/api/v3/conferences/${mcuRoomId}`).catch(() => {});
+    }
+
     check('server: no page errors', !checks.some(c => c.name.startsWith('pageerror')), '');
     let commit = '';
     try { commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(); } catch { /* not a git checkout */ }

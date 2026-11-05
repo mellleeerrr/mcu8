@@ -347,12 +347,11 @@ pub fn ensure_room_bridge(
     if !caps.hybrid_enabled || !caps.audio_bridge {
         return;
     }
-    if !bridge_allowed(
-        caps,
-        BridgeSide::BrowserJoining,
-        registry.room_has_peer(room),
-        gateway_presence(state, room).any(),
-    ) {
+    let is_mcu_room = state.mode.lock().ok().map(|mode| mode.effective_mode(&room)).unwrap_or(RoomMode::Sfu) == RoomMode::Mcu;
+    let has_browser = registry.room_has_peer(room);
+    let has_gateway = gateway_presence(state, room).any();
+
+    if !is_mcu_room && !bridge_allowed(caps, BridgeSide::BrowserJoining, has_browser, has_gateway) {
         return;
     }
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -401,6 +400,7 @@ pub fn stop_room_bridge(mcu: &McuEngine, registry: &WebRtcRoomRegistry, room: Ro
         if handle.is_some() {
             // Clear under the same lock a restart uses (see `run_bridge`).
             registry.clear_media_tap(room);
+            registry.set_room_h264(room, false);
         }
         handle
     };
@@ -419,13 +419,52 @@ async fn run_bridge(
     bridge: Arc<BridgeHandle>,
     mut rx: mpsc::Receiver<TappedAudio>,
 ) {
+    let is_mcu_room = state.mode.lock().ok().map(|m| m.effective_mode(&room)).unwrap_or(RoomMode::Sfu) == RoomMode::Mcu;
     let mut decoders: HashMap<ParticipantId, OpusCodec> = HashMap::new();
+    let mut peer_encoders: HashMap<ParticipantId, OpusCodec> = HashMap::new();
     // 48 kHz mono PCM waiting for the next 20 ms tick, per browser publisher.
     let mut buffers: BTreeMap<ParticipantId, VecDeque<f32>> = BTreeMap::new();
+    let mut peers: Vec<ParticipantId> = Vec::with_capacity(32);
+    let mut pcm_in = [0.0f32; FRAME_SAMPLES];
+    let mut opus_buf = [0u8; vks_gateway_sip::opus::MAX_PAYLOAD];
     let mut egress = OpusCodec::new();
     let mut rtp_ms: u64 = 0;
     let silence = [0.0f32; FRAME_SAMPLES];
     let mut ticker = vks_common::clock::AudioTicker::new_20ms();
+
+    let mut video_viewer = if is_mcu_room {
+        let spec = vks_media_mcu::farm::EncoderSpec::canonical(
+            vks_media_mcu::farm::FarmCodec::H264,
+            640,
+            360,
+            30,
+            800,
+            "baseline",
+            "3.1",
+        );
+        match mcu.acquire_video_viewer(room, &spec).await {
+            Ok(mut viewer) => {
+                mcu.ensure_video_ticker(room);
+                if let Some(idr) = viewer.take_initial_idr() {
+                    let frame = vks_media_sfu::BridgeMediaFrame {
+                        audio: false,
+                        codec: Codec::H264,
+                        wallclock: Instant::now(),
+                        rtp_time: MediaTime::from_micros(idr.pts_us()),
+                        data: idr.data_arc(),
+                    };
+                    registry.write_bridge_media(room, &frame);
+                }
+                Some(viewer)
+            }
+            Err(e) => {
+                tracing::warn!(room = %room, %e, "mcu video viewer acquire failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     loop {
         tokio::select! {
@@ -434,16 +473,18 @@ async fn run_bridge(
                     break;
                 }
                 let presence = gateway_presence(&state, room);
-                let peers = registry.peer_participants(room);
-                // The bridge exists only while both planes are present. A
-                // gateway hangup/BYE must not leak the task or freeze the
-                // browser's RTP clock (P0-12).
-                if peers.is_empty() || !presence.any() {
+                registry.fill_peer_participants(room, &mut peers);
+                let should_stop = if is_mcu_room {
+                    peers.is_empty() && !presence.any()
+                } else {
+                    peers.is_empty() || !presence.any()
+                };
+                if should_stop {
                     tracing::info!(
                         room = %room,
                         peers = peers.len(),
                         gateways = presence.gateways.len(),
-                        "hybrid bridge: one side left; stopping the bridge (browsers keep SFU media)"
+                        "hybrid bridge: one side left or room empty; stopping the bridge"
                     );
                     break;
                 }
@@ -457,8 +498,10 @@ async fn run_bridge(
                         continue;
                     };
                     if buffer.len() >= FRAME_SAMPLES {
-                        let slice: Vec<f32> = buffer.drain(..FRAME_SAMPLES).collect();
-                        mcu.set_audio_slice(room, *pid, &slice);
+                        for s in pcm_in.iter_mut() {
+                            *s = buffer.pop_front().unwrap_or(0.0);
+                        }
+                        mcu.set_audio_slice(room, *pid, &pcm_in);
                     } else {
                         mcu.set_audio_slice(room, *pid, &silence);
                     }
@@ -467,21 +510,49 @@ async fn run_bridge(
                 // `tick_audio_at` is a no-op for every other caller and this
                 // bridge-privileged entry point advances the mix exactly once.
                 mcu.tick_audio_at_bridge(room, mcu.clock().now_ms());
-                // Gateway-only mix: browsers hear each other through the SFU
-                // fanout, so their PCM must never enter this stream.
-                let pcm = mcu.mix_participants_audio(room, &presence.gateways);
-                if let Some(codec) = egress.as_mut() {
-                    if let Some(packet) = codec.encode(&pcm) {
-                        let sent = registry.write_bridge_media(
-                            room,
-                            true,
-                            Codec::Opus,
-                            Instant::now(),
-                            MediaTime::from_millis(rtp_ms),
-                            Arc::from(packet),
-                        );
-                        if sent == 0 {
-                            tracing::trace!(room = %room, "hybrid bridge: no browser accepted the egress frame");
+
+                if is_mcu_room {
+                    // Phase 8: MCU-mode room delivers isolated mix-minus audio to each browser peer
+                    peer_encoders.retain(|pid, _| peers.contains(pid));
+                    let mut out = [0.0f32; FRAME_SAMPLES];
+                    for pid in &peers {
+                        if mcu.copy_participant_audio(room, *pid, &mut out) {
+                            let encoder = match peer_encoders.entry(*pid) {
+                                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                                std::collections::hash_map::Entry::Vacant(entry) => match OpusCodec::new() {
+                                    Some(codec) => entry.insert(codec),
+                                    None => continue,
+                                },
+                            };
+                            if let Some(n) = encoder.encode_into(&out, &mut opus_buf) {
+                                let frame = vks_media_sfu::BridgeMediaFrame {
+                                    audio: true,
+                                    codec: Codec::Opus,
+                                    wallclock: Instant::now(),
+                                    rtp_time: MediaTime::from_millis(rtp_ms),
+                                    data: Arc::from(&opus_buf[..n]),
+                                };
+                                registry.write_bridge_media_to(room, *pid, frame);
+                            }
+                        }
+                    }
+                } else {
+                    // Gateway-only mix: browsers hear each other through the SFU
+                    // fanout, so their PCM must never enter this stream.
+                    let pcm = mcu.mix_participants_audio(room, &presence.gateways);
+                    if let Some(codec) = egress.as_mut() {
+                        if let Some(n) = codec.encode_into(&pcm, &mut opus_buf) {
+                            let frame = vks_media_sfu::BridgeMediaFrame {
+                                audio: true,
+                                codec: Codec::Opus,
+                                wallclock: Instant::now(),
+                                rtp_time: MediaTime::from_millis(rtp_ms),
+                                data: Arc::from(&opus_buf[..n]),
+                            };
+                            let sent = registry.write_bridge_media(room, &frame);
+                            if sent == 0 {
+                                tracing::trace!(room = %room, "hybrid bridge: no browser accepted the egress frame");
+                            }
                         }
                     }
                 }
@@ -489,6 +560,33 @@ async fn run_bridge(
                 let dropped = bridge.tap.dropped.swap(0, Ordering::Relaxed);
                 if dropped > 0 {
                     tracing::debug!(room = %room, dropped, "hybrid bridge: browser audio frames dropped on a full tap queue");
+                }
+            }
+            au_res = async {
+                if let Some(viewer) = video_viewer.as_mut() {
+                    viewer.rx.recv().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                match au_res {
+                    Ok(au) => {
+                        let frame = vks_media_sfu::BridgeMediaFrame {
+                            audio: false,
+                            codec: Codec::H264,
+                            wallclock: Instant::now(),
+                            rtp_time: MediaTime::from_micros(au.pts_us()),
+                            data: au.data_arc(),
+                        };
+                        registry.write_bridge_media(room, &frame);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
+                        tracing::debug!(room = %room, dropped, "mcu video bridge: viewer lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::debug!(room = %room, "mcu video bridge: group closed");
+                        video_viewer = None;
+                    }
                 }
             }
             frame = rx.recv() => {
@@ -526,6 +624,7 @@ async fn run_bridge(
         if owned {
             map.remove(&room);
             registry.clear_media_tap(room);
+            registry.set_room_h264(room, false);
         }
         owned
     };

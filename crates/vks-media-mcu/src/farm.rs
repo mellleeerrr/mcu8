@@ -305,6 +305,11 @@ impl AccessUnit {
         &self.data
     }
 
+    /// Annex-B байты AU как клонированный Arc (zero-copy передача в egress bridge).
+    pub fn data_arc(&self) -> Arc<[u8]> {
+        Arc::clone(&self.data)
+    }
+
     /// Есть ли в AU IDR-кадр.
     pub fn is_idr(&self) -> bool {
         self.is_idr

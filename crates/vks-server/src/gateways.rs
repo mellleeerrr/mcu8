@@ -6161,7 +6161,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             rtp_socket: socket,
             rtcp_socket: None,
             rtp_port: target.port(),
-            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(49000, 49000)),
+            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(target.port(), target.port())),
             mcu_engine: mcu.clone(),
             controls: GatewayMediaControls::default(),
             cancel_flag: cancel.clone(),
@@ -6240,7 +6240,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             rtp_socket: socket,
             rtcp_socket: None,
             rtp_port: target.port(),
-            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(49000, 49000)),
+            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(target.port(), target.port())),
             mcu_engine: mcu.clone(),
             controls: GatewayMediaControls::default(),
             cancel_flag: cancel.clone(),
@@ -6398,7 +6398,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             rtp_socket: socket,
             rtcp_socket: None,
             rtp_port: target.port(),
-            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(49000, 49000)),
+            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(target.port(), target.port())),
             mcu_engine: mcu.clone(),
             controls: GatewayMediaControls::default(),
             cancel_flag: cancel.clone(),
@@ -6503,7 +6503,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
                 vec![vks_core::track::Track::new(pid, vks_core::track::TrackKind::Audio)],
             );
         }
-        let terminal = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let terminal = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let target = socket.local_addr().unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -6525,7 +6525,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             rtp_socket: socket,
             rtcp_socket: None,
             rtp_port: target.port(),
-            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(49000, 49000)),
+            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(target.port(), target.port())),
             mcu_engine: mcu.clone(),
             controls: GatewayMediaControls::default(),
             cancel_flag: cancel.clone(),
@@ -6536,20 +6536,40 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 440.0 / 48_000.0).sin() * 0.25)
             .collect();
         let payload = codec.encode(&pcm).expect("encode Opus");
-        let mut packet = vec![0u8; 12 + payload.len()];
-        vks_gateway_sip::write_rtp_header(&mut packet[..12], 96, 1, 0, 42, false);
-        packet[12..].copy_from_slice(&payload);
-        terminal.send_to(&packet, target).await.unwrap();
+        let cancel_sender = Arc::new(AtomicBool::new(false));
+        let sender_cancel = cancel_sender.clone();
+        let sender_terminal = terminal.clone();
+        let sender_payload = payload.clone();
+        let sender_task = tokio::spawn(async move {
+            let mut seq = 1u16;
+            let mut ts = 0u32;
+            let mut pkt = vec![0u8; 12 + sender_payload.len()];
+            while !sender_cancel.load(Ordering::Relaxed) {
+                vks_gateway_sip::write_rtp_header(&mut pkt[..12], 96, seq, ts, 42, false);
+                pkt[12..].copy_from_slice(&sender_payload);
+                if sender_terminal.send_to(&pkt, target).await.is_err() {
+                    break;
+                }
+                seq = seq.wrapping_add(1);
+                ts = ts.wrapping_add(960);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !mcu
-                .participant_audio(room, listener)
-                .is_some_and(|audio| audio.iter().any(|sample| sample.abs() > 0.02))
-            {
+            loop {
+                if mcu
+                    .participant_audio(room, listener)
+                    .is_some_and(|audio| audio.iter().any(|sample| sample.abs() > 0.02))
+                {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
         .expect("Opus PCM must reach the 48 kHz MCU mix");
+        cancel_sender.store(true, Ordering::Relaxed);
+        let _ = sender_task.await;
         let mut first = vec![0u8; 1400];
         let (count, _) = tokio::time::timeout(Duration::from_secs(5), terminal.recv_from(&mut first))
             .await
@@ -6611,7 +6631,7 @@ print(json.dumps(dict(event='disconnected',reason='fixture peer release after ve
             rtp_socket: socket,
             rtcp_socket: None,
             rtp_port: target.port(),
-            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(49000, 49000)),
+            port_pool: Arc::new(vks_gateway_sip::RtpPortPool::new(target.port(), target.port())),
             mcu_engine: mcu.clone(),
             controls: GatewayMediaControls::default(),
             cancel_flag: cancel.clone(),
